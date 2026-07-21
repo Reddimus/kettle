@@ -6,7 +6,7 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 authors.workspace = true
-# See `kettle-config/Cargo.toml` for the cycle-218 per-crate-description rationale.
+# See `kettle-config/Cargo.toml` for the per-crate-description rationale.
 description = "kettle: streaming VT byte extractor — kitty/Sixel/iTerm2 image protocols, OSC 7 cwd, OSC 133 prompt marks, OSC 1→2 title rewrite"
 
 [lints]
@@ -15,7 +15,7 @@ workspace = true
 [dependencies]
 base64 = "0.22.1"
 flate2 = "1.1.9"
-# Cycle 277: narrow features to the formats iTerm2's inline-image
+# Narrow features to the formats iTerm2's inline-image
 # protocol spec actually accepts (PNG, JPEG, GIF). Default features
 # pull in EVERY image format the `image` crate supports — avif via
 # `rav1e` (~1.6 MB!), exr, webp, tiff, hdr, qoi, dds, ico, etc. —

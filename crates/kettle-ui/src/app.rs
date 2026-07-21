@@ -65,7 +65,7 @@ impl DeactivationHandler for AccessibilityDeactivation {
     fn deactivate_accessibility(&mut self) {}
 }
 
-/// Cycle 904 (audit): live state for a split-divider mouse drag — the addressed
+/// Live state for a split-divider mouse drag — the addressed
 /// split (`path`) and its orientation. The split's rect is re-fetched from
 /// `split_seams` on every move (keyed by `path`) so a layout change mid-drag
 /// (another pane closing) can't desync the ratio math.
@@ -74,7 +74,7 @@ pub(crate) struct SplitDrag {
     dir: Dir,
 }
 
-/// Cycle 929 (agent-first A2): an in-flight `run_command` awaiting its OSC-133
+/// An in-flight `run_command` awaiting its OSC-133
 /// completion. The control server wrote `cmd\n` to the pane; the next
 /// `CommandFinished` for that pane resolves the request with the exit code,
 /// duration, and the output captured since `start_line`. A deadline guards the
@@ -121,7 +121,7 @@ fn build_recovery_set<T, O, E>(
     }
 }
 
-/// Cycle 904 (audit): grab tolerance (px) for the thin split divider line, so
+/// Grab tolerance (px) for the thin split divider line, so
 /// it's easy to hit with the mouse without pixel-perfect aim.
 const SPLIT_SEAM_TOL: f32 = 5.0;
 const CELL_FLAG_UNDERLINE: u16 = 0b0000_0000_0000_1000;
@@ -295,21 +295,21 @@ pub enum UserEvent {
     /// A compatible bare Kettle launch asked this primary process to open a
     /// fresh OS window. The bounded inbox carries the request and completion.
     Activation,
-    /// Cycle 302 remote control: the remote-command file changed and
+    /// Remote control: the remote-command file changed and
     /// the watcher needs the main thread to read + process new lines.
     /// One event per change (notify coalesces consecutive writes), so
     /// the main thread can batch-read all pending lines at once.
     RemoteCommand,
-    /// Cycle 928 (agent-first A2): the control server enqueued a message
+    /// The control server enqueued a message
     /// (new connection / request / disconnect). The main thread drains the
     /// server channel and dispatches each request against `ws.mux`.
     Ctl,
-    /// Cycle 794: the background update-check thread found a newer GitHub
+    /// The background update-check thread found a newer GitHub
     /// release. Carries the tag (e.g. `v2.6.0`) + the release-page URL so the
     /// UI can show a passive bottom banner. The banner is mouse-driven
     /// (left-click opens the release page + dismisses, right-click dismisses);
-    /// keyboard users can bind the `open_update` / `dismiss_update` actions
-    /// (cycle 809) — it stays non-modal so it never steals the terminal's keys.
+    /// keyboard users can bind the `open_update` / `dismiss_update` actions —
+    /// it stays non-modal so it never steals the terminal's keys.
     UpdateAvailable {
         tag: String,
         url: String,
@@ -326,7 +326,7 @@ pub enum UserEvent {
     },
 }
 
-/// Cycle 752: decode kettle's embedded PNG into a winit window icon for the
+/// Decode kettle's embedded PNG into a winit window icon for the
 /// *running* window — the title-bar system-menu glyph (top-left, beside the
 /// minimize/maximize/close controls), the taskbar button, and the Alt-Tab
 /// thumbnail. winit leaves the window icon unset by default, so Windows showed
@@ -345,7 +345,7 @@ fn load_window_icon() -> Option<winit::window::Icon> {
     winit::window::Icon::from_rgba(img.into_raw(), w, h).ok()
 }
 
-/// Cycle 768: macOS `sticky = true` — make the window appear on every Space
+/// macOS `sticky = true` — make the window appear on every Space
 /// (Mission Control workspace). winit 0.30 dropped the native method, so we
 /// reach the underlying `NSWindow` through the raw AppKit handle and set its
 /// collection behavior — exactly what `set_visible_on_all_workspaces` did. The
@@ -422,7 +422,7 @@ fn ctl_mouse_button(params: &serde_json::Value) -> std::result::Result<u8, Strin
     }
 }
 
-/// Cycle 609 (Terminator parity, `terminal.py:real_copy_clipboard` +
+/// Terminator parity (`terminal.py:real_copy_clipboard` +
 /// `config.py:smart_copy`): pure decision for what `Action::Copy` should
 /// write to the clipboard.
 ///
@@ -467,7 +467,7 @@ fn putty_paste_source(source_clipboard: bool) -> PasteSource {
     }
 }
 
-/// Cycle 604 (Terminator parity, `key_zoom_in` / `key_zoom_out` via
+/// Terminator parity (`key_zoom_in` / `key_zoom_out` via
 /// Ctrl+wheel): pure decision for whether the wheel notch should resize
 /// the font.
 ///
@@ -492,7 +492,7 @@ fn should_zoom_font(ctrl: bool, lines: i32, disabled: bool) -> Option<i32> {
     }
 }
 
-/// Cycle 616 (Terminator parity, `plugins/auto_theme.py`):
+/// Terminator parity (`plugins/auto_theme.py`):
 /// pick the theme to switch to on `Action::ToggleLightDark`.
 ///
 /// Rules (case-insensitive):
@@ -505,7 +505,7 @@ fn should_zoom_font(ctrl: bool, lines: i32, disabled: bool) -> Option<i32> {
 ///   - neither set: return `None`; dispatch logs a warn.
 ///
 /// Pure — unit-testable without constructing a Config or App.
-/// Cycle 617: bridge from kettle-config's `SearchCaseSensitivity`
+/// Bridge from kettle-config's `SearchCaseSensitivity`
 /// to kettle-core's `CaseSensitivity`. Kept as a pure helper so
 /// the two crates don't grow a circular trait dependency.
 fn map_case_sensitivity(m: kettle_config::SearchCaseSensitivity) -> kettle_core::CaseSensitivity {
@@ -516,7 +516,7 @@ fn map_case_sensitivity(m: kettle_config::SearchCaseSensitivity) -> kettle_core:
     }
 }
 
-/// Cycle 622 (Terminator parity, `plugins/run_cmd_on_match.py`):
+/// Terminator parity (`plugins/run_cmd_on_match.py`):
 /// fire the configured argv as a fire-and-forget subprocess.
 ///
 /// Security posture:
@@ -548,8 +548,8 @@ fn spawn_trigger_command(argv: &[String]) {
     }
 }
 
-/// Cycle 652 (sub-cycle 4 of [`TERMINATOR-CONFIRM-DIALOG-DESIGN.md`](
-/// ../../../docs/TERMINATOR-CONFIRM-DIALOG-DESIGN.md)): which named
+/// Phase 4 of [`TERMINATOR-CONFIRM-DIALOG-DESIGN.md`](
+/// ../../../docs/TERMINATOR-CONFIRM-DIALOG-DESIGN.md): which named
 /// key was pressed in the confirm-modal keyboard handler. Lifted out
 /// of winit's `NamedKey` so the pure helper isn't coupled to a UI
 /// framework type.
@@ -568,7 +568,7 @@ pub enum ConfirmKey {
     No,
 }
 
-/// Cycle 652: outcome of a key press in the confirm dialog.
+/// Outcome of a key press in the confirm dialog.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConfirmKeyResult {
     /// Update `focus_idx` to the new value + redraw.
@@ -582,10 +582,10 @@ pub enum ConfirmKeyResult {
     Ignore,
 }
 
-/// Cycle 652: pure helper that maps a (current_focus, num_buttons,
+/// Pure helper that maps a (current_focus, num_buttons,
 /// key) tuple to the next action for the confirm-dialog state
-/// machine. Sub-cycle 5 wires this to the App's winit key handler.
-/// Cycle 662 (sub-cycle 6 of confirm-dialog design): count the
+/// machine, wired to the App's winit key handler.
+/// Count the
 /// leaf panes in a split-tree node. Used by the `Action::CloseTab`
 /// dispatch to ask `should_prompt(scope_count)`.
 fn count_leaves(node: &crate::mux::Node) -> usize {
@@ -605,7 +605,7 @@ fn confirm_dialog_keypress(
     }
     match key {
         ConfirmKey::Escape => ConfirmKeyResult::Cancel,
-        // Cycle 861 (audit): Enter activates the FOCUSED button, not always
+        // Enter activates the FOCUSED button, not always
         // Confirm. The close-confirm dialogs open focused on `Cancel` (index 0,
         // the safe default the renderer highlights); firing the destructive
         // action on Enter regardless of focus contradicted that highlight and
@@ -637,39 +637,39 @@ fn confirm_dialog_keypress(
             }
         }
         // v2.20.0 (`vim-menu-nav`): `y`/`n` answer the dialog directly —
-        // unlike Enter (which fires the FOCUSED button, cycle 861), `y` is
+        // unlike Enter (which fires the FOCUSED button), `y` is
         // an explicit answer to the question, so focus is irrelevant.
         ConfirmKey::Yes => ConfirmKeyResult::Confirm,
         ConfirmKey::No => ConfirmKeyResult::Cancel,
     }
 }
 
-/// Cycle 665 (sub-cycle 3 of [`TERMINATOR-VERTICAL-TABS-DESIGN.md`](
-/// ../../../docs/TERMINATOR-VERTICAL-TABS-DESIGN.md)): default
+/// Phase 3 of [`TERMINATOR-VERTICAL-TABS-DESIGN.md`](
+/// ../../../docs/TERMINATOR-VERTICAL-TABS-DESIGN.md): default
 /// strip width for vertical (Left / Right) tab bars when the
-/// config doesn't supply one. The cycle-673 `tab-bar-width`
+/// config doesn't supply one. The `cfg.tab_bar_width`
 /// config key supersedes this in production; this constant is
 /// the documented Firefox-sidebar-style fallback (180 px) the
-/// cycle-651 + cycle-665 unit-tested layout helpers use when
+/// unit-tested layout helpers use when
 /// invoked without an app-level cfg handle.
-#[allow(dead_code)] // doc-only reference + cycle-651 test fixture; production uses cfg.tab_bar_width
+#[allow(dead_code)] // doc-only reference + layout-helper test fixture; production uses cfg.tab_bar_width
 pub const VERTICAL_TAB_STRIP_W: f32 = 180.0;
 
-/// Cycle 651 + 665 (sub-cycles 2 + 3 of vertical-tabs design):
+/// Phases 2 and 3 of the vertical-tabs design:
 /// pure helper that computes the pane-content rect from the
 /// surface size + bar metrics + edge each occupies.
 ///
 /// Returns `(x, y, width, height)` in pixel coordinates.
 ///
-/// Sub-cycle 3 now honors `TabBarPos::Left` and `Right` — the
+/// Honors `TabBarPos::Left` and `Right` — the
 /// strip claims a per-side width slice (`VERTICAL_TAB_STRIP_W`,
 /// 180 px) instead of falling through to a per-edge height like
-/// in cycle-651 v1.
+/// the original horizontal-only layout did.
 ///
 /// Pure — no `&self`, no renderer, no winit. Drives the `App::area`
 /// method (which now wraps this helper) so vertical-strip wiring
 /// can be unit-tested without constructing a full App.
-#[allow(dead_code)] // production callers use content_rect_for_with_strip; this wrapper drives the cycle-651 layout-math drift guards (app.rs:9411+)
+#[allow(dead_code)] // production callers use content_rect_for_with_strip; this wrapper drives the layout-math drift guards (app.rs:9411+)
 fn content_rect_for(
     surface: (u32, u32),
     tab_bar_h: f32,
@@ -688,10 +688,10 @@ fn content_rect_for(
     )
 }
 
-/// Cycle 673 (sub-cycle 7 of vertical-tabs design): explicit
+/// Phase 7 of the vertical-tabs design: explicit
 /// strip-width variant so callers with `cfg.tab_bar_width` in
 /// scope can pass it through. The non-`_with_strip` wrapper
-/// above keeps the cycle-651 signature for code paths that
+/// above keeps the same signature for code paths that
 /// don't have a Config available.
 fn content_rect_for_with_strip(
     surface: (u32, u32),
@@ -724,21 +724,21 @@ fn content_rect_for_with_strip(
     (left_offset, top_offset, content_w, content_h)
 }
 
-/// Cycle 650 (sub-cycle 2 of [`TERMINATOR-TERMINALSHOT-DESIGN.md`](
-/// ../../../docs/TERMINATOR-TERMINALSHOT-DESIGN.md)): build the
+/// Phase 2 of [`TERMINATOR-TERMINALSHOT-DESIGN.md`](
+/// ../../../docs/TERMINATOR-TERMINALSHOT-DESIGN.md): build the
 /// per-pane screenshot path. Lives under `<cache>/kettle/shots/`
-/// (mirrors cycle-621 logger path scheme); falls back to
+/// (mirrors the `session_log_path` scheme below); falls back to
 /// `./kettle-shots/` when no cache dir resolves.
 ///
-/// File name shape: `kettle-<unix-secs>-<pid>.png`. Sub-cycle 3+
+/// File name shape: `kettle-<unix-secs>-<pid>.png`. A later phase
 /// of the terminalshot design will call this from
 /// `Action::TakeScreenshot` dispatch + queue a wgpu readback
 /// request keyed on the path.
 ///
 /// Pure modulo `unix_secs` + `cache_dir` — caller pins both.
-// Cycle 720 (2026-05-23): removed stale `#[allow(dead_code)]`.
+// (2026-05-23): removed stale `#[allow(dead_code)]`.
 // Called from `Action::TakeScreenshot` dispatch at app.rs ~5426
-// since cycle 689 (per-pane crop + toast notification).
+// (per-pane crop + toast notification).
 fn session_screenshot_path(
     unix_secs: u64,
     pid: u32,
@@ -750,7 +750,7 @@ fn session_screenshot_path(
     dir.join(format!("kettle-{unix_secs}-{pid}.png"))
 }
 
-/// Cycle 621 (Terminator parity, `plugins/logger.py`): build the
+/// Terminator parity (`plugins/logger.py`): build the
 /// per-pane session-log path. Lives under `<cache>/kettle/logs/`
 /// (XDG-respecting via env probe; falls back to `./kettle-logs/`
 /// when no cache dir is available).
@@ -771,7 +771,7 @@ fn session_log_path(
     dir.join(format!("kettle-{unix_secs}-{pid}.log"))
 }
 
-/// Cycle 621: locate the XDG cache dir for the current user without
+/// Locate the XDG cache dir for the current user without
 /// pulling in the `dirs` crate. Probes `$XDG_CACHE_HOME` first
 /// (the spec-canonical var) then `$HOME/.cache` on Linux/macOS,
 /// then `$LOCALAPPDATA` on Windows-ish, returning `None` if none
@@ -783,7 +783,7 @@ fn cache_dir_from_env<F: Fn(&str) -> Option<String>>(get: F) -> Option<std::path
     if let Some(p) = var("XDG_CACHE_HOME") {
         return Some(std::path::PathBuf::from(p));
     }
-    // Cycle 919 (audit L1): per-OS fallback, matching `default_path_from`. On
+    // Per-OS fallback, matching `default_path_from`. On
     // Windows the canonical per-user cache dir is `%LOCALAPPDATA%`; a stray
     // `HOME` (git-bash / MSYS / WSL-interop export one) must NOT redirect
     // screenshots / crash logs to `~/.cache` — the same config-dir split-brain
@@ -868,7 +868,7 @@ fn tab_strip_layout(
     }
 }
 
-/// Cycle 805: split the trailing new-tab button into `(arrow_left, plus_right)`
+/// Split the trailing new-tab button into `(arrow_left, plus_right)`
 /// hit-rects — the `▾` dropdown on the LEFT, the `+` on the RIGHT. `arrow_w` is
 /// clamped to the button width so a degenerate (tiny) button can't yield a
 /// negative `+` width. Pure → unit-tested and shared by the renderer geometry
@@ -882,7 +882,7 @@ fn split_new_tab_button(
     ((x, y, aw, h), (x + aw, y, (w - aw).max(0.0), h))
 }
 
-/// Cycle 618 (Terminator parity, key_next_profile / key_previous_profile):
+/// Terminator parity (key_next_profile / key_previous_profile):
 /// pick the next profile name after `current`, wrapping at the end.
 /// If `current` isn't in the list (e.g. user launched without `--profile`,
 /// or with an explicit `--config FILE`), the cycle starts at index 0.
@@ -1023,8 +1023,8 @@ fn paste_confirm_prompt(text: &str) -> String {
 /// Returns `Some(Default)` for chrome, `None` to let the content-area
 /// caller decide between `Pointer` (URL-hover) and `Text`.
 ///
-/// Cycle 320: `in_chrome_band` extended to also be true when the
-/// cursor is over the cycle-295 status bar. Same logic — over any
+/// `in_chrome_band` extended to also be true when the
+/// cursor is over the status bar. Same logic — over any
 /// kettle-chrome strip, show the OS arrow cursor rather than the
 /// I-beam terminal text-input style.
 fn chrome_cursor_icon(in_chrome_band: bool, modal_open: bool) -> Option<CursorIcon> {
@@ -1127,7 +1127,7 @@ fn hovered_close_button(segments: &[kettle_render::TabSeg], px: f32, py: f32) ->
 /// band? `bar_h` is the bar height in pixels, `surface_h` is total window
 /// height, `pos` is the tab-bar position config. Extracted so the cycle-tab-
 /// on-wheel-over-tab-bar decision is fully unit-tested.
-/// Cycle 393 (Terminator parity, titlebar Bucket-D sub-cycle 10):
+/// Terminator parity, titlebar Bucket-D:
 /// pure geometry helper for per-pane titlebar hit-testing. Returns
 /// Some(idx) when the click landed inside the titlebar y-band of
 /// pane idx; None otherwise. Pulled out of App::pane_at_titlebar_click
@@ -1156,7 +1156,7 @@ pub(crate) fn pane_titlebar_hit(
 /// SGR mouse base code for the extra "side" mouse buttons, or `None` for any
 /// button kettle handles locally (left/middle/right) or doesn't forward.
 ///
-/// Cycle 810 (audit): the press/release handlers used to drop every button
+/// The press/release handlers used to drop every button
 /// past right-click (`_ => return`), so a 5-button mouse's Back / Forward
 /// never reached a mouse-tracking TUI (tmux/vim bindings, pagers). xterm
 /// encodes buttons 8–11 as `128 + (button - 8)`; winit's `Back` is XBUTTON1
@@ -1173,11 +1173,11 @@ fn extra_mouse_sgr(button: MouseButton) -> Option<u8> {
 /// Whether an OSC 7 working directory is safe to turn into a `file://` URL and
 /// hand to the OS opener.
 ///
-/// Cycle 816 (audit): the cwd comes from untrusted PTY output (`parse_osc7`
+/// The cwd comes from untrusted PTY output (`parse_osc7`
 /// stores whatever a program reports), and a crafted `file://x//evil.host/share`
 /// yields a stored cwd of `//evil.host/share`. Building `file://{cwd}` from that
 /// produces a UNC-style URL that, when opened on Windows, connects to the
-/// attacker over SMB and leaks the user's NTLM hash. The cycle-815
+/// attacker over SMB and leaks the user's NTLM hash. The
 /// `is_safe_url` locality check already rejects the resulting URL, but this is
 /// the one call site that *constructs* `file://` from raw untrusted input, so
 /// it gets an explicit local-only guard too (defense-in-depth). Crucially this
@@ -1191,7 +1191,7 @@ fn cwd_is_local(cwd: &str) -> bool {
 /// Pure pointer → (col, line) math for a pane, shared by `px_to_point` so the
 /// per-pane-titlebar inset is drift-tested.
 ///
-/// Cycle 817 (audit): the renderer draws a multi-pane tab's cell content at
+/// The renderer draws a multi-pane tab's cell content at
 /// `oy = ry + padding_y + titlebar_h` (the per-pane titlebar reserves
 /// `titlebar_h` at the top), but the hit-test used to map from `ry + padding_y`
 /// — so in the DEFAULT config the moment you split a pane, every pointer landed
@@ -1199,7 +1199,7 @@ fn cwd_is_local(cwd: &str) -> bool {
 /// reported to vim/tmux/htop were all off by one. Subtracting the same
 /// `titlebar_h` here realigns the hit-test with what's drawn. Col/line clamp
 /// to ≥ 0 so a click in the chrome/padding doesn't underflow.
-/// Cycle 876: record a keystroke into the dev recorder as a privacy-preserving
+/// Record a keystroke into the dev recorder as a privacy-preserving
 /// token. Named keys and modified chords (`Enter`, `Ctrl+c`, `ArrowUp`) are
 /// recorded by name — they aren't secret. A bare printable character is recorded
 /// only as a redacted class glyph unless raw-input was opted into, so a typed
@@ -1341,7 +1341,7 @@ fn px_to_cell(
     (col, line, side)
 }
 
-/// Cycle 909 (R1 — selection/copy while scrolled back): map a VIEWPORT-relative
+/// R1 — selection/copy while scrolled back: map a VIEWPORT-relative
 /// point (line 0 = top visible row, what `px_to_point` returns) to the
 /// GRID-ABSOLUTE point that alacritty's `Selection` / `selection_to_string` /
 /// `to_range` and `grid[..]` indexing expect. It subtracts the focused pane's
@@ -1385,7 +1385,7 @@ fn selection_buffer_bounds(
     (top, bottom)
 }
 
-/// Cycle 910 (R2): minimum wall-clock between output-driven frames — a 60 fps
+/// R2: minimum wall-clock between output-driven frames — a 60 fps
 /// paint cap (the standard terminal/display refresh target; Alacritty/WezTerm do
 /// the same). Imperceptible for keystroke echo / streaming output, large enough
 /// to collapse a multi-read repaint burst into one settled frame, and — vs an
@@ -1393,7 +1393,7 @@ fn selection_buffer_bounds(
 /// re-rendering TUI (Claude Code's spinner, a progress bar) would otherwise burn.
 const OUTPUT_FRAME_BUDGET: std::time::Duration = std::time::Duration::from_millis(16);
 
-/// Cycle 910 (R2): whether an output-driven repaint should be DEFERRED
+/// R2: whether an output-driven repaint should be DEFERRED
 /// (coalesced) rather than painted now — true when the previous frame painted
 /// less than `budget` ago. Capping PTY-output paints to one per budget lets a
 /// non-atomic repaint burst (an app that doesn't bracket frames with DEC 2026
@@ -1452,8 +1452,8 @@ fn typed_recently(
     last_typed.is_some_and(|t| now.saturating_duration_since(t) < window)
 }
 
-/// Pure cols/rows-that-fit math for a pane rect, shared by `grid_of`. Cycle 817
-/// (audit): a multi-pane tab's per-pane titlebar steals `titlebar_h` of height,
+/// Pure cols/rows-that-fit math for a pane rect, shared by `grid_of`. A multi-pane
+/// tab's per-pane titlebar steals `titlebar_h` of height,
 /// so the PTY must be sized for the rows that actually fit *below* it — without
 /// this, `grid_of` over-reported rows by ~1 and the bottom row was drawn under
 /// the chrome / clipped. `max(1)` keeps a degenerate tiny pane at ≥ 1×1.
@@ -1525,7 +1525,7 @@ fn cursor_in_tab_bar_band(y: f32, bar_h: f32, surface_h: f32, pos: TabBarPos) ->
     if bar_h <= 0.0 {
         return false;
     }
-    // Cycle 668 (vertical-tabs sub-cycle 4): Left/Right strips
+    // Vertical-tabs: Left/Right strips
     // span the full window height — every y-coordinate inside
     // the window is in the "tab bar band" along the y-axis.
     // The x-axis distinction (which side of the window) is
@@ -1538,7 +1538,7 @@ fn cursor_in_tab_bar_band(y: f32, bar_h: f32, surface_h: f32, pos: TabBarPos) ->
     }
 }
 
-/// Cycle 320: sibling of `cursor_in_tab_bar_band` for the cycle-295
+/// Sibling of `cursor_in_tab_bar_band` for the
 /// status bar. Without this, hovering on the status strip showed
 /// the terminal I-beam cursor (because the strip isn't part of any
 /// pane's rect but isn't part of the tab-bar band either, so it
@@ -1593,7 +1593,7 @@ fn selection_autoscroll_lines(y: f32, rect_top: f32, rect_bottom: f32) -> i32 {
 /// the pane title is still the initial placeholder ("kettle") and the cwd
 /// is known, substitute the cwd's basename so `~/Repos/kettle` shows up
 /// as `kettle — kettle` and `~/Documents` as `Documents — kettle`,
-/// matching the cycle-89 tab-title fallback so the OS window title and
+/// matching the cwd-basename tab-title fallback so the OS window title and
 /// the in-app tab agree pre-OSC 2. Real shell-set titles still win the
 /// moment they arrive.
 fn window_title(template: &str, pane_title: &str, cwd: &str, tab: usize) -> String {
@@ -1657,7 +1657,7 @@ fn window_title_with_home(
         .filter(|s| !s.is_empty());
     let cwd_display = crate::mux::abbreviate_home(cwd, home);
     // If the shell hasn't set a real title yet but we know the cwd,
-    // substitute the cwd basename — same behavior as the cycle-89 tab
+    // substitute the cwd basename — same behavior as the tab
     // title fallback so the OS window title and the in-app tab agree
     // pre-OSC 2. The cwd basename is allowed to literally equal
     // "kettle" (e.g. cwd `~/Repos/kettle`); only the *placeholder* case
@@ -1719,7 +1719,7 @@ fn shell_quote_path(p: &std::path::Path) -> String {
     out
 }
 
-/// Cycle 298-301 vi-mode (Alacritty parity). Carries the vi cursor's
+/// Vi-mode (Alacritty parity). Carries the vi cursor's
 /// position + the visual-selection anchor when vi-mode is active.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct ViState {
@@ -1728,20 +1728,20 @@ pub(crate) struct ViState {
     row: usize,
     /// Vi cursor column.
     col: usize,
-    /// Cycle 301 sub-cycle 4: `Some((row, col))` after the user
+    /// `Some((row, col))` after the user
     /// presses `v` to start a visual selection. The selection spans
     /// from this anchor to the current (row, col). `y` yanks the
     /// selection to the clipboard and exits vi-mode.
     visual_anchor: Option<(usize, usize)>,
 }
 
-/// Cycle 308: pure-helper char-boundary truncation for status-bar
+/// Pure-helper char-boundary truncation for status-bar
 /// titles. Caps at `max` chars; appends `…` when truncated so the
 /// elision is visible. Uses char count (not bytes) so UTF-8
 /// multibyte glyphs aren't split. Returns the original string if it
 /// already fits.
 ///
-/// Before this helper, a long pane title fed to the cycle-296
+/// Before this helper, a long pane title fed to the
 /// status bar would wrap past the strip's 1-cell height — the user
 /// saw the first ~80 chars and the rest was invisible with no
 /// indication.
@@ -1754,7 +1754,7 @@ fn cap_title_for_status_bar(title: &str, max: usize) -> String {
     out
 }
 
-/// Cycle 937 (Peacock): a STABLE per-window seed for `accent-color = auto`,
+/// Peacock: a STABLE per-window seed for `accent-color = auto`,
 /// hashed from the window's working directory (the launch `-d DIR`, else the
 /// process cwd). Same project → same seed → same accent across launches;
 /// different projects → different accents. Pure given the cwd.
@@ -1764,7 +1764,7 @@ fn accent_seed_from_cwd(cwd: Option<&std::path::Path>) -> u64 {
         .map(|p| p.to_path_buf())
         .or_else(|| std::env::current_dir().ok())
         .unwrap_or_default();
-    // Cycle 942 (audit): canonicalize so every spelling of the same project
+    // Canonicalize so every spelling of the same project
     // (`-d .`, `-d C:\proj`, a relative path, a trailing slash) hashes to the
     // SAME seed — the documented "same project → same accent" stability.
     // Falls back to the raw path when it doesn't resolve (nonexistent dir).
@@ -1774,7 +1774,7 @@ fn accent_seed_from_cwd(cwd: Option<&std::path::Path>) -> u64 {
     h.finish()
 }
 
-/// Cycle 934 (agent-first A4) + cycle 941 (Terminator parity "Read only"):
+/// Agent-first A4, combined with Terminator parity ("Read only"):
 /// the per-pane titlebar label, composed from the pane's state badges —
 /// `[RO] ` while the pane is read-only (input dropped before the PTY), then
 /// the `agent-badge` when an agent control connection has the pane attached.
@@ -1926,7 +1926,7 @@ fn selection_kind(clicks: u8, alt: bool) -> kettle_core::SelectionType {
     }
 }
 
-/// Cycle 290: compile each configured `OutputTrigger`'s pattern to a
+/// Compile each configured `OutputTrigger`'s pattern to a
 /// `regex::Regex`, log + drop invalid patterns. Pure helper so the
 /// App constructor + `reload_config` path use exactly the same
 /// regex set after a config edit. An empty input returns an empty
@@ -1993,7 +1993,7 @@ fn reloaded_font_size(configured_changed: bool, configured: f32, runtime: Option
     }
 }
 
-/// Cycle 290: scan `text` for any compiled trigger match, returning the
+/// Scan `text` for any compiled trigger match, returning the
 /// first action that fires. Pure helper used by `App::run_triggers` and
 /// the drift guard. Returns `None` when no trigger fires so the caller
 /// can skip the urgency-attention call.
@@ -2069,7 +2069,7 @@ fn substitute_trigger_groups(argv: &[String], caps: &regex::Captures) -> Vec<Str
         .collect()
 }
 
-/// Cycle 288 smart selection (iTerm2 parity). When a double-click
+/// Smart selection (iTerm2 parity). When a double-click
 /// lands inside a `kettle_core::hints::detect` match (URL, file path,
 /// IPv4, git SHA), return the match's `[start_col, end_col]` inclusive
 /// range so the caller can build a `Simple` selection spanning the
@@ -2100,42 +2100,42 @@ pub(crate) struct HintTarget {
 
 /// One entry in the right-click context menu. `Separator` rows render
 /// as a thin divider in the menu and are skipped during keyboard nav
-/// Cycle 375: a context-menu click resolves to either a kettle
+/// A context-menu click resolves to either a kettle
 /// Action (built-in items) or a Lua callback index (kettle.add_menu_item
 /// entries).
 #[derive(Clone)]
 enum ContextMenuClick {
     Action(Action),
     LuaMenuItem(usize),
-    /// Cycle 611 (Terminator parity, `custom_commands.py`): a
+    /// Terminator parity (`custom_commands.py`): a
     /// `menu-item = LABEL = CMD` config entry. Dispatch writes
     /// `CMD\n` to the focused pane's PTY.
     ConfigCommand(String),
-    /// Cycle 685 (Terminator parity, sub-cycle 2 of
+    /// Terminator parity, phase 2 of
     /// [`TERMINATOR-THEME-SUBMENU-DESIGN.md`](
-    /// ../../../docs/TERMINATOR-THEME-SUBMENU-DESIGN.md)):
+    /// ../../../docs/TERMINATOR-THEME-SUBMENU-DESIGN.md):
     /// theme picked from the right-click "Theme ▸" submenu.
     /// Dispatch sets cfg.theme_name + cfg.theme and triggers a
-    /// redraw (same path as cycle-3514 `NextTheme`).
+    /// redraw (same path as `NextTheme`).
     SetTheme(String),
-    /// Cycle 686 (sub-cycle 8 of theme-submenu design): profile
+    /// Phase 8 of the theme-submenu design: profile
     /// picked from the right-click "Profile ▸" submenu. Dispatch
-    /// sets `App::config_path` to the cycle-618 profile path
+    /// sets `App::config_path` via the profile-path resolution helper
     /// and calls `reload_config`.
     SetProfile(String),
-    /// Cycle 687 (sub-cycle 3 of theme-submenu design): drill
+    /// Phase 3 of the theme-submenu design: drill
     /// into a `Submenu` row by index. The click handler pushes
     /// the current items onto `drill_stack` + replaces them
     /// with the submenu's items.
     DrillIntoSubmenu(usize),
-    /// Cycle 805: open a new tab running an explicit argv (a shell picked from
+    /// Open a new tab running an explicit argv (a shell picked from
     /// the new-tab `▾` dropdown). Dispatch calls `Mux::new_tab_with` with the
     /// focused tab's current working directory.
     NewTabWithArgv(Vec<String>),
-    /// Cycle 941 (Terminator parity, terminal_popup_menu.py "Open link" /
+    /// Terminator parity (terminal_popup_menu.py "Open link" /
     /// "Copy address"): a click on one of the URL-aware leading rows.
     /// `copy: true` puts the address on the clipboard; `copy: false` opens it
-    /// through the cycle-374 `open_url` chain (Lua handler →
+    /// through the `open_url` chain (Lua handler →
     /// custom_url_handler → system open, `is_safe_url`-guarded).
     Url {
         url: String,
@@ -2151,7 +2151,7 @@ enum ContextMenuItem {
         action: Action,
         enabled: bool,
     },
-    /// Cycle 717 (Preferences submenu, C8): like `Item` but with an
+    /// Preferences submenu, C8: like `Item` but with an
     /// owned `String` label so dynamic state markers (radio `● / ○`,
     /// check `✓ /  `) can be baked into the label at build time
     /// without leaking memory via `Box::leak`. Same dispatch surface
@@ -2162,7 +2162,7 @@ enum ContextMenuItem {
         enabled: bool,
     },
     Separator,
-    /// Cycle 375 (Terminator plugin parity, plugin sub-cycle 8):
+    /// Terminator plugin parity:
     /// menu item supplied by a Lua plugin via `kettle.add_menu_item(
     /// label, callback)`. Dispatch invokes the registered Lua
     /// callback (looked up by `lua_idx` in the kettle_menu_items
@@ -2171,7 +2171,7 @@ enum ContextMenuItem {
         label: String,
         lua_idx: usize,
     },
-    /// Cycle 611 (Terminator parity, `custom_commands.py`): user-
+    /// Terminator parity (`custom_commands.py`): user-
     /// defined menu entry from a config-file `menu-item = LABEL =
     /// CMD` line. Dispatch writes `command + "\n"` to the focused
     /// PTY. Simpler than `LuaItem` — no callback, just literal
@@ -2181,55 +2181,57 @@ enum ContextMenuItem {
         label: String,
         command: String,
     },
-    /// Cycle 684 (Terminator parity, sub-cycle 1 of
+    /// Terminator parity, phase 1 of
     /// [`TERMINATOR-THEME-SUBMENU-DESIGN.md`](
-    /// ../../../docs/TERMINATOR-THEME-SUBMENU-DESIGN.md)):
+    /// ../../../docs/TERMINATOR-THEME-SUBMENU-DESIGN.md):
     /// recursive variant carrying a nested item list. v1 of
     /// the renderer just appends "▸" to the label (no flyout
-    /// yet); sub-cycle 3 wires the second-panel flyout +
+    /// yet); phase 3 wires the second-panel flyout +
     /// hover-delay state machine + window-edge clipping.
     /// Lands the type now so the renderer + dispatch can
     /// compile against the final shape ahead of the
     /// interaction wiring.
     Submenu {
         label: String,
-        // `items` is the nested item list. Consumed by the cycle-687
+        // `items` is the nested item list. Consumed by the
         // drill-in dispatch (`ContextMenuClick::DrillIntoSubmenu`)
         // at app.rs ~7345 — clicking a Submenu row pushes the
         // parent items onto `drill_stack` and replaces them with
         // the submenu's items.
         items: Vec<ContextMenuItem>,
     },
-    /// Cycle 685 (Terminator parity, sub-cycle 2 of theme-submenu
-    /// design): a theme-choice leaf row used inside a
+    /// Terminator parity, phase 2 of the theme-submenu
+    /// design: a theme-choice leaf row used inside a
     /// `Submenu { label: "Theme", … }`. Clicking dispatches
     /// `ContextMenuClick::SetTheme(theme)` which swaps the
     /// current theme to the named one.
-    // Cycle 720 (2026-05-23): removed stale `#[allow(dead_code)]`.
-    // The flyout-side click dispatch landed at cycle 687/688.
+    // (2026-05-23): removed stale `#[allow(dead_code)]`.
+    // The flyout-side click dispatch landed with the submenu
+    // drill-in and theme-dispatch wiring.
     ThemeChoice {
         label: String,
         theme: String,
     },
-    /// Cycle 686 (sub-cycle 8 of theme-submenu design): a profile-
+    /// Phase 8 of the theme-submenu design: a profile-
     /// choice leaf row used inside a `Submenu { label: "Profile",
     /// … }`. Clicking dispatches
     /// `ContextMenuClick::SetProfile(profile)` which switches the
     /// active profile (`App::config_path` + reload_config).
-    // Cycle 720 (2026-05-23): removed stale `#[allow(dead_code)]`.
-    // The flyout-side click dispatch landed at cycle 687/688.
+    // (2026-05-23): removed stale `#[allow(dead_code)]`.
+    // The flyout-side click dispatch landed with the submenu
+    // drill-in and theme-dispatch wiring.
     ProfileChoice {
         label: String,
         profile: String,
     },
-    /// Cycle 805: a shell-choice leaf in the new-tab `▾` dropdown. Clicking
+    /// A shell-choice leaf in the new-tab `▾` dropdown. Clicking
     /// dispatches `ContextMenuClick::NewTabWithArgv(argv)` to open a tab
     /// running that shell.
     NewTabShell {
         label: String,
         argv: Vec<String>,
     },
-    /// Cycle 941 (Terminator parity, terminal_popup_menu.py "Open link" /
+    /// Terminator parity (terminal_popup_menu.py "Open link" /
     /// "Copy address"): URL-aware leading rows, present only when the
     /// right-click landed on a detected hyperlink. The URL is captured at
     /// menu-open time so a subsequent output scroll can't retarget the click.
@@ -2239,7 +2241,7 @@ enum ContextMenuItem {
         url: String,
         copy: bool,
     },
-    /// Dropdown-parity cycle: a static, non-dispatchable information line
+    /// A static, non-dispatchable information line
     /// (the About panel's version/update rows). Rendered like a disabled row
     /// (dimmed), survives `filter_disabled`, never highlighted, claims no
     /// mnemonic, and maps to no click.
@@ -2251,7 +2253,7 @@ enum ContextMenuItem {
 /// UI-side context-menu state (Terminator / GNOME / iTerm2 parity).
 /// Anchor is the post-clamp panel top-left; rows mirror the renderer's
 /// `ContextMenu` slice but carry the live `Action` for dispatch.
-/// Cycle 369 (Terminator parity): title-edit overlay state.
+/// Terminator parity: title-edit overlay state.
 #[derive(Debug, Clone)]
 pub enum TitleEditScope {
     /// Edit the OS window title (winit Window::set_title).
@@ -2262,20 +2264,20 @@ pub enum TitleEditScope {
     /// Edit the focused pane's title (used for the future per-pane
     /// titlebar render Bucket-D + as the OSC-1 equivalent).
     Pane,
-    /// Cycle 407 (Terminator parity, titlebar Bucket-D sub-cycle 8):
+    /// Terminator parity, titlebar Bucket-D:
     /// edit the focused pane's broadcast-group name. Writes to
     /// pane.group_name. Empty input clears the group.
     Group,
 }
 
-/// Cycle 680 (sub-cycle 4 of [`TERMINATOR-NAMED-GROUPS-DESIGN.md`](
-/// ../../../docs/TERMINATOR-NAMED-GROUPS-DESIGN.md)):
+/// Phase 4 of [`TERMINATOR-NAMED-GROUPS-DESIGN.md`](
+/// ../../../docs/TERMINATOR-NAMED-GROUPS-DESIGN.md):
 /// when a `Group` edit fires, this carries which set of panes the
 /// typed name applies to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum GroupBulkScope {
-    /// Default: just the focused pane (existing cycle-407
-    /// `EditPaneGroup` / cycle-642 `CreateGroup` behavior).
+    /// Default: just the focused pane (existing
+    /// `EditPaneGroup` / `CreateGroup` behavior).
     #[default]
     Single,
     /// Every pane in the focused tab gets the typed group name.
@@ -2290,18 +2292,18 @@ pub struct TitleEditState {
     /// Current text the user has typed. Pre-filled with the existing
     /// title so the user can edit in place vs starting blank.
     pub input: String,
-    /// Cycle 680: when `scope == Group`, which panes Apply writes
+    /// When `scope == Group`, which panes Apply writes
     /// to. Single = focused only (existing behavior); Tab/Window
     /// = bulk-assign via `Action::GroupTab`/`GroupWindow`.
     pub bulk: GroupBulkScope,
 }
 
-/// Cycle 648 (sub-cycle 2 of [`TERMINATOR-CONFIRM-DIALOG-DESIGN.md`](
-/// ../../../docs/TERMINATOR-CONFIRM-DIALOG-DESIGN.md)):
+/// Phase 2 of [`TERMINATOR-CONFIRM-DIALOG-DESIGN.md`](
+/// ../../../docs/TERMINATOR-CONFIRM-DIALOG-DESIGN.md):
 /// the action a confirmed modal will dispatch when the user accepts.
 ///
-/// First user is the cycle-637 `ask_before_closing` flow
-/// (`Action::CloseWindow` / `CloseTab` / `ClosePane`). Future cycles
+/// First user is the `ask_before_closing` flow
+/// (`Action::CloseWindow` / `CloseTab` / `ClosePane`). Future additions could
 /// add `KillProcess`, `DiscardLayout`, `ResetConfig` etc. — the
 /// enum is intentionally extensible.
 #[allow(clippy::enum_variant_names)] // close-family prefix is intentional
@@ -2318,8 +2320,8 @@ pub enum ConfirmAction {
     PasteText(Box<str>),
 }
 
-/// Cycle 648: which buttons a confirm modal shows. v1 is just
-/// the two-button [Cancel] / [Confirm] shape; future cycles can
+/// Which buttons a confirm modal shows. v1 is just
+/// the two-button [Cancel] / [Confirm] shape; future additions can
 /// add a third "Apply to all" or similar without rippling.
 #[derive(Debug, Clone)]
 pub enum ConfirmButton {
@@ -2331,7 +2333,7 @@ pub enum ConfirmButton {
     Confirm { label: String, destructive: bool },
 }
 
-/// Cycle 648: live state for an open confirm dialog. `focus_idx`
+/// Live state for an open confirm dialog. `focus_idx`
 /// points into `buttons` and the renderer / keyboard nav follow it.
 #[derive(Debug, Clone)]
 pub struct ConfirmDialogState {
@@ -2348,8 +2350,8 @@ pub(crate) struct ContextMenuState {
     /// enabled `Item`, never a `Separator` or disabled row. Updated by
     /// keyboard nav (`↑↓`) and mouse hover.
     highlight: usize,
-    /// Cycle 687 (sub-cycle 3 of [`TERMINATOR-THEME-SUBMENU-DESIGN.md`](
-    /// ../../../docs/TERMINATOR-THEME-SUBMENU-DESIGN.md)):
+    /// Phase 3 of [`TERMINATOR-THEME-SUBMENU-DESIGN.md`](
+    /// ../../../docs/TERMINATOR-THEME-SUBMENU-DESIGN.md):
     /// drill-in stack. When the user clicks a `Submenu` row, the
     /// parent's items are pushed here and replaced by the submenu's
     /// items. Esc / "Back" pops back to the parent.
@@ -2358,8 +2360,8 @@ pub(crate) struct ContextMenuState {
     /// "no nested-nested submenus in v1" carveout). The Vec
     /// shape is forward-compatible for arbitrary depth.
     drill_stack: Vec<Vec<ContextMenuItem>>,
-    /// Cycle 714 (Terminator menu UX, C5): scroll offset for long
-    /// submenus. The Theme submenu has ~512 entries; pre-cycle-714
+    /// Terminator menu UX, C5: scroll offset for long
+    /// submenus. The Theme submenu has ~512 entries; before this
     /// the panel grew off-screen with no scroll handling. Now
     /// `panel_h` is clamped to fit the surface, the visible window
     /// is `[scroll_offset, scroll_offset + max_visible_rows)`, and
@@ -2371,7 +2373,7 @@ pub(crate) struct ContextMenuState {
     /// when popping back to each level. Same length as `drill_stack`
     /// at all times.
     scroll_stack: Vec<usize>,
-    /// Cycle 715 (Terminator menu UX, C6): typeahead buffer. As the
+    /// Terminator menu UX, C6: typeahead buffer. As the
     /// user types A-Z chars, we accumulate them here and best-match
     /// against item labels (case-insensitive prefix). A single char
     /// also resolves to a mnemonic (first matchable char of any
@@ -2381,14 +2383,14 @@ pub(crate) struct ContextMenuState {
     /// Cleared after 750ms of inactivity (`typeahead_until`) so a
     /// pause restarts the buffer instead of accumulating forever.
     typeahead_buf: String,
-    /// Cycle 715. Deadline after which `typeahead_buf` is cleared
+    /// Deadline after which `typeahead_buf` is cleared
     /// on the next key. `None` when the buffer is empty.
     typeahead_until: Option<std::time::Instant>,
 }
 
 /// Pure: which segment-index a tab-bar cursor x-coordinate falls in,
 /// using the same rendered segment rects that hit-testing and painting use.
-/// Used by the cycle-249 drag-to-reorder handler — the user grabs a tab,
+/// Used by the drag-to-reorder handler — the user grabs a tab,
 /// drags, and the bar reorders to keep the dragged segment under the cursor.
 /// Clamped to the first/last rendered segment so a cursor that overshoots
 /// either edge still produces a valid target. Returns 0 for an empty bar.
@@ -2452,10 +2454,10 @@ fn dock_insertion_index(seg_mids: &[f32], cursor: f32) -> usize {
 /// Width of the strip that horizontal tab segments tile across, given the
 /// surface width and the trailing new-tab button geometry.
 ///
-/// Shared by `tab_bar()` (segment layout) and the cycle-249 drag-to-reorder
-/// handler so the drag target can't drift from the rendered segments. Cycle 821
-/// (audit): the drag had subtracted only `plus_w`, ignoring the cycle-805 `▾`
-/// arrow, so the strip was one button too wide and the reorder target lagged the
+/// Shared by `tab_bar()` (segment layout) and the drag-to-reorder
+/// handler (`tab_drag_target_index`) so the drag target can't drift from the rendered segments.
+/// The drag had subtracted only `plus_w`, ignoring the `▾`
+/// dropdown arrow, so the strip was one button too wide and the reorder target lagged the
 /// cursor near the right edge. `arrow_w` is `0.0` when the dropdown is absent
 /// (vertical bars). Floored at `plus_w` so a very narrow bar still reserves room
 /// for the `+` button.
@@ -2477,7 +2479,7 @@ fn tab_title_rect(
     (left, y, (right - left).max(0.0), h)
 }
 
-/// Cycle 917 (#4, user-requested): should the new-tab `▾` shell-dropdown arrow
+/// #4, user-requested: should the new-tab `▾` shell-dropdown arrow
 /// be shown? Hidden when there's only one shell to choose — e.g. a stock Ubuntu
 /// with just `bash` — so the arrow never opens a pointless one-item menu. On
 /// Windows there are always multiple launch targets (cmd / pwsh / WSL distros)
@@ -2485,14 +2487,14 @@ fn tab_title_rect(
 /// the arrow always shows there. The Unix count is a cheap PATH probe, cached
 /// process-wide since the installed shells don't change during a session.
 fn new_tab_dropdown_visible() -> bool {
-    // Dropdown-parity cycle: ALWAYS visible, superseding the cycle-917
-    // single-shell gating — the dropdown now carries Settings / Command
+    // ALWAYS visible, superseding the single-shell
+    // gating documented above — the dropdown now carries Settings / Command
     // palette / About rows (Windows Terminal's bottom section), so it is
     // never a pointless one-item menu even on a bash-only Ubuntu.
     true
 }
 
-/// Cycle 708 (Terminator parity, `layoutlauncher.py`): rank saved
+/// Terminator parity (`layoutlauncher.py`): rank saved
 /// layouts against the user-typed query. Empty query returns
 /// every layout in original (alphabetical) order; non-empty query
 /// keeps only entries whose lower-cased name contains every
@@ -2501,7 +2503,7 @@ fn new_tab_dropdown_visible() -> bool {
 /// field (no description), so the inner predicate is simpler.
 /// Pure — separated from `layout_picker_key` so a drift guard
 /// can exercise it without touching App state.
-/// Cycle 715 (Terminator menu UX, C6). Compute mnemonics for the
+/// Terminator menu UX, C6. Compute mnemonics for the
 /// context-menu rows: for each row, returns `Some((byte_index,
 /// char))` where `char` is the first lowercase A-Z letter in the
 /// label that hasn't already been claimed by an earlier row, or
@@ -2539,7 +2541,7 @@ fn assign_mnemonics(items: &[ContextMenuItem], reserved: &[char]) -> Vec<Option<
         .collect();
     let mut claimed: std::collections::HashSet<char> = std::collections::HashSet::new();
     let mut out: Vec<Option<(usize, char)>> = vec![None; labels.len()];
-    // Cycle 942 (audit): two rounds — the stable core rows claim their
+    // Two rounds — the stable core rows claim their
     // letters FIRST, the context-dependent UrlItem rows (only present when
     // the right-click landed on a link) claim from what's left. Otherwise
     // "Open Link" / "Copy Link Address" leading the menu stole 'c'/'o',
@@ -2575,7 +2577,7 @@ fn assign_mnemonics(items: &[ContextMenuItem], reserved: &[char]) -> Vec<Option<
     out
 }
 
-/// Cycle 715. Match the user's typeahead buffer to a row by
+/// Match the user's typeahead buffer to a row by
 /// case-insensitive prefix on the label. Returns the first
 /// dispatchable row whose label (lowercased) starts with `buf`
 /// (also lowercased). Separators/empty labels are skipped.
@@ -2609,7 +2611,7 @@ fn typeahead_match(items: &[ContextMenuItem], buf: &str) -> Option<usize> {
     })
 }
 
-/// Cycle 714 (Terminator menu UX, C5). How many rows starting at
+/// Terminator menu UX, C5. How many rows starting at
 /// `start` fit within `panel_h` pixels. Separators take `sep_h`,
 /// every other row takes `row_h`. Used by `step_context_menu_highlight`
 /// and `scroll_context_menu` to keep `scroll_offset` honest when the
@@ -2639,9 +2641,9 @@ fn count_rows_fitting(
     count
 }
 
-/// Cycle 713 (Terminator menu UX, C4). Drop disabled `Item`s from
+/// Terminator menu UX, C4. Drop disabled `Item`s from
 /// the context-menu and collapse the separators that would orphan
-/// around them. Pre-cycle-713 disabled rows rendered greyed-out —
+/// around them. Previously, disabled rows rendered greyed-out —
 /// after this filter they're hidden entirely, matching Terminator /
 /// GNOME Terminal: only-show-what-you-can-click.
 ///
@@ -2683,7 +2685,7 @@ fn filter_disabled(items: Vec<ContextMenuItem>) -> Vec<ContextMenuItem> {
     collapsed
 }
 
-/// Cycle 712 (Terminator menu UX, hover-to-highlight). Walk the
+/// Terminator menu UX, hover-to-highlight. Walk the
 /// vertical pixel layout of a context-menu's rows and return the
 /// row index containing `cursor_y`, or `None` if the cursor landed
 /// on a separator (visual gap) or beyond the last row. Pure so the
@@ -2765,12 +2767,12 @@ fn item_is_dispatchable(item: &ContextMenuItem) -> bool {
             | ContextMenuItem::DynamicItem { enabled: true, .. }
             | ContextMenuItem::LuaItem { .. }
             | ContextMenuItem::ConfigItem { .. }
-            // Cycle 684: Submenu rows are dispatchable for keyboard
+            // Submenu rows are dispatchable for keyboard
             // nav (↑↓ lands on them); clicks/Enter on a Submenu row
-            // will open the flyout once sub-cycle 3 lands. For now
-            // the click no-ops with an info log.
+            // will open the flyout once phase 3 of the theme-submenu design lands.
+            // For now the click no-ops with an info log.
             | ContextMenuItem::Submenu { .. }
-            // Cycle 890 (audit): theme / profile choice leaves are the
+            // Theme / profile choice leaves are the
             // *contents* of a drilled-in Theme ▸ / Profile ▸ submenu.
             // They were absent here, so once you drilled in via the
             // keyboard, ↑/↓ could not land on any row and Enter could
@@ -2778,10 +2780,10 @@ fn item_is_dispatchable(item: &ContextMenuItem) -> bool {
             // worked, so the rows were reachable by mouse only.
             | ContextMenuItem::ThemeChoice { .. }
             | ContextMenuItem::ProfileChoice { .. }
-            // Cycle 805: new-tab ▾ shell choices are always clickable + keyboard-
+            // New-tab ▾ shell choices are always clickable + keyboard-
             // navigable.
             | ContextMenuItem::NewTabShell { .. }
-            // Cycle 941: the URL-aware "Open Link" / "Copy Link Address" rows.
+            // The URL-aware "Open Link" / "Copy Link Address" rows.
             | ContextMenuItem::UrlItem { .. } // ContextMenuItem::Info is deliberately absent: a static info line
                                               // (About panel) is not highlightable or clickable.
     )
@@ -2794,7 +2796,7 @@ fn item_is_dispatchable(item: &ContextMenuItem) -> bool {
 /// config-command, theme/profile choice, new-tab shell) is reachable
 /// identically from mouse and keyboard.
 ///
-/// Cycle 890 (audit): the keyboard Enter / Space and mnemonic handlers
+/// The keyboard Enter / Space and mnemonic handlers
 /// previously inlined a *partial* match that only recognised `Item`
 /// (Enter / Space) or `Item`/`Submenu`/theme/profile (mnemonic), so
 /// Lua items, config commands and the new-tab ▾ dropdown were keyboard
@@ -2874,9 +2876,9 @@ fn clamp_context_menu_anchor(
 
 /// `(active-tab-index, focused-leaf-id)` — the value `App::focus_key` returns.
 pub(crate) type FocusKey = (usize, Option<u64>);
-/// Cycle 803 cache key for the search re-scan: `(query, focus, tab last-output)`.
+/// Cache key for the search re-scan: `(query, focus, tab last-output)`.
 pub(crate) type SearchScanKey = (String, FocusKey, Option<std::time::Instant>);
-/// Cycle 803 cache key for the viewport link re-scan: `(focus, tab last-output,
+/// Cache key for the viewport link re-scan: `(focus, tab last-output,
 /// scroll display_offset, focused cwd)`.
 /// v2.20.0 (review fix): the middle component is the focused pane's
 /// `output_generation` — the old key used the tab's `last_output_at`, which
@@ -2941,7 +2943,7 @@ pub struct App {
     /// C4: Quit semantics — drop every window and exit, regardless of how
     /// many are open.
     quit_requested: bool,
-    /// Cycle 875: developer session recorder (asciicast trace). `Some` only in
+    /// Developer session recorder (asciicast trace). `Some` only in
     /// a `dev-record` feature build when `--record PATH` / `KETTLE_RECORD` was
     /// given; compiled out entirely of shipped builds.
     #[cfg(feature = "dev-record")]
@@ -2979,33 +2981,33 @@ pub struct App {
     /// Remote-file counterpart to `config_reload_pending`. Commands accumulate
     /// in the bounded file, so one drain notification is sufficient.
     remote_command_pending: std::sync::Arc<std::sync::atomic::AtomicBool>,
-    /// Cycle 928 (agent-first A2): the in-process control server, present when
+    /// Agent-first A2: the in-process control server, present when
     /// `agent-server` is enabled (config or `--agent-server`). `None` keeps the
     /// zero-cost default path. Started in `resumed`, dropped on exit (which
     /// unregisters the discovery entry).
     ctl: Option<crate::ctl_server::CtlServer>,
-    /// Cycle 929 (agent-first A2): pending `run_command` correlations keyed by
+    /// Agent-first A2: pending `run_command` correlations keyed by
     /// pane id. A request writes `cmd\n`, records the start line + deadline
     /// here, and the next OSC-133 `CommandFinished` for that pane resolves it.
     pending_runs: std::collections::HashMap<u64, PendingRun>,
     clipboard: Option<arboard::Clipboard>,
-    /// Cycle 290 triggers: compiled regex set built from `cfg.triggers` at App
+    /// Triggers: compiled regex set built from `cfg.triggers` at App
     /// construction (and after live reload). Invalid patterns are logged via
     /// `log::warn!` and dropped.
     compiled_triggers: Vec<(regex::Regex, kettle_config::TriggerAction)>,
-    /// Cycle 290: last trigger fire, or `None` before the first fire / after a
+    /// Last trigger fire, or `None` before the first fire / after a
     /// config reload. Dedupes a fast-arriving match flood without fabricating
     /// an `Instant` before the OS monotonic clock's origin.
     last_trigger_fire: Option<std::time::Instant>,
-    /// Cycle 656/851: shared snapshot scanner — refreshes the OS process list
+    /// Shared snapshot scanner — refreshes the OS process list
     /// and parent→children index once per poll tick, then answers every pane
     /// from it. Used by the per-pane remote-session detector.
     remote_scanner: kettle_remote::RemoteScanner,
-    /// Cycle 656: throttle the remote-detect poll to ~5 Hz. `None` makes the
+    /// Throttle the remote-detect poll to ~5 Hz. `None` makes the
     /// first poll immediately eligible, including during the first minute
     /// after Windows boots.
     last_remote_poll: Option<std::time::Instant>,
-    /// Cycle 666: the most-recent auto-theme "schedule decision" (true=dark)
+    /// The most-recent auto-theme "schedule decision" (true=dark)
     /// we've applied, so a boundary-crossing fires the swap exactly once.
     last_schedule_decision: Option<bool>,
     /// Explicit `--config` file (persists for live reload).
@@ -3013,25 +3015,25 @@ pub struct App {
     /// First-tab CLI overrides (`-e cmd`, `-d dir`); consumed once.
     startup: crate::Options,
     _watcher: Option<notify::RecommendedWatcher>,
-    /// Cycle 302: drop guard for the remote-control watcher.
+    /// Drop guard for the remote-control watcher.
     _remote_watcher: Option<notify::RecommendedWatcher>,
-    /// Cycle 325 Lua scripting: bytes the user's `--lua-script` queued via
+    /// Lua scripting: bytes the user's `--lua-script` queued via
     /// `kettle.send_text(s)` before the first pane existed.
     pending_lua_send: Vec<u8>,
-    /// Cycle 326 Lua scripting: Actions queued via `kettle.exec_action(name)`,
+    /// Lua scripting: Actions queued via `kettle.exec_action(name)`,
     /// drained after the first pane spawns.
     pending_lua_actions: Vec<kettle_config::Action>,
-    /// Cycle 366: the live LuaEngine persisted across the App's lifetime so
+    /// The live LuaEngine persisted across the App's lifetime so
     /// `kettle.on(event, callback)` registrations stay in scope. All event
     /// hooks share `drain_lua_hook_commands` for the LuaCommand dispatch.
     lua_engine: Option<crate::LuaEngine>,
-    /// Cycle 366: set after LuaEvent::Startup fired once (Wayland can re-emit
+    /// Set after LuaEvent::Startup fired once (Wayland can re-emit
     /// `resumed`).
     lua_startup_fired: bool,
-    /// Cycle 794: `Some((tag, url))` while the "a newer kettle release is
+    /// `Some((tag, url))` while the "a newer kettle release is
     /// available" banner is showing. Esc dismisses; Enter opens the URL.
     update_available: Option<(String, String)>,
-    /// Dropdown-parity cycle: the full version string the About panel shows —
+    /// The full version string the About panel shows —
     /// the bin crate passes its `KETTLE_VERSION` (version + git hash, exactly
     /// what `--version` prints); falls back to the bare crate version.
     version_line: String,
@@ -3051,7 +3053,7 @@ struct TornDrag {
     /// streaming CursorMoved while the button is held), or `seq` itself
     /// for a lone-tab whole-window drag. Manual-follow only listens to the
     /// carrier — without this gate, stale tracking would hijack EVERY
-    /// window's cursor stream (cycle-943 review).
+    /// window's cursor stream.
     carrier: u64,
     /// Handoff instant. The X11/macOS pointer-event drop heuristics are
     /// suppressed for a short window after it (a stray client motion can
@@ -3094,8 +3096,8 @@ struct TornDrag {
     hwnd: Option<isize>,
 }
 
-/// Cycle 371 (Terminator plugin parity, plugin sub-cycle 7): fire a
-/// desktop notification with the given title + optional body. Wraps
+/// Fire a desktop notification with the given title + optional body,
+/// added for Terminator plugin parity. Wraps
 /// `notify-rust::Notification` so the caller doesn't need to import
 /// it directly. Failure modes degrade silently to log::warn — a
 /// headless run (no DBUS_SESSION_BUS_ADDRESS) or a sandboxed
@@ -3138,7 +3140,7 @@ impl App {
         }
         if self.pending_window_close {
             self.pending_window_close = false;
-            // v2.19.0 (tear-off UX, cycle-943): a dying window that is the
+            // v2.19.0 (tear-off UX): a dying window that is the
             // torn window or the manual-follow capture holder takes its
             // drag with it — abandon eagerly (clears the latched preview on
             // the still-mapped target and restores opacity) instead of
@@ -3222,11 +3224,11 @@ impl App {
         });
 
         // Watch the chosen config file's directory for live reload.
-        // Cycle 151: filter notify events by path so we only reload
+        // Filter notify events by path so we only reload
         // when the config file itself changes. Pre-fix, any file
         // event in the config dir (session.json save, palette
         // edits, theme cache, the user's text-editor swap files,
-        // …) triggered a reload. Particularly bad with cycle 109's
+        // …) triggered a reload. Particularly bad with `save_session`'s
         // atomic session save which writes `session.json.tmp.*`
         // then `rename`s — each save fires 3+ notify events that
         // all pointlessly reloaded the config. Match on `paths`
@@ -3257,7 +3259,7 @@ impl App {
             }
         }
 
-        // Cycle 302 remote-control watcher. Same notify pattern as the
+        // Remote-control watcher. Same notify pattern as the
         // config-reload watcher above. When startup.remote_file is
         // Some, watch its parent directory; on a change to the file
         // itself, send UserEvent::RemoteCommand so the main thread
@@ -3283,7 +3285,7 @@ impl App {
                 })
             {
                 let _ = std::fs::create_dir_all(&dir);
-                // Cycle 306: truncate any leftover content on
+                // Truncate any leftover content on
                 // startup so commands that arrived after a previous
                 // kettle crashed mid-process don't replay as bytes
                 // typed into the NEW kettle's focused pane. Subtle
@@ -3296,7 +3298,7 @@ impl App {
             }
         }
 
-        // Cycle 290: hoist the config load so the OutputTrigger
+        // Hoist the config load so the OutputTrigger
         // compile + the cfg field assignment can both reference it.
         // Inlining the `Config::load*` inside the struct-init lost
         // access to a local name for the triggers; the bare `cfg.…`
@@ -3306,15 +3308,15 @@ impl App {
             .as_deref()
             .map(Config::load_from)
             .unwrap_or_else(Config::load);
-        // Cycle 293 peacock parity: --accent CLI flag wins over the
+        // Peacock parity: --accent CLI flag wins over the
         // config `accent-color` key. Applied here once at startup;
-        // a runtime reload (cycle 151) would reread the config but
+        // a runtime reload (via the config-file watcher above) would reread the config but
         // we don't currently re-thread the CLI overrides, which is
         // intended — CLI flags are launch-time intent.
         if let Some(rgb) = startup.accent_override {
             initial_cfg.accent_color = Some(rgb);
         }
-        // Cycle 938 (Terminator parity): launch-time window-state CLI flags
+        // Terminator parity: launch-time window-state CLI flags
         // (`-m/-f/-H/-b/-T`) override the config for THIS launch — same
         // "CLI flags are launch-time intent" precedent as --accent above.
         if let Some(wstate) = startup.window_state_override {
@@ -3327,11 +3329,11 @@ impl App {
             // A literal title (no `{title}` placeholder) renders verbatim.
             initial_cfg.window_title_format = title;
         }
-        // Cycle 937 (Peacock): seed the per-window accent variation from this
+        // Peacock: seed the per-window accent variation from this
         // window's working directory, so `accent-color = auto` gives a window
         // in a different project a different (but per-project stable) accent.
         initial_cfg.accent_seed = accent_seed_from_cwd(startup.cwd.as_deref());
-        // Cycle 942 (audit): seed the ToggleFullscreen tracking flag from the
+        // Seed the ToggleFullscreen tracking flag from the
         // effective window-state (config `window-state = fullscreen` or `-f`).
         // It used to start `false` unconditionally, so a fullscreen launch
         // needed TWO ToggleFullscreen presses to exit (the first "entered"
@@ -3341,7 +3343,7 @@ impl App {
             kettle_config::WindowState::Fullscreen
         );
         let initial_triggers = compile_triggers(&initial_cfg.triggers);
-        // Dropdown-parity cycle: capture before `startup` moves into the App.
+        // Dropdown-parity: capture before `startup` moves into the App.
         let startup_version = startup
             .version
             .clone()
@@ -3350,24 +3352,24 @@ impl App {
             cache_dir_from_env(|key| std::env::var(key).ok()),
             startup_version.clone(),
         );
-        // Cycle 324: Lua scripting foundation. If `--lua-script PATH`
+        // Lua scripting foundation. If `--lua-script PATH`
         // was set, init a LuaEngine + run the script once. Failures
-        // log::warn but don't block the launch (same shape as the
-        // cycle-289 trigger compile fallthrough).
+        // log::warn but don't block the launch (same shape as
+        // `compile_triggers`'s per-pattern warn-and-skip fallthrough).
         //
-        // Cycle 325: also drain pending side-effect commands queued
+        // Also drain pending side-effect commands queued
         // by Lua and stash them on App so the first focused pane
         // gets them written to its PTY once it's ready (the pane
         // doesn't exist yet at this point in App::new).
         let mut pending_lua_send: Vec<u8> = Vec::new();
         let mut pending_lua_actions: Vec<kettle_config::Action> = Vec::new();
-        // Cycle 366: keep the LuaEngine alive on App so kettle.on(...)
+        // Keep the LuaEngine alive on App so kettle.on(...)
         // registrations survive past App::new + can be fire_event'd
         // from emission sites. If no --lua-script was passed AND no
         // ~/.config/kettle/init.lua exists, skip engine init entirely
         // so non-Lua kettle runs stay zero-cost.
         //
-        // Cycle 370 (plugin sub-cycle 11): auto-load
+        // Auto-load
         // `<config-dir>/init.lua` if present. Explicit --lua-script
         // CLI flag wins (overrides auto-load). Path resolution:
         //   1. --lua-script PATH (explicit; overrides)
@@ -3406,7 +3408,7 @@ impl App {
                                 fire_notify(&title, &body);
                             }
                             crate::LuaCommand::SetTheme(name) => {
-                                // Cycle 373: in App::new, mutate
+                                // In App::new, mutate
                                 // initial_cfg directly because
                                 // self.cfg doesn't exist yet.
                                 if let Some(canonical) = kettle_config::Theme::find_name(&name) {
@@ -3425,38 +3427,38 @@ impl App {
                 }
             }
         }
-        // Cycle 378 (plugin sub-cycle 3): if a LuaEngine is active,
+        // If a LuaEngine is active,
         // the Mux must subscribe to per-PTY output bytes so the
         // App can fire LuaEvent::Output. Set before the Mux moves
         // into the struct.
         let lua_output_subscribed = lua_engine.is_some();
-        // Cycle 875: also subscribe to per-pane PTY output when a dev recording
+        // Also subscribe to per-pane PTY output when a dev recording
         // is requested, so the recorder can tee output into the asciicast trace.
         #[cfg(feature = "dev-record")]
         let lua_output_subscribed = lua_output_subscribed || startup.record.is_some();
-        // Cycle 560 (BUG FIX): cycle 357 misread Terminator's
+        // BUG FIX: an earlier version misread Terminator's
         // `broadcast_default` config key. The Terminator semantics
         // are: when the user ENABLES broadcast (via a chord), what
         // scope applies — `all` / `group` / `off`. The default value
         // `group` does NOT mean "broadcast is on at startup". But
-        // cycle 357 mapped `!matches!(broadcast_default, Off)` to
+        // that earlier version mapped `!matches!(broadcast_default, Off)` to
         // `initial_broadcast = true`, so every new kettle window
         // started with broadcast ON. Users typing in one pane saw
         // their keystrokes mirrored across every other pane in the
-        // tab — the bug the cycle-560 user-report flagged.
+        // tab — the bug a user report flagged.
         //
         // Correct mapping: broadcast STATE always starts off.
         //
-        // NOTE (cycle 562): with the cycle-360 mapping removed, the
+        // NOTE: with that mapping removed, the
         // `broadcast_default` config field currently has no runtime
         // effect — it parses but no consumer reads it. The field is
         // kept in `kettle_config::Config` for forward-compatibility:
-        // a future cycle wiring the scope-when-enabled semantics
-        // (cycle-406 named-group integration with Terminator's
+        // a follow-up wiring the scope-when-enabled semantics
+        // (named-group integration with Terminator's
         // `broadcast_default = all` route) will read it. Until then,
         // setting `broadcast-default = all` in a config has no
-        // visible effect; broadcast scope defaults to the cycle-178
-        // active-tab leaves.
+        // visible effect; broadcast scope defaults to `BroadcastScope::Tab`,
+        // the active tab's panes.
         // C1 (multi-window foundation): per-window state lives in a
         // WindowState; the first window is seq 1. The Mux is built here
         // because its construction flags (`lua_output_subscribed`,
@@ -3464,7 +3466,7 @@ impl App {
         let mux = {
             let mut m = Mux::new();
             m.lua_output_subscribed = lua_output_subscribed;
-            // Cycle 881: a dev recording needs a lossless output channel so
+            // A dev recording needs a lossless output channel so
             // the asciicast trace can't drop chunks under a fast burst.
             #[cfg(feature = "dev-record")]
             {
@@ -3501,11 +3503,11 @@ impl App {
             config_reload_pending,
             config_reload_deadline: None,
             remote_command_pending,
-            // Cycle 928 (agent-first A2): server is started later in `resumed`
+            // Server is started later in `resumed`
             // (needs the pid + a live event-loop proxy for the waker).
             ctl: None,
             pending_runs: std::collections::HashMap::new(),
-            // Cycle 754: surface why the clipboard is unavailable instead of a
+            // Surface why the clipboard is unavailable instead of a
             // silent `None`. On headless/SSH-without-X11-forwarding/sandboxed
             // Linux, arboard can't connect to a display server, and copy/paste
             // + OSC 52 then silently no-op.
@@ -3550,17 +3552,16 @@ impl App {
     }
 
     /// Drain commands a Lua callback (event hook or menu-item)
-    /// just enqueued. Handles every LuaCommand variant: SendText
-    /// (cycle 325), ExecAction (cycle 326), Notify (cycle 371),
-    /// SetTheme (cycle 373).
+    /// just enqueued. Handles every LuaCommand variant: SendText,
+    /// ExecAction, Notify, SetTheme.
     ///
     /// Shared canonical drain path. Six call sites:
-    ///   - fire_tab_add_event       (cycles 425-426)
-    ///   - fire_tab_close_event     (cycles 424-426)
-    ///   - bell-event drain         (cycle 427)
-    ///   - output-event drain       (cycle 427)
-    ///   - startup-event drain      (cycle 428)
-    ///   - lua-menu-item click      (cycle 433)
+    ///   - fire_tab_add_event
+    ///   - fire_tab_close_event
+    ///   - bell-event drain
+    ///   - output-event drain
+    ///   - startup-event drain
+    ///   - lua-menu-item click
     ///
     /// `App::new` cannot use this (early init operates on locals
     /// before `self` exists). All other LuaCommand consumers route
@@ -3601,7 +3602,7 @@ impl App {
         }
     }
 
-    /// Cycle 425+426: fire LuaEvent::TabAdd + drain commands.
+    /// Fire LuaEvent::TabAdd + drain commands.
     /// Every Mux::new_tab / new_tab_with call site that USER-VISIBLY
     /// creates a tab (i.e. NOT startup-time first-tab init before
     /// plugins load) should call this. Centralizes the plugin-
@@ -3617,7 +3618,7 @@ impl App {
         self.drain_lua_hook_commands("tab_add hook");
     }
 
-    /// Cycle 424+426: fire LuaEvent::TabClose + drain commands.
+    /// Fire LuaEvent::TabClose + drain commands.
     /// Every close_tab call site should call this so plugins
     /// listening for tab_close see every close regardless of
     /// trigger source.
@@ -3632,12 +3633,12 @@ impl App {
         self.drain_lua_hook_commands("tab_close hook");
     }
 
-    /// Cycle 888: the shell the focused pane has effectively entered (e.g. the
+    /// The shell the focused pane has effectively entered (e.g. the
     /// user opened pwsh then typed `wsl`) — its argv + cwd, so a split can clone
     /// it in the same directory instead of a fresh default shell. Walks the
     /// focused pane's process tree via the remote scanner (one refresh on the
     /// split keystroke — not per frame). `None` for a plain pane, in which case
-    /// the split falls back to cloning the pane's own launch command (cycle 886).
+    /// the split falls back to cloning the pane's own launch command.
     fn focused_foreground_shell(
         &mut self,
         ws: &mut WindowState,
@@ -3648,7 +3649,7 @@ impl App {
         };
         self.remote_scanner.refresh_roots(&[pid]);
         let mut shell = self.remote_scanner.foreground_shell(pid)?;
-        // Cycle 917 (#2): assert the interactive-shell contract at the boundary.
+        // Assert the interactive-shell contract at the boundary.
         // The detector already rejects one-shot helpers, but re-checking here
         // means a split can never clone a non-interactive argv into a dead pane —
         // `None` routes the caller to `Mux::split`, which clones the pane's own
@@ -3667,7 +3668,7 @@ impl App {
         Some(shell)
     }
 
-    /// Cycle 750: fire LuaEvent::PaneClose + drain commands — the pane analog
+    /// Fire LuaEvent::PaneClose + drain commands — the pane analog
     /// of `fire_tab_close_event`. Every close-pane call site calls this with
     /// the id captured *before* `Mux::close_focused` removes the pane, so
     /// plugins listening for `pane_close` see the right id regardless of
@@ -3735,7 +3736,7 @@ impl App {
     /// wheel over the tab bar cycles tabs (kitty / iTerm2 / Ghostty
     /// parity). When the tab bar is hidden (`tab-bar = off` or
     /// `auto` with one tab) this returns `false`.
-    /// Cycle 320: cursor is over the cycle-295 status bar. Used
+    /// True when the cursor is over the status bar. Used
     /// by `cursor_in_chrome_band` so the OS arrow icon overrides
     /// the terminal I-beam over the status strip too.
     fn cursor_in_status_bar(&self, ws: &WindowState) -> bool {
@@ -3759,7 +3760,7 @@ impl App {
         px >= x && px < x + w && py >= y && py < y + h
     }
 
-    /// Cycle 320: combined chrome-band hit-test. True when the
+    /// Combined chrome-band hit-test. True when the
     /// cursor is over either the tab bar or the status bar — both
     /// belong in the "OS arrow cursor" group.
     fn cursor_in_chrome_band(&self, ws: &WindowState) -> bool {
@@ -3778,7 +3779,7 @@ impl App {
             .as_ref()
             .map(|r| r.surface_size())
             .unwrap_or((800, 600));
-        // Cycle 668 (vertical-tabs sub-cycle 4): for Left/Right
+        // For Left/Right
         // strips, the cursor needs to be within
         // `VERTICAL_TAB_STRIP_W` of the configured edge.
         match self.cfg.tab_bar_pos {
@@ -3796,7 +3797,7 @@ impl App {
         }
     }
 
-    /// Cycle 904 (audit): the resize cursor for a split of the given
+    /// The resize cursor for a split of the given
     /// orientation. A Horizontal split places panes side-by-side (a vertical
     /// divider you drag left/right → column resize); a Vertical split stacks
     /// them (a horizontal divider you drag up/down → row resize).
@@ -3807,7 +3808,7 @@ impl App {
         }
     }
 
-    /// Cycle 904: a SplitDrag for the divider seam under content-area pixel
+    /// A SplitDrag for the divider seam under content-area pixel
     /// `(px, py)`, or None. Used to start a drag-to-resize on left-press.
     fn split_drag_at(&self, ws: &WindowState, area: Rect, px: f32, py: f32) -> Option<SplitDrag> {
         let seams = ws.mux.split_seams(ws.mux.active, area);
@@ -3819,7 +3820,7 @@ impl App {
         })
     }
 
-    /// Cycle 904: the resize cursor to show while merely HOVERING a divider
+    /// The resize cursor to show while merely HOVERING a divider
     /// seam (no drag yet), or None when the cursor isn't over one. Suppressed
     /// while a modal owns the pointer. Cheap in the common single-pane case —
     /// `split_seams` returns empty when the tab root is a lone leaf.
@@ -3913,7 +3914,7 @@ impl App {
             None
         };
         let chrome = chrome_cursor_icon(self.cursor_in_chrome_band(ws), self.any_modal_open(ws));
-        // Cycle 904: a split divider under the cursor shows the resize cursor
+        // A split divider under the cursor shows the resize cursor
         // (after chrome/close-button, before the link-pointer / I-beam default).
         let want = close_hover
             .or(confirm_hover)
@@ -4027,7 +4028,7 @@ impl App {
         }
     }
 
-    /// Cycle 296: status-bar height (0 when off, cell_h + 6 px when
+    /// Status-bar height (0 when off, cell_h + 6 px when
     /// enabled). Pair with `cfg.status_bar` (StatusBarMode) for
     /// position. Slightly shorter than the tab bar so the two strips
     /// read as distinct horizontal bands.
@@ -4072,13 +4073,12 @@ impl App {
         Some((0.0, y, sw as f32, banner_h))
     }
 
-    /// Content area for panes (excludes the tab bar, cycle-296 status bar, and
+    /// Content area for panes (excludes the tab bar, status bar, and
     /// passive update banner), in physical pixels.
-    /// Cycle 389 (Terminator parity, titlebar Bucket-D sub-cycle 5):
-    /// hit-test for a click in any pane's per-pane titlebar region.
+    /// Terminator parity: hit-test for a click in any pane's per-pane titlebar region.
     /// Returns the pane id whose titlebar was clicked, or None if
-    /// the click fell outside titlebar regions. Honors
-    /// cfg.show_titlebar gate + the cycle-385 title_at_bottom flip.
+    /// the click fell outside titlebar regions. Honors the
+    /// `cfg.show_titlebar` gate + the `cfg.title_at_bottom` flip.
     /// Used by the click handler to dispatch EditPaneTitle on the
     /// clicked pane.
     fn pane_at_titlebar_click(&self, ws: &WindowState, px: f32, py: f32) -> Option<u64> {
@@ -4088,8 +4088,8 @@ impl App {
         let active = ws.mux.active;
         let rects = ws.mux.layout(active, self.area(ws));
         if rects.len() < 2 {
-            // Single-pane tab: titlebar isn't rendered (cycle-379
-            // gates on >1 pane).
+            // Single-pane tab: titlebar isn't rendered (the renderer's
+            // titlebar gate requires `show_titlebar` and more than one pane).
             return None;
         }
         let bar_h = ws.renderer.as_ref().map(|r| r.cell_h + 6.0).unwrap_or(20.0);
@@ -4102,7 +4102,7 @@ impl App {
             .as_ref()
             .map(|r| r.surface_size())
             .unwrap_or((800, 600));
-        // Cycle 651 + 673: delegate to the pure helper, threading
+        // Delegate to the pure helper, threading
         // `cfg.tab_bar_width` so a user-configured strip width
         // is honored.
         content_rect_for_with_strip(
@@ -4130,9 +4130,9 @@ impl App {
             .unwrap_or((800, 600));
         let (sw, sh) = (w as f32, h as f32);
         let is_vertical = self.cfg.tab_bar_pos.is_vertical();
-        // Cycle 668 (vertical-tabs sub-cycle 4): Left / Right
+        // Left / Right
         // route through a separate vertical-stacked path.
-        // Horizontal Top/Bottom keeps the cycle-620
+        // Horizontal Top/Bottom keeps the
         // compute_tab_segment_widths flow.
         if is_vertical {
             return self.tab_bar_vertical(ws, sw, sh, height);
@@ -4168,11 +4168,11 @@ impl App {
         let labels = ws.mux.tab_labels();
         let n = labels.len().max(1);
         // Trailing "▾ +" button: a `▾` dropdown arrow (left) + the `+` (right),
-        // each `height` wide. Cycle 805: the strip must reserve the WHOLE
+        // each `height` wide. The strip must reserve the WHOLE
         // button (arrow + plus), not just `plus_w`, or the last tab segment
         // overlaps it.
         let plus_w = height;
-        // Cycle 917 (#4): hide the ▾ shell-dropdown when only one shell is
+        // Hide the ▾ shell-dropdown when only one shell is
         // available (e.g. stock Ubuntu = just bash). A zero-width arrow drops it
         // from both the render pass (`new_tab_menu.2 > 0.0`) and the click
         // hit-test, and the `+` button reclaims the space.
@@ -4182,7 +4182,7 @@ impl App {
             0.0
         };
         let button_w = plus_w + arrow_w;
-        // Cycle 821: the drag-to-reorder handler derives its strip width from
+        // The drag-to-reorder handler derives its strip width from
         // the same helper, so the two can't disagree on where segments end.
         let strip = tab_segment_strip_width(sw, plus_w, arrow_w);
         let (arrow_rect, plus_rect) =
@@ -4211,7 +4211,7 @@ impl App {
             .enumerate()
             .map(|(i, label)| {
                 let x = layout.xs.get(i).copied().flatten().unwrap_or(OFFSCREEN_X);
-                // Cycle 246: per-tab activity dot. Active tabs short-circuit to
+                // Per-tab activity dot. Active tabs short-circuit to
                 // Normal (the focused-tab accent already signals "you are here").
                 let activity = ws
                     .mux
@@ -4255,13 +4255,13 @@ impl App {
             segments,
             new_tab: plus_rect,
             new_tab_menu: arrow_rect,
-            // Cycle 178: broadcast indicator on the active tab.
+            // Broadcast indicator on the active tab.
             broadcast: ws.mux.is_broadcast_on(),
             // Hover-on-✕ chip: renderer paints a red highlight behind
             // the close glyph; UI's `sync_cursor_icon` flips the OS
             // cursor to Pointer at the same time.
             hovered_close_idx: ws.hovered_close_idx,
-            // Cycle 255: while a tab-bar drag is in progress, hand
+            // While a tab-bar drag is in progress, hand
             // the renderer the cursor x so it paints a translucent
             // ghost of the dragged segment under the cursor.
             drag_cursor_x: if ws.tab_drag_active && ws.tab_drag_press.is_none() {
@@ -4309,7 +4309,7 @@ impl App {
         }
     }
 
-    /// Cycle 668 (vertical-tabs sub-cycle 4): tab-bar layout for
+    /// Tab-bar layout for
     /// `TabBarPos::Left` / `Right`. Stacks segments vertically,
     /// each one (`VERTICAL_TAB_STRIP_W` × `tab_bar_h`).
     /// New-tab `+` button anchors at the bottom of the strip.
@@ -4375,13 +4375,13 @@ impl App {
             y: 0.0,
             segments,
             new_tab: (strip_x, plus_y, strip_w, height),
-            // Cycle 805: no dropdown arrow on vertical bars — the bottom-of-
+            // No dropdown arrow on vertical bars — the bottom-of-
             // strip full-width `+` has nowhere sensible for a left-side arrow.
             new_tab_menu: (0.0, 0.0, 0.0, 0.0),
             broadcast: ws.mux.is_broadcast_on(),
             hovered_close_idx: ws.hovered_close_idx,
             // Drag-cursor preview is x-only in v1; vertical drag
-            // reorder is sub-cycle 6 of the design.
+            // reorder is a planned follow-up.
             drag_cursor_x: if ws.tab_drag_active && ws.tab_drag_press.is_none() {
                 Some(ws.cursor.x as f32)
             } else {
@@ -4403,9 +4403,9 @@ impl App {
 
     /// Height the per-pane titlebar reserves at the top of each pane in a tab
     /// with `pane_count` panes, matching the renderer's `pane_titlebar_h`
-    /// (`cfg.show_titlebar && panes > 1 → cell_h + 6`) and the cycle-389
-    /// titlebar hit-test. `0.0` (no inset) for a single-pane tab or when
-    /// titlebars are off. Cycle 817 (audit).
+    /// (`cfg.show_titlebar && panes > 1 → cell_h + 6`) and the
+    /// `pane_at_titlebar_click` hit-test. `0.0` (no inset) for a single-pane
+    /// tab or when titlebars are off.
     fn pane_titlebar_inset(&self, ws: &WindowState, pane_count: usize) -> f32 {
         if self.cfg.show_titlebar && pane_count > 1 {
             ws.renderer.as_ref().map(|r| r.cell_h + 6.0).unwrap_or(20.0)
@@ -4416,7 +4416,7 @@ impl App {
 
     fn grid_of(&self, ws: &WindowState, rect: Rect) -> (usize, usize) {
         // Full-area / single-pane sizing: no titlebar inset. Per-pane sizing in
-        // a split tab goes through `grid_of_inset` (cycle 817).
+        // a split tab goes through `grid_of_inset`.
         self.grid_of_inset(ws, rect, 0.0)
     }
 
@@ -4547,7 +4547,7 @@ impl App {
             .as_ref()
             .map(|r| (r.cell_w, r.cell_h))
             .unwrap_or((8.0, 16.0));
-        // Cycle 817 (audit): apply the same per-pane-titlebar inset the renderer
+        // Apply the same per-pane-titlebar inset the renderer
         // draws content with, or a split pane's pointer maps ~1 row too high.
         // The focused pane lives in the active tab, so its inset depends on the
         // active tab's pane count.
@@ -4567,12 +4567,12 @@ impl App {
         )
     }
 
-    /// Cycle 288: pull the on-screen text of `row` (viewport-relative)
+    /// Pull the on-screen text of `row` (viewport-relative)
     /// from the focused pane's grid so `smart_selection_at` can run its
     /// regex against the actual cells the user clicked on. Returns
     /// `None` if there's no focused pane, the lock can't be acquired,
     /// or the row is out of range.
-    /// Cycle 301 sub-cycle 4: extract the text of the vi visual
+    /// Extract the text of the vi visual
     /// selection from the focused pane's grid. Inclusive on both
     /// ends. Joins rows with `\n`. Returns "" on no focus / lock
     /// failure. Same row→column iteration shape as
@@ -4598,7 +4598,7 @@ impl App {
         if sr >= rows {
             return String::new();
         }
-        // Cycle 912 (R1 completion): the vi rows are viewport-relative (clamped
+        // R1 completion: the vi rows are viewport-relative (clamped
         // to 0..screen_lines, rendered at `oy + row*ch`), so convert each to a
         // grid-absolute line — a visual-yank made while scrolled back then reads
         // the VISIBLE rows, consistent with where the vi highlight is drawn,
@@ -4654,7 +4654,7 @@ impl App {
         Some(out.trim_end().to_string())
     }
 
-    /// Cycle 288: install a `Simple` selection from `(row, start)` to
+    /// Install a `Simple` selection from `(row, start)` to
     /// `(row, end)` inclusive in the focused pane. Returns true if the
     /// selection was set, false if there's no focused pane or the lock
     /// failed (in which case the caller falls through to its normal
@@ -4750,7 +4750,7 @@ impl App {
     /// Copy the focused pane's selection to the clipboard (call on release).
     /// Paste the clipboard into the focused pane, bracketed-paste-safe.
     /// Shared by `Action::Paste` and middle-click.
-    /// Cycle 351 (Terminator parity, terminatorlib/config.py:86-87
+    /// Terminator parity (terminatorlib/config.py:86-87
     /// `use_custom_url_handler` + `custom_url_handler`): open a URL
     /// either via the custom external program (if configured + non-
     /// empty) or fall through to the cross-platform `open` crate.
@@ -4763,17 +4763,17 @@ impl App {
             log::warn!("refused to open unsafe URL: {uri}");
             return;
         }
-        // Cycle 705 (Terminator plugin parity, plugin sub-cycle:
-        // `LuaEvent::UrlClicked`). Fired before pattern-handler
+        // Terminator plugin parity: fire
+        // `LuaEvent::UrlClicked`. Fired before pattern-handler
         // dispatch so analytics / logging / workflow-trigger
         // plugins see ALL URL clicks, regardless of which
-        // handler eventually opens them. The cycle-374
+        // handler eventually opens them. The
         // `try_url_handler` chain below still owns the "actually
         // launch" decision; this event is observation-only.
         if let Some(eng) = &self.lua_engine {
             eng.fire_event(&crate::LuaEvent::UrlClicked(uri.to_string()));
         }
-        // Cycle 374 (Terminator plugin parity, plugin sub-cycle 9):
+        // Terminator plugin parity:
         // Lua URL handlers get first dispatch. If a handler claims
         // the URL (its pattern matches), kettle does NOT fall
         // through to the cfg.custom_url_handler or system-open
@@ -4813,7 +4813,7 @@ impl App {
         self.paste_text(ws, text);
     }
 
-    /// Cycle 755: paste the **X11 PRIMARY selection** (middle-click). On X11 the
+    /// Paste the **X11 PRIMARY selection** (middle-click). On X11 the
     /// PRIMARY selection holds whatever was last highlighted with the mouse —
     /// distinct from the CLIPBOARD (Ctrl+C / Ctrl+Shift+C). The standard
     /// terminal convention is middle-click = paste PRIMARY, which kettle
@@ -4851,7 +4851,7 @@ impl App {
         self.paste_text(ws, text);
     }
 
-    /// Cycle 755: shared paste path — clamp, broadcast scoping, bracketed-paste
+    /// Shared paste path — clamp, broadcast scoping, bracketed-paste
     /// wrap, write to the focused PTY. Extracted so `paste_clipboard` and
     /// `paste_primary` (and any future paste channel) can't drift on the
     /// safety/scoping rules.
@@ -4894,14 +4894,14 @@ impl App {
         if text.is_empty() {
             return;
         }
-        // Cycle 876: record that a paste happened and its length — NEVER the
+        // Record that a paste happened and its length — NEVER the
         // pasted content (a common secret vector). The per-key hook captures
         // the Ctrl+V chord; this marker captures the size without the bytes.
         #[cfg(feature = "dev-record")]
         if let Some(rec) = self.recorder.as_mut() {
             rec.record_marker(&format!("kettle:paste len={}", text.chars().count()));
         }
-        // Broadcast paste (cycle 174 sibling to cycle 173): with the
+        // Broadcast paste: with the
         // group-input mode on (Ctrl+Shift+G), keystrokes go to every
         // pane in the active tab — paste is also user input and
         // should follow the same scoping. Each pane gets its own
@@ -4917,7 +4917,7 @@ impl App {
             .contains(kettle_core::TermMode::BRACKETED_PASTE);
         let bytes = input::paste_payload(text, bracketed);
         if let Some(p) = ws.mux.focused() {
-            // Cycle 941: paste is user input — a read-only pane drops it.
+            // Paste is user input — a read-only pane drops it.
             p.feed_input(&bytes);
         }
     }
@@ -4950,7 +4950,7 @@ impl App {
                     log::warn!("clipboard set PRIMARY failed (selection copy): {e}");
                 }
             }
-            // Cycle 777: log clipboard failures (was silently swallowed) so a
+            // Log clipboard failures (was silently swallowed) so a
             // broken clipboard is diagnosable — matches the vi-mode yank path.
             if let Err(e) = cb.set_text(s) {
                 log::warn!("clipboard set_text failed (selection copy): {e}");
@@ -5050,7 +5050,7 @@ impl App {
         let area = self.area(ws);
         let mut plan: Vec<(u64, usize, usize)> = Vec::new();
         for ti in 0..ws.mux.tabs.len() {
-            // Cycle 817 (audit): a split tab's panes each lose `titlebar_h` of
+            // A split tab's panes each lose `titlebar_h` of
             // height to their per-pane titlebar, so size each PTY for the rows
             // that fit below it (per-tab, since the inset depends on that tab's
             // own pane count).
@@ -5121,7 +5121,7 @@ impl App {
 
     fn drain_events(&mut self, ws: &mut WindowState) {
         let mut bell = false;
-        // Cycle 246: pane ids that fired `TermEvent::Bell` this drain
+        // Pane ids that fired `TermEvent::Bell` this drain
         // pass — latched onto their containing tabs *after* the
         // values_mut() iteration so we don't double-borrow mux.panes.
         let mut bell_panes: Vec<u64> = Vec::new();
@@ -5129,7 +5129,7 @@ impl App {
         // Keep the PTY reader's bounded chunks intact instead of concatenating
         // a whole backlog into a second potentially huge allocation.
         let mut output_chunks: Vec<(u64, Vec<u8>)> = Vec::new();
-        // Cycle 929 (agent-first A2): collect OSC-133 CommandFinished events per
+        // Collect OSC-133 CommandFinished events per
         // pane so the App is the SINGLE drainer — `drain_command_finished_events`
         // is destructive, so the command-notify, the run_command correlator, and
         // event subscribers must all be fed from one place, AFTER this pane loop.
@@ -5138,7 +5138,7 @@ impl App {
         // pass and dispatched after the pane loop so the UI owns all toasts.
         let mut protocol_notifications_local: Vec<(u64, kettle_core::ProtocolNotification)> =
             Vec::new();
-        // Cycle 412: pane ids whose shell exited with cfg.exit_action
+        // Pane ids whose shell exited with cfg.exit_action
         // = Restart. Queued during the drain; appended to
         // ws.pending_pane_restarts after the iteration so the
         // post-drain handler can process them with a fresh borrow.
@@ -5186,7 +5186,7 @@ impl App {
                         if self.cfg.osc52.can_copy()
                             && let Some(cb) = &mut self.clipboard
                         {
-                            // Cycle 777: log instead of silently swallowing.
+                            // Log instead of silently swallowing.
                             if let Err(e) = cb.set_text(clamp_osc52(&s, OSC52_MAX).to_string()) {
                                 log::warn!("clipboard set_text failed (OSC 52 write): {e}");
                             }
@@ -5257,7 +5257,7 @@ impl App {
                         ws.blink_on = true;
                         ws.last_blink = std::time::Instant::now();
                     }
-                    // Cycle 349 (Terminator parity, terminatorlib/
+                    // Terminator parity (terminatorlib/
                     // config.py:103 `force_no_bell`): silence every
                     // bell flavor regardless of cfg.bell mode. The
                     // match-guard combines the variant + the cfg
@@ -5268,7 +5268,7 @@ impl App {
                         bell_panes.push(pane_id);
                     }
                     TermEvent::Bell => {}
-                    // Cycle 357 (Terminator parity, terminatorlib/config.py:118
+                    // Terminator parity (terminatorlib/config.py:118
                     // `exit_action`): when the shell exits, choose
                     // whether to close the pane, restart the shell,
                     // or hold the dead shell visible (so the user can
@@ -5278,7 +5278,7 @@ impl App {
                     // Hold: don't mark closed; pane shows the last
                     // output until user explicitly closes via
                     // Ctrl+Shift+W.
-                    // Restart (cycle 412): queue the pane id for
+                    // Restart: queue the pane id for
                     // post-drain respawn so we don't double-borrow
                     // ws.mux during this iteration. Close the
                     // current PTY (pane.closed = true) — the
@@ -5286,19 +5286,19 @@ impl App {
                     // argv via Mux::spawn_pane.
                     // Close (default): unchanged kettle behavior.
                     TermEvent::Exit | TermEvent::ChildExit(_) => match self.cfg.exit_action {
-                        // Cycle 912 (audit): keep the dead shell on screen. Set
+                        // Keep the dead shell on screen. Set
                         // `held` so `reap()` skips this child-exited pane until
                         // the user explicitly closes it — the previous empty arm
                         // let reap remove it anyway, so Hold behaved like Close.
                         kettle_config::ExitAction::Hold => pane.held = true,
                         kettle_config::ExitAction::Restart => {
-                            // Cycle 418: queue for post-drain
+                            // Queue for post-drain
                             // respawn via Mux::new_tab_with. The
-                            // dead pane closes here; the cycle-418
-                            // handler spawns a fresh shell with
+                            // dead pane closes here; the post-drain
+                            // restart handling in `redraw` spawns a fresh shell with
                             // the same argv + cwd in a new tab.
                             //
-                            // Cycle 452: alacritty_terminal v0.26
+                            // alacritty_terminal v0.26
                             // fires BOTH `Event::ChildExit(status)`
                             // (event_loop.rs:263, only when status
                             // is Some) and `Event::Exit` (term/
@@ -5324,7 +5324,7 @@ impl App {
                     _ => {}
                 }
             }
-            // Cycle 612 / 929: drain OSC 133 D (CommandEnd) events ONCE here and
+            // Drain OSC 133 D (CommandEnd) events ONCE here and
             // defer processing to after the pane loop, where the App can fan a
             // single drain out to the command-notify, the run_command
             // correlator, and event subscribers (each consumer would otherwise
@@ -5350,21 +5350,21 @@ impl App {
                 ws.attention_active = true;
             }
         }
-        // Cycle 246: latch any per-pane bells onto their tab's
+        // Latch any per-pane bells onto their tab's
         // activity flag so the tab-bar dot survives even on tabs the
         // user isn't currently looking at. Active-tab bells were
         // already handled visually (`last_bell` above triggers the
         // visual-bell flash); the latching helper skips the active
         // tab so we don't double-signal.
         //
-        // Cycle 367 (Terminator plugin parity, plugin sub-cycle 5):
+        // Terminator plugin parity:
         // fire LuaEvent::Bell(pane_id) for every belled pane after
         // the kettle-side bell handling is done. Callbacks may queue
         // LuaCommands (kettle.notify, kettle.send_text); they get
-        // drained at the next App tick — same as the cycle-366
-        // startup flow.
-        // Cycle 427: route Bell + Output event drains through the
-        // cycle-426 drain_lua_hook_commands helper so all 4 hook
+        // drained at the next App tick — same as the
+        // pending_lua_send/pending_lua_actions drain in `resumed_inner`.
+        // Route Bell + Output event drains through the
+        // `drain_lua_hook_commands` helper so all 4 hook
         // event drains (TabAdd, TabClose, Bell, Output) share the
         // same canonical LuaCommand-match path.
         for id in bell_panes {
@@ -5374,10 +5374,10 @@ impl App {
             }
             self.drain_lua_hook_commands("bell hook");
         }
-        // Cycle 378/875: a single destructive drain fans out to Lua and the
+        // A single destructive drain fans out to Lua and the
         // optional recorder so neither consumer can steal bytes from the other.
         self.dispatch_output_chunks(ws, output_chunks);
-        // Cycle 929 (agent-first A2): fan out the OSC-133 CommandFinished events
+        // Fan out the OSC-133 CommandFinished events
         // drained above — command-notify (existing behavior), the run_command
         // correlator, and event subscribers all from this single place.
         for (pane_id, ev) in command_finished_local {
@@ -5428,7 +5428,7 @@ impl App {
                 }),
             );
         }
-        // Cycle 412: stash the per-tick restart list on App so the
+        // Stash the per-tick restart list on App so the
         // post-drain handler can process it with a fresh
         // &mut ws.mux borrow (the drain_events loop above held a
         // &mut iter into ws.mux.panes, so spawn_pane couldn't run
@@ -5438,7 +5438,7 @@ impl App {
         }
     }
 
-    /// Cycle 908 (dev-record completeness): fan out PTY output still queued in
+    /// Fan out PTY output still queued in
     /// the shared output sidechannels right now. Output that lands after the
     /// last redraw drain and before a pane is reaped or its window closes would
     /// otherwise be lost to both the recorder and Lua hooks. Call this before
@@ -5546,7 +5546,7 @@ impl App {
             .unwrap_or_default();
         let tab = ws.mux.active + 1;
         let want = window_title(&self.cfg.window_title_format, title, &cwd, tab);
-        // Cycle 876: an always-visible recording indicator in the title bar so
+        // An always-visible recording indicator in the title bar so
         // the dev recorder is never silently capturing. Keep it ASCII because
         // Linux window-manager title fonts do not reliably carry symbol glyphs.
         #[cfg(feature = "dev-record")]
@@ -5692,7 +5692,7 @@ impl App {
             return;
         }
         let query = ws.mux.search.query.clone();
-        // Cycle 803: re-run the (potentially full-scrollback) regex scan only
+        // Re-run the (potentially full-scrollback) regex scan only
         // when something that affects the match set changed — the query, the
         // focused pane, or that tab's last-output instant (new text could add
         // or remove matches). Match *navigation* (n/N changes `index`) and the
@@ -5849,7 +5849,7 @@ impl App {
     /// Clamped to the focused pane's live grid: a click in the right/bottom
     /// padding (the rect rounds up past an exact cell multiple) must report the
     /// LAST cell, never one past the edge. A mouse-tracking app that sees
-    /// `col == cols` or `row == rows` mis-renders (cycle 842, audit) — xterm
+    /// `col == cols` or `row == rows` mis-renders — xterm
     /// itself clamps the reported coordinate to the window.
     fn cursor_cell(&self, ws: &WindowState) -> Option<(usize, usize)> {
         let rect = self.focused_rect(ws, self.area(ws))?;
@@ -5860,7 +5860,7 @@ impl App {
         // Clamp to the pane's geometric grid (same cell size AND titlebar inset
         // `px_to_point` used): a click in the right/bottom padding rounds up to
         // `cols`/`rows`, one past the edge, which a mouse-tracking app
-        // mis-renders. Cycle 916 (file-by-file audit): clamp against the INSET
+        // mis-renders. Clamp against the INSET
         // grid (the size the split pane's PTY was actually given by resize_all) —
         // the zero-inset `grid_of` left the row ceiling ~1 too high in a
         // titlebar'd split, so a bottom-edge click reported one row past the
@@ -5887,7 +5887,7 @@ impl App {
         };
         let g = t.grid();
         let (rows, cols) = (g.screen_lines(), g.columns());
-        // Cycle 912 (R1 completion): convert each viewport row to its grid-
+        // R1 completion: convert each viewport row to its grid-
         // absolute line so hint detection scans the VISIBLE rows (incl. history
         // when scrolled back), not the active screen — otherwise a quick-select
         // label drawn over a visible URL would open the active-screen URL at the
@@ -5937,7 +5937,7 @@ impl App {
     /// Whether a mouse event at `cur` should be reported to a tracking app,
     /// given the `last` reported cell. Motion (1002/1003) coalesces to cell
     /// crossings; a press/release (`motion == false`) always reports. Pure so
-    /// the coalescing rule is unit-tested without a live PTY (cycle 842).
+    /// the coalescing rule is unit-tested without a live PTY.
     fn motion_should_report(
         motion: bool,
         last: Option<(usize, usize)>,
@@ -5958,7 +5958,7 @@ impl App {
         if ws.mods.shift_key() {
             return false;
         }
-        // Cycle 942 (audit, VTE input-enabled parity): a read-only pane gets
+        // VTE input-enabled parity: a read-only pane gets
         // no mouse-tracking reports either. Returning false falls through to
         // kettle-local handling, so selection / scrollback still work for the
         // user — the same degradation VTE applies when input is disabled.
@@ -5978,7 +5978,7 @@ impl App {
         // Cell-motion coalescing: a drag that stays inside one cell must not
         // re-report. xterm fires a 1002/1003 motion event only when the
         // pointer crosses into a new cell; without this a fast drag emits one
-        // SGR report per pixel of travel, flooding the TUI (cycle 842, audit).
+        // SGR report per pixel of travel, flooding the TUI.
         // Press/release always report (the guard is motion-only) and refresh
         // the baseline, so the next motion is compared against the right cell.
         if !Self::motion_should_report(motion, ws.last_mouse_cell, (row, col)) {
@@ -6060,7 +6060,7 @@ impl App {
             None => (None, String::new()),
         };
 
-        // Cycle 708 (Terminator parity, layoutlauncher.py):
+        // Terminator parity (layoutlauncher.py):
         // compute the layout-picker overlay's query + hint
         // string the same way as the command palette. Empty
         // layouts dir is fine — the hint reads `(no saved
@@ -6155,7 +6155,7 @@ impl App {
             || ws.layout_picker_input.is_some()
             || ws.hint_state.is_some()
             || ws.mux.search.open
-            // Cycle 763: the title-edit and confirm-dialog input bars are also
+            // The title-edit and confirm-dialog input bars are also
             // active text surfaces — keep the cursor steady (not mid-blink-off)
             // while the user is typing/navigating them, like the other modals.
             || ws.editing_title.is_some()
@@ -6180,7 +6180,7 @@ impl App {
             .and_then(|(c, r, t)| (t.elapsed() < RESIZE_OVERLAY_DURATION).then_some((c, r)));
 
         let context_menu = self.context_menu_overlay(ws);
-        // Cycle 372: marshal the in-progress Edit-title state for
+        // Marshal the in-progress Edit-title state for
         // the render layer so the user sees what they're typing. The
         // title-edit rect is app chrome, never a bottom overlay over terminal
         // rows.
@@ -6198,7 +6198,7 @@ impl App {
                     rect: self.title_edit_rect(ws),
                 }
             });
-        // Cycle 660: project the App's confirm_dialog into the
+        // Project the App's confirm_dialog into the
         // renderer's projection (so it shows even when no
         // search is open — confirm modals are independent).
         let confirm_dialog_early =
@@ -6224,7 +6224,7 @@ impl App {
                         .collect(),
                     focus_idx: d.focus_idx,
                 });
-        // Cycle 756: project the settings overlay (independent of search, like
+        // Project the settings overlay (independent of search, like
         // the confirm dialog). Values are read from the live Config so the
         // panel reflects the current state (incl. external reloads).
         let settings_overlay = self.settings_overlay_projection(ws);
@@ -6310,7 +6310,7 @@ impl App {
     }
 
     fn update_links(&mut self, ws: &mut WindowState) {
-        // Cycle 803: build a cheap key (focus + tab output instant + scroll
+        // Build a cheap key (focus + tab output instant + scroll
         // offset) and skip the viewport URL re-scan when the visible content
         // can't have changed. The brief lock to read display_offset is cheap;
         // the avoided work is `kettle_core::links`' per-cell regex pass.
@@ -6430,10 +6430,10 @@ impl App {
         if ws.ime_preedit.is_some() {
             self.update_ime_cursor_area(ws);
         }
-        // Cycle 745: reflect the focused pane's OSC 9;4 progress onto the OS
+        // Reflect the focused pane's OSC 9;4 progress onto the OS
         // taskbar button (pwsh 7 / Windows Terminal parity). No-op off Windows.
         self.poll_taskbar_progress(ws);
-        // Cycle 418: process any pane-restart requests queued during
+        // Process any pane-restart requests queued during
         // drain_events. Done HERE (after drain) so we don't hold a
         // &mut iter into ws.mux.panes when spawning a new tab.
         // event_loop arg is unused for now (the spawn doesn't need it);
@@ -6442,8 +6442,8 @@ impl App {
             let pane_ids: Vec<u64> = std::mem::take(&mut ws.pending_pane_restarts);
             let (cw, ch) = self.cell_px(ws);
             let waker = self.waker();
-            // Cycle 420: use the live grid (matches the existing surface)
-            // for the new tab. cycle-418 hardcoded 80×24 which mismatched
+            // Use the live grid (matches the existing surface)
+            // for the new tab. An earlier version hardcoded 80×24 which mismatched
             // any non-default kettle window size — the new shell would
             // start with a tiny grid then grow on next resize. Pulling
             // from the current area means the restart shell starts at
@@ -6468,7 +6468,7 @@ impl App {
                     ) {
                         log::warn!("exit-action = restart: spawn failed for pane {pane_id}: {e}");
                     } else {
-                        // Cycle 425: respawned tab is a fresh tab
+                        // A respawned tab is a fresh tab
                         // from the plugin's POV; fire TabAdd.
                         self.fire_tab_add_event(ws);
                     }
@@ -6477,7 +6477,7 @@ impl App {
         }
         // Reflect the active pane (incl. after tab/focus switches).
         self.sync_window_title(ws);
-        // Cycle 908: capture a just-exited pane's final output before reap drops
+        // Capture a just-exited pane's final output before reap drops
         // its sidechannel — otherwise the shell's last line is lost from the trace.
         #[cfg(feature = "dev-record")]
         self.flush_recorder_output(ws);
@@ -6491,7 +6491,7 @@ impl App {
         // `should_scroll_on_output` rule so the "what counts as new
         // output" decision lives outside the render path.
         let want_sob = self.cfg.scroll_on_output;
-        // Cycle 246: track which panes produced output this frame so
+        // Track which panes produced output this frame so
         // we can latch their tab's `last_output_at`. Collected here
         // and dispatched after the borrow ends — same shape as the
         // `bell_panes` collection in `drain_events`.
@@ -6559,7 +6559,7 @@ impl App {
         let overlay = self.overlay(ws);
         let area = self.area(ws);
         let tabbar = self.tab_bar(ws);
-        // Cycle 296: build status bar BEFORE the &mut renderer borrow
+        // Build status bar BEFORE the &mut renderer borrow
         // since `build_status_bar` reads ws.mux / self.cfg
         // immutably.
         let status = self.build_status_bar(ws);
@@ -6582,7 +6582,7 @@ impl App {
         // budget) the parser starved on `term.lock()` nearly continuously —
         // the v2.19.0 baseline measured 0.42–0.8 MB/s throughput vs 3–9 MB/s
         // for WT / Alacritty / WezTerm on the identical harness.
-        // Cycle 382: also pass the pane's title so the cycle-379
+        // Also pass the pane's title so the per-pane
         // titlebar can render the text.
         let mut snaps = std::mem::take(&mut ws.pane_snapshots);
         let mut metas = Vec::with_capacity(layout.len());
@@ -6636,7 +6636,7 @@ impl App {
             }
         }
         snaps.truncate(metas.len());
-        // Cycle 852 (audit): hand the renderer borrows into `metas` (which lives
+        // Hand the renderer borrows into `metas` (which lives
         // for the whole frame) instead of a second per-pane clone of the images
         // Vec / title String / group_name. `snap` borrows the pooled snapshot
         // the same way; both outlive `panes`, which drops before the pool
@@ -6663,7 +6663,7 @@ impl App {
                 },
             )
             .collect();
-        // Cycle 296: status bar built BEFORE the &mut renderer borrow
+        // Status bar built BEFORE the &mut renderer borrow
         // (the helper reads `ws.mux` immutably). Cheap when off.
         if let Err(e) = renderer.render_frame_with_status_and_pre_present(
             &panes,
@@ -6693,7 +6693,7 @@ impl App {
             }
             ws.window_shown = true;
         }
-        // Cycle 910 (R2): record the paint time and clear any pending coalesced
+        // Record the paint time and clear any pending coalesced
         // output paint now that this settled frame is on the surface.
         ws.last_paint = Some(std::time::Instant::now());
         ws.coalescing_paint = false;
@@ -6710,7 +6710,7 @@ impl App {
         };
     }
 
-    /// Cycle 296: compose the status-bar contents (HH:MM:SS · theme ·
+    /// Compose the status-bar contents (HH:MM:SS · theme ·
     /// focused-pane title). Returns `StatusBar::hidden` when the
     /// config has it off. The renderer's draw is a no-op on a
     /// hidden status bar so this is cheap even when never visible.
@@ -6734,7 +6734,7 @@ impl App {
         // Compose text: HH:MM:SS · theme · focused pane title.
         // SystemTime → seconds since UNIX → HH:MM:SS via div/mod, no
         // dep on chrono. The displayed time is UTC by design (a
-        // future cycle could honor $TZ — std::time has no built-in
+        // future change could honor $TZ — std::time has no built-in
         // local-tz conversion, would need chrono or time crate).
         let secs = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -6748,7 +6748,7 @@ impl App {
             .map(|p| p.title.clone())
             .filter(|s| !s.is_empty())
             .unwrap_or_else(|| "kettle".to_string());
-        // Cycle 308: cap the title at a character budget so a chatty
+        // Cap the title at a character budget so a chatty
         // prompt that puts the full cwd in the window title
         // (e.g. `PROMPT_COMMAND='echo -ne "\033]0;$PWD\007"'`)
         // doesn't overflow the strip's 1-cell height. Pure helper
@@ -6764,8 +6764,8 @@ impl App {
     /// Snapshot the focused `(tab, leaf)` pair. Paired with
     /// `note_focus_change` to detect whether an operation moved focus
     /// and, if so, reset the cursor blink phase so the new pane's
-    /// cursor is visible immediately (cycle 135 pattern, extracted to
-    /// a helper in cycle 136 so the mouse-driven paths can share it).
+    /// cursor is visible immediately, extracted to a helper so the
+    /// mouse-driven paths can share it.
     fn focus_key(&self, ws: &WindowState) -> (usize, Option<u64>) {
         (ws.mux.active, ws.mux.active_focus())
     }
@@ -6775,7 +6775,7 @@ impl App {
     fn note_focus_change(&mut self, ws: &mut WindowState, pre: (usize, Option<u64>)) {
         if self.focus_key(ws) != pre {
             self.reset_blink_phase(ws);
-            // Cycle 802 (audit): repaint immediately so the focused-pane
+            // Repaint immediately so the focused-pane
             // border and the cursor's solid/hollow state track the new pane.
             // Without this, a focus-follows-mouse (`focus = sloppy`) change
             // left a stale focus border until some *other* event happened to
@@ -6787,8 +6787,8 @@ impl App {
     }
 
     /// Close every modal overlay (search bar, command palette, hint
-    /// mode, SSH launcher). Cycle 111's Reset path inlined the same
-    /// four-line clear; cycle 154 extracts it so the modal-opening
+    /// mode, SSH launcher). The Reset action inlined the same
+    /// four-line clear; this extracts it so the modal-opening
     /// actions can call it first to avoid stacking two visible
     /// modals at once (palette opened while ssh launcher was up
     /// would render both, with palette capturing keys; visually
@@ -6805,10 +6805,10 @@ impl App {
         ws.ssh_input = None;
         ws.context_menu = None;
         ws.editing_title = None;
-        // Cycle 298 vi-mode behaves like a modal — Esc exits it,
-        // close_all_modals exits it. Sub-cycle 1.
+        // vi-mode behaves like a modal — Esc exits it,
+        // close_all_modals exits it.
         ws.vi_mode = None;
-        // Cycle 754: the confirm dialog ("Close this pane?", "Quit?") is a
+        // The confirm dialog ("Close this pane?", "Quit?") is a
         // modal too, but was omitted here — so opening search / palette / a
         // menu while a confirm prompt was up rendered BOTH overlays at once
         // with ambiguous key focus. Every modal-opener calls close_all_modals
@@ -6817,7 +6817,7 @@ impl App {
         ws.confirm_dialog = None;
     }
 
-    /// Cycle 369: apply the in-progress title edit + clear the
+    /// Apply the in-progress title edit + clear the
     /// overlay. The scope decides which setter is invoked.
     fn apply_title_edit(&mut self, ws: &mut WindowState) {
         if let Some(state) = ws.editing_title.take() {
@@ -6840,9 +6840,9 @@ impl App {
                     }
                 }
                 TitleEditScope::Group => {
-                    // Cycle 680: bulk-apply branches on
+                    // Bulk-apply branches on
                     // `state.bulk`. Single = focused pane only
-                    // (preserves cycle-407 behavior); Tab/Window
+                    // (preserves the original single-pane group-edit behavior); Tab/Window
                     // = bulk-assign via Action::GroupTab/Window.
                     let next = if value.is_empty() { None } else { Some(value) };
                     match state.bulk {
@@ -6880,9 +6880,9 @@ impl App {
 
     /// `true` while any modal overlay (search bar, command palette, hint
     /// mode, SSH launcher, context menu) is up. Mirrors `close_all_modals`
-    /// so the two stay in lock-step — extracted in cycle 161 to drive the
+    /// so the two stay in lock-step — extracted to drive the
     /// cursor-icon override (the OS arrow, not the I-beam, belongs over
-    /// modal chrome) and extended in cycle 245 for the right-click menu.
+    /// modal chrome) and later extended for the right-click menu.
     fn any_modal_open(&self, ws: &WindowState) -> bool {
         ws.mux.search.open
             || ws.palette_input.is_some()
@@ -6893,7 +6893,7 @@ impl App {
             || ws.context_menu.is_some()
             || ws.editing_title.is_some()
             || ws.vi_mode.is_some()
-            // Cycle 754: the confirm dialog is a modal too. Its key input has a
+            // The confirm dialog is a modal too. Its key input has a
             // dedicated priority branch, but without it here mouse/scroll/cursor
             // gating let clicks fall through to the terminal behind a "Quit?" /
             // "Close pane?" prompt.
@@ -6903,7 +6903,7 @@ impl App {
     /// Build the right-click context-menu item list. Each `Item`'s
     /// `enabled` flag is computed from current state: Copy needs a
     /// selection; Ungroup needs the focused pane to actually be in a
-    /// group. Cycle 713 wraps the whole list in `filter_disabled` at
+    /// group. The whole list is wrapped in `filter_disabled` at
     /// the `open_context_menu` call-site so disabled rows + the
     /// separators that would orphan them are hidden entirely
     /// (Terminator-style) rather than shown greyed-out — less visual
@@ -6914,7 +6914,7 @@ impl App {
             .focused()
             .and_then(|p| p.term.term.lock().ok().map(|t| t.selection.is_some()))
             .unwrap_or(false);
-        // Cycle 713: only enable Ungroup when the focused pane has a
+        // Only enable Ungroup when the focused pane has a
         // group_name set. Otherwise the row used to greyed-out
         // confuse new users ("why's that here if I can't click it?");
         // now it's filtered out entirely until it's actionable.
@@ -6923,7 +6923,7 @@ impl App {
             .focused()
             .map(|p| p.group_name.as_ref().is_some_and(|g| !g.is_empty()))
             .unwrap_or(false);
-        // Cycle 941 (Terminator parity, terminal_popup_menu.py "Read only"):
+        // Terminator parity, terminal_popup_menu.py "Read only":
         // checked while the focused pane drops user input.
         let read_only = ws.mux.focused().map(|p| p.read_only).unwrap_or(false);
         vec![
@@ -6959,7 +6959,7 @@ impl App {
                 action: Action::NewTab,
                 enabled: true,
             },
-            // Cycle 941 (Terminator parity): per-pane read-only toggle. The
+            // Terminator parity: per-pane read-only toggle. The
             // check marker mirrors the Preferences-submenu convention
             // ("✓ on / off"); dispatch goes through the same
             // `Action::TogglePaneReadOnly` the keybind uses.
@@ -6969,8 +6969,7 @@ impl App {
                 action: Action::TogglePaneReadOnly,
                 enabled: true,
             },
-            // Cycle 683 (named-groups sub-cycle 7): right-click
-            // entries for the broadcast-group surface. Layered
+            // Right-click entries for the broadcast-group surface. Layered
             // below the close-family + new-tab so they don't
             // hijack muscle memory; users who never use groups
             // see them at the bottom and can ignore.
@@ -6993,7 +6992,7 @@ impl App {
         ]
     }
 
-    /// Cycle 611 (Terminator parity, `custom_commands.py`): append
+    /// Terminator parity, `custom_commands.py`: append
     /// every `menu-item = LABEL = CMD` config entry to the context-
     /// menu item list. Called by `open_context_menu` AFTER the
     /// built-in items + BEFORE the Lua-supplied items so the visual
@@ -7015,30 +7014,30 @@ impl App {
         }
     }
 
-    /// Cycle 658 (sub-cycle 7 of [`TERMINATOR-REMOTE-DESIGN.md`](
-    /// ../../../docs/TERMINATOR-REMOTE-DESIGN.md)): append the
+    /// Phase 7 of [`TERMINATOR-REMOTE-DESIGN.md`](
+    /// ../../../docs/TERMINATOR-REMOTE-DESIGN.md): append the
     /// "Reconnect to …" / "Re-attach …" menu entry when the
     /// focused pane has a detected remote-session context.
     ///
-    /// Click → cycle-611 `ContextMenuItem::ConfigItem` dispatch
-    /// writes `clone_session_command(ctx) + "\n"` to the focused
+    /// Click → the same `ContextMenuItem::ConfigItem` dispatch
+    /// `append_config_menu_items` uses; writes `clone_session_command(ctx) + "\n"` to the focused
     /// pane's PTY. The user can then split first if they want
     /// the reconnect to land in a new pane, or hit the entry
     /// directly to reconnect in-place after the original session
     /// exits.
-    /// Cycle 686 (sub-cycle 8 of [`TERMINATOR-THEME-SUBMENU-DESIGN.md`](
-    /// ../../../docs/TERMINATOR-THEME-SUBMENU-DESIGN.md)):
+    /// Phase 8 of [`TERMINATOR-THEME-SUBMENU-DESIGN.md`](
+    /// ../../../docs/TERMINATOR-THEME-SUBMENU-DESIGN.md):
     /// append a `Submenu { "Profile", … }` entry populated from
-    /// `Config::list_profiles()`. Same machinery as the cycle-
-    /// 685 Theme submenu; click on a profile entry sets
-    /// `App::config_path` to the cycle-618 profile path and
-    /// reloads. The flyout-render side is still sub-cycle 3
-    /// (shared with Theme).
-    /// Cycle 717 (Preferences submenu, C8): append a `Preferences ▸`
+    /// `Config::list_profiles()`. Same machinery as
+    /// `append_theme_submenu_items`; click on a profile entry sets
+    /// `App::config_path` via the profile-path resolution helper and
+    /// reloads. The flyout-render side is still phase 3 of the
+    /// theme-submenu design (shared with Theme).
+    /// Preferences submenu, C8: append a `Preferences ▸`
     /// submenu with runtime-mutable toggles. Each toggle dispatches
-    /// through a dedicated `Action::*` variant (cycle-717) that
+    /// through a dedicated `Action::*` variant that
     /// updates `self.cfg` AND writes back to the user's config file
-    /// atomically via cycle-716's `persist_config_toggle`.
+    /// atomically via the `persist_config_toggle` helper.
     ///
     /// Submenu layout (radio = "● selected / ○ other"; check =
     /// "✓ on /   off"):
@@ -7047,9 +7046,9 @@ impl App {
     ///   - Copy on select (check)
     ///   - Bell (radio: Off / Visual / Attention / Both)
     ///   - Mouse-hide while typing (check)
-    ///   - Font size + / Font size − (reuses cycle-X actions)
+    ///   - Font size + / Font size − (reuses existing actions)
     ///   - Separator
-    ///   - Advanced… (cycle-718 / C9 — `Action::EditConfig`)
+    ///   - Advanced… (C9 — `Action::EditConfig`)
     fn append_preferences_submenu_items(&self, items: &mut Vec<ContextMenuItem>) {
         items.push(ContextMenuItem::Separator);
         let mut inner: Vec<ContextMenuItem> = Vec::new();
@@ -7141,7 +7140,7 @@ impl App {
             enabled: true,
         });
         inner.push(ContextMenuItem::Separator);
-        // Cycle 718 (C9): the Advanced… escape hatch for everything
+        // C9: the Advanced… escape hatch for everything
         // not exposed as a toggle.
         inner.push(ContextMenuItem::Item {
             label: "Advanced… (open config in $EDITOR)",
@@ -7173,13 +7172,13 @@ impl App {
         });
     }
 
-    /// Cycle 685 (sub-cycle 2 of [`TERMINATOR-THEME-SUBMENU-DESIGN.md`](
-    /// ../../../docs/TERMINATOR-THEME-SUBMENU-DESIGN.md)):
+    /// Phase 2 of [`TERMINATOR-THEME-SUBMENU-DESIGN.md`](
+    /// ../../../docs/TERMINATOR-THEME-SUBMENU-DESIGN.md):
     /// append a `Submenu { "Theme", … }` entry populated from
-    /// `Theme::list()`. The flyout-render side (sub-cycle 3)
+    /// `Theme::list()`. The flyout-render side (phase 3)
     /// will surface the submenu items in a side panel; for now
     /// the parent menu shows "Theme ▸" and clicking it logs an
-    /// info nudge (cycle 684).
+    /// info nudge.
     fn append_theme_submenu_items(&self, items: &mut Vec<ContextMenuItem>) {
         let theme_names = kettle_config::Theme::list();
         if theme_names.is_empty() {
@@ -7220,8 +7219,8 @@ impl App {
         }
     }
 
-    /// Cycle 375 (Terminator plugin parity, plugin sub-cycle 8):
-    /// append every Lua-registered menu item to the context-menu
+    /// Terminator plugin parity: append every Lua-registered menu item to
+    /// the context-menu
     /// item list. Called by `open_context_menu` after the built-in
     /// items so Lua items always render below the kettle defaults.
     /// Each entry's label is shown; clicking dispatches the
@@ -7243,20 +7242,20 @@ impl App {
 
     /// Open the right-click context menu at `(px, py)`. Closes any other
     /// open modal first so we don't render two overlays at once
-    /// (cycle 156 close_all_modals discipline), then computes the panel
+    /// (the close_all_modals discipline), then computes the panel
     /// size from the cell metrics and clamps the anchor so the menu fits
     /// the surface (right-click near the bottom-right corner flips up-
     /// and-left rather than rendering off-screen).
     fn open_context_menu(&mut self, ws: &mut WindowState, px: f32, py: f32) {
         self.close_all_modals(ws);
-        // Cycle 941 (Terminator parity, terminal_popup_menu.py "Open link" /
-        // "Copy address"): when the right-click landed on a detected
+        // Terminator parity, terminal_popup_menu.py "Open link" /
+        // "Copy address": when the right-click landed on a detected
         // hyperlink, lead with the URL rows. The URL is captured NOW — fresh
         // output scrolling the grid between open and click must not retarget
-        // the action. `update_links` is keyed (cycle 803) so this is a no-op
+        // the action. `update_links` is keyed so this is a no-op
         // when the viewport hasn't changed since the last scan.
         self.update_links(ws);
-        // Cycle 942 (audit): only offer the rows when the click is INSIDE the
+        // Only offer the rows when the click is INSIDE the
         // focused pane's rect. `cursor_cell` clamps out-of-rect coordinates to
         // the nearest cell (xterm parity — right for mouse reports), which
         // here could surface "Open Link" for a link the user never pointed at
@@ -7279,23 +7278,23 @@ impl App {
             items.push(ContextMenuItem::Separator);
         }
         items.extend(self.context_menu_items(ws));
-        // Cycle 611: append config-file menu items (if any).
+        // Append config-file menu items (if any).
         self.append_config_menu_items(&mut items);
-        // Cycle 375: append Lua-supplied items (if any).
+        // Append Lua-supplied items (if any).
         self.append_lua_menu_items(&mut items);
-        // Cycle 658 (remote.py sub-cycle 7): append the remote-
+        // Phase 7 of the remote-session design: append the remote-
         // session reconnect entry when the focused pane has a
         // detected SSH/Docker/Podman/kubectl context.
         self.append_remote_menu_items(ws, &mut items);
-        // Cycle 685 (theme-submenu sub-cycle 2): append the
+        // Phase 2 of the theme-submenu design: append the
         // Theme submenu populated from Theme::list(). The flyout
-        // open machinery lands in sub-cycle 3.
+        // open machinery lands in phase 3.
         self.append_theme_submenu_items(&mut items);
-        // Cycle 686 (theme-submenu sub-cycle 8): same machinery
+        // Phase 8 of the theme-submenu design: same machinery
         // for Profile (only appended when ~/.config/kettle/
         // profiles/ has any *.config files).
         self.append_profile_submenu_items(&mut items);
-        // Cycle 756: top-level "Settings…" entry opens the full in-app
+        // Top-level "Settings…" entry opens the full in-app
         // settings overlay (the richer, keyboard-navigable panel). The
         // Preferences ▸ submenu below stays as the quick-toggle surface.
         items.push(ContextMenuItem::Separator);
@@ -7304,13 +7303,13 @@ impl App {
             action: kettle_config::Action::OpenSettings,
             enabled: true,
         });
-        // Cycle 717 (Preferences submenu, C8): runtime-mutable
+        // Preferences submenu, C8: runtime-mutable
         // settings + the Advanced… escape hatch.
         self.append_preferences_submenu_items(&mut items);
         self.show_context_menu(ws, items, px, py);
     }
 
-    /// Cycle 805: shared tail of context-menu opening — drop disabled rows +
+    /// Shared tail of context-menu opening — drop disabled rows +
     /// collapse orphaned separators, compute panel geometry, clamp the anchor
     /// on-screen, and install the `ContextMenuState`. Used by both the
     /// right-click menu and the new-tab `▾` dropdown so they render
@@ -7322,7 +7321,7 @@ impl App {
         px: f32,
         py: f32,
     ) {
-        // Cycle 713 (Terminator menu UX, C4): every visible row is actionable.
+        // Terminator menu UX, C4: every visible row is actionable.
         let items = filter_disabled(items);
         let highlight = items.iter().position(item_is_dispatchable).unwrap_or(0);
         let (cw, ch) = self.menu_cell(ws);
@@ -7344,7 +7343,7 @@ impl App {
                 | ContextMenuItem::Info { .. } => row_h,
             })
             .sum();
-        // Dropdown-parity cycle: the width budget includes each row's
+        // Dropdown parity: the width budget includes each row's
         // right-aligned shortcut hint (+2 spacer columns) — the same formula
         // the renderer's `menu_row_chars` uses, kept in lockstep.
         let hints = self.menu_item_hints(&items);
@@ -7359,7 +7358,7 @@ impl App {
                 };
                 match it {
                     ContextMenuItem::Item { label, .. } => Some(label.chars().count() + hint_chars),
-                    // Cycle 941: count DynamicItem labels too — the hit-test twin
+                    // Count DynamicItem labels too — the hit-test twin
                     // (`context_menu_geometry`) already did, so the anchor clamp
                     // here used to underestimate the panel the renderer draws.
                     ContextMenuItem::DynamicItem { label, .. } => {
@@ -7372,10 +7371,10 @@ impl App {
                     }
                     ContextMenuItem::UrlItem { label, .. } => Some(label.chars().count()),
                     ContextMenuItem::Info { label } => Some(label.chars().count()),
-                    // Cycle 684: submenu rows show "label ▸" so the
+                    // Submenu rows show "label ▸" so the
                     // max-width budget needs +2 for the suffix.
                     ContextMenuItem::Submenu { label, .. } => Some(label.chars().count() + 2),
-                    // Cycle 685/686: Theme/Profile choices surface only inside an
+                    // Theme/Profile choices surface only inside an
                     // open flyout; the parent menu's width budget shouldn't grow.
                     ContextMenuItem::ThemeChoice { .. } => None,
                     ContextMenuItem::ProfileChoice { .. } => None,
@@ -7409,7 +7408,7 @@ impl App {
         }
     }
 
-    /// Dropdown-parity cycle: the renderer's FRACTIONAL cell metrics, for
+    /// The renderer's FRACTIONAL cell metrics, for
     /// menu geometry. `cell_px` rounds to integers for the PTY grid; the
     /// renderer positions menu rows with the f32 metrics, and using the
     /// rounded value here under-measured the panel by ~0.5px per row —
@@ -7493,7 +7492,7 @@ impl App {
                         }
                         format!("{input}\u{258f}")
                     } else if i == fld && nav.capturing {
-                        // Cycle 766: capture prompt on the focused keybind row.
+                        // Capture prompt on the focused keybind row.
                         "‹press a chord — Esc to cancel›".to_string()
                     } else {
                         crate::settings::read(&self.cfg, f)
@@ -7623,7 +7622,7 @@ impl App {
         true
     }
 
-    /// Dropdown-parity cycle: per-row shortcut hints for a menu, from the
+    /// Per-row shortcut hints for a menu, from the
     /// LIVE keybind map (a user rebind shows their actual chord). `Item` /
     /// `DynamicItem` rows look up their own Action; the Nth `NewTabShell`
     /// row maps to `Action::NewTabShell(N)` (the Ctrl+Shift+N family).
@@ -7656,7 +7655,7 @@ impl App {
             .collect()
     }
 
-    /// Dropdown-parity cycle: the new-tab `▾` dropdown's rows — the detected
+    /// The new-tab `▾` dropdown's rows — the detected
     /// shells, then Windows Terminal's bottom section (Settings / Command
     /// palette / About) behind a separator. Pure over the shell list so the
     /// menu shape is unit-testable.
@@ -7685,7 +7684,7 @@ impl App {
         items
     }
 
-    /// Dropdown-parity cycle: the About panel — version + git hash, update
+    /// The About panel — version + git hash, update
     /// status, and link rows, reusing the context-menu machinery (Info rows
     /// render dimmed and are not clickable; UrlItem rows copy/open).
     fn open_about_panel(&mut self, ws: &mut WindowState) {
@@ -7733,7 +7732,7 @@ impl App {
         self.show_context_menu(ws, items, sw * 0.5 - 140.0, sh * 0.4);
     }
 
-    /// Cycle 805 / dropdown-parity cycle: open the new-tab `▾` dropdown at
+    /// Open the new-tab `▾` dropdown at
     /// `(px, py)` — detected shells (process-cached in kettle-core, prewarmed
     /// at startup) plus the Settings / Command palette / About bottom rows.
     fn open_new_tab_menu(&mut self, ws: &mut WindowState, px: f32, py: f32) {
@@ -7743,17 +7742,18 @@ impl App {
         self.show_context_menu(ws, items, px, py);
     }
 
-    /// Cycle 805: open a new tab running `argv`, inheriting the focused tab's
+    /// Open a new tab running `argv`, inheriting the focused tab's
     /// current working directory. Shared by the new-tab `▾` dropdown's mouse +
-    /// keyboard dispatch. Mirrors the cycle-802 NewTab pattern: log on failure,
-    /// fire the `TabAdd` plugin event only when a tab was actually created.
+    /// keyboard dispatch. Mirrors the `Action::NewTab` handler's pattern: log
+    /// on failure, fire the `TabAdd` plugin event only when a tab was
+    /// actually created.
     fn open_tab_with_argv(&mut self, ws: &mut WindowState, argv: &[String]) {
         let area = self.area(ws);
         let (cols, rows) = self.grid_of(ws, area);
         let (cw, ch) = self.cell_px(ws);
         let waker = self.waker();
         let cwd = ws.mux.focused().and_then(|p| p.term.current_dir());
-        // Cycle 912 (audit): route through new_tab_with_launch so a WSL ▾-dropdown
+        // Route through new_tab_with_launch so a WSL ▾-dropdown
         // entry's Linux cwd is carried via `wsl --cd` instead of being dropped
         // (a Windows spawn can't `cd` into a Linux path, so it fell back home).
         match ws
@@ -7782,7 +7782,7 @@ impl App {
     }
 
     /// Move the context-menu highlight to `next` and sync `scroll_offset` so
-    /// it stays visible (cycle 714). Split out of
+    /// it stays visible. Split out of
     /// `step_context_menu_highlight` in v2.20.0 so the vim-menu-nav jumps
     /// (`g`/`G`, `Ctrl+d`/`Ctrl+u`) reuse the exact same scroll-window math.
     fn set_context_menu_highlight(&mut self, ws: &mut WindowState, next: usize) {
@@ -7796,7 +7796,7 @@ impl App {
             return;
         };
         menu.highlight = next;
-        // Cycle 714: if the new highlight is outside the visible
+        // If the new highlight is outside the visible
         // window, advance scroll_offset to bring it into view.
         let visible = count_rows_fitting(&menu.items, menu.scroll_offset, panel_h, row_h, sep_h);
         if next < menu.scroll_offset {
@@ -7824,7 +7824,7 @@ impl App {
         }
     }
 
-    /// Cycle 714. Scroll the context-menu by `delta` rows (positive
+    /// Scroll the context-menu by `delta` rows (positive
     /// = down). Clamped so we can't scroll past the last row that
     /// would still fill the visible window.
     fn scroll_context_menu(&mut self, ws: &mut WindowState, delta: isize) {
@@ -7865,7 +7865,7 @@ impl App {
     /// still feels distinct from "select this menu item." Returns
     /// `None` if the click missed the panel, hit a separator, or hit a
     /// disabled row; the caller then either dismisses (left-click
-    /// Cycle 712 (Terminator menu UX, hover-to-highlight).
+    /// Terminator menu UX, hover-to-highlight.
     /// Return the row index under the cursor when the context menu
     /// is open, `None` if the cursor is outside the panel OR landed
     /// on a separator. Thin wrapper around the pure `find_menu_row_y`
@@ -7883,7 +7883,7 @@ impl App {
         let (_, ch) = self.menu_cell(ws);
         let row_h = ch + kettle_render::menu::ROW_PAD;
         let sep_h = kettle_render::menu::SEP_H;
-        // Cycle 714: row-walk starts at scroll_offset; only the
+        // Row-walk starts at scroll_offset; only the
         // visible slice is hit-tested. Off-by-one is handled by
         // find_menu_row_y's half-open interval [y, y+h).
         let start = menu.scroll_offset.min(menu.items.len());
@@ -7894,7 +7894,7 @@ impl App {
         find_menu_row_y(py, ay, row_h, sep_h, &kinds).map(|i| i + start)
     }
 
-    /// Cycle 712. Set `menu.highlight` to whichever row the cursor is
+    /// Set `menu.highlight` to whichever row the cursor is
     /// over right now; no-op when the cursor is outside the panel or
     /// on a separator. Called from `CursorMoved`. Requests a redraw
     /// only when the highlight actually changed so we don't churn the
@@ -7919,13 +7919,13 @@ impl App {
     /// (right-click → re-open at the new point).
     /// Dispatch one resolved context-menu selection. The single sink for
     /// mouse clicks, keyboard Enter / Space, and mnemonic / typeahead
-    /// activation (cycle 889/890) so all three behave identically.
+    /// activation so all three behave identically.
     ///
     /// Every *leaf* click closes the menu first, then acts. Only
     /// `DrillIntoSubmenu` keeps the menu open — it replaces the visible
     /// level with the submenu's items (parent pushed onto `drill_stack`).
     ///
-    /// Cycle 889 (audit): the mouse path used to set `ws.context_menu =
+    /// The mouse path used to set `ws.context_menu =
     /// None` *before* matching the click, which made the
     /// `DrillIntoSubmenu` arm — which needs `ws.context_menu.as_mut()`
     /// — dead code: a mouse-clicked submenu row silently dismissed the
@@ -7948,7 +7948,7 @@ impl App {
                     if !nested_items.is_empty() {
                         let parent = std::mem::replace(&mut menu.items, nested_items);
                         menu.drill_stack.push(parent);
-                        // Cycle 714: each level keeps its own scroll view.
+                        // Each level keeps its own scroll view.
                         menu.scroll_stack.push(menu.scroll_offset);
                         menu.scroll_offset = 0;
                         // Drilling resets any in-progress typeahead so a
@@ -7973,7 +7973,7 @@ impl App {
             }
             ContextMenuClick::LuaMenuItem(idx) => {
                 ws.context_menu = None;
-                // Cycle 375/433: invoke the Lua callback + drain any
+                // Invoke the Lua callback + drain any
                 // LuaCommands it queued through the canonical helper.
                 if let Some(eng) = &self.lua_engine {
                     eng.invoke_menu_item(idx);
@@ -7982,8 +7982,8 @@ impl App {
             }
             ContextMenuClick::ConfigCommand(command) => {
                 ws.context_menu = None;
-                // Cycle 611 (Terminator parity): write `CMD\n` to the PTY.
-                // Cycle 941: acts as the user — a read-only pane drops it.
+                // Terminator parity: write `CMD\n` to the PTY.
+                // Acts as the user — a read-only pane drops it.
                 if let Some(p) = ws.mux.focused() {
                     let mut bytes = command.into_bytes();
                     bytes.push(b'\n');
@@ -7998,11 +7998,11 @@ impl App {
                 ws.theme_preview = None;
                 self.cfg.theme_name = name.clone();
                 self.cfg.theme = kettle_config::Theme::by_name(&name);
-                // Cycle 918: theme is config-governed — persist to the config
+                // Theme is config-governed — persist to the config
                 // file (not the session). A session-pinned theme used to OVERRIDE
                 // the config/compile-time default on restore, so a default change
                 // (or a fresh-config user) never saw the new theme.
-                // Cycle 919 (audit L4): notify if it can't be written, so the
+                // Notify if it can't be written, so the
                 // pick isn't silently lost on the next launch.
                 if !self.persist_pref("theme", &name) {
                     fire_notify(
@@ -8025,8 +8025,8 @@ impl App {
                 ws.context_menu = None;
                 self.open_tab_with_argv(ws, &argv);
             }
-            // Cycle 941 (Terminator parity): the URL-aware leading rows.
-            // Open routes through the cycle-374 `open_url` chain (Lua URL
+            // Terminator parity: the URL-aware leading rows.
+            // Open routes through the `open_url` chain (Lua URL
             // handlers → custom_url_handler → system open, with the
             // `is_safe_url` guard); Copy puts the address on the clipboard.
             ContextMenuClick::Url { url, copy } => {
@@ -8057,7 +8057,7 @@ impl App {
         let (_, ch) = self.menu_cell(ws);
         let row_h = ch + kettle_render::menu::ROW_PAD;
         let sep_h = kettle_render::menu::SEP_H;
-        // Cycle 714: skip the scrolled-off rows above scroll_offset
+        // Skip the scrolled-off rows above scroll_offset
         // before walking. `row_y` starts at the panel top; iteration
         // begins at item `scroll_offset`.
         let start = menu.scroll_offset.min(menu.items.len());
@@ -8077,7 +8077,7 @@ impl App {
                 | ContextMenuItem::Info { .. } => row_h,
             };
             if py >= row_y && py < row_y + h {
-                // Cycle 890: shared mapper — the same row→click table the
+                // Shared mapper — the same row→click table the
                 // keyboard Enter / Space + mnemonic paths use, so mouse and
                 // keyboard dispatch can never diverge again.
                 return item_to_click(item, idx);
@@ -8104,7 +8104,7 @@ impl App {
                 _ => row_h,
             })
             .sum();
-        // Cycle 714 (Terminator menu UX, C5): clamp the panel
+        // Terminator menu UX, C5: clamp the panel
         // height to the surface so a ~512-entry Theme submenu
         // can't grow off-screen. We reserve 80px of vertical
         // breathing room (40px top + 40px bottom) so the menu
@@ -8119,7 +8119,7 @@ impl App {
             .unwrap_or((800.0, 600.0));
         let max_h = (surface_h - kettle_render::menu::PANEL_BREATHING).max(row_h);
         let panel_h = natural_h.min(max_h);
-        // Dropdown-parity cycle: include the right-aligned hint budget —
+        // Dropdown parity: include the right-aligned hint budget —
         // kept in lockstep with `show_context_menu` and the renderer's
         // `menu_row_chars`.
         let hints = self.menu_item_hints(&menu.items);
@@ -8140,12 +8140,12 @@ impl App {
                     }
                     ContextMenuItem::LuaItem { label, .. } => Some(label.chars().count()),
                     ContextMenuItem::ConfigItem { label, .. } => Some(label.chars().count()),
-                    // Cycle 805: count shell-dropdown labels so this hit-test width
+                    // Count shell-dropdown labels so this hit-test width
                     // matches the panel `show_context_menu` actually rendered.
                     ContextMenuItem::NewTabShell { label, .. } => {
                         Some(label.chars().count() + hint_chars)
                     }
-                    // Cycle 941: same for the URL-aware leading rows.
+                    // Same for the URL-aware leading rows.
                     ContextMenuItem::UrlItem { label, .. } => Some(label.chars().count()),
                     ContextMenuItem::Info { label } => Some(label.chars().count()),
                     _ => None,
@@ -8162,7 +8162,7 @@ impl App {
     /// actions so the renderer stays Action-agnostic.
     fn context_menu_overlay(&self, ws: &WindowState) -> Option<ContextMenu> {
         let menu = ws.context_menu.as_ref()?;
-        // Dropdown-parity cycle: per-row shortcut hints from the LIVE keybind
+        // Dropdown parity: per-row shortcut hints from the LIVE keybind
         // map (computed per frame; the map only changes on reload).
         let hints = self.menu_item_hints(&menu.items);
         let rows = menu
@@ -8201,8 +8201,8 @@ impl App {
                     hint: String::new(),
                 },
                 ContextMenuItem::Submenu { label, .. } => ContextMenuRow {
-                    // Cycle 684: append "▸" to signal "this row
-                    // opens a submenu". Sub-cycle 3 wires the
+                    // Append "▸" to signal "this row
+                    // opens a submenu". Phase 3 of the theme-submenu design wires the
                     // actual flyout; for now the affordance is
                     // visible but clicking it just no-ops.
                     label: format!("{label} ▸"),
@@ -8210,7 +8210,7 @@ impl App {
                     enabled: true,
                     hint: String::new(),
                 },
-                // Cycle 687 (theme-submenu sub-cycle 3 drill-in):
+                // Phase 3 of the theme-submenu design (drill-in):
                 // ThemeChoice and ProfileChoice ARE rendered when
                 // they appear in the current items list. Since
                 // the drill-in click replaces menu.items with the
@@ -8231,14 +8231,14 @@ impl App {
                     enabled: true,
                     hint: String::new(),
                 },
-                // Cycle 805: new-tab ▾ shell choice — a normal clickable row.
+                // New-tab ▾ shell choice — a normal clickable row.
                 ContextMenuItem::NewTabShell { label, .. } => ContextMenuRow {
                     label: label.clone(),
                     separator: false,
                     enabled: true,
                     hint,
                 },
-                // Cycle 941: URL-aware leading rows ("Open Link" /
+                // URL-aware leading rows ("Open Link" /
                 // "Copy Link Address") — normal clickable rows.
                 ContextMenuItem::UrlItem { label, .. } => ContextMenuRow {
                     label: (*label).to_string(),
@@ -8246,7 +8246,7 @@ impl App {
                     enabled: true,
                     hint: String::new(),
                 },
-                // Dropdown-parity cycle: Info renders as a dimmed
+                // Dropdown parity: Info renders as a dimmed
                 // (disabled-style) static line.
                 ContextMenuItem::Info { label } => ContextMenuRow {
                     label: label.clone(),
@@ -8256,7 +8256,7 @@ impl App {
                 },
             })
             .collect();
-        // Cycle 714 (Terminator menu UX, C5): pass through the
+        // Terminator menu UX, C5: pass through the
         // scroll state + clamped panel height the renderer needs to
         // draw only the visible slice.
         let panel_h_clamped = self
@@ -8274,9 +8274,9 @@ impl App {
 
     /// Force the next redraw to render the cursor visible. Shared by:
     /// - the focus-change path (`note_focus_change`)
-    /// - `Action::Reset` (cycle 134) so a "fresh start" cursor is visible
+    /// - `Action::Reset` so a "fresh start" cursor is visible
     /// - `CursorBlinkingChange` events (DEC ?12 program-driven toggle)
-    /// - the four modal Escape handlers (cycle 140) so closing the
+    /// - the four modal Escape handlers so closing the
     ///   search/palette/hints/SSH overlay reveals the cursor immediately
     ///   instead of waiting up to one blink interval.
     fn reset_blink_phase(&mut self, ws: &mut WindowState) {
@@ -8284,15 +8284,16 @@ impl App {
         ws.last_blink = std::time::Instant::now();
     }
 
-    /// Cycle 717 (Preferences submenu, C8): write a `key = value`
-    /// line to the user's active config file via the cycle-716
-    /// atomic helper. Resolves the path the same way Action::EditConfig
+    /// Preferences submenu, C8: write a `key = value`
+    /// line to the user's active config file via the atomic
+    /// `persist_config_toggle` helper. Resolves the path the same way
+    /// Action::EditConfig
     /// does (App::config_path → `Config::default_path` fallback).
     /// Logs + ignores any I/O error so a transient FS issue doesn't
     /// kill the menu dispatch; the in-memory toggle still applied,
     /// so the user's next session will pick up the runtime change
     /// once it persists.
-    /// Cycle 919 (audit L4): returns `true` iff the value was written to the
+    /// Returns `true` iff the value was written to the
     /// config file. Callers of user-initiated changes (theme picks, Settings)
     /// notify the user on `false` so a change that's live this session but lost
     /// on restart isn't silent.
@@ -8326,11 +8327,11 @@ impl App {
         }
     }
 
-    /// Act on the cycle-794 update banner: dismiss it (recording the tag so it
+    /// Act on the update banner: dismiss it (recording the tag so it
     /// won't re-nag) and, when `open` is true, open the release page first.
     /// Returns `false` when no banner is showing (the caller decides whether
     /// that's a no-op or worth a debug log). Shared by the banner mouse
-    /// handler and the cycle-809 `OpenUpdate` / `DismissUpdate` keyboard
+    /// handler and the `OpenUpdate` / `DismissUpdate` keyboard
     /// actions so all three paths stay in lockstep.
     fn act_on_update_banner(&mut self, ws: &mut WindowState, open: bool) -> bool {
         let Some((tag, url)) = self.update_available.clone() else {
@@ -8359,18 +8360,17 @@ impl App {
         let (cw, ch) = self.cell_px(ws);
         let waker = self.waker();
         // Snapshot the (tab, pane-leaf) the cursor lives in so we can
-        // detect any focus change the action causes. Cycles 134/135
-        // landed this for keyboard-driven actions; cycle 136 extended
-        // to mouse paths via the shared `focus_key` / `note_focus_change`
+        // detect any focus change the action causes. This started as
+        // keyboard-only, then extended to mouse paths via the shared
+        // `focus_key` / `note_focus_change`
         // helpers.
         let pre_focus = self.focus_key(ws);
         match action {
             Action::NewTab => {
-                // Cycle 368 (plugin sub-cycle 4): fires LuaEvent::TabAdd
-                // with the new active tab index after Mux::new_tab.
-                // Cycle 426 collapsed the inline event/drain into the
+                // Fires LuaEvent::TabAdd
+                // with the new active tab index after Mux::new_tab, via the
                 // shared fire_tab_add_event helper.
-                // Cycle 802 (audit): surface a PTY-spawn failure instead of
+                // Surface a PTY-spawn failure instead of
                 // swallowing it with `let _ =` (the `-e` launch path already
                 // logs), and only fire TabAdd when a tab was actually created
                 // — firing it on failure announced a tab that doesn't exist.
@@ -8384,7 +8384,7 @@ impl App {
                 // Replaces the old spawn-a-separate-kettle-process behavior:
                 // tabs can now move live between windows, and the GPU device
                 // is shared. Falls back to a new tab if the window can't be
-                // created (degraded but useful, the cycle-425 precedent).
+                // created (degraded but useful, matching the existing spawn-failure fallback).
                 if let Err(_unopened) =
                     self.open_window(event_loop, WindowOpen::Fresh { cwd: None }, None, None)
                 {
@@ -8397,10 +8397,10 @@ impl App {
                 }
             }
             Action::SplitRight => {
-                // Cycle 888: if the focused pane has entered a shell it launched
+                // If the focused pane has entered a shell it launched
                 // (e.g. typed `wsl` in pwsh), clone THAT shell + its dir; else
-                // clone the pane's own launch command (cycle 886). Cycle 802:
-                // log a spawn failure instead of swallowing it.
+                // clone the pane's own launch command. Log
+                // a spawn failure instead of swallowing it.
                 let detected = self.focused_foreground_shell(ws);
                 let res = match detected {
                     Some(s) => ws.mux.split_with(
@@ -8445,10 +8445,10 @@ impl App {
                 }
             }
             Action::ClosePane => {
-                // Cycle 662 (confirm-dialog sub-cycle 6): per-pane
+                // Per-pane
                 // close prompts when ask_before_closing = Always.
                 // MultipleTerminals doesn't prompt (single pane); see
-                // cycle-638's should_prompt for the matrix.
+                // `should_prompt` for the matrix.
                 // v2.20.0 (Ghostty `confirm-close-surface` parity): a pane
                 // sitting idle at an integrated-shell prompt has no work to
                 // lose — skip the confirm. Plain shells (no OSC 133 marks)
@@ -8477,7 +8477,7 @@ impl App {
                     }
                     return;
                 }
-                // Cycle 750: capture the focused pane id BEFORE the close —
+                // Capture the focused pane id BEFORE the close —
                 // afterward active_focus() returns the promoted sibling.
                 let closing_pane = ws.mux.active_focus();
                 let was_last = ws.mux.close_focused();
@@ -8487,12 +8487,12 @@ impl App {
                 if was_last {
                     self.pending_window_close = true;
                 } else {
-                    // Cycle 735: explicit redraw + focus-event
-                    // refresh after a successful close-pane. Pre-735
+                    // Explicit redraw + focus-event
+                    // refresh after a successful close-pane. Previously
                     // the path returned without scheduling a frame
                     // OR re-emitting the focus event; the split tree
                     // had collapsed (sibling promoted to root) but
-                    // the renderer cache + the cycle-703 PaneFocus
+                    // the renderer cache + the PaneFocus
                     // event's last-fired pane id were both stale
                     // until the next user input implicitly nudged
                     // them. The CloseTab path (~30 lines below) gets
@@ -8513,7 +8513,7 @@ impl App {
                     if let Some(w) = &ws.window {
                         w.request_redraw();
                     }
-                    // The cycle-703 PaneFocus event needs to fire
+                    // The PaneFocus event needs to fire
                     // with the new focused id (the sibling that
                     // got promoted), so plugins that observe focus
                     // don't keep stale per-pane state. Mirrors the
@@ -8522,7 +8522,7 @@ impl App {
                 }
             }
             Action::CloseTab => {
-                // Cycle 662 (confirm-dialog sub-cycle 6): close the
+                // Close the
                 // active tab via the modal when ask_before_closing
                 // says so. scope_count = leaves in the active tab
                 // (panes_in_tab below).
@@ -8579,13 +8579,11 @@ impl App {
                     }
                     return;
                 }
-                // Cycle 368: capture the active index BEFORE close
+                // Capture the active index BEFORE close
                 // so the LuaEvent::TabClose payload is meaningful
                 // (after close, ws.mux.active points at a
-                // different tab).
-                //
-                // Cycle 426 collapsed the inline event/drain into
-                // the shared fire_tab_close_event helper.
+                // different tab), via the shared fire_tab_close_event
+                // helper.
                 let closing_idx = ws.mux.active;
                 if ws.mux.close_tab() {
                     self.pending_window_close = true;
@@ -8593,8 +8591,8 @@ impl App {
                 self.fire_tab_close_event(closing_idx);
             }
             Action::CloseWindow => {
-                // Cycle 660 (sub-cycle 5 of confirm-dialog design):
-                // intercept via the cycle-638 should_prompt helper.
+                // Phase 5 of the confirm-dialog design:
+                // intercept via the `should_prompt` helper.
                 // When ask-before-closing fires, open the modal
                 // with on_confirm=CloseWindow; the modal's Confirm
                 // dispatch (in the key handler) re-runs the close
@@ -8637,7 +8635,7 @@ impl App {
                 // gave the user a confusingly-misnamed alias for
                 // `close_tab`. Now they're genuinely different.
                 ws.mux.close_window();
-                // Cycle 157: save the (now-empty) session so next
+                // Save the (now-empty) session so next
                 // launch starts fresh. Otherwise the previous
                 // multi-tab state from before close_window stays
                 // in session.json and silently restores.
@@ -8657,7 +8655,7 @@ impl App {
             Action::ResizeUp => ws.mux.resize_focus(Dir::Vertical, -0.03),
             Action::ResizeDown => ws.mux.resize_focus(Dir::Vertical, 0.03),
             Action::Copy => {
-                // Cycle 609 (Terminator parity, terminatorlib/config.py
+                // Terminator parity (terminatorlib/config.py
                 // `smart_copy` + terminal.py:real_copy_clipboard):
                 //   smart_copy = true  (default) → if no selection, skip
                 //     the clipboard write so the existing clipboard
@@ -8670,7 +8668,7 @@ impl App {
                 //     want Ctrl+Shift+C to consistently mean "the
                 //     clipboard now reflects the current selection
                 //     (empty or not)" without smart heuristics.
-                // Pre-cycle-609 kettle hardcoded smart_copy = true.
+                // Previously kettle hardcoded smart_copy = true.
                 let selection_text = ws.mux.focused().and_then(|p| {
                     p.term
                         .term
@@ -8685,7 +8683,7 @@ impl App {
                     && let Some(cb) = &mut self.clipboard
                 {
                     let had_selection = !s.is_empty();
-                    // Cycle 777: log instead of silently swallowing.
+                    // Log instead of silently swallowing.
                     if let Err(e) = cb.set_text(s) {
                         log::warn!("clipboard set_text failed (copy): {e}");
                     }
@@ -8695,7 +8693,7 @@ impl App {
                     // (nonexistent) selection.
                     copied = had_selection;
                 }
-                // Cycle 333 (Terminator parity, terminatorlib/config.py:91
+                // Terminator parity (terminatorlib/config.py:91
                 // `clear_select_on_copy`): if the config asked, drop the
                 // selection so the user sees the copy "took". Default
                 // false matches Terminator's default — the selection
@@ -8710,7 +8708,7 @@ impl App {
             Action::Paste => self.paste_clipboard(ws),
             Action::IncreaseFontSize | Action::DecreaseFontSize | Action::ResetFontSize => {
                 if let Some(r) = ws.renderer.as_mut() {
-                    // Cycle 747: step the logical font size directly. Back-
+                    // Step the logical font size directly. Back-
                     // deriving from `r.cell_h` (now physical-px after the DPI
                     // fix) would double-apply the scale factor on HiDPI.
                     let new = match action {
@@ -8720,14 +8718,14 @@ impl App {
                     };
                     r.set_font_size(new);
                 }
-                // Cycle 936: the user changed the font OUTSIDE a scaled-zoom
+                // The user changed the font OUTSIDE a scaled-zoom
                 // enter/exit, so the saved pre-zoom size is now stale — drop it
                 // so a later zoom-out keeps this new chosen size instead of
                 // reverting to the old one.
                 ws.scaled_zoom_prev_font_size = None;
             }
             Action::StartSearch => {
-                // Cycle 154: close any other modal first so we don't
+                // Close any other modal first so we don't
                 // stack two visible overlays. (Opening only sets one
                 // of the four state fields; the others would stay
                 // None already on the happy path, but defending in
@@ -8741,21 +8739,20 @@ impl App {
                 ws.search_revealed = None; // re-reveal on this new search
             }
             Action::ToggleBroadcastAll => {
-                // Cycle 679: cycle-178 "broadcast-all" is actually
+                // The "broadcast-all" action is actually
                 // per-tab (the action's misnaming was a known
                 // tech-debt). The Tab variant preserves the
                 // existing UX exactly. The new All / Group
                 // variants are reachable via the upcoming
                 // GroupTab/GroupWindow/CreateGroup actions
-                // (cycle 642 surface, dispatch follow-up).
+                // (already surfaced; dispatch is a follow-up).
                 ws.mux.broadcast = crate::mux::BroadcastScope::Tab;
             }
             Action::ToggleBroadcastOff => {
                 ws.mux.broadcast = crate::mux::BroadcastScope::Off;
             }
             Action::ToggleBroadcastGroup => {
-                // Cycle 681 (named-groups sub-cycle 5): toggle
-                // broadcast scope between Off and
+                // Toggle broadcast scope between Off and
                 // Group(focused_pane.group_name). If focused
                 // pane has no group, log + no-op.
                 let focused_group = ws.mux.focused().and_then(|p| p.group_name.clone());
@@ -8774,8 +8771,7 @@ impl App {
                 };
             }
             Action::ToggleBroadcastWindow => {
-                // Cycle 681 (named-groups sub-cycle 5): toggle
-                // window-wide broadcast on/off. Distinct from
+                // Toggle window-wide broadcast on/off. Distinct from
                 // ToggleBroadcastAll (which is misnamed —
                 // actually per-tab).
                 ws.mux.broadcast = match &ws.mux.broadcast {
@@ -8797,18 +8793,18 @@ impl App {
                 self.resize_all(ws);
                 self.save_session(ws);
             }
-            // Cycle 702 Terminator parity (`key_send_newline`).
+            // Terminator parity (`key_send_newline`).
             // Write a literal `\n` to the focused pane's PTY.
             // Useful for shell line-editors that consume Enter
             // normally but expect explicit `\n` for line
             // continuation (multi-line readline prompts).
             Action::SendNewline => {
                 if let Some(p) = ws.mux.focused() {
-                    // Cycle 941: typed-input semantics — read-only drops it.
+                    // Typed-input semantics — read-only drops it.
                     p.feed_input(b"\n");
                 }
             }
-            // Cycle 696 Terminator parity (`key_preferences` /
+            // Terminator parity (`key_preferences` /
             // `key_preferences_keybindings`). Terminator's GUI
             // Preferences dialog is config-file-driven for
             // kettle, so the preferences keybind opens the user's
@@ -8836,11 +8832,11 @@ impl App {
                     );
                 }
             }
-            // Cycle 717 (Preferences submenu, C8): runtime-mutable
+            // Preferences submenu, C8: runtime-mutable
             // toggles. Each dispatch (a) mutates `self.cfg` so the
             // change applies immediately + (b) writes the new
             // `key = value` back to the user's config file via the
-            // cycle-716 `persist_config_toggle` helper (atomic
+            // `persist_config_toggle` helper (atomic
             // temp+rename, comment-preserving, with a first-write
             // backup at `<config>.bak`). Re-opening the menu picks
             // up the new state.
@@ -8905,10 +8901,10 @@ impl App {
                     },
                 );
             }
-            // Cycle 695 Terminator parity (`key_help`).
+            // Terminator parity (`key_help`).
             // Terminator's F1 opens its HTML manual via xdg-open;
             // kettle opens its README at the canonical GitHub URL
-            // via the cycle-X `open::that_detached` dispatch path
+            // via the `open::that_detached` dispatch path
             // (same one URL clicks already use, so it works on
             // Linux/macOS/Windows without spawning a per-platform
             // helper).
@@ -8918,7 +8914,7 @@ impl App {
                     log::warn!("Action::ShowHelp: failed to open {url}: {e}");
                 }
             }
-            // Cycle 693 Terminator parity (`key_scaled_zoom`).
+            // Terminator parity (`key_scaled_zoom`).
             // Toggle pane zoom + scale the font 1.5× so glyphs
             // grow with the enlarged pane area, then restore the
             // saved size on exit. Idempotent across other
@@ -8933,7 +8929,7 @@ impl App {
                 let now_zoomed = ws.mux.is_zoomed();
                 if let Some(r) = ws.renderer.as_mut() {
                     if now_zoomed {
-                        // Cycle 846 (audit): baseline off the LIVE renderer size,
+                        // Baseline off the LIVE renderer size,
                         // not `self.cfg.font_size`. Increase/DecreaseFontSize
                         // only call `r.set_font_size` (they never write
                         // `cfg.font_size`), so a prior manual zoom left the
@@ -8967,12 +8963,12 @@ impl App {
                 // (`\e c`, RIS) which wipes everything including
                 // current screen contents. kitty / iTerm2 / WezTerm
                 // all expose this as "Clear Scrollback" or similar.
-                // Honors broadcast (cycle-173/174 invariant): when
+                // Honors broadcast (the broadcast-write invariant): when
                 // group input is on, clear every pane's scrollback,
                 // not just the focused one. The user pressing
                 // clear_history with broadcast on intends "clean
                 // slate for all the panes I'm typing into."
-                // Cycle 942 (audit): route through feed_input — both branches
+                // Route through feed_input — both branches
                 // now agree that a read-only pane drops the clear (the
                 // broadcast branch inherited the gate from broadcast_write;
                 // the focused branch used to bypass it, a split-brain).
@@ -8998,24 +8994,24 @@ impl App {
                 // modal floating over a freshly-reset terminal.
                 // Sweep them too so the chord really does mean
                 // "fresh start". Matches Alacritty's `Reset` action.
-                // Cycle 942 (audit): feed_input — injecting ESC c into a
+                // feed_input — injecting ESC c into a
                 // read-only pane's child (e.g. a locked agent TUI, where ESC
                 // is the interrupt key) is exactly what the toggle prevents.
                 if let Some(p) = ws.mux.focused() {
                     p.feed_input(b"\x1bc");
                 }
                 self.clear_selection_on_input(ws);
-                // Cycle 111's modal sweep, extracted to a helper in
-                // cycle 154 so the modal-opening actions can reuse it.
+                // The modal sweep was later extracted into a helper
+                // so the modal-opening actions can reuse it.
                 self.close_all_modals(ws);
-                // Cycle 134: also reset the blink phase so the cursor
+                // Also reset the blink phase so the cursor
                 // is immediately visible. Without this, hitting Reset
                 // right as `blink_on` was false left the user staring
                 // at a missing cursor for up to one blink interval —
                 // confusing, because Reset is the chord users hit to
                 // recover from a visually-jammed terminal. Shares
-                // `reset_blink_phase` with cycle-135 focus-change and
-                // cycle-140 modal-close paths.
+                // `reset_blink_phase` with the focus-change and
+                // modal-close paths.
                 self.reset_blink_phase(ws);
             }
             Action::ScrollPageUp
@@ -9132,7 +9128,7 @@ impl App {
                 self.close_all_modals(ws);
                 ws.palette_input = Some((String::new(), 0));
             }
-            // Cycle 756: open the in-app settings overlay (Ctrl+, / right-click
+            // Open the in-app settings overlay (Ctrl+, / right-click
             // → Settings / palette "Open settings").
             Action::OpenSettings => {
                 self.close_all_modals(ws);
@@ -9153,7 +9149,7 @@ impl App {
                 ws.settings_restart_pending = false;
                 ws.settings_nav = Some(crate::settings::SettingsNav::default());
             }
-            // Cycle 708 (Terminator parity, layoutlauncher.py):
+            // Terminator parity (layoutlauncher.py):
             // open the runtime layout picker. Empty layouts dir
             // is fine — the modal still opens with a "no
             // matching layout" hint, so the user gets a clear
@@ -9171,19 +9167,18 @@ impl App {
                 }
             }
             Action::ToggleViMode => {
-                // Cycle 298 vi-mode (Alacritty parity), sub-cycle 1
-                // of 4. Foundation: toggle entry / exit. Visible
-                // block cursor at the focused pane's current cursor
+                // Vi-mode (Alacritty parity) foundation: toggle entry / exit.
+                // Visible block cursor at the focused pane's current cursor
                 // position; Esc also exits (handled in keyboard
                 // dispatch). h/j/k/l movement + visual selection +
-                // yank land in sub-cycles 2-4.
+                // yank come later.
                 if ws.vi_mode.is_some() {
                     ws.vi_mode = None;
                 } else {
                     self.close_all_modals(ws);
                     // Seed cursor at the focused pane's current
                     // terminal cursor position. h/j/k/l will move
-                    // around this in sub-cycle 2.
+                    // around this via `vi_mode_key`.
                     let (row, col) = ws
                         .mux
                         .focused()
@@ -9259,7 +9254,7 @@ impl App {
                 self.cfg.theme_name = name.to_string();
                 self.cfg.theme = kettle_config::Theme::by_name(name);
                 if !self.persist_pref("theme", name) {
-                    // cycle 918: config-governed; cycle 919 (L4): notify on failure
+                    // Config-governed; notify on failure.
                     fire_notify(
                         "kettle: theme not saved",
                         "Applied for this session — couldn't write it to your config file.",
@@ -9278,7 +9273,7 @@ impl App {
                     self.cfg.theme_name = next.clone();
                     self.cfg.theme = kettle_config::Theme::by_name(&next);
                     if !self.persist_pref("theme", &next) {
-                        // cycle 918: config-governed; cycle 919 (L4): notify on failure
+                        // Config-governed; notify on failure.
                         fire_notify(
                             "kettle: theme not saved",
                             "Applied for this session — couldn't write it to your config file.",
@@ -9296,7 +9291,7 @@ impl App {
                 }
             }
             Action::ToggleSessionLog => {
-                // Cycle 621 (Terminator parity, `plugins/logger.py`):
+                // Terminator parity (`plugins/logger.py`):
                 // toggle the focused pane's session log. Pure helper
                 // computes the file path; this arm does the I/O.
                 // v2.20.0 P7: routed through `Terminal::set_log_file` so the
@@ -9323,7 +9318,7 @@ impl App {
                         {
                             Ok(f) => {
                                 log::info!("toggle-session-log: writing to {}", path.display());
-                                // Cycle 625: propagate the config's
+                                // Propagate the config's
                                 // strip-ANSI choice to the reader
                                 // thread's per-Terminal flag BEFORE the
                                 // log goes live, so the first logged
@@ -9342,11 +9337,9 @@ impl App {
                 }
             }
             Action::TakeScreenshot => {
-                // Cycle 654 + 688 + 689 (terminalshot sub-cycles
-                // 3/4/5). Compute the output path, queue the
+                // Compute the output path, queue the
                 // request, then fire a desktop notification so the
-                // user knows where to look.
-                // Cycle 690 (terminalshot sub-cycle 6): compute
+                // user knows where to look. Also compute
                 // the focused pane's rect at dispatch time so the
                 // screenshot crops to just that pane. Computed
                 // BEFORE the `&mut ws.renderer` borrow to keep
@@ -9396,7 +9389,7 @@ impl App {
                 ws.mux.move_active_tab(1);
             }
             Action::NewTabShell(n) => {
-                // Dropdown-parity cycle: Ctrl+Shift+N opens the Nth dropdown
+                // Ctrl+Shift+N opens the Nth dropdown
                 // entry (Windows Terminal's profile shortcuts). The list is
                 // process-cached + prewarmed; out-of-range is a silent no-op,
                 // same as GotoTab clamping.
@@ -9414,7 +9407,7 @@ impl App {
                     ws.mux.touch_active_tab_seen();
                 }
             }
-            // Cycle 809 (audit): keyboard equivalents of clicking the cycle-794
+            // Keyboard equivalents of clicking the
             // update banner — `OpenUpdate` opens the release page + dismisses,
             // `DismissUpdate` just dismisses. Both no-op (debug-logged) when no
             // banner is showing, so a bound key is harmless the rest of the time.
@@ -9428,22 +9421,22 @@ impl App {
                     log::debug!("dismiss_update: no update banner is showing");
                 }
             }
-            // Cycle 345 Terminator-parity behavior wiring (continued
-            // from cycle 342's stubs). Each branch implements the
+            // Terminator-parity behavior wiring (continued
+            // from earlier stub work). Each branch implements the
             // Terminator key_<name> behavior in kettle-idiomatic
             // shape.
             //
-            // Still stubbed (overlay-required; future sub-cycles):
+            // Still stubbed (overlay-required; future work):
             //   RotateCw / RotateCcw (split-tree rotation in Mux)
             //   ToggleScrollbar (runtime scrollbar toggle)
             //   EditWindowTitle / EditTabTitle / EditPaneTitle
             //   NextProfile / PrevProfile (runtime profile cycle)
-            // Cycle 369 (Terminator parity, replaces cycle-354
-            // placeholders): real Edit-title overlay. Each action
+            // Terminator parity, replacing earlier
+            // placeholders: real Edit-title overlay. Each action
             // opens the overlay pre-filled with the current title.
             // Enter applies via the appropriate setter; Esc cancels.
             // Render is a thin bar at the top of the window (similar
-            // shape to cycle-X's command palette overlay).
+            // shape to the `Action::CommandPalette` overlay).
             Action::EditWindowTitle => {
                 self.close_all_modals(ws);
                 let current = ws.last_title.clone();
@@ -9490,9 +9483,9 @@ impl App {
                 }
             }
             Action::EditPaneGroup | Action::CreateGroup => {
-                // Cycle 407 + cycle 642: edit the focused pane's
+                // Edit the focused pane's
                 // broadcast-group name. Empty input → clear the
-                // group. Same overlay mechanism as cycle-369
+                // group. Same overlay mechanism as
                 // EditPaneTitle. `CreateGroup` (Terminator name)
                 // and `EditPaneGroup` (kettle name) share dispatch.
                 self.close_all_modals(ws);
@@ -9511,7 +9504,7 @@ impl App {
                 }
             }
             Action::GroupTab | Action::GroupWindow => {
-                // Cycle 680 (named-groups sub-cycle 4): open the
+                // Open the
                 // title-edit overlay with `bulk` set to Tab/Window
                 // so on Apply the typed name writes to every pane
                 // in scope.
@@ -9531,7 +9524,7 @@ impl App {
                 }
             }
             Action::UngroupTab | Action::UngroupWindow => {
-                // Cycle 680 (named-groups sub-cycle 4): bulk-
+                // Bulk-
                 // clear the group on every pane in scope. No
                 // overlay needed — empty input is the "clear"
                 // signal, and the action carries the scope.
@@ -9553,7 +9546,7 @@ impl App {
                     w.request_redraw();
                 }
             }
-            // Cycle 348 (Terminator parity, terminatorlib/terminal.py:
+            // Terminator parity (terminatorlib/terminal.py:
             // key_next_profile + key_previous_profile): runtime cycle
             // through profile files at <config-dir>/profiles/.
             //
@@ -9563,7 +9556,7 @@ impl App {
             // config-path, and loads the next/prev. Falls back to
             // log::info when no profiles directory or no entries.
             Action::NextProfile | Action::PrevProfile => {
-                // Cycle 618: delegate listing + name extraction to
+                // Delegate listing + name extraction to
                 // kettle-config so the same path math has a single
                 // home (and drift guards on it). Empty list → no-op
                 // with a one-line info nudge.
@@ -9590,7 +9583,7 @@ impl App {
                     }
                 }
             }
-            // Cycle 347: split-tree rotation. RotateCw flips dir +
+            // Split-tree rotation. RotateCw flips dir +
             // swaps children (Terminator's clockwise semantics);
             // RotateCcw flips dir without swap. No-op when the
             // focused leaf has no parent (single-pane tab).
@@ -9606,12 +9599,12 @@ impl App {
                     w.request_redraw();
                 }
             }
-            // Cycle 346: runtime scrollbar toggle. Cycles
+            // Runtime scrollbar toggle. Cycles
             // ScrollbarMode through Never → Always → Auto → Never.
             // Three-state cycle (vs binary) because Auto is the
             // useful steady state for most users; explicit toggle
             // is for power users with a specific preference. Same
-            // shape as cycle-X's NextTheme cycle.
+            // shape as the `NextTheme` cycle.
             Action::ToggleScrollbar => {
                 use kettle_config::ScrollbarMode::*;
                 self.cfg.scrollbar = match self.cfg.scrollbar {
@@ -9623,7 +9616,7 @@ impl App {
                     w.request_redraw();
                 }
             }
-            // Cycle 941 (Terminator parity): toggle the focused pane's read-only
+            // Terminator parity: toggle the focused pane's read-only
             // state. While on, user input (keystrokes / paste / broadcast) is
             // dropped before it reaches the PTY; the child keeps producing
             // output. A `[RO]` titlebar badge shows the state.
@@ -9634,7 +9627,7 @@ impl App {
                     w.request_redraw();
                 }
             }
-            // Cycle 345: broadcast zoom. kettle's font-size is
+            // Broadcast zoom. kettle's font-size is
             // window-wide (not per-pane like VTE's per-terminal
             // scale), so zoom-all has the same effect as the
             // existing single-pane zoom. Compose by reusing the
@@ -9642,7 +9635,7 @@ impl App {
             // arm — same shape as ResetAndClear.
             Action::ZoomInAll => {
                 if let Some(r) = ws.renderer.as_mut() {
-                    // Cycle 747: step logical size (see IncreaseFontSize).
+                    // Step logical size (see IncreaseFontSize).
                     r.set_font_size(r.font_size() + 1.0);
                 }
             }
@@ -9656,7 +9649,7 @@ impl App {
                     r.set_font_size(self.cfg.font_size);
                 }
             }
-            // Cycle 345: insert pane index. Pane index is 1-based
+            // Insert pane index. Pane index is 1-based
             // (matches Terminator's GotoTab + every user-facing
             // numbering). InsertPanePadded uses 2-digit zero-padded
             // form (Terminator default).
@@ -9680,7 +9673,7 @@ impl App {
                     p.feed_input(format!("{idx:02}").as_bytes());
                 }
             }
-            // Cycle 606 Terminator parity (`insert_term_name.py`
+            // Terminator parity (`insert_term_name.py`
             // plugin → `InsertTermName` menu item + keybind). Send
             // the focused pane's title (Pane::title — same string
             // the chrome shows in the per-pane titlebar) to the
@@ -9693,19 +9686,19 @@ impl App {
                     p.feed_input(title.as_bytes());
                 }
             }
-            // Cycle 607 Terminator parity (`dir_open.py` plugin →
+            // Terminator parity (`dir_open.py` plugin →
             // `CurrDirOpen` menu item). Open the focused pane's
             // current working directory in the OS file manager.
             // Builds `file://<cwd>` and routes through `open_url`
-            // so the cycle-374 Lua URL-handler dispatch + the
-            // cycle-X custom-url-handler config + the
+            // so the `LuaEvent::UrlClicked` dispatch + the
+            // `custom_url_handler` config + the
             // `is_safe_url` allowlist (which accepts `file://`
             // without `..`) all apply consistently. Identical
             // shape to clicking a `file://...` hyperlink in pane
             // output — re-uses the safety policy for free.
             Action::OpenCwdInFileManager => {
                 match ws.mux.focused().and_then(|p| p.term.current_dir()) {
-                    // Cycle 816 (audit): refuse a non-local OSC 7 cwd before
+                    // Refuse a non-local OSC 7 cwd before
                     // building/opening the URL (it's untrusted PTY input — a
                     // UNC path would trigger an SMB/NTLM leak on Windows).
                     Some(cwd) if cwd_is_local(&cwd) => {
@@ -9725,10 +9718,10 @@ impl App {
                     }
                 }
             }
-            // Cycle 345: half-page scroll. Same shape as cycle-X's
+            // Half-page scroll. Same shape as the
             // ScrollPageUp/Down handler but with half the row count.
             // Pull the row count from the focused pane's grid
-            // dimensions (cycle-X pattern; works for any pane size).
+            // dimensions (works for any pane size).
             Action::ScrollPageUpHalf | Action::ScrollPageDownHalf => {
                 if let Some(p) = ws.mux.focused()
                     && let Ok(mut t) = p.term.term.lock()
@@ -9744,15 +9737,15 @@ impl App {
                     t.scroll_display(Scroll::Delta(dir));
                 }
             }
-            // Cycle 755: paste the X11 PRIMARY selection (middle-click). On X11
+            // Paste the X11 PRIMARY selection (middle-click). On X11
             // PRIMARY is the last mouse-highlighted text, distinct from the
             // CLIPBOARD; `paste_primary` reads PRIMARY on Linux and falls back
             // to the clipboard on Wayland/macOS/Windows. It shares `paste_text`
             // so the LOCAL_PASTE_MAX clamp, bracketed-paste wrap, and broadcast
             // scoping all match Action::Paste.
             Action::PastePrimary => self.paste_primary(ws),
-            // Cycle 345: in-process Quake toggle. Same tri-state
-            // logic as cycle-319's --toggle remote command:
+            // In-process Quake toggle. Same tri-state
+            // logic as the `--toggle` remote command:
             //   hidden → show + focus
             //   visible + focused → hide
             //   visible + !focused → focus (don't hide)
@@ -9770,12 +9763,12 @@ impl App {
                     }
                 }
             }
-            // Cycle 384 (Terminator parity, detachable-tabs Bucket-D
+            // Terminator parity (detachable-tabs Bucket-D
             // Wayland-fallback). Spawn a NEW kettle process with the
             // focused pane's cwd as its starting dir, then close the
             // source tab. Running shells in the source tab stay
             // alive in the original window (cross-process PTY
-            // transfer needs SCM_RIGHTS — multi-cycle full impl).
+            // transfer needs SCM_RIGHTS — a larger undertaking).
             //
             // For now: just open a fresh kettle in the same cwd.
             // This gives the user the "move this work to a new
@@ -9784,7 +9777,7 @@ impl App {
                 // C5 (multi-window): LIVE in-process move — the tab's panes
                 // (PTYs, scrollback, running programs) transfer untouched to
                 // a brand-new window via detach_tab → open_window(AdoptTab).
-                // Replaces the cycle-405/410 serialize-and-respawn handoff
+                // Replaces an earlier serialize-and-respawn handoff
                 // (SCM_RIGHTS socketpair on Unix / one-shot JSON file
                 // elsewhere), which never transferred live PTYs — the target
                 // process respawned the shells from argv+cwd, losing running
@@ -9806,8 +9799,7 @@ impl App {
                 match self.open_window(event_loop, WindowOpen::AdoptTab(dt), None, None) {
                     Ok(_) => {
                         // The tab LEFT this window; plugins see the same
-                        // close event the process-handoff path fired
-                        // (cycle 424).
+                        // close event the process-handoff path fired.
                         self.fire_tab_close_event(closing_idx);
                         // C8: agents subscribed to the event feed see moves.
                         self.ctl_broadcast(
@@ -9836,13 +9828,13 @@ impl App {
                 }
             }
             Action::ResetAndClear => {
-                // Cycle 342 Terminator parity (key_reset_clear):
+                // Terminator parity (key_reset_clear):
                 // Reset (RIS, \ec) + ClearHistory (CSI 3 J) composed
                 // into a single keybind. The two byte writes go to
                 // the existing PTY-write path; the engine handles
-                // them the same as cycle-X's separate Reset +
+                // them the same as the separate Reset +
                 // ClearHistory actions.
-                // Cycle 942 (audit): feed_input, same read-only rule as the
+                // feed_input, same read-only rule as the
                 // separate Reset + ClearHistory arms.
                 if let Some(p) = ws.mux.focused()
                     && p.feed_input(b"\x1bc")
@@ -9851,7 +9843,7 @@ impl App {
                 }
             }
         }
-        // Cycle 135 (cont.): if focus moved as a result of the action,
+        // If focus moved as a result of the action,
         // land the cursor visible on the new pane right away.
         self.note_focus_change(ws, pre_focus);
         self.resize_all(ws);
@@ -9906,16 +9898,16 @@ impl App {
             theme: None,
             windows,
         };
-        // Cycle 918: theme is config-governed (persisted to the config file via
+        // Theme is config-governed (persisted to the config file via
         // `persist_pref`), NOT stored in the session. A session-pinned theme used
         // to OVERRIDE the config/compile-time default on restore, so a default
         // change (or a fresh-config user) silently kept the old theme.
         s.theme = None;
-        // Cycle 291: when launched with `--layout NAME`, save to the
+        // When launched with `--layout NAME`, save to the
         // named-layout file instead of the default session.json. Lets
         // the user maintain distinct workspaces ("dev", "ops", "docs")
         // without each one clobbering the others on close.
-        // Cycle 919 (audit M1): only write the DEFAULT session.json when this
+        // Only write the DEFAULT session.json when this
         // launch is in restore mode — symmetric with the opt-in load gate. A
         // fresh (non-opted-in) window must NOT overwrite the saved layout that
         // `--restore` / `restore-session = true` exists to recover.
@@ -9928,26 +9920,26 @@ impl App {
         }
     }
 
-    /// Cycle 666 (sub-cycle 5 of [`TERMINATOR-AUTO-THEME-DESIGN.md`](
-    /// ../../../docs/TERMINATOR-AUTO-THEME-DESIGN.md)): poll the
+    /// Phase 5 of [`TERMINATOR-AUTO-THEME-DESIGN.md`](
+    /// ../../../docs/TERMINATOR-AUTO-THEME-DESIGN.md): poll the
     /// clock-schedule (when `cfg.theme_schedule` is `Some(Clock { … })`)
     /// and flip the theme between `light_theme` and `dark_theme` on
     /// boundary crossings.
     ///
-    /// Cheap: a few u32 comparisons via cycle-664's
+    /// Cheap: a few u32 comparisons via
     /// `schedule_decision_clock`, run from `redraw()` per tick.
     /// State on `App::last_schedule_decision` means a single
-    /// boundary fires the swap once; sub-cycles can stretch the
-    /// throttling later if needed.
-    /// Cycle 703 (Terminator plugin parity, plugin sub-cycle:
-    /// `LuaEvent::PaneFocus`). Detect focus boundary crossings —
+    /// boundary fires the swap once; a follow-up could stretch the
+    /// throttling further if needed.
+    /// Terminator plugin parity (`LuaEvent::PaneFocus`).
+    /// Detect focus boundary crossings —
     /// from any source (keybind, mouse click, new tab, close tab,
     /// remote-control IPC) — and emit a single `PaneFocus` event
     /// per crossing.
     ///
     /// Polled from `redraw()` per tick rather than wiring every
     /// focus-changing call site because (a) there are 6+
-    /// such sites today and (b) future cycles will add more.
+    /// such sites today and (b) future changes will add more.
     /// One diff site = one drift guard, not N.
     ///
     /// First tick after startup emits with `previous = None` so
@@ -9963,7 +9955,7 @@ impl App {
         if let Some(eng) = self.lua_engine.as_ref() {
             eng.fire_event(&crate::LuaEvent::PaneFocus(prev, cur_id));
         }
-        // Cycle 930 (agent-first A2): mirror the focus change to ctl subscribers.
+        // Agent-first A2: mirror the focus change to ctl subscribers.
         self.ctl_broadcast(
             "pane_focus",
             Some(cur_id),
@@ -9971,7 +9963,7 @@ impl App {
         );
     }
 
-    /// Cycle 745: reflect the FOCUSED pane's OSC 9;4 progress onto the OS
+    /// Reflect the FOCUSED pane's OSC 9;4 progress onto the OS
     /// taskbar button each frame (pwsh 7 / Windows Terminal parity). Reads the
     /// focused pane the same way the cursor-blink poll does; `Taskbar` dedups
     /// internally, so an unchanged value costs nothing. No-op off Windows.
@@ -9986,18 +9978,17 @@ impl App {
         }
     }
 
-    /// Cycle 704 (Terminator plugin parity, plugin sub-cycle:
-    /// `LuaEvent::TitleChanged`). Walk live panes, diff each
-    /// title against `ws.last_emitted_titles`, emit on any
+    /// Terminator plugin parity (`LuaEvent::TitleChanged`). Walk live panes,
+    /// diff each title against `ws.last_emitted_titles`, emit on any
     /// boundary cross. One pass site, regardless of how many
     /// title-mutating sites exist in App.
     ///
     /// O(n_panes) per redraw. Even 100 panes is trivial — a
-    /// hash lookup + string compare per entry. Future cycles
+    /// hash lookup + string compare per entry. A follow-up
     /// can add a "dirty-title" bitset on Mux if pane counts
     /// grow into the thousands.
     fn poll_title_event(&mut self, ws: &mut WindowState) {
-        // Cycle 930 (agent-first A2): also run when a ctl subscriber is present,
+        // Agent-first A2: also run when a ctl subscriber is present,
         // so title changes reach agents even without a Lua engine.
         let has_subscribers = self
             .ctl
@@ -10021,7 +10012,7 @@ impl App {
             }
             self.ctl_broadcast("title", Some(id), serde_json::json!({"title": title}));
         }
-        // Cycle 763: drop title state for panes that have closed so this map
+        // Drop title state for panes that have closed so this map
         // can't grow unbounded over a long session of opening/closing panes
         // (it's only ever read for live panes). Covers every close path —
         // keybind, confirm dialog, tab close, reap. The O(1) length guard means
@@ -10038,7 +10029,7 @@ impl App {
             return;
         };
         // Compute now in local-ish HH:MM (UTC for v1 — same as the
-        // cycle-296 status-bar clock; a future cycle could pick up
+        // status-bar clock; a follow-up could pick up
         // `$TZ` but no extra dep yet).
         let secs = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -10047,7 +10038,7 @@ impl App {
         let day_secs = secs % 86_400;
         let h = (day_secs / 3600) as u8;
         let m = ((day_secs % 3600) / 60) as u8;
-        // Cycle 670: branch on the schedule variant.
+        // Branch on the schedule variant.
         let is_dark = match schedule {
             kettle_config::ThemeSchedule::Clock { .. } => {
                 kettle_config::schedule_decision_clock((h, m), schedule)
@@ -10056,7 +10047,7 @@ impl App {
                 // Day-of-year approximation: days since unix
                 // epoch mod 365. Good enough — sunrise/sunset
                 // varies very slowly day-to-day, and we re-poll
-                // every redraw tick anyway. Sub-cycle 8 could
+                // every redraw tick anyway. A follow-up could
                 // refine with a real Gregorian-calendar
                 // conversion if needed.
                 let days_since_epoch = (secs / 86_400) as u32;
@@ -10075,7 +10066,7 @@ impl App {
         if was_first {
             return;
         }
-        // Boundary crossing: ask the cycle-649 resolve_theme_for_mode
+        // Boundary crossing: ask `resolve_theme_for_mode`
         // what to switch to. We override the ThemeMode to Light/Dark
         // for the duration of the swap so the helper picks the
         // configured light/dark theme name.
@@ -10167,8 +10158,8 @@ impl App {
         }
     }
 
-    /// Cycle 660 (sub-cycle 5 of [`TERMINATOR-CONFIRM-DIALOG-DESIGN.md`](
-    /// ../../../docs/TERMINATOR-CONFIRM-DIALOG-DESIGN.md)): dispatch
+    /// Phase 5 of [`TERMINATOR-CONFIRM-DIALOG-DESIGN.md`](
+    /// ../../../docs/TERMINATOR-CONFIRM-DIALOG-DESIGN.md): dispatch
     /// the `ConfirmAction` after the user accepts the modal. Skips
     /// the `should_prompt` check (we wouldn't be here otherwise) so
     /// the close-family actions run their real bodies.
@@ -10188,12 +10179,12 @@ impl App {
                 self.pending_window_close = true;
             }
             ConfirmAction::CloseTab => {
-                // CloseTab dispatch (cycle X). Sub-cycle 6 wires
+                // CloseTab dispatch. A follow-up wires
                 // ask-before-closing for CloseTab too; this arm is
                 // the dispatch target for that future wiring.
-                // Cycle 898 (audit): honor close_tab()'s return like the
+                // Honor close_tab()'s return like the
                 // keybind path (app.rs Action::CloseTab) — `true` means that
-                // was the LAST tab, so the window must exit now. Pre-fix the
+                // was the LAST tab, so the window must exit now. Before this fix the
                 // return was dropped, so closing the last tab via the confirm
                 // dialog deferred exit by a tick and painted an empty frame.
                 if ws.mux.close_tab() {
@@ -10204,7 +10195,7 @@ impl App {
                 self.save_session(ws);
             }
             ConfirmAction::ClosePane => {
-                // Cycle 750: capture the pane id before the close so the
+                // Capture the pane id before the close so the
                 // pane_close hook fires with the right id (mirrors the
                 // keybind path).
                 let closing_pane = ws.mux.active_focus();
@@ -10212,7 +10203,7 @@ impl App {
                 if let Some(id) = closing_pane {
                     self.fire_pane_close_event(id);
                 }
-                // Cycle 898 (audit): honor close_focused()'s return like the
+                // Honor close_focused()'s return like the
                 // keybind ClosePane path — `true` means the last pane closed,
                 // so exit; otherwise redraw the collapsed layout (the renderer
                 // cache + focus id are stale until a frame is scheduled).
@@ -10232,8 +10223,8 @@ impl App {
         }
     }
 
-    /// Cycle 656 (sub-cycle 6 of [`TERMINATOR-REMOTE-DESIGN.md`](
-    /// ../../../docs/TERMINATOR-REMOTE-DESIGN.md)): periodic poll of
+    /// Phase 6 of [`TERMINATOR-REMOTE-DESIGN.md`](
+    /// ../../../docs/TERMINATOR-REMOTE-DESIGN.md): periodic poll of
     /// every pane's process tree to detect SSH / Docker / Podman /
     /// kubectl sessions. Throttled to ~5 Hz so a typical 60 Hz
     /// redraw doesn't refresh sysinfo every frame.
@@ -10258,7 +10249,7 @@ impl App {
             .iter()
             .filter_map(|id| ws.mux.panes.get(id)?.term.child_pid())
             .collect();
-        // Cycle 851: refresh the OS process snapshot + parent→children index
+        // Refresh the OS process snapshot + parent→children index
         // ONCE per tick, then query every pane against the shared index.
         self.remote_scanner.refresh_roots(&roots);
         for id in pane_ids {
@@ -10304,20 +10295,20 @@ impl App {
             .as_deref()
             .map(Config::load_from)
             .unwrap_or_else(Config::load);
-        // Cycle 290: re-compile triggers from the freshly-loaded config
+        // Re-compile triggers from the freshly-loaded config
         // BEFORE assigning, while `new` is still owned. Recompile
         // catches added/removed/changed patterns. Clearing the throttle stamp
         // lets a fresh edit fire immediately even mid-throttle.
         self.compiled_triggers = compile_triggers(&new.triggers);
         self.last_trigger_fire = None;
-        // Cycle 937: the accent seed is a runtime per-window value (not in the
+        // The accent seed is a runtime per-window value (not in the
         // config file), so carry it across a reload + re-apply the --accent
         // override (launch-time intent survives a reload).
         new.accent_seed = self.cfg.accent_seed;
         if let Some(rgb) = self.startup.accent_override {
             new.accent_color = Some(rgb);
         }
-        // Cycle 942 (audit): the cycle-938 launch-time window flags are the
+        // The launch-time window flags are the
         // same "launch-time intent" — without re-applying, ANY live reload
         // (including kettle's own theme/settings persistence writes) silently
         // reverted a `-T` pinned title to `window-title-format` (and the
@@ -10392,13 +10383,13 @@ impl App {
         log::debug!("config reload applied once across {} windows", seqs.len());
     }
 
-    /// Cycle 290: scan every pane's recent output for configured
+    /// Scan every pane's recent output for configured
     /// trigger patterns. On the first match in this tick, raise the
     /// OS window's attention indicator (taskbar flash / dock bounce
     /// / WM_HINTS urgency) — but only if the window isn't focused,
     /// AND throttle to one fire per 2 seconds so a build script
     /// printing 100 error lines doesn't pulse the taskbar 100×.
-    /// Cycle 302: drain pending lines from the remote-command file
+    /// Drain pending lines from the remote-command file
     /// and dispatch each. Atomic-truncate after read so a fast-firing
     /// `kettle --remote-send` storm doesn't re-process the same lines
     /// every notify event. v1 commands:
@@ -10410,7 +10401,7 @@ impl App {
     /// missing file is a no-op (notify-watcher can fire on the
     /// initial create event before the writer's content is visible;
     /// next event will catch it).
-    /// Cycle 928 (agent-first A2): drain the control-server channel and
+    /// Agent-first A2: drain the control-server channel and
     /// dispatch each message on the main thread (the only place `ws.mux` is
     /// touched). Mirrors `drain_remote_commands` but with per-connection
     /// replies + a connection table.
@@ -10672,7 +10663,7 @@ impl App {
                     "argv": pane.argv,
                     "child_pid": pane.term.child_pid(),
                     "agent_attached": attached,
-                    // Cycle 942: surfaced so an agent can SEE the user's
+                    // Surfaced so an agent can SEE the user's
                     // read-only lock before a send_text/run_command bounces
                     // with the `read_only` error code.
                     "read_only": pane.read_only,
@@ -11800,7 +11791,7 @@ impl App {
         let Some(p) = Self::ctl_pane_ref(ws, &self.windows, pane) else {
             return Response::err(req.id, ec::NO_SUCH_PANE, "pane vanished");
         };
-        // Cycle 941: an agent acts as the user — the per-pane read-only
+        // An agent acts as the user — the per-pane read-only
         // toggle (Terminator parity) blocks it like any other input, with an
         // explicit error instead of a silent drop.
         if !p.feed_input(text.as_bytes()) {
@@ -11889,7 +11880,7 @@ impl App {
                 bytes.extend_from_slice(&b);
             }
         }
-        // Cycle 941 semantics: the per-pane read-only toggle blocks agents
+        // The per-pane read-only toggle blocks agents
         // like any other input, with an explicit error.
         if !p.feed_input(&bytes) {
             return Response::err(
@@ -11972,7 +11963,7 @@ impl App {
         }
     }
 
-    /// Cycle 934 (agent-first A4): flip a pane's agent badge + emit the
+    /// Agent-first A4: flip a pane's agent badge + emit the
     /// `agent_attached` event so subscribers + the titlebar update.
     fn set_pane_agent_attached(&mut self, ws: &mut WindowState, pane: u64, attached: bool) {
         // C8 (multi-window): the pane may live in any window.
@@ -12010,7 +12001,7 @@ impl App {
         }
     }
 
-    /// Cycle 930 (agent-first A2): broadcast an event to subscribed control
+    /// Agent-first A2: broadcast an event to subscribed control
     /// connections (no-op when the server is off / nobody subscribed).
     fn ctl_broadcast(&self, kind: &str, pane: Option<u64>, data: serde_json::Value) {
         if let Some(ctl) = &self.ctl
@@ -12079,7 +12070,7 @@ impl App {
             if !line.ends_with('\r') && !line.ends_with('\n') {
                 line.push('\r');
             }
-            // Cycle 941: an agent acts as the user — the per-pane read-only
+            // An agent acts as the user — the per-pane read-only
             // toggle (Terminator parity) blocks it, with an explicit error
             // (no PendingRun is registered; nothing was written).
             if !p.feed_input(line.as_bytes()) {
@@ -12105,7 +12096,7 @@ impl App {
         );
     }
 
-    /// Cycle 929: an OSC-133 `CommandFinished` arrived for `pane` — if a
+    /// An OSC-133 `CommandFinished` arrived for `pane` — if a
     /// `run_command` is pending there, reply with the exit code, duration, and
     /// the output captured since the command started.
     fn resolve_pending_run(
@@ -12135,9 +12126,9 @@ impl App {
         let _ = run.reply.send(resp);
     }
 
-    /// Cycle 929: reply `timed_out` to any pending run whose deadline passed
+    /// Reply `timed_out` to any pending run whose deadline passed
     /// (no OSC-133 completion — usually the shell lacks shell integration), and
-    /// (cycle 936) immediately resolve any pending run whose pane has CLOSED, so
+    /// immediately resolve any pending run whose pane has CLOSED, so
     /// the agent isn't blocked for the full timeout after a pane vanishes.
     /// Called each event-loop tick from the redraw scheduler.
     fn check_pending_run_deadlines(&mut self, ws: &mut WindowState) {
@@ -12235,7 +12226,7 @@ impl App {
         let Some(path) = self.startup.remote_file.clone() else {
             return;
         };
-        // Cycle 315: cap the read at 1 MB. A legitimate command is
+        // Cap the read at 1 MB. A legitimate command is
         // dozens of bytes; even a chatty automation pushing 1000
         // commands fits in ~64 KB. 1 MB is 10× safety margin. A
         // larger file likely means a runaway script or an accidental
@@ -12266,11 +12257,11 @@ impl App {
             if let Some(payload) = line.strip_prefix("send-text ") {
                 let decoded = payload.replace("\\n", "\n");
                 if let Some(p) = ws.mux.focused() {
-                    // Cycle 941: remote.cmd acts as the user — read-only drops it.
+                    // remote.cmd acts as the user — read-only drops it.
                     p.feed_input(decoded.as_bytes());
                 }
             } else if line == "toggle-window" {
-                // Cycle 303 + 319: tri-state Quake dropdown toggle.
+                // Tri-state Quake dropdown toggle.
                 // The naive binary toggle (hide-when-visible / show-
                 // when-hidden) had a real UX problem: when kettle was
                 // visible but the user had clicked away to another
@@ -12283,8 +12274,7 @@ impl App {
                 //   visible + !focused → raise + focus (don't hide)
                 //
                 // winit's has_focus / is_visible / focus_window /
-                // set_visible all support this; the helper landed in
-                // cycle 319.
+                // set_visible all support this.
                 if let Some(w) = &ws.window {
                     let visible = w.is_visible().unwrap_or(true);
                     let focused = w.has_focus();
@@ -12301,10 +12291,10 @@ impl App {
                     }
                 }
             } else if line == "new-tab" {
-                // Cycle 419 (Terminator parity, remote-control verb):
+                // Terminator parity (remote-control verb):
                 // open a new tab via the remote-control IPC channel.
-                // Mirrors the Action::NewTab dispatch (cycle 134) +
-                // cycle 423: also fire LuaEvent::TabAdd so plugins
+                // Mirrors the Action::NewTab dispatch and
+                // also fires LuaEvent::TabAdd so plugins
                 // listening for tab_add see remote-triggered tabs
                 // the same as keyboard ones.
                 let (cw, ch) = self.cell_px(ws);
@@ -12390,7 +12380,7 @@ impl App {
                         }
                     }
                     kettle_config::TriggerAction::RunCommand(argv) => {
-                        // Cycle 622 (Terminator parity, `plugins/run_cmd_on_match.py`):
+                        // Terminator parity, `plugins/run_cmd_on_match.py`:
                         // fire-and-forget spawn. Argv form means no
                         // shell expansion at kettle's layer; the
                         // configured command is treated as data, not
@@ -12409,16 +12399,16 @@ impl App {
     fn search_key(&mut self, ws: &mut WindowState, key: &Key, text: Option<&str>) {
         match key {
             Key::Named(NamedKey::Escape) => {
-                // Cycle 140: closing the search overlay reveals the
+                // Closing the search overlay reveals the
                 // pane's cursor underneath. Reset blink so the
                 // cursor is visible immediately — same UX argument
-                // as cycles 134/135 (focus + Reset paths).
+                // as the focus and Reset paths.
                 ws.mux.search.open = false;
                 self.reset_blink_phase(ws);
             }
             Key::Named(NamedKey::Enter) => {
-                // Cycle 358 (Terminator parity, terminatorlib/config.py:93
-                // `invert_search`): flip the default-direction.
+                // Terminator parity, terminatorlib/config.py:93
+                // `invert_search`: flip the default-direction.
                 // - Default: Enter → next match, Shift+Enter → previous.
                 // - With invert_search = true: Enter → previous match,
                 //   Shift+Enter → next. Matches Terminator's "search
@@ -12443,7 +12433,7 @@ impl App {
                 ws.mux.search.query.pop();
             }
             _ => {
-                // Cycle 857 (audit): filter control chars like the sibling
+                // Filter control chars like the sibling
                 // title / SSH-input handlers do — a stray control byte
                 // (Tab, embedded ESC from a paste, etc.) must not land in the
                 // search query and corrupt the match.
@@ -12457,7 +12447,7 @@ impl App {
     }
 
     /// Advance the search selection one match forward (`go_back = false`) or
-    /// backward, honoring `search-wrap` (cycle 940: `false` stops at the ends
+    /// backward, honoring `search-wrap` (`false` stops at the ends
     /// instead of cycling). Extracted from `search_key`'s Enter arm in
     /// v2.20.0 so vim-menu-nav's Ctrl+j/Ctrl+k share the exact stepping.
     fn search_step_match(&mut self, ws: &mut WindowState, go_back: bool) {
@@ -12483,14 +12473,14 @@ impl App {
     /// to move the selection, `Enter` to run it, `Esc` to cancel.
     /// Quick-select hint key handling: type the label of a target to act on
     /// it (open URLs, copy paths/hashes/IPs); `Esc` cancels.
-    /// Cycle 299: vi-mode key dispatcher (sub-cycle 2). Handles
+    /// Vi-mode key dispatcher. Handles
     /// h/j/k/l movement, 0/$/g/G/H/M/L jumps, and Esc exit. Other
     /// keys are absorbed (no PTY write) so a stray press doesn't
     /// land bytes in the shell while the user thinks they're
     /// navigating.
     ///
     /// Movement clamps to the focused pane's grid (no negative rows
-    /// yet — sub-cycle 3 extends into scrollback).
+    /// yet — a follow-up extends into scrollback).
     fn vi_mode_key(&mut self, ws: &mut WindowState, key: &Key, text: Option<&str>) {
         // Esc exits.
         if matches!(key, Key::Named(NamedKey::Escape)) {
@@ -12529,7 +12519,7 @@ impl App {
             'H' => state.row = 0,
             'M' => state.row = max_row / 2,
             'L' => state.row = max_row,
-            // Cycle 301 sub-cycle 4: `v` toggles char-visual mode.
+            // `v` toggles char-visual mode.
             // Setting the anchor at the current cursor position begins
             // a selection; pressing `v` again clears it.
             'v' => {
@@ -12538,7 +12528,7 @@ impl App {
                     None => Some((state.row, state.col)),
                 };
             }
-            // Cycle 301: `y` yanks the visual selection to clipboard
+            // `y` yanks the visual selection to clipboard
             // (system + selection) and exits vi-mode — same shape as
             // Alacritty.
             'y' => {
@@ -12551,10 +12541,10 @@ impl App {
                     };
                     let yanked = self.yank_vi_selection(ws, start, end);
                     if !yanked.is_empty() {
-                        // Cycle 316: log a warn when clipboard is None
+                        // Log a warn when clipboard is None
                         // (e.g. SSH without X11 / Wayland forwarding,
                         // missing DISPLAY, or arboard init failed at
-                        // startup). Pre-fix, vi-mode `y` silently
+                        // startup). Before this fix, vi-mode `y` silently
                         // dropped the selection — the user saw the
                         // visual-mode highlight clear + vi-mode exit,
                         // assumed copy worked, then hit paste and
@@ -12637,12 +12627,12 @@ impl App {
 
     fn act_hint(&mut self, h: &HintTarget) {
         if h.kind == kettle_core::hints::Kind::Url {
-            // Cycle 351: route through open_url helper so the
+            // Route through open_url helper so the
             // hint-mode URL-open path also honors the custom URL
             // handler config.
             self.open_url(&h.text);
         } else if let Some(cb) = self.clipboard.as_mut() {
-            // Cycle 777: log instead of silently swallowing.
+            // Log instead of silently swallowing.
             if let Err(e) = cb.set_text(h.text.clone()) {
                 log::warn!("clipboard set_text failed (hint copy): {e}");
             }
@@ -12719,7 +12709,7 @@ impl App {
         }
     }
 
-    /// Cycle 756: keyboard routing while the settings overlay is open.
+    /// Keyboard routing while the settings overlay is open.
     /// ↑/↓ move between fields, Tab/Shift+Tab switch category, ←/→ change the
     /// focused field's value, Space/Enter activate (toggle / cycle forward),
     /// Esc closes. Every change persists to the config file via `persist_pref`
@@ -12743,7 +12733,7 @@ impl App {
             fld = field_count - 1;
         }
 
-        // Cycle 766: chord-capture mode — the focused Keybind field is waiting
+        // Chord-capture mode — the focused Keybind field is waiting
         // for the user to press a chord. Esc cancels. A bare modifier press maps
         // to `None` via `to_kkey`, so we simply stay in capture until a real key
         // arrives. Any other chord is bound to the action live AND appended to
@@ -12757,7 +12747,7 @@ impl App {
             }
             if let Some(kk) = to_kkey(key) {
                 let mods = to_mods(ws.mods);
-                // Cycle 835 (audit): refuse a modifier-less binding to a
+                // Refuse a modifier-less binding to a
                 // text/essential key — it would shadow that key in normal typing
                 // everywhere, persisted, with no in-overlay unbind. Stay in
                 // capture mode and tell the user instead of soft-bricking.
@@ -12964,7 +12954,7 @@ impl App {
             self.reload_config(ws);
             return;
         }
-        // Cycle 919 (audit L4): notify if the Settings change can't
+        // Notify if the Settings change can't
         // be written — it's live this session but lost on restart.
         if !self.persist_pref(key_str, &new_val) {
             fire_notify(
@@ -12972,7 +12962,7 @@ impl App {
                 "Applied for this session — couldn't write it to your config file.",
             );
         }
-        // Cycle 856 (audit): the single "Window padding" control is
+        // The single "Window padding" control is
         // meant to set *uniform* padding, but persisted only the X
         // axis — leaving `window-padding-y` at its default produced
         // visibly lopsided padding. Mirror the value to the Y axis.
@@ -12988,7 +12978,7 @@ impl App {
             ws.settings_restart_pending = true;
         }
         self.reload_config(ws);
-        // Cycle 918: the cycle-880 `save_session()`-for-theme band-aid
+        // The `save_session()`-for-theme band-aid
         // is gone. It existed only to defend against startup's
         // session-theme override (now removed) reverting a Settings
         // pick after an unclean exit. The pick is durably written to
@@ -13054,7 +13044,7 @@ impl App {
         }
     }
 
-    /// Cycle 708 (Terminator parity, `layoutlauncher.py`):
+    /// Terminator parity, `layoutlauncher.py`:
     /// keyboard routing while the layout picker overlay is open.
     /// Same shape as `palette_key` but ranks against
     /// `Session::list_layouts()` and dispatches by spawning
@@ -13136,7 +13126,7 @@ impl App {
     /// close the menu when at the top level. Extracted from the Esc arm in
     /// v2.20.0 so vim-menu-nav's `h` shares the exact code path.
     fn context_menu_back(&mut self, ws: &mut WindowState) {
-        // Cycle 687 (theme-submenu sub-cycle 3): Esc on
+        // Esc on
         // a drilled-in submenu pops back to the parent
         // instead of closing the menu entirely. Only
         // when drill_stack is empty does Esc close.
@@ -13144,7 +13134,7 @@ impl App {
             && let Some(parent) = menu.drill_stack.pop()
         {
             menu.items = parent;
-            // Cycle 714: restore the parent level's
+            // Restore the parent level's
             // scroll_offset so popping out of a deep theme
             // list doesn't snap the parent's scroll position
             // to 0.
@@ -13167,7 +13157,7 @@ impl App {
     /// shared mapper. Extracted from the Enter arm in v2.20.0 so
     /// vim-menu-nav's `l` shares the exact code path.
     fn context_menu_activate(&mut self, ws: &mut WindowState, event_loop: &ActiveEventLoop) {
-        // Cycle 890 (audit): resolve the highlighted row through the
+        // Resolve the highlighted row through the
         // shared mapper so Enter / Space dispatches *every* row type
         // — submenu (drills in), Lua item, config command, theme /
         // profile choice, new-tab ▾ shell — not just `Item`. The
@@ -13300,7 +13290,7 @@ impl App {
                 self.context_menu_activate(ws, event_loop);
             }
             _ => {
-                // Cycle 715 (Terminator menu UX, C6): mnemonics +
+                // Terminator menu UX, C6: mnemonics +
                 // typeahead. A single A-Z keystroke dispatches a row
                 // whose mnemonic char matches; multi-char accumulates
                 // into `typeahead_buf` for prefix-match. Buffer
@@ -13346,7 +13336,7 @@ impl App {
                     })
                 });
                 if let Some(idx) = mnemonic_hit {
-                    // Cycle 890: dispatch the matched row through the same
+                    // Dispatch the matched row through the same
                     // shared mapper + sink as mouse clicks and Enter / Space,
                     // so a mnemonic reaches every row type (Lua / config /
                     // ▾ shell included) and the close-or-drill decision stays
@@ -13435,9 +13425,9 @@ impl App {
                 }
             }
             _ => {
-                // Cycle 863 (audit): filter control chars before appending,
-                // like the search / palette / title handlers — the cycle-857
-                // comment claimed this handler already did, but it didn't.
+                // Filter control chars before appending,
+                // like the search / palette / title handlers — the comment
+                // in `search_key` claimed this handler already did, but it didn't.
                 if let Some(t) = text
                     && !t.chars().any(|c| c.is_control())
                     && let Some(q) = ws.ssh_input.as_mut()
@@ -13449,7 +13439,7 @@ impl App {
     }
 }
 
-/// Cycle 352 (Terminator parity): remap encoded Backspace/Delete bytes per
+/// Terminator parity: remap encoded Backspace/Delete bytes per
 /// the user's `backspace-binding`/`delete-binding`. Extracted in v2.20.0
 /// (review fix) so `send_keys` honors the same remap as GUI keystrokes —
 /// the "same path as a human key press" contract.
@@ -13786,7 +13776,7 @@ fn to_kkey(key: &Key) -> Option<KKey> {
 /// Whether a captured `(mods, key)` chord is safe to bind from the settings
 /// keybind-capture overlay.
 ///
-/// Cycle 835 (audit): a modifier-LESS chord is rejected unless the key is an
+/// A modifier-LESS chord is rejected unless the key is an
 /// F-key. Binding e.g. a bare `a` (a mis-press during capture) inserted
 /// `Trigger { mods: empty, key: Char('a') }` into the keybinds AND the config
 /// file; afterward the global key path matched it before text encoding, so
@@ -13835,10 +13825,10 @@ fn should_reveal_after_renderer_init(state: kettle_config::WindowState) -> bool 
     !matches!(state, kettle_config::WindowState::Hidden)
 }
 
-/// Cycle 919 (audit M1/M2): is the default last-session (`session.json`) active
+/// Is the default last-session (`session.json`) active
 /// for THIS launch? Drives BOTH the startup restore gate (whether to `load()`)
 /// and the `save_session` gate (whether to `save()` the default session). They
-/// MUST agree: cycle 918 made *load* opt-in (fresh windows by default) but left
+/// MUST agree: an earlier change made *load* opt-in (fresh windows by default) but left
 /// *save* unconditional, so a fresh, non-opted-in window silently overwrote the
 /// saved layout that `--restore` exists to recover — data loss against the
 /// feature's own contract. Routing both through this one predicate keeps them
@@ -13848,7 +13838,7 @@ fn should_restore_session(startup_restore: bool, cfg_restore_session: bool) -> b
     startup_restore || cfg_restore_session
 }
 
-/// Cycle 812 (audit #10): how long to let the synchronous GPU adapter+device
+/// How long to let the synchronous GPU adapter+device
 /// init run before treating it as a hung graphics driver. Real init is ~1.5s;
 /// this is deliberately generous so a slow-but-working GPU is never killed,
 /// while still bounding the worst case (a wedged driver that never returns)
@@ -13908,7 +13898,7 @@ fn normalized_ime_preedit(
     (!text.is_empty()).then_some((text, selection))
 }
 
-/// Watchdog body for the GPU-init guard (cycle 812). Polls `done` every `step`
+/// Watchdog body for the GPU-init guard. Polls `done` every `step`
 /// until `timeout` elapses. Returns `true` if the timeout was reached without
 /// `done` ever being observed set — i.e. the caller should treat the init as
 /// hung — and `false` if `done` was seen in time (init finished, watchdog
@@ -13931,13 +13921,13 @@ fn gpu_init_timed_out(
     !done.load(Ordering::Acquire)
 }
 
-/// Cycle 786: should an open modal swallow a pointer event (mouse press /
+/// Should an open modal swallow a pointer event (mouse press /
 /// wheel) instead of letting it fall through to the tab bar, pane focus, or
 /// mouse-tracking *behind* the dialog? True whenever any modal is open —
 /// search / palette / ssh / settings / layout-picker / hint / confirm dialog /
 /// inline title-edit / vi copy-mode — *except* a lone context menu, which owns
 /// its own click/scroll paths above and is re-opened (relocated) by a
-/// right-click below, so gating it here would break that. Before this cycle a
+/// right-click below, so gating it here would break that. Before this fix a
 /// click switched tabs / focused a pane and a wheel zoomed the font or scrolled
 /// the pane while a dialog the user thought was capturing input sat on top.
 fn modal_swallows_pointer(any_modal_open: bool, context_menu_open: bool) -> bool {
@@ -14271,7 +14261,7 @@ fn window_hwnd(w: &winit::window::Window) -> Option<isize> {
 /// check matters: suspended UWP apps park full-screen DWM-cloaked windows
 /// in the z-order that would otherwise always read as "covered".
 ///
-/// Known limitation (cycle-943, accepted): always-on-top foreign windows
+/// Known limitation (accepted): always-on-top foreign windows
 /// sit ABOVE the torn window and are invisible to a downward walk — a
 /// band covered by one still shows the marker (the merge itself is
 /// unaffected). GetWindowRect also includes the invisible Win10/11 resize
@@ -14349,15 +14339,15 @@ impl App {
     ) -> winit::window::WindowAttributes {
         let mut attrs = Window::default_attributes()
             .with_title("kettle")
-            // Cycle 752: show kettle's icon in the title bar / taskbar / Alt-Tab
+            // Show kettle's icon in the title bar / taskbar / Alt-Tab
             // for the running window (winit leaves it unset by default).
             .with_window_icon(load_window_icon())
             // v2.34.0: seed the native titlebar (Windows DWM caption, Wayland
             // Adwaita CSD) to match the active palette from the first frame;
             // runtime changes go through `maybe_sync_native_theme`.
             .with_theme(self.native_theme_hint());
-        // Cycle 332 (Terminator parity, terminatorlib/config.py:75 +
-        // 78). `borderless` removes OS chrome; `always-on-top` keeps
+        // Terminator parity, terminatorlib/config.py:75 +
+        // 78. `borderless` removes OS chrome; `always-on-top` keeps
         // the window above other windows. Best-effort per OS; failure
         // modes degrade silently (e.g. Wayland respects compositor
         // rules over our hint).
@@ -14367,8 +14357,8 @@ impl App {
         if self.cfg.always_on_top {
             attrs = attrs.with_window_level(winit::window::WindowLevel::AlwaysOnTop);
         }
-        // Cycle 691 (Terminator parity, terminatorlib/config.py:79
-        // `hide_from_taskbar`): on Windows, winit 0.30 exposes
+        // Terminator parity, terminatorlib/config.py:79
+        // `hide_from_taskbar`: on Windows, winit 0.30 exposes
         // `WindowAttributesExtWindows::with_skip_taskbar`. Other
         // platforms remain Bucket E — X11/Wayland/macOS need
         // raw-window-handle direct atom writes which the design
@@ -14382,7 +14372,7 @@ impl App {
             use winit::platform::windows::WindowAttributesExtWindows;
             attrs = WindowAttributesExtWindows::with_skip_taskbar(attrs, true);
         }
-        // Cycle 754: on non-Windows the key parses but there's no winit API to
+        // On non-Windows the key parses but there's no winit API to
         // honor it (X11 would need a `_NET_WM_STATE_SKIP_TASKBAR` atom write).
         // Log so a user porting a Terminator config knows it's recognized but
         // not yet applied here — mirrors the `sticky` log on macOS below
@@ -14396,8 +14386,8 @@ impl App {
                  window will still appear in the taskbar/dock"
             );
         }
-        // Cycle 344 (Terminator parity, terminatorlib/config.py:75
-        // `window_state`). Apply initial window state at creation.
+        // Terminator parity, terminatorlib/config.py:75
+        // `window_state`. Apply initial window state at creation.
         match state {
             kettle_config::WindowState::Normal => {}
             kettle_config::WindowState::Maximise => {
@@ -14419,8 +14409,8 @@ impl App {
                 self.cfg.window_position_y.unwrap_or(0),
             ));
         }
-        // Cycle 359 (Terminator parity, terminatorlib/config.py:74
-        // `geometry_hinting`): when true, request that the WM resize
+        // Terminator parity, terminatorlib/config.py:74
+        // `geometry_hinting`: when true, request that the WM resize
         // the window in font-cell increments (so a drag-resize lands
         // on exact column/row boundaries vs sub-cell sliver). Uses
         // an approximate cell size — actual font metrics aren't
@@ -14446,7 +14436,7 @@ impl App {
             // doesn't put both methods in scope (which would make
             // `attrs.with_name(…)` ambiguous).
             use winit::platform::x11::WindowAttributesExtX11;
-            // Cycle 755: derive WM_CLASS from the running binary's stem
+            // Derive WM_CLASS from the running binary's stem
             // (default "kettle") instead of hardcoding, so a fork or renamed
             // binary groups correctly in GNOME/KDE task switchers without
             // editing code. The canonical build is `kettle`, so this matches
@@ -14596,8 +14586,8 @@ impl App {
     #[cfg_attr(not(target_os = "macos"), allow(unused_variables))]
     fn apply_post_create(&self, window: &Window) {
         window.set_ime_allowed(true);
-        // Cycle 694 (Terminator parity, terminatorlib/config.py:81
-        // `sticky`): show window on every workspace. macOS exposes
+        // Terminator parity, terminatorlib/config.py:81
+        // `sticky`: show window on every workspace. macOS exposes
         // this as a Window-level method via `WindowExtMacOS`, so
         // we apply it after construction (unlike Windows
         // `with_skip_taskbar` which is a build-time attribute).
@@ -14606,8 +14596,8 @@ impl App {
         // would need raw-window-handle direct atom writes (heavy
         // dep for one config key).
         //
-        // Cycle 768: macOS `sticky` is now implemented for real. winit 0.30
-        // dropped `WindowExtMacOS::set_visible_on_all_workspaces` (cycle 730
+        // macOS `sticky` is now implemented for real. winit 0.30
+        // dropped `WindowExtMacOS::set_visible_on_all_workspaces` (an earlier change
         // stubbed it as a log to stop breaking the macOS build), so we reach
         // through the raw NSWindow handle and set
         // `NSWindowCollectionBehavior::CanJoinAllSpaces | Stationary` via
@@ -14616,7 +14606,7 @@ impl App {
         if self.cfg.sticky {
             set_visible_on_all_spaces(window);
         }
-        // Cycle 754: X11/Wayland sticky needs a `_NET_WM_STATE_STICKY` atom
+        // X11/Wayland sticky needs a `_NET_WM_STATE_STICKY` atom
         // write that winit 0.30 doesn't expose; log (don't silently no-op) so
         // the user knows the key is recognized but not yet applied here.
         #[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "openbsd"))]
@@ -14766,7 +14756,7 @@ impl App {
         self.resize_all(&mut ws);
         self.focused_seq = seq;
         // First frame painted directly — RedrawRequested is not delivered to
-        // a never-shown window on Windows (the cycle-785 reveal dance).
+        // a never-shown window on Windows (the `should_reveal_after_renderer_init` reveal dance).
         self.redraw(&mut ws);
         if let Some(w) = &ws.window {
             w.request_redraw();
@@ -14931,7 +14921,7 @@ impl App {
                     (f64::from(p.y) + ws.cursor.y - grab.1) as i32,
                 )
             });
-        // The dragged tab is the ACTIVE tab — the cycle-249 reorder keeps
+        // The dragged tab is the ACTIVE tab — the drag-to-reorder gesture keeps
         // it active while the FSM's armed index can go stale across
         // reorders (same invariant the old at-release tear relied on).
         let closing_idx = ws.mux.active;
@@ -14980,8 +14970,8 @@ impl App {
                 // straight to manual-follow: performWindowDragWithEvent on
                 // the TORN window would consume NSApp.currentEvent — a
                 // mouseDragged belonging to the SOURCE window — which is
-                // unsound for a window that never saw the press (cycle-943
-                // review); the lone-tab branch above keeps the native path
+                // unsound for a window that never saw the press; the
+                // lone-tab branch above keeps the native path
                 // there since it drags the window that owns the event.
                 let native = if cfg!(target_os = "macos") {
                     false
@@ -15087,7 +15077,7 @@ impl App {
             // Hidden bar (single-tab auto, preview not applied yet): use
             // the geometry the bar WILL have once the preview materializes
             // it, so the slot can't flip between the first hit-test and
-            // the next one (cycle-943): vertically the lone segment
+            // the next one: vertically the lone segment
             // occupies the strip's first bar_h, horizontally it spans the
             // button-trimmed strip — NOT the whole band.
             let bh = w.renderer.as_ref().map(|r| r.cell_h + 8.0).unwrap_or(24.0);
@@ -15229,7 +15219,7 @@ impl App {
     /// v2.19.0 (re-dock): set/clear a window's dock preview. The preview
     /// that MATERIALIZES a hidden single-tab auto bar is render-only — the
     /// strip overlays the top of the content for the hover's duration and
-    /// the PTY grids are NOT resized (cycle-943: hovering across the band
+    /// the PTY grids are NOT resized (hovering across the band
     /// edge would otherwise SIGWINCH-spam the target's shells with
     /// resize/restore pairs; the real resize happens once, in
     /// `dock_tab_into`, when a drop actually merges).
@@ -15290,7 +15280,7 @@ impl App {
             // Native loop: `ws` IS the torn window; the target is mapped.
             let donor_active = ws.mux.active;
             let Some(dt) = ws.mux.detach_tab(donor_active) else {
-                // Cycle-943: every early return after take() must clear the
+                // Every early return after take() must clear the
                 // latched preview, or the marker (and a materialized auto
                 // bar) sticks to the target forever.
                 self.clear_dock_preview_at(ws, target_seq);
@@ -15352,7 +15342,7 @@ impl App {
         }
     }
 
-    /// v2.19.0 (re-dock, cycle-943): clear a latched dock preview wherever
+    /// v2.19.0 (re-dock): clear a latched dock preview wherever
     /// its window lives — the checked-out `ws` or the map.
     fn clear_dock_preview_at(&mut self, ws: &mut WindowState, target_seq: u64) {
         if ws.seq == target_seq {
@@ -15516,11 +15506,11 @@ impl App {
         let accessibility = Self::new_accessibility_adapter(event_loop, &window);
         let size = window.inner_size();
         let scale = window.scale_factor() as f32;
-        // Cycle 812 (audit #10): guard the synchronous GPU init against a hung
+        // Guard the synchronous GPU init against a hung
         // graphics driver. `Renderer::new` block_on's wgpu's adapter+device
         // requests on this (event-loop) thread; a wedged driver or GPU reset
         // can make those never return, leaving kettle stuck on an invisible
-        // window (cycle 785 keeps it hidden until the first paint) with no
+        // window (kept hidden until the first paint) with no
         // diagnostic — indistinguishable from a crash. A watchdog thread (which
         // only ever touches an `AtomicBool`, so there's no Send/thread-affinity
         // hazard with the GPU objects) turns that infinite hang into a clean,
@@ -15530,7 +15520,7 @@ impl App {
         {
             let gpu_init_done = gpu_init_done.clone();
             // If the watchdog thread can't be spawned we simply proceed without
-            // it (back to the pre-cycle-812 behavior) rather than failing init.
+            // it (back to the behavior without the watchdog) rather than failing init.
             let _ = std::thread::Builder::new()
                 .name("kettle-gpu-init-watchdog".into())
                 .spawn(move || {
@@ -15597,7 +15587,7 @@ impl App {
         // fields. The REST of `self.startup` stays intact for the whole
         // session — the explicit-restore gates below (`--tab-handoff` /
         // `--layout` / `--restore`), the save-session layout/restore gating,
-        // and reload_config's launch-override re-application (cycle 938) all
+        // and reload_config's launch-override re-application all
         // read it later.
         //
         // C7 regression fix: this used to be a wholesale
@@ -15614,7 +15604,7 @@ impl App {
             .record
             .clone()
             .map(|p| (p, self.startup.record_raw_input));
-        // Cycle 928 (agent-first A2): the `--agent-server` override for the
+        // Agent-first A2: the `--agent-server` override for the
         // control-server start further down (after the first paint).
         let startup_agent_server = self.startup.agent_server;
         let has_override = cmd_override.is_some() || cwd_override.is_some();
@@ -15639,28 +15629,28 @@ impl App {
             }
             true
         } else {
-            // Cycle 291: load the named layout if `--layout NAME` was
+            // Load the named layout if `--layout NAME` was
             // passed; otherwise fall through to the default session
             // (which is the per-install last-state file).
             //
-            // Cycle 404 (Terminator parity, detachable-tabs Bucket-D
-            // sub-cycle 8): --tab-handoff PATH wins over both. Used
-            // by Action::MoveTabToNewWindow (cycle 384) when spawning
+            // Terminator parity, detachable-tabs Bucket-D
+            // (new-window-on-drop): --tab-handoff PATH wins over both. Used
+            // by Action::MoveTabToNewWindow when spawning
             // the target kettle process; passes the source tab's
             // serialized state via a one-shot JSON file. The handoff
             // file is deleted after read.
-            // Cycle 409 (Terminator parity, detachable-tabs Bucket-D
-            // sub-cycle 7 target): --tab-handoff-fd FD wins over
+            // Terminator parity, detachable-tabs Bucket-D
+            // (drop-logic target): --tab-handoff-fd FD wins over
             // --tab-handoff PATH. Receives a serialized tab + PTY
             // fds via SCM_RIGHTS over the inherited socket fd. Unix-
             // only; Windows + Wayland use the file-fallback path.
             //
-            // Today's commit ships the recv + deserialize half;
+            // This commit ships the recv + deserialize half;
             // adopting the received fds as live Pane PTYs needs a
             // Terminal::from_fd constructor — that's the remaining
-            // sub-cycle 7 piece. For now: the recv runs + the JSON
+            // piece of that phase. For now: the recv runs + the JSON
             // restores via the existing path; PTY fds get closed on
-            // drop. Future sub-cycle replaces the existing PTY-spawn
+            // drop. A follow-up replaces the existing PTY-spawn
             // with adoption.
             let loaded = if let Some(fd) = self.startup.tab_handoff_fd {
                 #[cfg(unix)]
@@ -15678,7 +15668,7 @@ impl App {
                                 "tab-handoff-fd: received {n} bytes + {} fds",
                                 received_fds.len()
                             );
-                            // Future cycle adopts received_fds as
+                            // A follow-up adopts received_fds as
                             // Pane PTYs; for now they leak on drop
                             // (the source process holds the
                             // canonical reference + will close them
@@ -15712,7 +15702,7 @@ impl App {
                 // `--layout NAME` is an explicit named-workspace restore.
                 crate::session::Session::load_layout(name)
             } else if should_restore_session(self.startup.restore, self.cfg.restore_session) {
-                // Cycle 918: the default last-session restore is OPT-IN now —
+                // The default last-session restore is OPT-IN now —
                 // fresh windows by default, matching every mainstream terminal
                 // (GNOME Terminal, Windows Terminal, kitty, Alacritty, WezTerm,
                 // iTerm2). Enable "continue where I left off" with `--restore`
@@ -15724,7 +15714,7 @@ impl App {
             };
             match loaded {
                 Some(s) if !s.is_empty() => {
-                    // Cycle 918: the theme is NO LONGER applied from the session.
+                    // The theme is NO LONGER applied from the session.
                     // It is config-governed (the config `theme =` line, with the
                     // compile-time default as fallback), persisted via
                     // `persist_pref`. Applying a session-stored theme here used to
@@ -15796,7 +15786,7 @@ impl App {
             return;
         }
         self.resize_all(ws);
-        // Cycle 928 (agent-first A2): start the control server now — right after
+        // Agent-first A2: start the control server now — right after
         // the first pane exists, BEFORE the first GPU paint (which can take
         // several seconds on a cold shader cache). The server only needs the
         // pid + a live proxy for its waker, so binding it here makes the agent
@@ -15824,7 +15814,7 @@ impl App {
                 );
             }
         }
-        // Cycle 325 Lua scripting: drain any `kettle.send_text(s)`
+        // Lua scripting: drain any `kettle.send_text(s)`
         // bytes the startup script queued, into the now-existing
         // focused pane's PTY. The pane is fresh; the shell will
         // see this as the user's first typing.
@@ -15832,14 +15822,14 @@ impl App {
             && let Some(p) = ws.mux.focused()
         {
             let bytes = std::mem::take(&mut self.pending_lua_send);
-            // Cycle 941: Lua send_text acts as the user — read-only drops it.
+            // Lua send_text acts as the user — read-only drops it.
             p.feed_input(&bytes);
         }
-        // Cycle 326 Lua scripting: drain any `kettle.exec_action(name)`
+        // Lua scripting: drain any `kettle.exec_action(name)`
         // dispatches the startup script queued. Done after the
         // send_text drain so scripts that mix both produce a
         // deterministic order. Actions go through the existing
-        // dispatch helper so they hit every cycle-specific hook
+        // dispatch helper so they hit every existing hook
         // (focus tracking, palette/menu closing, blink reset).
         if !self.pending_lua_actions.is_empty() {
             let actions = std::mem::take(&mut self.pending_lua_actions);
@@ -15847,7 +15837,7 @@ impl App {
                 self.handle_action(ws, a, event_loop);
             }
         }
-        // Cycle 366 (Terminator plugin parity, sub-cycle 3): fire
+        // Terminator plugin parity: fire
         // LuaEvent::Startup the first time we have an alive window
         // + at least one pane. Subsequent resumed() calls (Wayland
         // can re-emit) get short-circuited by lua_startup_fired.
@@ -15858,7 +15848,7 @@ impl App {
             if let Some(eng) = &self.lua_engine {
                 eng.fire_event(&crate::LuaEvent::Startup);
             }
-            // Cycle 428: route through the same helper as TabAdd /
+            // Route through the same helper as TabAdd /
             // TabClose / Bell / Output so all 5 event hooks share
             // one canonical command-drain path. Inherent methods are
             // callable from a trait impl as long as `self: &mut App`.
@@ -15869,10 +15859,10 @@ impl App {
         // `request_redraw` — so visible startup windows receive terminal
         // content immediately after renderer + pane setup. The follow-up
         // `request_redraw` schedules the next normal frame.
-        // Cycle 875: start the developer session recorder now that the grid
+        // Start the developer session recorder now that the grid
         // exists (only a `dev-record` build with `--record` / `KETTLE_RECORD`;
         // opts captured above before `startup` was consumed).
-        // Cycle 908 (dev-record completeness): start it BEFORE the first
+        // Dev-record completeness: start it BEFORE the first
         // `redraw()` below — `redraw()` runs the first `drain_events()`, which
         // tees PTY output into the trace; starting the recorder *after* it
         // dropped the session's opening output (e.g. a fast `-e cmd`'s line).
@@ -15907,7 +15897,7 @@ impl App {
             env!("CARGO_PKG_VERSION"),
             self.cfg.update_policy,
         );
-        // Dropdown-parity cycle: warm the shell-detection cache (wsl.exe /
+        // Warm the shell-detection cache (wsl.exe /
         // vswhere probes, bounded ~2s each) off the UI thread so the first
         // dropdown open / Ctrl+Shift+N press doesn't pay it.
         kettle_core::term::prewarm_shell_detection();
@@ -15926,12 +15916,12 @@ impl App {
                 if !self.window_has_new_output(ws) {
                     return;
                 }
-                // Cycle 290: run output triggers before the redraw —
+                // Run output triggers before the redraw —
                 // a match fires window urgency so the user notices the
                 // event even if they're focused on another OS window.
                 // Cheap when triggers are empty (which is the default).
                 self.run_triggers(ws);
-                // Cycle 910 (R2): coalesce rapid PTY-output paints to ~one per
+                // R2: coalesce rapid PTY-output paints to ~one per
                 // frame budget so a non-atomic repaint burst settles before we
                 // snapshot the grid. When deferred, `about_to_wait` schedules
                 // the flush at the budget deadline so the final frame still
@@ -15967,7 +15957,7 @@ impl App {
             UserEvent::RemoteCommand => self.drain_remote_commands(ws),
             UserEvent::Ctl => self.drain_ctl(ws, _el),
             UserEvent::UpdateAvailable { tag, url } => {
-                // Cycle 794: a newer release exists. Show the dismissable
+                // A newer release exists. Show the dismissable
                 // bottom-bar banner, fire one desktop toast, and nudge the
                 // taskbar/dock so the user notices even if kettle is unfocused.
                 // The background thread already filtered out dismissed versions.
@@ -15978,7 +15968,7 @@ impl App {
                 self.update_available = Some((tag, url));
                 self.resize_all(ws);
                 if let Some(w) = &ws.window {
-                    // Cycle 879: only raise OS attention (+ latch the tracker)
+                    // Only raise OS attention (+ latch the tracker)
                     // when unfocused — mirroring the bell path — so
                     // `attention_active` keeps meaning "a flash is actually
                     // outstanding". FlashWindowEx is a no-op on the foreground
@@ -16022,7 +16012,7 @@ impl App {
         }
         match event {
             WindowEvent::CloseRequested => {
-                // Cycle 875/908: fan out in-flight shared PTY output, then flush
+                // Fan out in-flight shared PTY output, then flush
                 // before exit (Drop also flushes). `finish()` only flushes
                 // recorder events already written; it cannot pull the shared
                 // sidechannel or deliver its tail to Lua.
@@ -16053,7 +16043,7 @@ impl App {
                 self.pending_window_close = true;
             }
             WindowEvent::Resized(size) => {
-                // Cycle 841 (audit): minimizing a window delivers Resized(0, 0)
+                // Minimizing a window delivers Resized(0, 0)
                 // on Windows. Reconfiguring the surface + `resize_all` to a 0×0
                 // area collapsed every PTY to a 1×1 grid (`grid_of`'s `.max(1)`),
                 // firing a SIGWINCH storm that reflowed/redrew every TUI in every
@@ -16065,7 +16055,7 @@ impl App {
                     return;
                 }
                 self.apply_window_resize(ws, size.width, size.height);
-                // Cycle 875: record the new grid size into the asciicast trace.
+                // Record the new grid size into the asciicast trace.
                 #[cfg(feature = "dev-record")]
                 if self.recorder.is_some() {
                     let (cols, rows) = self.grid_of(ws, self.area(ws));
@@ -16078,7 +16068,7 @@ impl App {
                 }
             }
             WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
-                // Cycle 747: actually apply the new DPI scale. Previously this
+                // Actually apply the new DPI scale. Previously this
                 // arm only requested a redraw and dropped the factor, so text
                 // stayed at the launch scale — tiny at >100% Windows scaling,
                 // and never rescaling when dragged to a different-DPI monitor.
@@ -16106,15 +16096,15 @@ impl App {
                 // is pressed/released over a link.
                 self.sync_cursor_icon(ws);
             }
-            // Cycle 402 (Terminator parity, detachable-tabs Bucket-D
-            // sub-cycle 6): winit CursorLeft/Entered events transition
+            // Terminator parity, detachable-tabs Bucket-D
+            // (cross-window cursor detection): winit CursorLeft/Entered events transition
             // the detach FSM. CursorLeft → DraggingOutside (caller
             // generates a fresh session_id for the future cross-process
             // IPC handshake); CursorEntered → DraggingInside (user
             // brought the cursor back; cancel the cross-window flow).
             //
-            // Staging note (cycle 854 audit, updated by C5): the FSM's
-            // *entry* transitions are wired by C6 of the multi-window cycle
+            // Staging note (updated by C5): the FSM's
+            // *entry* transitions are wired by C6 of the multi-window rollout
             // (mouse-down arming on the tab bar). The working cross-window
             // move is the keyboard `Action::MoveTabToNewWindow`, now a LIVE
             // in-process detach_tab → open_window(AdoptTab) (the SCM_RIGHTS
@@ -16177,8 +16167,8 @@ impl App {
                 // loop; X11: the WM holds an active pointer grab). The first
                 // CursorMoved after movement is therefore the post-drop
                 // signal on platforms without Windows' synthesized release
-                // (which arrives first there and wins). Guards (cycle-943
-                // review): a short post-handoff blackout absorbs a stray
+                // (which arrives first there and wins). Guards: a short
+                // post-handoff blackout absorbs a stray
                 // client motion racing the WM actually taking the grab, and
                 // the latch is REVALIDATED against the torn window's final
                 // resting position — a WM-cancelled move (Esc) snaps the
@@ -16223,7 +16213,7 @@ impl App {
                 // re-dock hit-test. Gated on the CARRIER: only the capture
                 // holder's stream drives the follow — without the gate,
                 // stale tracking would hijack every window's cursor stream
-                // and keep refreshing the failsafe forever (cycle-943).
+                // and keep refreshing the failsafe forever.
                 if let Some(td) = self.torn_drag.as_ref()
                     && !td.native
                     && td.carrier == ws.seq
@@ -16255,7 +16245,7 @@ impl App {
                     }
                     return;
                 }
-                // Cycle 904 (audit): dragging a split divider — recompute the
+                // Dragging a split divider — recompute the
                 // addressed split's ratio from the cursor and apply. The split
                 // rect is re-fetched from the live seams so a mid-drag layout
                 // change (a pane elsewhere closing) can't desync the math; if
@@ -16276,7 +16266,7 @@ impl App {
                                 ws.cursor.y as f32,
                             );
                             ws.mux.set_split_ratio(ws.mux.active, &path, ratio);
-                            // Cycle 916 (file-by-file audit): the layout-tree
+                            // The layout-tree
                             // ratio changed, but each pane's PTY grid is resized
                             // only by resize_all (the keyboard resize path reaches
                             // it via handle_action's tail). Without this the child
@@ -16297,17 +16287,17 @@ impl App {
                 // are fine to ignore — the next "real" motion will fire.
                 self.show_mouse_cursor(ws);
                 self.sync_cursor_icon(ws);
-                // Cycle 712 (Terminator menu UX, hover-to-highlight):
+                // Terminator menu UX, hover-to-highlight:
                 // cursor over a context-menu row immediately updates
                 // the highlight. Matches GTK/NSMenu/Win32 menu
-                // conventions; before this cycle the highlight only
+                // conventions; before this fix the highlight only
                 // moved via keyboard so the menu felt unresponsive to
                 // mouse users. Cheap: no-op when the menu is closed.
                 if ws.context_menu.is_some() {
                     self.update_menu_highlight_from_cursor(ws);
                 }
-                // Cycle 360 (Terminator parity, terminatorlib/config.py:73
-                // `focus = sloppy`): focus-follows-mouse. The pane
+                // Terminator parity, terminatorlib/config.py:73
+                // `focus = sloppy`: focus-follows-mouse. The pane
                 // under the cursor becomes focused on every cursor
                 // movement (vs default `click` mode where click is
                 // required). `system` is treated like `click` for
@@ -16317,7 +16307,7 @@ impl App {
                     && !ws.tab_drag_active
                     && !ws.selecting
                     && ws.scrollbar_drag_offset.is_none()
-                    // Cycle 786 (audit A4): don't let focus-follows-mouse
+                    // Don't let focus-follows-mouse
                     // reassign pane focus while a modal is open — typing into
                     // search/palette while the cursor drifts over another pane
                     // would otherwise silently steal focus.
@@ -16329,16 +16319,16 @@ impl App {
                         .focus_at(area, ws.cursor.x as f32, ws.cursor.y as f32);
                     self.note_focus_change(ws, pre);
                 }
-                // Cycle 249: drag-to-reorder tabs (kitty / iTerm2 /
+                // Drag-to-reorder tabs (kitty / iTerm2 /
                 // Ghostty parity). When a left-button press in the tab
                 // bar armed `tab_drag_active`, walk the bar geometry,
                 // compute the target index under the cursor, and swap
                 // the active tab toward it via `move_active_tab`
-                // (cycle ~125's pure swap-with-clamp helper).
-                // v2.19.0 (cycle-943): x-only — gated off vertical bars,
+                // (the pure swap-with-clamp helper).
+                // v2.19.0: x-only — gated off vertical bars,
                 // where mapping cursor.x onto a vertically stacked strip
                 // produced silent bogus shuffles during any tab drag
-                // (vertical drag-reorder remains the deferred sub-cycle 6).
+                // (vertical drag-reorder remains deferred).
                 if let Some((ox, oy)) = ws.tab_drag_press {
                     let dx = ws.cursor.x as f32 - ox;
                     let dy = ws.cursor.y as f32 - oy;
@@ -16355,7 +16345,7 @@ impl App {
                 {
                     let bar = self.tab_bar(ws);
                     if bar.height > 0.0 && !bar.segments.is_empty() {
-                        // Cycle 821/956/964: use the same rendered segment
+                        // Use the same rendered segment
                         // rects that click hit-testing and painting use.
                         let target = tab_drag_target_index(ws.cursor.x as f32, &bar.segments);
                         let delta = target as i32 - ws.mux.active as i32;
@@ -16453,7 +16443,7 @@ impl App {
                 // stale, abandon. But an OTHER-button press routed to the
                 // manual-follow capture holder is live mid-drag input:
                 // swallow it (Chromium swallows stray presses during a tab
-                // drag) instead of killing the gesture (cycle-943 review).
+                // drag) instead of killing the gesture.
                 if let Some(td) = self.torn_drag.as_ref() {
                     if td.native || button == MouseButton::Left {
                         self.finalize_torn_drag(ws, false);
@@ -16461,19 +16451,20 @@ impl App {
                         return;
                     }
                 }
-                // Cycle 810 (audit): forward Back / Forward (buttons 8 / 9) to
+                // Forward Back / Forward (buttons 8 / 9) to
                 // a mouse-tracking app rather than dropping them. No local UI
                 // meaning, so they no-op when tracking is off.
-                // Cycle 831 (audit): gate behind an open modal — this forward
+                // Gate behind an open modal — this forward
                 // sat ABOVE the modal check below, so a side-button press leaked
                 // SGR into a tracking TUI *behind* a search/palette/settings/…
-                // dialog (the exact leak cycle 786 closed for L/M/R + wheel). A
+                // dialog (the exact leak the `modal_swallows_pointer` gate closed
+                // for L/M/R + wheel). A
                 // lone context menu isn't a modal here.
                 if let Some(sgr) = extra_mouse_sgr(button) {
-                    // Cycle 897 (audit): a lone context menu must swallow the
+                    // A lone context menu must swallow the
                     // side-button press too — dismiss the menu and DON'T forward.
                     // `modal_swallows_pointer` returns false for a lone menu, so
-                    // pre-fix a Back/Forward click both leaked SGR to the
+                    // before this fix a Back/Forward click both leaked SGR to the
                     // tracking app *behind* the menu AND left the menu open
                     // (every other button dismisses it).
                     if ws.context_menu.is_some() {
@@ -16494,7 +16485,7 @@ impl App {
                     MouseButton::Right => 2,
                     _ => return,
                 };
-                // Context menu (cycle 245): if the menu is open, a left-click
+                // Context menu: if the menu is open, a left-click
                 // either fires the row that was hit or — if the click landed
                 // outside the panel — closes the menu. Middle-click outside
                 // dismisses too; only right-click falls through so it can
@@ -16502,7 +16493,7 @@ impl App {
                 if ws.context_menu.is_some()
                     && let Some(click) = self.context_menu_click_action(ws, bcode)
                 {
-                    // Cycle 889: route through the shared sink. It closes the
+                    // Route through the shared sink. It closes the
                     // menu per-leaf and keeps it open for DrillIntoSubmenu —
                     // the old inline `ws.context_menu = None` *before* the
                     // match made the drill arm dead code (submenu clicks just
@@ -16557,7 +16548,7 @@ impl App {
                     }
                     return;
                 }
-                // Cycle 786 (audit A1, critical): with any *other* modal open
+                // With any *other* modal open
                 // (search / palette / ssh / settings / layout-picker / hint /
                 // confirm dialog / inline title-edit / vi copy-mode) the click
                 // must be consumed — otherwise it fell straight through to the
@@ -16573,7 +16564,7 @@ impl App {
                 // middle = close that tab).
                 let bar = self.tab_bar(ws);
                 let (px, py) = (ws.cursor.x as f32, ws.cursor.y as f32);
-                // Cycle 794: the update banner is the bottom bar when shown.
+                // The update banner is the bottom bar when shown.
                 // Left-click opens the release page (+ records the dismissal so
                 // it won't re-nag); right-click dismisses without opening. Only
                 // reachable with no modal open (the gate above returned for
@@ -16587,7 +16578,7 @@ impl App {
                 {
                     // Left-click opens + dismisses; right-click only
                     // dismisses. Shared with the keyboard `OpenUpdate` /
-                    // `DismissUpdate` actions (cycle 809).
+                    // `DismissUpdate` actions.
                     self.act_on_update_banner(ws, bcode == 0);
                     return;
                 }
@@ -16600,7 +16591,7 @@ impl App {
                     && (bcode == 0 || bcode == 1)
                 {
                     if bcode == 0 && bar.new_tab_menu.2 > 0.0 && in_bar(bar.new_tab_menu, px, py) {
-                        // Cycle 805: the `▾` dropdown — open the shell chooser
+                        // The `▾` dropdown — open the shell chooser
                         // anchored at the arrow's bottom-left. Checked BEFORE the
                         // `+` so the arrow region isn't swallowed by the button.
                         let (ax, ay, _, ah) = bar.new_tab_menu;
@@ -16609,7 +16600,7 @@ impl App {
                         let area = self.area(ws);
                         let (cols, rows) = self.grid_of(ws, area);
                         let (cw, ch) = self.cell_px(ws);
-                        // Cycle 802 (audit): log a `+`-button new-tab spawn
+                        // Log a `+`-button new-tab spawn
                         // failure rather than swallowing it. v2.26.0 (audit):
                         // also fire TabAdd on success (the `+` click previously
                         // skipped it, so Lua `TabAdd` / dev-record missed it).
@@ -16632,18 +16623,18 @@ impl App {
                     } else if let Some(seg) = bar.segments.iter().find(|s| in_bar(s.rect, px, py)) {
                         let close = bcode == 1 || in_bar(seg.close, px, py);
                         if close {
-                            // Cycle 144: closing a tab (middle-click or
+                            // Closing a tab (middle-click or
                             // ✕) can shift focus to a different tab
-                            // (cycle 120's `reap_tabs` bookkeeping).
+                            // (`reap_tabs`'s bookkeeping).
                             // Treat it like any other focus-changing
                             // action so the cursor on the now-active
                             // tab lands visible immediately.
                             let pre = self.focus_key(ws);
-                            // Cycle 424: fire TabClose so plugins see
+                            // Fire TabClose so plugins see
                             // the ✕-click close the same as Action::CloseTab.
                             let closing_idx = seg.idx;
                             if ws.mux.close_tab_at(seg.idx) {
-                                // Cycle 157: save the (empty) session
+                                // Save the (empty) session
                                 // before exit so next launch starts
                                 // fresh rather than restoring the
                                 // *previous* multi-tab state. Other
@@ -16662,7 +16653,7 @@ impl App {
                             ws.mux.active = seg.idx;
                             ws.mux.touch_active_tab_seen();
                             self.note_focus_change(ws, pre);
-                            // Cycle 249: arm the drag-to-reorder
+                            // Arm the drag-to-reorder
                             // handler so a subsequent CursorMoved
                             // event with the left button still held
                             // can swap the active tab toward the
@@ -16699,8 +16690,8 @@ impl App {
                 let area = self.area(ws);
                 // Ctrl/Cmd + left-click opens a hyperlink under the cursor.
                 //
-                // Cycle 350 (Terminator parity, terminatorlib/config.py:120
-                // `link_single_click`): when true, single-click (no
+                // Terminator parity, terminatorlib/config.py:120
+                // `link_single_click`: when true, single-click (no
                 // modifier) is enough to open URLs. Default keeps
                 // kettle's Ctrl-click guard so accidental drags don't
                 // navigate.
@@ -16710,13 +16701,13 @@ impl App {
                     && url_modifier
                     && let Some(uri) = self.link_at_cursor(ws).map(|l| l.uri.clone())
                 {
-                    // Cycle 351: route through helper so custom URL
+                    // Route through helper so custom URL
                     // handler config is honored.
                     self.open_url(&uri);
                     return;
                 }
-                // Cycle 389 (Terminator parity, titlebar Bucket-D
-                // sub-cycle 5): left-click on per-pane titlebar
+                // Terminator parity, titlebar Bucket-D:
+                // left-click on per-pane titlebar
                 // focuses + opens the EditPaneTitle overlay. Two
                 // clicks model (focus first, edit second) avoids
                 // accidental title edits on focus transitions.
@@ -16736,7 +16727,7 @@ impl App {
                     }
                     return;
                 }
-                // Cycle 904 (audit): a left-press on a split divider seam starts
+                // A left-press on a split divider seam starts
                 // a drag-to-resize gesture rather than focusing a pane / starting
                 // a selection. Seams are hit-tested over the same content `area`
                 // the panes lay out in, with a small grab tolerance.
@@ -16763,8 +16754,8 @@ impl App {
                 // selection when the platform exposes one; otherwise it falls
                 // back to the regular clipboard.
                 //
-                // Cycle 350 (Terminator parity, terminatorlib/config.py:88
-                // `disable_mouse_paste`): when true, middle-click does
+                // Mirrors Terminator's `disable_mouse_paste`
+                // (terminatorlib/config.py:88): when true, middle-click does
                 // not paste. Useful for terminal-of-last-resort use
                 // cases where accidental middle-clicks shouldn't leak
                 // clipboard content into commands.
@@ -16775,8 +16766,8 @@ impl App {
                     }
                     return;
                 }
-                // Cycle 350 (Terminator parity, terminatorlib/config.py:89
-                // `putty_paste_style`): right-click pastes (PuTTY/Windows
+                // Mirrors Terminator's `putty_paste_style`
+                // (terminatorlib/config.py:89): right-click pastes (PuTTY/Windows
                 // convention) instead of opening the context menu. The
                 // companion `putty_paste_style_source_clipboard` decides
                 // whether the source is CLIPBOARD or PRIMARY.
@@ -16803,12 +16794,12 @@ impl App {
                 // Right-click handling — layered:
                 //
                 // 1. `Shift + right-click` *with* an existing selection
-                //    keeps the cycle-49 extend-selection behavior (xterm
+                //    keeps the extend-selection behavior (xterm
                 //    convention; muscle memory for kettle's power users
                 //    since v1.0).
                 // 2. Any other right-click opens the context menu at the
                 //    click point (Terminator / GNOME / iTerm2 default).
-                //    Before cycle 245 this branch was a silent no-op,
+                //    This branch used to be a silent no-op,
                 //    which left first-time users confused.
                 //
                 // Mouse-tracking already short-circuited above when the
@@ -16839,11 +16830,11 @@ impl App {
                 button,
                 ..
             } => {
-                // Cycle 810 (audit): release report for the side buttons, so a
+                // Release report for the side buttons, so a
                 // tracking app sees the matching button-up after the press.
-                // Cycle 831 (audit): gated behind an open modal, matching Pressed.
+                // Gated behind an open modal, matching Pressed.
                 if let Some(sgr) = extra_mouse_sgr(button) {
-                    // Cycle 897 (audit): symmetry with the Pressed path — a lone
+                    // Symmetry with the Pressed path — a lone
                     // context menu swallows the side-button release too (its
                     // press was swallowed above, so no up-report should leak).
                     if ws.context_menu.is_some() {
@@ -16871,7 +16862,7 @@ impl App {
                 // live means the tracking went stale (an X11 drop we never
                 // observed) — abandon it and process the release normally.
                 //
-                // Esc-cancel guard (cycle-943 review, HIGH): WM_EXITSIZEMOVE
+                // Esc-cancel guard (HIGH): WM_EXITSIZEMOVE
                 // fires for EVERY modal-loop exit — Esc-cancel included —
                 // and the synthesized release is indistinguishable from a
                 // drop, while the latch survives the snap-back (the live
@@ -16903,9 +16894,9 @@ impl App {
                     }
                     ws.selecting = false;
                     ws.scrollbar_drag_offset = None;
-                    // Cycle 904: end any split-divider drag on left-button up.
+                    // End any split-divider drag on left-button up.
                     ws.dragging_split = None;
-                    // Cycle 249: end the drag-to-reorder gesture on
+                    // End the drag-to-reorder gesture on
                     // left-button release. Any swaps that happened
                     // during the drag are already committed; this just
                     // disarms the CursorMoved handler.
@@ -16987,7 +16978,7 @@ impl App {
                 if lines == 0 {
                     return;
                 }
-                // Cycle 714 (Terminator menu UX, C5): wheel over an
+                // Terminator menu UX (C5): wheel over an
                 // open context menu scrolls its rows (one row per
                 // wheel notch). Pre-empts every other wheel dispatch
                 // so a 512-entry Theme submenu scrolls cleanly
@@ -17007,7 +16998,7 @@ impl App {
                 {
                     return;
                 }
-                // Cycle 786 (audit A2): a non-context-menu modal swallows the
+                // A non-context-menu modal swallows the
                 // wheel too — without this, Ctrl+wheel still zoomed the font
                 // and Shift/plain wheel still scrolled the pane / cycled tabs
                 // behind an open search / palette / settings / etc. The context
@@ -17032,14 +17023,13 @@ impl App {
                     }
                     return;
                 }
-                // Cycle 604 (Terminator parity): Ctrl+wheel resizes the
+                // Terminator parity: Ctrl+wheel resizes the
                 // font. Fires BEFORE the mouse-tracking pass-through so
                 // it works even when a TUI like tmux/htop has mouse
                 // tracking on — matches gnome-terminal / Terminator /
                 // xterm UX. `cfg.disable_mousewheel_zoom = true`
-                // (recognized since cycle 334; previously a no-op
-                // because the feature it disables didn't exist) opts
-                // out for users who scroll-zoom by accident on a
+                // (previously a no-op, before this feature existed)
+                // opts out for users who scroll-zoom by accident on a
                 // touchpad. Step size matches the existing keyboard
                 // IncreaseFontSize / DecreaseFontSize actions for a
                 // single source of truth.
@@ -17049,7 +17039,7 @@ impl App {
                     self.cfg.disable_mousewheel_zoom,
                 ) && let Some(r) = ws.renderer.as_mut()
                 {
-                    // Cycle 747: step logical size, not the now-physical
+                    // Step logical size, not the now-physical
                     // cell_h (which would double-apply the DPI scale).
                     let new = if sign > 0 {
                         r.font_size() + 1.0
@@ -17094,11 +17084,12 @@ impl App {
                 }
             }
             WindowEvent::DroppedFile(path) => {
-                // Cycle 897 (audit): a file dropped while a modal (search /
+                // A file dropped while a modal (search /
                 // palette / settings / confirm dialog / inline title-edit / vi
                 // copy-mode / …) is open must NOT inject its path into the PTY
-                // behind the dialog — the same pointer-leak class cycle 786
-                // closed for clicks. A lone context menu doesn't count here.
+                // behind the dialog — the same pointer-leak class
+                // `modal_swallows_pointer` already closes for clicks. A lone
+                // context menu doesn't count here.
                 if self.any_modal_open(ws) {
                     return;
                 }
@@ -17112,7 +17103,7 @@ impl App {
                 // user would have to add a space between the previous
                 // token and the path.
                 //
-                // Cycle 182: route through `paste_payload` so a vim /
+                // Route through `paste_payload` so a vim /
                 // neovim / fzf / mc that has bracketed paste enabled
                 // sees the path wrapped in `\e[200~ … \e[201~` and
                 // treats it as a paste block (no per-char command
@@ -17120,10 +17111,10 @@ impl App {
                 // vim caused each char of the path to act as a normal-
                 // mode command — chaotic. Clipboard paste already
                 // routes through the same helper; this brings drag-
-                // drop into line. Honors broadcast (cycle 173/174):
+                // drop into line. Honors broadcast:
                 // when group input is on, the path goes to every pane
                 // in the active tab — and each pane gets the *per-
-                // pane* BRACKETED_PASTE wrap (cycle 174 invariant),
+                // pane* BRACKETED_PASTE wrap (applied individually per pane),
                 // so a broadcast set containing one shell + one vim
                 // doesn't break either of them.
                 let text = format!("{} ", shell_quote_path(&path));
@@ -17138,7 +17129,7 @@ impl App {
                         .contains(kettle_core::TermMode::BRACKETED_PASTE);
                     let bytes = input::paste_payload(&text, bracketed);
                     if let Some(p) = ws.mux.focused() {
-                        // Cycle 941: drag-drop is user input — read-only drops it.
+                        // Drag-drop is user input — read-only drops it.
                         p.feed_input(&bytes);
                     }
                 }
@@ -17158,7 +17149,7 @@ impl App {
                 if f {
                     self.focused_seq = ws.seq;
                 }
-                // Cycle 876: non-interactive UI-state marker (OS-driven focus
+                // Non-interactive UI-state marker (OS-driven focus
                 // change — a transition the PTY output stream can't show).
                 #[cfg(feature = "dev-record")]
                 if let Some(rec) = self.recorder.as_mut() {
@@ -17168,7 +17159,7 @@ impl App {
                         "kettle:focus_out"
                     });
                 }
-                // Cycle 897 (audit): a focus loss can swallow the button-UP that
+                // A focus loss can swallow the button-UP that
                 // ends an in-progress drag (the release lands on whatever window
                 // took focus), latching `selecting` / `scrollbar_drag_offset` /
                 // `tab_drag_active` / a held `mouse_btn`. The next CursorMoved
@@ -17191,7 +17182,7 @@ impl App {
                     ws.tab_drag_active = false;
                     ws.tab_drag_press = None;
                     ws.tab_pressed_idx = None;
-                    // Cycle 904: a focus loss also ends any split-divider drag.
+                    // A focus loss also ends any split-divider drag.
                     ws.dragging_split = None;
                     ws.mouse_btn = None;
                     // C6: a focus loss also cancels an in-flight tab tear-off
@@ -17205,11 +17196,11 @@ impl App {
                     // outlives focus. Stale tracking is cleaned by the
                     // press/release handlers + the about_to_wait failsafe.
                 }
-                // Cycle 344 (Terminator parity, terminatorlib/config.py:77
-                // `hide_on_lose_focus`): Quake-style auto-hide. When
+                // Mirrors Terminator's `hide_on_lose_focus`
+                // (terminatorlib/config.py:77): Quake-style auto-hide. When
                 // the user clicks away to another window, hide the
                 // kettle window. Reappears via `kettle --toggle`
-                // (cycle 303) or whatever global hotkey the user
+                // or whatever global hotkey the user
                 // bound. Honors only on focus-LOSS (f == false).
                 if !f
                     && self.cfg.hide_on_lose_focus
@@ -17217,9 +17208,8 @@ impl App {
                 {
                     w.set_visible(false);
                 }
-                // Cycle 171: route through the shared helper so all
-                // user-driven blink-reset paths share one implementation
-                // (cycles 134-141 + 144 + 150 audit). The
+                // Route through the shared helper so all
+                // user-driven blink-reset paths share one implementation. The
                 // CursorBlinkingChange handler still inlines the body
                 // because it runs inside `ws.mux.panes.values_mut()`
                 // and can't borrow `self` again — that one's documented.
@@ -17233,7 +17223,7 @@ impl App {
                 {
                     p.term.write(if f { b"\x1b[I" } else { b"\x1b[O" });
                 }
-                // Cycle 869: winit's `request_user_attention(None)` alone does
+                // winit's `request_user_attention(None)` alone does
                 // not reliably stop the Win11 taskbar flash once started, so
                 // when an attention request is outstanding, clear it directly
                 // (FlashWindowEx FLASHW_STOP via Taskbar) on focus-gain and
@@ -17351,7 +17341,7 @@ impl App {
                         return;
                     }
                 }
-                // Cycle 876: record the keystroke (redacted token) BEFORE any
+                // Record the keystroke (redacted token) BEFORE any
                 // modal/early-return path consumes it, so the trace captures
                 // every key. Pasted content never reaches here — it's a `paste`
                 // marker (see the paste sites), never raw bytes.
@@ -17378,11 +17368,11 @@ impl App {
                     }
                     return;
                 }
-                // Keep the cursor solid while actively typing (cycle 144).
+                // Keep the cursor solid while actively typing.
                 // Routes through the shared helper so the eight
                 // user-driven blink-reset paths (Reset / focus changes /
                 // modal close / typing / tab close / window focus /
-                // DEC ?12 toggle) stay in lock-step. Cycle 171.
+                // DEC ?12 toggle) stay in lock-step.
                 self.reset_blink_phase(ws);
                 // Hide the OS mouse cursor (configurable; default on, like
                 // every modern terminal). Re-shown on the next CursorMoved.
@@ -17397,7 +17387,7 @@ impl App {
                     return;
                 }
 
-                // Cycle 299: vi-mode key dispatch (sub-cycle 2). When
+                // Vi-mode key dispatch. When
                 // vi_mode is Some, intercept keys for vi-style
                 // navigation before they reach the PTY. h/j/k/l move
                 // the vi cursor; 0/$/g/G jump; Esc exits.
@@ -17434,7 +17424,7 @@ impl App {
                     }
                     return;
                 }
-                // Cycle 756: settings overlay key handling (exclusive modal).
+                // Settings overlay key handling (exclusive modal).
                 if ws.settings_nav.is_some() {
                     self.settings_key(ws, &event.logical_key, event_loop);
                     if let Some(w) = &ws.window {
@@ -17459,7 +17449,7 @@ impl App {
                     return;
                 }
 
-                // Cycle 660 (sub-cycle 5 of confirm-dialog design):
+                // Phase 5 of TERMINATOR-CONFIRM-DIALOG-DESIGN.md:
                 // confirm-modal key handler. Tab/Shift+Tab/←→
                 // cycle focus, Enter dispatches on_confirm, Esc
                 // closes the modal without dispatching. Modal is
@@ -17529,7 +17519,7 @@ impl App {
                     }
                     return;
                 }
-                // Cycle 369: Edit-title overlay key handler. Esc
+                // Edit-title overlay key handler. Esc
                 // cancels; Enter applies via apply_title_edit;
                 // Backspace removes one char; printable text appends.
                 if ws.editing_title.is_some() {
@@ -17592,15 +17582,15 @@ impl App {
                     .focused()
                     .and_then(|p| p.term.term.lock().ok().map(|t| *t.mode()))
                     .unwrap_or(kettle_core::TermMode::empty());
-                // Cycle 828 (audit): application-keypad mode (DECKPAM) — an
+                // Application-keypad mode (DECKPAM) — an
                 // unmodified numpad key emits its SS3 sequence when the focused
                 // app set it. Tried before the normal encoder, which is
                 // location-agnostic. `event.location` distinguishes the numpad
                 // from the main keyboard row.
                 let encoded = input::encode_key_event(&event, ws.mods, mode);
                 if let Some(mut bytes) = encoded {
-                    // Cycle 352 (Terminator parity, terminatorlib/config.py:107-108
-                    // `backspace_binding` + `delete_binding`): remap the
+                    // Mirrors Terminator's `backspace_binding` + `delete_binding`
+                    // (terminatorlib/config.py:107-108): remap the
                     // encoded bytes when the user picked a non-default
                     // binding. Same as VTE's per-profile override.
                     // v2.20.0: shared with `send_keys` (review fix) so the
@@ -17624,7 +17614,7 @@ impl App {
         ws: &mut WindowState,
         _event_loop: &ActiveEventLoop,
     ) -> Option<u64> {
-        // Cycle 908: drain trailing recorder output before reap removes a
+        // Drain trailing recorder output before reap removes a
         // just-exited pane (covers the shell-exit → process-exit close path,
         // e.g. a fast `-e cmd` session).
         #[cfg(feature = "dev-record")]
@@ -17785,7 +17775,7 @@ impl App {
                 .map(|r| selection_autoscroll_lines(ws.cursor.y as f32, r.1, r.1 + r.3) != 0)
                 .unwrap_or(false)
         };
-        // Cycle 910 (R2): a deferred (coalesced) output paint becomes due
+        // A deferred (coalesced) output paint becomes due
         // `OUTPUT_FRAME_BUDGET` after the last frame. Until then it stays
         // pending and we wake at its deadline so the burst paints exactly once.
         let output_budget = effective_output_budget(ws.flood_paints);
@@ -17833,7 +17823,7 @@ impl App {
             let ms = (remaining.as_millis() as u64).max(1);
             wait_ms = Some(wait_ms.map_or(ms, |w| w.min(ms)));
         }
-        // Cycle 929 (agent-first A2): reply `timed_out` to any pending
+        // Reply `timed_out` to any pending
         // run_command whose deadline has passed, and—while runs are pending—
         // schedule a wake at the soonest deadline so a fully-silent command
         // (no output to wake us) still times out on time.
@@ -17870,7 +17860,7 @@ impl App {
     }
 }
 
-/// Cycle 754 drift guard. The confirm dialog ("Close pane?", "Quit?") is a
+/// Drift guard. The confirm dialog ("Close pane?", "Quit?") is a
 /// modal: opening another overlay over it must clear it (`close_all_modals`),
 /// and it must count as a modal for mouse/scroll/cursor gating
 /// (`any_modal_open`). A full behavioral test would need a constructed `App`
@@ -17901,7 +17891,7 @@ mod modal_discipline_guard {
         );
     }
 
-    /// Cycle 898 drift guard (audit). The confirm-dialog dispatch must honor
+    /// Drift guard. The confirm-dialog dispatch must honor
     /// the close return values like the keybind paths: `close_tab()` /
     /// `close_focused()` returning `true` means the last tab / pane closed, so
     /// the window must `event_loop.exit()` immediately instead of deferring a
@@ -18038,7 +18028,7 @@ mod tests {
         let body = src
             .split("fn reload_config_windows(&mut self)")
             .nth(1)
-            .and_then(|body| body.split("/// Cycle 290: scan").next())
+            .and_then(|body| body.split("/// Scan every pane's recent output").next())
             .expect("reload_config_windows body");
         assert_eq!(body.matches("self.load_reloaded_config()").count(), 1);
         assert!(body.contains("self.windows.keys().copied().collect()"));
@@ -18343,10 +18333,10 @@ mod tests {
         assert!(!should_reveal_after_renderer_init(WindowState::Hidden));
     }
 
-    /// Cycle 919 (audit M1/M2): the default-session restore is opt-in. The same
+    /// The default-session restore is opt-in. The same
     /// predicate gates BOTH the startup `load()` and the `save()` so they can't
-    /// drift apart (cycle 918 shipped a load-gated/save-unconditional asymmetry
-    /// that let a fresh window clobber the saved layout). (F,F) — the default —
+    /// drift apart (an earlier version gated load but left save unconditional,
+    /// an asymmetry that let a fresh window clobber the saved layout). (F,F) — the default —
     /// means do NOT touch session.json; any opt-in (`--restore` one-shot OR
     /// `restore-session = true`) turns both load and save back on.
     #[test]
@@ -18411,7 +18401,7 @@ mod tests {
         );
     }
 
-    /// Cycle 919 (audit M2) drift guard: in `resumed()`, the explicit restore
+    /// Drift guard: in `resumed()`, the explicit restore
     /// paths (`--tab-handoff-fd`, `--tab-handoff`, `--layout`) must all be
     /// resolved BEFORE the opt-in default-session branch, so an explicit launch
     /// target can never be overridden by a stale `session.json`. A future
@@ -18450,7 +18440,7 @@ mod tests {
         );
     }
 
-    /// Cycle 786 drift guard (audit A1/A2): a mouse press / wheel is swallowed
+    /// Drift guard: a mouse press / wheel is swallowed
     /// whenever a non-context-menu modal is open, so it can't fall through to
     /// the tab bar / pane focus / mouse-tracking behind the dialog. A lone
     /// context menu is the one exception — it owns its click/scroll paths and a
@@ -18501,7 +18491,7 @@ mod tests {
         );
     }
 
-    /// Cycle 904 (audit) drift guard. Mouse drag-to-resize of split dividers is
+    /// Drift guard. Mouse drag-to-resize of split dividers is
     /// wired across three event handlers (press starts the drag, move applies
     /// the new ratio, up/focus-loss ends it) plus a hover resize-cursor. A
     /// behavioral test needs a window + a real mouse drag (and the geometry math
@@ -18524,11 +18514,11 @@ mod tests {
         // Up + focus-loss end the drag (distinctive comments at each site, so
         // this guard doesn't self-match its own assertion literals).
         assert!(
-            src.contains("Cycle 904: end any split-divider drag on left-button up."),
+            src.contains("End any split-divider drag on left-button up."),
             "the split drag must be cleared on left-button up"
         );
         assert!(
-            src.contains("Cycle 904: a focus loss also ends any split-divider drag."),
+            src.contains("A focus loss also ends any split-divider drag."),
             "the split drag must be cleared on focus loss"
         );
         // Hover shows a resize cursor.
@@ -18562,7 +18552,7 @@ mod tests {
         );
     }
 
-    /// Cycle 908 (dev-record completeness) drift guard. Redraw and close-time
+    /// Drift guard (dev-record completeness). Redraw and close-time
     /// drains destructively consume one shared output channel, so both must fan
     /// out through the same recorder + Lua dispatcher before panes disappear.
     #[cfg(feature = "dev-record")]
@@ -18574,9 +18564,9 @@ mod tests {
             "the recorder-output flush helper must exist"
         );
         for marker in [
-            "Cycle 908: capture a just-exited pane's final output before reap drops",
-            "Cycle 908: drain trailing recorder output before reap removes a",
-            "Cycle 875/908: tee any in-flight PTY output into the trace,",
+            "Capture a just-exited pane's final output before reap drops",
+            "Drain trailing recorder output before reap removes a",
+            "Tee any in-flight PTY output into the trace,",
         ] {
             assert!(
                 src.contains(marker),
@@ -18604,7 +18594,7 @@ mod tests {
         );
     }
 
-    /// Cycle 897 (audit) drift guards. Three event-state leaks, each needing a
+    /// Drift guards. Three event-state leaks, each needing a
     /// winit event loop (+ modal / tracking PTY / drag gesture) for a behavioral
     /// test, so pinned at the source level like the sibling pointer-gate guards:
     ///   1. A dropped file behind an open modal must not inject into the PTY.
@@ -18622,13 +18612,13 @@ mod tests {
                 && src.contains("if self.any_modal_open(ws) {\n                    return;\n                }\n                // Standard modern-terminal affordance"),
             "DroppedFile must early-return when a modal is open"
         );
-        // 2. Focus-loss drag-flag reset (the block also clears dragging_split
-        //    since cycle 904, so check the individual resets, not a contiguous
+        // 2. Focus-loss drag-flag reset (the block also clears dragging_split,
+        //    so check the individual resets, not a contiguous
         //    block).
         assert!(
             src.contains("if ws.selecting && self.cfg.copy_on_select {")
                 && src.contains("ws.selecting = false;")
-                && src.contains("ws.tab_drag_active = false;\n                    ws.tab_drag_press = None;\n                    ws.tab_pressed_idx = None;\n                    // Cycle 904: a focus loss also ends any split-divider drag.\n                    ws.dragging_split = None;\n                    ws.mouse_btn = None;"),
+                && src.contains("ws.tab_drag_active = false;\n                    ws.tab_drag_press = None;\n                    ws.tab_pressed_idx = None;\n                    // A focus loss also ends any split-divider drag.\n                    ws.dragging_split = None;\n                    ws.mouse_btn = None;"),
             "the Focused `!f` arm must disarm the latched drag flags"
         );
         // 3. Side-button dismisses a lone context menu instead of leaking SGR.
@@ -18640,13 +18630,13 @@ mod tests {
         );
     }
 
-    /// Cycle 831 (audit) drift guard. The cycle-810 side-button (Back/Forward)
+    /// Drift guard. The side-button (Back/Forward)
     /// forward must be gated behind the modal check — it once sat above it and
     /// leaked SGR into a tracking TUI behind a dialog. A behavioral test needs a
     /// modal + tracking PTY; pin the gated shape at the source level. Both the
     /// Pressed and Released arms must guard `send_mouse(sgr, …)` with
     /// `!modal_swallows_pointer(…)` inside the `extra_mouse_sgr` block.
-    /// Cycle 841 (audit) drift guard. A 0×0 `Resized` (window minimize on
+    /// Drift guard. A 0×0 `Resized` (window minimize on
     /// Windows) must be ignored — reconfiguring + `resize_all` to 0×0 collapses
     /// every PTY to a 1×1 grid (SIGWINCH storm). A behavioral test needs a winit
     /// event loop; pin the early-return at the source level.
@@ -18661,7 +18651,7 @@ mod tests {
         assert!(!App::motion_should_report(true, Some((4, 4)), (4, 4)));
     }
 
-    /// Cycle 846 (audit) drift guard. `ScaledZoom` must baseline off the live
+    /// Drift guard. `ScaledZoom` must baseline off the live
     /// renderer size (`r.font_size()`), never `self.cfg.font_size` — the latter
     /// is stale after any manual Increase/DecreaseFontSize (which only touch the
     /// renderer), so scaling from it discards the user's manual zoom on exit.
@@ -18684,7 +18674,7 @@ mod tests {
         );
     }
 
-    /// Cycle 857 (audit) drift guard. `search_key` must filter control chars
+    /// Drift guard. `search_key` must filter control chars
     /// before appending to the query (like the title / SSH-input handlers), so a
     /// stray control byte can't corrupt the search. The handler needs full App
     /// state; pin the filter at the source.
@@ -18704,9 +18694,9 @@ mod tests {
         );
     }
 
-    /// Cycle 863 (audit) drift guard. `ssh_key` must filter control chars
+    /// Drift guard. `ssh_key` must filter control chars
     /// before appending to the host input, like its sibling handlers (the
-    /// cycle-857 comment had claimed this was already done). Needs full App
+    /// `search_key` guard above had claimed this was already done). Needs full App
     /// state; pin at the source.
     #[test]
     fn ssh_key_filters_control_chars() {
@@ -18935,7 +18925,7 @@ mod tests {
         );
     }
 
-    /// Cycle 856 (audit) drift guard. The single "Window padding" Settings
+    /// Drift guard. The single "Window padding" Settings
     /// control must persist BOTH `window-padding-x` and `-y` so the result is
     /// symmetric — persisting only X leaves Y at its default (lopsided). A
     /// behavioral test needs the live overlay + persist path; pin the
@@ -18964,7 +18954,7 @@ mod tests {
         );
     }
 
-    /// Dropdown-parity cycle: the `▾` menu is shells → separator → Windows
+    /// The `▾` menu is shells → separator → Windows
     /// Terminal's bottom section (Settings / Command palette / About).
     #[test]
     fn new_tab_menu_items_has_wt_bottom_rows() {
@@ -19004,7 +18994,7 @@ mod tests {
             }
         ));
         // Every dispatchable row gets a distinct mnemonic; the two-pass
-        // assignment (cycle 942) must keep working with the new bottom rows.
+        // assignment must keep working with the new bottom rows.
         let mn = assign_mnemonics(&items, &[]);
         let mut letters: Vec<char> = mn.iter().flatten().map(|(_, c)| *c).collect();
         assert_eq!(letters.len(), 5, "all 5 dispatchable rows get mnemonics");
@@ -19013,7 +19003,7 @@ mod tests {
         assert_eq!(letters.len(), 5, "mnemonics are distinct");
     }
 
-    /// Dropdown-parity cycle: an `Info` row (About panel) is inert — not
+    /// An `Info` row (About panel) is inert — not
     /// dispatchable, no click mapping, survives filter_disabled.
     #[test]
     fn info_rows_are_inert_but_visible() {
@@ -19106,7 +19096,7 @@ mod tests {
     /// `mem::take(&mut self.startup)` silently defaults every later read:
     /// the `--tab-handoff` / `--layout` / `--restore` startup gates (they
     /// loaded NOTHING — verified live, a 2-tab `--layout` opened 1 tab), the
-    /// save-session layout/restore gating, and reload_config's cycle-938
+    /// save-session layout/restore gating, and reload_config's
     /// launch-override re-application.
     #[test]
     fn startup_is_not_taken_wholesale() {
@@ -19201,7 +19191,7 @@ mod tests {
 
     #[test]
     fn side_button_forward_is_modal_gated() {
-        // Cycle 885: normalize CRLF before this multi-line `\n` scan. The GitHub
+        // Normalize CRLF before this multi-line `\n` scan. The GitHub
         // Windows runner checks out with autocrlf, turning the LF-committed file
         // into CRLF so the exact `{\n   self.send_mouse(sgr,` literal matched 0
         // (the `build (windows-latest)` job was red from v2.8.0). The new
@@ -19228,7 +19218,7 @@ mod tests {
         }
     }
 
-    /// Cycle 713 drift guard. Disabled `Item`s are removed entirely
+    /// Drift guard. Disabled `Item`s are removed entirely
     /// (Terminator-style "only show what you can click") and
     /// orphaned/leading/trailing separators collapse so the menu
     /// never has visual gaps that lead nowhere.
@@ -19253,7 +19243,7 @@ mod tests {
         assert!(matches!(&got[2], ContextMenuItem::Item { label, .. } if *label == "New Tab"));
     }
 
-    /// Cycle 713: runs of separators collapse to a single one; a
+    /// Runs of separators collapse to a single one; a
     /// leading separator (everything-disabled above it) gets dropped.
     #[test]
     fn consecutive_separators_collapse_and_leading_is_dropped() {
@@ -19273,7 +19263,7 @@ mod tests {
         assert!(matches!(&got[2], ContextMenuItem::Item { label, .. } if *label == "Cancel"));
     }
 
-    /// Cycle 713: filter is identity (modulo trailing separator) when
+    /// Filter is identity (modulo trailing separator) when
     /// nothing is disabled.
     #[test]
     fn filter_disabled_is_near_identity_when_all_enabled() {
@@ -19282,14 +19272,14 @@ mod tests {
         assert_eq!(got.len(), 3);
     }
 
-    /// Cycle 713: empty menu stays empty (defensive).
+    /// Empty menu stays empty (defensive).
     #[test]
     fn filter_disabled_handles_empty() {
         let got = filter_disabled(vec![]);
         assert!(got.is_empty());
     }
 
-    /// Cycle 713: all-disabled menu collapses to empty (no rows, no
+    /// All-disabled menu collapses to empty (no rows, no
     /// orphan separators).
     #[test]
     fn filter_disabled_collapses_all_disabled_to_empty() {
@@ -19302,7 +19292,7 @@ mod tests {
         assert!(got.is_empty());
     }
 
-    /// Cycle 717 drift guard. The Preferences ▸ submenu builder
+    /// Drift guard. The Preferences ▸ submenu builder
     /// must surface every runtime-mutable toggle the spec promises:
     ///   - 3 scrollbar radio rows
     ///   - 3 boolean toggles (cursor blink, copy on select, mouse-hide)
@@ -19317,7 +19307,7 @@ mod tests {
     #[test]
     fn preferences_submenu_contains_all_user_facing_toggles() {
         // We can't directly call append_preferences_submenu_items
-        // without an App; instead pin the Action variants this cycle
+        // without an App; instead pin the Action variants this change
         // ships so the keybinds-side palette wiring stays in sync.
         let expected_actions: &[Action] = &[
             Action::SetScrollbarAlways,
@@ -19334,7 +19324,7 @@ mod tests {
             Action::DecreaseFontSize,
             Action::EditConfig,
         ];
-        // Each action parses from its name (cycle-104 from_name
+        // Each action parses from its name (the `Action::from_name`
         // surface) so the keybind grammar accepts them. Catches the
         // case where someone adds a variant but forgets the
         // from_name arm.
@@ -19367,7 +19357,7 @@ mod tests {
         }
     }
 
-    /// Cycle 715 drift guard. `assign_mnemonics` returns the first
+    /// Drift guard. `assign_mnemonics` returns the first
     /// A-Z char per row; on collision the second row's first letter
     /// is taken, so the second row falls through to its next A-Z.
     /// Pinning the contract: Copy=C, Close Pane=l (C taken),
@@ -19399,7 +19389,7 @@ mod tests {
         assert_eq!(mn[6], None);
     }
 
-    /// Cycle 942 (audit): the URL-aware leading rows claim their mnemonics
+    /// The URL-aware leading rows claim their mnemonics
     /// AFTER the stable core rows. Without the two-round pass, "Open Link" /
     /// "Copy Link Address" leading the menu stole 'o'/'c', silently remapping
     /// muscle-memory mnemonics whenever the right-click landed on a link
@@ -19487,7 +19477,7 @@ mod tests {
         assert_eq!(super::half_page_menu_target(&[], 0, 3, 1), 0);
     }
 
-    /// Cycle 715 drift guard. Typeahead prefix-match is case-
+    /// Drift guard. Typeahead prefix-match is case-
     /// insensitive and stops at the first dispatchable hit.
     #[test]
     fn typeahead_th_highlights_theme_first() {
@@ -19511,7 +19501,7 @@ mod tests {
         assert_eq!(typeahead_match(&menu, ""), None);
     }
 
-    /// Cycle 715 drift guard. Disabled rows aren't typeahead targets
+    /// Drift guard. Disabled rows aren't typeahead targets
     /// (would be confusing to highlight a row that can't dispatch).
     #[test]
     fn typeahead_skips_disabled_rows() {
@@ -19520,7 +19510,7 @@ mod tests {
         assert_eq!(typeahead_match(&menu, "th"), Some(1));
     }
 
-    /// Cycle 714 drift guard. `count_rows_fitting` walks rows from
+    /// Drift guard. `count_rows_fitting` walks rows from
     /// `start` forward and sums heights until the next row would
     /// exceed `panel_h`. Pinning the arithmetic so scroll math
     /// can't silently drift if the row-height constants change.
@@ -19554,7 +19544,7 @@ mod tests {
         assert_eq!(count_rows_fitting(&menu, 99, 1000.0, row_h, sep_h), 0);
     }
 
-    /// Cycle 714 drift guard. With a 512-entry submenu and a real
+    /// Drift guard. With a 512-entry submenu and a real
     /// surface-bound panel height of ~580px (surface_h=660 - 80px
     /// chrome breathing room), `count_rows_fitting` reports a tiny
     /// fraction of the total — the rest scrolls into view. The
@@ -19580,7 +19570,7 @@ mod tests {
         assert!(visible < big.len(), "panel must clamp; visible={visible}");
     }
 
-    /// Cycle 712 drift guard. Hover-to-highlight walks `find_menu_row_y`
+    /// Drift guard. Hover-to-highlight walks `find_menu_row_y`
     /// on every `CursorMoved`; pin the contract so a render-layout
     /// change can't silently drop separator handling, off-by-one the
     /// last row, or break the out-of-bounds contract.
@@ -19640,7 +19630,7 @@ mod tests {
         );
     }
 
-    /// Cycle 708 drift guard. `rank_layouts` filters layout names by
+    /// Drift guard. `rank_layouts` filters layout names by
     /// every lower-cased query token; empty query returns identity.
     #[test]
     fn rank_layouts_filters_by_tokens_case_insensitive() {
@@ -19668,7 +19658,7 @@ mod tests {
 
     #[test]
     fn cap_title_for_status_bar_truncates_at_char_budget_with_ellipsis() {
-        // Cycle 308 drift guard. The status-bar strip is 1 cell tall;
+        // Drift guard. The status-bar strip is 1 cell tall;
         // a long title would wrap past the visible region without
         // this cap. Pins the contract:
         //   - under-budget: returned as-is, no `…`.
@@ -19726,7 +19716,7 @@ mod tests {
         assert!(!is_conhost_startup_title("my session", &[]));
     }
 
-    /// Cycle 934 (agent-first A4) + cycle 941 (read-only): the per-pane
+    /// The per-pane
     /// titlebar badges, composed by `compose_pane_title`.
     #[test]
     fn pane_title_badges_compose_from_state() {
@@ -19827,7 +19817,7 @@ mod tests {
         assert_eq!(wheel_lines(&one, -5.0), 0);
     }
 
-    /// Cycle 609 drift guard: pin the `copy_clipboard_decision`
+    /// Drift guard: pin the `copy_clipboard_decision`
     /// policy. The four cases enumerate every (selection ×
     /// smart_copy) combination so a future refactor that inverts
     /// the smart_copy semantics or drops the empty-clobber case
@@ -19899,7 +19889,7 @@ mod tests {
         );
     }
 
-    /// Cycle 604 drift guard: pin the `should_zoom_font` policy. The
+    /// Drift guard: pin the `should_zoom_font` policy. The
     /// in-wheel-handler call relies on this returning Some only when
     /// Ctrl is held AND the user hasn't opted out via
     /// `disable-mousewheel-zoom`. If a future refactor accidentally
@@ -19976,7 +19966,7 @@ mod tests {
         use super::gpu_init_timed_out;
         use std::sync::atomic::AtomicBool;
         use std::time::Duration;
-        // Cycle 812 drift guard. `done` never set within the window → reports a
+        // Drift guard. `done` never set within the window → reports a
         // hang (true), so the real watchdog would log + exit.
         let stuck = AtomicBool::new(false);
         assert!(gpu_init_timed_out(
@@ -20066,7 +20056,7 @@ mod tests {
         assert!(effective_output_budget(u32::MAX) <= Duration::from_millis(50));
     }
 
-    /// Cycle 912 (audit): the `about_to_wait` coalescer must FLUSH a due deferred
+    /// The `about_to_wait` coalescer must FLUSH a due deferred
     /// frame (clear `coalescing_paint`) BEFORE it computes the WaitUntil clamp,
     /// or a still-pending paint could re-schedule a ~1 ms wake every tick
     /// (busy-spin). A behavioral test needs a live winit event loop; pin the
@@ -20225,7 +20215,7 @@ mod tests {
     #[test]
     fn cwd_is_local_rejects_unc_and_traversal() {
         use super::cwd_is_local;
-        // Cycle 816 drift guard. Ordinary absolute cwds (the OSC 7 path form,
+        // Drift guard. Ordinary absolute cwds (the OSC 7 path form,
         // which uses forward slashes even on Windows: /C:/Users/x) are fine.
         assert!(cwd_is_local("/home/user"));
         assert!(cwd_is_local("/C:/Users/me/Repos"));
@@ -20240,7 +20230,7 @@ mod tests {
     fn extra_mouse_sgr_maps_side_buttons() {
         use super::extra_mouse_sgr;
         use winit::event::MouseButton;
-        // Cycle 810 drift guard. Back = XBUTTON1 = SGR 128, Forward =
+        // Drift guard. Back = XBUTTON1 = SGR 128, Forward =
         // XBUTTON2 = SGR 129; the primary three + anything else are handled
         // locally (or dropped), so they return None here.
         assert_eq!(extra_mouse_sgr(MouseButton::Back), Some(128));
@@ -20287,14 +20277,14 @@ mod tests {
 
     #[test]
     fn cursor_in_status_bar_band_geometry() {
-        // Cycle 321 drift guard for the cycle-320 status-bar
-        // cursor-icon fix. Same shape as the cycle-264 tab-bar
+        // Drift guard for the status-bar
+        // cursor-icon fix. Same shape as the `cursor_in_tab_bar_band_geometry`
         // drift guard above. Pins:
         //   - Off mode → always false (status bar invisible).
         //   - Top mode → [0, bar_h).
         //   - Bottom mode → [surface - bar_h, surface].
-        //   - bar_h == 0 → false regardless of mode (cycle-296
-        //     `status_bar_h()` returns 0 on the Off branch even
+        //   - bar_h == 0 → false regardless of mode (`status_bar_h()`
+        //     returns 0 on the Off branch even
         //     before the mode check; this is the same defensive
         //     contract).
         use super::cursor_in_status_bar_band;
@@ -20401,7 +20391,7 @@ mod tests {
         use kettle_render::TabSeg;
         // Two tab segments side-by-side, each 100×24 with a trailing
         // 24-px close-button zone at x=76..100 (segment 0) and
-        // x=176..200 (segment 1) — mirrors the cycle-241 tab_bar()
+        // x=176..200 (segment 1) — mirrors the tab_bar()
         // builder's `(x + seg_w - height)` formula.
         let segs = vec![
             TabSeg {
@@ -20578,7 +20568,7 @@ mod tests {
 
     /// v2.19.0 drift guard: the tear-at-threshold call sites and the native
     /// drag handoff stay wired the way the platform analysis verified them.
-    /// Source-level needles (the cycle-916 concat style) because the flow
+    /// Source-level needles because the flow
     /// spans winit's event dispatch and can't run headless.
     #[test]
     fn tear_off_flow_stays_wired() {
@@ -20608,8 +20598,8 @@ mod tests {
             "the Released-arm tear must be gated to Wayland and detachable-tabs"
         );
         // 5. The drop commits the latched dock from the left-release —
-        //    GATED on the primary button being physically up (cycle-943
-        //    HIGH: Windows' synthesized release fires for an Esc-CANCELLED
+        //    GATED on the primary button being physically up (HIGH:
+        //    Windows' synthesized release fires for an Esc-CANCELLED
         //    modal loop too, with the button still held; committing there
         //    performed the exact merge the user was cancelling).
         assert!(
@@ -20623,8 +20613,8 @@ mod tests {
             src.contains("let commit = self.revalidate_dock_latch(ws);"),
             "heuristic commits must revalidate the latch"
         );
-        // 7. Manual-follow listens only to the capture holder (cycle-943:
-        //    stale tracking must not hijack every window's cursor stream).
+        // 7. Manual-follow listens only to the capture holder (stale
+        //    tracking must not hijack every window's cursor stream).
         assert!(
             src.contains("&& td.carrier == ws.seq\n                {"),
             "manual-follow must be carrier-gated"
@@ -20636,7 +20626,7 @@ mod tests {
         );
     }
 
-    /// Cycle 959 drift guard: the Terminator-parity detachable-tabs setting is
+    /// Drift guard: the Terminator-parity detachable-tabs setting is
     /// a real runtime switch, not just a parsed compatibility key.
     #[test]
     fn detachable_tabs_config_gates_all_detach_paths() {
@@ -20663,7 +20653,7 @@ mod tests {
         );
     }
 
-    /// Cycle 821 drift guard: the drag strip and `tab_bar()`'s segment layout
+    /// Drift guard: the drag strip and `tab_bar()`'s segment layout
     /// share this width, so a tab can be dragged all the way to the last slot.
     #[test]
     fn tab_segment_strip_width_excludes_both_buttons() {
@@ -20731,7 +20721,7 @@ mod tests {
         assert_eq!(next_context_menu_highlight(&all_disabled, 0, 1), 0);
     }
 
-    /// Cycle 889/890 (audit): the shared row→click mapper must recognise
+    /// The shared row→click mapper must recognise
     /// EVERY dispatchable row type, so the keyboard Enter / Space +
     /// mnemonic paths reach the same set of rows the mouse hit-test does.
     /// Before the fix, Enter handled only `Item`, and the mnemonic path
@@ -20831,7 +20821,7 @@ mod tests {
             ),
             Some(ContextMenuClick::NewTabWithArgv(_))
         ));
-        // Cycle 941: URL-aware rows → Url { copy } carrying the captured
+        // URL-aware rows → Url { copy } carrying the captured
         // address, for both the Open and Copy flavors.
         assert!(matches!(
             item_to_click(
@@ -20870,7 +20860,7 @@ mod tests {
         assert!(item_to_click(&ContextMenuItem::Separator, 0).is_none());
     }
 
-    /// Cycle 890 (audit): theme + profile choice leaves must be keyboard-
+    /// Theme + profile choice leaves must be keyboard-
     /// navigable, otherwise drilling into a Theme ▸ / Profile ▸ submenu
     /// leaves ↑/↓ unable to land on any row.
     #[test]
@@ -20962,7 +20952,7 @@ mod tests {
         assert_eq!(window_title(dflt, "   ", "", 1), "kettle");
         assert_eq!(window_title(dflt, "kettle", "", 1), "kettle");
         // Empty / placeholder title *with* cwd → cwd basename fills in
-        // (cycle-89 tab-title fallback, same shape for the window title).
+        // (the cwd-basename tab-title fallback, same shape for the window title).
         assert_eq!(
             window_title(dflt, "", "/home/k/Repos/kettle", 1),
             "kettle — kettle",
@@ -21090,7 +21080,7 @@ mod tests {
 
     #[test]
     fn match_triggers_finds_pattern_anywhere_in_text() {
-        // Cycle 290 drift guard. The matching engine should fire on
+        // Drift guard. The matching engine should fire on
         // the first regex hit, return its action, and silently no-op
         // when nothing matches. Anchors (`^` / `$`) work too because
         // we scan multi-line viewport snapshots; the trigger uses
@@ -21210,7 +21200,7 @@ mod tests {
     #[test]
     fn smart_selection_at_returns_full_token_range() {
         use super::smart_selection_at;
-        // Cycle 288 drift guard. The function should pick up every hint
+        // Drift guard. The function should pick up every hint
         // kettle-core::hints::detect knows about (URL / path / IPv4 /
         // git SHA), return the inclusive `[start, end]` of the match
         // when the cursor lands inside it, and None otherwise.
@@ -21240,7 +21230,7 @@ mod tests {
         assert!(smart_selection_at("plain prose with nothing structured", 5).is_none());
     }
 
-    /// Cycle 662 drift guard. `count_leaves` is the pure helper
+    /// Drift guard. `count_leaves` is the pure helper
     /// behind `Action::CloseTab`'s scope_count for the confirm-
     /// dialog. Walks a tiny synthetic tree to verify the recursion.
     #[test]
@@ -21291,9 +21281,9 @@ mod tests {
         assert_eq!(count_leaves(&four), 4);
     }
 
-    /// Cycle 652 drift guard. `confirm_dialog_keypress` is the pure
+    /// Drift guard. `confirm_dialog_keypress` is the pure
     /// state machine for the confirm dialog's keyboard handler.
-    /// Sub-cycle 4 of confirm-dialog design.
+    /// Phase 4 of TERMINATOR-CONFIRM-DIALOG-DESIGN.md.
     #[test]
     fn confirm_dialog_keypress_walks_state_machine() {
         use super::{ConfirmKey, ConfirmKeyResult, confirm_dialog_keypress};
@@ -21306,7 +21296,7 @@ mod tests {
             confirm_dialog_keypress(1, 2, ConfirmKey::Escape),
             ConfirmKeyResult::Cancel
         );
-        // Cycle 861: Enter activates the FOCUSED button (buttons are
+        // Enter activates the FOCUSED button (buttons are
         // `[Cancel, Confirm]`). Focused on Cancel (idx 0) → Cancel; focused on
         // Confirm (idx 1, the last) → Confirm. This must match the highlighted
         // button so Enter on the safe default doesn't fire the destructive action.
@@ -21373,8 +21363,8 @@ mod tests {
     }
 
     /// v2.20.0 (`vim-menu-nav`): `y` confirms regardless of focus (it
-    /// answers the QUESTION, unlike Enter which fires the focused button —
-    /// cycle 861), `n` cancels regardless of focus.
+    /// answers the QUESTION, unlike Enter which fires the focused button),
+    /// `n` cancels regardless of focus.
     #[test]
     fn confirm_dialog_y_and_n_answer_directly() {
         use super::{ConfirmKey, ConfirmKeyResult, confirm_dialog_keypress};
@@ -21466,8 +21456,8 @@ mod tests {
         );
     }
 
-    /// Cycle 651 drift guard. `content_rect_for` is the pure helper
-    /// behind `App::area`. Sub-cycle 2 of vertical-tabs design.
+    /// Drift guard. `content_rect_for` is the pure helper
+    /// behind `App::area`. Phase 2 of TERMINATOR-VERTICAL-TABS-DESIGN.md.
     /// Walks the 4 (tab_pos)×3 (status_pos) cases.
     #[test]
     fn content_rect_for_carves_out_tab_and_status_bands() {
@@ -21506,7 +21496,7 @@ mod tests {
             StatusBarMode::Bottom,
         );
         assert_eq!(r, (0.0, 0.0, 800.0, 560.0));
-        // Cycle 665: Left vertical strip — content carves out
+        // Left vertical strip — content carves out
         // `VERTICAL_TAB_STRIP_W` (180 px) from the LEFT side.
         let r = content_rect_for((800, 600), 24.0, 0.0, TabBarPos::Left, StatusBarMode::Off);
         assert_eq!(r, (180.0, 0.0, 620.0, 600.0));
@@ -21582,9 +21572,9 @@ mod tests {
         assert_eq!(r, (180.0, 0.0, 620.0, 574.0));
     }
 
-    /// Cycle 650 drift guard. `session_screenshot_path` is the
+    /// Drift guard. `session_screenshot_path` is the
     /// pure helper behind `Action::TakeScreenshot`. Mirrors the
-    /// cycle-621 `session_log_path` shape.
+    /// `session_log_path` shape.
     #[test]
     fn session_screenshot_path_under_cache_kettle_shots() {
         use super::session_screenshot_path;
@@ -21600,11 +21590,11 @@ mod tests {
             p,
             std::path::PathBuf::from("kettle-shots/kettle-1716422400-1234.png")
         );
-        // .png extension is fixed (vs the cycle-621 .log shape).
+        // .png extension is fixed (vs the `session_log_path` .log shape).
         assert_eq!(p.extension().and_then(|s| s.to_str()), Some("png"));
     }
 
-    /// Cycle 621 drift guard. `session_log_path` is the pure helper
+    /// Drift guard. `session_log_path` is the pure helper
     /// behind `Action::ToggleSessionLog`. Verify:
     ///   - lives under `<cache>/kettle/logs/`
     ///   - filename includes both the unix-secs (for sort) and pid
@@ -21628,7 +21618,7 @@ mod tests {
         );
     }
 
-    /// Cycle 621 drift guard. `cache_dir_from_env` probes the XDG /
+    /// Drift guard. `cache_dir_from_env` probes the XDG /
     /// HOME / Windows-ish envs in order. Empty values are treated as
     /// unset so a stripped CI container with `XDG_CACHE_HOME=""`
     /// falls through to the next probe instead of returning `""`.
@@ -21645,7 +21635,7 @@ mod tests {
             cache_dir_from_env(f).as_deref(),
             Some(std::path::Path::new("/x/cache"))
         );
-        // Cycle 919 (audit L1): the non-XDG fallback is per-OS, mirroring the
+        // The non-XDG fallback is per-OS, mirroring the
         // config-dir resolver. On Unix, empty XDG falls through to HOME/.cache.
         #[cfg(not(windows))]
         {
@@ -21752,7 +21742,7 @@ mod tests {
         );
     }
 
-    /// Cycle 805 drift guard. `split_new_tab_button` splits the trailing
+    /// Drift guard. `split_new_tab_button` splits the trailing
     /// button into the `▾` arrow (left) and `+` (right) hit-rects; they must
     /// abut with no gap/overlap, and a degenerate `arrow_w` can't yield a
     /// negative `+` width.
@@ -21772,7 +21762,7 @@ mod tests {
         assert!(p2.2 >= 0.0);
     }
 
-    /// Cycle 618 drift guard. `pick_next_profile` is the pure
+    /// Drift guard. `pick_next_profile` is the pure
     /// helper behind `Action::NextProfile`/`PrevProfile`. Cycles
     /// the sorted profile list with wrap-around; starts at index 0
     /// when current isn't a known profile (e.g. --config FILE or
@@ -21913,7 +21903,7 @@ mod tests {
         );
     }
 
-    /// Cycle 616 drift guard. `pick_light_dark_target` is the
+    /// Drift guard. `pick_light_dark_target` is the
     /// pure helper behind `Action::ToggleLightDark` — the policy
     /// must round-trip current ↔ {light, dark} cleanly, default
     /// to `dark` on a third-party current theme, and silently

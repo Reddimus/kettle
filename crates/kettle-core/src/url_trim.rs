@@ -80,7 +80,7 @@ mod tests {
 
     #[test]
     fn keeps_balanced_closing_brackets() {
-        // Cycle 166: the Wikipedia case. Pre-fix, the trailing `)` was
+        // The Wikipedia case. Pre-fix, the trailing `)` was
         // always stripped, turning the URL into a 404 (`Foo_(bar` is a
         // real, different path).
         assert_eq!(

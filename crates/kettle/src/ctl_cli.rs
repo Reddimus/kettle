@@ -1,4 +1,4 @@
-//! Cycle 930 (agent-first A2): `kettle ctl` — a thin control-plane client.
+//! `kettle ctl` — a thin control-plane client.
 //!
 //! Discovers a running kettle's control server (via the kettle-ctl registry, or
 //! `--pid`), issues one method call, and prints the result — or, for

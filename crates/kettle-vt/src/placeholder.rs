@@ -11,8 +11,8 @@
 //! the diacritic⇄number table, per-cell diacritic parsing, the image-id
 //! reconstruction, and the left-inheritance algorithm for omitted
 //! diacritics. Compositing resolved placeholder cells against the grid
-//! happens in the renderer (next ROADMAP cycle); this layer is fully unit
-//! tested in isolation.
+//! happens in the renderer (a follow-up item on the roadmap); this layer is
+//! fully unit tested in isolation.
 
 /// The Private-Use placeholder code point (`IMAGE_PLACEHOLDER_CHAR`,
 /// `kitty/kitty/data-types.h:132`).
@@ -138,9 +138,9 @@ pub fn resolve_run(cells: &[RawCell]) -> Vec<ResolvedCell> {
         };
         let col = match c.diacritics.col {
             Some(cc) => cc,
-            // Cycle 858 (audit): the previous `same_neighbor && row.is_none()`
-            // arm produced the same `left.col + 1` as the plain `same_neighbor`
-            // arm below, so it was a dead duplicate — merged.
+            // The previous `same_neighbor && row.is_none()` arm produced the
+            // same `left.col + 1` as the plain `same_neighbor` arm below, so
+            // it was a dead duplicate — merged.
             // Saturating add: `resolve_run` is a pure-spec `pub` fn; a
             // >65,536-cell same-neighbor run would overflow `u16` and, under
             // the release profile (`panic = "abort"` + overflow-checks), abort

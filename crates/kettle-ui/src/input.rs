@@ -138,7 +138,7 @@ pub fn xterm_modifier(mods: ModifiersState) -> u32 {
 /// Application-keypad (DECKPAM) encoding for a **numpad** key, or `None` when it
 /// doesn't apply (mode off, not a numpad key, or a Ctrl/Alt modifier is held).
 ///
-/// Cycle 828 (audit): `TermMode::APP_KEYPAD` is set/cleared by DECKPAM (`ESC =`)
+/// `TermMode::APP_KEYPAD` is set/cleared by DECKPAM (`ESC =`)
 /// / DECKPNM (`ESC >`) in the engine, but the key encoder only ever consulted
 /// `APP_CURSOR` — so under application-keypad mode the numpad still sent plain
 /// ASCII instead of the xterm SS3 keypad sequences (`ESC O p`..`ESC O y` for
@@ -266,7 +266,7 @@ pub fn encode(
                 });
             }
             NamedKey::Escape => return Some(vec![0x1b]),
-            // Cycle 818 (audit): the space bar arrives as NamedKey::Space, which
+            // The space bar arrives as NamedKey::Space, which
             // returned a literal space BEFORE any modifier was inspected — so
             // Ctrl+Space emitted 0x20 instead of NUL (0x00), silently breaking
             // emacs/readline set-mark and tmux/vim C-SPC bindings. (The
@@ -819,8 +819,8 @@ pub fn paste_payload(text: &str, bracketed: bool) -> Vec<u8> {
     // Strip in a FIXPOINT loop, not a single left-to-right pass: a crafted body
     // like `\x1b[20\x1b[201~1~` re-forms an intact `\x1b[201~` across the splice
     // seam after one `.replace`, leaving a live closer that ends bracketed paste
-    // early and auto-runs the tail. Loop until no marker survives (cycle 916,
-    // file-by-file audit). The guard runs in BOTH arms: even a non-bracketed
+    // early and auto-runs the tail. Loop until no marker survives. The guard
+    // runs in BOTH arms: even a non-bracketed
     // paste can carry a stray marker that the receiving app would misread.
     let strip_markers = |s: String| -> String {
         let mut safe = s;
@@ -1171,7 +1171,7 @@ mod tests {
 
     #[test]
     fn paste_strips_overlap_reconstructed_marker() {
-        // Cycle 916 (file-by-file audit): a single left-to-right `.replace` pass
+        // A single left-to-right `.replace` pass
         // leaves a marker that re-forms across the splice seam.
         // `\x1b[20\x1b[201~1~` -> (strip inner `\x1b[201~`) -> `\x1b[201~`. The
         // fixpoint loop must leave exactly ONE closer (the wrapper's). The old
@@ -1272,7 +1272,7 @@ mod tests {
         assert_eq!(enc("/"), Some(vec![0x1F]), "Ctrl+/ = US (tmux/nano undo)");
     }
 
-    /// Cycle 828 (audit): application-keypad mode (DECKPAM) makes unmodified
+    /// Application-keypad mode (DECKPAM) makes unmodified
     /// numpad keys emit SS3 sequences; without it (and off the numpad) they send
     /// plain ASCII via the normal encoder.
     #[test]
@@ -1335,7 +1335,7 @@ mod tests {
         assert_eq!(encode(&ch("5"), Some("5"), none, mode), Some(b"5".to_vec()));
     }
 
-    /// Cycle 818 (audit): the space bar comes through as NamedKey::Space, so the
+    /// The space bar comes through as NamedKey::Space, so the
     /// Ctrl+@/Ctrl+Space → NUL rule has to be handled there, not only in the
     /// Ctrl-punctuation table (which Space never reaches).
     #[test]
@@ -1540,7 +1540,7 @@ mod tests {
             mouse_encode(true, 64, true, false, 0, 0, none),
             b"\x1b[<64;1;1M"
         );
-        // Cycle 810: side buttons. Back = SGR 128, Forward = 129 — press 'M'
+        // Side buttons. Back = SGR 128, Forward = 129 — press 'M'
         // at grid (0,0), release 'm'. Pins the xterm 8–11 button encoding the
         // app forwards for XBUTTON1/2.
         assert_eq!(

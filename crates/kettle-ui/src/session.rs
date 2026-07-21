@@ -18,7 +18,7 @@ pub enum SNode {
         /// `None` = ungrouped (the Terminator default). `#[serde(default)]`
         /// (additive wire field) so an OLD `session.json` written before this
         /// field existed still deserializes — it just restores ungrouped, the
-        /// pre-cycle behavior. Populated by `Mux::snap`, consumed by
+        /// original default. Populated by `Mux::snap`, consumed by
         /// `Mux::build_node`.
         #[serde(default)]
         group: Option<String>,
@@ -35,7 +35,7 @@ pub enum SNode {
 impl SNode {
     /// Number of leaf panes in this tree — each leaf becomes one real PTY on
     /// restore, so `Mux::restore` uses this to bound the spawn fan-out against a
-    /// crafted-but-small `session.json` (cycle 863, audit). serde_json's default
+    /// crafted-but-small `session.json`. serde_json's default
     /// 128-level recursion limit already bounds nesting depth, so this is a
     /// simple (non-recursive-overflow) count.
     pub fn leaf_count(&self) -> usize {
@@ -51,22 +51,22 @@ pub struct STab {
     pub root: SNode,
     /// Focused pane's DFS-order index within `root`'s leaves (0 = first
     /// leaf). `#[serde(default)]` means old session files without this
-    /// field still load — they restore to the first leaf, the pre-cycle
-    /// behavior. Saved by `Mux::snapshot`, consumed by `Mux::restore`.
+    /// field still load — they restore to the first leaf, the original
+    /// default. Saved by `Mux::snapshot`, consumed by `Mux::restore`.
     #[serde(default)]
     pub focus: usize,
     /// User-set tab-title override (mirrors `Tab::title_override`). `Some(s)`
     /// = the tab bar shows `s` instead of the focused pane's auto-title;
     /// `None` = auto-title. `#[serde(default)]` (additive wire field) so an
     /// OLD `session.json` lacking it still loads — it restores with no
-    /// override, the pre-cycle behavior. Saved by `Mux::snapshot`, consumed
+    /// override, the original default. Saved by `Mux::snapshot`, consumed
     /// by `Mux::restore`.
     #[serde(default)]
     pub title_override: Option<String>,
     /// Whether this tab was zoomed (focused pane maximized; mirrors
     /// `Tab::zoomed`). `#[serde(default)]` (additive wire field, defaults to
     /// `false`) so an OLD `session.json` without it loads unzoomed, the
-    /// pre-cycle behavior. Saved by `Mux::snapshot`, consumed by
+    /// original default. Saved by `Mux::snapshot`, consumed by
     /// `Mux::restore`.
     #[serde(default)]
     pub zoomed: bool,
@@ -102,7 +102,7 @@ pub struct Session {
     /// something sensible; `windows` is the source of truth when present.
     pub tabs: Vec<STab>,
     pub active: usize,
-    /// LEGACY back-compat field. Cycle 919 (audit L7): the theme is now
+    /// LEGACY back-compat field. The theme is now
     /// CONFIG-governed — every runtime theme change is persisted to the config
     /// `theme =` line via `persist_pref`, and `save_session` writes this as
     /// `None` while restore IGNORES it. Kept only so older `session.json` files
@@ -116,7 +116,7 @@ pub struct Session {
     pub windows: Vec<SWindow>,
 }
 
-/// Cycle 291 / 789 (audit D1): sanitize a user-supplied layout name (from
+/// Sanitize a user-supplied layout name (from
 /// `kettle --layout <NAME>`) to `[A-Za-z0-9._-]`, replacing every other byte —
 /// crucially path separators `/` and `\`, plus the Windows drive `:` — with
 /// `_`. This is the only guard stopping `--layout ../../etc/passwd` from
@@ -146,7 +146,7 @@ impl Session {
             .and_then(|p| p.parent().map(|d| d.join("session.json")))
     }
 
-    /// Cycle 291 named-layout path: returns
+    /// The named-layout path: returns
     /// `<config-dir>/layouts/<sanitized>.json`. The name is sanitized
     /// to `[A-Za-z0-9._-]` so a user can't traverse out of the
     /// layouts directory via `--layout ../../etc/passwd`. Returns
@@ -164,7 +164,7 @@ impl Session {
         load_from_path(&p)
     }
 
-    /// Cycle 291: load from the named-layout path instead of the default
+    /// Load from the named-layout path instead of the default
     /// `session.json`. Used when the user launched with `kettle --layout
     /// <NAME>`. Returns `None` if the layout file doesn't exist yet —
     /// kettle just starts with a default first tab, exactly the same
@@ -174,10 +174,9 @@ impl Session {
         load_from_path(&p)
     }
 
-    /// Cycle 404 (Terminator parity, detachable-tabs Bucket-D
-    /// sub-cycle 8 file-fallback): load a one-shot tab-handoff
-    /// JSON file written by another kettle process (cycle 384's
-    /// Action::MoveTabToNewWindow). Reads the path + deletes it
+    /// Terminator parity, detachable-tabs Bucket-D file-fallback: load a
+    /// one-shot tab-handoff JSON file written by another kettle process
+    /// (via `Action::MoveTabToNewWindow`). Reads the path + deletes it
     /// after read (one-shot handoff — avoids accidental re-use
     /// across launches).
     pub fn load_tab_handoff(path: &std::path::Path) -> Option<Session> {
@@ -198,13 +197,13 @@ impl Session {
         }
     }
 
-    /// Cycle 708 (Terminator parity, `terminatorlib/layoutlauncher.py`):
+    /// Terminator parity, `terminatorlib/layoutlauncher.py`:
     /// list saved layouts by name (alphabetical). Walks
     /// `<config-dir>/layouts/*.json`, strips the extension. Returns
     /// an empty `Vec` when the layouts dir doesn't exist (a fresh
     /// install has none) — that's not an error, just "nothing to
     /// pick from yet". Closes the layout-launcher Bucket-D gap by
-    /// giving `Action::OpenLayoutPicker` (cycle 708) a source of
+    /// giving `Action::OpenLayoutPicker` a source of
     /// names to filter against.
     pub fn list_layouts() -> Vec<String> {
         let Some(default) = kettle_config::Config::default_path() else {
@@ -232,7 +231,7 @@ impl Session {
         names
     }
 
-    /// Cycle 291: save to the named-layout path. Creates the parent
+    /// Save to the named-layout path. Creates the parent
     /// directory if it doesn't exist (a first-time
     /// `kettle --layout dev` from a fresh install needs to create
     /// `<config-dir>/layouts/` itself).
@@ -337,7 +336,7 @@ pub(crate) fn save_to_path(s: &Session, p: &std::path::Path) -> std::io::Result<
 /// Pure (well, takes a path; no other state) so the rename-on-corruption
 /// contract is testable without standing up the full app.
 ///
-/// Cycle 585: bound the read at 16 MiB. A realistic kettle session is
+/// Bound the read at 16 MiB. A realistic kettle session is
 /// at most a few KB (a handful of panes × short cwd / title / cmd
 /// strings). The session file is auto-generated by kettle, but a
 /// swap-attack with filesystem access could replace it with a multi-GB
@@ -462,7 +461,7 @@ fn stash_oversize_session(path: &std::path::Path, size: u64, limit: u64) {
 mod tests {
     use super::*;
 
-    /// Cycle 863 (audit): `leaf_count` bounds the restore PTY fan-out, so it
+    /// `leaf_count` bounds the restore PTY fan-out, so it
     /// must count every leaf across an arbitrarily nested split tree.
     #[test]
     fn snode_leaf_count_walks_the_tree() {
@@ -486,7 +485,7 @@ mod tests {
         assert_eq!(tree.leaf_count(), 3);
     }
 
-    /// Cycle 789 drift guard (audit D1, security). `sanitize_layout_name` is
+    /// Drift guard (security). `sanitize_layout_name` is
     /// the sole barrier between an untrusted `--layout <NAME>` CLI argument and
     /// the filesystem; a regression that stopped replacing path separators
     /// would reopen `--layout ../../etc/passwd` as an arbitrary-file read.
@@ -590,12 +589,12 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// Cycle 585: a session.json swapped out for a multi-MB blob
+    /// A session.json swapped out for a multi-MB blob
     /// (filesystem-tampering scenario; out of strict scope but
     /// defense-in-depth) must not be read into RAM. The 16 MiB
     /// pre-read size cap returns None and renames the bomb to
     /// `.json.toobig.<unix-seconds>` for forensics, same pattern
-    /// as the cycle-108 corrupted-file recovery path above.
+    /// as the corrupted-file recovery branch of `load_from_path` above.
     #[test]
     fn load_from_path_rejects_oversize_file_without_reading_into_memory() {
         let dir = tmp_dir("oversize");
@@ -630,7 +629,7 @@ mod tests {
 
     #[test]
     fn load_from_path_backs_up_corrupted_file_and_returns_none() {
-        // Cycle-108 contract: a corrupted file (kettle killed mid-write,
+        // A corrupted file (kettle killed mid-write,
         // disk full, hand-edit) used to silently drop the user's tabs/
         // splits state on the next launch. Now: return None *and* rename
         // the file out of the way so the user can inspect / restore.
@@ -657,7 +656,7 @@ mod tests {
 
     #[test]
     fn save_to_path_is_atomic_and_round_trips() {
-        // Cycle-109 contract: save writes through a `.tmp` sibling then
+        // Save writes through a `.tmp` sibling then
         // renames into place. Asserts the rename happened (dest exists,
         // tmp doesn't), and that the saved content round-trips through
         // load_from_path back to an equivalent Session.
@@ -835,7 +834,7 @@ mod tests {
         assert_eq!(s.tabs.len(), 1);
         // `theme` is also #[serde(default)] → None on pre-theme files.
         assert_eq!(s.theme, None);
-        // `focus` likewise — pre-cycle sessions restore to first leaf.
+        // `focus` likewise — sessions predating it restore to first leaf.
         assert_eq!(s.tabs[0].focus, 0);
     }
 
@@ -960,10 +959,10 @@ mod tests {
 
     #[test]
     fn session_round_trips_focused_pane_index() {
-        // Cycle 82: the session now records which leaf was focused so
+        // The session records which leaf was focused so
         // restore brings the user back to the same pane within each tab.
         // Confirm the round-trip and that the default lands on first leaf
-        // (preserving the pre-cycle behavior for older sessions).
+        // (preserving the original default for older sessions).
         let s = Session {
             tabs: vec![STab {
                 root: SNode::Split {
@@ -1061,7 +1060,7 @@ mod tests {
     fn legacy_session_without_group_title_zoom_fields_loads_to_defaults() {
         // The three new fields are all `#[serde(default)]`, so a session.json
         // written by an OLDER kettle (no `group`/`title_override`/`zoomed`
-        // keys) must still deserialize cleanly — to the pre-cycle defaults:
+        // keys) must still deserialize cleanly — to the original defaults:
         // ungrouped pane, no title override, not zoomed. This is the
         // backward-compat guarantee that makes the wire-format extension safe.
         let legacy = r#"{"tabs":[{"root":{"Leaf":{"cwd":"/tmp"}},"focus":0}],"active":0}"#;

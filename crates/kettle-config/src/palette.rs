@@ -82,7 +82,7 @@ pub fn commands() -> Vec<(&'static str, Action)> {
         ("Jump to previous prompt", JumpPrevPrompt),
         ("Jump to next prompt", JumpNextPrompt),
         ("Toggle vi-mode (scrollback)", ToggleViMode),
-        // Cycle 342 Terminator-parity entries.
+        // Terminator-parity entries.
         ("Rotate panes clockwise", RotateCw),
         ("Rotate panes counter-clockwise", RotateCcw),
         ("Toggle scrollbar visibility", ToggleScrollbar),
@@ -102,7 +102,7 @@ pub fn commands() -> Vec<(&'static str, Action)> {
         ("Previous theme", PrevTheme),
         ("Toggle light/dark theme", ToggleLightDark),
         ("Toggle session log (pane → file)", ToggleSessionLog),
-        // Cycle 941 Terminator parity ("Read only"): drop user input to the
+        // Terminator parity ("Read only"): drop user input to the
         // focused pane while letting its output keep flowing.
         ("Toggle read-only (focused pane)", TogglePaneReadOnly),
         ("Take screenshot (focused pane)", TakeScreenshot),
@@ -136,12 +136,13 @@ mod tests {
 
     #[test]
     fn palette_includes_every_user_facing_action() {
-        // Cycle-117 drift guard. When cycle 110 added ScrollLineUp/Down,
-        // the palette quietly missed them — users couldn't reach the
-        // new actions via Ctrl+Shift+K. The class of "new Action variant
-        // landed but only the keymap and `--list-actions` know about it"
-        // is the same shape as cycle 104's drift between `from_name` and
-        // `action_names`. Pin it: every action *intended* for palette
+        // Drift guard. When ScrollLineUp/Down were added, the palette
+        // quietly missed them — users couldn't reach the new actions via
+        // Ctrl+Shift+K. The class of "new Action variant landed but only
+        // the keymap and `--list-actions` know about it" is the same
+        // shape as the drift between `from_name` and `action_names` that
+        // `action_names_round_trip_through_from_name` (keybinds.rs)
+        // guards against. Pin it: every action *intended* for palette
         // dispatch must appear, identifiable by ⩾1 entry whose Action
         // matches the variant. Variants intentionally excluded from
         // the palette (geometric / parametric / palette-itself) are
@@ -169,12 +170,12 @@ mod tests {
             GotoTab(0),     // placeholder for the parametric family
             NewTabShell(0), // dropdown-parity: parametric, like GotoTab
             CommandPalette,
-            // Cycle 245: OpenContextMenu is the right-click handler
+            // OpenContextMenu is the right-click handler
             // itself — surfacing it inside the palette would be a
             // weird self-reference (palette → context menu → palette
             // entry). Triggered by the mouse only, not user-typed.
             OpenContextMenu,
-            // Cycle 342 Terminator-parity actions excluded from the palette
+            // Terminator-parity actions excluded from the palette
             // because they're either parametric (no enumeration target),
             // tied to inline overlays (the title-edit ones open their own
             // input prompts), or send raw text to the focused PTY (insert-
@@ -188,8 +189,8 @@ mod tests {
             InsertPanePadded,
             InsertPaneName,
             OpenCwdInFileManager,
-            // Cycle 809 (audit): the update-banner actions only do anything
-            // while the cycle-794 banner is on screen (a no-op + debug log
+            // The update-banner actions only do anything
+            // while the update banner is on screen (a no-op + debug log
             // otherwise), so they'd be dead rows in the palette most of the
             // time. They stay bindable for keyboard access to the banner.
             OpenUpdate,
@@ -282,7 +283,7 @@ mod tests {
             UndoCloseTab,
             DuplicateTab,
             DuplicatePane,
-            // Cycle 342 Terminator-parity actions.
+            // Terminator-parity actions.
             RotateCw,
             RotateCcw,
             ToggleScrollbar,
@@ -309,7 +310,7 @@ mod tests {
             OpenUpdate,
             DismissUpdate,
             GotoTab(0),
-            // Dropdown-parity cycle: About is palette-listed; NewTabShell is
+            // Dropdown parity: About is palette-listed; NewTabShell is
             // parametric like GotoTab (the dropdown + Ctrl+Shift+N reach it).
             About,
             NewTabShell(0),

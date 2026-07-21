@@ -6,7 +6,7 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 authors.workspace = true
-# See `kettle-config/Cargo.toml` for the cycle-218 per-crate-description rationale.
+# See `kettle-config/Cargo.toml` for the per-crate-description rationale.
 description = "kettle: wgpu + glyphon GPU renderer — quads, images, text, overlay pass, headless offscreen self-test"
 
 [lints]
@@ -27,7 +27,7 @@ unicode-width.workspace = true
 wgpu = "30.0.0"
 
 [dev-dependencies]
-# Cycle 251: temp PNG output for the menu-visual integration test
+# Temp PNG output for the menu-visual integration test
 # (tests/menu_visual.rs). Standard crate for this; tiny dep, only
 # pulled in for test compilation.
 tempfile = "3"

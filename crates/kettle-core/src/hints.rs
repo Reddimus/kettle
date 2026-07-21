@@ -2,7 +2,7 @@
 //! `QuickSelect` style): scan the visible rows for interesting tokens —
 //! URLs, filesystem paths, git hashes, IPv4 addresses — and assign each a
 //! short, easy-to-type label. Pure and fully unit-tested; the overlay +
-//! keypress handling (a later cycle) consume [`detect`] and [`labels`].
+//! keypress handling (a follow-up) consume [`detect`] and [`labels`].
 
 use regex::Regex;
 use std::sync::OnceLock;
@@ -42,7 +42,7 @@ fn res() -> &'static [(Kind, Regex)] {
             ),
             (
                 Kind::Ip,
-                // Cycle 916 (file-by-file audit): clamp each octet to 0..=255 (was
+                // Clamp each octet to 0..=255 (was
                 // `\d{1,3}`, which surfaced 999.999.999.999 and other out-of-range
                 // dotted numbers as IP quick-select targets). The `regex` crate
                 // has no lookaround, so a 5-group `1.2.3.4.5` can still match its
@@ -70,8 +70,8 @@ use crate::url_trim::trim_trailing;
 pub fn detect(rows: &[&str]) -> Vec<HintSpan> {
     let mut out: Vec<HintSpan> = Vec::new();
     for (row, line) in rows.iter().enumerate() {
-        // Byte offset -> char column for this line. Cycle 916 (file-by-file
-        // audit): push each char's column exactly `len_utf8()` times (matching
+        // Byte offset -> char column for this line. Push each char's
+        // column exactly `len_utf8()` times (matching
         // links.rs/search.rs) so a multi-byte char's continuation bytes map to
         // ITS column, not the next one — the old `while v.len() <= b` attributed a
         // trailing non-ASCII char's bytes to the following column, so
@@ -219,7 +219,7 @@ mod tests {
         assert_eq!(labels(n, abc), labels(n, abc));
         // Degenerate alphabet → no labels (caller falls back).
         assert!(labels(5, "").is_empty());
-        // Cycle 936 (review): a single-character alphabet must NOT hang (the
+        // A single-character alphabet must NOT hang (the
         // fixed-width search can't represent n>1) — fall back to distinct
         // increasing-length labels.
         assert_eq!(labels(1, "x"), vec!["x"]);

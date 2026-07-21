@@ -1,4 +1,4 @@
-//! Cycle 926 (agent-first A2): the server discovery registry.
+//! The server discovery registry.
 //!
 //! Each running kettle that has its control server enabled writes a
 //! `<pid>.json` entry into a registry directory; a client lists the directory,

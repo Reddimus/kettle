@@ -1,4 +1,4 @@
-//! Cycle 926 (agent-first A2): the local-IPC transport.
+//! The local-IPC transport.
 //!
 //! A blocking, thread-per-connection transport with the same surface on every
 //! OS: a [`CtlListener`] that `accept()`s [`CtlStream`]s (server), and

@@ -1,5 +1,5 @@
-//! Cycle 925 (agent-first A2): kettle's agent control plane — protocol,
-//! transport, discovery, and client.
+//! kettle's agent control plane — protocol, transport, discovery, and
+//! client.
 //!
 //! This crate is UI-free and engine-free: it defines the versioned NDJSON wire
 //! protocol ([`protocol`]), the local-IPC transport ([`transport`], a Unix
@@ -14,8 +14,8 @@
 pub mod activation;
 pub mod client;
 pub mod discovery;
-// Multi-window cycle: cross-process window-presence registry (Peacock accent
-// dedupe). No endpoint, always on, best-effort — see the module docs.
+// Cross-process window-presence registry (Peacock accent dedupe). No
+// endpoint, always on, best-effort — see the module docs.
 pub mod presence;
 pub mod protocol;
 pub mod transport;

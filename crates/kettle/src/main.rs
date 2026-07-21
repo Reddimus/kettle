@@ -1,6 +1,6 @@
 //! kettle - a fast, cross-platform GPU terminal emulator.
 
-// Cycle 868: kettle runs as a Windows GUI-subsystem app so Windows never
+// kettle runs as a Windows GUI-subsystem app so Windows never
 // auto-allocates a console — there is ZERO phantom-console flash on
 // Explorer / Start-menu launch (the long-standing complaint). When launched
 // from a terminal, `attach_parent_console_if_needed()` (called first in
@@ -8,13 +8,14 @@
 // `--check-update`, `--print-completions`, `--shell-integration`, …) still
 // print.
 //
-// History — why the conditional attach matters: cycle 734 first set this
+// History — why the conditional attach matters: an earlier attempt set this
 // attribute but paired it with an *unconditional* AttachConsole + CONOUT$
 // reopen, which OVERWROTE the inherited stdout PIPE on `kettle --flag | grep`
 // (and the `>> $PROFILE` redirect), so piped output vanished and Windows CI
-// went red. Cycle 740 reverted to the default console subsystem +
-// `ShowWindow(SW_HIDE)` — correct stdout, but a sub-50ms console flash. This
-// cycle restores the GUI subsystem AND fixes the 734 bug: reopen CONOUT$
+// went red. That was reverted to the default console subsystem +
+// `ShowWindow(SW_HIDE)` — correct stdout, but a sub-50ms console flash. The
+// current approach restores the GUI subsystem AND fixes the earlier stdout
+// bug by reopening CONOUT$
 // ONLY for std handles that are NOT already inherited (detected via
 // `GetFileType` → pipe/file/char), so piped/redirected output is never
 // touched. The `not(test)` guard keeps `cargo test` on the console subsystem
@@ -103,13 +104,13 @@ fn write_cli_stderr(args: std::fmt::Arguments<'_>, newline: bool) {
     finish_cli_write(result, &STDERR_CLOSED, "stderr");
 }
 
-// Cycle 922 (agent-first A1): headless `kettle exec` engine. Bin-side, no
+// Agent-first: headless `kettle exec` engine. Bin-side, no
 // kettle-ui/winit dependency (a source-scan drift guard pins that).
 mod exec;
-// Cycle 930 (agent-first A2): `kettle ctl` — thin control-plane client over
+// Agent-first: `kettle ctl` — thin control-plane client over
 // kettle-ctl (discover a running server, call a method, or stream events).
 mod ctl_cli;
-// Cycle 931 (agent-first A3): `kettle mcp` — stdio MCP server exposing kettle as
+// Agent-first: `kettle mcp` — stdio MCP server exposing kettle as
 // native agent tools (run a command, drive a running kettle).
 mod mcp;
 mod mcp_tools;
@@ -122,7 +123,7 @@ mod update_cli;
 ///
 /// - `kettle 0.1.0 (a1b2c3d4e5f6)` — git checkout, sha12 in parens.
 /// - `kettle 0.1.0` — non-git build; concat with an empty string
-///   leaves the version pristine. Cycle 192.
+///   leaves the version pristine.
 const KETTLE_VERSION: &str = concat!(env!("CARGO_PKG_VERSION"), env!("KETTLE_GIT_SHA"));
 
 #[derive(Parser, Debug)]
@@ -250,7 +251,7 @@ struct Cli {
     print_completions: Option<String>,
 
     /// Render a representative frame offscreen to a PNG and exit (no window).
-    // Cycle 913 (audit): mutually exclusive with --screenshot-menu so passing
+    // Mutually exclusive with --screenshot-menu so passing
     // both fails loudly (clap rejects symmetrically + it shows in --help) rather
     // than silently dropping one.
     #[arg(long, value_name = "PATH", conflicts_with = "screenshot_menu")]
@@ -478,15 +479,15 @@ struct Cli {
     #[arg(long, value_name = "PATH")]
     remote_file: Option<std::path::PathBuf>,
 
-    /// Execute a Lua script at startup (WezTerm parity, foundation
-    /// sub-cycle). The script runs once with a `kettle` global
+    /// Execute a Lua script at startup (WezTerm parity; this is the
+    /// foundational layer). The script runs once with a `kettle` global
     /// namespace exposing read-only introspection:
     ///
     ///   kettle.version()      → string, e.g. "1.7.x"
     ///   kettle.config_path()  → string|nil, the resolved config path
     ///   kettle.theme()        → string, the resolved theme name
     ///
-    /// Subsequent sub-cycles add side-effect APIs (send_text,
+    /// Future work adds side-effect APIs (send_text,
     /// notify, event hooks). Errors in the script print to stderr
     /// (log::warn) but don't fail the kettle launch — same shape
     /// as malformed-config tolerance.
@@ -504,7 +505,7 @@ struct Cli {
     #[arg(short = 'e', long = "exec", num_args = 1.., allow_hyphen_values = true, value_name = "CMD")]
     exec: Vec<String>,
 
-    /// Agent-first subcommands (cycle 922+). `kettle exec` runs a command
+    /// Agent-first subcommands. `kettle exec` runs a command
     /// headlessly under a real PTY and streams its output to stdout (no GUI);
     /// `kettle ctl` / `kettle mcp` drive a running kettle programmatically.
     /// All of kettle's existing flags are the GUI launcher; the subcommands
@@ -513,7 +514,7 @@ struct Cli {
     cmd: Option<Cmd>,
 }
 
-/// `--agent-server MODE` values (cycle 928).
+/// `--agent-server MODE` values.
 #[derive(clap::ValueEnum, Clone, Copy, Debug)]
 enum AgentServerArg {
     Off,
@@ -658,7 +659,7 @@ fn is_bare_gui_argv(args: impl IntoIterator) -> bool {
     args.next().is_none()
 }
 
-/// Cycle 741: compute where a crash report is written, in addition to
+/// Compute where a crash report is written, in addition to
 /// stderr. Pure + env-injected so it is unit-testable, mirroring
 /// `home_dir_fallback` in kettle-core. Uses the platform STATE dir (crash
 /// logs are diagnostic state that should survive a cache clear):
@@ -766,11 +767,11 @@ fn stable_path_hash(path: &std::path::Path) -> u64 {
     })
 }
 
-/// Cycle 741: install a `panic = "abort"`-safe panic hook as the very first
+/// Install a `panic = "abort"`-safe panic hook as the very first
 /// thing `main` does. Before this, a panic on a Start-menu launch was
-/// invisible — the cycle-740 console-hide path swallows stderr, and
-/// `panic = "abort"` (Cargo.toml) skips unwinding — so two prior cycles had
-/// to *guess* at a crash's cause. The hook prints a full report (message,
+/// invisible — an earlier console-hide approach (`ShowWindow(SW_HIDE)`)
+/// swallows stderr, and `panic = "abort"` (Cargo.toml) skips unwinding — so
+/// earlier debugging attempts had to *guess* at a crash's cause. The hook prints a full report (message,
 /// thread, location, backtrace) to stderr AND appends it to a crash-log file
 /// under the state dir, so a crash is always recoverable from a user even
 /// with no console. The hook itself never panics (all `let _ =` / `unwrap_or`)
@@ -801,7 +802,7 @@ fn install_panic_hook() {
              location: {loc}\nmessage: {msg}\nbacktrace:\n{bt}\n"
         );
 
-        // Cycle 863 (audit): a fallible write, not `eprintln!`. With SIGPIPE at
+        // A fallible write, not `eprintln!`. With SIGPIPE at
         // SIG_IGN (Rust default), `eprintln!` to a broken stderr pipe panics —
         // and a panic inside the panic hook aborts immediately under
         // `panic = "abort"`, losing the crash-log write below. `writeln!` lets
@@ -826,10 +827,11 @@ fn install_panic_hook() {
     }));
 }
 
-/// Windows GUI-subsystem console bridge (cycle 868). On a terminal launch,
+/// Windows GUI-subsystem console bridge. On a terminal launch,
 /// attach the parent console and wire up ONLY the std handles that aren't
 /// already inherited — so a piped/redirected stdout (`kettle --flag | grep`,
-/// `… > $PROFILE`), the trap that broke cycle 734, is left untouched. On an
+/// `… > $PROFILE`), the trap that broke the earlier unconditional-reopen
+/// approach, is left untouched. On an
 /// Explorer/Start-menu launch there is no parent console, so this is a no-op
 /// and kettle stays a pure GUI app: no console window, no flash.
 #[cfg(windows)]
@@ -859,7 +861,7 @@ fn attach_parent_console_if_needed() {
 
     // True when the parent already handed us this handle via STARTUPINFO
     // (a pipe for `| grep`, a file for `> out`, or a console char device).
-    // Re-pointing such a handle is exactly the cycle-734 stdout regression.
+    // Re-pointing such a handle is exactly the stdout-pipe regression described above.
     unsafe fn is_inherited(h: HANDLE) -> bool {
         if h.is_null() || h == INVALID_HANDLE_VALUE {
             return false;
@@ -869,7 +871,7 @@ fn attach_parent_console_if_needed() {
         // genuine unknown device AND on error, and does NOT reset last-error on
         // success — so clear last-error FIRST, then a post-call GetLast() == 0
         // means a real (non-error) UNKNOWN. Without the SetLastError(0) the
-        // check could read a stale code from an earlier Win32 call (cycle 878).
+        // check could read a stale code from an earlier Win32 call.
         unsafe { SetLastError(0) };
         match unsafe { GetFileType(h) } {
             FILE_TYPE_DISK | FILE_TYPE_PIPE | FILE_TYPE_CHAR => true,
@@ -888,7 +890,7 @@ fn attach_parent_console_if_needed() {
         let err_ok = is_inherited(err);
         // Piped / redirected: leave the inherited handles alone so `| grep`
         // and `> file` keep working. THIS early-return is the guard that
-        // prevents re-breaking the cycle-740 CI smoke.
+        // prevents re-breaking the Windows CI stdout smoke test.
         if out_ok && err_ok {
             return;
         }
@@ -935,13 +937,13 @@ fn attach_parent_console_if_needed() {
 fn attach_parent_console_if_needed() {}
 
 fn main() -> anyhow::Result<()> {
-    // Cycle 868: under the GUI subsystem (see the crate-root attribute), a
+    // Under the GUI subsystem (see the crate-root attribute), a
     // terminal launch must attach the parent console so CLI subcommands print;
     // an Explorer/Start-menu launch has no parent console and stays windowed
     // (no console at all). MUST run before any stdout/stderr use (logging /
     // println!) so the std handles are wired first.
     attach_parent_console_if_needed();
-    // Cycle 741: capture panics (message + backtrace) to stderr AND a crash
+    // Capture panics (message + backtrace) to stderr AND a crash
     // log under the state dir — early so even an early panic lands.
     install_panic_hook();
     reset_sigpipe();
@@ -980,7 +982,7 @@ fn main() -> anyhow::Result<()> {
             log::warn!("could not show update recovery notification: {error}");
         }
     }
-    // Cycle 204: log the build identity at info level on startup. A user
+    // Log the build identity at info level on startup. A user
     // grep'ing their stderr for warnings to file a bug report can paste
     // the surrounding lines — the version line lands once near the top,
     // disambiguating which kettle build emitted the warning. `info` level
@@ -991,7 +993,7 @@ fn main() -> anyhow::Result<()> {
     let bare_gui_launch = is_bare_gui_argv(std::env::args_os());
     let cli = Cli::parse();
 
-    // Cycle 922 (agent-first): subcommands are self-contained non-GUI entry
+    // Agent-first: subcommands are self-contained non-GUI entry
     // points. Dispatch BEFORE any GUI flag handling / config-path checks and
     // exit with the subcommand's own code — `kettle exec`'s exit code is the
     // child's, so it must drive `std::process::exit`, not `return Ok(())`.
@@ -1073,8 +1075,8 @@ fn main() -> anyhow::Result<()> {
     // otherwise — the user got a screenshot / table / window with
     // their carefully-crafted theme nowhere in sight and no clue why.
     //
-    // Cycle 106 caught the "no such file" case. Cycle 164 extends the
-    // check to *not a regular file* (typically a directory — a user
+    // An earlier fix caught the "no such file" case; this check extends it to
+    // *not a regular file* (typically a directory — a user
     // typing `--config ~/.config/kettle` instead of
     // `--config ~/.config/kettle/config` would have `read_to_string`
     // return an `IsADirectory` error, the diagnostics path would
@@ -1085,7 +1087,7 @@ fn main() -> anyhow::Result<()> {
     // Omitting `--config` (relying on the default path) still
     // silently falls back to defaults; that's the intended
     // "kettle works out of the box" behavior.
-    // Cycle 801: skip the must-already-exist check when `--write-default-config`
+    // Skip the must-already-exist check when `--write-default-config`
     // is set — there `--config PATH` names the file to *create*, so a missing
     // path is the expected, valid case rather than a typo to reject.
     if !cli.write_default_config
@@ -1094,7 +1096,7 @@ fn main() -> anyhow::Result<()> {
     {
         return Err(anyhow::anyhow!("--config {}: {reason}", p.display()));
     }
-    // Same shape for `--working-directory DIR` (cycle 107). The engine
+    // Same shape for `--working-directory DIR`. The engine
     // silently falls back to `$HOME` when the directory doesn't exist
     // (see `kettle_core::term::Terminal::new`: `Some(d) if is_dir =>
     // cmd.cwd(d)`, else HOME), so a typo'd `-d ~/projets` spawned the
@@ -1126,7 +1128,7 @@ fn main() -> anyhow::Result<()> {
         return Ok(());
     }
     if cli.print_default_config {
-        // Cycle 227: `kettle --print-default-config > ~/.config/kettle/config`
+        // `kettle --print-default-config > ~/.config/kettle/config`
         // is the one-command bootstrap. The example file lives at
         // `docs/kettle.example.config` (also linked from README and
         // CONFIG.md); embedding it at build time means the binary
@@ -1138,7 +1140,7 @@ fn main() -> anyhow::Result<()> {
         return Ok(());
     }
     if cli.write_default_config {
-        // Cycle 801: the robust bootstrap. `--print-default-config > FILE`
+        // The robust bootstrap. `--print-default-config > FILE`
         // (the documented one-liner) fails confusingly on a fresh install
         // because the shell can't redirect into a directory that doesn't
         // exist yet (`~/.config/kettle/` / `%APPDATA%\kettle\`), and on
@@ -1170,7 +1172,7 @@ fn main() -> anyhow::Result<()> {
         return Ok(());
     }
     if let Some(shell) = cli.print_completions.as_deref() {
-        // Cycle 237: clap_complete generates a shell-completion
+        // clap_complete generates a shell-completion
         // script from the Cli derive — same source of truth as
         // `--help` so a new flag is auto-completed without a
         // manual table update.
@@ -1194,16 +1196,16 @@ fn main() -> anyhow::Result<()> {
         return Ok(());
     }
     if let Some(shell) = cli.shell_integration.as_deref() {
-        // Cycle 229: same shape as `--print-default-config`, but for
+        // Same shape as `--print-default-config`, but for
         // the OSC 133 shell-integration snippet. Embedded at build
         // time so `cargo install kettle` users (no source tree
         // accessible) get the right snippet, and so the binary's
         // output can never drift from the in-tree source of truth
         // under `shell-integration/`.
         //
-        // Cycle 730: added PowerShell (alias `powershell` / `ps1` /
-        // `pwsh`) so Windows users + cross-platform PowerShell Core
-        // users get jump-to-prompt parity with bash/zsh/fish. Same
+        // PowerShell support (alias `powershell` / `ps1` /
+        // `pwsh`) was added later so Windows users + cross-platform PowerShell
+        // Core users get jump-to-prompt parity with bash/zsh/fish. Same
         // include_str!-at-build-time embedding pattern.
         let snippet = match shell {
             "bash" => include_str!("../../../shell-integration/kettle.bash"),
@@ -1228,8 +1230,8 @@ fn main() -> anyhow::Result<()> {
         // configuring a bunch of hosts wanted to verify the parse
         // *from the CLI* without launching kettle. Same `--config FILE`
         // override convention as the rest of the introspection
-        // commands; falls back to the default config path. Cycle
-        // 313: also honors `--profile NAME`.
+        // commands; falls back to the default config path. Also honors
+        // `--profile NAME`.
         let cfg = match resolve_config_path(&cli) {
             Some(p) if p.exists() => kettle_config::Config::load_from(&p),
             _ => kettle_config::Config::default(),
@@ -1282,7 +1284,7 @@ fn main() -> anyhow::Result<()> {
         // had to restart kettle and inspect by hand to confirm a
         // `keybind = …` line took effect; now they can introspect from
         // the CLI in one shot.
-        // Cycle 313: honor `--profile NAME` here too.
+        // Honor `--profile NAME` here too.
         let lines = match resolve_config_path(&cli) {
             Some(p) if p.exists() => {
                 let cfg = kettle_config::Config::load_from(&p);
@@ -1296,7 +1298,7 @@ fn main() -> anyhow::Result<()> {
         return Ok(());
     }
     if cli.config_path {
-        // Cycle 313: honor `--profile NAME` here too.
+        // Honor `--profile NAME` here too.
         match resolve_config_path(&cli) {
             Some(p) => println!("{}", p.display()),
             None => println!("(no config path resolvable)"),
@@ -1316,18 +1318,18 @@ fn main() -> anyhow::Result<()> {
         return Ok(());
     }
     if cli.check_update {
-        // Cycle 794: one-shot deliberate check (no throttle, no event loop).
+        // One-shot deliberate check (no throttle, no event loop).
         println!("{}", kettle_ui::check_for_update_cli());
         return Ok(());
     }
     if cli.check_config {
-        // Cycle 313: route through `resolve_config_path` so this
+        // Route through `resolve_config_path` so this
         // path honors `--profile NAME` uniformly with every other
-        // introspection flag. Cycle 312 did the same inline; cycle
-        // 313 extracts the helper because the same gap existed at
+        // introspection flag. An earlier fix did the same inline in just this
+        // spot; this extracts the helper because the same gap existed at
         // every other site.
         let path = resolve_config_path(&cli);
-        // Cycle 196: surface read errors explicitly. Pre-fix,
+        // Surface read errors explicitly. Pre-fix,
         // `load_from_with_diagnostics` silently returned defaults on
         // any read error (permission denied, ENOENT-after-stat-race,
         // I/O error) — the warn went to stderr but `--check-config`'s
@@ -1335,10 +1337,10 @@ fn main() -> anyhow::Result<()> {
         // think their config loaded. Now: probe `read_to_string`
         // directly and turn a read failure into a malformed entry
         // so it lands in the issues list with a non-zero exit code.
-        // Cycle 197 (cycle 196 follow-up): drive parse_collect /
+        // A follow-up to that read-error fix: drive parse_collect /
         // detect_malformed_values directly from the text we already
         // read, rather than calling `load_from_with_diagnostics`
-        // which reads the file a SECOND time internally. Cycle 196's
+        // which reads the file a SECOND time internally. The
         // first take did the read twice (once for the error probe,
         // once inside load_from_with_diagnostics). Harmless but
         // wasteful; now the read happens once.
@@ -1357,7 +1359,7 @@ fn main() -> anyhow::Result<()> {
             },
             _ => (kettle_config::Config::default(), Vec::new(), Vec::new()),
         };
-        // Cycle 194: lead with the kettle build version + git SHA, so a
+        // Lead with the kettle build version + git SHA, so a
         // user pasting `--check-config` output into a bug report doesn't
         // also need to run `--version` separately. Matches the
         // diagnostic-first-line convention `cargo --version`-style tools
@@ -1367,12 +1369,12 @@ fn main() -> anyhow::Result<()> {
             Some(p) if p.exists() => println!("config:  {}", p.display()),
             Some(p) => {
                 println!("config:  {} (not found — using defaults)", p.display());
-                // Cycle 228: when no config exists at the resolved
+                // When no config exists at the resolved
                 // default path, point the user at the bootstrap
                 // one-liner. Without this, a newcomer who ran
                 // `--check-config` and saw "using defaults" had to
                 // know on their own that `--print-default-config`
-                // (cycle 227) is the way to create one. The hint
+                // is the way to create one. The hint
                 // names the actual resolved path so copy-paste works.
                 println!("hint:    kettle --print-default-config > {}", p.display());
             }
@@ -1382,7 +1384,7 @@ fn main() -> anyhow::Result<()> {
         println!("font:    {} {}pt", cfg.font_family, cfg.font_size);
         println!("scrollback: {}", cfg.scrollback);
         println!("keybinds: {} bound", cfg.keybinds.len());
-        // Echo back the resolved values of the per-cycle config gates so
+        // Echo back the resolved values of the per-feature config gates so
         // users can verify with `kettle --check-config` that their tweaks
         // are taking effect (rather than greping the source). Grouped by
         // theme of related settings; only one line per group for brevity.
@@ -1390,10 +1392,10 @@ fn main() -> anyhow::Result<()> {
             "cursor:  {:?} (blink={}, interval={}ms)",
             cfg.cursor_style, cfg.cursor_blink, cfg.cursor_blink_interval
         );
-        // Cycle 535: when force_no_bell silences every bell flavor
+        // When force_no_bell silences every bell flavor
         // regardless of mode, annotate the existing line so the user
         // doesn't read "bell: Visual" while wondering why no bell
-        // actually fires. The cycle-461 `extra_check_config_lines`
+        // actually fires. The `extra_check_config_lines` function
         // also echoes "bell:    force-no-bell=true (silences ...)"
         // as its own line; this annotation pairs the two.
         let bell_suffix = if cfg.force_no_bell {
@@ -1471,7 +1473,7 @@ fn main() -> anyhow::Result<()> {
                 styles_set.join(", ")
             );
         }
-        // Cycles 461-470: echo Terminator-parity / cycle-295 opt-in
+        // Echo the Terminator-parity / status-bar opt-in
         // keys when the user has actually set them. Extracted as a
         // pure helper (`extra_check_config_lines`) so the contract
         // is unit-testable — without this, a user who set
@@ -1481,8 +1483,8 @@ fn main() -> anyhow::Result<()> {
         for line in extra_check_config_lines(&cfg) {
             println!("{line}");
         }
-        // Cycle 201: count and display I/O errors (cycle 196's read
-        // failures) as their own category rather than reusing the
+        // Count and display I/O errors (the read failures surfaced
+        // above) as their own category rather than reusing the
         // "malformed value:" prefix — a permission-denied file isn't
         // a value-parsing failure, and labeling it as one was
         // confusing the diagnostic. Read errors get an `i/o error:`
@@ -1506,7 +1508,7 @@ fn main() -> anyhow::Result<()> {
         std::process::exit(1);
     }
 
-    // Both `--screenshot` and `--screenshot-menu` (cycle 251) share
+    // Both `--screenshot` and `--screenshot-menu` share
     // the same pre-validation + config load + capture path; the only
     // difference is the `DebugScene` passed to `capture_png_with`.
     // The flags are mutually exclusive — pick the first one set.
@@ -1533,7 +1535,6 @@ fn main() -> anyhow::Result<()> {
         //   image format`
         // *after* doing all the GPU work — confusing and wasted. Pre-
         // validate so the message is clear and the failure is cheap.
-        // Cycle 128.
         match out.extension().and_then(|e| e.to_str()) {
             Some(e) if e.eq_ignore_ascii_case("png") => {}
             Some(e) => {
@@ -1558,12 +1559,12 @@ fn main() -> anyhow::Result<()> {
         // both unknown keys *and* malformed values, which made it
         // confusing when a screenshot didn't reflect what the user
         // thought their config said.
-        // Cycle 313: honor `--profile NAME` here too.
+        // Honor `--profile NAME` here too.
         let mut cfg = match resolve_config_path(&cli) {
             Some(p) if p.exists() => kettle_config::Config::load_from(&p),
             _ => kettle_config::Config::default(),
         };
-        // Cycle 293: --accent CLI flag wins over the config
+        // --accent CLI flag wins over the config
         // `accent-color` key for screenshots too, so a user
         // generating per-workspace docs gets the accent applied
         // without editing a config file.
@@ -1604,7 +1605,7 @@ fn main() -> anyhow::Result<()> {
         return Ok(());
     }
 
-    // Cycle 303 Quake dropdown: `--toggle` is sugar for `--remote-send`
+    // Quake dropdown: `--toggle` is sugar for `--remote-send`
     // with a fixed `toggle-window` command. Same path-resolution
     // (--remote-file or default) so a user can bind their global
     // hotkey to `kettle --toggle` without any extra config.
@@ -1626,7 +1627,7 @@ fn main() -> anyhow::Result<()> {
         return Ok(());
     }
 
-    // Cycle 302 remote-control SENDER side. When `--remote-send TEXT`
+    // Remote-control SENDER side. When `--remote-send TEXT`
     // is set, append TEXT (with trailing newline if missing) to the
     // remote-command file and exit without launching a window. The
     // running kettle that's watching the file picks up the line and
@@ -1674,7 +1675,7 @@ fn main() -> anyhow::Result<()> {
     // force borderless off over a `borderless = true` config.
     let borderless_override = cli.borderless.then_some(true);
     let remote_file = cli.remote_file.clone().or_else(default_remote_file);
-    // Cycle 863 (audit): validate the internal handoff fd before it reaches
+    // Validate the internal handoff fd before it reaches
     // `UnixStream::from_raw_fd`. The source process always passes an inherited
     // descriptor >= 3; a negative value violates `from_raw_fd`'s safety
     // contract, and 0/1/2 would adopt stdio as a socket (and later `close` it).
@@ -1683,7 +1684,7 @@ fn main() -> anyhow::Result<()> {
     {
         anyhow::bail!("--tab-handoff-fd: expected an inherited descriptor >= 3, got {fd}");
     }
-    // Cycle 913 (audit): a whitespace-only program name (`kettle -e ""`) slips
+    // A whitespace-only program name (`kettle -e ""`) slips
     // past the is_empty check (the Vec has one element) but would reach
     // CommandBuilder::new("") — fail loudly at the CLI surface, like --config /
     // --working-directory already do for bad paths.
@@ -1739,7 +1740,7 @@ fn main() -> anyhow::Result<()> {
     kettle_ui::run_with(kettle_ui::Options {
         activation,
         command: (!cli.exec.is_empty()).then_some(cli.exec),
-        // Dropdown-parity cycle: the About panel shows exactly what
+        // Dropdown-parity: the About panel shows exactly what
         // `--version` prints (crate version + git hash).
         version: Some(KETTLE_VERSION.to_string()),
         cwd: cli.working_directory,
@@ -1761,7 +1762,7 @@ fn main() -> anyhow::Result<()> {
         tab_handoff_fd: cli.tab_handoff_fd,
         #[cfg(feature = "dev-record")]
         record,
-        // Cycle 916 (file-by-file audit): bool-PARSE the env var — `is_some()`
+        // Bool-PARSE the env var — `is_some()`
         // turned `=0`/`=false`/empty all ON, the opposite of intent, silently
         // enabling raw keystroke (password) capture into the trace. Only an
         // explicit truthy value enables it. (dev-record feature only.)
@@ -1770,7 +1771,7 @@ fn main() -> anyhow::Result<()> {
     })
 }
 
-/// Cycle 302: default remote-command file path. Lives under the
+/// Default remote-command file path. Lives under the
 /// kettle config directory so `--remote-send` / `--remote-file`
 /// callers and the kettle window's watcher agree without explicit
 /// paths on either side. None when the config dir isn't resolvable
@@ -1780,17 +1781,17 @@ fn default_remote_file() -> Option<std::path::PathBuf> {
     kettle_config::Config::default_path().and_then(|p| p.parent().map(|d| d.join("remote.cmd")))
 }
 
-/// Cycle 313: resolve the effective config file path from
+/// Resolve the effective config file path from
 /// `--config FILE` / `--profile NAME` / the default path, in that
 /// precedence. Used by every introspection flag (`--check-config`,
 /// `--list-keybinds`, `--list-ssh-hosts`, `--config-path`,
 /// `--screenshot`) so they all honor `--profile` uniformly.
 ///
-/// Before this helper, only the windowed-run path (and as of cycle
-/// 312, `--check-config`) honored `--profile`. A user running e.g.
+/// Before this helper, only the windowed-run path (and, from a later
+/// fix, `--check-config`) honored `--profile`. A user running e.g.
 /// `kettle --profile dev --list-keybinds` would silently get the
-/// default config's keymap rather than the dev profile's — same
-/// silent-fallback shape as cycle 196.
+/// default config's keymap rather than the dev profile's — the same
+/// silent-fallback shape as the config read-error handling above.
 fn resolve_config_path(cli: &Cli) -> Option<std::path::PathBuf> {
     cli.config
         .clone()
@@ -1814,9 +1815,9 @@ fn resolve_config_path(cli: &Cli) -> Option<std::path::PathBuf> {
 /// vs `not a directory`) and the call site is short enough; extracting both
 /// into a shared kind-enum helper would add more glue than it removes.
 ///
-/// Cycle 198: also probe `File::open` so a permission-denied file fails
-/// at the CLI surface instead of at the silent runtime fallback. Cycles
-/// 106 (no such file), 164 (not a regular file), 198 (unreadable) cover
+/// Also probe `File::open` so a permission-denied file fails
+/// at the CLI surface instead of at the silent runtime fallback. The no-
+/// such-file, not-a-regular-file, and unreadable-file checks together cover
 /// the three classes of "user typed `--config FILE` but kettle ignored
 /// it" complaints.
 fn config_path_problem(p: &std::path::Path) -> Option<&'static str> {
@@ -1835,26 +1836,26 @@ fn config_path_problem(p: &std::path::Path) -> Option<&'static str> {
 /// Empty input yields a single "(no ssh-host entries configured)" line so
 /// the user sees their config is empty rather than no output at all.
 /// Pure so the formatting is unit-testable without the CLI.
-/// Format the opt-in echo lines for `--check-config` (cycles 461-470).
+/// Format the opt-in echo lines for `--check-config`.
 /// Pure helper: takes a `Config`, returns one `String` per echo line
 /// the user should see. Empty `Vec` for a default config — terse
 /// default-summary output is the contract.
 ///
 /// Adding a new branch: bump the doc list below, append the `if`,
 /// and add the in-isolation assertion to
-/// `extra_check_config_lines_surface_each_opt_in_key` (cycle 471).
+/// `extra_check_config_lines_surface_each_opt_in_key`.
 /// The `extra_check_config_lines_empty_for_default_config` guard
 /// will catch a branch that fires on default config.
 ///
 /// Each variant gates on a single field's non-default-ness:
-///   - `accent` (cycle 309) — `accent_color` is `Some`
-///   - `bell: force-no-bell` (cycle 349) — `force_no_bell` is `true`
-///   - `triggers` (cycle 289) — at least one trigger
-///   - `lua: sandbox=...` (cycle 376) — `lua_sandbox != Safe`
-///   - `bg-image` (cycles 380-396) — `background_image` non-empty
-///   - `window-flags` (cycles 339/342) — any of window_state /
+///   - `accent` — `accent_color` is `Some`
+///   - `bell: force-no-bell` — `force_no_bell` is `true`
+///   - `triggers` — at least one trigger
+///   - `lua: sandbox=...` — `lua_sandbox != Safe`
+///   - `bg-image` — `background_image` non-empty
+///   - `window-flags` — any of window_state /
 ///     borderless / always_on_top is non-default
-///   - `status-bar` (cycle 295) — `status_bar != Off`
+///   - `status-bar` — `status_bar != Off`
 fn extra_check_config_lines(cfg: &kettle_config::Config) -> Vec<String> {
     let mut lines = Vec::new();
     if let Some(c) = cfg.accent_color {
@@ -1911,8 +1912,8 @@ fn format_ssh_hosts(hosts: &[(String, String)]) -> Vec<String> {
         .collect()
 }
 
-/// Cycle 938 (Terminator parity) + cycle 942 (audit): map the window-state
-/// CLI flags to an override. Fixed precedence: **hidden > fullscreen >
+/// Map the window-state CLI flags to an override (Terminator parity).
+/// Fixed precedence: **hidden > fullscreen >
 /// maximise** — `-H` is the explicit "don't show me" intent (Quake-style
 /// background launch), so it must not be silently dropped when a script also
 /// passes `-m`/`-f` (Terminator applies hidden last for the same reason).
@@ -1938,7 +1939,7 @@ mod window_state_flag_tests {
     use super::window_state_from_flags;
     use kettle_config::WindowState;
 
-    /// Cycle 942 (audit): full truth table — in particular `-H` must win over
+    /// Full truth table — in particular `-H` must win over
     /// `-m`/`-f` (it used to be silently dropped when combined).
     #[test]
     fn hidden_wins_then_fullscreen_then_maximise() {
@@ -2167,7 +2168,8 @@ mod tests {
     use super::{Cli, config_path_problem, extra_check_config_lines, format_ssh_hosts};
     use clap::Parser;
 
-    /// Cycle 868 drift guard (supersedes the cycle-734 / 740 versions).
+    /// Windows GUI-subsystem drift guard (supersedes the guards for earlier
+    /// console-handling approaches).
     /// kettle is a Windows GUI-subsystem app (`#![cfg_attr(all(windows,
     /// not(test)), windows_subsystem = "windows")]`), so Explorer / Start-menu
     /// launches never get a phantom console — zero flash. A terminal launch
@@ -2176,10 +2178,10 @@ mod tests {
     /// inherited (detected via `GetFileType`) — so piped/redirected stdout is
     /// never clobbered.
     ///
-    /// That conditional is the whole point: cycle 734 set the same attribute
-    /// but reopened the console UNCONDITIONALLY, overwriting the inherited
-    /// stdout pipe on `kettle --flag | grep` and breaking Windows CI; cycle 740
-    /// reverted to the console subsystem + a `SW_HIDE` flash. If a future
+    /// That conditional is the whole point: an earlier attempt set the same
+    /// attribute but reopened the console UNCONDITIONALLY, overwriting the
+    /// inherited stdout pipe on `kettle --flag | grep` and breaking Windows
+    /// CI; that was reverted to the console subsystem + a `SW_HIDE` flash. If a future
     /// contributor drops the GetFileType inherited-handle early-return, piped
     /// CLI output silently disappears on Windows again. These asserts catch
     /// both directions (attribute removed, or guard removed) at gauntlet time.
@@ -2210,7 +2212,8 @@ mod tests {
                 "missing console-attach token: {needle}"
             );
         }
-        // The inherited-handle guard (the cycle-734 fix) is present: without
+        // The inherited-handle guard (the fix for the earlier unconditional-reopen
+        // regression) is present: without
         // GetFileType + GetStdHandle there is no way to tell a piped stdout
         // from an allocated console, so an unconditional reopen would re-break
         // `kettle --flag | grep` on Windows CI.
@@ -2220,7 +2223,7 @@ mod tests {
                 "missing inherited-handle guard token: {needle}"
             );
         }
-        // Belt-and-suspenders: the cycle-740 console-hide hack must be gone —
+        // Belt-and-suspenders: the earlier console-hide hack must be gone —
         // under the GUI subsystem there is no auto-console to hide, and a stray
         // hide could hide the user's *parent* console after attach. The needle
         // is built at runtime so this assertion doesn't self-match via
@@ -2228,7 +2231,7 @@ mod tests {
         let hide_call = format!("ShowWindow(hwnd, {})", "SW_HIDE");
         assert!(
             !src.contains(&hide_call),
-            "the cycle-740 console-hide call is back; remove it — under the GUI \
+            "the console-hide call is back; remove it — under the GUI \
              subsystem there is no auto-allocated console to hide."
         );
     }
@@ -2236,25 +2239,25 @@ mod tests {
     #[test]
     fn config_path_problem_catches_missing_and_directory() {
         use std::io::Write;
-        // Missing path → "no such file" (cycle 106 shape; preserved).
+        // Missing path → "no such file" (preserved from the original check).
         let missing = std::path::PathBuf::from("/definitely/not/a/real/path/kettle.conf");
         assert_eq!(config_path_problem(&missing), Some("no such file"));
 
-        // Real temp dir: `--config DIR` was the cycle 164 gap. Pre-fix,
+        // Real temp dir: `--config DIR` was the not-a-regular-file gap. Pre-fix,
         // `--config ~/.config/kettle` (where the file is `.config/kettle/config`
         // and the user dropped the trailing component) silently fell back to
         // defaults — `read_to_string` returned IsADirectory, `load_from_with_diagnostics`
         // logged a warn and used defaults, and the user saw their carefully-
         // crafted theme nowhere with no obvious cue why.
-        // Cycle 593: PID + nanos. Stale directories from a previously
+        // PID + nanos. Stale directories from a previously
         // panicked test run (Ctrl+C, OOM, hardware fault) used to
         // collide with a re-run sharing the same PID — common on
         // Windows where PIDs cycle quickly and rare-but-real on Linux
         // CI runners. The nanos suffix means even the same PID gets a
         // fresh dir. Matches the pattern in session::tests +
-        // config_tests + the cycle-592 bg_image / lua fixes.
+        // config_tests + the bg-image / lua config test fixtures.
         let tmp = std::env::temp_dir().join(format!(
-            "kettle-cycle164-{}-{}",
+            "kettle-config-test-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -2272,7 +2275,7 @@ mod tests {
             .unwrap();
         assert_eq!(config_path_problem(&file), None);
 
-        // Cycle 198: unreadable file (perm-denied) is rejected at the
+        // Unreadable file (perm-denied) is rejected at the
         // CLI surface so the runtime doesn't silently fall back to
         // defaults. Skip on Windows / CI users where chmod-000 doesn't
         // actually deny read to the calling user.
@@ -2307,7 +2310,7 @@ mod tests {
 
     #[test]
     fn print_completions_emits_per_shell_scripts() {
-        // Cycle 237: clap_complete's output is per-shell shaped.
+        // clap_complete's output is per-shell shaped.
         // Pin the contract: each known shell emits a non-trivial
         // script that mentions kettle's command name. A regression
         // (e.g. someone passes the wrong Shell variant, or the
@@ -2339,9 +2342,9 @@ mod tests {
 
     #[test]
     fn shell_integration_snippets_match_in_tree_files() {
-        // Cycle 229: `kettle --shell-integration <shell>` emits one
+        // `kettle --shell-integration <shell>` emits one
         // of the embedded `shell-integration/kettle.{bash,zsh,fish,ps1}`
-        // files (ps1 added in cycle 730). The contract: the embedded
+        // files (ps1 added later). The contract: the embedded
         // content must equal the in-tree file byte-for-byte (so
         // docs/SHELL-INTEGRATION.md and `--shell-integration` never
         // diverge) and each snippet must include the OSC 133 prefix
@@ -2385,7 +2388,7 @@ mod tests {
 
     #[test]
     fn print_default_config_round_trip() {
-        // Cycle 227: `kettle --print-default-config` emits the
+        // `kettle --print-default-config` emits the
         // embedded `docs/kettle.example.config`. The first-launch
         // bootstrap is:
         //   kettle --print-default-config > ~/.config/kettle/config
@@ -2396,7 +2399,7 @@ mod tests {
         //   2. It is a valid kettle config — Config::parse_collect
         //      reports zero unknown-key / malformed-value
         //      diagnostics. Everything in the example file is
-        //      commented out by convention (cycle 100 drift guard),
+        //      commented out by convention,
         //      so the only requirement is the parser accepts it.
         let embedded = include_str!("../../../docs/kettle.example.config");
         assert!(
@@ -2410,15 +2413,15 @@ mod tests {
             diags.is_empty(),
             "embedded example config emits diagnostics: {diags:?}"
         );
-        // Cycle 413 drift guard: the example config MUST document the
-        // Terminator-parity surface that cycles 331-410 added. If a
+        // Drift guard: the example config MUST document the
+        // Terminator-parity surface. If a
         // future contributor strips the section, this test catches it
         // before users see a stripped-down `--print-default-config`
         // output.
         //
-        // Cycle 459: extended with accent-color (cycle 309 peacock
-        // parity), force-no-bell (cycle 349 Terminator force_no_bell
-        // parity), and trigger (cycle 290 regex-on-output → action).
+        // Later extended with accent-color (peacock
+        // parity), force-no-bell (Terminator force_no_bell
+        // parity), and trigger (regex-on-output → action).
         for key in &[
             "window-state",
             "borderless",
@@ -2502,7 +2505,7 @@ mod tests {
         assert!(d.exec.is_empty() && d.working_directory.is_none() && d.config.is_none());
     }
 
-    /// Cycle 913 (audit): `--screenshot` and `--screenshot-menu` are mutually
+    /// `--screenshot` and `--screenshot-menu` are mutually
     /// exclusive — passing both now fails loudly instead of silently dropping one.
     #[test]
     fn cli_screenshot_flags_are_mutually_exclusive() {
@@ -2525,14 +2528,14 @@ mod tests {
     #[test]
     fn cli_help_text_has_no_internal_cycle_refs() {
         // `--help` is the very first contact most users have with the CLI.
-        // Earlier cycles' rustdoc-style notes ("(cycle 103)", "(cycle 106)")
-        // helped *me* trace audit history during development but leak as
+        // Internal engineering-note parentheticals in rustdoc-style comments
+        // helped trace history during development but leak as
         // mysterious-looking parentheticals when piped to a real terminal
-        // user. The audit trail lives in CHANGELOG and code comments; the
+        // user. That history lives in CHANGELOG and code comments; the
         // user-facing help text should not.
         //
         // Walk every argument's long+short help string and assert none
-        // contain "cycle " — same shape as cycle 116's
+        // contain "cycle " — same shape as the
         // `defaults_has_no_shadow_collisions` drift guard, but for the
         // CLI's user-facing surface instead of the keybind defaults.
         use clap::CommandFactory;
@@ -2565,11 +2568,11 @@ mod tests {
         }
     }
 
-    /// Cycle 839 (audit): the hand-written man page must document every
-    /// `--<long>` flag and must not leak internal `cycle N` refs. The pre-839
-    /// page was missing `--check-update` + `--write-default-config` and carried
-    /// cycle parentheticals precisely because the only man-page guard checked
-    /// keybinds, not flags. Walk the clap CLI and pin both.
+    /// The hand-written man page must document every
+    /// `--<long>` flag and must not leak internal `cycle N` refs. An earlier
+    /// version of the page was missing `--check-update` + `--write-default-config`
+    /// and carried cycle parentheticals precisely because the only man-page
+    /// guard checked keybinds, not flags. Walk the clap CLI and pin both.
     #[test]
     fn man_page_documents_every_flag_without_cycle_refs() {
         use clap::CommandFactory;
@@ -2624,9 +2627,9 @@ mod tests {
         // A `#[arg(...)]` whose doc-comment contains an indented `  kettle …`
         // example must declare `verbatim_doc_comment` — otherwise clap
         // collapses the leading spaces in `--help`, flattening the example
-        // back into prose. The original cycle 229 / 237 fixes covered
+        // back into prose. The original fixes covered
         // --shell-integration and --print-completions; --print-default-config
-        // (added by cycle 227) had the same indented-example pattern and the
+        // had the same indented-example pattern and the
         // same wrapping bug, which is what this guard pins.
         //
         // Same shape as `cli_help_text_has_no_internal_cycle_refs` directly
@@ -2660,8 +2663,8 @@ mod tests {
 
     #[test]
     fn man_page_documents_load_bearing_default_keybinds() {
-        // Cycle 282 drift guard. The cycle-279 hand-written `kettle.1` man
-        // page documents the default keybind set. Cycle 281 caught four
+        // Drift guard. The hand-written `kettle.1` man
+        // page documents the default keybind set. An earlier audit caught four
         // entries that had drifted from the actual defaults (`Ctrl+Shift+
         // arrow` was a scroll binding, not focus; `Ctrl+Shift+Z` /
         // `Ctrl+Shift+D` weren't default-bound at all). This guard pins
@@ -2716,7 +2719,7 @@ mod tests {
             "Ctrl+Shift+X", // ToggleZoom
             // Broadcast
             "Super+G", // ToggleBroadcastAll
-            // Vi-mode (cycle 298). The Ctrl+Shift+Space entry point
+            // Vi-mode. The Ctrl+Shift+Space entry point
             // is load-bearing — without it, vi-mode users can't
             // enter the mode at all. h/j/k/l are mentioned in the
             // man page but not pinned here (they're the de-facto
@@ -2740,10 +2743,10 @@ mod tests {
 
     #[test]
     fn extra_check_config_lines_empty_for_default_config() {
-        // Cycle 471 drift guard. The default config produces no
+        // Drift guard. The default config produces no
         // opt-in echo lines so `kettle --check-config` stays terse
         // for the common case (just the base summary + `status: OK`).
-        // A future cycle that adds a noisy default-fires echo line
+        // A future change that adds a noisy default-fires echo line
         // would regress this contract.
         let cfg = kettle_config::Config::default();
         let lines = extra_check_config_lines(&cfg);
@@ -2757,7 +2760,7 @@ mod tests {
     #[test]
     #[allow(clippy::field_reassign_with_default)]
     fn extra_check_config_lines_surface_each_opt_in_key() {
-        // Cycle 471 drift guard. Each cycle 461-470 echo branch
+        // Drift guard. Each opt-in echo branch
         // fires for its specific opt-in field; setting each one
         // independently should produce exactly the expected line.
         let mut cfg = kettle_config::Config::default();
@@ -2832,13 +2835,13 @@ mod tests {
     #[test]
     #[allow(clippy::field_reassign_with_default)]
     fn extra_check_config_lines_no_internal_cycle_refs() {
-        // Cycle 537 drift guard. `kettle --check-config` output is
+        // Drift guard. `kettle --check-config` output is
         // user-facing — internal "cycle N" / "cycle-N" references
-        // shouldn't leak into it (same anti-pattern the cycle-179
-        // drift guard catches in markdown docs, but for binary
-        // runtime output). Cycle 536 caught one in the triggers
-        // echo ("cycle-289 Urgency action") that the cycle-179
-        // file-scan didn't reach.
+        // shouldn't leak into it (same anti-pattern the
+        // `user_facing_docs_have_no_internal_cycle_refs` guard catches in
+        // markdown docs, but for binary runtime output). An earlier fix
+        // caught one in the triggers echo (a stray cycle-number stamp in
+        // the trigger-action text) that the markdown file-scan didn't reach.
         //
         // Build a cfg that triggers EVERY echo branch + assert no
         // resulting line matches "cycle " or "cycle-" followed by
@@ -2871,8 +2874,8 @@ mod tests {
         }
     }
 
-    /// Cycle 711 drift guard. `scripts/menu-screenshot.sh` is the
-    /// repro harness for the C3-C9 context-menu sub-cycles —
+    /// Drift guard. `scripts/menu-screenshot.sh` is the
+    /// repro harness for the context-menu screenshot work —
     /// `just menu-shot` and the CONTRIBUTING workflow both depend on
     /// it being checked in, executable, and pointing at the right
     /// kettle binary. Pin the contract:
@@ -2883,15 +2886,15 @@ mod tests {
     ///      accidentally drops one of the load-bearing tools fails
     ///      here instead of at runtime on a contributor's machine).
     ///
-    /// Cycle 730: gated `#[cfg(unix)]` because the test uses
+    /// Gated `#[cfg(unix)]` because the test uses
     /// `std::os::unix::fs::PermissionsExt::mode()` for the
     /// executable-bit check (Windows has no equivalent — NTFS doesn't
-    /// have a Unix-style mode word). Pre-730 this test failed
-    /// compilation on Windows MSVC builds with E0433 "cannot find
-    /// `unix` in `os`". Caught locally on the cycle-730 Windows 11
-    /// audit; the fix matches the same `#[cfg(unix)]` pattern the
-    /// cycle-198 unreadable-config test at `main.rs:1052` already
-    /// uses for an equivalent unix-only chmod check.
+    /// have a Unix-style mode word). Before this guard was added, this
+    /// test failed compilation on Windows MSVC builds with E0433 "cannot
+    /// find `unix` in `os`". Caught locally on a Windows 11 test pass;
+    /// the fix matches the same `#[cfg(unix)]` pattern the
+    /// `config_path_problem_catches_missing_and_directory` unreadable-config
+    /// test already uses for an equivalent unix-only chmod check.
     #[cfg(unix)]
     #[test]
     fn scripts_menu_shot_exists_and_executable() {

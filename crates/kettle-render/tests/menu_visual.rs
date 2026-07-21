@@ -1,4 +1,4 @@
-//! Cycle 251: visual regression test for the right-click context menu.
+//! Visual regression test for the right-click context menu.
 //!
 //! v1.3.0 and v1.3.1 shipped a *blank* context menu — the panel bg
 //! quad was drawn AFTER the menu text in the same render pass, so the
@@ -11,7 +11,7 @@
 //!
 //! This test renders the menu via the new
 //! `capture_png_with(.., DebugScene::ContextMenu)` headless path
-//! (cycle 251) and asserts two invariants:
+//! and asserts two invariants:
 //!
 //! 1. The menu PNG differs from the no-menu PNG by enough pixels that
 //!    it's clearly drawing *something* (a blank-menu regression

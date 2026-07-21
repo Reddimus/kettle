@@ -14,7 +14,7 @@ use kettle_core::{CursorShape, PtyOutputSender, TermEvent, Terminal, Waker};
 const LOSSLESS_OUTPUT_QUEUE_DEPTH: usize = 8;
 
 /// Initial pane title seeded from the launching argv before the program's
-/// first OSC 2. Plain shells use the placeholder "kettle" — cycle 89's
+/// first OSC 2. Plain shells use the placeholder "kettle" — the
 /// cwd-basename fallback fills in for those once OSC 7 arrives. SSH panes
 /// have no local cwd, so we surface the target inline (`ssh me@box`) so a
 /// tab full of them is distinguishable while connections are
@@ -115,9 +115,8 @@ pub struct SearchState {
 pub struct Pane {
     pub term: Terminal,
     pub rx: Receiver<TermEvent>,
-    /// Cycle 378 (Terminator plugin parity, plugin sub-cycle 3):
-    /// optional output sidechannel. `Some` when the LuaEngine
-    /// subscribed at App startup; the App drains it each tick and
+    /// Terminator plugin parity: optional output sidechannel. `Some` when the
+    /// LuaEngine subscribed at App startup; the App drains it each tick and
     /// fires LuaEvent::Output(pane_id, bytes).
     pub output_rx: Option<Receiver<Vec<u8>>>,
     pub title: String,
@@ -129,19 +128,18 @@ pub struct Pane {
     /// instant any real OSC 2 title is stored, so a program-set title is never
     /// suppressed. Seeded `true` only for generic-shell panes (see `spawn_pane`).
     pub title_is_placeholder: bool,
-    /// Cycle 406 (Terminator parity, named broadcast groups
-    /// foundation): per-pane group name. When set, the pane is
-    /// part of a named broadcast group; keyboard input to any
-    /// member of the group broadcasts to every member. None
-    /// means the pane has no group (Terminator default).
+    /// Terminator parity, named broadcast groups foundation: per-pane group
+    /// name. When set, the pane is part of a named broadcast group;
+    /// keyboard input to any member of the group broadcasts to every
+    /// member. None means the pane has no group (Terminator default).
     ///
-    /// Distinct from the cycle-178 per-tab broadcast (which is
+    /// Distinct from the per-tab broadcast (`BroadcastScope::Tab`, which is
     /// scope=tab, no name): named groups can span multiple tabs +
     /// be selectively enabled. Per-tab broadcast remains the
     /// quick-toggle path.
     pub group_name: Option<String>,
     pub closed: bool,
-    /// Cycle 912 (audit): `exit-action = hold` was silently broken — `reap()`
+    /// `exit-action = hold` was silently broken — `reap()`
     /// removed any pane whose child had exited regardless of intent. `held`
     /// marks a pane deliberately KEPT on screen after its shell exited (Hold);
     /// reap skips it until the user explicitly closes it (which sets `closed`).
@@ -152,26 +150,26 @@ pub struct Pane {
     pub last_history: Option<usize>,
     /// Launching argv ([] means the configured shell). Held so a
     /// closed-tab snapshot can re-spawn the same program in
-    /// `Action::UndoCloseTab` (cycle 247) — SSH tabs and `-e PROG`
+    /// `Action::UndoCloseTab` — SSH tabs and `-e PROG`
     /// tabs reopen as the same SSH connection / TUI, not a generic
     /// shell. Doesn't track environment / cwd-after-launch — those
     /// re-derive from the OSC-7 cwd that's already snapshotted.
     pub argv: Vec<String>,
-    /// Cycle 655 (Terminator parity, `plugins/remote.py`, sub-cycle
-    /// 6 of [`TERMINATOR-REMOTE-DESIGN.md`](
-    /// ../../../docs/TERMINATOR-REMOTE-DESIGN.md)): the most-recently
+    /// Terminator parity, `plugins/remote.py`, phase 6 of
+    /// [`TERMINATOR-REMOTE-DESIGN.md`](
+    /// ../../../docs/TERMINATOR-REMOTE-DESIGN.md): the most-recently
     /// detected remote-session context for this pane. Updated by
-    /// the App's periodic poll (sub-cycle 6, to be wired). `None`
+    /// the App's periodic poll (to be wired). `None`
     /// means either the pane's process tree has no SSH / container
     /// descendant, or the poll hasn't run yet. When non-None, the
     /// pane title shows `format_remote_title(...)` and the right-
-    /// click menu (sub-cycle 7) exposes a "Clone session" entry.
+    /// click menu exposes a "Clone session" entry.
     pub remote_context: Option<kettle_remote::RemoteContext>,
-    /// Cycle 934 (agent-first A4): set while an agent control connection has
+    /// Agent-first: set while an agent control connection has
     /// targeted this pane (a mutating method or `subscribe`). Drives the
     /// titlebar agent badge; cleared when the last attached connection drops.
     pub agent_attached: bool,
-    /// Cycle 941 (Terminator parity, terminal_popup_menu.py "Read only"): when
+    /// Terminator parity, terminal_popup_menu.py "Read only": when
     /// true, user input (keystrokes / paste / broadcast) is dropped before it
     /// reaches this pane's PTY — the child keeps producing output, but the pane
     /// can't be typed into. Toggled via `Action::TogglePaneReadOnly` or the
@@ -180,7 +178,7 @@ pub struct Pane {
 }
 
 impl Pane {
-    /// Cycle 941 (Terminator parity): write user-originated input (keystroke /
+    /// Terminator parity: write user-originated input (keystroke /
     /// paste / IME / drag-drop / send-text) to the PTY, honoring the read-only
     /// toggle. Returns `true` when the bytes were written. VTE
     /// `feed_child` + `input-enabled` semantics: read-only blocks the *user*
@@ -196,7 +194,7 @@ impl Pane {
     }
 }
 
-/// Cycle 912 (audit): pure reap predicate. A pane is removed when explicitly
+/// Pure reap predicate. A pane is removed when explicitly
 /// closed (Close / Restart / ClosePane set `closed`) OR its child exited and it
 /// is not being HELD on screen (`exit-action = hold`). Without the `!held` guard
 /// Hold behaved identically to Close — the dead shell vanished on the next
@@ -224,13 +222,13 @@ impl Node {
         }
     }
 
-    /// Cycle 602: find the leaf id that should receive focus when
+    /// Find the leaf id that should receive focus when
     /// `id` is removed from this tree. Returns the first leaf of
     /// `id`'s sibling subtree at the deepest Split containing
     /// `id`. Returns `None` if `id` isn't a leaf in this tree, or
     /// if the tree is a single Leaf (no sibling to promote).
     ///
-    /// User-reported bug pre-cycle-602: `close_focused` was setting
+    /// User-reported bug: `close_focused` was setting
     /// `tab.focus = tab.root.first_leaf()` after the close, which
     /// always jumps to the LEFTMOST leaf of the whole tab — i.e.,
     /// the first pane the user split from. Closing a deeply-nested
@@ -285,7 +283,7 @@ impl Node {
 
     /// All leaf ids in DFS-order. Used by `broadcast_write` to scope
     /// broadcast input to one tab's panes rather than every pane in every
-    /// tab (cycle 112 — `Action::ToggleBroadcastAll` was originally
+    /// tab (`Action::ToggleBroadcastAll` was originally
     /// "every pane in the whole mux", a footgun for users with several
     /// tabs since typing one char would echo into every pane everywhere;
     /// per-tab matches Terminator's `broadcast_all` and is what users
@@ -439,7 +437,7 @@ impl Node {
         false
     }
 
-    /// Cycle 904 (audit): collect every split's divider seam, each tagged with
+    /// Collect every split's divider seam, each tagged with
     /// the `path` (a/b descent from the root) that addresses it for mutation,
     /// its `dir`, the split's full `rect`, and the seam coordinate `pos` (x for
     /// a Horizontal split's vertical divider, y for a Vertical split's
@@ -475,7 +473,7 @@ impl Node {
         }
     }
 
-    /// Cycle 904: set the ratio of the split addressed by `path` (the a/b
+    /// Set the ratio of the split addressed by `path` (the a/b
     /// descent produced by `dividers`). Returns false if the path doesn't land
     /// on a split (stale path after a layout change). The ratio is clamped to
     /// the same [0.05, 0.95] band `layout` enforces, so a pane can't be dragged
@@ -500,7 +498,7 @@ impl Node {
     }
 }
 
-/// Cycle 904 (audit): one split divider, addressable for mouse drag-to-resize.
+/// One split divider, addressable for mouse drag-to-resize.
 #[derive(Clone, Debug, PartialEq)]
 pub struct SplitSeam {
     /// a/b descent from the tab root that uniquely addresses the split node.
@@ -514,7 +512,7 @@ pub struct SplitSeam {
     pub pos: f32,
 }
 
-/// Cycle 904: the ratio a Horizontal/Vertical split should take so its divider
+/// The ratio a Horizontal/Vertical split should take so its divider
 /// sits under the cursor, clamped to the same band `layout` enforces.
 pub fn ratio_from_pos(rect: Rect, dir: Dir, px: f32, py: f32) -> f32 {
     let (x, y, w, h) = rect;
@@ -537,7 +535,7 @@ pub fn ratio_from_pos(rect: Rect, dir: Dir, px: f32, py: f32) -> f32 {
     raw.clamp(0.05, 0.95)
 }
 
-/// Cycle 904: index of the first seam within `tol` px of the cursor (along the
+/// Index of the first seam within `tol` px of the cursor (along the
 /// seam's perpendicular axis) and inside the split's cross-axis extent. Inner
 /// (deeper) seams are pushed AFTER their ancestors by `dividers`, so a tie near
 /// nested dividers resolves to the outer split — a stable, predictable pick.
@@ -557,15 +555,15 @@ pub fn seam_at(seams: &[SplitSeam], px: f32, py: f32, tol: f32) -> Option<usize>
 pub struct Tab {
     pub root: Node,
     pub focus: u64,
-    /// Cycle 354 (Terminator parity, terminatorlib/notebook.py): an
+    /// Terminator parity, terminatorlib/notebook.py: an
     /// optional user-set title override. When `Some(s)`, the tab
     /// bar displays `s` instead of the focused pane's title.
-    /// Cleared automatically when the user opens a new tab (cycle-X
-    /// new-tab path) — sticky-override behavior matches Terminator.
+    /// Cleared automatically when the user opens a new tab —
+    /// sticky-override behavior matches Terminator.
     pub title_override: Option<String>,
     /// When true, only the focused pane is shown at full size.
     pub zoomed: bool,
-    /// Cycle 246: per-tab activity state for the tab-bar dot
+    /// Per-tab activity state for the tab-bar dot
     /// indicator. `last_output_at` updates whenever any pane in this
     /// tab produces output. `last_seen_at` updates when this tab
     /// becomes active. The renderer compares the two to decide
@@ -608,7 +606,7 @@ pub enum TabActivity {
 /// the tab-bar accent already convey focus — adding a dot there would
 /// be redundant.
 ///
-/// `now` and `silence_threshold` drive the cycle-252 Silent variant
+/// `now` and `silence_threshold` drive the `TabActivity::Silent` variant
 /// — when an inactive tab had unseen output that's been quiet for at
 /// least the threshold, the indicator transitions Output → Silent.
 /// Passing the wall clock in (rather than calling `Instant::now()`
@@ -671,24 +669,24 @@ pub struct ClosedTab {
 /// standard is 8-10; we keep 10 to amortize accidental close-bursts.
 const CLOSED_TAB_RING_CAP: usize = 10;
 
-/// Cycle 678 (sub-cycle 2 of [`TERMINATOR-NAMED-GROUPS-DESIGN.md`](
-/// ../../../docs/TERMINATOR-NAMED-GROUPS-DESIGN.md)): the
+/// Phase 2 of [`TERMINATOR-NAMED-GROUPS-DESIGN.md`](
+/// ../../../docs/TERMINATOR-NAMED-GROUPS-DESIGN.md): the
 /// broadcast-scope enum the design proposes. The existing
-/// `mux.broadcast: bool` represents `Off | Tab`; future cycles
+/// `mux.broadcast: bool` represents `Off | Tab`; a follow-up
 /// will migrate it to this richer enum so `Group(name)`
 /// (scope-by-name-across-tabs) becomes expressible.
 ///
-/// Lands the type now so the cycle-642 `Action::GroupTab` etc.
+/// Lands the type now so the `Action::GroupTab` etc.
 /// dispatch can be wired against the final shape ahead of the
 /// refactor.
-// Cycle 720 (2026-05-23): removed stale `#[allow(dead_code)]`. The
-// All + Group variants are now consumed by the cycle-679/681/682
+// 2026-05-23: removed stale `#[allow(dead_code)]`. The
+// All + Group variants are now consumed by the
 // GroupTab + GroupWindow + CreateGroup dispatch arms in app.rs.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum BroadcastScope {
     #[default]
     Off,
-    /// Cycle-178 per-tab broadcast: every pane in the focused
+    /// Per-tab broadcast: every pane in the focused
     /// tab receives input. Today's `mux.broadcast = true`
     /// behavior.
     Tab,
@@ -700,7 +698,7 @@ pub enum BroadcastScope {
     Group(String),
 }
 
-/// Cycle 678: pure helper that computes the set of pane IDs that
+/// Pure helper that computes the set of pane IDs that
 /// should receive a broadcast for the given scope. Pure — takes
 /// `(scope, focused_pane_id, panes_in_focused_tab, all_panes_with_groups)`
 /// and returns the target list. Unit-testable.
@@ -709,7 +707,7 @@ pub enum BroadcastScope {
 /// group)` pairs covering every pane in every tab. The caller
 /// is responsible for assembling it (a one-liner over
 /// `self.panes.iter()`).
-// Cycle 720 (2026-05-23): removed stale `#[allow(dead_code)]`.
+// 2026-05-23: removed stale `#[allow(dead_code)]`.
 // `compute_broadcast_targets` is the impl behind the public
 // `Mux::broadcast_targets` (called from app.rs).
 pub fn compute_broadcast_targets(
@@ -763,21 +761,21 @@ pub struct Mux {
     pub panes: HashMap<u64, Pane>,
     pub active: usize,
     pub search: SearchState,
-    /// Cycle 679 (sub-cycle 3 of named-groups design):
-    /// migrated from `bool` to `BroadcastScope`. The cycle-178
+    /// Phase 3 of the named-groups design:
+    /// migrated from `bool` to `BroadcastScope`. The
     /// per-tab broadcast = `BroadcastScope::Tab`; old "off" =
     /// `Off`. New variants: `All` (window-wide), `Group(name)`
     /// (cross-tab named group). Callers that just want a
     /// yes/no should use `Mux::is_broadcast_on()`.
     pub broadcast: BroadcastScope,
-    /// Cycle 378: set when a LuaEngine subscribes at App startup.
+    /// Set when a LuaEngine subscribes at App startup.
     /// Controls whether spawn_pane attaches the output sidechannel
     /// to new PTYs (zero-cost when false: no per-PTY-read alloc).
     pub lua_output_subscribed: bool,
     /// When the dev recorder is teeing PTY output, use bounded lossless
     /// backpressure rather than the Lua plugin tap's best-effort delivery.
     pub record_lossless: bool,
-    /// Ring buffer of recently-closed tab snapshots (cycle 247).
+    /// Ring buffer of recently-closed tab snapshots.
     /// Bounded so a long-running session doesn't accumulate state.
     /// LIFO: `pop_back` returns the most-recently-closed tab.
     pub closed_tabs: std::collections::VecDeque<ClosedTab>,
@@ -801,7 +799,7 @@ impl Mux {
     /// flag and updates `last_seen_at` so `classify_tab_activity` no
     /// longer reports `Output` / `Bell` on it. Call after any
     /// `self.active = ...` change so the tab the user just switched
-    /// to drops its indicator immediately. Cycle 246.
+    /// to drops its indicator immediately.
     pub fn touch_active_tab_seen(&mut self) {
         if let Some(tab) = self.tabs.get_mut(self.active) {
             tab.last_seen_at = Some(std::time::Instant::now());
@@ -855,7 +853,7 @@ impl Mux {
         cwd: Option<&str>,
         argv: &[String],
     ) -> Result<u64> {
-        // Cycle 787 (audit B1, investigated + intentionally kept unbounded):
+        // Investigated and intentionally kept unbounded:
         // a bounded channel here is UNSAFE in both variants. `TermEvent` is
         // `alacritty_terminal::event::Event`, which carries one-shot events that
         // must never be dropped — `Exit` (child gone → pane close; dropping it
@@ -872,8 +870,8 @@ impl Mux {
         // sustained growth only happens if the UI thread is already wedged, at
         // which point OOM is a symptom, not the disease. Keep it unbounded.
         let (tx, rx): (Sender<TermEvent>, Receiver<TermEvent>) = crossbeam_channel::unbounded();
-        // Cycle 378 (Terminator plugin parity, plugin sub-cycle 3):
-        // optional output sidechannel for LuaEvent::Output emission.
+        // Terminator plugin parity: optional output sidechannel for
+        // LuaEvent::Output emission.
         // The Mux's output_tx is set when a LuaEngine subscribes
         // (App configures it post-construction); None when no
         // plugin is listening so the alloc-per-PTY-read is skipped.
@@ -894,7 +892,7 @@ impl Mux {
         } else {
             None
         };
-        // Cycle 343 Terminator parity: route through new_with_env so
+        // Terminator parity: route through new_with_env so
         // cfg.term / cfg.colorterm / cfg.login_shell take effect at
         // PTY spawn. The legacy `Terminal::new` shim still exists
         // for non-Mux callers (currently none in-tree).
@@ -973,8 +971,8 @@ impl Mux {
         }
     }
 
-    /// Cycle 397 (Terminator parity, detachable-tabs Bucket-D
-    /// sub-cycle 2): serialize ONE tab (by index) to the same
+    /// Terminator parity, detachable-tabs Bucket-D:
+    /// serialize ONE tab (by index) to the same
     /// STab wire format that session.json uses. Returns None when
     /// the index is out-of-range.
     // C5: its production callers were the serialize-and-respawn handoff
@@ -1005,7 +1003,7 @@ impl Mux {
                     // recreate the focus on the new tree (pane ids are
                     // reallocated across restores, so the id itself isn't
                     // portable). `0` means "first leaf" — same as the
-                    // pre-cycle behavior, which is what missing-field
+                    // original behavior, which is what missing-field
                     // restores fall back to via #[serde(default)].
                     focus: t.root.leaf_index_of(t.focus).unwrap_or(0),
                     title_override: t.title_override.clone(),
@@ -1029,7 +1027,7 @@ impl Mux {
         cw: u16,
         ch: u16,
         mk: &dyn Fn() -> Waker,
-        // Cycle 893 (audit): every pane id spawned while building this
+        // Every pane id spawned while building this
         // subtree is appended here so the caller can reap them if a LATER
         // sibling fails. Without it, a split whose first child spawned but
         // whose second child failed left the first child's PTY + child
@@ -1084,7 +1082,7 @@ impl Mux {
         ch: u16,
         mk: &dyn Fn() -> Waker,
     ) -> bool {
-        // Cycle 863 (audit): bound the total PTY fan-out. The 16 MiB file-size
+        // Bound the total PTY fan-out. The 16 MiB file-size
         // cap is a weak proxy — a small session.json of minimal flat leaves
         // (~30 bytes each) could ask to fork hundreds of thousands of shells on
         // launch, hanging/OOMing the machine. Stop restoring further tabs once
@@ -1102,7 +1100,7 @@ impl Mux {
                 break;
             }
             spawned += tab_leaves;
-            // Cycle 893 (audit): track every pane id this tab's tree spawns so
+            // Track every pane id this tab's tree spawns so
             // a partial failure (e.g. the 2nd pane of a split fails to fork)
             // can reap the panes already created for the same tree instead of
             // leaking their PTYs + child processes.
@@ -1127,7 +1125,7 @@ impl Mux {
                     });
                 }
                 Err(e) => {
-                    // Cycle 893 (audit): reap any panes the partially-built
+                    // Reap any panes the partially-built
                     // tree already spawned. A split's first child can fork
                     // fine and the second fail (cwd gone, fork under quota);
                     // those orphans would otherwise sit in `self.panes`
@@ -1193,8 +1191,8 @@ impl Mux {
             bell: false,
             title_override: None,
         };
-        // Cycle 349 (Terminator parity, terminatorlib/config.py:97
-        // `new_tab_after_current_tab`): when true, insert the new
+        // Terminator parity, terminatorlib/config.py:97
+        // `new_tab_after_current_tab`: when true, insert the new
         // tab right AFTER the active one (vs at the end of the
         // tabs list). The new tab becomes active either way.
         if cfg.new_tab_after_current_tab && self.active + 1 < self.tabs.len() {
@@ -1211,12 +1209,12 @@ impl Mux {
         Ok(())
     }
 
-    /// Cycle 912 (audit): new tab running an explicit `argv` + cwd, with the same
+    /// New tab running an explicit `argv` + cwd, with the same
     /// WSL-aware `--cd` dir translation `split_with` applies. The new-tab ▾
     /// dropdown's WSL entry routed through `new_tab_with` directly (a raw spawn),
     /// so a WSL launcher's Linux cwd failed the Windows `is_dir` gate and the new
-    /// tab fell back to the home dir — the cycle-887 regression class, where only
-    /// splits/duplicates were wired through `launch_cwd`.
+    /// tab fell back to the home dir — the same class of regression fixed for
+    /// splits/duplicates by wiring them through `launch_cwd`.
     #[allow(clippy::too_many_arguments)]
     pub fn new_tab_with_launch(
         &mut self,
@@ -1264,7 +1262,7 @@ impl Mux {
         Ok(())
     }
 
-    /// Cycle 886/887: the `(argv, spawn-cwd)` that reproduces the focused pane
+    /// The `(argv, spawn-cwd)` that reproduces the focused pane
     /// in a new pane/tab — clones its launch command and inherits its cwd, so a
     /// pane launched as WSL / ssh / a specific shell duplicates into the same.
     /// A default-shell pane's argv IS the configured shell, so the common case
@@ -1321,7 +1319,7 @@ impl Mux {
         if self.tabs.is_empty() {
             return self.new_tab(cfg, cols, rows, cw, ch, waker);
         }
-        // Cycle 886/887 + v2.33.1: clone shell-like launches, but keep direct
+        // v2.33.1: clone shell-like launches, but keep direct
         // agent/editor panes split-friendly by falling back to a shell in the
         // focused cwd. See `split_focused_launch`.
         let (argv, cwd) = self.split_focused_launch(cfg);
@@ -1333,7 +1331,7 @@ impl Mux {
             .map(|tab| insert_split(tab, new_id, dir))
             .unwrap_or(false);
         if !grafted {
-            // Cycle 917 (#2 hardening): the graft failed (no active tab, or the
+            // The graft failed (no active tab, or the
             // tree had no leaf to attach to). Reap the just-spawned pane rather
             // than leaking its PTY, and surface a real error — this path was a
             // silent `Ok(())` that left an orphaned pane behind.
@@ -1343,7 +1341,7 @@ impl Mux {
         Ok(())
     }
 
-    /// Cycle 888: split running an explicit `argv` + cwd — e.g. a shell detected
+    /// Split running an explicit `argv` + cwd — e.g. a shell detected
     /// running inside the focused pane (`pwsh → wsl`). Mirrors `split` but with a
     /// caller-supplied command instead of cloning the pane's launch argv; the
     /// WSL `--cd` dir handling is applied via `launch_cwd`.
@@ -1372,7 +1370,7 @@ impl Mux {
             .map(|tab| insert_split(tab, new_id, dir))
             .unwrap_or(false);
         if !grafted {
-            // Cycle 917 (#2 hardening): the graft failed (no active tab, or the
+            // The graft failed (no active tab, or the
             // tree had no leaf to attach to). Reap the just-spawned pane rather
             // than leaking its PTY, and surface a real error — this path was a
             // silent `Ok(())` that left an orphaned pane behind.
@@ -1395,7 +1393,7 @@ impl Mux {
         v
     }
 
-    /// Cycle 904 (audit): the divider seams of `tab` laid out over `area`,
+    /// The divider seams of `tab` laid out over `area`,
     /// matching `layout`'s geometry. Empty when the tab is zoomed (one pane, no
     /// dividers) — so mouse drag-to-resize is inert in zoom, as it should be.
     pub fn split_seams(&self, tab: usize, area: Rect) -> Vec<SplitSeam> {
@@ -1409,7 +1407,7 @@ impl Mux {
         out
     }
 
-    /// Cycle 904: set the ratio of the split addressed by `path` in `tab`.
+    /// Set the ratio of the split addressed by `path` in `tab`.
     /// Returns whether a split was found (false on a stale path). The ratio is
     /// clamped to layout's [0.05, 0.95] band.
     pub fn set_split_ratio(&mut self, tab: usize, path: &[bool], ratio: f32) -> bool {
@@ -1427,7 +1425,7 @@ impl Mux {
         }
     }
 
-    /// Cycle 693. Whether the active tab is currently zoomed (used by
+    /// Whether the active tab is currently zoomed (used by
     /// `Action::ScaledZoom` to decide whether it's the enter-zoom path
     /// — which scales the font up — or the leave-zoom path — which
     /// restores the saved size).
@@ -1456,7 +1454,7 @@ impl Mux {
         self.panes.get_mut(&id)
     }
 
-    /// Cycle 347 (Terminator parity, terminatorlib/terminal.py:key_rotate_cw):
+    /// Terminator parity, terminatorlib/terminal.py:key_rotate_cw:
     /// rotate the focused leaf's parent split by flipping its direction
     /// (Horizontal ↔ Vertical) and optionally swapping its children.
     /// `clockwise = true` matches Terminator's rotate_cw (vertical→
@@ -1473,7 +1471,7 @@ impl Mux {
         rotate_node(&mut tab.root, focus, clockwise)
     }
 
-    /// Cycle 345: 0-based index of the focused pane within its tab's
+    /// 0-based index of the focused pane within its tab's
     /// in-order traversal of the binary split tree. Used by
     /// `InsertPaneNumber` + `InsertPanePadded` to send the pane index
     /// to the PTY. Returns None when no tab exists.
@@ -1519,7 +1517,7 @@ impl Mux {
     /// pressed side AND overlap it on the perpendicular axis, pick the smallest
     /// primary-axis gap, tie-broken by perpendicular center proximity.
     ///
-    /// Cycle 917 (#1, user-reported on native Ubuntu): the old rule ranked
+    /// User-reported on native Ubuntu: the old rule ranked
     /// candidates purely by Euclidean distance between pane **centers**, gated
     /// only by "candidate center is on the requested side". In a nested layout a
     /// **diagonal** pane whose center happened to be closer than a directly
@@ -1685,9 +1683,9 @@ impl Mux {
         let a = self.active;
         if let Some(tab) = self.tabs.get_mut(a) {
             let focus = tab.focus;
-            // Cycle 602: pick the post-close focus BEFORE removing the leaf
-            // so we know which sibling subtree to promote. Pre-cycle-602
-            // this was `tab.root.first_leaf()` POST-remove, which always
+            // Pick the post-close focus BEFORE removing the leaf
+            // so we know which sibling subtree to promote. The old approach
+            // used `tab.root.first_leaf()` POST-remove, which always
             // jumped to the leftmost leaf of the whole tab — a regression
             // the user described as "closing a pane sets my cursor back
             // to my first focused terminal" (the leftmost = first split).
@@ -1699,7 +1697,7 @@ impl Mux {
             match root.remove_leaf(focus) {
                 Ok(n) | Err(Some(n)) => {
                     tab.root = n;
-                    // Cycle 917 (#2 hardening): only repair focus when it's no
+                    // Only repair focus when it's no
                     // longer a leaf in the collapsed tree — the same guard
                     // `reap_tabs` already has (mux.rs ~1809). close_focused always
                     // removes the focused leaf so this normally fires; matching the
@@ -1729,10 +1727,10 @@ impl Mux {
         self.close_tab_at(a)
     }
 
-    /// Cycle 398 (Terminator parity, detachable-tabs Bucket-D
-    /// sub-cycle 4): extract a tab from the tabs list WITHOUT
+    /// Terminator parity, detachable-tabs Bucket-D: extract a tab
+    /// from the tabs list WITHOUT
     /// dropping its panes' PTYs. Used by the cross-process tab
-    /// handoff path (sub-cycle 7): the source process extracts
+    /// handoff send path: the source process extracts
     /// the tab → sends the serialized state + PTY fds via
     /// SCM_RIGHTS to the target process → target reconstructs
     /// the tab.
@@ -1744,8 +1742,8 @@ impl Mux {
     ///
     /// Returns None for out-of-range idx.
     ///
-    /// Cycle 720 (2026-05-23): the `#[allow(dead_code)]` covered
-    /// the period before the cycle-411 SCM_RIGHTS IPC actually
+    /// 2026-05-23: the `#[allow(dead_code)]` covered
+    /// the period before the SCM_RIGHTS IPC actually
     /// landed. Today this is exercised by `mux::tests` round-trip
     /// drift guards (extract→insert restores the tab state) — the
     /// IPC integration ships under a feature gate the binary
@@ -1772,9 +1770,9 @@ impl Mux {
         Some(tab)
     }
 
-    /// Cycle 398 (companion to extract_tab): insert a Tab into
+    /// Companion to extract_tab: insert a Tab into
     /// the tabs vec at the given index. Used by the cross-process
-    /// receive path (sub-cycle 8) when an incoming handoff lands.
+    /// receive path when an incoming handoff lands.
     /// `at` clamps to [0, tabs.len()].
     #[allow(dead_code)]
     pub fn insert_tab(&mut self, at: usize, tab: Tab) {
@@ -1846,7 +1844,7 @@ impl Mux {
     /// Close the entire window: drop every pane in every tab. The caller
     /// (the chrome layer) then exits the event loop because `tabs` is
     /// empty. Distinct from `close_tab` which only closes the focused
-    /// tab — cycle 113 split them apart so the keybinds (`close_tab`
+    /// tab — they were split apart so the keybinds (`close_tab`
     /// vs `close_window`) finally do different things. Returns true
     /// (kept for parity with `close_tab` / `close_tab_at`; the chrome
     /// callers use it as "exit now").
@@ -1860,7 +1858,7 @@ impl Mux {
     /// Close the tab at `idx` (all its panes). Returns true if no tabs remain.
     pub fn close_tab_at(&mut self, idx: usize) -> bool {
         if idx < self.tabs.len() {
-            // Cycle 247: snapshot the first leaf's argv+cwd before
+            // Snapshot the first leaf's argv+cwd before
             // dropping the tab so `Action::UndoCloseTab` can bring it
             // back. The ring is LIFO-bounded; closing tabs faster than
             // we undo evicts the oldest.
@@ -1892,7 +1890,7 @@ impl Mux {
     }
 
     /// Open a new tab that duplicates the focused pane's argv + OSC-7
-    /// cwd (iTerm2's "Duplicate Tab" affordance, cycle 248). Falls
+    /// cwd (iTerm2's "Duplicate Tab" affordance). Falls
     /// back to the configured shell when the focused pane has empty
     /// argv (`new_tab_with` semantics — empty argv ≡ shell). Returns
     /// `Ok(())` even if there's no focused tab to duplicate; the
@@ -1915,7 +1913,7 @@ impl Mux {
         {
             return self.new_tab(cfg, cols, rows, cw, ch, waker);
         }
-        // Cycle 886/887: clone via the shared helper so a WSL tab duplicates
+        // Clone via the shared helper so a WSL tab duplicates
         // with `wsl --cd <dir>` instead of falling back to the home dir.
         let (argv, cwd) = self.clone_focused_launch(cfg);
         self.new_tab_with(cfg, cols, rows, cw, ch, waker, &argv, cwd.as_deref())
@@ -1940,7 +1938,7 @@ impl Mux {
         if self.tabs.is_empty() {
             return self.new_tab(cfg, cols, rows, cw, ch, waker);
         }
-        // Cycle 886/887: shares `clone_focused_launch` with `split` (now also a
+        // Shares `clone_focused_launch` with `split` (now also a
         // clone) — clones the focused pane's argv + cwd, WSL-aware.
         let (argv, cwd) = self.clone_focused_launch(cfg);
         let new_id = self.spawn_pane(cfg, cols, rows, cw, ch, waker, cwd.as_deref(), &argv)?;
@@ -1951,7 +1949,7 @@ impl Mux {
             .map(|tab| insert_split(tab, new_id, dir))
             .unwrap_or(false);
         if !grafted {
-            // Cycle 917 (#2 hardening): the graft failed (no active tab, or the
+            // The graft failed (no active tab, or the
             // tree had no leaf to attach to). Reap the just-spawned pane rather
             // than leaking its PTY, and surface a real error — this path was a
             // silent `Ok(())` that left an orphaned pane behind.
@@ -2037,17 +2035,17 @@ impl Mux {
         for id in dead_ids {
             let mut ti = 0;
             while ti < tabs.len() {
-                // Cycle 603: companion to cycle 602's `close_focused`
+                // Companion to `close_focused`'s neighbor-promotion
                 // fix. When a PTY exits and the dying leaf IS the
                 // focused one, capture the neighbor BEFORE the
                 // destructive `remove_leaf` so the post-rebuild
                 // focus can promote it instead of jumping to the
-                // leftmost leaf of the whole tab. Pre-cycle-603,
+                // leftmost leaf of the whole tab. Before this fix,
                 // typing `exit` in the rightmost pane of a 4-pane
                 // tab would jump focus to the leftmost pane —
                 // exactly the same user-described "first focused
-                // terminal" symptom that motivated cycle 602, just
-                // triggered by shell exit instead of `close-pane`.
+                // terminal" symptom that motivated the close_focused
+                // fix, just triggered by shell exit instead of `close-pane`.
                 let neighbor_if_focused = if tabs[ti].focus == *id {
                     tabs[ti].root.neighbor_of(*id)
                 } else {
@@ -2055,17 +2053,17 @@ impl Mux {
                 };
                 let root = std::mem::replace(&mut tabs[ti].root, Node::Leaf(0));
                 match root.remove_leaf(*id) {
-                    // Cycle 603 part-B: previously this match used
+                    // Previously this match used
                     // `Err(_) => tabs.remove(ti)` which conflated two
                     // distinct outcomes. `Err(Some(n))` means the
                     // dying leaf was a direct child of root and `n`
                     // is the surviving sibling — the tab MUST stay
-                    // with `n` as the new root. Pre-fix, any 2-pane
+                    // with `n` as the new root. Before this fix, any 2-pane
                     // tab + `exit` in either pane deleted the whole
                     // tab (the surviving sibling went with it).
                     // Reachable in production via `child_exited()` in
-                    // `Mux::reap`. Mirrors the cycle-285 distinction
-                    // already in `close_focused` below.
+                    // `Mux::reap`. Mirrors the same Ok(n)/Err(Some(n))/
+                    // Err(None) distinction already in `close_focused` below.
                     Ok(n) | Err(Some(n)) => {
                         tabs[ti].root = n;
                         if !tabs[ti].root.contains(tabs[ti].focus) {
@@ -2076,7 +2074,7 @@ impl Mux {
                     }
                     Err(None) => {
                         tabs.remove(ti);
-                        // Cycle 120: keep `active` pointing at the
+                        // Keep `active` pointing at the
                         // same tab the user is focused on after the
                         // shift, not the same numeric index. Removing
                         // a tab at `ti < active` shifts every later
@@ -2102,7 +2100,7 @@ impl Mux {
     }
 
     /// Send `bytes` to every pane in the **active tab** (not every tab in
-    /// the mux). Cycle 112 fix: the old implementation broadcast across
+    /// the mux). The old implementation broadcast across
     /// every pane in every tab — typing one character with broadcast on
     /// echoed into the user's other tabs too (often unrelated work, often
     /// where the user *didn't* want their fan-out keystroke). Terminator's
@@ -2110,21 +2108,21 @@ impl Mux {
     /// Sessions" defaults per-window; kitty's `send_text` targets all
     /// windows in the current tab. We follow that convention.
     pub fn broadcast_write(&mut self, bytes: &[u8]) {
-        // Cycle 679 (named-groups sub-cycle 3): respect the new
-        // BroadcastScope enum. Off short-circuits; Tab keeps the
-        // cycle-178 active-tab behavior; All targets every pane
+        // Respect the `BroadcastScope` enum (phase 3 of the named-groups
+        // design). Off short-circuits; Tab keeps the
+        // active-tab behavior; All targets every pane
         // window-wide; Group(name) targets cross-tab matches.
         let ids = self.broadcast_target_ids();
         for id in ids {
             if let Some(p) = self.panes.get_mut(&id) {
-                // Cycle 941: a read-only pane drops user input (keystroke /
+                // A read-only pane drops user input (keystroke /
                 // paste / broadcast). The child still produces output.
                 p.feed_input(bytes);
             }
         }
     }
 
-    /// Cycle 941: toggle the focused pane's read-only state; returns the new
+    /// Toggle the focused pane's read-only state; returns the new
     /// value (or `false` if there's no focused pane).
     pub fn toggle_focused_read_only(&mut self) -> bool {
         if let Some(p) = self.focused() {
@@ -2135,14 +2133,14 @@ impl Mux {
         }
     }
 
-    /// Cycle 679: is broadcast active in any scope (Tab/All/Group)?
+    /// Is broadcast active in any scope (Tab/All/Group)?
     /// Most callers just need a yes/no — this preserves the old
     /// `bool` ergonomics post-migration.
     pub fn is_broadcast_on(&self) -> bool {
         !matches!(self.broadcast, BroadcastScope::Off)
     }
 
-    /// Cycle 679: compute the pane IDs that should receive a
+    /// Compute the pane IDs that should receive a
     /// broadcast given the current `self.broadcast` scope. Returns
     /// an empty Vec when scope is Off. Used by `broadcast_write`
     /// and `broadcast_paste`.
@@ -2186,20 +2184,20 @@ impl Mux {
     }
 
     /// Snap every pane in the active tab's broadcast set back to the
-    /// bottom of its scrollback. Cycle-173 companion to
+    /// bottom of its scrollback. Companion to
     /// `broadcast_write`: `scroll-on-keystroke` (default true) needs to
     /// apply to every targeted pane, not just the focused one, otherwise
     /// the user broadcasting input to N panes sees a confusing mismatch
     /// (typing reaches the remote shells but the local view of any
     /// scrolled-back pane stays pinned to history). Same scoping as
     /// `broadcast_write` — active tab's leaves only, never other tabs.
-    /// Cycle 942 (audit): skips read-only panes — their keystroke was dropped
+    /// Skips read-only panes — their keystroke was dropped
     /// by `feed_input`, so yanking their viewport would break the "no input,
     /// no snap" rule the focused-pane path follows (a scrolled-back read-only
     /// monitoring pane must stay where the user put it).
     pub fn broadcast_scroll_to_bottom(&mut self) {
-        // Cycle 679 (named-groups sub-cycle 3): scope-aware
-        // target set, same as broadcast_write / broadcast_paste.
+        // Scope-aware target set (phase 3 of the named-groups design),
+        // same as broadcast_write / broadcast_paste.
         let ids = self.broadcast_target_ids();
         for id in ids {
             if let Some(p) = self.panes.get_mut(&id)
@@ -2231,7 +2229,7 @@ impl Mux {
     }
 
     /// Distribute a clipboard paste to every pane in the active tab's
-    /// broadcast set. Cycle-174 companion to `broadcast_write` and
+    /// broadcast set. Companion to `broadcast_write` and
     /// `broadcast_scroll_to_bottom`: with broadcast on (group-input
     /// mode, Ctrl+Shift+G), keystrokes go to every pane, and paste is
     /// also user input so it should follow the same scoping. Each pane
@@ -2244,8 +2242,8 @@ impl Mux {
     /// auto-execute attack inside vim. Pure modulo the writes; the
     /// per-pane wrap is the only logic here.
     pub fn broadcast_paste(&mut self, text: &str) {
-        // Cycle 679 (named-groups sub-cycle 3): route through the
-        // scope-aware target computation (same as broadcast_write).
+        // Route through the scope-aware target computation
+        // (phase 3 of the named-groups design), same as broadcast_write.
         let ids = self.broadcast_target_ids();
         if ids.is_empty() {
             return;
@@ -2253,11 +2251,11 @@ impl Mux {
         // Build the two possible payloads lazily — only when we hit the
         // first pane that needs each variant. With a 4 MiB clipboard
         // paste and 5 panes (or more, for shells-broadcast-on-CI
-        // patterns), the pre-cycle-191 code allocated 5 copies of the
+        // patterns), the old code allocated 5 copies of the
         // wrap (5 × 4 MiB = 20 MiB temporary). With caching, at most
         // two copies regardless of pane count. `OnceCell`-style lazy
         // via `Option`: skip even one allocation when the broadcast
-        // set is entirely one BRACKETED_PASTE state. Cycle 191.
+        // set is entirely one BRACKETED_PASTE state.
         let mut raw: Option<Vec<u8>> = None;
         let mut wrapped: Option<Vec<u8>> = None;
         for id in ids {
@@ -2274,7 +2272,7 @@ impl Mux {
                 } else {
                     raw.get_or_insert_with(|| crate::input::paste_payload(text, false))
                 };
-                // Cycle 941: paste is user input — read-only panes drop it.
+                // Paste is user input — read-only panes drop it.
                 p.feed_input(bytes);
             }
         }
@@ -2336,7 +2334,7 @@ impl Mux {
 /// (Action::EditTabTitle) wins; else the focused pane's title; else — while the
 /// title is still the `kettle` placeholder — the cwd basename; else `tab N`.
 ///
-/// Cycle 829 (audit): the override branch was missing from `tab_titles`, so a
+/// The override branch was missing from `tab_titles`, so a
 /// custom tab title was stored but never shown (a silent no-op overwritten by
 /// the shell's next OSC 2 title). Pulled out as a pure fn so the precedence is
 /// drift-tested without standing up a PTY.
@@ -2532,7 +2530,7 @@ fn rotate_node(node: &mut Node, target: u64, clockwise: bool) -> bool {
 /// next to the currently-focused leaf in direction `dir`, move focus to
 /// the new pane, and **exit zoom** if it was on.
 ///
-/// Cycle 130: splitting while zoomed used to leave the tab zoomed AND
+/// Splitting while zoomed used to leave the tab zoomed AND
 /// focused on the new pane, so the user only saw the new pane — the
 /// half they just split from disappeared from view (still alive, just
 /// hidden by `Mux::layout`'s zoom-collapse). Every modern terminal
@@ -2546,7 +2544,7 @@ fn insert_split(tab: &mut Tab, new_id: u64, dir: Dir) -> bool {
         tab.zoomed = false;
         return true;
     }
-    // Cycle 917 (#2 hardening): `tab.focus` was stale — not a leaf in this tree
+    // `tab.focus` was stale — not a leaf in this tree
     // (a focus-desync class of bug). Previously `split_leaf` silently no-op'd
     // and the freshly-spawned pane was orphaned (leaked PTY + child) while the
     // split still reported success. Repair focus to a real leaf and retry; the
@@ -2593,7 +2591,7 @@ fn usable_cwd(dir: Option<String>) -> Option<String> {
     dir.filter(|d| std::path::Path::new(d).is_dir())
 }
 
-/// Cycle 887: is this argv launching WSL (`wsl` / `wsl.exe`, by argv[0]
+/// Is this argv launching WSL (`wsl` / `wsl.exe`, by argv[0]
 /// basename)? Used to route the cloned cwd through `wsl --cd` instead of the
 /// Windows spawn cwd. Mirrors `kettle_core`'s private `is_wsl_launcher`.
 ///
@@ -2610,7 +2608,7 @@ pub(crate) fn argv_is_wsl(argv: &[String]) -> bool {
         .unwrap_or(false)
 }
 
-/// Cycle 887: given a cloned `argv` + the focused pane's raw reported cwd,
+/// Given a cloned `argv` + the focused pane's raw reported cwd,
 /// decide the `(argv, spawn-cwd)` to launch with. For a WSL launcher the dir is
 /// carried via `wsl --cd <dir>` (which accepts Windows AND Linux paths) and no
 /// Windows spawn cwd is set — WSL reports a Linux path a Windows spawn would
@@ -2621,7 +2619,7 @@ fn launch_cwd(mut argv: Vec<String>, raw_cwd: Option<String>) -> (Vec<String>, O
         if let Some(d) = raw_cwd.filter(|d| !d.is_empty())
             && !argv.iter().any(|a| a == "--cd")
         {
-            // Cycle 894 (audit): insert `--cd <dir>` immediately AFTER the
+            // Insert `--cd <dir>` immediately AFTER the
             // launcher (index 1), in WSL's option section. Appending at the
             // end was wrong whenever argv carried a command —
             // `wsl -d Ubuntu -- bash -l` became
@@ -2660,7 +2658,7 @@ impl Default for Mux {
 mod node_tests {
     use super::*;
 
-    /// Cycle 789 drift guard (audit D2). Session focus persistence is the core
+    /// Drift guard. Session focus persistence is the core
     /// state machine for relaunch: `snapshot` records the focused pane's
     /// DFS-order *index* via `leaf_index_of` (pane ids are reallocated across
     /// restores, so the id itself isn't portable), and `restore` recreates
@@ -2700,7 +2698,7 @@ mod node_tests {
         assert_eq!(solo.nth_leaf(0), 7);
     }
 
-    // ---- Cycle 917 (#1): directional pane-focus navigation scaffolding ----
+    // ---- Directional pane-focus navigation scaffolding ----
 
     /// A representative wide area (matches the user's HiDPI screenshot ratio).
     const AREA: Rect = (0.0, 0.0, 2560.0, 1440.0);
@@ -2903,7 +2901,7 @@ mod node_tests {
         }
     }
 
-    /// Cycle 893 drift guard (audit). When a saved split-tree partially
+    /// Drift guard. When a saved split-tree partially
     /// rebuilds — the first child spawns, a later sibling fails (cwd gone,
     /// fork under quota) — `build_node` returns `Err` and the whole tree is
     /// discarded, but the panes already spawned for the first child stay in
@@ -2932,7 +2930,7 @@ mod node_tests {
         );
     }
 
-    /// Cycle 904 (audit): split divider drag-to-resize geometry. `dividers`
+    /// Split divider drag-to-resize geometry. `dividers`
     /// must mirror `layout` exactly, `set_ratio_at` must address the right
     /// split via its path, and the pos→ratio + hit-test helpers must be
     /// correct. These are the pieces a behavioral mouse test can't reach
@@ -3004,10 +3002,10 @@ mod node_tests {
         assert!(!nested.set_ratio_at(&[false, true], 0.5)); // descends into Leaf1
     }
 
-    /// Cycle 678 drift guard. `compute_broadcast_targets` is the
+    /// Drift guard. `compute_broadcast_targets` is the
     /// pure helper that maps a `BroadcastScope` + focused pane +
     /// tab + window state to the set of target pane IDs.
-    /// Sub-cycle 2 of named-groups design.
+    /// Phase 2 of the named-groups design.
     #[test]
     fn compute_broadcast_targets_matrix() {
         let in_tab = vec![1u64, 2, 3];
@@ -3133,7 +3131,7 @@ mod node_tests {
     #[test]
     fn resolve_tab_title_precedence() {
         use super::resolve_tab_title;
-        // Cycle 829 (audit): an explicit override wins over a real pane title
+        // An explicit override wins over a real pane title
         // AND over the cwd fallback — the bug was that it was ignored entirely.
         // (The `bool` arg is `Pane::title_is_placeholder`.)
         assert_eq!(
@@ -3403,7 +3401,7 @@ mod node_tests {
 
     #[test]
     fn initial_pane_title_seeds_ssh_with_target_else_kettle() {
-        // Plain shell (or empty argv) → "kettle" placeholder; cycle-89
+        // Plain shell (or empty argv) → "kettle" placeholder; the
         // cwd-basename fallback fills it in once OSC 7 arrives.
         assert_eq!(initial_pane_title(&[]), "kettle");
         assert_eq!(initial_pane_title(&["bash".into()]), "kettle");
@@ -3490,7 +3488,7 @@ mod node_tests {
         assert!(!direct_launch_splits_to_shell(&[]));
     }
 
-    /// Cycle 886/887: splitting/duplicating clones the focused pane's command;
+    /// Splitting/duplicating clones the focused pane's command;
     /// for WSL the dir is carried via `wsl --cd` (a Windows spawn can't `cd`
     /// into the Linux path WSL reports). Guards the pure decision.
     #[test]
@@ -3509,7 +3507,7 @@ mod node_tests {
         assert_eq!(cwd, None);
 
         // WSL + a reported (Linux) dir → carried via `--cd`, inserted in the
-        // option section right after the launcher (cycle 894), no spawn cwd.
+        // option section right after the launcher, no spawn cwd.
         let (argv, cwd) = launch_cwd(
             s(&["wsl.exe", "-d", "Ubuntu"]),
             Some("/mnt/c/Users/me/proj".into()),
@@ -3520,9 +3518,9 @@ mod node_tests {
         );
         assert_eq!(cwd, None);
 
-        // Cycle 894 (audit): WSL carrying a command after `--`. `--cd` MUST
+        // WSL carrying a command after `--`. `--cd` MUST
         // land before the `--` separator so it reaches WSL, not the command.
-        // Appending at the end (the pre-894 bug) put it after `bash -l`.
+        // Appending at the end (the old bug) put it after `bash -l`.
         let (argv, cwd) = launch_cwd(
             s(&["wsl.exe", "-d", "Ubuntu", "--", "bash", "-l"]),
             Some("/home/me/proj".into()),
@@ -3542,7 +3540,7 @@ mod node_tests {
         );
         assert_eq!(cwd, None);
 
-        // Cycle 894: WSL with a bare command positional (no `--`). `--cd`
+        // WSL with a bare command positional (no `--`). `--cd`
         // still goes first so it isn't consumed as an argument to the command.
         let (argv, _) = launch_cwd(s(&["wsl.exe", "htop"]), Some("/home/me".into()));
         assert_eq!(argv, s(&["wsl.exe", "--cd", "/home/me", "htop"]));
@@ -3607,7 +3605,7 @@ mod node_tests {
         // Same DFS-order traversal that nth_leaf / leaf_index_of /
         // session-save use, so any caller switching between these
         // helpers gets a consistent enumeration. Used by broadcast_write
-        // (cycle 112) to scope broadcast input to a single tab.
+        // to scope broadcast input to a single tab.
         let single = Node::Leaf(7);
         assert_eq!(single.leaf_ids(), vec![7]);
         // Build:  Split(a=Leaf(1), b=Split(a=Leaf(2), b=Leaf(3)))
@@ -3753,7 +3751,7 @@ mod node_tests {
         assert!(m.tabs.is_empty());
     }
 
-    /// Cycle 602: user-reported bug. When the user splits many times
+    /// User-reported bug. When the user splits many times
     /// and then closes a pane deep in the tree, focus jumps back to
     /// the leftmost (first focused) pane instead of the deeper
     /// neighbor of the closed pane.
@@ -3768,7 +3766,7 @@ mod node_tests {
     ///                 a: Leaf(30),
     ///                 b: Leaf(40)}}}
     ///
-    /// User focuses Leaf(40) and closes it. Pre-cycle-602:
+    /// User focuses Leaf(40) and closes it. Before the fix:
     /// `tab.root.first_leaf()` returns 10 (the leftmost of the WHOLE
     /// tree). Expected: focus moves to Leaf(30) — the immediate
     /// neighbor that took 40's slot in the deepest split.
@@ -3808,11 +3806,12 @@ mod node_tests {
         assert_eq!(
             m.tabs[0].focus, 30,
             "focus must move to the *nearest neighbor* (30), not jump back \
-             to the leftmost-leaf-of-the-tab (10) — that's the cycle-602 bug"
+             to the leftmost-leaf-of-the-tab (10) — that's the \
+             focus-jumped-to-leftmost-leaf bug"
         );
     }
 
-    /// Cycle 912 (audit): `exit-action = hold` survival. Before the fix `reap`
+    /// `exit-action = hold` survival. Before the fix `reap`
     /// removed any child-exited pane, so Hold behaved like Close. `is_reapable`
     /// now keeps a held child-exited pane until it's explicitly closed.
     #[test]
@@ -3822,7 +3821,7 @@ mod node_tests {
         assert!(!is_reapable(false, false, false));
         // Default (Close): child exited, not held -> reaped.
         assert!(is_reapable(false, false, true));
-        // Hold: child exited but held -> NOT reaped (the cycle-912 fix).
+        // Hold: child exited but held -> NOT reaped (the fix above).
         assert!(!is_reapable(false, true, true));
         // Explicit close (ClosePane / Restart set `closed`) always reaps, even
         // a held pane — so the user can still dismiss a held dead shell.
@@ -3830,16 +3829,17 @@ mod node_tests {
         assert!(is_reapable(true, false, false));
     }
 
-    /// Cycle 603: companion to cycle 602's close-focused fix —
+    /// Companion to the close_focused neighbor-promotion fix —
     /// the PTY-died-while-focused path through `reap_tabs` had
     /// the same `tab.root.first_leaf()` anti-pattern. When the
     /// user runs `exit` in the focused pane (or its process
     /// crashes), focus should land on the immediate neighbor,
     /// not jump back to the leftmost leaf of the whole tab.
     ///
-    /// Same 4-leaf tree as cycle 602's test: focus = 40, reap
-    /// dead leaf 40. Pre-cycle-603: focus = 10 (leftmost). Post-
-    /// fix: focus = 30 (the immediate neighbor of 40).
+    /// Same 4-leaf tree as
+    /// `close_focused_picks_nearest_neighbor_not_leftmost_root`'s
+    /// test: focus = 40, reap dead leaf 40. Before the fix: focus = 10
+    /// (leftmost). Post-fix: focus = 30 (the immediate neighbor of 40).
     #[test]
     fn reap_tabs_promotes_neighbor_when_focused_pane_dies() {
         let mut tabs = vec![Tab {
@@ -3873,11 +3873,12 @@ mod node_tests {
         assert_eq!(
             tabs[0].focus, 30,
             "focus must move to the *nearest neighbor* (30), not jump back \
-             to the leftmost-leaf-of-the-tab (10) — that's the cycle-603 bug"
+             to the leftmost-leaf-of-the-tab (10) — that's the \
+             focus-jumped-to-leftmost-leaf bug"
         );
     }
 
-    /// Cycle 603 part-B: the EXISTING `reap_tabs` match arm
+    /// The EXISTING `reap_tabs` match arm
     /// conflated `Err(None)` (tab is empty) with `Err(Some(sibling))`
     /// (focused leaf was a direct child of root and the sibling
     /// was promoted). For a 2-pane tab where one pane's PTY exits,
@@ -3885,7 +3886,7 @@ mod node_tests {
     /// the pre-fix `Err(_) => tabs.remove(ti)` arm then deleted
     /// the WHOLE tab, losing the surviving sibling along with it.
     ///
-    /// Latent bug surfaced by cycle 603's broader audit: any
+    /// Latent bug surfaced by the broader audit of `reap_tabs`: any
     /// 2-pane tab + `exit` in either pane = both panes vanish.
     /// Reachable in production via the `child_exited()` check in
     /// `Mux::reap`.
@@ -3920,11 +3921,11 @@ mod node_tests {
         assert_eq!(tabs[0].focus, 10);
     }
 
-    /// Cycle 603 negative-case: if the dying pane is NOT the
+    /// Negative case: if the dying pane is NOT the
     /// focused one, focus must stay put — the existing
     /// `contains(focus)` guard already covers this, so this test
-    /// catches a regression where the cycle-603 neighbor-capture
-    /// accidentally triggers for non-focused dyings.
+    /// catches a regression where the neighbor-capture logic in
+    /// `reap_tabs` accidentally triggers for non-focused dyings.
     #[test]
     fn reap_tabs_keeps_focus_when_dying_pane_is_not_focused() {
         let mut tabs = vec![Tab {
@@ -3950,7 +3951,7 @@ mod node_tests {
         );
     }
 
-    /// Cycle 602: companion to the test above. The `neighbor_of`
+    /// Companion to the test above. The `neighbor_of`
     /// helper drives the focus-restoration. Asserts the contract
     /// directly so a future refactor of `close_focused` that
     /// stops calling `neighbor_of` (or breaks the helper) fails
@@ -4061,7 +4062,7 @@ mod node_tests {
 
     #[test]
     fn classify_tab_activity_transitions_to_silent_after_threshold() {
-        // Cycle 252: Output → Silent transition once the last unseen
+        // Output → Silent transition once the last unseen
         // output is older than the silence threshold. The test fakes
         // a clock by passing `now` explicitly — same trick the
         // primary classifier test uses, keeping the function pure.
@@ -4148,7 +4149,7 @@ mod node_tests {
 
     #[test]
     fn closed_tab_ring_bounded_and_lifo() {
-        // Cycle 247: snapshot ring is bounded at `CLOSED_TAB_RING_CAP`
+        // The snapshot ring is bounded at `CLOSED_TAB_RING_CAP`
         // and pops LIFO (most-recent first). Builds a fake ring
         // directly so we don't need to spawn real PTYs.
         let mut m = Mux::new();
@@ -4180,7 +4181,7 @@ mod node_tests {
 
     #[test]
     fn reap_tabs_keeps_active_pointed_at_the_same_tab() {
-        // Cycle-120 contract. `reap` used to handle only the "active
+        // `reap` used to handle only the "active
         // tab was the last one and the list shrunk" case via the
         // trailing clamp, missing the much more common "a tab BEFORE
         // active died" case which silently shifted what `active`
@@ -4199,7 +4200,7 @@ mod node_tests {
                 bell: false,
             }
         }
-        // Scenario 1 (the cycle-120 bug): focused on the middle tab
+        // Scenario 1 (the active-index-drift bug described above): focused on the middle tab
         // (B); the leftmost tab (A) dies. Pre-fix: active stayed 1
         // and now indexed C — focus silently jumped past B. Post-
         // fix: active decrements to 0 so it still points at B.
@@ -4256,7 +4257,7 @@ mod node_tests {
 
     #[test]
     fn close_window_drops_every_tab_and_pane() {
-        // Cycle 113: close_window is *not* an alias for close_tab.
+        // close_window is *not* an alias for close_tab.
         // Build a multi-tab, multi-pane mux and verify everything is
         // gone after close_window, including the active index reset.
         let mut m = Mux::new();
@@ -4291,10 +4292,10 @@ mod node_tests {
 
     #[test]
     fn insert_split_exits_zoom_and_focuses_new_pane() {
-        // Cycle-130 contract. With a single-leaf tab zoomed (one pane
+        // With a single-leaf tab zoomed (one pane
         // visible), splitting should produce a 2-leaf tab, focus the
         // new pane, and exit zoom so the user sees both halves —
-        // matching tmux / WezTerm. Pre-cycle, zoom stayed on and the
+        // matching tmux / WezTerm. Before this fix, zoom stayed on and the
         // old half silently hid.
         let mut tab = Tab {
             root: Node::Leaf(1),
@@ -4328,7 +4329,7 @@ mod node_tests {
         assert_eq!(tab.focus, 2);
     }
 
-    /// Cycle 919 (audit L5): the cycle-917 stale-focus retry. When `tab.focus`
+    /// The stale-focus retry. When `tab.focus`
     /// points at a leaf NOT in the tree (a focus-desync), `split_leaf` no-ops on
     /// the stale id; `insert_split` must repair focus to `first_leaf()`, retry,
     /// graft the new pane, and return true — instead of the old silent no-op that
@@ -4360,7 +4361,7 @@ mod node_tests {
         );
     }
 
-    /// Cycle 919 (audit L5) drift guard: every split caller that may graft a
+    /// Drift guard: every split caller that may graft a
     /// freshly-spawned pane must REAP it (`self.panes.remove(&new_id)`) if the
     /// graft fails, instead of leaking the PTY/child. There are three such
     /// callers (`split`, `split_with`, `duplicate_focused_pane`); `>= 3` lets a
@@ -4402,7 +4403,7 @@ mod node_tests {
 
     #[test]
     fn serialize_tab_handles_out_of_range_idx() {
-        // Cycle 397 drift guard. Out-of-range index returns
+        // Drift guard. Out-of-range index returns
         // None without panic.
         let m = Mux::new();
         assert!(m.serialize_tab(0).is_none());
@@ -4411,14 +4412,14 @@ mod node_tests {
 
     #[test]
     fn mux_new_starts_with_broadcast_off() {
-        // Cycle 560 drift guard. A fresh Mux MUST start with
-        // broadcast disabled. The cycle-357 bug seeded broadcast=true
+        // Drift guard. A fresh Mux MUST start with
+        // broadcast disabled. An earlier bug seeded broadcast=true
         // from `broadcast_default = group` (the default), so every
         // kettle window started broadcasting input across all panes
         // in the active tab — users typing in one pane saw the
         // input mirrored everywhere.
         //
-        // The fix (cycle 560) removed the bad seeding in App::new;
+        // The fix removed the bad seeding in App::new;
         // this guard pins the Mux::new contract so a future App-
         // side re-introduction of broadcast-on-startup gets caught
         // by the App-side construction path being out of sync with
@@ -4435,7 +4436,7 @@ mod node_tests {
 
     #[test]
     fn extract_and_insert_tab_roundtrip() {
-        // Cycle 398 drift guard. extract_tab → insert_tab
+        // Drift guard. extract_tab → insert_tab
         // reproduces the same tab + the active idx tracks
         // correctly across the operation.
         let mut m = Mux::new();

@@ -501,7 +501,7 @@ impl Extractor {
         let result = match mode {
             Mode::Dcs => {
                 // Sixel: params then 'q' then data.
-                // Cycle 916 (file-by-file audit): a Sixel DCS is `P1;P2;P3 q
+                // A Sixel DCS is `P1;P2;P3 q
                 // <data>` — the bytes before `q` are only digits / `;`. Requiring
                 // that prefix shape stops other DCS strings whose body contains a
                 // `q` (DECRQSS `$q…`, XTGETTCAP `+q…`) from being swallowed as
@@ -594,7 +594,7 @@ impl Extractor {
                 // ASCII prefix) and only allocate the owned String on a match.
                 // Every other OSC — titles, colors, OSC 8 hyperlinks, OSC 52,
                 // OSC 104 — reaches this branch and would otherwise heap-alloc a
-                // full String just to fail `starts_with` (cycle 844, audit).
+                // full String just to fail `starts_with`.
                 if seq.starts_with(b"1337;File=") {
                     std::str::from_utf8(&seq)
                         .ok()

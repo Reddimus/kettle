@@ -94,7 +94,7 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
 /// A cached GPU texture for one decoded image, plus a clone of the `Arc`
 /// whose pointer is the cache key.
 ///
-/// Cycle 807 (audit, ABA fix): the cache key is `Arc::as_ptr(&img.rgba)` —
+/// ABA fix: the cache key is `Arc::as_ptr(&img.rgba)` —
 /// the heap address of the pixel buffer. Holding an `Arc` clone here **pins
 /// that address** for exactly as long as the entry lives in the cache, so a
 /// dropped-then-reallocated image can't land on a still-cached key and bind
@@ -345,7 +345,7 @@ impl ImagePipeline {
         queue: &wgpu::Queue,
         img: &ImageData,
     ) -> Option<usize> {
-        // Cycle 813 (audit) defense-in-depth: never hand wgpu a texture larger
+        // Defense-in-depth: never hand wgpu a texture larger
         // than the device supports — that's a validation error wgpu's default
         // (no error-scope) handler turns into a panic, and panic=abort makes it
         // a whole-process abort. `ImageData::new` already caps dims at
@@ -436,7 +436,7 @@ impl ImagePipeline {
             ],
         });
         // Store an `Arc` clone alongside the bind group so the keyed buffer
-        // address stays pinned while cached (cycle 807 ABA guard — see
+        // address stays pinned while cached (ABA guard — see
         // `CachedTexture`).
         self.cache.insert(
             key,
@@ -501,7 +501,7 @@ impl ImagePipeline {
         for (i, item) in items.iter().take(item_count).enumerate() {
             // Push the instance for every item so buffer slot `i` stays aligned
             // with the enumerate index stored in `draws`; only record a draw for
-            // images that produced a texture (cycle 813: an oversized image is
+            // images that produced a texture (an oversized image is
             // skipped rather than aborting the renderer).
             let uv = source_uv(&item.image, item.source_rect);
             let (uv_origin, uv_size) = uv.unwrap_or(([0.0; 2], [0.0; 2]));
@@ -555,7 +555,7 @@ impl ImagePipeline {
 mod aba_guard_tests {
     use kettle_core::{ImageData, ImageSourceRect};
 
-    /// Cycle 807 drift guard (audit, ABA fix). The image cache keys textures
+    /// Drift guard (ABA fix). The image cache keys textures
     /// by the rgba `Arc`'s raw pointer; it MUST hold an `Arc` clone
     /// (`CachedTexture._rgba`) to pin that address while the entry is cached,
     /// or a dropped-then-reallocated image can collide on a stale key and draw

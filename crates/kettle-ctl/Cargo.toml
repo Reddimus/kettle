@@ -6,7 +6,7 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 authors.workspace = true
-# Cycle 925 (agent-first A2): the control-plane protocol + transport + client,
+# Agent-first (A2): the control-plane protocol + transport + client,
 # isolated in a UI-free leaf crate. The GUI App hosts the server (kettle-ui),
 # the bin hosts the `kettle ctl` client + `kettle mcp` bridge — but the wire
 # protocol, the platform transport (Unix socket / Windows named pipe), the
@@ -25,7 +25,7 @@ serde = { workspace = true }
 serde_json = "1"
 
 [target.'cfg(unix)'.dependencies]
-# Multi-window cycle (Peacock presence): pid-liveness via kill(pid, 0) for
+# Multi-window (Peacock presence): pid-liveness via kill(pid, 0) for
 # stale-entry cleanup. Already in the workspace graph (kettle-ui).
 libc = "0.2"
 
@@ -42,7 +42,7 @@ windows-sys = { version = "0.61", features = [
     "Win32_Storage_FileSystem",
     "Win32_Security",
     "Win32_Security_Authorization",
-    # Multi-window cycle (Peacock presence): pid-liveness via OpenProcess +
+    # Multi-window (Peacock presence): pid-liveness via OpenProcess +
     # GetExitCodeProcess for stale-entry cleanup.
     "Win32_System_Threading",
 ] }

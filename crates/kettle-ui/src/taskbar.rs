@@ -1,4 +1,4 @@
-//! Cycle 745: OS taskbar progress indicator driven by OSC 9;4
+//! OS taskbar progress indicator driven by OSC 9;4
 //! (`kettle_core::Progress`, surfaced by `Terminal::progress`). PowerShell 7's
 //! `Write-Progress` (with `$PSStyle.Progress.UseOSCIndicator = $true`) and
 //! `winget` emit the sequence; this mirrors Windows Terminal by reflecting the
@@ -39,7 +39,7 @@ impl Taskbar {
     }
 
     /// Clear any outstanding OS attention request (the taskbar-button flash)
-    /// on `window`. Cycle 869: winit's `request_user_attention(None)` does not
+    /// on `window`. winit's `request_user_attention(None)` does not
     /// reliably stop the Windows 11 taskbar flash once it's started, so on
     /// Windows this issues `FlashWindowEx(FLASHW_STOP)` directly. No-op on
     /// other platforms (the winit clear handles those). Best-effort.
@@ -201,7 +201,7 @@ mod imp {
         }
 
         /// No taskbar-progress API is wired up off Windows yet (a macOS dock
-        /// badge could be added via objc2 in a later cycle).
+        /// badge could be added via objc2 as a follow-up).
         pub fn set(&mut self, _window: &Window, _progress: Option<Progress>) {}
 
         /// No taskbar attention API off Windows; the winit

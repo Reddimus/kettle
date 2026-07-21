@@ -99,14 +99,14 @@ pub struct LinkRect {
     pub hover: bool,
 }
 
-// Cycle 721 (2026-05-23): named constants for the right-click
-// context-menu chrome. Pre-721 these magic numbers (12.0 row-pad,
-// 8.0 sep-h, 40.0 horiz-pad, 180.0 min-w, 80.0 surface-breathing)
-// were duplicated across 16 sites in `kettle-render/src/lib.rs` +
-// `kettle-ui/src/app.rs`; the duplication made the cycle-682 +
-// cycle-714 layout-math changes a 16-line search-and-replace
-// instead of a 1-line edit. Re-exported so `kettle-ui` can pull
-// them in via `use kettle_render::menu;` instead of redeclaring.
+// Named constants for the right-click context-menu chrome. These
+// magic numbers (12.0 row-pad, 8.0 sep-h, 40.0 horiz-pad, 180.0
+// min-w, 80.0 surface-breathing) used to be duplicated across 16
+// sites in `kettle-render/src/lib.rs` + `kettle-ui/src/app.rs`; the
+// duplication turned earlier layout-math changes into a 16-line
+// search-and-replace instead of a 1-line edit. Re-exported so
+// `kettle-ui` can pull them in via `use kettle_render::menu;`
+// instead of redeclaring.
 pub mod menu {
     /// Vertical padding inside each context-menu row. Cell-height +
     /// MENU_ROW_PAD = total row height (~28-32 px on default cell
@@ -123,7 +123,7 @@ pub mod menu {
     /// longest label is tiny.
     pub const MIN_W: f32 = 180.0;
     /// Top + bottom breathing room reserved when clamping the panel
-    /// height to the surface (cycle 714 scrollable submenus). Keeps
+    /// height to the surface (for scrollable submenus). Keeps
     /// the menu from kissing the window edge.
     pub const PANEL_BREATHING: f32 = 80.0;
 }
@@ -152,13 +152,13 @@ pub struct ContextMenuRow {
     /// gives the user a sense of "this is an option that's not
     /// available right now," but not selectable.
     pub enabled: bool,
-    /// Dropdown-parity cycle: a right-aligned, dimmed shortcut hint
+    /// Dropdown-parity: a right-aligned, dimmed shortcut hint
     /// (e.g. `Ctrl+Shift+1`). Empty = no hint. The App computes it from the
     /// LIVE keybind map so user rebinds show their actual chord.
     pub hint: String,
 }
 
-/// Dropdown-parity cycle: a menu row's character budget — the label plus
+/// Dropdown-parity: a menu row's character budget — the label plus
 /// its right-aligned shortcut hint (2 spacer columns between them). One
 /// formula shared by the renderer's shape + draw passes; the App's
 /// anchor-clamp and hit-test twins mirror it.
@@ -195,13 +195,13 @@ pub struct ContextMenu {
     /// points at an enabled, non-separator row when the menu is
     /// non-empty.
     pub highlight: usize,
-    /// Cycle 714 (Terminator menu UX, C5): index of the first row
-    /// the renderer should paint. Rows `0..scroll_offset` are
-    /// scrolled off-panel; the renderer also stops drawing when
-    /// the accumulated row height exceeds `panel_h_clamped`. Zero
-    /// means "show from the top" (the pre-cycle-714 default).
+    /// Index of the first row the renderer should paint (Terminator
+    /// menu UX parity). Rows `0..scroll_offset` are scrolled
+    /// off-panel; the renderer also stops drawing when the
+    /// accumulated row height exceeds `panel_h_clamped`. Zero means
+    /// "show from the top" (the default before scrollable submenus).
     pub scroll_offset: usize,
-    /// Cycle 714. Panel height after the surface clamp (App-side
+    /// Panel height after the surface clamp (App-side
     /// `context_menu_geometry` already applies the clamp); the
     /// renderer reuses it to decide which rows are visible + to
     /// position the ▲/▼ arrows. Zero means "no clamp", in which
@@ -242,14 +242,14 @@ pub struct Overlay {
     pub palette_query: Option<String>,
     /// The ranked command labels (selected one marked) for the palette.
     pub palette_hint: String,
-    /// Cycle 708 (Terminator parity, `layoutlauncher.py`):
-    /// `Some(typed)` while the layout picker is open. Same UX
-    /// surface as the command palette but the hint string lists
-    /// layout names from `Session::list_layouts`.
+    /// Terminator parity (`layoutlauncher.py`): `Some(typed)` while
+    /// the layout picker is open. Same UX surface as the command
+    /// palette but the hint string lists layout names from
+    /// `Session::list_layouts`.
     pub layout_picker_query: Option<String>,
     pub layout_picker_hint: String,
-    /// Cycle 372 (Terminator parity, edit-title overlay UX): the
-    /// in-progress title-edit text + a scope label and chrome rect.
+    /// Terminator parity (edit-title overlay UX): the in-progress
+    /// title-edit text + a scope label and chrome rect.
     /// `None` when no edit is in progress.
     pub edit_title: Option<TitleEditOverlay>,
     /// Window has keyboard focus. Terminal cursors are suppressed entirely
@@ -269,31 +269,31 @@ pub struct Overlay {
     /// top of everything else so an overlapping pane border doesn't
     /// occlude the menu.
     pub context_menu: Option<ContextMenu>,
-    /// Cycle 300 vi-mode cursor (sub-cycle 3 of 4). `Some((row,col))`
-    /// while the user is in vi-mode; the renderer paints a 1-cell
-    /// outlined block at that grid position in the focused pane.
-    /// Different chrome from the terminal cursor (block vs outline)
-    /// so the user can tell the two modes apart at a glance.
+    /// Vi-mode cursor. `Some((row,col))` while the user is in
+    /// vi-mode; the renderer paints a 1-cell outlined block at that
+    /// grid position in the focused pane. Different chrome from the
+    /// terminal cursor (block vs outline) so the user can tell the
+    /// two modes apart at a glance.
     pub vi_cursor: Option<(usize, usize)>,
-    /// Cycle 301 vi-mode visual selection (sub-cycle 4). `Some` when
-    /// the user has pressed `v` to start a selection. The renderer
+    /// Vi-mode visual selection. `Some` when the user has pressed
+    /// `v` to start a selection. The renderer
     /// highlights cells from `vi_visual_anchor` to `vi_cursor`
     /// (inclusive both ends) using theme.selection_background.
     pub vi_visual_anchor: Option<(usize, usize)>,
-    /// Cycle 660 (sub-cycle 3 of [`TERMINATOR-CONFIRM-DIALOG-DESIGN.md`](
-    /// ../../../docs/TERMINATOR-CONFIRM-DIALOG-DESIGN.md)): when
+    /// Phase 3 of [`TERMINATOR-CONFIRM-DIALOG-DESIGN.md`](
+    /// ../../../docs/TERMINATOR-CONFIRM-DIALOG-DESIGN.md): when
     /// `Some`, render a centered modal dialog over a dimming
     /// backdrop. The renderer paints the prompt + button row;
     /// the button at `focus_idx` gets the accent-border treatment.
     pub confirm_dialog: Option<ConfirmDialogOverlay>,
-    /// Cycle 756: `Some` while the in-app settings overlay is open. Painted
+    /// `Some` while the in-app settings overlay is open. Painted
     /// centered, above panes but below the confirm dialog.
     pub settings: Option<SettingsOverlay>,
     /// v2.20.0 (Ghostty `resize-overlay` parity): `Some((cols, rows))` while
     /// the transient size chip should paint (the app owns the timing; the
     /// renderer just draws a centered `cols×rows` chip above everything).
     pub resize_overlay: Option<(u16, u16)>,
-    /// Cycle 794: `Some((tag, url))` while the "a newer kettle release is
+    /// `Some((tag, url))` while the "a newer kettle release is
     /// available" banner is showing. Rendered as a passive, lowest-priority
     /// bottom bar — any real modal (search/palette/…) takes the bar instead,
     /// and it returns when they close. Dismissed with Esc, opened with Enter.
@@ -305,7 +305,7 @@ fn cursor_focus_gate(window_focused: bool, terminal_requests_cursor: bool) -> bo
     window_focused && terminal_requests_cursor
 }
 
-/// Cycle 660: renderer-side projection of `App::confirm_dialog`.
+/// Renderer-side projection of `App::confirm_dialog`.
 /// Stripped of dispatch state — just the bits needed to paint.
 #[derive(Debug, Clone)]
 pub struct ConfirmDialogOverlay {
@@ -317,7 +317,7 @@ pub struct ConfirmDialogOverlay {
     pub focus_idx: usize,
 }
 
-/// Cycle 660: paint-side button shape. `destructive: true` gets
+/// Paint-side button shape. `destructive: true` gets
 /// the red-accent treatment (Close / Delete buttons).
 #[derive(Debug, Clone)]
 pub struct ConfirmDialogButton {
@@ -325,7 +325,7 @@ pub struct ConfirmDialogButton {
     pub destructive: bool,
 }
 
-/// Cycle 756: renderer-side projection of `App::settings_nav` + the resolved
+/// Renderer-side projection of `App::settings_nav` + the resolved
 /// field values. The UI computes labels/values (reading `Config`); the renderer
 /// just paints a centered panel — a row of category tabs, then label/value
 /// rows for the active category, with the focused row highlighted.
@@ -348,7 +348,7 @@ pub struct SettingsOverlay {
     pub footer_note: Option<String>,
 }
 
-/// Cycle 756: one settings row — a human label and its current value string.
+/// One settings row — a human label and its current value string.
 #[derive(Debug, Clone)]
 pub struct SettingsRow {
     pub label: String,
@@ -364,8 +364,8 @@ pub type Rect4 = (f32, f32, f32, f32);
 
 /// Activity state of a tab — `Normal` draws no indicator, `Output`
 /// draws a small cyan dot, `Bell` draws a yellow dot. Terminator-
-/// parity affordance ("you've got new output in an inactive tab")
-/// cycle 246. Renderer-side enum so the UI doesn't need to leak its
+/// parity affordance ("you've got new output in an inactive tab").
+/// Renderer-side enum so the UI doesn't need to leak its
 /// `kettle_ui::mux::TabActivity` type across crate boundaries.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum TabActivity {
@@ -373,7 +373,7 @@ pub enum TabActivity {
     Normal,
     Output,
     Bell,
-    /// Cycle 252: inactive tab had unseen output but went quiet for
+    /// Inactive tab had unseen output but went quiet for
     /// at least `tab-silence-threshold-ms`. Terminator's "Silence
     /// Watcher" affordance — useful for tail-following long jobs
     /// (`tail -f`, build watchers) where the *absence* of output is
@@ -399,7 +399,7 @@ pub struct TabSeg {
     /// fitted with the older `fit_tab_title` middle-ellipsis path.
     pub path: Option<String>,
     pub active: bool,
-    /// Inactive-tab activity (cycle 246). Always `Normal` on the
+    /// Inactive-tab activity. Always `Normal` on the
     /// active segment so the focused-tab accent isn't doubled-up by
     /// a redundant dot.
     pub activity: TabActivity,
@@ -407,12 +407,12 @@ pub struct TabSeg {
 
 /// The tab bar geometry — computed once in the UI, used for both drawing
 /// (here) and click hit-testing (app), so there is a single source of truth.
-/// Cycle 296: thin status-bar strip at the top or bottom of the
+/// Thin status-bar strip at the top or bottom of the
 /// surface. Disabled by default; when on, the App sets `height` > 0
 /// and supplies a pre-formatted single-line string.
 ///
 /// Content is a free-form `String` so the App can compose whatever
-/// it wants (the cycle-295 default: "HH:MM:SS · theme · pane title").
+/// it wants (the default: "HH:MM:SS · theme · pane title").
 /// Renderer just draws background + text; layout / refresh / content
 /// composition all live in the App.
 pub struct StatusBar {
@@ -443,12 +443,12 @@ pub struct TabBar {
     pub segments: Vec<TabSeg>,
     /// The trailing "new tab" (+) button rect.
     pub new_tab: Rect4,
-    /// Cycle 805: the `▾` dropdown-arrow rect, immediately LEFT of `new_tab`.
+    /// The `▾` dropdown-arrow rect, immediately LEFT of `new_tab`.
     /// Clicking it opens the new-tab shell chooser. Zero-area `(0,0,0,0)` when
     /// the dropdown is disabled (vertical tab bars) — the renderer then draws a
     /// plain `+` and the hit-test skips the arrow branch.
     pub new_tab_menu: Rect4,
-    /// Cycle 178: visual indicator that broadcast / group-input mode is
+    /// Visual indicator that broadcast / group-input mode is
     /// on. Without this, the user can forget broadcast is enabled and
     /// type to one pane expecting it to stay local — every keystroke
     /// goes to every pane in the active tab silently. The renderer
@@ -462,7 +462,7 @@ pub struct TabBar {
     /// background only appears on hover. Computed in the UI's cursor-
     /// sync path so the renderer has zero geometry knowledge.
     pub hovered_close_idx: Option<usize>,
-    /// Cycle 255 ghost-drag indicator: `Some(cursor_x)` while a
+    /// Ghost-drag indicator: `Some(cursor_x)` while a
     /// left-button drag is in progress in the tab bar. The renderer
     /// draws a translucent overlay copy of the dragged (active) tab
     /// segment centered at `cursor_x`, so the user sees what's being
@@ -519,15 +519,15 @@ pub struct PaneView<'a> {
     pub focused: bool,
     /// Decoded images placed in this pane (Sixel / kitty / iTerm2).
     ///
-    /// Borrowed (cycle 852, audit): the backing `Vec` lives in the per-frame
+    /// Borrowed: the backing `Vec` lives in the per-frame
     /// `metas` collection for the whole frame — exactly like `snap` borrows
     /// the pooled snapshot — so the renderer reads it without a second
     /// per-pane clone.
     pub images: &'a [kettle_core::Placement],
-    /// Cycle 382 (Terminator parity, per-pane-titlebar Bucket-D
-    /// sub-cycle 3 follow-up): the pane's title — rendered into
-    /// the cycle-379 titlebar background quad when
-    /// cfg.show_titlebar = true. Borrowed from `metas` (cycle 852).
+    /// Terminator parity, per-pane-titlebar: the pane's title —
+    /// rendered into the titlebar background quad (see
+    /// `pick_titlebar_bg`) when cfg.show_titlebar = true. Borrowed
+    /// from `metas`.
     pub title: &'a str,
     /// Prefix badges that belong immediately before the semantic title, such as
     /// `[RO] ` and the configured agent badge. Kept separate from `title` so
@@ -537,20 +537,19 @@ pub struct PaneView<'a> {
     /// prove the pane title is a placeholder or an already-truncated cwd
     /// suffix. Home-abbreviated by the caller.
     pub title_path: Option<&'a str>,
-    /// Cycle 386 (Terminator parity, per-pane-titlebar Bucket-D
-    /// sub-cycle 6): pane terminal size in cols × rows. Appended
-    /// to the titlebar title text as `WxH` unless
-    /// cfg.title_hide_sizetext is true.
+    /// Terminator parity, per-pane-titlebar: pane terminal size in
+    /// cols × rows. Appended to the titlebar title text as `WxH`
+    /// unless cfg.title_hide_sizetext is true.
     pub size_cols: u16,
     pub size_rows: u16,
-    /// Cycle 386 (Terminator parity, sub-cycle 6): bell-state
-    /// indicator for the pane. When true and cfg.icon_bell is
-    /// also true, a small dot renders in the titlebar.
+    /// Terminator parity: bell-state indicator for the pane. When
+    /// true and cfg.icon_bell is also true, a small dot renders in
+    /// the titlebar.
     pub bell: bool,
-    /// Cycle 406 (Terminator parity, titlebar Bucket-D sub-cycle 8):
-    /// optional named broadcast group. When `Some(name)`, the
-    /// titlebar prefixes `[name]` (group label in brackets)
-    /// before the pane title. Borrowed from `metas` (cycle 852).
+    /// Terminator parity, titlebar: optional named broadcast group.
+    /// When `Some(name)`, the titlebar prefixes `[name]` (group
+    /// label in brackets) before the pane title. Borrowed from
+    /// `metas`.
     pub group_name: Option<&'a str>,
 }
 
@@ -804,14 +803,14 @@ pub struct Renderer {
     /// Pane id currently occupying each per-pane buffer/cache slot.
     pane_buffer_ids: Vec<Option<u64>>,
     pane_buffers: Vec<TextBuffer>,
-    /// Cycle 827 (audit): pooled scratch for `build_pane`'s per-cell style runs,
+    /// Pooled scratch for `build_pane`'s per-cell style runs,
     /// reused across frames. Both the Vec backing store AND each run's `String`
     /// buffer are recycled (the builder writes into slots by index rather than
     /// pushing fresh `String`s), so a busy colored pane no longer mints dozens–
     /// hundreds of `String` allocations on the 60 fps render hot path. Same
     /// high-water-mark pooling as `pane_buffers`.
     span_scratch: Vec<(String, Rgb, bool, bool)>,
-    /// Cycle 827: pooled scratch for `build_pane`'s line-break indices.
+    /// Pooled scratch for `build_pane`'s line-break indices.
     span_breaks_scratch: Vec<usize>,
     /// v2.20.0 P1 (perf): per-pane, per-row content keys for the line-level
     /// shaping cache. `build_pane` hashes each grid row's style runs (text,
@@ -888,15 +887,15 @@ pub struct Renderer {
     /// Input-method preedit buffer and equality gate.
     ime_buffer: TextBuffer,
     ime_text: String,
-    /// Cycle 853 (audit): pooled scratch for the per-frame cell/UI quad list
+    /// Pooled scratch for the per-frame cell/UI quad list
     /// (`render_frame_with_status` filled a fresh `Vec` of `panes*16+256`
     /// `QuadInstance`s every frame). Taken + cleared at the top of the frame,
     /// returned after the GPU upload — same high-water pooling as `span_scratch`.
     quad_scratch: Vec<QuadInstance>,
-    /// Cycle 382 (Terminator parity, per-pane-titlebar Bucket-D
-    /// sub-cycle 3): one TextBuffer per pane for the title text
-    /// drawn in the cycle-379 titlebar quad. Reused across redraws
-    /// to amortize allocation; trimmed/grown alongside pane_buffers.
+    /// Terminator parity, per-pane-titlebar: one TextBuffer per pane
+    /// for the title text drawn in the titlebar quad (see
+    /// `pick_titlebar_bg`). Reused across redraws to amortize
+    /// allocation; trimmed/grown alongside pane_buffers.
     pane_titlebar_buffers: Vec<TextBuffer>,
     tab_buffers: Vec<TextBuffer>,
     hint_buffers: Vec<TextBuffer>,
@@ -904,15 +903,15 @@ pub struct Renderer {
     /// across openings to amortize allocation; trimmed when the row
     /// count shrinks for a smaller menu.
     context_menu_buffers: Vec<TextBuffer>,
-    /// Dropdown-parity cycle: one buffer per row's right-aligned shortcut
+    /// Dropdown-parity: one buffer per row's right-aligned shortcut
     /// hint (empty-hint rows shape nothing). Pooled like its sibling.
     context_menu_hint_buffers: Vec<TextBuffer>,
-    /// Cycle 756: one text buffer per display line of the settings overlay
+    /// One text buffer per display line of the settings overlay
     /// (title, category tabs, field rows, footer). Grown + truncated like the
     /// context-menu pool.
     settings_buffers: Vec<TextBuffer>,
     tabbar_buffer: TextBuffer,
-    /// Cycle 805: the `▾` new-tab dropdown-arrow glyph, in its own buffer
+    /// The `▾` new-tab dropdown-arrow glyph, in its own buffer
     /// (drawn left of `+`) so it lands precisely in `new_tab_menu` and the `+`
     /// stays put in `new_tab`. Unused when the dropdown is disabled.
     new_tab_arrow_buffer: TextBuffer,
@@ -930,7 +929,7 @@ pub struct Renderer {
     /// One buffer, N positions via per-tab `TextArea` instances.
     tab_close_buffer: TextBuffer,
     search_buffer: TextBuffer,
-    /// Cycle 296: status-bar text. Single line, reused every frame
+    /// Status-bar text. Single line, reused every frame
     /// via `set_text` — same one-buffer pattern `tabbar_buffer` uses
     /// for tab labels. Stays at length 0 when the status bar is off.
     status_bar_buffer: TextBuffer,
@@ -942,7 +941,7 @@ pub struct Renderer {
     /// the right-click context menu's shadow / panel / border /
     /// highlight quads. Lives in its own pass so the menu's text
     /// (rendered by `menu_text_renderer` below) lands *on top of* the
-    /// panel bg rather than underneath it. Cycle 251 split this out
+    /// panel bg rather than underneath it. This was split out
     /// after v1.3.0+v1.3.1 shipped a blank menu — opaque panel-bg
     /// quad in `overlay_quads` was painted on top of the menu text
     /// (which was bundled with all other text in the single
@@ -974,18 +973,17 @@ pub struct Renderer {
     /// continuous `time` so motion is smooth-valued even though we repaint at a
     /// low fps cap.
     starfield_started: std::time::Instant,
-    /// Cycle 388 (Terminator parity, bg-image Bucket-D sub-cycles
-    /// 3+4): decoded background-image cache. Tuple of
-    /// (cfg.background_image path, decoded ImageData). Invalidated
-    /// + re-decoded when the config path changes.
-    // Cycle 892 (audit): key is `(path, blur_radius)` — keying on the path
+    /// Terminator parity, bg-image: decoded background-image cache.
+    /// Tuple of (cfg.background_image path, decoded ImageData).
+    /// Invalidated + re-decoded when the config path changes.
+    // Key is `(path, blur_radius)` — keying on the path
     // alone meant toggling `background-blur` was ignored on reload unless
     // the image path *also* changed. The value is bounded to 64 MiB per frame
     // and 128 MiB per animation; it is freed (`= None`) when config moves away from
     // `background-type = image` so a large wallpaper doesn't sit resident
     // for the rest of the session after the user turns it off.
     //
-    // Cycle 918: a FAILED decode is cached as `frames.is_empty()` (was the
+    // A FAILED decode is cached as `frames.is_empty()` (was the
     // inner `Option::None`). Caching the failed key (a) stops rendering the
     // previous wallpaper after the path changes to a broken one, and (b) stops
     // re-attempting the failing decode every frame.
@@ -993,7 +991,7 @@ pub struct Renderer {
     // for a still image — plus per-frame gaps + the playback clock origin, so
     // the render loop swaps the already-decoded frame per `bg_current_frame`.
     bg_image_cache: Option<BgImageAnim>,
-    /// Cycle 919 (audit L2): when the current bg-image (path, blur) FAILED to
+    /// When the current bg-image (path, blur) FAILED to
     /// decode, the earliest `Instant` to retry — throttling self-heal to ≥3s so
     /// a broken/corrupt path isn't re-decoded every frame. `None` once a decode
     /// succeeds (the loaded wallpaper never re-decodes) or while no bg image is
@@ -1004,14 +1002,13 @@ pub struct Renderer {
     /// `self.font_family.clone()` (needed to satisfy the borrow checker while
     /// `&mut self.font_system` is held alongside ~20 `Family::Name(&family)`
     /// reads) is a refcount bump, not a heap alloc + memcpy at 60fps. `Arc<str>`
-    /// derefs to `str`, so every `Family::Name(&family)` site is unchanged
-    /// (cycle 845, audit).
+    /// derefs to `str`, so every `Family::Name(&family)` site is unchanged.
     font_family: Arc<str>,
     font_size: f32,
     metrics: Metrics,
     pub cell_w: f32,
     pub cell_h: f32,
-    /// Cycle 636 (Terminator parity, `cell_width` / `cell_height`):
+    /// Terminator parity (`cell_width` / `cell_height`):
     /// multiplicative scale applied to the measured cell metrics.
     /// `(1.0, 1.0)` is the default — measured dimensions unchanged.
     /// `(1.0, 1.5)` would space lines 50% taller; useful for users
@@ -1021,21 +1018,21 @@ pub struct Renderer {
     pub cell_scale_w: f32,
     pub cell_scale_h: f32,
     pub scale: f32,
-    /// Multi-window cycle (Peacock): the per-window accent the App resolved
+    /// Multi-window (Peacock): the per-window accent the App resolved
     /// (theme pool slot + live dedupe across windows and processes). `None`
     /// falls back to the static `cfg.resolved_accent(theme)` — pinned hex or
     /// the theme signature. The offscreen `--screenshot` renderer never sets
     /// one, so hero renders stay cfg-governed.
     accent_override: Option<Rgb>,
-    /// Cycle 654 (sub-cycle 3 of
-    /// [`TERMINATOR-TERMINALSHOT-DESIGN.md`](../../../docs/TERMINATOR-TERMINALSHOT-DESIGN.md)):
+    /// Phase 3 of
+    /// [`TERMINATOR-TERMINALSHOT-DESIGN.md`](../../../docs/TERMINATOR-TERMINALSHOT-DESIGN.md):
     /// when `Some`, the next `render_frame` call should also do a
     /// surface-readback into a staging buffer + dispatch a PNG
     /// encode off-thread. v1 of this field is the storage only —
-    /// sub-cycle 4 wires the actual readback. `App::dispatch`
-    /// for `Action::TakeScreenshot` (cycle 640) sets this via
+    /// phase 4 wires the actual readback. `App::dispatch`
+    /// for `Action::TakeScreenshot` sets this via
     /// `set_pending_screenshot()` after computing the path via
-    /// the cycle-650 `session_screenshot_path` helper.
+    /// the `session_screenshot_path` helper.
     pub pending_screenshot: Option<ScreenshotRequest>,
     /// Lazy, single-consumer readback worker. Live surface capture must never
     /// block the winit event-loop thread: Wayland can disconnect clients that
@@ -1044,8 +1041,8 @@ pub struct Renderer {
     screenshot_worker: Option<ScreenshotWorker>,
 }
 
-/// Cycle 654: a queued screenshot request. Sub-cycle 4 of
-/// terminalshot design will consume this in `render_frame`.
+/// A queued screenshot request. Phase 4 of the terminalshot design
+/// consumes this in `render_frame`.
 #[derive(Debug, Clone)]
 pub struct ScreenshotRequest {
     /// Where to save the PNG. Caller already computed this via
@@ -1431,7 +1428,7 @@ impl Renderer {
             .copied()
             .find(|f| f.is_srgb())
             .unwrap_or(caps.formats[0]);
-        // Cycle 148: pick a real alpha-aware mode when the user wants
+        // Pick a real alpha-aware mode when the user wants
         // transparency. The previous `caps.alpha_modes[0]` just took
         // whatever the backend listed first — usually `Opaque`, which
         // ignores the alpha channel from `Color { a: ... }` on the
@@ -1455,8 +1452,8 @@ impl Renderer {
         } else {
             caps.alpha_modes[0]
         };
-        // Cycle 688 (sub-cycle 4 of TERMINATOR-TERMINALSHOT-DESIGN.md):
-        // add COPY_SRC so the cycle-654 pending_screenshot path can read
+        // Phase 4 of TERMINATOR-TERMINALSHOT-DESIGN.md: add COPY_SRC
+        // so the `pending_screenshot` path can read
         // back the live surface. Gate it on the surface's advertised caps:
         // most desktop adapters support it, but the Microsoft Remote Display
         // adapter injected in a Windows RDP session advertises only
@@ -1500,12 +1497,12 @@ impl Renderer {
         // hits the wgpu 8192px-per-side texture limit (or floods the
         // window with one giant glyph). 5.0 is below "tiny but
         // legible"; 72.0 is "billboard". The runtime setter already
-        // had this clamp (cycle 73); `Renderer::new` silently didn't,
+        // had this clamp; `Renderer::new` silently didn't,
         // so the bound was only enforced after a Ctrl+0 ResetFontSize
         // round-trip — same "downstream cache stale at startup" shape
-        // as cycle 98's font-family fix.
+        // as the `set_font_family` fix.
         let font_size = clamp_font_size(cfg.font_size);
-        // Cycle 747: physical-pixel metrics — logical font size × DPI scale.
+        // Physical-pixel metrics — logical font size × DPI scale.
         let metrics = metrics_for(font_size, scale);
         let mut measure = TextBuffer::new(&mut font_system, metrics);
         let tabbar_buffer = TextBuffer::new(&mut font_system, metrics);
@@ -1521,7 +1518,7 @@ impl Renderer {
         ime_buffer.set_wrap(Wrap::None);
         let (cell_w, cell_h) =
             measure_cell(&mut font_system, &mut measure, &cfg.font_family, metrics);
-        // Cycle 636: honor cfg.cell_width / cell_height multipliers
+        // Honor cfg.cell_width / cell_height multipliers
         // (Terminator parity). Values are pre-clamped to [0.5, 3.0]
         // at parse time so the cell can't degenerate to 0 here.
         let cell_scale_w = cfg.cell_width.max(0.01);
@@ -1652,7 +1649,7 @@ impl Renderer {
         &self.gpu
     }
 
-    /// Multi-window cycle (Peacock): set/clear this window's accent.
+    /// Multi-window (Peacock): set/clear this window's accent.
     pub fn set_accent_override(&mut self, accent: Option<Rgb>) {
         self.accent_override = accent;
     }
@@ -1667,19 +1664,18 @@ impl Renderer {
     }
 
     pub fn resize(&mut self, width: u32, height: u32) {
-        // Cycle 394 (Terminator parity, bg-image Bucket-D sub-cycle 8):
-        // explicit resize handler for the background-image render
-        // path. The cycle-388 bg-image cache stores the DECODED
-        // image (not a window-sized texture); the cycle-390 UV-mode
-        // dispatch recomputes the image rect from the current
-        // surface dims every frame via build_frame. So a resize
-        // implicitly takes effect on the next frame — no manual
-        // texture re-upload needed.
+        // Terminator parity, bg-image: explicit resize handler for
+        // the background-image render path. The `bg_image_cache`
+        // stores the DECODED image (not a window-sized texture); the
+        // background-image-mode dispatch recomputes the image rect
+        // from the current surface dims every frame via build_frame.
+        // So a resize implicitly takes effect on the next frame — no
+        // manual texture re-upload needed.
         //
-        // This comment closes the docs/TERMINATOR-BG-IMAGE-DESIGN.md
-        // sub-cycle 8 with the "implicit per-frame recompute"
-        // contract documented so a future contributor sees that
-        // the per-frame recompute IS the impl.
+        // This comment closes phase 8 of
+        // docs/TERMINATOR-BG-IMAGE-DESIGN.md with the "implicit
+        // per-frame recompute" contract documented so a future
+        // contributor sees that the per-frame recompute IS the impl.
         //
         // Floor at 1 (`surface.configure(0, …)` panics) and ceiling
         // at the device's max-texture-dimension-2d. The default wgpu
@@ -1690,8 +1686,8 @@ impl Renderer {
         // stale surface that paints nothing on the next frame. Clip
         // the surface to the device's announced limit so we still
         // render the visible top-left region cleanly even if the
-        // user has unusually large geometry. Cycle 137 sibling to
-        // cycle 119's `cap_axis_cells` (which fixed the same
+        // user has unusually large geometry. Sibling to
+        // `cap_axis_cells` (which fixed the same
         // class of bug on the `--screenshot` path).
         let max = self.gpu.device.limits().max_texture_dimension_2d.max(1);
         self.config.width = width.clamp(1, max);
@@ -1705,21 +1701,21 @@ impl Renderer {
 
     pub fn set_font_size(&mut self, size: f32) {
         self.font_size = clamp_font_size(size);
-        // Cycle 747: re-derive physical metrics at the current DPI scale so a
+        // Re-derive physical metrics at the current DPI scale so a
         // font-size change (zoom, reload) keeps HiDPI scaling applied.
         self.metrics = metrics_for(self.font_size, self.scale);
         self.remeasure_cell();
     }
 
     /// The current *logical* font size (the user-facing pt value, before the
-    /// cycle-747 DPI multiply). Zoom keybinds step this rather than
+    /// DPI multiply). Zoom keybinds step this rather than
     /// back-deriving it from the now-physical `cell_h`, which would otherwise
     /// double-apply the scale factor.
     pub fn font_size(&self) -> f32 {
         self.font_size
     }
 
-    /// Cycle 747: update the device-pixel scale factor (DPI). Wired to winit's
+    /// Update the device-pixel scale factor (DPI). Wired to winit's
     /// `ScaleFactorChanged` — fired at startup and whenever the window moves to
     /// a monitor with a different scale. Recomputes physical metrics from the
     /// unchanged *logical* `font_size` and re-measures the cell, so glyphs keep
@@ -1745,8 +1741,8 @@ impl Renderer {
     /// `reload_config` so a `font-family = …` change in the user's config
     /// actually takes effect at runtime — without this, the renderer kept
     /// the family it was constructed with forever and only the `font-size`
-    /// part of a reload was visible (silent partial-apply, same family as
-    /// the cycle-44+ "reload doesn't re-flow downstream caches" gap).
+    /// part of a reload was visible (silent partial-apply, the same
+    /// "reload doesn't re-flow downstream caches" gap class).
     pub fn set_font_family(&mut self, family: String) {
         if self.font_family.as_ref() == family.as_str() {
             return;
@@ -1764,7 +1760,7 @@ impl Renderer {
         let m = self.metrics;
         let mut measure = TextBuffer::new(&mut self.font_system, m);
         let (cw, ch) = measure_cell(&mut self.font_system, &mut measure, &family, m);
-        // Cycle 636: apply the configured cell_width/cell_height
+        // Apply the configured cell_width/cell_height
         // multipliers AFTER measurement so a font-family or font-
         // size change preserves the user's chosen scale.
         self.cell_w = cw * self.cell_scale_w.max(0.01);
@@ -1801,7 +1797,7 @@ impl Renderer {
         self.pending_screenshot.take()
     }
 
-    /// Cycle 636 (Terminator parity, `cell_width` / `cell_height`):
+    /// Terminator parity (`cell_width` / `cell_height`):
     /// update the cell-scale multipliers + re-measure. Called by the
     /// App's `reload_config` path when the user reloads with a new
     /// `cell-width` / `cell-height` value. No-op when the requested
@@ -1946,7 +1942,7 @@ impl Renderer {
         self.render_frame_with_status(panes, tabbar, cfg, overlay, &StatusBar::hidden())
     }
 
-    /// Cycle 296: extended `render_frame` variant that also draws the
+    /// Extended `render_frame` variant that also draws the
     /// status-bar strip. The bare `render_frame` shim passes a hidden
     /// status bar, so existing call sites that don't yet know about
     /// the new feature still compile.
@@ -1984,7 +1980,7 @@ impl Renderer {
         // between panes, tab-bar background) so a program-driven bg flip
         // reaches the *whole* window rather than just cells with explicit
         // `Named(Background)`. Same precedence the OSC 11 query path
-        // returns (cycle 44) — override wins, theme is fallback.
+        // returns — override wins, theme is fallback.
         let default_bg = panes
             .iter()
             .find(|p| p.focused)
@@ -2000,10 +1996,10 @@ impl Renderer {
         let sw = self.config.width as f32;
         let sh = self.config.height as f32;
 
-        // Cycle 379+382 (Terminator parity, per-pane-titlebar):
-        // hoisted alongside buffer allocation so the cycle-382
-        // text-setting block can reference it. Same condition as
-        // the cycle-379 quad render (cfg.show_titlebar && >1 pane).
+        // Terminator parity, per-pane-titlebar: hoisted alongside
+        // buffer allocation so the titlebar text-setting block below
+        // can reference it. Same condition as the titlebar quad
+        // render (see `pick_titlebar_bg`; cfg.show_titlebar && >1 pane).
         let pane_titlebar_h: f32 = if cfg.show_titlebar && panes.len() > 1 {
             ch + 6.0
         } else {
@@ -2042,7 +2038,7 @@ impl Renderer {
         while self.pane_style_keys.len() < panes.len() {
             self.pane_style_keys.push(0);
         }
-        // Cycle 382: parallel grow for per-pane titlebar buffers.
+        // Parallel grow for per-pane titlebar buffers.
         while self.pane_titlebar_buffers.len() < panes.len() {
             let b = TextBuffer::new(&mut self.font_system, metrics);
             self.pane_titlebar_buffers.push(b);
@@ -2074,7 +2070,7 @@ impl Renderer {
                 self.pane_titlebar_texts[i].clear();
             }
         }
-        // Cycle 749: release buffers for panes that have closed. The grow
+        // Release buffers for panes that have closed. The grow
         // loops above only ever extend, so without this the two vecs sat at
         // the session's high-water pane count — a 6-way split that you close
         // back to one pane left 5 idle TextBuffers (with their shaped glyph
@@ -2086,7 +2082,7 @@ impl Renderer {
         self.pane_style_keys.truncate(panes.len());
         self.pane_titlebar_buffers.truncate(panes.len());
         self.pane_titlebar_texts.truncate(panes.len());
-        // Cycle 382: write each pane's title into its titlebar
+        // Write each pane's title into its titlebar
         // buffer NOW (before the later loops borrow self
         // immutably). pane_titlebar_h was computed earlier as
         // either 0.0 or ch+6.0; only do the mutation when active.
@@ -2098,16 +2094,16 @@ impl Renderer {
                 } else {
                     pv.title
                 };
-                // Cycle 386: titlebar text = "  TITLE [WxH] [●]"
+                // Titlebar text = "  TITLE [WxH] [●]"
                 // where:
                 //   - [WxH] is shown unless cfg.title_hide_sizetext
                 //   - [●] is shown when cfg.icon_bell && pv.bell
-                // Cycle 682 (named-groups sub-cycle 6): when
+                // Named groups: when
                 //   `pane.group_name = Some("fleet")`, prepend
                 //   the group pill: "  [fleet] TITLE …".
                 //   The render-side bracket gives it a visual
                 //   weight without needing a separate quad
-                //   shape (sub-cycle 7 can promote to a real
+                //   shape (a future pass could promote it to a real
                 //   colored chip).
                 // v2.24.0: fit the label to the pane width, shedding the size
                 // text then the group tag then middle-ellipsizing the title
@@ -2145,12 +2141,12 @@ impl Renderer {
             }
         }
 
-        // Cycle 761: pre-size the per-frame quad/image vectors so the render
+        // Pre-size the per-frame quad/image vectors so the render
         // hot path doesn't repeatedly reallocate as they grow (borders +
         // per-pane chrome + cell-background quads dominate `quads`). Capacities
         // are rough upper-of-typical estimates; growth still happens for
         // outliers but the common 60fps path avoids the realloc churn.
-        // Cycle 853 (audit): reuse the pooled quad scratch (cleared, capacity
+        // Reuse the pooled quad scratch (cleared, capacity
         // retained from the prior frame) instead of allocating a fresh Vec every
         // frame. Returned to `self.quad_scratch` after the GPU upload below.
         let mut quads: Vec<QuadInstance> = std::mem::take(&mut self.quad_scratch);
@@ -2160,9 +2156,9 @@ impl Renderer {
         // context menu's bg/shadow/border/highlight sit on top of
         // every other UI element. The menu's text is rendered by
         // `menu_text_renderer` after this pass so the labels land on
-        // top of the panel bg. Cycle 251.
+        // top of the panel bg.
         //
-        // Cycle 915 (audit): the four per-frame buffers below (menu_q / over /
+        // The four per-frame buffers below (menu_q / over /
         // img_items / image-live sets) are intentionally allocated fresh each frame, unlike
         // the pooled `quad_scratch` / `span_scratch`. They are small and usually
         // near-empty (no open context menu, a handful of panes, no cell images),
@@ -2185,34 +2181,34 @@ impl Renderer {
         let mut bg_live: std::collections::HashSet<usize> = std::collections::HashSet::new();
         let mut inline_live: std::collections::HashSet<usize> = std::collections::HashSet::new();
 
-        // Cycle 388 (Terminator parity, bg-image Bucket-D sub-cycles
-        // 3+4): when cfg.background_type = Image + cfg.background_image
-        // is set, decode-once + cache + prepend a fullscreen image
-        // item BEFORE any cell-images so the wallpaper renders at the
-        // back. The cycle-381 decode_bg_image helper handles the
-        // file-not-found / decode-error paths gracefully.
+        // Terminator parity, bg-image: when cfg.background_type = Image +
+        // cfg.background_image is set, decode-once + cache + prepend a
+        // fullscreen image item BEFORE any cell-images so the wallpaper
+        // renders at the back. The `decode_bg_image_frames_with_blur`
+        // helper handles the file-not-found / decode-error paths
+        // gracefully.
         use kettle_config::BackgroundType;
         if matches!(cfg.background_type, BackgroundType::Image) && !cfg.background_image.is_empty()
         {
             let want = cfg.background_image.clone();
-            // Cycle 396: route through decode_bg_image_with_blur
+            // Route through decode_bg_image_with_blur
             // so cfg.background_blur takes effect at load time.
             // Radius 8 is a reasonable default for the on/off
-            // toggle Terminator's bool config exposes; a future
-            // sub-cycle could expose a `background_blur_radius`
+            // toggle Terminator's bool config exposes; a follow-up
+            // could expose a `background_blur_radius`
             // numeric for finer control.
             let blur_radius: u32 = if cfg.background_blur { 8 } else { 0 };
-            // Cycle 892 (audit): reload when the path OR the blur radius
+            // Reload when the path OR the blur radius
             // changes. Before, blur lived outside the cache key, so toggling
             // `background-blur` on a still-loaded image was silently ignored.
             let need_reload = match self.bg_image_cache.as_ref() {
                 None => true,
-                // Reload when the (path, blur) key changed, OR — cycle 919 (audit
-                // L2) — when the cached entry is a FAILED decode (`frames` empty)
+                // Reload when the (path, blur) key changed, OR when
+                // the cached entry is a FAILED decode (`frames` empty)
                 // and the throttle has elapsed: a transient read error / an
                 // in-place file fix self-heals, but THROTTLED (≥3s between
                 // attempts) so a broken or corrupt path is NOT re-decoded every
-                // frame (the per-frame thrash cycle 918 removed). A successful
+                // frame (avoiding the per-frame thrash this replaced). A successful
                 // decode clears the throttle, so the happy path never re-decodes.
                 Some(c) => {
                     c.path != want
@@ -2225,7 +2221,7 @@ impl Renderer {
             };
             if need_reload {
                 // v2.21.x: decode ALL frames (one for a still image; many for an
-                // animated GIF/APNG/WebP). Cycle 918: store the (path, blur) key
+                // animated GIF/APNG/WebP). Store the (path, blur) key
                 // even when decode fails (empty `frames`) so the stale wallpaper
                 // stops rendering for a now-broken path and we don't re-decode
                 // the failing file every frame.
@@ -2245,7 +2241,7 @@ impl Renderer {
                             .unzip(),
                         None => (Vec::new(), Vec::new()),
                     };
-                // Cycle 919 (audit L2): on failure, throttle the next retry; on
+                // On failure, throttle the next retry; on
                 // success, clear it so the loaded wallpaper never re-decodes.
                 self.bg_image_retry_at = if frames.is_empty() {
                     Some(std::time::Instant::now() + std::time::Duration::from_secs(3))
@@ -2288,8 +2284,8 @@ impl Renderer {
                 if cfg.chrome_background == kettle_config::ChromeBackground::Auto {
                     bg_frame_avg = Some(color::average_color(data.rgba.as_slice()));
                 }
-                // Cycle 390 (Terminator parity, bg-image Bucket-D
-                // sub-cycle 5): UV-mode variants. background-image-mode
+                // Terminator parity, bg-image: UV-mode variants.
+                // background-image-mode
                 // controls how the decoded image fills the surface.
                 //
                 //   stretch_and_fill (default): one quad covering the
@@ -2329,7 +2325,7 @@ impl Renderer {
                         }
                     }
                     "tile" => {
-                        // Cycle 825 (audit): a tiny source image (e.g. a 1×1
+                        // A tiny source image (e.g. a 1×1
                         // pixel) tiles into a huge number of CPU quads + Arc
                         // clones EVERY frame — ~8.3M on a 4K surface — hanging
                         // the render thread. Past `MAX_BG_TILES`, fall back to a
@@ -2337,7 +2333,7 @@ impl Renderer {
                         bg_img_items.push(imgpipe::ImageItem::full(0.0, 0.0, sw, sh, data.clone()));
                     }
                     "center" => {
-                        // Cycle 391: align_horiz/vert nudge the
+                        // align_horiz/vert nudge the
                         // centered position. left/top → 0, right/
                         // bottom → max-edge, center/middle (default)
                         // → centered.
@@ -2356,7 +2352,7 @@ impl Renderer {
                         bg_img_items.push(imgpipe::ImageItem::full(x, y, w, h, data.clone()));
                     }
                     "scale" => {
-                        // Cycle 391: aspect-preserving fit within
+                        // Aspect-preserving fit within
                         // the surface; align_horiz/vert position
                         // the scaled image.
                         let scale = (sw / img_w).min(sh / img_h);
@@ -2382,12 +2378,12 @@ impl Renderer {
                 }
             }
         } else if self.bg_image_cache.is_some() {
-            // Cycle 892 (audit): config no longer requests an image background
+            // Config no longer requests an image background
             // (type switched away, or path cleared) — drop the decoded RGBA so
             // a large wallpaper isn't pinned for the rest of the
             // session. Re-enabling re-decodes via the need_reload path above.
             self.bg_image_cache = None;
-            self.bg_image_retry_at = None; // cycle 919 (L2): reset the self-heal throttle
+            self.bg_image_retry_at = None; // reset the self-heal throttle
         }
 
         // v2.23.0: the opaque fill color for the window chrome strips (tab bar,
@@ -2396,7 +2392,7 @@ impl Renderer {
         // it's `palette[8]` exactly as before. See `resolve_chrome_bg`.
         let chrome_strip_bg = resolve_chrome_bg(cfg, theme, bg_frame_avg);
 
-        // Cycle 296: status-bar background. The text is uploaded
+        // Status-bar background. The text is uploaded
         // alongside `tabbar_buffer.set_text` further down so the same
         // text-renderer pass handles both. Just a chrome-dim panel
         // here (1 quad).
@@ -2417,14 +2413,14 @@ impl Renderer {
         // Tab bar background + per-segment chrome (text added later).
         if tabbar.height > 0.0 {
             let by = tabbar.y;
-            // Cycle 672 (vertical-tabs sub-cycle 5): when the strip
+            // Vertical tabs: when the strip
             // is vertical (TabBarPos::Left/Right), paint the bar
             // background as a column matching the strip rect
             // instead of a full-width horizontal stripe.
             if cfg.tab_bar_pos.is_vertical() {
                 // Derive the strip's x + width from the first
-                // segment (cycle-668 hands us correct per-segment
-                // rects). new_tab anchors at the same x/w.
+                // segment (the UI's tab-bar layout already hands us
+                // correct per-segment rects). new_tab anchors at the same x/w.
                 let (sx, _, swid, _) = tabbar
                     .segments
                     .first()
@@ -2435,26 +2431,26 @@ impl Renderer {
                 quads.push(rect(0.0, by, sw, tabbar.height, chrome_strip_bg, 1.0));
             }
             for s in &tabbar.segments {
-                // Cycle 672 (vertical-tabs sub-cycle 5): use the
-                // segment's own y/h (from cycle 668) instead of
+                // Vertical tabs: use the
+                // segment's own y/h (from the UI's tab-bar layout) instead of
                 // the strip-wide `by`/`tabbar.height`. For
                 // horizontal layouts the values match; for
                 // vertical they're per-row.
                 let (x, seg_y, w, seg_h) = s.rect;
                 if s.active {
                     quads.push(rect(x, seg_y, w, seg_h, default_bg, 1.0));
-                    // Cycle 178: when broadcast / group-input mode is on,
+                    // When broadcast / group-input mode is on,
                     // use a warning-yellow accent (theme palette index 3,
                     // the standard ANSI "yellow" slot) for the active tab
                     // so the user can't forget broadcast is enabled and
                     // type to one pane expecting it to stay local. Other
                     // tabs are unaffected — broadcast is scoped to the
-                    // active tab (cycle-112 invariant), so only the
+                    // active tab, so only the
                     // active segment's accent flips.
                     let accent = if tabbar.broadcast {
                         theme.palette[3]
                     } else {
-                        // Cycle 293/937 + multi-window: the per-WINDOW accent
+                        // Multi-window: the per-WINDOW accent
                         // (Peacock pool slot, live-deduped), falling back to
                         // explicit `accent-color` → theme signature.
                         self.ui_accent(cfg, theme)
@@ -2463,7 +2459,7 @@ impl Renderer {
                 }
                 // Thin separator on the right (horizontal) or
                 // bottom (vertical) of each segment. For vertical,
-                // the cycle-668 layout stacks rows top-to-bottom,
+                // the UI's tab-bar layout stacks rows top-to-bottom,
                 // so the separator goes ALONG the bottom edge of
                 // each row instead of the right edge.
                 if cfg.tab_bar_pos.is_vertical() {
@@ -2471,7 +2467,7 @@ impl Renderer {
                 } else {
                     quads.push(rect(x + w - 1.0, seg_y, 1.0, seg_h, theme.background, 0.5));
                 }
-                // Activity indicator dot (cycle 246) — a small disc-
+                // Activity indicator dot — a small disc-
                 // approximation in the lower-left of any *inactive*
                 // segment whose tab has produced output (cyan) or
                 // rung the terminal bell (yellow) since the user last
@@ -2482,7 +2478,7 @@ impl Renderer {
                 let dot_color = match s.activity {
                     TabActivity::Bell => Some(theme.palette[3]),
                     TabActivity::Output => Some(theme.palette[6]),
-                    // Cycle 252: Silent is the "your watched output
+                    // Silent is the "your watched output
                     // stopped" state. Dim palette[8] — same color
                     // the inactive-pane border + chrome surfaces use,
                     // so it reads as "low-urgency, FYI" rather than
@@ -2510,8 +2506,8 @@ impl Renderer {
                 // square (no shader for actual rounded corners; we get
                 // the chip feel from the pad + opacity choice).
                 //
-                // Cycle 349 (Terminator parity, terminatorlib/config.py:81
-                // `close_button_on_tab`): when false, skip the close
+                // Terminator parity, terminatorlib/config.py:81
+                // `close_button_on_tab`: when false, skip the close
                 // chip + the ✕ glyph entirely. Tab is still closable
                 // via Ctrl+Shift+W; just the visual chrome is removed.
                 if !cfg.close_button_on_tab {
@@ -2546,18 +2542,18 @@ impl Renderer {
                     ));
                 }
             }
-            // New-tab (+) button background. Cycle 672: use the
-            // new_tab rect's own y/h (which cycle-668 set to the
+            // New-tab (+) button background. Use the
+            // new_tab rect's own y/h (set to the
             // strip-bottom row for vertical layouts).
-            // Cycle 805: paint the union of [▾ | +] when the dropdown arrow is
+            // Paint the union of [▾ | +] when the dropdown arrow is
             // present so there's no unpainted gap behind it; otherwise just the
             // `+` button.
             let (nx, ny, nw, nh) = tabbar.new_tab;
             let (mx, _, mw, _) = tabbar.new_tab_menu;
             let (bx, bw) = if mw > 0.0 { (mx, mw + nw) } else { (nx, nw) };
             quads.push(rect(bx, ny, bw, nh, chrome_strip_bg, 1.0));
-            // Cycle 255: drag-in-progress ghost. While the user holds a
-            // left button down on the tab bar (cycle 249), paint a
+            // Drag-in-progress ghost. While the user holds a
+            // left button down on the tab bar, paint a
             // translucent overlay copy of the active segment centered
             // at the cursor x. The underlying segments still snap to
             // their target positions via `move_active_tab`; the ghost
@@ -2572,12 +2568,12 @@ impl Renderer {
                 let (_, _, seg_w, seg_h) = active_seg.rect;
                 // Clamp the ghost's left edge so the box doesn't slide
                 // entirely off either end of the bar — same idea as
-                // cycle 245's context-menu anchor clamp.
+                // `context_menu_geometry`'s anchor clamp.
                 let half = seg_w * 0.5;
                 let max_x = (sw - seg_w).max(0.0);
                 let ghost_x = (cx - half).clamp(0.0, max_x);
-                // Soft drop shadow under the ghost (same trick as the
-                // cycle-251 context menu).
+                // Soft drop shadow under the ghost (same trick as
+                // `menu_chrome_quads`'s context menu).
                 over.push(rect(
                     ghost_x + 3.0,
                     by + 3.0,
@@ -2592,7 +2588,7 @@ impl Renderer {
                 over.push(rect(ghost_x, by, seg_w, seg_h, theme.background, 0.85));
                 // Accent strip on the left edge, same color the live
                 // active segment uses (palette[3] yellow under
-                // broadcast, cycle-293 accent-color → palette[4]
+                // broadcast, accent-color → palette[4]
                 // otherwise — keeps the ghost visually identical to
                 // the source segment).
                 let accent = if tabbar.broadcast {
@@ -2642,39 +2638,38 @@ impl Renderer {
             // `focused-split-color` for the focused pane (defaults to
             // theme `palette[4]`, the accent blue).
             //
-            // Cycle 184: when broadcast / group-input mode is on, the
+            // When broadcast / group-input mode is on, the
             // focused-pane border flips to theme palette[3] (yellow,
-            // the same warning slot the tab-bar accent uses in cycle
-            // 178). The tab-bar indicator alone wasn't enough: with
+            // the same warning slot the tab-bar accent uses). The tab-bar indicator alone wasn't enough: with
             // `tab-bar = auto` and only one tab open (the default
             // single-window case), the tab bar is hidden and the
             // user has no visual cue that broadcast is active.
             // Per-pane border-color shift works regardless of tab-bar
             // state. Inactive panes keep their normal divider color
-            // — broadcast is scoped to the active tab (cycle-112
-            // invariant) and the focused-pane border is the single
+            // — broadcast is scoped to the active tab (a
+            // broadcast-scope invariant) and the focused-pane border is the single
             // most-visible chrome element on every layout.
             let border = if pv.focused {
                 if tabbar.broadcast {
                     theme.palette[3]
                 } else {
-                    // Cycle 293/937: cascade order is
+                    // Cascade order is
                     //   focused-split-color (explicit override)
                     //   → resolved accent (explicit accent-color → Peacock
                     //     auto → the theme's signature accent, Mocha mauve)
                     // Backward-compat: anyone who set `focused-split-color`
-                    // before cycle 293 keeps their pinned color.
+                    // keeps their pinned color.
                     cfg.focused_split_color
                         .unwrap_or_else(|| self.ui_accent(cfg, theme))
                 }
             } else {
                 cfg.split_divider_color.unwrap_or(theme.palette[8])
             };
-            // Cycle 353 (Terminator parity, terminatorlib/config.py:74
+            // Terminator parity (terminatorlib/config.py:74
             // `handle_size`): split-divider width in px. -1 means
             // "use theme default" (1.0 here); positive values 0-20 are
             // honored directly. Clamping was already done at parse
-            // time (cycle 339).
+            // time.
             let bw = if cfg.handle_size < 0 {
                 1.0
             } else {
@@ -2685,12 +2680,12 @@ impl Renderer {
             quads.push(rect(rx, ry, bw, rh, border, 1.0));
             quads.push(rect(rx + rw - bw, ry, bw, rh, border, 1.0));
 
-            // Cycle 379: per-pane titlebar background quad. Drawn
+            // Per-pane titlebar background quad. Drawn
             // ABOVE the pane's border + BELOW the pane's content.
             // Color picks from the cfg.title_*_bg_color variants
             // based on focus + broadcast group state.
             if pane_titlebar_h > 0.0 {
-                // Cycle 387 + 710: see `pick_titlebar_bg`.
+                // See `pick_titlebar_bg`.
                 let bar_bg = pick_titlebar_bg(
                     cfg,
                     theme,
@@ -2698,8 +2693,8 @@ impl Renderer {
                     pv.focused,
                     tabbar.broadcast,
                 );
-                // Cycle 385 (Terminator parity, titlebar Bucket-D
-                // sub-cycle 9): title_at_bottom flips the bar from
+                // Terminator parity, titlebar Bucket-D
+                // phase 9 of TERMINATOR-PANE-TITLEBAR-DESIGN.md: title_at_bottom flips the bar from
                 // (top of pane) to (bottom of pane). Cells shift
                 // is still applied at the top — that's the
                 // intentional follow-up. Today the bar lands at the
@@ -2732,7 +2727,7 @@ impl Renderer {
                 overlay.vi_visual_anchor,
                 &mut quads,
                 pane_titlebar_h,
-                // Cycle 891: the whole-surface clear color so build_pane can
+                // The whole-surface clear color so build_pane can
                 // detect when an unfocused pane needs its own bg backdrop.
                 default_bg,
             );
@@ -2746,7 +2741,7 @@ impl Renderer {
                     inline_live.insert(p.img.allocation_key());
                     img_items.push(imgpipe::ImageItem::placement(
                         rx + pad_x + p.col as f32 * cw,
-                        // Cycle 383: image placements also shift
+                        // Image placements also shift
                         // below the titlebar so a kitty/sixel
                         // image at row 0 doesn't overlap the bar.
                         ry + pad_y + pane_titlebar_h + row as f32 * ch,
@@ -2808,7 +2803,7 @@ impl Renderer {
                         hl.width as f32 * cw,
                         ch,
                         if hl.active {
-                            // Cycle 920: the active match follows the theme's
+                            // The active match follows the theme's
                             // yellow (Mocha #f9e2af) unless overridden, so it
                             // matches the inactive highlight's theme.selection_bg
                             // instead of a hardcoded TokyoNight amber.
@@ -2862,8 +2857,8 @@ impl Renderer {
 
             // Post-text overlay: dim unfocused panes; per-pane scrollbar.
             //
-            // Cycle 356 (Terminator parity, terminatorlib/config.py:84-85
-            // `inactive_color_offset` + `inactive_bg_color_offset`):
+            // Terminator parity, terminatorlib/config.py:84-85
+            // `inactive_color_offset` + `inactive_bg_color_offset`:
             // when EITHER offset is < 1.0, layer a dim over the
             // unfocused pane. Uses the BG offset for the overlay
             // alpha (since the visible effect on the bg is most of
@@ -2993,7 +2988,7 @@ impl Renderer {
             self.search_buffer
                 .shape_until_scroll(&mut self.font_system, false);
         } else if let Some(q) = &overlay.layout_picker_query {
-            // Cycle 708 (Terminator parity, layoutlauncher.py):
+            // Terminator parity, layoutlauncher.py:
             // layout picker overlay. Same bar shape as the
             // palette but the hint string lists layouts.
             have_search = true;
@@ -3036,8 +3031,8 @@ impl Renderer {
             self.search_buffer
                 .shape_until_scroll(&mut self.font_system, false);
         } else if let Some(edit) = &overlay.edit_title {
-            // Cycle 372 (Terminator parity, edit-title overlay UX):
-            // a thin bar in app chrome mirroring the shape of the cycle-X
+            // Terminator parity, edit-title overlay UX:
+            // a thin bar in app chrome mirroring the shape of the
             // palette + ssh-input overlays without covering terminal rows.
             // Uses palette[3] (yellow) so it's visually distinct
             // from the palette (5) and ssh (4) bars.
@@ -3068,7 +3063,7 @@ impl Renderer {
             self.search_buffer
                 .shape_until_scroll(&mut self.font_system, false);
         } else if let Some(dlg) = &overlay.confirm_dialog {
-            // Cycle 660 (sub-cycle 3 of TERMINATOR-CONFIRM-DIALOG-DESIGN.md):
+            // Phase 3 of TERMINATOR-CONFIRM-DIALOG-DESIGN.md:
             // a bottom-bar projection of the modal. v1 of the
             // renderer skips the fancy centered-panel + backdrop
             // The bottom bar gives immediate modal feedback with prompt,
@@ -3079,7 +3074,7 @@ impl Renderer {
             let bar_h = ch + 10.0;
             search_rect = (0.0, sh - bar_h, sw, bar_h);
             // Red-ish accent (palette[1]) to signal "destructive
-            // confirmation pending" vs the cycle-X palette/ssh/
+            // confirmation pending" vs the palette/ssh/
             // edit-title yellows/blues/cyans.
             quads.push(rect(0.0, sh - bar_h, sw, bar_h, theme.palette[1], 0.96));
             let mut buttons_label = String::new();
@@ -3124,14 +3119,14 @@ impl Renderer {
             self.search_buffer
                 .shape_until_scroll(&mut self.font_system, false);
         } else if let Some((tag, url)) = &overlay.update_available {
-            // Cycle 794: passive "newer release available" banner — lowest
+            // Passive "newer release available" banner — lowest
             // priority, so any real modal above takes the bar and this returns
             // when they close. The full strip uses readable chrome; a small
             // green accent carries the update cue without making foreground text
             // fight a bright background.
             have_search = true;
             let bar_h = ch + 10.0;
-            // Cycle 808 (audit): stack above a bottom-anchored tab / status bar
+            // Stack above a bottom-anchored tab / status bar
             // so the passive banner doesn't paint over (or, with the App's
             // matching hit-test, steal clicks from) it. `status.y > 0` marks a
             // bottom status bar (top sits at y == 0).
@@ -3179,7 +3174,7 @@ impl Renderer {
                 self.tab_texts.push(String::new());
             }
             self.tab_texts.truncate(tabbar.segments.len());
-            // Cycle 788 (audit B4): shrink the pool when tabs close, matching
+            // Shrink the pool when tabs close, matching
             // `pane_buffers`/`settings_buffers` — otherwise it stuck at the
             // peak tab count for the whole session (open 50, close to 5 → 50
             // shaped-text buffers retained).
@@ -3190,7 +3185,7 @@ impl Renderer {
                 // excludes fixed tab chrome such as the close button, so
                 // fitting and visual centering share the same coordinate space.
                 //
-                // Cycle 804: the budget now tracks the *actual* segment width
+                // The budget tracks the *actual* segment width
                 // instead of a hard 24-char cap, so a wide tab shows its full
                 // title (and only ellipsizes when the title genuinely doesn't
                 // fit). We reserve `fixed_w` for the non-title part of the
@@ -3260,7 +3255,7 @@ impl Renderer {
             }
             self.tabbar_buffer
                 .shape_until_scroll(&mut self.font_system, false);
-            // Cycle 805: the `▾` dropdown arrow, shaped in its own buffer so it
+            // The `▾` dropdown arrow, shaped in its own buffer so it
             // lands inside `new_tab_menu` (left of `+`). Skipped when disabled.
             if tabbar.new_tab_menu.2 > 0.0 {
                 self.new_tab_arrow_buffer.set_metrics(metrics);
@@ -3316,7 +3311,7 @@ impl Renderer {
             }
         }
 
-        // Cycle 296: upload status-bar text. Single buffer, single
+        // Status-bar text. Single buffer, single
         // line; sized to surface width so cosmic-text doesn't wrap
         // an overlong status string.
         if status.height > 0.0 && !status.text.is_empty() {
@@ -3367,7 +3362,7 @@ impl Renderer {
         }
 
         // Context-menu row labels (one buffer per row, separators skipped)
-        // + right-aligned shortcut hints (dropdown-parity cycle).
+        // + right-aligned shortcut hints (dropdown-parity).
         if let Some(menu) = &overlay.context_menu {
             while self.context_menu_buffers.len() < menu.rows.len() {
                 let b = TextBuffer::new(&mut self.font_system, metrics);
@@ -3377,7 +3372,7 @@ impl Renderer {
                 let b = TextBuffer::new(&mut self.font_system, metrics);
                 self.context_menu_hint_buffers.push(b);
             }
-            // Cycle 788 (audit B2): shrink to the current row count so a small
+            // Shrink to the current row count so a small
             // menu after a large one (common with dynamic Lua menus) doesn't
             // keep the peak's worth of shaped-glyph buffers. The field doc
             // promised this trim; the code never did it until now.
@@ -3433,7 +3428,7 @@ impl Renderer {
             }
         }
 
-        // Cycle 756: settings-overlay row buffers (one per display line).
+        // Settings-overlay row buffers (one per display line).
         if let Some(set) = &overlay.settings {
             let lines = settings_display_lines(set);
             while self.settings_buffers.len() < lines.len() {
@@ -3466,7 +3461,7 @@ impl Renderer {
                 let b = TextBuffer::new(&mut self.font_system, metrics);
                 self.hint_buffers.push(b);
             }
-            // Cycle 788 (audit B3): quick-select labels every visible link, so
+            // Quick-select labels every visible link, so
             // densities swing widely (50 → 5 → 100); shrink the pool to the
             // current label count instead of pinning it at the peak.
             self.hint_buffers.truncate(overlay.hint_labels.len());
@@ -3519,13 +3514,13 @@ impl Renderer {
         let mut areas: Vec<TextArea> = Vec::with_capacity(panes.len() + 2);
         // Menu text lives in its own areas vec so we can hand it to a
         // dedicated `menu_text_renderer.prepare(...)` call after the
-        // main `text_renderer.prepare(...)`. Cycle 251 — drawing the
+        // main `text_renderer.prepare(...)` — drawing the
         // menu's bg / shadow / border / highlight before the menu's
         // text in the same pass painted text right under bg; this
         // split fixes that by giving the menu its own
         // bg→border→highlight→text pipeline at the end of the render
         // pass.
-        // Cycle 761: pre-size for the menu / settings-overlay rows it collects.
+        // Pre-size for the menu / settings-overlay rows it collects.
         let mut menu_areas: Vec<TextArea> = Vec::with_capacity(48);
         // v2.20.0 (Ghostty parity): the transient resize chip — centered,
         // drawn in the menu pass (last) so it reads over any pane content.
@@ -3568,7 +3563,7 @@ impl Renderer {
             // fallback when a span lacks an explicit color. Almost every
             // cell does carry an explicit color via `Attrs::color`, but
             // whitespace / IME composition / chrome strings ride the
-            // default. Matches the OSC 11 chrome path landed in cycle 65 —
+            // default. Matches the OSC 11 chrome path —
             // engine override (Colors[256]) wins, theme is fallback.
             let pane_fg = pv.snap.colors[256]
                 .map(|c| Rgb::new(c.r, c.g, c.b))
@@ -3580,7 +3575,7 @@ impl Renderer {
                 areas.push(TextArea {
                     buffer: &self.pane_buffers[i],
                     left: rx + pad_x,
-                    // Cycle 383: shift cell text below the titlebar
+                    // Shift cell text below the titlebar
                     // when active. Same offset used inside build_pane
                     // (which renders cells/cursor/images/links).
                     top: ry + pad_y + pane_titlebar_h,
@@ -3596,16 +3591,16 @@ impl Renderer {
                 });
             }
         }
-        // Cycle 382 (Terminator parity, per-pane-titlebar Bucket-D
-        // sub-cycle 3): per-pane title text. Push the TextAreas
-        // referencing the cycle-382 buffers (already populated
-        // during the cycle-379 build_pane pass — see
+        // Terminator parity, per-pane-titlebar Bucket-D,
+        // phase 3 of TERMINATOR-PANE-TITLEBAR-DESIGN.md: per-pane title text. Push the TextAreas
+        // referencing the `pane_titlebar_buffers` (already populated
+        // earlier in this pass — see
         // build_pane_titlebar_text).
         if pane_titlebar_h > 0.0 {
             for (i, pv) in panes.iter().enumerate() {
                 let (rx, ry, rw, rh) = pv.rect;
-                // Cycle 387: matching fg variant for the three states.
-                // Cycle 920: derive from the theme so the title text stays
+                // Matching fg variant for the three states,
+                // derived from the theme so the title text stays
                 // readable + on-theme. The focused + broadcast bars are the
                 // theme's (light) blue `palette[4]`, so their text is the dark
                 // `theme.cursor_text`; the inactive bar is the dark `palette[8]`
@@ -3618,10 +3613,10 @@ impl Renderer {
                 } else {
                     cfg.title_inactive_fg_color.unwrap_or(theme.foreground)
                 };
-                // Cycle 385: text-area position mirrors the
-                // cycle-385 bar position so the title text follows
+                // Text-area position mirrors the
+                // titlebar bar's y-position so the title text follows
                 // the bar to the bottom when title_at_bottom is
-                // true. 2px top padding matches cycle-382.
+                // true. 2px top padding matches the titlebar buffer population above.
                 let text_top = if cfg.title_at_bottom {
                     ry + rh - pane_titlebar_h + 2.0
                 } else {
@@ -3639,7 +3634,7 @@ impl Renderer {
                     scale: 1.0,
                     bounds: TextBounds {
                         left: rx as i32,
-                        // Cycle 761: clamp to ≥0 so a pane flush against the
+                        // Clamp to ≥0 so a pane flush against the
                         // window top can't hand glyphon a negative clip bound.
                         top: (text_top - 2.0).max(0.0) as i32,
                         right: (rx + rw) as i32,
@@ -3677,7 +3672,7 @@ impl Renderer {
                 // at rest (still readable, but visually subordinate to
                 // the title text). Centered inside `seg.close`.
                 //
-                // Cycle 349: skipped when cfg.close_button_on_tab is
+                // Skipped when cfg.close_button_on_tab is
                 // false (matches the quad branch above).
                 if !cfg.close_button_on_tab {
                     continue;
@@ -3685,7 +3680,7 @@ impl Renderer {
                 let (cx, _, ccw, _) = s.close;
                 let hovered = tabbar.hovered_close_idx == Some(s.idx);
                 let close_fg = if hovered {
-                    // Cycle 920: dark glyph (theme.cursor_text) on the theme-red
+                    // Dark glyph (theme.cursor_text) on the theme-red
                     // close chip (palette[1]) — higher contrast than white on the
                     // Mocha pink-red, and tracks the theme instead of a literal.
                     theme.cursor_text
@@ -3723,7 +3718,7 @@ impl Renderer {
                 default_color: GColor::rgb(fg.r, fg.g, fg.b),
                 custom_glyphs: &[],
             });
-            // Cycle 805: the `▾` dropdown arrow glyph, at `new_tab_menu` (left
+            // The `▾` dropdown arrow glyph, at `new_tab_menu` (left
             // of `+`). Only present when the dropdown is enabled.
             if tabbar.new_tab_menu.2 > 0.0 {
                 let (ax, _, aw, _) = tabbar.new_tab_menu;
@@ -3794,7 +3789,7 @@ impl Renderer {
                 custom_glyphs: &[],
             });
         }
-        // Cycle 296: status-bar text area. Left-padded 8 px, baseline
+        // Status-bar text area. Left-padded 8 px, baseline
         // nudged 3 px below the strip top so descenders don't clip.
         if status.height > 0.0 && !status.text.is_empty() {
             areas.push(TextArea {
@@ -3814,14 +3809,14 @@ impl Renderer {
         }
         // Hint labels over the focused pane (chips drawn above as quads).
         if let Some((frx, fry, frw, frh)) = focus_origin {
-            // Cycle 920: hint-label text follows the theme background (dark on
+            // Hint-label text follows the theme background (dark on
             // the theme-yellow chip) unless overridden.
             let lab = cfg.search_foreground.unwrap_or(theme.background);
             for (i, hint) in overlay.hint_labels.iter().enumerate() {
                 areas.push(TextArea {
                     buffer: &self.hint_buffers[i],
                     left: frx + pad_x + hint.col as f32 * cw,
-                    // Cycle 383: hint labels also shift below the
+                    // Hint labels also shift below the
                     // titlebar so they land over the cell they
                     // mark, not over the title text.
                     top: fry + pad_y + pane_titlebar_h + hint.row as f32 * ch,
@@ -3854,8 +3849,8 @@ impl Renderer {
             }
         }
 
-        // Right-click context menu — drawn in its own final pass
-        // (cycle 251). v1.3.0/v1.3.1 put the menu's panel-bg quad in
+        // Right-click context menu — drawn in its own final pass.
+        // v1.3.0/v1.3.1 put the menu's panel-bg quad in
         // `over` (drawn AFTER text), with the opaque bg covering the
         // menu text underneath. Now: chrome quads go to `menu_q`
         // (drawn after `over` via `self.menu_quads.draw`); row labels
@@ -3878,7 +3873,7 @@ impl Renderer {
             let row_h = ch + 12.0;
             let sep_h = 8.0_f32;
             let (ax, ay) = menu.anchor;
-            // Cycle 714: skip scrolled-off rows + stop drawing when
+            // Skip scrolled-off rows + stop drawing when
             // the next row would extend past the clamped panel
             // height. Keeps text rendering in lockstep with the
             // chrome-quad loop above.
@@ -3926,7 +3921,7 @@ impl Renderer {
                     default_color: GColor::rgb(fg.r, fg.g, fg.b),
                     custom_glyphs: &[],
                 });
-                // Dropdown-parity cycle: the right-aligned dimmed hint.
+                // Dropdown-parity: the right-aligned dimmed hint.
                 if !row.hint.is_empty() {
                     let hint_fg = dim_blend(theme.foreground, theme.background);
                     let hint_w = row.hint.chars().count() as f32 * cw;
@@ -3944,7 +3939,7 @@ impl Renderer {
             }
         }
 
-        // Cycle 756: settings overlay — a centered modal panel drawn on top via
+        // Settings overlay — a centered modal panel drawn on top via
         // the menu pipeline (dim backdrop + panel + accent border + focused-row
         // highlight as quads; one TextArea per display line).
         if let Some(set) = &overlay.settings {
@@ -3954,7 +3949,7 @@ impl Renderer {
             let panel_h = (lines.len() as f32 * row_h + 24.0).min((sh - 40.0).max(80.0));
             let px = ((sw - panel_w) * 0.5).max(0.0);
             let py = ((sh - panel_h) * 0.5).max(0.0);
-            // Cycle 937 + multi-window: the settings overlay's accent follows
+            // Multi-window: the settings overlay's accent follows
             // this WINDOW's chrome accent, so it matches the focus border +
             // active tab rather than always-blue.
             let acc = self.ui_accent(cfg, theme);
@@ -4170,7 +4165,7 @@ impl Renderer {
         }
         self.quads
             .upload(&self.gpu.device, &self.gpu.queue, [sw, sh], &quads);
-        // Cycle 853: return the scratch to the pool (keeps its capacity for next
+        // Return the scratch to the pool (keeps its capacity for next
         // frame). Last use of `quads` is the upload just above.
         self.quad_scratch = quads;
         // v2.23.0: wallpaper into its own back pipeline; inline images into
@@ -4224,11 +4219,11 @@ impl Renderer {
             wgpu::CurrentSurfaceTexture::Occluded | wgpu::CurrentSurfaceTexture::Timeout => {
                 return Ok(());
             }
-            // Cycle 798 (audit): the genuinely surface-fatal states — Outdated
+            // The genuinely surface-fatal states — Outdated
             // (resize / format change), **Lost** (GPU device reset, sleep/wake,
             // monitor hot-swap, driver TDR), Validation — reconfigure the surface
             // and skip this frame; the next redraw paints on the fresh surface.
-            // Pre-798 only `Outdated` reconfigured and `Lost` fell into a bare
+            // An earlier version only reconfigured on `Outdated` and let `Lost` fall into a bare
             // `return Ok(())`, so after a device-lost the surface was never
             // recovered: every frame returned Lost again and the window froze
             // permanently. Reconfiguring on the catch-all is the standard wgpu
@@ -4279,11 +4274,11 @@ impl Renderer {
                             r: srgb(bg.r),
                             g: srgb(bg.g),
                             b: srgb(bg.b),
-                            // Cycle 380 (Terminator parity, terminatorlib/
+                            // Terminator parity, terminatorlib/
                             // config.py:106 + 117 `background_darkness` +
-                            // `background_type`): when bg-type=transparent,
+                            // `background_type`: when bg-type=transparent,
                             // compose the configured darkness with the
-                            // cycle-X background-opacity. background_darkness
+                            // background-opacity. background_darkness
                             // is documented as 0.0 = fully dark (no
                             // transparency) .. 1.0 = no tint; we treat
                             // 1.0 - darkness as the additional alpha-
@@ -4325,7 +4320,7 @@ impl Renderer {
                 .render(&self.atlas, &self.viewport, &mut pass)?;
             // Dimming + scrollbar sit on top of glyphs.
             self.overlay_quads.draw(&mut pass);
-            // Cycle 251: the right-click context menu owns the last
+            // The right-click context menu owns the last
             // two passes — chrome quads (shadow / bg / border /
             // highlight) then row labels — so the menu sits above
             // every other UI element AND the row labels sit above the
@@ -4525,12 +4520,12 @@ impl Renderer {
         vi_cursor: Option<(usize, usize)>,
         vi_visual_anchor: Option<(usize, usize)>,
         quads: &mut Vec<QuadInstance>,
-        // Cycle 383 (Terminator parity, per-pane-titlebar Bucket-D
-        // sub-cycle 2 complete): extra top offset for cell content
-        // so it doesn't overlap the cycle-379 titlebar bar. When
+        // Terminator parity, per-pane-titlebar Bucket-D,
+        // phase 2 of TERMINATOR-PANE-TITLEBAR-DESIGN.md: extra top offset for cell content
+        // so it doesn't overlap the per-pane titlebar bar. When
         // titlebar is off this is 0.0 (zero overhead).
         pane_titlebar_h: f32,
-        // Cycle 891 (audit): the whole-surface clear color (the FOCUSED
+        // The whole-surface clear color (the FOCUSED
         // pane's OSC 11 bg, or the theme bg). When this pane's own
         // default bg differs from it we must paint a backdrop — the
         // per-cell loop skips quads for default-bg cells on the
@@ -4564,7 +4559,7 @@ impl Renderer {
         // `selection-foreground` color was parsed and stored but the
         // renderer ignored it.
         let selection_range = snap.selection;
-        // Cycle 912 (R1 completion): snapshot cells + selection carry
+        // Snapshot cells + selection carry
         // GRID-ABSOLUTE lines (negative when scrolled into history); the per-cell
         // bg/underline/strikeout quads and the selection-bg quad position by
         // VIEWPORT row, so convert with `viewport_row = grid_line + display_offset`
@@ -4580,7 +4575,7 @@ impl Renderer {
             .map(|c| Rgb::new(c.r, c.g, c.b))
             .unwrap_or(theme.background);
 
-        // Cycle 891 (audit): when this pane's default bg differs from the
+        // When this pane's default bg differs from the
         // surface clear color (e.g. an UNFOCUSED pane running a program that
         // set its own OSC 11 background, while the focused pane defines the
         // clear color), paint a backdrop over the pane interior. Without it
@@ -4613,7 +4608,7 @@ impl Renderer {
             }
         }
 
-        // Cycle 827 (audit): take the pooled scratch (with last frame's String
+        // Take the pooled scratch (with last frame's String
         // buffers) instead of allocating fresh. `n` is the LOGICAL run count;
         // `spans` may hold extra slots from a busier prior frame, which we reuse
         // (clear + refill) before falling back to a push. Stored back to `self`
@@ -4628,7 +4623,7 @@ impl Renderer {
         // `None` when the next char must open a new run.
         let mut cur: Option<(Rgb, bool, bool)> = None;
 
-        // Cycle 939 (Terminator parity, cursor_fg_color / cursor_bg_color): a
+        // Terminator parity, cursor_fg_color / cursor_bg_color: a
         // focused SOLID block cursor renders the block in `theme.cursor`
         // (cursor-color / cursor-bg-color) with the glyph UNDER it recolored to
         // `theme.cursor_text` (cursor-fg-color) — the standard "inverted cursor"
@@ -4659,13 +4654,13 @@ impl Renderer {
                 None
             }
         };
-        // Cycle 942 (audit): an OSC 12 runtime cursor color moves the block
+        // An OSC 12 runtime cursor color moves the block
         // out from under the theme's cursor/cursor_text pair, so the
         // recolored glyph follows reverse-video (its own cell bg) instead of
         // `theme.cursor_text` (which was tuned against `theme.cursor`).
         // Resolved once; the cursor-draw below resolves the same slot.
         let cursor_rt_override = color::resolve_query(258, theme, term_colors);
-        // Cycle 942 (audit): a wide (CJK/emoji) glyph under the cursor needs
+        // A wide (CJK/emoji) glyph under the cursor needs
         // a TWO-cell block — recoloring the glyph to cursor_text while the
         // 1-cell block covered only its left half left the right half drawn
         // in cursor_text on the default bg (invisible on Mocha, where
@@ -4685,7 +4680,7 @@ impl Renderer {
         for sc in &snap.cells {
             let row = sc.line;
             let col = sc.col;
-            // Cycle 912: viewport row for quad placement; `row` (grid-absolute,
+            // Viewport row for quad placement; `row` (grid-absolute,
             // negative when scrolled) stays for the relative line-break deltas.
             let vrow = row + display_off;
             if row != cur_row {
@@ -4723,15 +4718,15 @@ impl Renderer {
             if cfg.minimum_contrast > 1.0 {
                 fg = color::with_min_contrast(fg, bg, cfg.minimum_contrast as f64);
             }
-            // Cycle 355 (Terminator parity, terminatorlib/config.py:111
-            // `allow_bold`): when false, suppress bold attr entirely.
+            // Terminator parity, terminatorlib/config.py:111
+            // `allow_bold`: when false, suppress bold attr entirely.
             // Useful on fonts without a bold companion.
             let bold = cfg.allow_bold && flags.contains(Flags::BOLD);
             let italic = flags.contains(Flags::ITALIC);
             saw_styled_text |= bold || italic;
             let hidden = flags.contains(Flags::HIDDEN);
-            // Cycle 355 (Terminator parity, terminatorlib/config.py:130
-            // `bold_is_bright`): when true + bold + fg comes from
+            // Terminator parity, terminatorlib/config.py:130
+            // `bold_is_bright`: when true + bold + fg comes from
             // palette[0..8], remap to palette[8..16] (the xterm
             // bright variant). Color::bright_for_bold returns the
             // mapped color or the original if it's not a low-palette
@@ -4772,8 +4767,8 @@ impl Renderer {
                 ));
             }
             // SGR 4 underline family / SGR 9 strikeout — both engine-
-            // tracked since cycle ~14 (`sgr_underline_dim_strike` test),
-            // rendered from cycle 79 onward.
+            // tracked (see the `sgr_underline_dim_strike` test); render
+            // support followed later.
             //
             // Underline color: SGR 58 (`\e[58;2;r;g;bm` / `[58;5;Nm`) sets
             // a per-cell `underline_color`, used by neovim spell-check to
@@ -4856,7 +4851,7 @@ impl Renderer {
         if let Some(sel) = snap.selection {
             let (s, e) = (sel.start, sel.end);
             for r in s.line.0..=e.line.0 {
-                // Cycle 912: selection lines are grid-absolute; map to the
+                // Selection lines are grid-absolute; map to the
                 // viewport row and clip to the visible screen. The old `r < 0`
                 // guard DROPPED any selection scrolled up into history, and a
                 // positive `r` was drawn at the wrong (un-offset) viewport y.
@@ -4889,7 +4884,7 @@ impl Renderer {
         // use this to flip between block/underline/beam for normal/insert/
         // replace modes. The engine is seeded from `cfg.cursor_style` at pane
         // creation so the default still matches the user's config.
-        // Cycle 150: also require cursor_visible. The old check fell
+        // Also require cursor_visible. The old check fell
         // through to draw the hollow-outline branch on an unfocused
         // window even when DEC ?25l had hidden the cursor. So a
         // program that called `printf '\e[?25l'` (vim, less, fzf…)
@@ -4899,16 +4894,16 @@ impl Renderer {
         // visible branch since DECSCUSR shapes and DEC ?25 hide are
         // independent (a program can use HollowBlock to mean "I'm
         // not in this pane" while still wanting the cursor visible).
-        // Cycle 916 (file-by-file audit): the cursor point is grid-absolute
+        // The cursor point is grid-absolute
         // (kettle never enters alacritty vi-mode), so when scrolled back
         // (display_offset > 0) it must convert to a viewport row like the cells
-        // and selection already do (cycle 912) — else a phantom cursor block
+        // and selection already do above — else a phantom cursor block
         // paints over scrollback after the text has scrolled away. The old
         // `cp.line.0 >= 0` guard was dead (a writing cursor's absolute line is
         // always >= 0); the real visibility test is whether its viewport row is
         // on screen.
         if draw_cursor {
-            // Cycle 942: a wide glyph under a solid block cursor widens the
+            // A wide glyph under a solid block cursor widens the
             // block to both columns (and a spacer-parked cursor re-anchors to
             // the lead glyph's cell). `cursor_wide_quad` is only ever set on
             // the focused solid-Block path, so beam/underline/hollow shapes
@@ -4936,11 +4931,11 @@ impl Renderer {
                 let (cwidth, alpha, cheight, yoff) = match shape {
                     EShape::Beam => (cw * 0.15, 1.0, ch, 0.0),
                     EShape::Underline => (cw, 1.0, 2.0, ch - 2.0),
-                    // Cycle 939: a focused block cursor is SOLID (was a 0.55
+                    // A focused block cursor is SOLID (was a 0.55
                     // translucent tint). v2.21.0: the inverted glyph under it is
                     // drawn in the dedicated cursor-glyph pass (see below), not
                     // recolored into the pane buffer, so a blink no longer
-                    // reshapes the row. Cycle 942: `bcells` widens it over a
+                    // reshapes the row. `bcells` widens it over a
                     // wide (CJK/emoji) glyph so the right half isn't uncovered.
                     EShape::Block | EShape::HollowBlock | EShape::Hidden => {
                         (cw * bcells, 1.0, ch, 0.0)
@@ -4965,7 +4960,7 @@ impl Renderer {
             }
         }
 
-        // Cycle 301 vi-mode visual selection (sub-cycle 4). Drawn
+        // Vi-mode visual selection. Drawn
         // BEFORE the vi cursor so the cursor's hollow block reads on
         // top of the selection's solid fill. Selection spans
         // [anchor..cursor] inclusive; the anchor / cursor order is
@@ -4992,7 +4987,7 @@ impl Renderer {
             }
         }
 
-        // Cycle 300 vi-mode cursor (sub-cycle 3 of 4). When the user
+        // Vi-mode cursor. When the user
         // is in vi-mode, draw a magenta hollow block at the vi
         // cursor's grid position over the focused pane. Distinct
         // from the terminal cursor (different color + always hollow,
@@ -5019,7 +5014,7 @@ impl Renderer {
             quads.push(rect(bx, by, cw, ch, vi_color, 0.20));
         }
 
-        // Lay out the text buffer. Cycle 870: advance lines by the grid's
+        // Lay out the text buffer. Advance lines by the grid's
         // `cell_h` (which includes the cfg.cell_height multiplier) so the text
         // rows stay locked to the cursor/quad row step — see `pane_metrics`.
         let pm = pane_metrics(self.metrics.font_size, self.cell_h);
@@ -5262,7 +5257,7 @@ impl Renderer {
 /// Upper bound on tiles a `tile` background may emit per frame before falling
 /// back to a single stretched quad. ~60-px tiles on a 4K surface (3840×2160 →
 /// 64×34 ≈ 2176) stay under it; only pathologically small source images
-/// (≤ ~30 px) trip the cap. Cycle 825 (audit).
+/// (≤ ~30 px) trip the cap.
 const MAX_BG_TILES: usize = 4096;
 
 /// Divide a bounded frame resource across independent panes in deterministic
@@ -5300,7 +5295,7 @@ fn placement_is_visible(snap: &PaneSnapshot, placement: &kettle_core::Placement)
 /// Whether a `tile` background's source image yields a sane number of tiles for
 /// the surface, or so many (a tiny source image) that the per-frame quad +
 /// Arc-clone storm would hang the renderer and it should stretch instead. Zero
-/// dims are treated as 1 px so we never divide by zero. Cycle 825 (audit).
+/// dims are treated as 1 px so we never divide by zero.
 fn bg_tiles_within_cap(surface_w: f32, surface_h: f32, img_w: f32, img_h: f32) -> bool {
     let tiles_x = (surface_w / img_w.max(1.0)).ceil().max(1.0);
     let tiles_y = (surface_h / img_h.max(1.0)).ceil().max(1.0);
@@ -5324,7 +5319,7 @@ fn font_features(cfg: &Config) -> FontFeatures {
 /// highlights on grid row `r`, given the normalized `(start, end)` endpoints and
 /// the pane's column count, or `None` when the row's span is empty.
 ///
-/// Cycle 820 (audit): an intermediate (non-end) row now extends to the pane's
+/// An intermediate (non-end) row extends to the pane's
 /// real last column (`cols - 1`), not a hardcoded `256`. On a pane wider than
 /// 256 columns — common on 4K/ultrawide with a small font (a 3840-px pane at a
 /// ~7-px cell is ~548 cols) — the middle rows of a multi-row visual selection
@@ -5381,7 +5376,7 @@ fn selection_row_span(
 /// Attrs for one style run: the family picks the bold/italic variant
 /// (`cfg.family_for`), the color is the run's resolved fg, weight/style
 /// mirror the SGR bold/italic bits. Split out of the retired whole-buffer
-/// `build_rich_spans` (cycle 806) so the v2.20.0 P1 per-line shaping cache
+/// `build_rich_spans` so the v2.20.0 P1 per-line shaping cache
 /// can build a single row's `AttrsList` at a time — runs that didn't change
 /// never construct an `Attrs` at all.
 fn run_attrs<'a>(
@@ -5408,8 +5403,8 @@ fn run_attrs<'a>(
 /// when something was cut. CJK characters and emoji are wide (2 cells
 /// each), so a char-count truncation overflows the tab segment / title
 /// when these are present; this honors the cell width that the renderer
-/// Cycle 710 (regression fix): pick the per-pane titlebar background
-/// color from the cycle-387 (focus, broadcast) state.
+/// Pick the per-pane titlebar background
+/// color from the focus / broadcast state.
 ///
 /// The focused branch used to fall back to a hardcoded
 /// Terminator-bright `Rgb::new(0xc8, 0x00, 0x03)` which screamed
@@ -5420,7 +5415,7 @@ fn run_attrs<'a>(
 /// `title_transmit_bg_color = #hex` still wins — anyone who pinned the
 /// Terminator look keeps it.
 ///
-/// Cycle 920: receive (broadcast) and inactive now ALSO derive from the theme
+/// Receive (broadcast) and inactive now ALSO derive from the theme
 /// (they were hardcoded Terminator/legacy literals — `#0076c9` blue and
 /// `#c0bebf` grey — that clashed with a dark theme like the Catppuccin Mocha
 /// default). Broadcast mirrors the focused cascade (accent → `palette[4]`);
@@ -5431,7 +5426,7 @@ fn run_attrs<'a>(
 pub(crate) fn pick_titlebar_bg(
     cfg: &kettle_config::Config,
     theme: &kettle_config::Theme,
-    // Multi-window cycle: the already-resolved per-window accent (the live
+    // Multi-window: the already-resolved per-window accent (the live
     // renderer passes its `ui_accent`; tests and any cfg-only caller pass
     // `cfg.resolved_accent(theme)`).
     accent: Rgb,
@@ -5527,7 +5522,7 @@ pub fn clamp_font_size(size: f32) -> f32 {
     size.clamp(5.0, 72.0)
 }
 
-/// Cycle 747: build glyphon [`Metrics`] for a *logical* `font_size` at a given
+/// Build glyphon [`Metrics`] for a *logical* `font_size` at a given
 /// device-pixel `scale` (the window's `scale_factor`). glyphon shapes and
 /// rasterizes in the same coordinate space as the wgpu surface, which winit
 /// sizes in **physical** pixels — so a logical `font_size` must be multiplied
@@ -5546,10 +5541,10 @@ pub fn metrics_for(font_size: f32, scale: f32) -> Metrics {
     Metrics::new(px, px * 1.25)
 }
 
-/// Cycle 870: metrics for a terminal PANE's text buffer. The glyph size stays
+/// Metrics for a terminal PANE's text buffer. The glyph size stays
 /// `font_size` (the DPI-scaled px from `metrics_for`), but the LINE HEIGHT is
 /// the grid's actual row height `cell_h` — which already folds in the 1.25
-/// line-height ratio AND any `cfg.cell_height` multiplier (cycle 636). The
+/// line-height ratio AND any `cfg.cell_height` multiplier. The
 /// cursor and selection/vi quads step by `cell_h` per row (`by = oy + line *
 /// ch`), so the text must advance by the same `cell_h`; laying it out at the
 /// unscaled `metrics.line_height` instead drifts a fraction of a row per line —
@@ -5585,7 +5580,7 @@ pub fn escalation_for_attempt(attempt: u32) -> AdapterEscalation {
     }
 }
 
-/// Cycle 753: request a GPU adapter, preferring real hardware but transparently
+/// Request a GPU adapter, preferring real hardware but transparently
 /// retrying with a **software rasterizer** (Mesa llvmpipe / lavapipe, or WARP on
 /// Windows) when no hardware adapter is available. Before this, all four adapter
 /// sites passed `force_fallback_adapter: false` and hard-errored with "no
@@ -5942,12 +5937,12 @@ async fn resolve_headless_adapter(
     .await
 }
 
-/// Cycle 756: number of header display-lines before the field rows in the
+/// Number of header display-lines before the field rows in the
 /// settings panel (title, category tabs, blank). The focused-row highlight
 /// quad and the per-line text areas both index off this.
 const SETTINGS_FIELD_START: usize = 3;
 
-/// Cycle 756: build the settings panel's display lines from its renderer-side
+/// Build the settings panel's display lines from its renderer-side
 /// projection — title, a category-tab strip (active category bracketed), a
 /// blank, one `"▸ label        value"` line per field (focused row marked),
 /// a blank, then the keybind footer. Shared by the buffer-text pass and the
@@ -5993,7 +5988,7 @@ fn settings_display_lines(set: &SettingsOverlay) -> Vec<String> {
     lines
 }
 
-/// Cycle 784: the settings panel's width in character cells — the widest
+/// The settings panel's width in character cells — the widest
 /// display line, so the panel grows to fit its content. Both render passes
 /// (buffer-text + quad/highlight) call this off the same `settings_display_lines`
 /// output, keeping them in lockstep. The old hardcoded 44 cols clipped the
@@ -6337,7 +6332,7 @@ fn rect(x: f32, y: f32, w: f32, h: f32, c: Rgb, a: f32) -> QuadInstance {
 ///
 /// Shared between [`Renderer::render_frame`] and [`capture_png_with`]
 /// so the live menu and the headless visual-regression screenshot
-/// produce identical pixels. Cycle 251.
+/// produce identical pixels.
 fn menu_chrome_quads(
     menu: &ContextMenu,
     theme: &kettle_config::Theme,
@@ -6346,7 +6341,7 @@ fn menu_chrome_quads(
     ch: f32,
 ) -> Vec<QuadInstance> {
     let mut out: Vec<QuadInstance> = Vec::new();
-    // Dropdown-parity cycle: the panel must budget for the right-aligned
+    // Dropdown-parity: the panel must budget for the right-aligned
     // shortcut hints too — same `menu_row_chars` formula as the text passes,
     // or hints would render past the panel background.
     let max_chars = menu
@@ -6359,11 +6354,11 @@ fn menu_chrome_quads(
     let panel_w = (max_chars * cw + 40.0).max(180.0);
     let row_h = ch + 12.0;
     let sep_h = 8.0_f32;
-    // Cycle 714 (Terminator menu UX, C5): natural panel height
+    // Terminator menu UX: natural panel height
     // (sum of every row) may exceed the surface. App-side
     // `context_menu_geometry` already computed the clamped
     // height; if non-zero we honor it, otherwise fall back to
-    // the natural sum (pre-cycle-714 behavior — no clamp).
+    // the natural sum (the original behavior — no clamp).
     let natural_h: f32 = menu
         .rows
         .iter()
@@ -6412,7 +6407,7 @@ fn menu_chrome_quads(
         0.65,
     ));
 
-    // Per-row highlight + separators. Cycle 714: skip scrolled-off
+    // Per-row highlight + separators. Skip scrolled-off
     // rows; stop drawing when we'd go past panel_h.
     let mut row_y = ay;
     let start = menu.scroll_offset.min(menu.rows.len());
@@ -6437,13 +6432,13 @@ fn menu_chrome_quads(
             // Soft accent tint across the row.
             out.push(rect(ax + 1.0, row_y, panel_w - 2.0, row_h, accent, 0.18));
             // 2-px accent strip on the left of the highlighted row —
-            // same pattern as the cycle-178 active-tab accent and
-            // cycle-184 focused-pane border.
+            // same pattern as the active-tab accent strip and
+            // the focused-pane border.
             out.push(rect(ax + 1.0, row_y, 2.0, row_h, accent, 1.0));
         }
         row_y += row_h;
     }
-    // Cycle 714 (Terminator menu UX, C5): ▲/▼ scroll arrows when
+    // Terminator menu UX: ▲/▼ scroll arrows when
     // the natural list is clipped above or below. Drawn as small
     // accent-colored bars rather than glyphs so they don't need a
     // separate text-buffer path. The text-area loop in render_frame
@@ -6478,19 +6473,19 @@ fn srgb(c: u8) -> f64 {
     }
 }
 
-/// Cycle 380 (Terminator parity, terminatorlib/config.py:106 + 117):
-/// compose the kettle background-opacity (cycle-X) with Terminator's
+/// Terminator parity, terminatorlib/config.py:106 + 117:
+/// compose the kettle background-opacity with Terminator's
 /// `background_darkness` + `background_type`. Logic:
 ///
 ///   bg-type = solid (default):  alpha = background_opacity
 ///   bg-type = transparent:      alpha = background_opacity * background_darkness
 ///   bg-type = image:            alpha = background_opacity (image render
-///                               will land in a later bg-image sub-cycle;
+///                               will land in a later bg-image phase;
 ///                               for now darkness applies same as transparent
 ///                               so users get the dim tint stage early)
 ///
 /// All inputs already clamped at parse time so no defensive math needed.
-/// Cycle 891 (audit): the interior rectangle of a pane to paint with its
+/// The interior rectangle of a pane to paint with its
 /// own default background, given the pane `(x, y, w, h)`, border width
 /// `bw`, titlebar strip height `pane_titlebar_h` (0 when off), and whether
 /// the titlebar sits at the bottom. Returns the rect *inside* the border
@@ -6636,7 +6631,7 @@ fn measure_cell(
     metrics: Metrics,
 ) -> (f32, f32) {
     buf.set_metrics(metrics);
-    // Cycle 865 (audit): size the measure box relative to the (physical)
+    // Size the measure box relative to the (physical)
     // metrics, not a fixed 1000×100. At a large font on a high-DPI display the
     // physical font size can be ~200px, so the 10-glyph probe is ~1300px wide
     // and wrapped against the old 1000px box — `line_w` then reflected only the
@@ -6732,7 +6727,7 @@ fn text_layout_damage_key(
 /// per-tab `✕`, trailing `+`), with a themed shell session on the left and a
 /// monitor-style readout on the right. Content is synthetic; the rendering
 /// pipeline is identical to the live one.
-/// Which synthetic scene to render in [`capture_png_with`]. Cycle 251.
+/// Which synthetic scene to render in [`capture_png_with`].
 ///
 /// The default screenshot path renders a single-pane, single-tab,
 /// no-overlay representative frame — what `kettle --screenshot` ships
@@ -6747,12 +6742,12 @@ fn text_layout_damage_key(
 /// v2.x series that frozen literal made the hero image look years out of
 /// date even though the pixels still matched the (equally frozen) scene.
 /// `env!` resolves at compile time, so a release version bump regenerates
-/// a correct screenshot with zero code churn (cycle 771).
+/// a correct screenshot with zero code churn.
 pub(crate) const SCREENSHOT_DEMO_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum DebugScene {
-    /// Existing `--screenshot` behavior (cycle 168).
+    /// Existing `--screenshot` behavior.
     #[default]
     Default,
     /// Render with a synthetic right-click context menu open over the
@@ -6771,7 +6766,7 @@ pub enum DebugScene {
 /// banner, given the surface height, the banner's own height, and the heights
 /// of any **bottom-anchored** tab / status bars it must stack above.
 ///
-/// Cycle 808 (audit): the banner is a non-modal bottom strip. When the user
+/// The banner is a non-modal bottom strip. When the user
 /// puts the tab bar or status bar at the bottom (`tab-bar-pos = bottom` /
 /// `status-bar = bottom`), drawing the banner flush at `surface_h - banner_h`
 /// painted *over* that bar and — paired with the click handler that treated
@@ -6794,9 +6789,9 @@ fn update_banner_chrome_colors(theme: &kettle_config::Theme) -> (Rgb, Rgb) {
     (bg, accent)
 }
 
-/// Back-compat wrapper for the cycle-168 `capture_png` callers (the CLI
-/// smoke + the cycle-236 `--screenshot` end-to-end CI step). Always
-/// renders [`DebugScene::Default`].
+/// Back-compat wrapper for `capture_png` callers (the CLI smoke test
+/// and the `--screenshot` end-to-end CI step). Always renders
+/// [`DebugScene::Default`].
 pub fn capture_png(
     cfg: &Config,
     cols: u32,
@@ -6860,7 +6855,7 @@ pub fn gpu_info(cfg: &Config) -> Result<String> {
 }
 
 /// Render a screenshot PNG; returns the **actual** (cols, rows) used after
-/// the cycle-119 texture-limit cap so the CLI can report what was rendered
+/// the texture-limit cap so the CLI can report what was rendered
 /// rather than what was requested (which can differ when the user asks for
 /// more cells than the wgpu 8192-px-per-side limit allows at the active
 /// font size).
@@ -6874,7 +6869,7 @@ pub fn capture_png_with(
     capture_png_with_annotation(cfg, cols, rows, out, scene, None)
 }
 
-/// Cycle 294: extended `capture_png_with` variant that adds an
+/// Extended `capture_png_with` variant that adds an
 /// optional bottom-left caption overlay (an "annotated screenshot" —
 /// useful for docs, README hero images, and bug reports that want
 /// to caption a screenshot with a version / repro / env note).
@@ -6886,7 +6881,7 @@ pub fn capture_png_with(
 ///
 /// Hooked into the `--screenshot --annotate TEXT` CLI surface.
 /// iTerm2's *persistent* annotations (in-terminal sticky notes
-/// attached to scrollback positions) are a separate, multi-cycle
+/// attached to scrollback positions) are a separate, larger
 /// feature; this is just the screenshot caption.
 pub fn capture_png_with_annotation(
     cfg: &Config,
@@ -6932,14 +6927,14 @@ pub fn capture_png_with_annotation(
         // Second pipelines for the `DebugScene::ContextMenu` overlay.
         // Allocated unconditionally (small, cheap) so the render pass
         // can always call `draw` / `render` on them — empty uploads
-        // are a no-op. Mirrors the live `Renderer` (cycle 251).
+        // are a no-op. Mirrors the live `Renderer`.
         let mut menu_quads_pipe = QuadPipeline::new(&device, format);
         let mut menu_text_renderer =
             TextRenderer::new(&mut atlas, &device, wgpu::MultisampleState::default(), None);
 
         let theme = &cfg.theme;
         let fam = cfg.font_family.clone();
-        // Same clamp Renderer::new (cycle 118) and set_font_size apply.
+        // Same clamp Renderer::new and set_font_size apply.
         // capture_png builds its OWN device + texture chain rather than
         // going through Renderer::new, so the bound has to be repeated
         // here — without it, a `font-size = 500` config + `--screenshot
@@ -6954,7 +6949,7 @@ pub fn capture_png_with_annotation(
         let tab_h = ch + 12.0;
         // wgpu's max-texture-per-side is 8192 on every backend / GPU
         // class we care about. The CLI already clamps `--cols ≤ 400` /
-        // `--rows ≤ 200` (cycle 69), but at a 72pt clamped font size the
+        // `--rows ≤ 200`, but at a 72pt clamped font size the
         // cell can be ~35×90px — so 200 cols × 90px = 18000px wide
         // exceeds the limit even without an enormous font config. Cap
         // each side dynamically against the actual cell size so the
@@ -6978,9 +6973,9 @@ pub fn capture_png_with_annotation(
         //
         // Tab labels are defined once and reused for BOTH the chrome geometry
         // and the text buffer below, so the highlighted segment + separators
-        // always line up with the glyphs. Cycle 859 (audit): the old fixed
-        // 240px segments were ~2× wider than the ~120px labels, so the second
-        // tab's text floated inside the first tab's highlight.
+        // always line up with the glyphs. The old fixed 240px segments were
+        // ~2× wider than the ~120px labels, so the second tab's text floated
+        // inside the first tab's highlight.
         let tab_text_left = 8.0_f32;
         // v2.31.0: tabs FILL the bar (the live v2.28.0 layout), NOT the old
         // compact label-width tabs — the README hero/showcase must reflect the
@@ -7004,8 +6999,8 @@ pub fn capture_png_with_annotation(
         let (w0, w1) = (tab_w, tab_w);
         q.push(rect(0.0, 0.0, wf, tab_h, theme.palette[8], 1.0));
         // Active tab 0: themed background + a 2px left accent bar (live style).
-        // Cycle 293/937: cascade through the resolved accent so peacock + the
-        // theme's signature accent show in --screenshot too.
+        // Cascade through the resolved accent so peacock + the theme's
+        // signature accent show in --screenshot too.
         let screenshot_accent = cfg.resolved_accent(theme);
         q.push(rect(tab_text_left, 0.0, w0, tab_h, theme.background, 1.0));
         q.push(rect(tab_text_left, 0.0, 2.0, tab_h, screenshot_accent, 1.0));
@@ -7045,8 +7040,8 @@ pub fn capture_png_with_annotation(
             theme.palette[8],
             1.0,
         ));
-        // Cycle 293/937: focused_split_color → resolved accent (explicit →
-        // Peacock → theme signature), same order as the live renderer.
+        // focused_split_color → resolved accent (explicit → Peacock →
+        // theme signature), same order as the live renderer.
         let foc = cfg
             .focused_split_color
             .unwrap_or_else(|| cfg.resolved_accent(theme));
@@ -7059,9 +7054,9 @@ pub fn capture_png_with_annotation(
 
         // Block cursor sitting at the end of the left pane's idle prompt
         // (`kevim@kettle:~/Repos/kettle$ ` = 29 columns, so the cursor's empty
-        // input cell is column 29). Cycle 859 (audit): the prompt text was
-        // lengthened but this column wasn't, leaving the cursor stranded
-        // mid-path on the "e" of `~/Repos/kettle`. Keep `cur_col` in sync with
+        // input cell is column 29). The prompt text was lengthened but
+        // this column wasn't, leaving the cursor stranded mid-path on the
+        // "e" of `~/Repos/kettle`. Keep `cur_col` in sync with
         // the final prompt line in the `left` buffer below.
         let cur_row = 6.0;
         let cur_col = 29.0;
@@ -7100,7 +7095,7 @@ pub fn capture_png_with_annotation(
         tab_buf.shape_until_scroll(&mut font_system, false);
 
         // The demo `cargo test` compile line carries the live crate
-        // version (cycle 771) — never a hardcoded literal — so the hero /
+        // version — never a hardcoded literal — so the hero /
         // showcase screenshots track the real product version forever.
         let compile_line = format!("kettle v{SCREENSHOT_DEMO_VERSION}\n");
         let mut left = TextBuffer::new(&mut font_system, metrics);
@@ -7113,7 +7108,7 @@ pub fn capture_png_with_annotation(
                 // Keep this command short enough that it never wraps even in the
                 // narrow showcase split (~50-col left pane) — a wrap would push
                 // every line down one and strand the hardcoded `cur_row` cursor
-                // on a blank line (cycle 859, audit).
+                // on a blank line.
                 ("$ cargo test\n", fg.clone()),
                 ("   Compiling ", dim.clone()),
                 (compile_line.as_str(), dim.clone()),
@@ -7164,7 +7159,7 @@ pub fn capture_png_with_annotation(
         );
         right.shape_until_scroll(&mut font_system, false);
 
-        // Cycle 294: optional caption overlay at the bottom of the
+        // Optional caption overlay at the bottom of the
         // image. When `annotation` is Some, paint a translucent dark
         // strip across the bottom 24px + render the caption text in
         // theme.foreground. Useful for docs, README hero images, and
@@ -7251,7 +7246,7 @@ pub fn capture_png_with_annotation(
                 custom_glyphs: &[],
             });
         }
-        // Cycle 294: append the annotation TextArea if set. Bottom-
+        // Append the annotation TextArea if set. Bottom-
         // anchored — left margin 8 px, text baseline ~4 px above
         // the bottom edge so the descenders don't clip.
         if annotation.is_some() {
@@ -7339,7 +7334,6 @@ pub fn capture_png_with_annotation(
         // ships. Quads go through the shared `menu_chrome_quads`
         // helper; text areas are built inline here because the
         // capture-path text-buffer pool is local to this function.
-        // Cycle 251.
         let mut menu_text_buffers: Vec<TextBuffer> = Vec::new();
         let mut menu_q: Vec<QuadInstance> = Vec::new();
         let mut menu_areas: Vec<TextArea> = Vec::new();
@@ -7406,9 +7400,9 @@ pub fn capture_png_with_annotation(
                 anchor: (pad + cw * 2.0, tab_h + pad + ch * 2.0),
                 rows,
                 highlight: 1,
-                // Cycle 714: deterministic screenshot fixture stays
-                // unscrolled + unclamped (the harness paints all 8
-                // rows in their natural height).
+                // Deterministic screenshot fixture stays unscrolled +
+                // unclamped (the harness paints all 8 rows in their
+                // natural height).
                 scroll_offset: 0,
                 panel_h_clamped: 0.0,
             };
@@ -7565,10 +7559,10 @@ pub fn capture_png_with_annotation(
                             r: srgb(bg.r),
                             g: srgb(bg.g),
                             b: srgb(bg.b),
-                            // Cycle 380: route through composed_bg_alpha
+                            // Route through composed_bg_alpha
                             // so the screenshot path also honors
-                            // background-type + background-darkness.
-                            // Cycle 149: honor cfg.background_opacity
+                            // background-type + background-darkness,
+                            // and honor cfg.background_opacity
                             // here too. The live-window clear op
                             // already did (line ~862), but the
                             // screenshot path hardcoded `a: 1.0` —
@@ -7597,7 +7591,7 @@ pub fn capture_png_with_annotation(
             // order as the live `Renderer::render_frame`: quads, then glyphs.
             grid_glyphs.draw(&mut pass, &grid_clips, [w, h]);
             text_renderer.render(&atlas, &vp, &mut pass)?;
-            // Cycle 251: menu chrome + menu text, same pass order as
+            // Menu chrome + menu text, same pass order as
             // the live `Renderer::render_frame`. Cheap no-ops for the
             // `DebugScene::Default` path because both uploads are
             // empty.
@@ -8318,7 +8312,7 @@ mod gpu_tests {
         })
     }
 
-    /// Cycle 797 drift guard. A dark sRGB quad (#1a1b23) drawn to an sRGB
+    /// Drift guard. A dark sRGB quad (#1a1b23) drawn to an sRGB
     /// target must read back ≈ #1a1b23, NOT the gamma-lifted ~#5a5f68 that the
     /// missing sRGB→linear decode in the quad shader produced (full-screen
     /// TUIs like AstroNvim set an explicit bg on every cell, so the lift
@@ -8348,7 +8342,7 @@ mod gpu_tests {
 mod screenshot_demo_tests {
     use super::SCREENSHOT_DEMO_VERSION;
 
-    /// Cycle 771 drift guard. The README hero / UX showcase screenshots are
+    /// Drift guard. The README hero / UX showcase screenshots are
     /// generated from the hardcoded `DebugScene::Default` scene, whose demo
     /// `cargo test` compile line used to bake a literal `kettle v0.1.0` into
     /// the rendered pixels. By the v2.x series that frozen string made the
@@ -8384,18 +8378,18 @@ mod pick_titlebar_bg_tests {
     use super::pick_titlebar_bg;
     use kettle_config::{Config, Rgb, Theme};
 
-    /// Cycle 710 drift guard. The focused titlebar must NEVER fall
+    /// Drift guard. The focused titlebar must NEVER fall
     /// through to the historic hardcoded `#c80003` Terminator red.
     ///
-    /// Cascade order (cycle 937 folds accent-color + the theme accent into
-    /// `Config::resolved_accent`):
+    /// Cascade order (`Config::resolved_accent` folds accent-color + the
+    /// theme accent together):
     ///   1. explicit `title_transmit_bg_color = #hex`
-    ///   2. `focused_split_color` (cycle 271 split-border override)
+    ///   2. `focused_split_color` (split-border override)
     ///   3. resolved accent = explicit `accent-color` → Peacock auto →
     ///      `theme.accent` (the theme's signature accent — Catppuccin Mocha's
     ///      mauve; `palette[4]` for themes without one)
     ///
-    /// Unfocused panes stay on their pre-cycle-710 neutral fallbacks
+    /// Unfocused panes stay on their previous neutral fallbacks
     /// so the gray + blue (broadcast) defaults don't regress.
     #[test]
     fn focused_titlebar_uses_accent_cascade_when_unset() {
@@ -8442,7 +8436,7 @@ mod pick_titlebar_bg_tests {
         );
     }
 
-    /// Cycle 920: unfocused + non-broadcast derives from the theme's surface
+    /// Unfocused + non-broadcast derives from the theme's surface
     /// `palette[8]` (was a hardcoded `#c0bebf` grey that clashed with dark
     /// themes like the Catppuccin Mocha default). An explicit
     /// `title-inactive-bg-color` still wins.
@@ -8463,7 +8457,7 @@ mod pick_titlebar_bg_tests {
         );
     }
 
-    /// Cycle 920/937: unfocused + broadcast mirrors the focused cascade
+    /// Unfocused + broadcast mirrors the focused cascade
     /// (`title-receive-bg-color → resolved accent`) — was a hardcoded `#0076c9`
     /// Terminator blue. The resolved accent defaults to the theme's signature
     /// accent (Mocha mauve). An explicit value still wins.
@@ -8520,7 +8514,7 @@ mod clamp_font_size_tests {
 
     #[test]
     fn clamp_font_size_bounds_match_set_font_size() {
-        // Floor + ceiling pinned: 5.0 and 72.0. Below cycle 73 only
+        // Floor + ceiling pinned: 5.0 and 72.0. At one point only
         // set_font_size enforced these; Renderer::new took
         // cfg.font_size raw, so a `font-size = 200` config booted with
         // 200pt cells (texture-limit risk) until a Ctrl+0 reload
@@ -8545,7 +8539,7 @@ mod hidpi_scale_tests {
     use super::{measure_cell, metrics_for, pane_metrics};
     use glyphon::{Buffer as TextBuffer, FontSystem};
 
-    /// Cycle 870: the pane text buffer must advance lines by the grid's `cell_h`
+    /// The pane text buffer must advance lines by the grid's `cell_h`
     /// (which includes the `cfg.cell_height` multiplier) so the cursor and
     /// selection/vi quads — which step by `cell_h` per row — stay locked to the
     /// text. Laying out at the unscaled `metrics.line_height` drifts a fraction
@@ -8565,7 +8559,7 @@ mod hidpi_scale_tests {
         assert_eq!(pm1.line_height, base.line_height);
     }
 
-    /// Cycle 747 core invariant: a logical font size renders at
+    /// Core invariant: a logical font size renders at
     /// `font_size × scale` physical pixels. This is the bug that made text
     /// tiny on a 200%-scaled Windows 11 display — `scale` was stored but the
     /// metrics ignored it, so a 13pt font drew at ~6.5px on a 2× monitor.
@@ -8621,7 +8615,7 @@ mod hidpi_scale_tests {
         );
     }
 
-    /// Cycle 865 (audit): at a large font on a high-DPI display the 10-glyph
+    /// At a large font on a high-DPI display the 10-glyph
     /// measure probe (~1300px at 72pt×3) exceeded the old fixed 1000px measure
     /// box and wrapped, so `cell_w` came out too narrow and mis-gridded the
     /// terminal. With the metrics-relative box it must scale linearly.
@@ -8649,7 +8643,7 @@ mod hidpi_scale_tests {
 
 #[cfg(test)]
 mod pane_buffer_lifecycle_tests {
-    /// Cycle 749 drift guard. The per-pane text-buffer vecs are grown with
+    /// Drift guard. The per-pane text-buffer vecs are grown with
     /// `while len < panes.len()` and must be truncated back down when panes
     /// close, or they sit at the session's high-water pane count holding idle
     /// glyph buffers. A behavioral test would need a full GPU `Renderer`, so
@@ -8810,7 +8804,7 @@ mod pane_buffer_lifecycle_tests {
         );
     }
 
-    /// Cycle 891 (audit): an unfocused pane carrying its own OSC 11
+    /// An unfocused pane carrying its own OSC 11
     /// background must paint a backdrop over its interior, because the
     /// per-cell loop skips default-bg cells (they'd otherwise leak the
     /// focused pane's clear color). The backdrop rect must stay INSIDE the
@@ -8844,7 +8838,7 @@ mod pane_buffer_lifecycle_tests {
         assert!(pane_backdrop_rect((0.0, 0.0, 3.0, 3.0), 2.0, 0.0, false).is_none());
     }
 
-    /// Cycle 892 (audit): the background-image cache must (a) key on blur
+    /// The background-image cache must (a) key on blur
     /// radius so toggling `background-blur` reloads, and (b) be freed when
     /// the config moves away from `background-type = image`. Pinned at the
     /// source level — exercising it needs a full GPU `Renderer`.
@@ -8866,7 +8860,7 @@ mod pane_buffer_lifecycle_tests {
             "the decoded wallpaper must be freed when background-type leaves \
              image / the path is cleared"
         );
-        // Cycle 919 (audit L2): a FAILED decode self-heals on a THROTTLE — the
+        // A FAILED decode self-heals on a THROTTLE — the
         // reload condition includes `c.frames.is_empty()` gated on
         // `bg_image_retry_at`, so a transient error / in-place fix recovers
         // without re-decoding a broken path every frame.
@@ -8875,7 +8869,7 @@ mod pane_buffer_lifecycle_tests {
             "a failed bg-image decode must retry (empty frames) but throttled \
              via bg_image_retry_at — self-heal without per-frame thrash"
         );
-        // Cycle 918: on a needed reload the key is stored UNCONDITIONALLY (empty
+        // On a needed reload the key is stored UNCONDITIONALLY (empty
         // frames on decode failure), and only a successfully-decoded entry
         // renders. Together these stop a stale wallpaper rendering for a broken
         // new path and stop re-decoding the failing file every frame.
@@ -9035,7 +9029,7 @@ mod pane_buffer_lifecycle_tests {
         assert_eq!(pick_pinned_adapter(&infos, 0, 0, "", ""), None);
     }
 
-    /// Cycle 891 (audit): the unfocused-pane backdrop is gated on the pane's
+    /// The unfocused-pane backdrop is gated on the pane's
     /// own default bg differing from the surface clear color, and pinned to
     /// the build_pane path. Source-level guard (behavioral check needs GPU).
     #[test]
@@ -9052,7 +9046,7 @@ mod pane_buffer_lifecycle_tests {
         );
     }
 
-    /// Cycle 788 drift guard (audit B2/B3/B4). The overlay text-buffer pools
+    /// Drift guard (audit B2/B3/B4). The overlay text-buffer pools
     /// are grown with `while len < N` exactly like the pane pools and must be
     /// truncated back down too, or each ratchets to its session high-water mark
     /// (peak menu rows / hint labels / tab count) holding idle shaped-glyph
@@ -9087,7 +9081,7 @@ mod pane_buffer_lifecycle_tests {
         }
     }
 
-    /// Cycle 827 drift guard (audit). `build_pane`'s per-cell style-run scratch
+    /// Drift guard (audit). `build_pane`'s per-cell style-run scratch
     /// must be POOLED on `self` (taken + returned) and reuse each run's `String`
     /// buffer by index (clear + refill), not `Vec::new()` + `to_string()` per
     /// frame — otherwise a busy colored pane mints dozens–hundreds of `String`
@@ -9104,7 +9098,7 @@ mod pane_buffer_lifecycle_tests {
             src.contains("self.span_scratch = spans;"),
             "span scratch must be returned to the pool for the next frame"
         );
-        // Cycle 853: the per-frame quad list is pooled the same way.
+        // The per-frame quad list is pooled the same way.
         assert!(
             src.contains("std::mem::take(&mut self.quad_scratch)"),
             "the frame quad Vec must be taken from the pool, not allocated fresh"
@@ -9119,7 +9113,7 @@ mod pane_buffer_lifecycle_tests {
         );
     }
 
-    /// Cycle 964 drift guard. Tab text must use the full rendered segment rect
+    /// Drift guard. Tab text must use the full rendered segment rect
     /// as its budget, including the active tab. Otherwise a wide equal-width
     /// tab can still middle-ellipsize a path to the compact active affordance
     /// even though the full segment has room.
@@ -9142,7 +9136,7 @@ mod pane_buffer_lifecycle_tests {
         );
     }
 
-    /// Cycle 791 drift guard (audit C1). Image-placement draw must keep the
+    /// Drift guard (audit C1). Image-placement draw must keep the
     /// `len > 1` fast-path so the common 0–1-image pane doesn't pay a per-frame
     /// `Vec` alloc + sort, AND must still z-sort the 2+ case so higher-z images
     /// land on top. A behavioral test needs a full GPU `Renderer`; pin both at
@@ -9161,13 +9155,13 @@ mod pane_buffer_lifecycle_tests {
         );
     }
 
-    /// Cycle 845 drift guard (audit). `render_frame_with_status` clones
+    /// Drift guard (audit). `render_frame_with_status` clones
     /// `self.font_family` every frame (to hold an owned handle while
     /// `&mut self.font_system` is borrowed across ~20 `Family::Name(&family)`
     /// reads). The field must stay `Arc<str>` so that clone is a refcount bump,
     /// not a per-frame heap alloc + memcpy at 60fps. A behavioral test needs a
     /// GPU `Renderer`; pin the field type at the source level.
-    /// Cycle 852 drift guard. `PaneView` must *borrow* its per-frame
+    /// Drift guard. `PaneView` must *borrow* its per-frame
     /// images/title/group_name from the frame's `metas` collection (exactly as
     /// `snap` borrows the pooled `PaneSnapshot`), not own clones — otherwise
     /// `redraw()` double-clones every visible pane's image `Vec` + title
@@ -9560,7 +9554,7 @@ mod settings_hit_test_tests {
 mod update_banner_top_tests {
     use super::{color, update_banner_chrome_colors, update_banner_top};
 
-    /// Cycle 808 drift guard (audit). The passive update banner must stack
+    /// Drift guard (audit). The passive update banner must stack
     /// above any BOTTOM-anchored tab / status bar so it neither paints over
     /// nor steals clicks from it. The renderer (draw) and the App (hit-test)
     /// share this pure helper, so they can't drift apart.
@@ -9602,7 +9596,7 @@ mod update_banner_top_tests {
 mod bg_tile_cap_tests {
     use super::bg_tiles_within_cap;
 
-    /// Cycle 825 drift guard: a small source image must NOT tile into a
+    /// Drift guard: a small source image must NOT tile into a
     /// per-frame quad storm — past the cap it falls back to a stretched quad.
     #[test]
     fn tiny_source_image_falls_back_to_stretch() {
@@ -9662,7 +9656,7 @@ mod inline_placement_budget_tests {
 mod vi_selection_row_span_tests {
     use super::vi_selection_row_span;
 
-    /// Cycle 820 drift guard: middle rows of a multi-row vi visual selection
+    /// Drift guard: middle rows of a multi-row vi visual selection
     /// extend to the real last column, not a hardcoded 256.
     #[test]
     fn middle_rows_use_real_width_not_256() {
@@ -9838,7 +9832,7 @@ mod settings_panel_cols_tests {
     use super::settings_panel_cols;
     use unicode_width::UnicodeWidthStr;
 
-    // Cycle 784: the settings panel must be wide enough for its two widest
+    // The settings panel must be wide enough for its two widest
     // lines — the footer hint and the in-capture chord prompt — both of which
     // exceed the old hardcoded 44 cols. Live sweep saw "Esc close" clipped to
     // "Esc clo" and the capture prompt overflowing onto the next row.

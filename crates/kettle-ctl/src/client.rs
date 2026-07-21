@@ -1,4 +1,4 @@
-//! Cycle 927 (agent-first A2): the blocking control-plane client.
+//! The blocking control-plane client (agent-first A2).
 //!
 //! Connects to a running kettle's control server (discovered via the registry
 //! or named by pid/endpoint), issues correlated `call(method, params)`

@@ -36,9 +36,9 @@ pub mod images;
 pub mod links;
 pub mod scrollbar;
 pub mod search;
-// Cycle 924 (agent-first A1): asciicast session recorder. Behind the
+// Agent-first asciicast session recorder. Behind the
 // `asciicast` feature in normal builds; always available under `cfg(test)` so
-// the in-crate tests + the cycle-911 replay test exercise it without the
+// the in-crate tests + the `writes_a_replayable_asciicast_file` test exercise it without the
 // feature flag.
 #[cfg(any(feature = "asciicast", test))]
 pub mod record;
@@ -59,7 +59,7 @@ pub use term::{
     CommandFinished, ProtocolNotification, PtyOutputSender, PtyWriter, ScreenText, SharedTerm,
     Terminal,
 };
-// Cycle 745: OSC 9;4 taskbar-progress state, surfaced by `Terminal::progress`
+// OSC 9;4 taskbar-progress state, surfaced by `Terminal::progress`
 // (re-exported so the UI can name it without depending on kettle-vt directly).
 pub use kettle_vt::Progress;
 pub use kettle_vt::{GraphicsBudget, GraphicsLimits, GraphicsReservation};

@@ -1,20 +1,20 @@
-//! Cycle 399 (Terminator parity, detachable-tabs Bucket-D
-//! sub-cycle 3): SCM_RIGHTS file-descriptor passing over Unix
-//! sockets. Used by the cross-window tab-handoff path
-//! (docs/TERMINATOR-DETACHABLE-TABS-DESIGN.md sub-cycles 7+8):
+//! SCM_RIGHTS file-descriptor passing over Unix sockets, built for
+//! Terminator parity (detachable tabs, Bucket-D, phase 3 of
+//! docs/TERMINATOR-DETACHABLE-TABS-DESIGN.md). Used by the cross-window
+//! tab-handoff path (docs/TERMINATOR-DETACHABLE-TABS-DESIGN.md phases 7+8):
 //!
-//!   source process → SerializedTab (cycle 397) + raw PTY fds
+//!   source process → SerializedTab + raw PTY fds
 //!                 → send_fds over unix socket
 //!   target process ← recv_fds over unix socket
 //!                 ← deserialize_tab + adopt fds as Pane PTYs
 //!
 //! Unix-only by design (Linux + macOS + BSDs). Windows + Wayland
-//! get the keyboard-driven fallback (`Action::MoveTabToNewWindow`,
-//! cycle 384) instead.
+//! get the keyboard-driven fallback (`Action::MoveTabToNewWindow`)
+//! instead.
 //!
 //! The actual cross-process IPC handshake + auth + connection
-//! lifecycle is sub-cycles 6 + 7 + 8; this module is the pure
-//! fd-passing primitive those sub-cycles compose.
+//! lifecycle is phases 6+7+8 of docs/TERMINATOR-DETACHABLE-TABS-DESIGN.md;
+//! this module is the pure fd-passing primitive those phases compose.
 
 #![cfg(unix)]
 #![allow(dead_code)]
@@ -23,7 +23,7 @@ use std::io;
 use std::os::unix::io::RawFd;
 use std::os::unix::net::UnixStream;
 
-// Cycle 848 (audit): use `libc::SCM_RIGHTS` directly rather than a hand-rolled
+// Use `libc::SCM_RIGHTS` directly rather than a hand-rolled
 // `0x01`. The literal was only `#[cfg]`'d for linux/macos/freebsd, so on
 // NetBSD/OpenBSD/DragonFly/illumos/Android the const was undefined and the
 // `#![cfg(unix)]` module failed to compile. `libc::SCM_RIGHTS` is correct for
@@ -52,7 +52,7 @@ pub fn send_fds(socket: &UnixStream, payload: &[u8], fds: &[RawFd]) -> io::Resul
     }
     if fds.is_empty() {
         // No fds → fall through to normal write. Saves a cmsg.
-        // Cycle 899 (audit): `write` can short-write (return < payload.len()),
+        // `write` can short-write (return < payload.len()),
         // and the caller (the detachable-tabs IPC layer) closes the SOURCE tab
         // on a "successful" send — so a partial write silently lost the tail of
         // the serialized tab and the tab vanished. `write_all` loops until the
@@ -94,7 +94,7 @@ pub fn send_fds(socket: &UnixStream, payload: &[u8], fds: &[RawFd]) -> io::Resul
     if sent < 0 {
         return Err(io::Error::last_os_error());
     }
-    // Cycle 899 (audit): sendmsg can SHORT-write on a stream socket. The fds
+    // sendmsg can SHORT-write on a stream socket. The fds
     // (ancillary SCM_RIGHTS data) ride with the first delivered byte and must
     // NOT be resent (re-sending the cmsg would duplicate the fds in the
     // receiver). So flush any remaining payload bytes with a plain write_all —
@@ -136,7 +136,7 @@ pub fn recv_fds(
     msg.msg_iovlen = 1;
     msg.msg_control = cmsg_buf.as_mut_ptr() as *mut libc::c_void;
     msg.msg_controllen = cmsg_space as _;
-    // Cycle 848 (audit): receive the fds close-on-exec where the platform
+    // Receive the fds close-on-exec where the platform
     // offers atomic delivery (Linux/Android `MSG_CMSG_CLOEXEC`); macOS and
     // others lack the flag and fall back to the `fcntl` below. Without CLOEXEC a
     // received PTY-master fd would leak into any shell spawned between this
@@ -154,7 +154,7 @@ pub fn recv_fds(
         let mut cmsg = libc::CMSG_FIRSTHDR(&msg);
         while !cmsg.is_null() {
             if (*cmsg).cmsg_level == libc::SOL_SOCKET && (*cmsg).cmsg_type == SCM_RIGHTS {
-                // Cycle 863 (audit): guard the length arithmetic. A cmsg whose
+                // Guard the length arithmetic. A cmsg whose
                 // `cmsg_len < CMSG_LEN(0)` would make the subtraction underflow
                 // and the loop read wildly OOB. SCM_RIGHTS headers from the
                 // kernel always satisfy this, but it's a cheap check on an
@@ -199,7 +199,7 @@ mod tests {
 
     #[test]
     fn send_fds_empty_payload_errors() {
-        // Cycle 399 drift guard. SCM_RIGHTS requires ≥1 byte of
+        // Drift guard: SCM_RIGHTS requires ≥1 byte of
         // real data alongside the ancillary cmsg; the kernel
         // rejects an empty iovec. Returns InvalidInput rather
         // than silently sending nothing.
@@ -210,7 +210,7 @@ mod tests {
 
     #[test]
     fn send_fds_with_no_fds_falls_through_to_write() {
-        // Cycle 399: zero fds skips the SCM_RIGHTS path entirely
+        // Zero fds skips the SCM_RIGHTS path entirely
         // (saves a cmsg). Should write the payload via normal
         // socket write.
         let (s1, s2) = std::os::unix::net::UnixStream::pair().expect("socketpair");
@@ -224,13 +224,13 @@ mod tests {
         assert_eq!(&buf[..n], payload);
     }
 
-    /// Cycle 899 (audit): the no-fds send path must deliver the WHOLE payload
+    /// The no-fds send path must deliver the WHOLE payload
     /// even when the kernel send buffer can't hold it in one write — a short
     /// write would lose the tail of the serialized tab, and the caller closes
     /// the source tab on a "successful" send → silent tab loss. Behavioral
     /// test: a tiny SO_SNDBUF + a payload far larger than it forces the
     /// `write_all` loop across many writes; a concurrent reader drains the
-    /// socket so the blocking writer makes progress. (Replaces a cycle-899
+    /// socket so the blocking writer makes progress. (Replaces a
     /// source-scan guard that self-matched its own banned-literal and failed
     /// on the unix CI leg where this module actually compiles.)
     #[test]
@@ -269,7 +269,7 @@ mod tests {
         );
     }
 
-    /// Cycle 848 (audit): a sent fd round-trips and is delivered close-on-exec
+    /// A sent fd round-trips and is delivered close-on-exec
     /// (atomic `MSG_CMSG_CLOEXEC` on Linux, `fcntl` fallback elsewhere), so a
     /// handed-off PTY master can't leak into a later-spawned shell.
     #[test]

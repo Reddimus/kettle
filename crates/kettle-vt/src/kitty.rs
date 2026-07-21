@@ -16,7 +16,7 @@
 //!   `a=c` copy a rectangle between frames; `a=d,d=f` frame delete
 //! - `a=p,P=,Q=` *relative placement*: recorded with its `H/V` cell offset
 //!   and parent; the on-screen position is resolved from the parent at
-//!   render time (a later cycle). Parent deletion cascades to relatives.
+//!   render time (see `resolve_chain`). Parent deletion cascades to relatives.
 //!
 //! Spec: `kitty/docs/graphics-protocol.rst`.
 
@@ -99,9 +99,9 @@ pub struct VirtualPlacement {
 /// A *relative placement* (`a=p,P=,Q=`): this placement is positioned
 /// `(h, v)` cells from the top-left of its parent placement (positive = right
 /// / down). Most useful with Unicode placeholders — the real image tracks a
-/// placeholder that moves with the text. Render-time position resolution is
-/// a later cycle; this records the relation. kitty
-/// `graphics-protocol.rst:682`.
+/// placeholder that moves with the text. Render-time position resolution
+/// happens in `resolve_chain` (kettle-core); this only records the relation.
+/// kitty `graphics-protocol.rst:682`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RelativePlacement {
     pub parent_img: u32,
@@ -121,7 +121,8 @@ pub struct Frame {
 }
 
 /// Per-image animation control state (`a=a`), set by the client and read by
-/// the renderer's playback loop (a later cycle). `current` is 1-based.
+/// `current_frame` below, which the renderer's playback loop drives.
+/// `current` is 1-based.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AnimationState {
     pub current: u32,
@@ -168,7 +169,7 @@ pub fn current_frame(gaps: &[i32], st: &AnimationState, elapsed_ms: u128) -> usi
         return 0;
     }
     let clamp_current = || (st.current.max(1) as usize - 1).min(gaps.len() - 1);
-    // Cycle 849 (audit): two cheap passes over `gaps` instead of collecting a
+    // Two cheap passes over `gaps` instead of collecting a
     // `Vec<(usize, u128)>` of the displayable frames. This runs from
     // `Terminal::placements()` on every paint of a playing animation, so a
     // running GIF allocated + freed a Vec per frame. Pass 1 accumulates the
@@ -284,7 +285,7 @@ impl KittyState {
     /// Feed one APC `G` body (between `ESC _ G` and `ESC \`).
     pub fn feed(&mut self, body: &str) -> KittyOut {
         let (control, payload) = body.split_once(';').unwrap_or((body, ""));
-        // Cycle 912 (audit): a malformed APC `G` body with a multi-MB control
+        // A malformed APC `G` body with a multi-MB control
         // prefix (no ';') would expand into a huge transient HashMap in
         // parse_control. Kitty control keys are tiny, so reject an over-long
         // control half outright — defense-in-depth (every other kitty map is
@@ -372,7 +373,7 @@ impl KittyState {
         }
         if action == "a" {
             // Animation control. Record state for the renderer playback loop.
-            // Cycle 582: gate the entry on the saturation cap. Updates to an
+            // Gate the entry on the saturation cap. Updates to an
             // already-tracked id are always allowed (no growth); a brand-new
             // id past saturation is a no-op for animation control so an
             // attacker can't grow `anim` indefinitely by sending `a=a,i=N`
@@ -411,7 +412,7 @@ impl KittyState {
                 && let Some(r) = dim("r")
             {
                 if r <= 1 {
-                    // Cycle 582: already inside the `action == "a"` arm so the
+                    // Already inside the `action == "a"` arm so the
                     // saturation gate above protects this `entry` from growth
                     // (we only get here if id was admitted). Safe to keep.
                     self.anim.entry(id).or_default().root_gap = z;
@@ -485,9 +486,9 @@ impl KittyState {
                 }
                 slot.1.append(control, payload, &budget)
             };
-            // Cycle 578: defense against an attacker chaining `m=1`
+            // Defense against an attacker chaining `m=1`
             // continuation chunks indefinitely. Drop the slot once it
-            // crosses the per-slot cap. Cycle 764: also enforce the global
+            // crosses the per-slot cap. Also enforce the global
             // cap (this frame slot + every in_flight slot) so concurrent
             // image + animation transmissions can't sum past the ceiling.
             if !accepted || self.in_flight_bytes() > self.budget.limits().in_flight_bytes {
@@ -606,7 +607,7 @@ impl KittyState {
             // `a=p,U=1` registers a virtual placement (shown later via
             // placeholder text); plain `a=p` puts the image at the cursor.
             if virt {
-                // Cycle 582: saturation gate. Updates to an already-tracked
+                // Saturation gate. Updates to an already-tracked
                 // id are always allowed (no growth); brand-new ids past the
                 // cap are dropped so an attacker can't grow the placement
                 // map by firing `a=p,U=1,i=N` for many distinct N.
@@ -662,7 +663,7 @@ impl KittyState {
         // Transmit (optionally + display): only the *first* chunk carries the
         // full control; continuation chunks carry just `m` (and maybe `q`).
         let more = kv.get("m").map(|v| v == "1").unwrap_or(false);
-        // Cycle 579: refuse new transmissions once the in-flight map
+        // Refuse new transmissions once the in-flight map
         // is saturated. A continuation chunk for an existing slot is
         // always allowed — only brand-new ids count against the cap.
         if !self.in_flight.contains_key(&id)
@@ -681,7 +682,7 @@ impl KittyState {
             let acc = self.in_flight.entry(id).or_default();
             acc.append(control, payload, &budget)
         };
-        // Cycle 578: per-slot cap. Cycle 764: also enforce the global cap
+        // Per-slot cap. Also enforce the global cap
         // across all slots so concurrent large transmissions can't sum past
         // MAX_TOTAL_IN_FLIGHT_BYTES. Either breach drops this slot.
         if !accepted || self.in_flight_bytes() > self.budget.limits().in_flight_bytes {
@@ -701,7 +702,7 @@ impl KittyState {
             return KittyOut::None;
         };
         if id != 0 {
-            // Cycle 581: cap stored-image count. An update to an
+            // Cap stored-image count. An update to an
             // already-present id is always allowed (replaces in
             // place — no growth); a brand-new id past saturation is
             // refused so an attacker can't grow `store` indefinitely
@@ -714,7 +715,7 @@ impl KittyState {
         // placement, but draw nothing at the cursor.
         if first.get("U").map(|v| v == "1").unwrap_or(false) {
             let fz = first.get("z").and_then(|v| v.parse().ok()).unwrap_or(z);
-            // Cycle 582: saturation gate (same shape as the standalone
+            // Saturation gate (same shape as the standalone
             // `a=p,U=1` path above). The store-side gate above doesn't
             // imply this one — store and virtual_placements are independent
             // maps, and `U=1` on an existing-id update would silently grow
@@ -773,7 +774,7 @@ impl KittyState {
         self.rel.get(&(id, placement))
     }
 
-    /// Cycle 764: total bytes currently buffered across every in-flight
+    /// Total bytes currently buffered across every in-flight
     /// transmission — all `in_flight` slots plus the animation `frame_in_flight`
     /// slot. Used to enforce the shared in-flight byte limit. O(slots) ≤ 8, called
     /// once per chunk, so trivially cheap.
@@ -828,19 +829,22 @@ impl KittyState {
             .is_some_and(|n| n <= self.budget.limits().animation_bytes)
     }
 
-    /// Test-only accessor for the cycle-579 in-flight slot cap drift guard.
+    /// Test-only accessor for the in-flight slot cap drift guard
+    /// (`kitty_in_flight_slot_cap_refuses_new_ids_past_saturation`).
     #[cfg(test)]
     fn in_flight_len_for_test(&self) -> usize {
         self.in_flight.len()
     }
 
-    /// Test-only accessor for the cycle-581 store slot cap drift guard.
+    /// Test-only accessor for the store slot cap drift guard
+    /// (`kitty_stored_images_cap_holds_against_distinct_id_flood`).
     #[cfg(test)]
     fn store_len_for_test(&self) -> usize {
         self.store.len()
     }
 
-    /// Test-only accessor for the cycle-582 anim slot cap drift guard.
+    /// Test-only accessor for the anim slot cap drift guard
+    /// (`kitty_anim_slot_cap_holds_against_distinct_id_flood`).
     /// `anim` is the most acute remaining per-id HashMap because an
     /// attacker can grow it with `a=a,i=N` for arbitrary N without ever
     /// transmitting a real image.
@@ -872,8 +876,8 @@ fn parse_control(s: &str) -> HashMap<String, String> {
 
 /// Inflate a zlib (`o=z`) kitty payload, never allocating more than `cap`
 /// bytes. A decompression bomb — a tiny compressed stream that inflates to
-/// gigabytes — returns `None` instead of OOMing/aborting the process. Cycle
-/// 814 (audit): `.take(cap + 1)` bounds the read; reading past `cap` proves the
+/// gigabytes — returns `None` instead of OOMing/aborting the process.
+/// `.take(cap + 1)` bounds the read; reading past `cap` proves the
 /// stream is over-budget, so we reject it rather than silently truncate.
 fn inflate_bounded_with_budget(
     compressed: &[u8],
@@ -920,7 +924,7 @@ fn decode(control: &str, b64: &str) -> Option<ImageData> {
 
 fn decode_with_budget(control: &str, b64: &str, budget: &GraphicsBudget) -> Option<ImageData> {
     let kv = parse_control(control);
-    // Cycle 916 (file-by-file audit): STANDARD base64 rejects embedded whitespace;
+    // STANDARD base64 rejects embedded whitespace;
     // `.trim()` only strips the ends. Strip all ASCII whitespace so a line-wrapped
     // single-shot kitty payload still decodes (the chunked m=1 path is fine).
     if b64.len() > budget.limits().transmission_bytes {
@@ -971,7 +975,7 @@ fn decode_with_budget(control: &str, b64: &str, budget: &GraphicsBudget) -> Opti
         "24" => {
             let w: u32 = kv.get("s")?.parse().ok()?;
             let h: u32 = kv.get("v")?.parse().ok()?;
-            // Cycle 912 (audit): validate the payload length against the declared
+            // Validate the payload length against the declared
             // dimensions BEFORE the 4/3 RGBA expansion, mirroring what the f=32
             // arm gets for free from ImageData::new. Without this, a mismatched
             // 1x1 claim carrying a huge payload wasted a ~payload-sized alloc +
@@ -1001,7 +1005,7 @@ mod tests {
     // One opaque RGBA pixel (f=32,s=1,v=1): bytes [1,2,3,4].
     const PX: &str = "AQIDBA==";
 
-    /// Cycle 912 (audit): the f=24 RGB arm validates the payload length against
+    /// The f=24 RGB arm validates the payload length against
     /// the declared dimensions BEFORE the 4/3 RGBA expansion. A mismatched 1x1
     /// claim carrying a larger payload is rejected (None) instead of allocating
     /// and copying first; a correctly-sized payload still decodes.
@@ -1013,7 +1017,7 @@ mod tests {
         assert!(super::decode("f=24,s=1,v=1", "AQID").is_some());
     }
 
-    /// Cycle 912 (audit): an APC `G` body with a multi-MB control prefix (no ';')
+    /// An APC `G` body with a multi-MB control prefix (no ';')
     /// is rejected fast (KittyOut::None) instead of expanding into a huge
     /// transient HashMap in parse_control.
     #[test]
@@ -1025,7 +1029,7 @@ mod tests {
         assert!(matches!(k.feed(&body), KittyOut::None));
     }
 
-    /// Cycle 814 (audit) drift guard for the kitty `o=z` decompression-bomb
+    /// Drift guard for the kitty `o=z` decompression-bomb
     /// defense. A few dozen bytes of zlib inflate to 64 KiB of zeros; under a
     /// generous cap it decodes, under a tiny cap it's rejected (None) WITHOUT
     /// allocating the full output. This pins the `.take(cap+1)` bound so a
@@ -1212,9 +1216,9 @@ mod tests {
         assert_eq!(current_frame(&g2, &load, 250), 1);
         assert_eq!(current_frame(&g2, &load, 900), 1, "loading waits at end");
 
-        // Cycle 849: the freeze / loading-hold must land on the last
+        // The freeze / loading-hold must land on the last
         // *displayable* frame, skipping a trailing gapless one — the two-pass
-        // rewrite tracks the last `g > 0` index, so guard that directly.
+        // walk tracks the last `g > 0` index, so guard that directly.
         let g3 = [100, 200, -1]; // displayable: idx 0,1; total 300
         assert_eq!(
             current_frame(&g3, &run(1, false), 999),
@@ -1337,7 +1341,7 @@ mod tests {
         assert!(limits.in_flight_bytes < limits.in_flight_slots * limits.transmission_bytes);
     }
 
-    /// Cycle 582 drift guard: `a=a,i=N` for many distinct N must not
+    /// Drift guard: `a=a,i=N` for many distinct N must not
     /// grow the `anim` HashMap past `MAX_STORED_IMAGES`. This is the
     /// most acute remaining per-id surface because animation control
     /// doesn't require a prior transmission — every `a=a` admits a
@@ -1368,7 +1372,7 @@ mod tests {
         );
     }
 
-    /// Cycle 581 drift guard: completing more than `MAX_STORED_IMAGES`
+    /// Drift guard: completing more than `MAX_STORED_IMAGES`
     /// distinct `a=T` transmissions must not grow `store` past the
     /// cap. An update to an already-stored id is still accepted
     /// (replaces in place; no growth).
@@ -1414,7 +1418,7 @@ mod tests {
         assert_eq!(k.virtual_placement(1).map(|p| p.cols), Some(2));
     }
 
-    /// Cycle 580 drift guard: chaining more than `MAX_FRAMES_PER_IMAGE`
+    /// Drift guard: chaining more than `MAX_FRAMES_PER_IMAGE`
     /// frame transmissions for one image must not grow the `frames[id]`
     /// Vec past the cap. Verifies the silent-drop behavior so a hostile
     /// PTY emitter can't OOM kettle by spamming `a=f` frames at one id.
@@ -1457,7 +1461,7 @@ mod tests {
         );
     }
 
-    /// Cycle 579 drift guard: a hostile PTY emitter that fires
+    /// Drift guard: a hostile PTY emitter that fires
     /// `MAX_IN_FLIGHT_SLOTS + 1` distinct `i=` values (each with a
     /// single `m=1` chunk that never receives its `m=0` terminator)
     /// must not grow the `in_flight` HashMap past the cap. Brand-new

@@ -48,7 +48,7 @@ pub(crate) fn track_consumed_key_release(
     }
 }
 
-/// Multi-window cycle (Peacock): the accent this window resolved + claimed.
+/// Multi-window effort (Peacock): the accent this window resolved + claimed.
 pub(crate) struct WindowAccent {
     /// The live color (recomputed from `slot` when the theme changes).
     pub(crate) color: kettle_config::Rgb,
@@ -80,10 +80,10 @@ pub(crate) struct WindowState {
     /// native accessibility traffic on the UI thread.
     pub(crate) accessibility_key: Option<u64>,
     pub(crate) accessibility_updated_at: Option<std::time::Instant>,
-    /// Cycle 745: OS taskbar progress, driven by the focused pane's OSC 9;4
+    /// OS taskbar progress, driven by the focused pane's OSC 9;4
     /// state each frame (pwsh 7 / Windows Terminal parity). No-op off Windows.
     pub(crate) taskbar: crate::taskbar::Taskbar,
-    /// Cycle 869: true while an OS attention request (taskbar flash / dock
+    /// True while an OS attention request (taskbar flash / dock
     /// bounce) is outstanding. winit's `request_user_attention(None)` doesn't
     /// reliably stop the Win11 taskbar flash, so we track outstanding requests
     /// and clear them directly via `Taskbar::clear_attention` on focus-gain.
@@ -111,30 +111,30 @@ pub(crate) struct WindowState {
     /// fade timer, so it costs zero idle wakeups — just a single repaint on the
     /// hover-enter / hover-leave transition.
     pub(crate) scrollbar_hover: bool,
-    /// Cycle 904 (audit): in-progress mouse drag of a split divider. `Some`
+    /// In-progress mouse drag of a split divider. `Some`
     /// while the left button is held after a press landed on a divider seam;
     /// each CursorMoved recomputes the addressed split's ratio from the cursor.
     pub(crate) dragging_split: Option<SplitDrag>,
     /// `(query, index)` last scrolled-to, so the viewport follows search
     /// matches into scrollback without re-scrolling every frame.
     pub(crate) search_revealed: Option<(String, usize)>,
-    /// Cycle 803: cache key for the last completed search scan — see app.rs
+    /// Cache key for the last completed search scan — see app.rs
     /// (`update_search` re-scans only when query/focus/output changed).
     pub(crate) search_scan_key: Option<SearchScanKey>,
-    /// Cycle 803: cache key for the last viewport link-autodetect scan — see
+    /// Cache key for the last viewport link-autodetect scan — see
     /// app.rs (`update_links` re-scans only on output, scroll, or focus).
     pub(crate) links_scan_key: Option<LinksScanKey>,
     pub(crate) mouse_btn: Option<u8>,
     /// Last `(row, col)` reported to a mouse-tracking app, so cell-motion
     /// reports (1002/1003) fire only on a cell crossing — xterm coalesces
     /// intra-cell moves; a fast drag would otherwise flood one SGR report
-    /// per pixel of travel (cycle 842, audit).
+    /// per pixel of travel.
     pub(crate) last_mouse_cell: Option<(usize, usize)>,
     pub(crate) links: Vec<kettle_core::Link>,
     pub(crate) ssh_input: Option<String>,
     /// `Some((query, selected))` while the command palette is open.
     pub(crate) palette_input: Option<(String, usize)>,
-    /// Cycle 756: `Action::OpenSettings` overlay navigation. `Some` while the
+    /// `Action::OpenSettings` overlay navigation. `Some` while the
     /// in-app settings panel is open.
     pub(crate) settings_nav: Option<crate::settings::SettingsNav>,
     /// v2.24.0: when `Some`, an inline text prompt (the image-path entry) is open
@@ -151,7 +151,7 @@ pub(crate) struct WindowState {
     /// differs from this (an edge-trigger), so an animated wallpaper repaints at
     /// the GIF's fps instead of continuously (the animated-idle-CPU fix).
     pub(crate) last_bg_frame: Option<usize>,
-    /// Cycle 708 (Terminator parity): `Action::OpenLayoutPicker` modal state —
+    /// Terminator parity: `Action::OpenLayoutPicker` modal state —
     /// (typed query, selected index) against `Session::list_layouts`.
     pub(crate) layout_picker_input: Option<(String, usize)>,
     /// Active quick-select hint mode: detected targets + typed prefix.
@@ -167,10 +167,10 @@ pub(crate) struct WindowState {
     /// the single post-event chokepoint in `window_event` when the highlight
     /// leaves a theme row or the menu closes.
     pub(crate) theme_preview: Option<(String, kettle_config::Theme)>,
-    /// Cycle 369: when `Some`, the user is editing a window/tab/pane title via
+    /// When `Some`, the user is editing a window/tab/pane title via
     /// an inline overlay.
     pub(crate) editing_title: Option<TitleEditState>,
-    /// Cycle 648: when `Some`, a confirm modal is open. Keyboard input routes
+    /// When `Some`, a confirm modal is open. Keyboard input routes
     /// to modal dispatch and the renderer paints the centered modal panel.
     pub(crate) confirm_dialog: Option<ConfirmDialogState>,
     pub(crate) window_focused: bool,
@@ -185,7 +185,7 @@ pub(crate) struct WindowState {
     /// Last `CursorIcon` we pushed to the window — used to dedupe so we
     /// don't issue a `set_cursor` syscall on every CursorMoved event.
     pub(crate) last_cursor_icon: Option<CursorIcon>,
-    /// Cycle 249: drag-to-reorder tab state. `Some(_)` while a left-
+    /// Drag-to-reorder tab state. `Some(_)` while a left-
     /// mouse-button press in the tab bar is being held; cleared on release.
     pub(crate) tab_drag_active: bool,
     /// Surface position where the in-window tab reorder gesture was armed.
@@ -197,10 +197,10 @@ pub(crate) struct WindowState {
     /// a visual press state only; hit-test and drag behavior use the segment
     /// rects and `tab_drag_*` fields.
     pub(crate) tab_pressed_idx: Option<usize>,
-    /// Cycle 402: tab tear-off drag FSM state. Distinct from the in-window
-    /// `tab_drag_active` reorder (cycle 249); both fire from the same
+    /// Tab tear-off drag FSM state. Distinct from the in-window
+    /// `tab_drag_active` reorder; both fire from the same
     /// mouse-down on the tab bar. Wired live in C6 of the multi-window
-    /// cycle: a release while DraggingOutside tears the tab off into a new
+    /// effort: a release while DraggingOutside tears the tab off into a new
     /// in-process window at the drop point.
     pub(crate) detach_drag: crate::detach::DragState,
     /// C6: surface position of the tab-bar mouse-down that armed
@@ -218,21 +218,21 @@ pub(crate) struct WindowState {
     /// Index of the tab whose close-button (`✕`) zone the mouse cursor
     /// is currently over (pointer-cursor swap + hover-background quad).
     pub(crate) hovered_close_idx: Option<usize>,
-    /// Cycle 298 vi-mode (Alacritty parity): `Some(ViState)` while kettle is
+    /// Vi-mode (Alacritty parity): `Some(ViState)` while kettle is
     /// intercepting keys for vi-style navigation.
     pub(crate) vi_mode: Option<ViState>,
-    /// Cycle 693 Terminator parity (`key_scaled_zoom`): font size saved on
+    /// Terminator parity (`key_scaled_zoom`): font size saved on
     /// entering scaled zoom so leave-zoom restores it exactly.
     pub(crate) scaled_zoom_prev_font_size: Option<f32>,
-    /// Cycle 703: the pane id we last fired the Lua focus-change event for.
+    /// The pane id we last fired the Lua focus-change event for.
     pub(crate) last_emitted_focus: Option<u64>,
-    /// Cycle 704: last title we emitted a `title_changed` Lua event for,
+    /// Last title we emitted a `title_changed` Lua event for,
     /// keyed by pane id. Self-prunes (only live panes are iterated).
     pub(crate) last_emitted_titles: std::collections::HashMap<u64, String>,
     pub(crate) blink_on: bool,
     pub(crate) last_blink: std::time::Instant,
     pub(crate) last_bell: Option<std::time::Instant>,
-    /// Cycle 910 (R2): coalesce output-driven repaints. `last_paint` is when
+    /// Coalesce output-driven repaints (R2). `last_paint` is when
     /// the last frame painted; `coalescing_paint` marks a deferred output
     /// paint whose frame budget has not elapsed yet. Input/cursor paints
     /// bypass this (they call `request_redraw` directly).
@@ -247,8 +247,8 @@ pub(crate) struct WindowState {
     pub(crate) last_click: Option<(std::time::Instant, usize, usize, u8)>,
     /// Last OS window title set (dedupe `set_title` syscalls).
     pub(crate) last_title: String,
-    /// Cycle 412: pane ids whose shell exited + cfg.exit_action requested
-    /// restart. Drained AFTER drain_events; dedup'd on push (cycle 452).
+    /// Pane ids whose shell exited + cfg.exit_action requested
+    /// restart. Drained AFTER drain_events; dedup'd on push.
     pub(crate) pending_pane_restarts: Vec<u64>,
     /// Whether a visible-state window has already been shown. Startup creates
     /// the OS window hidden during renderer init, then reveals visible states
@@ -260,7 +260,7 @@ pub(crate) struct WindowState {
     /// The fan-out `UserEvent::Wakeup` compares against the live counters to
     /// decide whether THIS window has anything new to paint.
     pub(crate) seen_output_gen: std::collections::HashMap<u64, u64>,
-    /// Multi-window cycle (Peacock): this window's resolved accent claim.
+    /// Multi-window effort (Peacock): this window's resolved accent claim.
     /// `None` while unresolved (first frame) or when the user opted out
     /// (`accent-color = theme`/`off`/`none` or a pinned hex). Kept in sync
     /// each frame by `App::sync_window_accent`.
@@ -268,8 +268,8 @@ pub(crate) struct WindowState {
     /// PERF (key-repeat stutter fix): when the user last typed bytes into a
     /// PTY in this window. Output arriving within `TYPING_ECHO_WINDOW` of a
     /// keystroke paints IMMEDIATELY (request_redraw is vsync-coalesced, so
-    /// this can't outpace the display) instead of through the cycle-910
-    /// output coalescer — whose WaitUntil deadline has ~16ms timer
+    /// this can't outpace the display) instead of through the
+    /// output coalescer (`coalescing_paint`) — whose WaitUntil deadline has ~16ms timer
     /// granularity on Windows, which made held-key echo visibly stutter
     /// while Terminator (steady GTK frame clock) stayed smooth.
     pub(crate) last_typed: Option<std::time::Instant>,

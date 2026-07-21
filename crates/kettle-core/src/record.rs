@@ -1,7 +1,7 @@
 //! Asciicast v2 session recorder (cargo feature `asciicast`).
 //!
-//! Cycle 875 introduced this as kettle-ui's developer-only `dev-record`
-//! recorder; cycle 924 (agent-first A1) promoted it here to kettle-core — the
+//! This started as kettle-ui's developer-only `dev-record`
+//! recorder; it was later promoted here to kettle-core (agent-first A1) — the
 //! crate that owns the `Terminal` — so it is the ONE shared recorder behind
 //! both the GUI's `--record` (kettle-ui `dev-record` feature) and `kettle exec
 //! --record` (the bin enables `kettle-core/asciicast` unconditionally, so
@@ -15,7 +15,7 @@
 //! - `[t, "o", <utf8>]`   — terminal OUTPUT
 //! - `[t, "r", "CxR"]`    — resize
 //! - `[t, "m", <json>]`   — kettle UI/UX markers (players ignore them)
-//! - `[t, "i", <token>]`  — keystroke TOKENS, never raw typed chars (cycle 876)
+//! - `[t, "i", <token>]`  — keystroke TOKENS, never raw typed chars
 //!
 //! The file is created `0600` on Unix and is purely local — kettle never
 //! uploads it. Writes are best-effort: the first I/O error disables the
@@ -37,7 +37,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 /// its 8KiB buffer fills, so a flood can't grow the loss window); a hard
 /// crash loses at most this much trailing trace. `finish` / `Drop` still
 /// flush, so every clean close path produces a complete, replayable file —
-/// the cycle-908 closure verification is unaffected.
+/// verified by the `writes_a_replayable_asciicast_file` test.
 const FLUSH_INTERVAL: Duration = Duration::from_millis(250);
 
 /// A single trace stops at an event boundary before growing past 512 MiB.
@@ -80,7 +80,7 @@ pub struct Recorder {
     status: RecordStatus,
     bytes_written: u64,
     max_bytes: u64,
-    /// Cycle 876: when true, record raw typed characters in `i` events.
+    /// When true, record raw typed characters in `i` events.
     /// Default false — bare printables are redacted to a generic class so a
     /// typed password never lands in the trace (`--record-raw-input` opts in).
     raw_input: bool,
@@ -176,7 +176,7 @@ impl Recorder {
         })
     }
 
-    /// Whether raw typed characters are captured (vs redacted). Cycle 876.
+    /// Whether raw typed characters are captured (vs redacted).
     pub fn raw_input(&self) -> bool {
         self.raw_input
     }
@@ -339,7 +339,7 @@ impl Recorder {
         self.emit("r", &format!("{cols}x{rows}"));
     }
 
-    /// Record a keystroke as an `i` event. Cycle 876: the caller passes a
+    /// Record a keystroke as an `i` event. The caller passes a
     /// privacy-preserving TOKEN (a named key / chord like `Enter` / `Ctrl+c`,
     /// or a redacted printable class via `printable_token`) — never raw typed
     /// characters unless raw-input mode was opted into. Pasted content is never
@@ -348,7 +348,7 @@ impl Recorder {
         self.emit("i", token);
     }
 
-    /// Record a kettle UI/UX state transition as an `m` marker (cycle 876).
+    /// Record a kettle UI/UX state transition as an `m` marker.
     /// `label` is a short tag like `kettle:tab_add` / `kettle:focus_out` /
     /// `kettle:agent send_text pane=3`. Players that understand markers show
     /// the label; others ignore it. Captures state the PTY output stream can't
@@ -726,7 +726,7 @@ fn event_line(time: f64, code: &str, data: &str) -> String {
     format!("[{time:.6}, \"{code}\", {data_json}]")
 }
 
-/// Cycle 876: redact a bare printable keystroke. In raw mode the literal text is
+/// Redact a bare printable keystroke. In raw mode the literal text is
 /// kept (full-fidelity repro the dev explicitly opted into with
 /// `--record-raw-input`); otherwise each character collapses to a generic class
 /// glyph so a typed password never appears in the trace — only its keystroke
@@ -791,7 +791,7 @@ mod tests {
         assert_eq!(printable_token("abc", true), "abc");
     }
 
-    /// Cycle 936 (review): a multibyte codepoint split across two
+    /// A multibyte codepoint split across two
     /// `record_output` chunks must decode whole, not mangle into U+FFFD halves.
     #[test]
     fn record_output_stitches_split_utf8_across_chunks() {

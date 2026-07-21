@@ -17,7 +17,7 @@ pub fn parse(input: &str) -> Vec<Entry> {
     // editors saved the file with one. Without this, the BOM bytes
     // were prepended to the first key — so `\u{feff}theme` showed up
     // as "unknown key: ﻿theme" in --check-config and the theme silently
-    // didn't apply. Cycle 155.
+    // didn't apply.
     let input = input.strip_prefix('\u{feff}').unwrap_or(input);
     for raw in input.lines() {
         let line = raw.trim();
@@ -43,7 +43,7 @@ mod tests {
 
     #[test]
     fn strips_leading_utf8_bom() {
-        // Cycle 155: Notepad and a few Windows editors save UTF-8
+        // Notepad and a few Windows editors save UTF-8
         // text with a leading byte-order mark (\u{feff}, 0xEF 0xBB
         // 0xBF). Without this strip, the first key would parse as
         // `\u{feff}theme` and surface as an unknown key. The BOM

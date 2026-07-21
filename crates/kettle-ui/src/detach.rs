@@ -1,8 +1,8 @@
-//! Cycle 400 (Terminator parity, detachable-tabs): tab tear-off drag state
-//! machine. Lives in its own module so the App's mouse-handler stays small
+//! Tab tear-off drag state machine (Terminator parity, detachable-tabs).
+//! Lives in its own module so the App's mouse-handler stays small
 //! and the states are unit-testable as a pure FSM.
 //!
-//! Wired live by C6 of the multi-window cycle — the tear is an IN-PROCESS
+//! Wired live by C6 of the multi-window effort — the tear is an IN-PROCESS
 //! `detach_tab → open_window(AdoptTab)` (live PTYs, nothing respawns), so
 //! the cross-process IPC machinery the original design sketched is gone:
 //!
@@ -63,7 +63,7 @@ pub enum DragState {
 }
 
 impl DragState {
-    /// Cycle 400: transition Idle → ArmedInside on mouse-down
+    /// Transition Idle → ArmedInside on mouse-down
     /// over a tab. Returns the new state; caller stores it.
     pub fn on_mouse_down_on_tab(tab_idx: usize) -> Self {
         DragState::ArmedInside { tab_idx }
@@ -75,7 +75,7 @@ impl DragState {
     /// the OS-native drag-distance most desktops ship.
     pub const DRAG_DISTANCE_THRESHOLD_PX: f32 = 4.0;
 
-    /// Cycle 400: ArmedInside → DraggingInside transition on
+    /// ArmedInside → DraggingInside transition on
     /// mouse-move with distance > threshold. Sub-pixel moves
     /// stay Armed (real click intent). Returns the new state
     /// or self unchanged if not a drag.
@@ -90,7 +90,7 @@ impl DragState {
         }
     }
 
-    /// Cycle 400: any-state → Idle on mouse-up.
+    /// Any-state → Idle on mouse-up.
     /// Caller is responsible for any actual drop logic (which
     /// tab to move where) before calling this; this just
     /// resets the FSM.
@@ -98,11 +98,11 @@ impl DragState {
         DragState::Idle
     }
 
-    /// Cycle 401 (Terminator parity, detachable-tabs Bucket-D
-    /// sub-cycle 9): cancel path. Returns Some(tab_idx) if a tab
-    /// was being dragged when the cancel fired — caller can
-    /// restore that tab's visual state (clear ghost, reset focus).
-    /// None when the cancel comes from Idle (no-op).
+    /// Terminator parity, detachable-tabs Bucket-D, phase 9 of
+    /// docs/TERMINATOR-DETACHABLE-TABS-DESIGN.md: cancel path. Returns
+    /// Some(tab_idx) if a tab was being dragged when the cancel fired —
+    /// caller can restore that tab's visual state (clear ghost, reset
+    /// focus). None when the cancel comes from Idle (no-op).
     pub fn cancel(self) -> (Self, Option<usize>) {
         match self {
             DragState::Idle => (DragState::Idle, None),
@@ -112,7 +112,7 @@ impl DragState {
         }
     }
 
-    /// Cycle 401: transition DraggingInside → DraggingOutside when the
+    /// Transition DraggingInside → DraggingOutside when the
     /// cursor leaves the window (event-driven OR position-derived).
     /// Returns self unchanged from non-DraggingInside.
     pub fn on_cursor_leave_window(self) -> Self {
@@ -122,7 +122,7 @@ impl DragState {
         }
     }
 
-    /// Cycle 401: transition DraggingOutside → DraggingInside on
+    /// Transition DraggingOutside → DraggingInside on
     /// cursor-re-entered-this-window event (user changed their
     /// mind mid-drag). Preserves the original tab_idx. Returns
     /// self unchanged from non-DraggingOutside.
@@ -169,7 +169,7 @@ mod tests {
 
     #[test]
     fn cancel_returns_dragged_tab_idx() {
-        // Cycle 401 drift guard. cancel() reports the tab that was being
+        // Drift guard: cancel() reports the tab that was being
         // manipulated so the caller can restore its visual state.
         let (s, restored) = DragState::Idle.cancel();
         assert!(matches!(s, DragState::Idle));

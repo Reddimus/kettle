@@ -16,7 +16,7 @@ pub struct Match {
     pub end_col: usize,
 }
 
-/// Cycle 617 (Terminator parity, terminatorlib/config.py:117
+/// Terminator parity (terminatorlib/config.py:117
 /// `case_sensitive`): override the default smart-case policy
 /// at search time. `Smart` keeps ripgrep/vim's smart-case
 /// (insensitive until the pattern has any uppercase),
@@ -41,7 +41,7 @@ pub fn build_regex(pattern: &str) -> Option<Regex> {
     build_regex_with(pattern, CaseSensitivity::Smart)
 }
 
-/// Cycle 617: same as `build_regex` but with an explicit override.
+/// Same as `build_regex` but with an explicit override.
 /// Pure — no terminal state involved.
 pub fn build_regex_with(pattern: &str, mode: CaseSensitivity) -> Option<Regex> {
     if pattern.is_empty() {
@@ -62,7 +62,7 @@ pub fn search(term: &Term<EventProxy>, pattern: &str) -> Vec<Match> {
     search_with(term, pattern, CaseSensitivity::Smart)
 }
 
-/// Cycle 617: search with an explicit case-sensitivity override.
+/// Search with an explicit case-sensitivity override.
 pub fn search_with(term: &Term<EventProxy>, pattern: &str, mode: CaseSensitivity) -> Vec<Match> {
     let Some(re) = build_regex_with(pattern, mode) else {
         return Vec::new();
@@ -74,7 +74,7 @@ pub fn search_with(term: &Term<EventProxy>, pattern: &str, mode: CaseSensitivity
     let bottom = grid.bottommost_line().0;
 
     let mut matches = Vec::new();
-    // Cycle 762: reuse the line-text + byte→column scratch buffers across every
+    // Reuse the line-text + byte→column scratch buffers across every
     // scrollback line instead of allocating a fresh String + Vec per line. On a
     // 10k-line scrollback that's 2 allocations total rather than ~20k; `.clear()`
     // keeps the capacity.
@@ -85,7 +85,7 @@ pub fn search_with(term: &Term<EventProxy>, pattern: &str, mode: CaseSensitivity
         // shared helper, so the wide-char-spacer fix can't drift (v2.26.0).
         crate::grid_text::row_text_into(grid, line, cols, &mut text, &mut col_of_byte);
         for m in re.find_iter(&text) {
-            // Cycle 865 (audit): skip zero-width matches. A user pattern that can
+            // Skip zero-width matches. A user pattern that can
             // match empty (`a*`, `^`, `\b`) yields a zero-length match at every
             // position; without this each produces a spurious one-cell highlight
             // the match doesn't really cover.
@@ -181,7 +181,7 @@ mod tests {
         assert!(build_regex("").is_none());
     }
 
-    /// Cycle 617 drift guard. The three CaseSensitivity modes drive
+    /// Drift guard. The three CaseSensitivity modes drive
     /// the (?i) flag override on `build_regex_with`:
     ///   - Smart: case-insensitive unless any uppercase in pattern
     ///   - Always: case-sensitive even for all-lowercase pattern

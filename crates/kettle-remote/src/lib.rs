@@ -1,40 +1,40 @@
 //! kettle-remote — SSH / Docker / Podman / kubectl session detection.
 //!
-//! Cycle 643 (sub-cycle 2 of
-//! [`TERMINATOR-REMOTE-DESIGN.md`](../../../docs/TERMINATOR-REMOTE-DESIGN.md)):
+//! Phase 2 of
+//! [`TERMINATOR-REMOTE-DESIGN.md`](../../../docs/TERMINATOR-REMOTE-DESIGN.md):
 //! crate skeleton + `RemoteContext` type + `detect_remote` stub.
 //!
-//! Sub-cycle ledger (closed):
+//! Implementation history (closed):
 //!
-//! - Cycle 644 (sub-cycle 3) — SSH detector
+//! - Phase 3 — SSH detector
 //!   (`detect_ssh` covering 11 argv shapes; see `tests` module).
-//! - Cycle 645 (sub-cycle 4) — Container detector
+//! - Phase 4 — Container detector
 //!   (`detect_container` for Docker / Podman / kubectl / lxc;
 //!   11 argv shapes).
-//! - Cycle 646 (sub-cycle 5) — process-tree BFS via sysinfo
+//! - Phase 5 — process-tree BFS via sysinfo
 //!   (`detect_remote_with(child_pid, &mut System)`).
-//! - Cycle 658 (sub-cycle 7) — `clone_session_command` +
+//! - Phase 7 — `clone_session_command` +
 //!   `clone_session_label` (Clone Session menu item).
-//! - Cycle 720 (2026-05-23): re-wrote the original
-//!   "sub-cycle 3 *will* ship" forward-looking comments now that
-//!   the foundations all landed at cycles 644-658.
+//! - (2026-05-23): re-wrote the original
+//!   "the SSH detector *will* ship" forward-looking comments now that
+//!   the phases above had all landed.
 
 #![forbid(unsafe_code)]
 
-/// Cycle 656: re-export `sysinfo::System` so kettle-ui can own one
+/// Re-export `sysinfo::System` so kettle-ui can own one
 /// (and pass it to `detect_remote_with`) without pulling sysinfo
 /// in as a direct dep. Keeps sysinfo a transitive-only dep that
 /// kettle-ui doesn't need to track its version of.
 pub use sysinfo::System as SysinfoSystem;
 
-/// Cycle 643: a detected remote-session context.
+/// A detected remote-session context.
 ///
 /// Returned by [`detect_remote`] when the pane's process tree
 /// contains a recognized remote-client process (`ssh`, `docker
 /// exec`, `podman exec`, `kubectl exec`, `lxc-attach`).
 ///
-/// Drives the cycle-647-target right-click "Clone session" menu
-/// item and the pane-title update.
+/// Drives the `clone_session_command`/`clone_session_label` right-click
+/// "Clone session" menu item and the pane-title update.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RemoteContext {
     /// SSH session. `host` is the target host (e.g. `box.example.com`);
@@ -48,9 +48,9 @@ pub enum RemoteContext {
     },
 }
 
-/// Cycle 643: which container runtime the detected `docker exec` /
+/// Which container runtime the detected `docker exec` /
 /// `podman exec` / `kubectl exec` / `lxc-attach` command is using.
-/// Drives the cycle-647-target "Clone session" command construction
+/// Drives the `clone_session_command` "Clone session" command construction
 /// (matches the same argv shape for the new pane).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ContainerRuntime {
@@ -60,23 +60,22 @@ pub enum ContainerRuntime {
     Lxc,
 }
 
-/// Cycle 730: process-tree abstraction so the BFS body of
+/// Process-tree abstraction so the BFS body of
 /// [`detect_remote_with`] is testable against a synthetic fixture
 /// instead of needing real OS processes.
 ///
-/// Pre-729, the BFS read `sysinfo::System` directly; the only test
+/// Previously, the BFS read `sysinfo::System` directly; the only test
 /// that could exist was the `detect_remote_returns_none_for_invalid_pids`
 /// smoke (`detect_remote(0).is_none()`). Two-hop ssh, depth-3
 /// container, closer-wins-on-tie — none of those could be unit-
 /// tested without spawning real ssh / docker processes from CI,
-/// which the cycle-646 author specifically called out as too
-/// fragile (see the comment on that test).
+/// which is flagged as too fragile in the comment on that test.
 ///
 /// Implementations:
 /// - [`sysinfo::System`](https://docs.rs/sysinfo) — built-in via
 ///   the impl below; used by [`detect_remote_with`].
 /// - `tests::MockProcessTree` — `#[cfg(test)]`-only fixture in the
-///   test module; powers the 8 cycle-730 BFS tests.
+///   test module; powers the 8 BFS tests below.
 ///
 /// The trait is intentionally minimal: four read-only methods +
 /// one `refresh`, all `u32`-pid typed (no `sysinfo::Pid` leak).
@@ -94,11 +93,11 @@ pub trait ProcessTree {
     fn parent_of(&self, pid: u32) -> Option<u32>;
     /// Argv of `pid` as lossy UTF-8 strings, or `None` if the
     /// process is gone or never existed. Lossy conversion mirrors
-    /// the pre-729 `to_string_lossy` behavior — non-UTF8 argv is
+    /// the original `to_string_lossy` behavior — non-UTF8 argv is
     /// exotic and the detectors only care about `argv[0]` + flags
     /// which are always ASCII in practice.
     fn argv_of(&self, pid: u32) -> Option<Vec<String>>;
-    /// Cycle 888: the working directory of `pid` (lossy UTF-8), or `None` if
+    /// The working directory of `pid` (lossy UTF-8), or `None` if
     /// unknown. Default `None` so an external impl that can't report a cwd
     /// degrades gracefully (shell-detection just inherits no cwd); the sysinfo
     /// impl overrides it. Used to carry the dir of a detected running shell into
@@ -111,10 +110,10 @@ pub trait ProcessTree {
     fn all_pids(&self) -> Vec<u32>;
 }
 
-/// Cycle 730: the production `ProcessTree` impl. Wraps sysinfo's
+/// The production `ProcessTree` impl. Wraps sysinfo's
 /// cmd-refresh + `processes()` map behind the trait's u32-pid API.
 ///
-/// The refresh strategy matches the pre-729 in-line code: cmd-only
+/// The refresh strategy matches the original in-line code: cmd-only
 /// refresh (not memory / disk / network), all PIDs, full refresh
 /// of any that disappeared. sysinfo's internal cache makes this
 /// cheap on the second + later calls (~hundreds of µs on a typical
@@ -162,8 +161,8 @@ impl ProcessTree for sysinfo::System {
     }
 }
 
-/// Cycle 646 (sub-cycle 5 of [`TERMINATOR-REMOTE-DESIGN.md`](
-/// ../../../docs/TERMINATOR-REMOTE-DESIGN.md)): detect a remote-
+/// Phase 5 of [`TERMINATOR-REMOTE-DESIGN.md`](
+/// ../../../docs/TERMINATOR-REMOTE-DESIGN.md): detect a remote-
 /// session context for the pane rooted at `child_pid`.
 ///
 /// Walks the process tree starting from `child_pid` (the shell
@@ -185,13 +184,13 @@ pub fn detect_remote(child_pid: u32) -> Option<RemoteContext> {
     detect_remote_with(child_pid, &mut sys)
 }
 
-/// Cycle 646: same as [`detect_remote`] but reuses a caller-owned
+/// Same as [`detect_remote`] but reuses a caller-owned
 /// `sysinfo::System`. The App's poll loop will own one of these
 /// across ticks so the process-list refresh amortizes (sysinfo's
 /// internal cache survives between calls).
 ///
-/// Cycle 730: now a thin wrapper around the generic
-/// `detect_in_tree` helper (private — see the cycle-730 doc on
+/// Now a thin wrapper around the generic
+/// `detect_in_tree` helper (private — see the doc on
 /// `ProcessTree` for why the BFS body got extracted) so the
 /// detection logic is testable. Signature preserved —
 /// `kettle-ui::App` still passes `&mut self.remote_sysinfo` (a
@@ -200,7 +199,7 @@ pub fn detect_remote_with(child_pid: u32, sys: &mut sysinfo::System) -> Option<R
     detect_in_tree(child_pid, sys)
 }
 
-/// Cycle 851 (audit): a shared process snapshot for multi-pane polling.
+/// A shared process snapshot for multi-pane polling.
 ///
 /// `detect_remote_with` refreshes the OS-wide process list **and** rebuilds the
 /// parent→children index on every call. The app's poll loop calls it once per
@@ -277,7 +276,7 @@ impl RemoteScanner {
         detect_root_in_index(child_pid, self.tree(), &self.index)
     }
 
-    /// Cycle 888: the deepest known-shell descendant of the pane rooted at
+    /// The deepest known-shell descendant of the pane rooted at
     /// `child_pid` (its argv + cwd), using the index from the last
     /// [`refresh`](Self::refresh). Lets a Split / Duplicate clone the shell the
     /// user actually entered (e.g. `wsl` typed inside pwsh) instead of the
@@ -429,7 +428,7 @@ impl ProcessTree for LinuxProcessTree {
     }
 }
 
-/// Cycle 730: generic BFS over any [`ProcessTree`]. Walks descendants
+/// Generic BFS over any [`ProcessTree`]. Walks descendants
 /// of `child_pid` breadth-first; closest descendants checked first
 /// so a `bash → docker → ssh` tree resolves to the docker context
 /// (the directly-spawned remote client), not the deeper-but-also-
@@ -447,11 +446,11 @@ fn detect_in_tree<T: ProcessTree + ?Sized>(child_pid: u32, tree: &mut T) -> Opti
 }
 
 /// Group every PID by its parent, so a BFS over descendants is O(N) to build
-/// the index plus O(D) to walk. The pre-729 sysinfo BFS used `sysinfo::Pid`
+/// the index plus O(D) to walk. The original sysinfo BFS used `sysinfo::Pid`
 /// keys; the trait abstraction is `u32` so the same map works for both
 /// `sysinfo::System` and `MockProcessTree`.
 ///
-/// Cycle 851 (audit): extracted so a multi-pane poll can build this **once**
+/// Extracted so a multi-pane poll can build this **once**
 /// per tick (via [`RemoteScanner`]) instead of once per pane.
 fn build_children_index<T: ProcessTree + ?Sized>(
     tree: &T,
@@ -464,7 +463,7 @@ fn build_children_index<T: ProcessTree + ?Sized>(
             children_by_parent.entry(parent).or_default().push(*pid);
         }
     }
-    // Cycle 916 (file-by-file audit): all_pids() comes from sysinfo's HashMap, so
+    // all_pids() comes from sysinfo's HashMap, so
     // sibling order is non-deterministic. BFS over it made equal-depth tie-breaks
     // (which shell a Split clones; which remote client the pane title shows) flap
     // run-to-run. Sort each sibling list so the lowest PID deterministically wins.
@@ -477,7 +476,7 @@ fn build_children_index<T: ProcessTree + ?Sized>(
 /// BFS from `child_pid` over a **prebuilt** parent→children index, resolving
 /// the closest process (starting with the pane root itself) whose argv matches a
 /// known remote client. Does no refresh and no map build — cheap enough to call
-/// per pane against a shared index (cycle 851, audit). `argv_of` lookups still go
+/// per pane against a shared index. `argv_of` lookups still go
 /// to `tree`, but those hit sysinfo's already-refreshed cache (no OS walk).
 ///
 /// v2.32.0 (audit, low): the BFS now seeds at depth 0 with `child_pid` ITSELF, so
@@ -524,7 +523,7 @@ fn detect_root_in_index<T: ProcessTree + ?Sized>(
     None
 }
 
-/// Cycle 888: a shell session detected running inside a pane — the argv to
+/// A shell session detected running inside a pane — the argv to
 /// relaunch it with and its working directory. Returned by
 /// [`RemoteScanner::foreground_shell`] so a Split / Duplicate can reproduce the
 /// shell the user is actually in (e.g. they opened pwsh then typed `wsl`) rather
@@ -535,7 +534,7 @@ pub struct ShellLaunch {
     pub cwd: Option<String>,
 }
 
-/// Cycle 888: is `prog` (an argv[0]) a known interactive shell a split should
+/// Is `prog` (an argv[0]) a known interactive shell a split should
 /// reproduce? Matched on the basename (path- and `.exe`-insensitive, via
 /// [`argv0_basename`]). Deliberately an allowlist — a split should clone
 /// `wsl` / `bash` / `pwsh`, but NOT an arbitrary foreground program like `vim`.
@@ -560,8 +559,8 @@ fn is_known_shell(prog: &str) -> bool {
     )
 }
 
-/// Cycle 917 (#2, user-reported on native Ubuntu): is this shell invocation a
-/// ONE-SHOT / non-interactive command rather than an interactive session? A
+/// Is this shell invocation a ONE-SHOT / non-interactive command rather than
+/// an interactive session (user-reported on native Ubuntu)? A
 /// foreground agent/editor (`claude`/`codex`/`nvim`) routinely spawns transient
 /// `sh -c "…"` / `bash -c "…"` helpers; cloning one into a split spawns a shell
 /// that runs the command and exits immediately, leaving a blank/dead pane
@@ -585,8 +584,8 @@ fn is_noninteractive_shell(argv: &[String]) -> bool {
         }),
         // PowerShell: -Command / -c, -File, or -EncodedCommand / -e (each
         // prefix-abbreviated, case-insensitive) all run and exit — UNLESS
-        // -NoExit keeps the session open. Cycle 919 (audit L3) added
-        // -EncodedCommand (`pwsh -e <base64>` is how tools spawn one-shots).
+        // -NoExit keeps the session open. -EncodedCommand support was added
+        // (`pwsh -e <base64>` is how tools spawn one-shots).
         "pwsh" | "powershell" => {
             let norm = |a: &String| {
                 a.strip_prefix('-')
@@ -594,7 +593,7 @@ fn is_noninteractive_shell(argv: &[String]) -> bool {
                     .unwrap_or(a)
                     .to_ascii_lowercase()
             };
-            // Cycle 918: `-NoExit` keeps the session interactive even alongside
+            // `-NoExit` keeps the session interactive even alongside
             // `-Command`/`-File`, so such an invocation is NOT one-shot. Match its
             // prefix-abbreviations (`-noe`…`-noexit`) without colliding with
             // `-NoLogo`/`-NoProfile` (which differ at the 3rd letter).
@@ -662,7 +661,7 @@ fn wsl_runs_command(rest: &[String]) -> bool {
     false
 }
 
-/// Cycle 917 (#2): is `argv` a clonable INTERACTIVE shell? A split clones the
+/// Is `argv` a clonable INTERACTIVE shell? A split clones the
 /// pane's detected foreground shell only when this holds; otherwise the caller
 /// falls back to the pane's own launch shell, so a split can never spawn a
 /// dead/one-shot pane. Public so the UI can assert the same contract at the
@@ -671,7 +670,7 @@ pub fn shell_launch_is_interactive(argv: &[String]) -> bool {
     argv.first().map(|p| is_known_shell(p)).unwrap_or(false) && !is_noninteractive_shell(argv)
 }
 
-/// Cycle 888: find the DEEPEST known-shell descendant of `child_pid` — the shell
+/// Find the DEEPEST known-shell descendant of `child_pid` — the shell
 /// the user has effectively entered (e.g. `pwsh → wsl.exe`). Returns its argv +
 /// cwd to relaunch in a split. BFS by depth; the deepest shell wins (the most
 /// nested ≈ the current foreground). `None` when no descendant is a known shell
@@ -693,7 +692,7 @@ fn find_foreground_shell_in_index<T: ProcessTree + ?Sized>(
     }
     let mut best: Option<(u32, u32)> = None; // (depth, pid) of the deepest shell
     while let Some((pid, depth)) = queue.pop_front() {
-        // Cycle 917 (#2): a candidate must be a known shell AND an INTERACTIVE
+        // A candidate must be a known shell AND an INTERACTIVE
         // invocation — a deeper `sh -c "…"` helper (spawned by node/claude/nvim)
         // is rejected so the split never clones a one-shot that exits instantly.
         let is_shell = tree
@@ -772,7 +771,7 @@ fn deepest_descendant_in_index(
     deepest
 }
 
-/// Cycle 888: one-shot [`find_foreground_shell_in_index`] over a fresh snapshot
+/// One-shot [`find_foreground_shell_in_index`] over a fresh snapshot
 /// (mirrors [`detect_in_tree`]). Test-only — the app uses
 /// [`RemoteScanner::foreground_shell`] for the amortized shared-index path.
 #[cfg(test)]
@@ -789,7 +788,7 @@ fn find_foreground_shell<T: ProcessTree + ?Sized>(
 /// names: drop any `/`- or `\`-separated path, a trailing (case-insensitive)
 /// `.exe`, and lowercase the rest.
 ///
-/// Cycle 823 (audit): the detectors split only on `/` and kept `.exe`, so on
+/// The detectors used to split only on `/` and keep `.exe`, so on
 /// Windows `argv[0]` is a backslash path with extension
 /// (`C:\Windows\System32\OpenSSH\ssh.exe`) — `split('/')` returned the whole
 /// path, and even a bare `ssh.exe` failed the `== "ssh"` check. The entire
@@ -861,10 +860,10 @@ fn shell_single_quote(s: &str) -> String {
     out
 }
 
-/// Cycle 644 (sub-cycle 3 of [`TERMINATOR-REMOTE-DESIGN.md`](
-/// ../../../docs/TERMINATOR-REMOTE-DESIGN.md)): SSH-session
+/// Phase 3 of [`TERMINATOR-REMOTE-DESIGN.md`](
+/// ../../../docs/TERMINATOR-REMOTE-DESIGN.md): SSH-session
 /// detector. Takes a process's argv (as the sysinfo walk in
-/// sub-cycle 5 will supply it) and returns `Some(Ssh { host, user })`
+/// phase 5 will supply it) and returns `Some(Ssh { host, user })`
 /// if the argv shape matches an `ssh` invocation, else `None`.
 ///
 /// Recognized `argv[0]` values: `ssh`, `sshpass`. (`autossh` is a
@@ -912,7 +911,7 @@ pub fn detect_ssh(argv: &[String]) -> Option<RemoteContext> {
             && !s.is_empty()
         {
             // `-o foo=bar` / `-p 22` / `-l user` / `-J jump` style: skip a value.
-            // Cycle 836 (audit): this is the COMPLETE OpenSSH value-taking
+            // This is the COMPLETE OpenSSH value-taking
             // single-char option set (ssh(1)). The old subset omitted `-J`
             // (ProxyJump, common in bastion setups) and `-w/-e/-m/-O/-Q/-S/-B/
             // -E/-I`, so e.g. `ssh -J jump host` skipped nothing and took `jump`
@@ -986,8 +985,8 @@ pub fn detect_ssh(argv: &[String]) -> Option<RemoteContext> {
     Some(RemoteContext::Ssh { host, user })
 }
 
-/// Cycle 645 (sub-cycle 4 of [`TERMINATOR-REMOTE-DESIGN.md`](
-/// ../../../docs/TERMINATOR-REMOTE-DESIGN.md)): Container-session
+/// Phase 4 of [`TERMINATOR-REMOTE-DESIGN.md`](
+/// ../../../docs/TERMINATOR-REMOTE-DESIGN.md): Container-session
 /// detector. Recognizes the four common container-exec argv shapes:
 ///
 ///   - `docker exec [-it] <container> <cmd> [args …]`
@@ -1011,7 +1010,7 @@ pub fn detect_container(argv: &[String]) -> Option<RemoteContext> {
     };
     let mut i = 1; // skip argv[0] (the exe)
     if runtime != ContainerRuntime::Lxc {
-        // Cycle 836 (audit): find the `exec` subcommand, allowing GLOBAL options
+        // Find the `exec` subcommand, allowing GLOBAL options
         // before it (`kubectl -n ns exec …`, `docker --context foo exec …`)
         // rather than pinning it at argv[1] (which silently returned None for
         // those). Scan for the first literal `exec` token; a container/namespace
@@ -1037,7 +1036,7 @@ pub fn detect_container(argv: &[String]) -> Option<RemoteContext> {
             continue;
         }
         if let Some(stripped) = a.strip_prefix("--") {
-            // Cycle 836 (audit): a bare `--flag` is VALUELESS by default — most
+            // A bare `--flag` is VALUELESS by default — most
             // docker/podman/kubectl exec long flags are booleans
             // (--privileged/--interactive/--tty/--detach). The old `i += 2`
             // treated `docker exec --privileged alpine sh` as `--privileged
@@ -1103,8 +1102,8 @@ pub fn detect_container(argv: &[String]) -> Option<RemoteContext> {
     None
 }
 
-/// Cycle 658 (sub-cycle 7 of [`TERMINATOR-REMOTE-DESIGN.md`](
-/// ../../../docs/TERMINATOR-REMOTE-DESIGN.md)): format a
+/// Phase 7 of [`TERMINATOR-REMOTE-DESIGN.md`](
+/// ../../../docs/TERMINATOR-REMOTE-DESIGN.md): format a
 /// `RemoteContext` as a shell command string the user can re-run.
 /// Drives the right-click "Reconnect to …" / "Re-attach …" menu
 /// entry — clicking writes this string to the focused pane's PTY
@@ -1166,9 +1165,9 @@ pub fn clone_session_command(ctx: &RemoteContext) -> Option<String> {
     }
 }
 
-/// Cycle 658: short user-friendly label for the right-click menu
-/// entry that reconnects to a detected remote session. The cycle-
-/// 611 `ContextMenuItem::ConfigItem { label, command }` consumes
+/// Short user-friendly label for the right-click menu
+/// entry that reconnects to a detected remote session. The
+/// `ContextMenuItem::ConfigItem { label, command }` variant consumes
 /// the pair `(clone_session_label(ctx), clone_session_command(ctx))`.
 pub fn clone_session_label(ctx: &RemoteContext) -> String {
     match ctx {
@@ -1188,7 +1187,7 @@ pub fn clone_session_label(ctx: &RemoteContext) -> String {
     }
 }
 
-/// Cycle 643: format a `RemoteContext` as a one-line title string
+/// Format a `RemoteContext` as a one-line title string
 /// for use in the pane-title surface (Terminator's pattern).
 ///
 ///   - `Ssh { user: None, host: "box" }`             → `"ssh box"`
@@ -1278,7 +1277,7 @@ mod tests {
         std::fs::remove_dir_all(root).unwrap();
     }
 
-    /// Cycle 643 drift guard. `format_remote_title` is the pure
+    /// Drift guard. `format_remote_title` is the pure
     /// formatter behind the per-pane title update path.
     #[test]
     fn format_remote_title_covers_ssh_and_container_shapes() {
@@ -1332,9 +1331,9 @@ mod tests {
         );
     }
 
-    /// Cycle 658 drift guard. `clone_session_command` is the pure
+    /// Drift guard. `clone_session_command` is the pure
     /// formatter for the right-click "Reconnect to …" menu entry's
-    /// dispatched command. Sub-cycle 7 of remote.py design.
+    /// dispatched command (phase 7 of the remote-session design).
     #[test]
     fn clone_session_command_for_all_shapes() {
         // v2.32.0 (audit H1): dynamic fields are POSIX single-quoted and the
@@ -1547,7 +1546,7 @@ mod tests {
         assert_eq!(format_remote_title(&ctx), "ssh alice@h");
     }
 
-    /// Cycle 658 drift guard: `clone_session_label` is the menu
+    /// Drift guard: `clone_session_label` is the menu
     /// label paired with `clone_session_command`.
     #[test]
     fn clone_session_label_for_all_shapes() {
@@ -1581,7 +1580,7 @@ mod tests {
         );
     }
 
-    /// Cycle 646 drift guard: `detect_remote` returns None for
+    /// Drift guard: `detect_remote` returns None for
     /// pids that aren't real (or have no descendants matching a
     /// remote-client argv). Real-process testing isn't feasible
     /// here — we'd need to actually spawn ssh, which adds CI
@@ -1596,7 +1595,7 @@ mod tests {
         assert!(detect_remote(u32::MAX).is_none());
     }
 
-    /// Cycle 645 drift guard. `detect_container` walks the four
+    /// Drift guard. `detect_container` walks the four
     /// container-runtime argv shapes.
     #[test]
     fn detect_container_recognizes_docker_podman_kubectl_lxc() {
@@ -1661,7 +1660,7 @@ mod tests {
         assert!(detect_container(&argv(&["docker", "exec", "-it"])).is_none());
     }
 
-    /// Cycle 644 drift guard. `detect_ssh` walks argv shapes that
+    /// Drift guard. `detect_ssh` walks argv shapes that
     /// match real-world ssh invocations.
     #[test]
     fn detect_ssh_recognizes_common_argv_shapes() {
@@ -1741,7 +1740,7 @@ mod tests {
         assert!(detect_ssh(&argv(&["ssh", "-V"])).is_none());
     }
 
-    /// Cycle 823 (audit) drift guard: argv[0] in the Windows shape — a
+    /// Drift guard: argv[0] in the Windows shape — a
     /// backslash path WITH a `.exe` extension — must still be recognized. The
     /// detectors split only on `/` and kept `.exe`, so the whole remote feature
     /// was silently dead on Windows 11.
@@ -1796,7 +1795,7 @@ mod tests {
         );
     }
 
-    /// Cycle 836 (audit): each of these argv shapes used to drive the WRONG
+    /// Each of these argv shapes used to drive the WRONG
     /// reconnect target/command.
     #[test]
     fn detect_handles_proxyjump_bool_flags_and_global_flags() {
@@ -1859,17 +1858,17 @@ mod tests {
         );
     }
 
-    // === Cycle 730: ProcessTree fixture + mocked BFS tests =========
+    // === ProcessTree fixture + mocked BFS tests =========
     //
-    // Pre-729 the only `detect_remote_with` test was the
+    // Previously the only `detect_remote_with` test was the
     // `detect_remote_returns_none_for_invalid_pids` smoke (above)
     // — it called the real sysinfo against pid 0 / u32::MAX. The
     // BFS body (descendant walk, closer-wins-on-tie, refresh
     // contract) was untested because spawning real ssh from CI
-    // is too fragile. Cycle 730 extracted [`ProcessTree`] so the
-    // BFS body is now testable with a synthetic process tree.
+    // is too fragile. Extracting [`ProcessTree`] made the
+    // BFS body testable with a synthetic process tree.
 
-    /// Cycle 730 fixture: a `ProcessTree` impl backed by a hashmap.
+    /// Fixture: a `ProcessTree` impl backed by a hashmap.
     /// `add(pid, parent, argv)` builds the tree; `ProcessTree` reads
     /// it. `refresh()` is a no-op (the fixture is already-built).
     struct MockProcessTree {
@@ -1900,7 +1899,7 @@ mod tests {
             );
         }
 
-        /// Cycle 888: like `add` but with a reported working directory (for the
+        /// Like `add` but with a reported working directory (for the
         /// foreground-shell tests).
         fn add_cwd(&mut self, pid: u32, parent: Option<u32>, argv: &[&str], cwd: &str) {
             self.procs.insert(
@@ -1936,7 +1935,7 @@ mod tests {
         }
     }
 
-    /// Cycle 888 drift guard: `pwsh → wsl.exe` (the user's exact case — open
+    /// Drift guard: `pwsh → wsl.exe` (the user's exact case — open
     /// PowerShell, type `wsl`, split) resolves to the WSL shell + its dir, so a
     /// split can clone WSL in the same directory instead of a fresh pwsh.
     #[test]
@@ -2054,7 +2053,7 @@ mod tests {
         );
     }
 
-    /// Cycle 888: the DEEPEST shell wins (most-nested ≈ current foreground), and
+    /// The DEEPEST shell wins (most-nested ≈ current foreground), and
     /// a non-shell foreground (e.g. vim) is never cloned.
     #[test]
     fn find_foreground_shell_picks_deepest_and_ignores_non_shells() {
@@ -2083,7 +2082,7 @@ mod tests {
         assert_eq!(find_foreground_shell(1, &mut tree), None);
     }
 
-    /// Cycle 917 (#2, user-reported on native Ubuntu): a foreground agent/editor
+    /// User-reported on native Ubuntu: a foreground agent/editor
     /// (`claude`/`codex`/`nvim`) spawns transient `sh -c "…"` helpers. The
     /// detector must NOT clone a one-shot helper into a split — doing so spawns a
     /// shell that runs the command and exits immediately, leaving a blank/dead
@@ -2168,7 +2167,7 @@ mod tests {
             &["pwsh", "-c", "x"],
             &["pwsh", "-File", "s.ps1"],
             &["powershell.exe", "-co", "x"],
-            // Cycle 919 (audit L3): -EncodedCommand / -e / -enc run a one-shot.
+            // -EncodedCommand / -e / -enc run a one-shot.
             &["pwsh", "-EncodedCommand", "AGUA"],
             &["pwsh", "-e", "AGUA"],
             &["pwsh", "-enc", "AGUA"],
@@ -2207,7 +2206,7 @@ mod tests {
             &["wsl", "-d", "Ubuntu"],
             &["wsl", "--cd", "/home/me"],
             &["wsl", "--cd", "/home/me", "-d", "Ubuntu"],
-            // Cycle 936 (review): `~` selects the home dir for an INTERACTIVE
+            // `~` selects the home dir for an INTERACTIVE
             // shell (not a command); `--distribution-id` takes a GUID value
             // that must be consumed, not mistaken for a command.
             &["wsl", "~"],
@@ -2224,7 +2223,7 @@ mod tests {
         }
     }
 
-    /// Cycle 730 drift guard: ssh as a direct child of the pane's
+    /// Drift guard: ssh as a direct child of the pane's
     /// shell is the most common shape. `detect_in_tree` must reach
     /// it in a single BFS hop.
     #[test]
@@ -2277,7 +2276,7 @@ mod tests {
         );
     }
 
-    /// Cycle 851 drift guard: the shared-index path (`build_children_index`
+    /// Drift guard: the shared-index path (`build_children_index`
     /// once + per-root `detect_root_in_index`) — how `RemoteScanner` amortizes a
     /// multi-pane poll — must answer each root identically to the one-shot
     /// `detect_in_tree`, and one index build must serve several distinct roots.
@@ -2316,7 +2315,7 @@ mod tests {
         );
     }
 
-    /// Cycle 730 drift guard: `ssh-with-credentials` wrappers
+    /// Drift guard: `ssh-with-credentials` wrappers
     /// (e.g., `sshpass`, `assume-role`, corporate VPN wrappers)
     /// spawn ssh one or more levels deep. The BFS must walk past
     /// the non-matching intermediate process.
@@ -2335,7 +2334,7 @@ mod tests {
         );
     }
 
-    /// Cycle 730 drift guard: container exec at depth 3 (shell →
+    /// Drift guard: container exec at depth 3 (shell →
     /// tmux session → window → `docker exec`). Matches the
     /// terminator-parity assumption that a pane can have arbitrary-
     /// depth descendants.
@@ -2359,7 +2358,7 @@ mod tests {
         );
     }
 
-    /// Cycle 730 drift guard: when two descendants both match a
+    /// Drift guard: when two descendants both match a
     /// remote-client argv, the *closer* (depth-1) wins over the
     /// deeper (depth-2). This pins the BFS-is-breadth-first
     /// contract — a future swap to DFS would silently change
@@ -2380,7 +2379,7 @@ mod tests {
         );
     }
 
-    /// Cycle 730 drift guard: when `child_pid` has no entry in the
+    /// Drift guard: when `child_pid` has no entry in the
     /// tree AND nothing claims it as parent, return `None` without
     /// looping forever or panicking.
     #[test]
@@ -2391,7 +2390,7 @@ mod tests {
         assert!(detect_in_tree(999, &mut tree).is_none());
     }
 
-    /// Cycle 730 drift guard: an empty tree returns `None`.
+    /// Drift guard: an empty tree returns `None`.
     /// Boundary case for the BFS init.
     #[test]
     fn detect_in_tree_empty_tree_returns_none() {
@@ -2399,7 +2398,7 @@ mod tests {
         assert!(detect_in_tree(100, &mut tree).is_none());
     }
 
-    /// Cycle 730 drift guard: descendants that don't match a
+    /// Drift guard: descendants that don't match a
     /// remote-client argv return `None` even though the walk
     /// completes successfully. Catches the "grep ssh log.txt"
     /// false-positive class.
@@ -2410,16 +2409,16 @@ mod tests {
         tree.add(150, Some(100), &["vim", "file.txt"]);
         tree.add(151, Some(100), &["python", "-c", "print('hi')"]);
         // grep "ssh" is not an ssh client — argv[0] gates the
-        // detector. Pre-729 this couldn't be tested without
+        // detector. Previously this couldn't be tested without
         // spawning a real grep.
         tree.add(200, Some(150), &["grep", "ssh", "log.txt"]);
         assert!(detect_in_tree(100, &mut tree).is_none());
     }
 
-    /// Cycle 730 drift guard: a cycle in the parent chain
+    /// Drift guard: a cycle in the parent chain
     /// (impossible in a real OS, but possible in a buggy fixture
     /// or future trait impl) must not loop the BFS forever. The
-    /// `visited` set added in cycle 730 protects against this;
+    /// `visited` set protects against this;
     /// this test fails if someone removes that defensive code.
     #[test]
     fn detect_in_tree_handles_parent_cycle_without_looping() {

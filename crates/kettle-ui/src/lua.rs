@@ -1,21 +1,21 @@
-//! Cycle 324: Lua scripting foundation (WezTerm parity).
+//! Lua scripting foundation (WezTerm parity).
 //!
 //! Exposes a `kettle` namespace inside a Lua VM so the user's
 //! `--lua-script PATH` (or future `<config-dir>/init.lua`) can read
-//! kettle's runtime state. Foundation sub-cycle ships read-only
-//! introspection; subsequent sub-cycles add side-effect APIs:
+//! kettle's runtime state. The foundation ships read-only
+//! introspection; side-effect APIs build on top of it:
 //!
-//!   cycle 324 (this one): kettle.version() / config_path() / theme()
-//!   cycle 325+:           kettle.send_text(s), set_tab_title(s)
-//!   cycle 326+:           kettle.exec_action(name)
-//!   cycle 365+:           kettle.on(event, callback) event hooks
-//!                         (foundation; see docs/TERMINATOR-PLUGIN-DESIGN.md
-//!                         for the full sub-cycle roadmap)
+//!   kettle.version() / config_path() / theme()  -- read-only foundation
+//!   kettle.send_text(s), set_tab_title(s)
+//!   kettle.exec_action(name)
+//!   kettle.on(event, callback) event hooks       -- foundation; see
+//!                                                    docs/TERMINATOR-PLUGIN-DESIGN.md
+//!                                                    for the full roadmap
 //!
 //! Why read-only first: hooking Lua into the live App requires
 //! threading an Arc<Mutex<...>> handle through, which is the kind
-//! of plumbing that's easier to verify in isolation. Foundation
-//! cycle ships the dep + the VM + the namespace + a drift guard;
+//! of plumbing that's easier to verify in isolation. The foundation
+//! ships the dep + the VM + the namespace + a drift guard;
 //! the side-effect APIs add incrementally without re-touching
 //! the wiring.
 
@@ -25,10 +25,10 @@ use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
-/// Cycle 601: per-call cap on `kettle.send_text(s)`. A hostile
+/// Per-call cap on `kettle.send_text(s)`. A hostile
 /// `init.lua` running under the default `lua-sandbox = safe` mode
-/// (where `os.execute`/`io.popen` are nil'd, cycle 376) could still
-/// queue gigabytes of PTY-bound text via `for i=1,10000 do
+/// (where `os.execute`/`io.popen` are nil'd by the safe-sandbox setup
+/// in `new_inner`) could still queue gigabytes of PTY-bound text via `for i=1,10000 do
 /// kettle.send_text(string.rep("X", 1<<20)) end` and OOM kettle at
 /// the App's drain step (app.rs:900 unconditionally
 /// `extend_from_slice`s every queued SendText into a single Vec).
@@ -36,7 +36,7 @@ use std::sync::{Arc, Mutex};
 /// with massive headroom and stops the bomb shape early.
 const MAX_LUA_SEND_TEXT_BYTES: usize = 1 << 20;
 
-/// Cycle 601: per-call cap on `kettle.notify(title, body)`. Real
+/// Per-call cap on `kettle.notify(title, body)`. Real
 /// desktop notifications are tiny (titles ~30 chars, bodies a
 /// sentence or two). 8 KiB per field is ~100× over realistic
 /// use, ample for a multi-line code-snippet body, and matches
@@ -45,7 +45,7 @@ const MAX_LUA_SEND_TEXT_BYTES: usize = 1 << 20;
 /// huge title in a loop.
 const MAX_LUA_NOTIFY_BYTES: usize = 8 << 10;
 
-/// Cycle 601: cap on the in-process LuaCommand queue length. A
+/// Cap on the in-process LuaCommand queue length. A
 /// hostile script that fires `for i=1,10^9 do
 /// kettle.exec_action("noop") end` (or any other API) would grow
 /// `pending` without bound — even short commands at 32 bytes each
@@ -55,7 +55,7 @@ const MAX_LUA_NOTIFY_BYTES: usize = 8 << 10;
 /// pushes drop silently with a `log::warn`.
 const MAX_PENDING_COMMANDS: usize = 1024;
 
-/// Cycle 847 (audit): per-registry caps on Lua-registered callbacks. The
+/// Per-registry caps on Lua-registered callbacks. The
 /// command queue above is bounded against a hostile `init.lua`, but the
 /// callback registries (`kettle.on`, `add_menu_item`, `add_url_handler`) were
 /// not — a runaway `for i=1,1e9 do kettle.on('output', f) end` grew the
@@ -70,7 +70,7 @@ static LUA_EVENTS_WARNED: AtomicBool = AtomicBool::new(false);
 static LUA_MENU_WARNED: AtomicBool = AtomicBool::new(false);
 static LUA_URL_WARNED: AtomicBool = AtomicBool::new(false);
 
-/// Cycle 601: locked push with queue-length cap. All four
+/// Locked push with queue-length cap. All four
 /// `kettle.*` side-effect callbacks route through this so the
 /// `MAX_PENDING_COMMANDS` invariant is enforced exactly once,
 /// not duplicated four times. Returns `Ok(())` whether or not
@@ -94,12 +94,12 @@ fn bounded_push(pending: &Mutex<Vec<LuaCommand>>, cmd: LuaCommand) -> mlua::Resu
     Ok(())
 }
 
-/// Cycle 325: side-effect commands buffered from Lua. The Lua VM
+/// Side-effect commands buffered from Lua. The Lua VM
 /// can't directly mutate App state (lifetime + threading), so
 /// side-effect APIs (send_text, set_tab_title, notify, ...) push
 /// onto this queue and the App drains it after the script
-/// returns. Same shape as the cycle-302 remote-control IPC's
-/// line-buffer, just in-process.
+/// returns. Same shape as the kettle-ctl newline-delimited JSON
+/// protocol's line buffer, just in-process.
 #[derive(Debug, Clone)]
 pub enum LuaCommand {
     /// `kettle.send_text(s)` → write s to the focused pane's PTY.
@@ -109,22 +109,22 @@ pub enum LuaCommand {
     /// keybind grammar accepts: `new_tab`, `split_right`,
     /// `toggle_vi_mode`, etc.
     ExecAction(String),
-    /// `kettle.notify(title, body)` (cycle 371) → desktop notification
+    /// `kettle.notify(title, body)` → desktop notification
     /// via notify-rust. Fires once kettle drains commands so a script
     /// running before the first paint doesn't race the notification
     /// daemon.
     Notify { title: String, body: String },
-    /// `kettle.set_theme(name)` (cycle 373) → switch the active theme
+    /// `kettle.set_theme(name)` → switch the active theme
     /// at runtime. Looked up case-insensitively against the ~500
     /// bundled themes via Theme::find_name; falls through with
     /// log::warn if no match.
     SetTheme(String),
 }
 
-/// Cycle 365 (Terminator plugin parity, design doc:
-/// docs/TERMINATOR-PLUGIN-DESIGN.md): event hooks. Foundation sub-cycle
-/// ships the registry + dispatch surface; subsequent sub-cycles wire
-/// each variant to the actual emission site in App.
+/// Terminator plugin parity (design doc:
+/// docs/TERMINATOR-PLUGIN-DESIGN.md): event hooks. The foundation
+/// ships the registry + dispatch surface; wiring each variant to
+/// its actual emission site in App follows incrementally.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum LuaEvent {
     /// Emitted once after kettle's first window + first pane are
@@ -137,38 +137,39 @@ pub enum LuaEvent {
     TabClose(usize),
     /// Emitted when a bell rings in a pane. Payload: pane id.
     Bell(u64),
-    /// Cycle 750 (Terminator plugin parity): emitted when a split pane is
+    /// Terminator plugin parity: emitted when a split pane is
     /// closed — the pane analog of [`TabClose`](Self::TabClose). Payload: the
     /// id of the pane that closed. Fired *before* the pane's PTY teardown so
     /// plugins keyed by pane id (status bars, per-pane theme overlays,
     /// activity watchers) can drop their state. Used by
     /// `kettle.on('pane_close', function(pane_id) … end)`.
     PaneClose(u64),
-    /// Cycle 377 (Terminator plugin parity, plugin sub-cycle 3):
-    /// emitted on each batch of PTY output drained from a pane.
+    /// Terminator plugin parity (phase 3 of
+    /// docs/TERMINATOR-PLUGIN-DESIGN.md): emitted on each batch of
+    /// PTY output drained from a pane.
     /// Payload: pane id + bytes since last emission. Throttled
     /// at the dispatch site (App level) — Lua callbacks see a
     /// coalesced byte chunk, not every individual chunk from a
     /// busy build.
     Output(u64, Vec<u8>),
-    /// Cycle 703 (Terminator plugin parity, plugin sub-cycle:
-    /// focus event hook). Emitted when keyboard focus moves
+    /// Terminator plugin parity (focus event hook).
+    /// Emitted when keyboard focus moves
     /// between panes (within a tab, across tabs, or window
     /// restore). Payload: (previous_focused_pane_id_or_nil,
     /// new_focused_pane_id). Used by status-bar plugins,
     /// activity-watch plugins, and per-pane theme overlays
     /// that need to react to focus changes.
     PaneFocus(Option<u64>, u64),
-    /// Cycle 704 (Terminator plugin parity, plugin sub-cycle:
-    /// title-change event hook). Emitted when a pane's title
+    /// Terminator plugin parity (title-change event hook).
+    /// Emitted when a pane's title
     /// changes — via OSC 0/2 (shell-issued), inline edit
     /// (`Action::EditPaneTitle`), reset (TermEvent::ResetTitle),
-    /// or cycle-655 remote-context derivation. Payload:
+    /// or the remote-context detection in `poll_remote_contexts`. Payload:
     /// (pane_id, new_title). Used by status-bar plugins and
     /// title-mirroring plugins.
     TitleChanged(u64, String),
-    /// Cycle 705 (Terminator plugin parity, plugin sub-cycle:
-    /// URL-click event hook). Emitted on every safe URL click
+    /// Terminator plugin parity (URL-click event hook).
+    /// Emitted on every safe URL click
     /// — before any pattern-handler dispatch — so analytics /
     /// logging / workflow-trigger plugins see ALL URL clicks,
     /// regardless of which handler ultimately opens them.
@@ -195,16 +196,16 @@ impl LuaEvent {
 }
 
 /// Owned Lua VM with kettle's namespace registered. Single-threaded
-/// today (Lua VMs aren't natively reentrant); future cycles may
+/// today (Lua VMs aren't natively reentrant); a future change may
 /// wrap in `Arc<Mutex<...>>` to allow event-hook callbacks from
 /// the App's threads.
-/// Cycle 900 (audit): the every-N-instructions hook fires once per this many
+/// The every-N-instructions hook fires once per this many
 /// Lua VM instructions. Large enough that any normal callback (which runs far
 /// fewer instructions) never triggers it — zero overhead in the common case —
 /// while still giving fine-grained runaway detection.
 const HOOK_INSTRUCTION_INTERVAL: u32 = 1_000_000;
 
-/// Cycle 900: default per-invocation budget, expressed as the max number of
+/// Default per-invocation budget, expressed as the max number of
 /// hook fires before a script is force-aborted. `128 × 1_000_000` ≈ 128 M
 /// instructions — an enormous margin over any realistic plugin call, but a
 /// `while true do end` (incl. inside the `output` callback) trips it in well
@@ -216,7 +217,7 @@ pub struct LuaEngine {
     /// Side-effect commands queued by Lua functions. Drained by
     /// the App after exec_file returns.
     pending: Arc<Mutex<Vec<LuaCommand>>>,
-    /// Cycle 900 (audit): instruction-budget watchdog. `hook_fires` counts how
+    /// Instruction-budget watchdog. `hook_fires` counts how
     /// many times the every-N-instructions hook has fired since the current
     /// top-level Lua invocation began (reset by `arm_budget`); when it exceeds
     /// the cap captured in the hook closure, the hook returns an error,
@@ -227,7 +228,7 @@ pub struct LuaEngine {
 }
 
 impl LuaEngine {
-    /// Construct a fresh Lua VM with the cycle-324 read-only
+    /// Construct a fresh Lua VM with the read-only
     /// `kettle` namespace installed:
     ///
     ///   kettle.version()      → string  e.g. "1.7.8"
@@ -236,12 +237,13 @@ impl LuaEngine {
     ///
     /// Fails if the Lua VM can't initialize (resource exhaustion,
     /// not normally seen). Adding entries to the namespace is the
-    /// happy path for subsequent sub-cycles — extend this function.
+    /// happy path for future additions — extend this function.
     pub fn new(theme_name: &str) -> Result<Self> {
         Self::new_with_sandbox(theme_name, true)
     }
 
-    /// Cycle 376 (Terminator plugin parity, plugin sub-cycle 12):
+    /// Terminator plugin parity (phase 12 of
+    /// docs/TERMINATOR-PLUGIN-DESIGN.md):
     /// build a VM with the configured sandbox level. `safe = true`
     /// nil's the Lua stdlib functions that can execute external
     /// processes or open arbitrary files: `os.execute`, `os.exit`,
@@ -258,7 +260,7 @@ impl LuaEngine {
         Self::new_inner(theme_name, safe, DEFAULT_MAX_HOOK_FIRES)
     }
 
-    /// Cycle 900: test-only constructor that dials the instruction budget down
+    /// Test-only constructor that dials the instruction budget down
     /// so a runaway aborts in a few million instructions (sub-second) rather
     /// than the ~128 M production cap.
     #[cfg(test)]
@@ -266,7 +268,7 @@ impl LuaEngine {
         Self::new_inner(theme_name, true, max_fires)
     }
 
-    /// Cycle 900: the real constructor. `max_fires` is the per-invocation
+    /// The real constructor. `max_fires` is the per-invocation
     /// instruction-budget cap (in hook fires), captured by value into the hook
     /// closure — fixed for the VM's life, so no shared field is needed.
     fn new_inner(theme_name: &str, safe: bool, max_fires: u64) -> Result<Self> {
@@ -302,7 +304,7 @@ impl LuaEngine {
             if let Ok(pkg) = globals.get::<mlua::Table>("package") {
                 let _ = pkg.set("loadlib", mlua::Value::Nil);
             }
-            // NOTE on `debug.*` (audited cycle 591): mlua's `Lua::new()`
+            // NOTE on `debug.*`: mlua's `Lua::new()`
             // loads `StdLib::ALL_SAFE`, which EXCLUDES the `debug`
             // library entirely. The dangerous methods —
             // `debug.getregistry` (reach into mlua's reference table),
@@ -316,14 +318,14 @@ impl LuaEngine {
             // fails the gauntlet rather than silently widening the
             // surface.
         }
-        // Cycle 916 (file-by-file audit): cap the VM heap. The instruction-budget
+        // Cap the VM heap. The instruction-budget
         // hook below only fires on Lua bytecode dispatch, so a single native call
         // (`string.rep('X', 1<<32)`, unbounded table growth) allocates before any
         // check can fire — this turns runaway allocation into a recoverable Lua
         // error instead of an OOM-abort of kettle. 256 MiB is far above any sane
         // plugin yet bounds a hostile/buggy one.
         lua.set_memory_limit(256 << 20)?;
-        // Cycle 900 (audit): install the instruction-budget watchdog. The hook
+        // Install the instruction-budget watchdog. The hook
         // fires every `HOOK_INSTRUCTION_INTERVAL` VM instructions; when a single
         // top-level invocation exceeds `max_hook_fires` fires it errors out,
         // unwinding the runaway script. User Lua can't disable it — mlua's
@@ -354,7 +356,7 @@ impl LuaEngine {
         // Expose values as callable functions (not bare strings) so
         // user scripts use the conventional `kettle.version()` form.
         // Callable form also makes it easy to add side effects later
-        // (e.g. cycle-325's send_text needs to be a function anyway).
+        // (e.g. `send_text` needs to be a function anyway).
         let version: &str = env!("CARGO_PKG_VERSION");
         kettle_tbl
             .set(
@@ -377,12 +379,12 @@ impl LuaEngine {
                 lua.create_function(move |_, ()| Ok(theme.clone()))?,
             )
             .context("set kettle.theme")?;
-        // Cycle 325: side-effect API. `kettle.send_text(s)` queues
+        // Side-effect API. `kettle.send_text(s)` queues
         // a SendText command for the App to drain + write to the
         // focused pane's PTY. Lua-side it looks synchronous, but
         // the actual PTY write happens once the script returns —
         // a kettle script can't observe its own typing.
-        // Cycle 601: per-call cap on `s` (MAX_LUA_SEND_TEXT_BYTES)
+        // Per-call cap on `s` (MAX_LUA_SEND_TEXT_BYTES)
         // and global cap on the queue length (MAX_PENDING_COMMANDS)
         // — see the constants above for the threat-model rationale.
         let pending_for_send = Arc::clone(&pending);
@@ -401,7 +403,7 @@ impl LuaEngine {
                 })?,
             )
             .context("set kettle.send_text")?;
-        // Cycle 326: kettle.exec_action(name) dispatches a kettle
+        // kettle.exec_action(name) dispatches a kettle
         // Action by its keybind-grammar name. Lua scripts get the
         // same dispatch power as the keymap — `new_tab`,
         // `split_right`, `toggle_vi_mode`, etc.
@@ -414,10 +416,10 @@ impl LuaEngine {
                 })?,
             )
             .context("set kettle.exec_action")?;
-        // Cycle 371 (plugin sub-cycle 7): kettle.notify(title, body?)
+        // Phase 7 of docs/TERMINATOR-PLUGIN-DESIGN.md: kettle.notify(title, body?)
         // queues a desktop notification. Body is optional;
         // `kettle.notify('Build done')` works too.
-        // Cycle 601: per-field cap (MAX_LUA_NOTIFY_BYTES) on title +
+        // Per-field cap (MAX_LUA_NOTIFY_BYTES) on title +
         // body so a hostile script can't smuggle gigabytes through
         // the notify API. Real desktop notifications are tiny.
         let pending_for_notify = Arc::clone(&pending);
@@ -441,7 +443,7 @@ impl LuaEngine {
                 })?,
             )
             .context("set kettle.notify")?;
-        // Cycle 373 (plugin sub-cycle 10): kettle.set_theme(name)
+        // Phase 10 of docs/TERMINATOR-PLUGIN-DESIGN.md: kettle.set_theme(name)
         // queues a SetTheme command; the App drains + applies via
         // the existing NextTheme infrastructure.
         let pending_for_theme = Arc::clone(&pending);
@@ -453,9 +455,9 @@ impl LuaEngine {
                 })?,
             )
             .context("set kettle.set_theme")?;
-        // Cycle 375 (plugin sub-cycle 8): kettle.add_menu_item(
+        // Phase 8 of docs/TERMINATOR-PLUGIN-DESIGN.md: kettle.add_menu_item(
         //   label, callback). Lua-supplied entries that render BELOW
-        // the built-in context-menu items (cycle-245). Callback is
+        // the built-in context-menu items. Callback is
         // a Lua function invoked when the item is clicked.
         //
         // Storage: kettle_menu_items registry table; each entry is
@@ -488,7 +490,7 @@ impl LuaEngine {
                 })?,
             )
             .context("set kettle.add_menu_item")?;
-        // Cycle 374 (plugin sub-cycle 9): kettle.add_url_handler(
+        // Phase 9 of docs/TERMINATOR-PLUGIN-DESIGN.md: kettle.add_url_handler(
         //   name, pattern, callback). Lua-supplied URL handlers that
         // run when a URL matches the pattern, BEFORE kettle's default
         // open-in-browser path. Use case: route Launchpad/GitHub PR
@@ -529,15 +531,15 @@ impl LuaEngine {
                 )?,
             )
             .context("set kettle.add_url_handler")?;
-        // Cycle 365 (Terminator plugin parity foundation):
+        // Terminator plugin parity foundation:
         // `kettle.on(event_name, callback)` registers a Lua function to
         // fire when the named event occurs. Stored as a registry-table
         // entry keyed by event name; callbacks accumulate in a list
         // (multiple subscribers per event).
         //
         // Today's wiring: registry installed + drift-guarded. App-side
-        // emission per LuaEvent variant lands in subsequent sub-cycles
-        // (see docs/TERMINATOR-PLUGIN-DESIGN.md sub-cycle 3+).
+        // emission per LuaEvent variant lands incrementally
+        // (see docs/TERMINATOR-PLUGIN-DESIGN.md phase 3+).
         let event_table = lua.create_table().context("create event-hooks table")?;
         lua.set_named_registry_value("kettle_events", event_table)
             .context("register kettle_events table")?;
@@ -580,7 +582,7 @@ impl LuaEngine {
         })
     }
 
-    /// Cycle 900 (audit): reset the instruction budget at the start of a
+    /// Reset the instruction budget at the start of a
     /// top-level Lua invocation, so each call gets the full budget rather than
     /// sharing one cumulative counter across the session (which would
     /// eventually false-trip a long-lived plugin). Called by every public entry
@@ -589,9 +591,9 @@ impl LuaEngine {
         self.hook_fires.store(0, Ordering::Relaxed);
     }
 
-    /// Cycle 375: list the labels of every Lua-registered context
+    /// List the labels of every Lua-registered context
     /// menu item, in registration order. Used by App to extend the
-    /// cycle-245 context menu with kettle.add_menu_item entries.
+    /// built-in context menu with kettle.add_menu_item entries.
     pub fn list_menu_item_labels(&self) -> mlua::Result<Vec<String>> {
         self.arm_budget();
         let items: mlua::Table = self.lua.named_registry_value("kettle_menu_items")?;
@@ -605,7 +607,7 @@ impl LuaEngine {
         Ok(out)
     }
 
-    /// Cycle 375: invoke the Lua callback for menu-item index
+    /// Invoke the Lua callback for menu-item index
     /// `idx` (0-based; the App walks the registered list in the
     /// same order `list_menu_item_labels` returned). Errors
     /// log::warn + don't propagate.
@@ -626,7 +628,7 @@ impl LuaEngine {
         }
     }
 
-    /// Cycle 374: invoke the first registered URL handler whose
+    /// Invoke the first registered URL handler whose
     /// pattern matches the given URL. Returns true when a handler
     /// claimed the URL (kettle should NOT also open it); false
     /// otherwise (kettle continues to its default open-in-browser
@@ -670,7 +672,7 @@ impl LuaEngine {
         })
     }
 
-    /// Cycle 365: fire a named event to every Lua callback registered
+    /// Fire a named event to every Lua callback registered
     /// for it. Args are converted from `&str` for simplicity (every
     /// current event payload fits as a single string; future events
     /// can extend with a richer arg type).
@@ -726,7 +728,7 @@ impl LuaEngine {
         }
     }
 
-    /// Cycle 325: drain pending side-effect commands queued by Lua
+    /// Drain pending side-effect commands queued by Lua
     /// during the most recent script execution. Returns whatever
     /// the script accumulated; the buffer is reset.
     pub fn drain_commands(&self) -> Vec<LuaCommand> {
@@ -740,12 +742,12 @@ impl LuaEngine {
     /// with the script path attached so the user sees which file
     /// failed.
     ///
-    /// Cycle 587: bound the read at 4 MiB. Real init.lua files run
+    /// Bound the read at 4 MiB. Real init.lua files run
     /// a few KB to ~100 KB; pulling in a moderately complex plugin
     /// suite might reach a few hundred KB. 4 MiB is a generous
     /// margin while still catching a swap-attack blob (same
-    /// defense-in-depth pattern as cycle 585 session.json + cycle
-    /// 586 config). Past the cap the script is refused with an
+    /// defense-in-depth pattern as the session.json and config
+    /// read-size caps). Past the cap the script is refused with an
     /// `anyhow` error so the user gets a clear diagnostic rather
     /// than an OOM mid-load.
     pub fn exec_file(&self, path: &Path) -> Result<()> {
@@ -798,7 +800,7 @@ impl LuaEngine {
 mod tests {
     use super::*;
 
-    /// Cycle 847 (audit). The callback registries must be bounded against a
+    /// The callback registries must be bounded against a
     /// hostile/runaway `init.lua`, mirroring the command-queue cap. Registering
     /// far past the cap saturates at the cap rather than growing unbounded.
     #[test]
@@ -823,7 +825,7 @@ mod tests {
 
     #[test]
     fn kettle_namespace_exposes_version_and_theme() {
-        // Cycle 324 drift guard. The minimum-viable read-only Lua
+        // The minimum-viable read-only Lua
         // surface: a user's init.lua can call kettle.version() +
         // kettle.theme() to print which kettle they're running.
         let eng = LuaEngine::new("TokyoNight Night").expect("init");
@@ -835,7 +837,7 @@ mod tests {
 
     #[test]
     fn kettle_config_path_returns_a_string_or_nil() {
-        // Cycle 446 drift guard. `kettle.config_path()` (cycle 324)
+        // `kettle.config_path()`
         // returns either the resolved XDG-style config path as a
         // string or nil. Plugins inspecting their environment
         // (e.g. `kettle.notify("config: " .. (kettle.config_path() or
@@ -871,7 +873,7 @@ mod tests {
 
     #[test]
     fn send_text_queues_command_drained_by_app() {
-        // Cycle 325 drift guard. `kettle.send_text(s)` queues a
+        // `kettle.send_text(s)` queues a
         // command that the App drains + writes to the focused pane.
         let eng = LuaEngine::new("Default").expect("init");
         eng.eval_str("kettle.send_text('echo hello\\n')")
@@ -892,7 +894,7 @@ mod tests {
 
     #[test]
     fn exec_action_queues_named_action() {
-        // Cycle 326 drift guard. `kettle.exec_action(name)` queues
+        // `kettle.exec_action(name)` queues
         // the name string; App turns it into an Action via
         // `Action::from_name` at drain time.
         let eng = LuaEngine::new("Default").expect("init");
@@ -912,9 +914,9 @@ mod tests {
 
     #[test]
     fn notify_queues_notify_command() {
-        // Cycle 430 drift guard. `kettle.notify(title, body?)` must
+        // `kettle.notify(title, body?)` must
         // queue a `LuaCommand::Notify` with the title + optional
-        // body; the cycle-426-428 `drain_lua_hook_commands` helper
+        // body; the `drain_lua_hook_commands` helper
         // depends on this variant being present.
         let eng = LuaEngine::new("Default").expect("init");
         eng.eval_str("kettle.notify('Build done', 'rustc finished')")
@@ -945,8 +947,8 @@ mod tests {
 
     #[test]
     fn set_theme_queues_set_theme_command() {
-        // Cycle 430 drift guard. `kettle.set_theme(name)` must queue
-        // a `LuaCommand::SetTheme` with the name; the cycle-426-428
+        // `kettle.set_theme(name)` must queue
+        // a `LuaCommand::SetTheme` with the name; the
         // `drain_lua_hook_commands` helper resolves it via
         // `kettle_config::Theme::find_name` at drain time.
         let eng = LuaEngine::new("Default").expect("init");
@@ -967,7 +969,7 @@ mod tests {
 
     #[test]
     fn on_event_hook_registers_and_fires() {
-        // Cycle 365 drift guard. kettle.on('startup', fn) registers
+        // kettle.on('startup', fn) registers
         // a callback; fire_event(Startup) invokes it. Errors from
         // individual callbacks DON'T propagate (logged + skipped),
         // so a broken plugin can't take down kettle.
@@ -1002,7 +1004,7 @@ mod tests {
         eng.fire_event(&LuaEvent::Bell(7));
     }
 
-    /// Cycle 703 drift guard. `LuaEvent::PaneFocus(prev_opt, cur)`
+    /// `LuaEvent::PaneFocus(prev_opt, cur)`
     /// emits to Lua as `(prev|nil, cur)` so plugins can branch on
     /// the first focus after startup (`prev == nil`) vs.
     /// subsequent focus changes.
@@ -1029,7 +1031,7 @@ mod tests {
         assert_eq!(LuaEvent::PaneFocus(None, 1).name(), "pane_focus");
     }
 
-    /// Cycle 750 drift guard. `LuaEvent::PaneClose(pane_id)` emits to Lua as a
+    /// `LuaEvent::PaneClose(pane_id)` emits to Lua as a
     /// single integer pane id (the pane analog of `tab_close`), so plugins can
     /// drop per-pane state when a split closes.
     #[test]
@@ -1054,7 +1056,7 @@ mod tests {
         eng2.fire_event(&LuaEvent::PaneClose(99));
     }
 
-    /// Cycle 704 drift guard. `LuaEvent::TitleChanged(pane_id,
+    /// `LuaEvent::TitleChanged(pane_id,
     /// title)` emits to Lua as `(pane_id, title_string)` so
     /// plugins can mirror titles into status bars.
     #[test]
@@ -1080,7 +1082,7 @@ mod tests {
         );
     }
 
-    /// Cycle 705 drift guard. `LuaEvent::UrlClicked(uri)` emits
+    /// `LuaEvent::UrlClicked(uri)` emits
     /// to Lua as `(uri_string,)` and is fired BEFORE pattern-
     /// handler dispatch — analytics plugins see every URL click.
     #[test]
@@ -1114,7 +1116,7 @@ mod tests {
 
     #[test]
     fn on_event_hook_isolates_callback_errors() {
-        // Cycle 365: a callback that raises a Lua error doesn't
+        // A callback that raises a Lua error doesn't
         // propagate — logged + skipped + sibling callbacks still
         // run. This is the "broken plugin doesn't take down
         // kettle" contract.
@@ -1132,8 +1134,8 @@ mod tests {
 
     #[test]
     fn add_menu_item_registers_and_invoke_runs_callback() {
-        // Cycle 435 drift guard. `kettle.add_menu_item(label, cb)`
-        // (cycle 375) appends a {label, callback} entry to the
+        // `kettle.add_menu_item(label, cb)`
+        // appends a {label, callback} entry to the
         // kettle_menu_items registry; `invoke_menu_item(idx)` calls
         // the matching callback. Plugin-context-menu surface relies
         // on both. Callback errors log + don't propagate.
@@ -1157,7 +1159,7 @@ mod tests {
         assert_eq!(eng.eval_str("return fired").unwrap(), "11");
     }
 
-    /// Cycle 900 (audit): a runaway script (`while true do end`) must be
+    /// A runaway script (`while true do end`) must be
     /// force-aborted by the instruction-budget hook instead of wedging the
     /// thread forever. The test dials the budget down so the abort happens in a
     /// few million instructions (sub-second) rather than the ~128 M prod cap.
@@ -1178,7 +1180,7 @@ mod tests {
         assert_eq!(eng.eval_str("return 1 + 1").unwrap(), "2");
     }
 
-    /// Cycle 900: the budget is per-invocation — a tight-but-finite loop that
+    /// The budget is per-invocation — a tight-but-finite loop that
     /// fits well under the cap runs to completion across repeated calls without
     /// a cumulative counter eventually tripping it.
     #[test]
@@ -1196,8 +1198,8 @@ mod tests {
 
     #[test]
     fn url_handler_matches_pattern_and_short_circuits() {
-        // Cycle 435 drift guard. `kettle.add_url_handler(name,
-        // pattern, cb)` (cycle 374) registers a handler;
+        // `kettle.add_url_handler(name,
+        // pattern, cb)` registers a handler;
         // `try_url_handler(url)` returns true + invokes the cb when
         // the Lua-pattern matches, false otherwise. Used by the
         // url-open path to let plugins claim URLs before the system
@@ -1225,11 +1227,11 @@ mod tests {
         // The script writes a result into a global so the test can
         // check it ran. Same shape as a user's `~/.config/kettle/
         // init.lua` setting up environment.
-        // Cycle 592: PID + nanos so parallel `cargo test` runs don't
-        // race on a shared /tmp path. Same pattern as the cycle-587
+        // PID + nanos so parallel `cargo test` runs don't
+        // race on a shared /tmp path. Same pattern as the
         // oversize-script test below.
         let path = std::env::temp_dir().join(format!(
-            "kettle-lua-cycle324-smoke-{}-{}.lua",
+            "kettle-lua-smoke-{}-{}.lua",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -1244,7 +1246,7 @@ mod tests {
         let _ = std::fs::remove_file(&path);
     }
 
-    /// Cycle 587 drift guard: an oversized Lua script must be refused
+    /// An oversized Lua script must be refused
     /// via the metadata pre-check rather than read into RAM. Real
     /// init.lua files top out around 100 KB; a multi-MB blob is either
     /// a runaway autogen script or a swap-attack — either way the
@@ -1252,10 +1254,7 @@ mod tests {
     #[test]
     fn exec_file_rejects_oversize_script() {
         let dir = std::env::temp_dir();
-        let path = dir.join(format!(
-            "kettle-lua-cycle587-oversize-{}.lua",
-            std::process::id()
-        ));
+        let path = dir.join(format!("kettle-lua-oversize-{}.lua", std::process::id()));
         // 5 MiB of LEGITIMATE Lua (`x = x + 1\n` repeated). Verifies
         // the size gate fires BEFORE loading — even a syntactically
         // valid payload past the cap is refused, so a future refactor
@@ -1277,13 +1276,12 @@ mod tests {
 
     #[test]
     fn safe_sandbox_nils_dangerous_stdlib_apis() {
-        // Cycle 571 drift guard. The cycle-376 sandbox (default
+        // The safe-mode sandbox (default
         // `lua-sandbox = safe`) nils the Lua stdlib APIs that can
         // execute external processes, open arbitrary files, or load
         // native shared libraries. A future refactor removing one of
         // these nils silently degrades the security posture documented
-        // in SECURITY.md (cycle 447 "Lua plugin sandbox escape" in
-        // scope).
+        // in SECURITY.md's "Lua plugin sandbox escape" in-scope entry.
         //
         // Assert every member of the nil-list is `nil` after sandbox
         // construction. The list mirrors the in-code nil sweep.
@@ -1358,11 +1356,12 @@ mod tests {
 
     #[test]
     fn trusted_sandbox_leaves_stdlib_intact() {
-        // Cycle 571 companion test. The opt-in `lua-sandbox =
+        // The opt-in `lua-sandbox =
         // trusted` mode leaves the dangerous APIs callable. Users
         // explicitly setting `trusted` accept the full Lua stdlib
-        // surface (cycle-447 SECURITY.md: opt-in trust, out-of-scope
-        // for sandbox-escape reports). A future refactor that nils
+        // surface (per SECURITY.md's "Lua plugin sandbox escape" entry:
+        // opt-in trust is out-of-scope for sandbox-escape reports).
+        // A future refactor that nils
         // these even in trusted mode silently breaks user scripts.
         let eng = LuaEngine::new_with_sandbox("Default", false).expect("init (trusted sandbox)");
         // os.execute exists in trusted mode (still a function).
@@ -1376,7 +1375,7 @@ mod tests {
         );
     }
 
-    /// Cycle 591 drift guard: pin that mlua's `Lua::new()` default
+    /// Pin that mlua's `Lua::new()` default
     /// excludes the entire `debug` library (per its `StdLib::ALL_SAFE`
     /// load list). If a future refactor switches to `Lua::unsafe_new()`
     /// or explicitly loads `StdLib::DEBUG`, the dangerous methods
@@ -1396,12 +1395,12 @@ mod tests {
                 "safe={safe}: `debug` library must be nil at the global \
                  level — mlua's Lua::new() defaults exclude it. If a future \
                  refactor switches to Lua::unsafe_new() or loads StdLib::DEBUG, \
-                 update SECURITY.md cycle-447 + cycle-591 notes accordingly"
+                 update SECURITY.md's Lua plugin sandbox escape notes accordingly"
             );
         }
     }
 
-    /// Cycle 601 drift guard: `kettle.send_text(s)` must drop
+    /// `kettle.send_text(s)` must drop
     /// strings larger than `MAX_LUA_SEND_TEXT_BYTES`. Pre-cap, a
     /// hostile script (or even a buggy legitimate one that runs
     /// away on a loop) could queue gigabytes of PTY-bound text and
@@ -1429,7 +1428,7 @@ mod tests {
         );
     }
 
-    /// Cycle 601 drift guard: `kettle.notify(title, body)` rejects
+    /// `kettle.notify(title, body)` rejects
     /// each field over `MAX_LUA_NOTIFY_BYTES`. Real desktop
     /// notifications are tiny; oversized title/body almost certainly
     /// indicates a runaway script.
@@ -1459,7 +1458,7 @@ mod tests {
         );
     }
 
-    /// Cycle 601 drift guard: the queue length caps at
+    /// The queue length caps at
     /// `MAX_PENDING_COMMANDS`. A hostile script firing
     /// `for i=1,10^9 do kettle.exec_action('noop') end` would
     /// otherwise grow the Vec without bound — even at 32 bytes per

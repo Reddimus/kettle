@@ -4,16 +4,16 @@ use std::sync::Arc;
 
 use crate::graphics_limits::{GraphicsBudget, GraphicsReservation};
 
-/// Cycle 576 decompression-bomb defense: max per-axis pixel count
+/// Decompression-bomb defense: max per-axis pixel count
 /// accepted by `ImageData::from_encoded`. Matches `sixel::MAX_DIM`
-/// (cycle predates the audit doc; same realistic-terminal envelope).
+/// (same realistic-terminal envelope).
 pub const MAX_IMAGE_DIM: u32 = 8192;
 
-/// Cycle 576 decompression-bomb defense: max total bytes the `image`
+/// Decompression-bomb defense: max total bytes the `image`
 /// crate may allocate while decoding. The independent axis cap still rejects
 /// pathological shapes; the byte cap limits any one retained image to 64 MiB.
 ///
-/// Cycle 814: `pub(crate)` so the kitty decoder can bound its zlib (`o=z`)
+/// `pub(crate)` so the kitty decoder can bound its zlib (`o=z`)
 /// inflate to this same envelope.
 pub const MAX_IMAGE_BYTES: u64 = 64 * 1024 * 1024;
 
@@ -59,21 +59,21 @@ impl ImageData {
         rgba: Vec<u8>,
         budget: &GraphicsBudget,
     ) -> Option<ImageData> {
-        // Cycle 577: checked arithmetic. The previous unchecked
+        // Checked arithmetic. The previous unchecked
         // `width as usize * height as usize * 4` would panic on debug
         // and silently wrap on release for adversarial header values
         // (e.g. a kitty `f=32,s=4294967295,v=4294967295` payload). The
         // overflow is reachable on 64-bit: `u32::MAX² × 4` ≈ 7.4×10¹⁹
         // bytes, well above `u64::MAX`. With `checked_mul` the
         // oversize case becomes a clean `None` return, identical UX
-        // to the existing `rgba.len()` mismatch path. Cycle 576's
-        // 8192-px `from_encoded` cap funnels the encoded path safely;
+        // to the existing `rgba.len()` mismatch path. The 8192-px
+        // `from_encoded` cap funnels the encoded path safely;
         // this guard covers the *raw* `ImageData::new` surface for any
         // future caller.
         if width == 0 || height == 0 {
             return None;
         }
-        // Cycle 813 (audit): cap per-axis dimensions at the same `MAX_IMAGE_DIM`
+        // Cap per-axis dimensions at the same `MAX_IMAGE_DIM`
         // the `from_encoded` decoder already enforces — but here, at the single
         // chokepoint every constructor funnels through (`new`/`crop`/`solid`/
         // `from_encoded`). The kitty `f=32`/`f=24` raw-pixel branches parse
@@ -131,8 +131,8 @@ impl ImageData {
     }
 
     /// Decode an encoded terminal-embedded image (PNG / JPEG / GIF — the
-    /// only formats kettle-vt enables on the `image` crate per Cargo.toml
-    /// cycle-277 narrow features). Bounded against decompression bombs:
+    /// only formats kettle-vt enables on the `image` crate per Cargo.toml's
+    /// narrowed feature list). Bounded against decompression bombs:
     /// rejects images wider/taller than 8192 px or whose decoded RGBA
     /// buffer would exceed 64 MiB.
     pub fn from_encoded(bytes: &[u8]) -> Option<ImageData> {
@@ -194,7 +194,7 @@ impl ImageData {
         if w == 0 || h == 0 {
             return None;
         }
-        // Cycle 813 (audit): bound dims BEFORE the fill allocation — `new`
+        // Bound dims BEFORE the fill allocation — `new`
         // would reject oversized dims, but `solid` pre-allocates `w*h*4` first,
         // so an attacker-influenced kitty animation background (`Y=` with huge
         // base dims) could OOM here before the check. Reject up front.
@@ -262,7 +262,7 @@ impl ImageData {
         };
         for row in 0..ch {
             for col in 0..cw {
-                // Cycle 760: compute byte offsets in u64 so the multiply can't
+                // Compute byte offsets in u64 so the multiply can't
                 // wrap u32 for very large frames. `cw`/`ch` already clamp the
                 // result in-bounds (x+col < width, y+row < height), so the
                 // cast back to usize is always valid.
@@ -342,7 +342,7 @@ mod tests {
         assert!(ImageData::solid(0, 4, [0; 4]).is_none());
     }
 
-    /// Cycle 577: `ImageData::new` must not panic or wrap on adversarial
+    /// `ImageData::new` must not panic or wrap on adversarial
     /// `width × height × 4` arithmetic. Tests `u32::MAX × u32::MAX × 4`
     /// (which overflows `u64::MAX` ≈ 1.8 × 10¹⁹ on 64-bit) returns
     /// cleanly — no panic in debug, no silent acceptance in release.
@@ -362,7 +362,7 @@ mod tests {
         assert!(ImageData::new(2, 2, vec![0; 16]).is_some());
     }
 
-    /// Cycle 813 (audit) drift guard. `ImageData::new` must reject per-axis
+    /// Drift guard: `ImageData::new` must reject per-axis
     /// dimensions above `MAX_IMAGE_DIM` so the kitty `f=32`/`f=24` raw-pixel
     /// decoders (which parse width/height straight from the untrusted `s=`/`v=`
     /// control words) can never produce an image that overflows the GPU's
@@ -420,7 +420,7 @@ mod tests {
         assert_eq!(pinned.rgba.as_slice(), &[0; 16]);
     }
 
-    /// Cycle 576 drift guard for the decompression-bomb defense in
+    /// Drift guard for the decompression-bomb defense in
     /// `from_encoded`. Encodes a small PNG (positive case) and a PNG
     /// whose width exceeds `MAX_IMAGE_DIM` (negative case) via the
     /// `image` crate's encoder, then re-decodes through `from_encoded`
