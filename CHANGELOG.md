@@ -6,6 +6,8 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+## [2.36.5] — 2026-07-21
+
   ### Added
   - **Copying a file in the OS file manager and pasting it into a pane now
     inserts the file's path**, so a video, PDF, or any non-image file can be
