@@ -5064,6 +5064,159 @@ cell-height = 1.2\n";
         }
     }
 
+    #[test]
+    fn no_internal_cycle_refs_anywhere() {
+        // The repo's early development wove numbered audit bookkeeping
+        // markers through code comments, docs, scripts, and build
+        // files. Those markers were removed wholesale — provenance
+        // lives in git history and CHANGELOG.md, whose historical
+        // entries are the record the old markers pointed into (and
+        // which is therefore the one deliberate exemption below).
+        // This guard keeps the shapes from drifting back into any
+        // living source: it walks every workspace Rust file plus the
+        // doc/script/packaging text surfaces and fails on the numbered
+        // form (the marker word + space or hyphen + digits), the
+        // placeholder form (marker word + space or hyphen + a
+        // standalone `x`), and the `sub-`-prefixed form.
+        //
+        // The marker word is assembled at runtime so this test's own
+        // source cannot match itself.
+        let word_owned: String = ["cy", "cle"].concat();
+        let word = word_owned.as_bytes();
+
+        fn line_of(text: &[u8], off: usize) -> usize {
+            1 + text[..off].iter().filter(|&&b| b == b'\n').count()
+        }
+
+        let scan = |path: &std::path::Path, offenders: &mut Vec<String>| {
+            let Ok(raw) = std::fs::read(path) else {
+                return;
+            };
+            let lower: Vec<u8> = raw.iter().map(|b| b.to_ascii_lowercase()).collect();
+            for (i, w) in lower.windows(word.len()).enumerate() {
+                if w != word {
+                    continue;
+                }
+                let after = &lower[i + word.len()..];
+                let numbered_or_placeholder = match (after.first(), after.get(1)) {
+                    (Some(&s), Some(&c)) if s == b' ' || s == b'-' => {
+                        c.is_ascii_digit()
+                            || (c == b'x'
+                                && !after.get(2).is_some_and(|b| b.is_ascii_alphanumeric()))
+                    }
+                    _ => false,
+                };
+                let sub_prefixed = i >= 4 && &lower[i - 4..i] == b"sub-";
+                if numbered_or_placeholder || sub_prefixed {
+                    let end = (i + 40).min(raw.len());
+                    offenders.push(format!(
+                        "{}:{}: {}",
+                        path.display(),
+                        line_of(&raw, i),
+                        String::from_utf8_lossy(&raw[i.saturating_sub(4)..end]).trim()
+                    ));
+                }
+            }
+        };
+
+        fn walk(dir: &std::path::Path, visit: &mut dyn FnMut(&std::path::Path)) {
+            let Ok(entries) = std::fs::read_dir(dir) else {
+                return;
+            };
+            for entry in entries.flatten() {
+                let p = entry.path();
+                if p.is_dir() {
+                    let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                    if name != "target" && name != ".git" {
+                        walk(&p, visit);
+                    }
+                } else {
+                    visit(&p);
+                }
+            }
+        }
+
+        let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let repo_root = manifest.join("../..");
+        let mut offenders: Vec<String> = Vec::new();
+
+        // Binary assets are the only skip class — everything textual
+        // is fair game, including extensionless files like the
+        // pre-commit hook and templated packaging inputs.
+        let is_binary = |p: &std::path::Path| {
+            let ext = p
+                .extension()
+                .and_then(|e| e.to_str())
+                .unwrap_or("")
+                .to_ascii_lowercase();
+            matches!(
+                ext.as_str(),
+                "png"
+                    | "jpg"
+                    | "jpeg"
+                    | "gif"
+                    | "ico"
+                    | "icns"
+                    | "bmp"
+                    | "ttf"
+                    | "otf"
+                    | "woff"
+                    | "woff2"
+                    | "zip"
+                    | "gz"
+                    | "tar"
+                    | "bin"
+                    | "exe"
+                    | "dll"
+            )
+        };
+
+        // Every Rust source and manifest in the workspace, including
+        // build scripts and integration tests.
+        walk(&repo_root.join("crates"), &mut |p| {
+            let ext = p.extension().and_then(|e| e.to_str()).unwrap_or("");
+            if ext == "rs" || ext == "toml" {
+                scan(p, &mut offenders);
+            }
+        });
+
+        // Living text surfaces. CHANGELOG.md is deliberately absent.
+        for rel in [
+            "README.md",
+            "CONTRIBUTING.md",
+            "SECURITY.md",
+            "CODE_OF_CONDUCT.md",
+            "AGENTS.md",
+            "CLAUDE.md",
+            "Justfile",
+            "flake.nix",
+            "Cargo.toml",
+            "deny.toml",
+            ".gitignore",
+            ".gitattributes",
+        ] {
+            let p = repo_root.join(rel);
+            if p.exists() {
+                scan(&p, &mut offenders);
+            }
+        }
+        for dir in ["docs", "scripts", "packaging", ".github", ".githooks"] {
+            walk(&repo_root.join(dir), &mut |p| {
+                if !is_binary(p) {
+                    scan(p, &mut offenders);
+                }
+            });
+        }
+
+        assert!(
+            offenders.is_empty(),
+            "internal audit-marker references must not reappear outside \
+             CHANGELOG.md; reword the rationale in timeless prose (see \
+             CONTRIBUTING.md):\n{}",
+            offenders.join("\n")
+        );
+    }
+
     // ────────────────────────────────────────────────────────────
     // Consolidated drift guards for user-facing markdown.
     //
