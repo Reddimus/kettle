@@ -23,6 +23,29 @@ prompt, and press its chord from the table. A text-only paste result means the
 client did not detect image data; Kettle cannot convert clipboard text back into
 an image.
 
+## File paste (paths)
+
+Image paste (above) covers images only. For any other file — a video, a PDF, an
+arbitrary binary — the portable channel both Claude Code and Codex accept is a
+**file path pasted as text**: the client reads the path (`Read`, or `ffmpeg`/
+`ffprobe` via a shell for a video) rather than receiving bytes over an escape
+sequence.
+
+Kettle supports this two ways, both of which paste a shell-quoted path (never
+raw bytes):
+
+- **Copy a file** in Explorer/Finder, then paste (`Ctrl+Shift+V`). When the
+  clipboard holds a file list instead of text, Kettle pastes the path(s).
+  Controlled by `paste-files` (on by default; `paste-files = off` disables it).
+- **Drag and drop** a file onto the window — always pastes the path.
+
+Multiple selected files paste as space-separated quoted paths. Paths are quoted
+for the focused pane's shell (POSIX single-quote, PowerShell `''`, or `cmd`
+double-quote), and when the pane runs **WSL** a Windows path is translated to
+its `/mnt/c/…` (or in-distro `/home/…` for a `\\wsl.localhost\…` share) form so
+the Linux-side agent can open it. There is no video decoder in either client;
+the path lets the agent drive `ffmpeg` itself.
+
 ## Focus and cursor state
 
 When a Kettle window is unfocused, Kettle suppresses the rendered terminal
