@@ -1921,6 +1921,15 @@ fn compile_triggers(
 
 const CONFIG_RELOAD_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(75);
 
+/// Should a live config reload fire a "malformed values ignored" notification?
+/// Only when the diagnostics are non-empty AND differ from the set surfaced on
+/// the previous reload — kettle's own settings-persistence writes (theme /
+/// preferences toggles) reload the config, and an unchanged malformed set must
+/// not re-notify on every one of them. Pure so the edge-trigger rule is tested.
+fn should_notify_malformed(new: &[String], last: &[String]) -> bool {
+    !new.is_empty() && new != last
+}
+
 /// Filesystem watchers observe the containing directory so atomic replacement
 /// works across platforms. Only content/name changes to the exact file are
 /// actionable: accepting `Access(Open)` creates a read -> reload -> read
@@ -2985,6 +2994,11 @@ pub struct App {
     last_schedule_decision: Option<bool>,
     /// Explicit `--config` file (persists for live reload).
     config_path: Option<std::path::PathBuf>,
+    /// The malformed-value diagnostics surfaced on the previous live reload,
+    /// so the reload notification is edge-triggered — kettle's own
+    /// settings-persistence writes reload the config and must not re-fire an
+    /// identical warning every time. See [`should_notify_malformed`].
+    config_malformed_last: Vec<String>,
     /// First-tab CLI overrides (`-e cmd`, `-d dir`); consumed once.
     startup: crate::Options,
     _watcher: Option<notify::RecommendedWatcher>,
@@ -3503,6 +3517,7 @@ impl App {
             last_remote_poll: None,
             last_schedule_decision: None,
             config_path: startup.config.clone(),
+            config_malformed_last: Vec::new(),
             startup,
             _watcher: watcher,
             _remote_watcher: remote_watcher,
@@ -10297,6 +10312,28 @@ impl App {
             .as_deref()
             .map(Config::load_from)
             .unwrap_or_else(Config::load);
+        // Surface malformed values (typos the parser silently ignores, e.g.
+        // `cursor-style = beem`) on live reload. `--check-config` already
+        // catches these at the CLI, but a live edit otherwise reverted with no
+        // feedback. Edge-triggered via `should_notify_malformed` so kettle's
+        // own settings-persistence writes don't spam an unchanged warning.
+        let malformed = self
+            .config_path
+            .clone()
+            .or_else(Config::default_path)
+            .filter(|p| p.exists())
+            .map(|p| Config::load_from_with_diagnostics(&p).2)
+            .unwrap_or_default();
+        if should_notify_malformed(&malformed, &self.config_malformed_last) {
+            fire_notify(
+                "kettle: config values ignored",
+                &format!(
+                    "These lines have invalid values and were skipped:\n{}",
+                    malformed.join("\n")
+                ),
+            );
+        }
+        self.config_malformed_last = malformed;
         // Re-compile triggers from the freshly-loaded config
         // BEFORE assigning, while `new` is still owned. Recompile
         // catches added/removed/changed patterns. Clearing the throttle stamp
@@ -19766,6 +19803,26 @@ mod tests {
             parts.path.as_deref(),
             Some("~/Repos/SPI-1/flight-event-line-server-go")
         );
+    }
+
+    #[test]
+    fn malformed_config_notification_is_edge_triggered() {
+        use super::should_notify_malformed;
+        let none: Vec<String> = vec![];
+        let a = vec!["cursor-style = beem".to_string()];
+        let b = vec!["cursor-style = beem".to_string(), "bell = loud".to_string()];
+        // Nothing malformed → never notify.
+        assert!(!should_notify_malformed(&none, &none));
+        assert!(!should_notify_malformed(&none, &a));
+        // First appearance of a problem → notify.
+        assert!(should_notify_malformed(&a, &none));
+        // Same problem set on the next reload (e.g. a settings-persistence
+        // write) → stay quiet.
+        assert!(!should_notify_malformed(&a, &a));
+        // A newly-introduced/changed problem → notify again.
+        assert!(should_notify_malformed(&b, &a));
+        // Fixing everything → no notification (and resets the latch).
+        assert!(!should_notify_malformed(&none, &b));
     }
 
     #[test]

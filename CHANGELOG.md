@@ -21,6 +21,13 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
     behavior). Explicit drag-and-drop always pastes a path regardless.
 
   ### Fixed
+  - **A typo saved into a live-reloaded config no longer reverts silently.**
+    `--check-config` already flagged malformed values (e.g. `cursor-style =
+    beem`) at the CLI, but editing one into the running config just dropped the
+    line with no feedback. Kettle now fires a desktop notification listing the
+    ignored lines on reload. It is edge-triggered — an unchanged malformed set
+    (as produced by Kettle's own settings-persistence writes) does not re-notify,
+    and fixing the config resets the latch.
   - **The stray `C` and the intermittently solid autofill text that appeared
     only in Kettle while running Claude Code are fixed at the parser.** The VT
     pre-parser treated a raw `0x9c` byte inside an OSC/DCS/APC control string as
