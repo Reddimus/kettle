@@ -65,7 +65,7 @@ fn hls_to_rgb(h: f32, l: f32, s: f32) -> Rgb {
 
 /// Geometric capacity growth: the smallest power-of-two multiple of `cur`
 /// (floored at 1) that is `>= needed`, never exceeding `MAX_DIM` (callers
-/// guarantee `needed <= MAX_DIM`). Cycle 824 (audit): doubling the allocation
+/// guarantee `needed <= MAX_DIM`). Doubling the allocation
 /// makes total re-layout work across a decode amortized **O(W·H)** instead of
 /// the old exact-fit regrow's **O(W²·H)**.
 fn grow_cap(cur: usize, needed: usize) -> usize {
@@ -80,7 +80,7 @@ fn grow_cap(cur: usize, needed: usize) -> usize {
 /// are decoupled from the **logical** extent (`width`/`height`): capacity grows
 /// geometrically (cheap, rare), while the extent tracks the last pixel touched.
 ///
-/// Cycle 824 (audit): the previous decoder reallocated to the EXACT new size and
+/// The previous decoder reallocated to the EXACT new size and
 /// full-copied every existing row on each growth — and a spec-legal sixel that
 /// omits the raster-attribute size hint grows its width one pixel at a time, so
 /// that was O(W) reallocations of O(W·H) each = O(W²·H), seconds-to-minutes of
@@ -237,9 +237,9 @@ pub(crate) fn decode_with_budget(data: &[u8], budget: &GraphicsBudget) -> Option
                         ci += 1;
                     }
                     let rgb = if pu == 2 {
-                        // Cycle 860 (audit): clamp each percentage to 0..=100
+                        // Clamp each percentage to 0..=100
                         // BEFORE scaling. `read_num` saturates a long digit run
-                        // at `i64::MAX` (cycle 830), and `i64::MAX * 255` then
+                        // at `i64::MAX`, and `i64::MAX * 255` then
                         // overflows — a process-abort under `panic = "abort"`
                         // with overflow checks (debug/test), garbage in release —
                         // reachable from any untrusted Sixel DCS. Clamping is
@@ -247,8 +247,8 @@ pub(crate) fn decode_with_budget(data: &[u8], budget: &GraphicsBudget) -> Option
                         let pct = |v: i64| (v.clamp(0, 100) * 255 / 100) as u8;
                         Rgb(pct(comps[0]), pct(comps[1]), pct(comps[2]))
                     } else {
-                        // Cycle 916 (file-by-file audit): clamp HLS components
-                        // like the RGB branch (cycle 860) — read_num saturates a
+                        // Clamp HLS components
+                        // like the RGB branch above — read_num saturates a
                         // long digit run at i64::MAX, so an unclamped cast feeds
                         // garbage hue/lightness/saturation into hls_to_rgb. Spec
                         // ranges: H 0..=360, L/S 0..=100.
@@ -333,7 +333,7 @@ fn read_num(data: &[u8], mut i: usize) -> (i64, usize) {
     let mut v: i64 = 0;
     let mut any = false;
     while i < data.len() && data[i].is_ascii_digit() {
-        // Cycle 830 (audit): saturating, not `v * 10 + d`. Every numeric param
+        // Saturating, not `v * 10 + d`. Every numeric param
         // (`!<n>` repeat, `#<n>` palette, `"<n>` raster) is attacker-controlled
         // from a DCS body up to 64 MiB; a ~20-digit run overflowed the i64
         // multiply — a hard process abort under debug/test (panic=abort), a
@@ -351,7 +351,7 @@ fn read_num(data: &[u8], mut i: usize) -> (i64, usize) {
 mod tests {
     use super::{MAX_DIM, decode, grow_cap};
 
-    /// Cycle 824 (audit) drift guard: capacity grows GEOMETRICALLY (doubling),
+    /// Drift guard: capacity grows GEOMETRICALLY (doubling),
     /// which is what turns the decoder's total re-layout work from O(W²·H) into
     /// amortized O(W·H). If a refactor reverts to exact-fit growth (`grow_cap`
     /// returning `needed`), the doubling assertions below fail.
@@ -366,7 +366,7 @@ mod tests {
         assert!(grow_cap(0, MAX_DIM) >= MAX_DIM);
     }
 
-    /// Cycle 830 (audit): a long digit run in any numeric param must not
+    /// A long digit run in any numeric param must not
     /// overflow `read_num`'s i64 accumulate (a debug/test panic=abort). A
     /// 25-digit count decodes cleanly (saturates, then the dim/ensure caps
     /// reject it) rather than aborting the process.
@@ -381,7 +381,7 @@ mod tests {
         let _ = decode(body2.as_bytes()); // must not panic (result either way ok)
     }
 
-    /// Cycle 860 (audit): a `#Pc;2;Pr;Pg;Pb` RGB palette entry with an absurd
+    /// A `#Pc;2;Pr;Pg;Pb` RGB palette entry with an absurd
     /// (saturated) component must not overflow the `* 255 / 100` scaling. Before
     /// the clamp, `i64::MAX * 255` aborted the process under overflow checks.
     #[test]
@@ -394,7 +394,7 @@ mod tests {
         assert!(decode(b"#0;2;100;0;0#0~").is_some());
     }
 
-    /// Cycle 824 (audit): a wide raster-attribute-LESS sixel (width grows one
+    /// A wide raster-attribute-LESS sixel (width grows one
     /// pixel at a time) was the O(W²·H) DoS trigger. It must still decode to the
     /// correct dimensions — and now does so in O(W·H) (instant rather than the
     /// seconds-to-minutes the old exact-fit regrow took).

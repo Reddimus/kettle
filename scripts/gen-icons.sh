@@ -6,7 +6,7 @@
 # PNGs that ship in the hicolor theme (and get embedded as the winit
 # window icon). Re-run it after editing the SVG.
 #
-# NOTE (v2.18 cycle): `scripts/gen-icons.py` is the committed Pillow
+# NOTE: `scripts/gen-icons.py` is the committed Pillow
 # reproduction of the SVG — it regenerates EVERYTHING (Linux PNGs, the
 # macOS iconset, AND packaging/windows/kettle.ico) and runs anywhere
 # Python + Pillow exist, which this rsvg-convert path can't (no rsvg on
@@ -66,7 +66,7 @@ for size in "${SIZES[@]}"; do
   echo "  kettle-${size}.png"
 done
 
-# --- macOS .iconset (cycle 772) -------------------------------------------
+# --- macOS .iconset --------------------------------------------------------
 # The macOS bundle icon is built by `iconutil -c icns kettle.iconset`
 # (release.yml) from this directory of fixed-name PNGs. They had been
 # committed as 16-bit/color RGBA -- the SAME depth as the Super-key bug

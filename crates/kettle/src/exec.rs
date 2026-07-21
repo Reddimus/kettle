@@ -1,4 +1,4 @@
-//! Cycle 922–923 (agent-first A1): `kettle exec` — run a command under a real
+//! `kettle exec` (agent-first A1) — run a command under a real
 //! PTY with full VT emulation, headlessly (no GPU, no window, no winit), and
 //! stream its output to this process's real stdout.
 //!
@@ -198,7 +198,7 @@ pub fn run_exec(opts: ExecOpts) -> i32 {
     run_exec_with(opts, &default_size_probe, &mut std::io::stdout().lock())
 }
 
-/// Cycle 932 (agent-first A3): run a command headlessly and CAPTURE its output
+/// (agent-first A3): run a command headlessly and CAPTURE its output
 /// in-process (instead of streaming to stdout) — the engine behind the
 /// `kettle_run` MCP tool. Returns `(exit_code, output)`; the output is the
 /// tail-capped (1 MiB) child output in the requested mode (strip-ansi

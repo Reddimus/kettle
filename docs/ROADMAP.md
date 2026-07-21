@@ -27,13 +27,13 @@
       vim/tmux/htop/fzf; local selection/scroll when tracking is off
 - [x] Shell integration (OSC 133 A/B/C/D) + jump-to-prompt
       (`Ctrl+Up`/`Ctrl+Down`); bash/zsh/fish/**powershell** snippets in
-      docs/SHELL-INTEGRATION.md (cycle 730 added the PowerShell variant
+      docs/SHELL-INTEGRATION.md (the PowerShell variant is available
       via `--shell-integration powershell` for Win11 + cross-platform
       PowerShell Core users)
 - [x] OSC 9;4 taskbar progress (PowerShell 7 / Windows Terminal parity):
       the focused pane's `ESC]9;4;state;pct` drives the Windows taskbar
       button via `ITaskbarList3` (normal/error/indeterminate/paused);
-      no-op off Windows (cycle 745)
+      no-op off Windows
 - [x] OSC 9 / OSC 777 desktop notifications: PTY programs can request a
       bounded desktop notification with `OSC 9 ; message` or
       `OSC 777 ; notify ; title ; body`; taskbar progress remains the separate
@@ -53,7 +53,7 @@
       headless GPU smoke, CLI smoke on all three OSes — see
       docs/TESTING.md. The "automated test harness" entry was first
       logged at 19 tests circa v0.2 and now reflects v1.40.0; the
-      same per-cycle drift-guard discipline grew it.
+      same per-feature drift-guard discipline grew it.
 
 - [x] Offscreen GPU self-test (compiles WGSL + renders a pass with no
       window) run in CI on Linux/macOS/Windows — real cross-platform GPU
@@ -378,7 +378,7 @@
       paste containing the *open* marker could trap the shell in
       paste mode past the wrapper's real close. +1 test paired
       symmetrically with the existing close-marker test.
-- [x] **`kettle --check-config` echoes every per-cycle gate.**
+- [x] **`kettle --check-config` echoes every per-feature gate.**
       Resolved cursor / bell / OSC 52 / scroll / mouse / tabs /
       title / word-delimiters / ssh values now appear so a user
       can verify their tweaks took effect without grepping source.
@@ -404,7 +404,7 @@
       Now bound by default + `keybind = alt+5=goto_tab:5` parses
       (1-based; 0 rejected to surface the ambiguity). +2 tests.
 - [x] **OSC 11 default-bg override reaches the chrome.** Mirror
-      of the OSC 12 cursor-color fix in cycle 56 — surface clear,
+      of the OSC 12 cursor-color render fix — surface clear,
       active tab-bar segment, and per-cell default-bg check all
       now read from `term_colors[257]` instead of hard-wiring
       `theme.background`.
@@ -441,7 +441,7 @@
       and emoji (2 cells each) no longer overflow the tab segment.
       Uses `UnicodeWidthChar::width()`. +1 test.
 - [x] **Local paste capped at 4 MiB.** Pair to the OSC 52 1 MiB
-      cap (cycle 47) — guards against accidentally pasting a multi-
+      cap — guards against accidentally pasting a multi-
       GB file from the clipboard and freezing the PTY. Reuses
       `clamp_osc52` byte-clamper.
 - [x] **`selection-foreground` actually applied.** Config key was
@@ -507,9 +507,9 @@
       the tab-title behavior; a cwd literally named "kettle"
       no longer collapses the substitution. +2 test asserts.
 - [x] **`--check-config` echoes window padding, opacity, split
-      colors.** The cycle-59 expansion missed
-      padding/opacity/unfocused-split-opacity and the cycle-83
-      split-color overrides; new `window:` line (always shown) +
+      colors.** The earlier diagnostics-echo expansion missed
+      padding/opacity/unfocused-split-opacity and the
+      `focused-split-color` overrides; new `window:` line (always shown) +
       conditional `splits:` line surface them.
 - [x] **`--list-keybinds` renders `Goto tab N` (1-based).** The
       Debug-derived `GotoTab(0)` label leaked the 0-based
@@ -519,16 +519,16 @@
 - [x] **SSH tab title seeded from the target.** Fresh SSH tabs
       and session-restored ones with an `ssh` argv now read
       `ssh <target>` until the remote shell sends its first
-      OSC 2 — cycle-89's cwd-basename fallback can't help SSH
+      OSC 2 — the cwd-basename fallback can't help SSH
       panes since they have no local cwd. Pure
       `initial_pane_title(argv)` helper wired into `spawn_pane`
       so both fresh and restored paths share it. +1 test.
-- [x] **`CONTRIBUTING.md` added.** Documents the audit-
-      cycle pattern that has driven 150+ commits so a new
+- [x] **`CONTRIBUTING.md` added.** Documents the engineering
+      pattern that has driven 150+ commits so a new
       contributor can land their first change with the same
       shape — bounded bug → pure helper → wire → pin →
-      gate → docs → commit. Real-example walkthrough of
-      cycle 151. Linked from README's documentation
+      gate → docs → commit. Real-example walkthrough of a
+      representative bounded-bug fix. Linked from README's documentation
       section.
 - [x] **macOS release build is actually universal.**
       Artifact has been named `kettle-macos-universal.zip`
@@ -538,7 +538,7 @@
       Linux + Windows native unchanged.
 - [x] **`--check-config` skips empty values.** parse.rs
       documents empty-as-reset semantics; runtime honors it
-      (cycle 121/122 + every enum/bool/numeric defaulting on
+      (every enum/bool/numeric defaulting on
       empty). But `detect_malformed_values` still flagged
       `theme = ""` etc., disagreeing with the runtime. Now
       one empty-skip gate covers every key. +1 test.
@@ -547,8 +547,8 @@
       exit paths had. Next launch restored the stale
       multi-tab state from BEFORE the close instead of
       starting fresh.
-- [x] **`detect_malformed_values` also strips BOM.** Cycle
-      156 sibling to cycle 155 — the diagnostic path does
+- [x] **`detect_malformed_values` also strips BOM.** Sibling
+      to the config-parser BOM strip — the diagnostic path does
       its own scan and was still surfacing
       `missing `=` separator: "\u{feff}font-family"` with the
       invisible BOM mangled into the user-facing message.
@@ -561,8 +561,8 @@
 - [x] **Modal open closes any other modal first.** A user
       hitting Ctrl+Shift+K with the SSH launcher already up
       saw both overlays render at once. New
-      `close_all_modals()` helper extracted from cycle 111's
-      Reset sweep; the four modal-open actions
+      `close_all_modals()` helper extracted from the
+      `Action::Reset` local-UI-state sweep; the four modal-open actions
       (StartSearch / OpenSsh / CommandPalette / HintMode)
       call it before setting their own state.
 - [x] **Workspace `repository` URL fixed
@@ -576,7 +576,7 @@
       restore. Now both use case-insensitive comparison.
 - [x] **Live config reload only fires for actual config
       file changes.** The notify watcher reloaded on
-      every event in the dir; cycle 109's atomic session
+      every event in the dir; the atomic session
       save (write-temp + rename) was firing 3+ pointless
       reloads per save. Filter on `event.paths == config`.
 - [x] **DEC ?25l hides cursor even when unfocused.** The
@@ -585,7 +585,8 @@
       through even when a TUI had sent `\e[?25l`. Now the
       flag gates the whole branch.
 - [x] **`--screenshot` honors `background-opacity`.**
-      Sibling to cycle 148. Screenshot clear-op hardcoded
+      Sibling to the background-opacity live-transparency fix below.
+      Screenshot clear-op hardcoded
       `a: 1.0`; now routes through cfg.background_opacity
       like the live-window path. PNG is RGBA8 so the alpha
       lands directly in the output.
@@ -596,13 +597,14 @@
       `PostMultiplied` → `Inherit` → `Auto` when opacity
       < 1.0. Opaque configs unchanged.
 - [x] **`Action::from_name` is case-insensitive +
-      trimmed.** Same pattern as cycle 146 on the keybind
+      trimmed.** Same pattern as the enum-config-key
+      case-insensitivity fix below, applied to the keybind
       action surface. `keybind = ctrl+shift+c = Copy`
       finally resolves to Copy; pre-fix it silently
       dropped (diagnostic flagged it but runtime
       ignored). +1 test.
-- [x] **Enum config keys are case-insensitive.** Cycle 138
-      made bools case-insensitive; cycle 146 finishes the
+- [x] **Enum config keys are case-insensitive.** An earlier
+      change made bools case-insensitive; this one finishes the
       job for the six enum keys (`bell`, `osc52`,
       `tab-bar`, `tab-bar-position`, `scrollbar`,
       `cursor-style`). Diagnostic + runtime agree on case
@@ -613,34 +615,35 @@
       a UTF-8 locale; `branch` < `Calamity` etc. Also flows
       to `next_theme` / `prev_theme` cycle order.
 - [x] **Tab-close clicks (middle / ✕) reset blink phase.**
-      Last user-driven focus path missing the cycle 134-141
+      Last user-driven focus path missing the blink-phase-reset
       pattern. `close_tab_at` shifts focus to a neighbor;
       the now-active pane's cursor lands visible
       immediately.
 - [x] **`docs/CONFIG.md` documents bool aliases / numeric
       clamps / `beam` alias.** Added a "Type notes"
-      preamble listing the cycle-138 bool aliases and the
-      cycles-118/131/132/133 numeric clamp ranges. Cursor-
-      style row updated with the `beam` alias.
+      preamble listing the bool-config-key aliases and the
+      accumulated numeric clamp ranges (font-size, opacities,
+      scroll-multiplier, minimum-contrast, cursor-blink-interval,
+      scrollback). Cursor-style row updated with the `beam` alias.
 - [x] **`cursor-style = beam` aliases `bar`.** Alacritty
       refugees writing their old spelling no longer get a
       silent Block fallback. Diagnostic no longer flags it.
       +1 test.
 - [x] **Typing resets blink phase.** Last user-gesture path
-      to gain the cycle 134/135/136/140 blink-reset.
+      to gain the blink-reset behavior.
       Alacritty / kitty / iTerm2 / WezTerm all do it on
       every keystroke; matches the rest of kettle's
       user-driven paths.
-- [x] **Modal-close paths reset blink phase.** Cycle 134
-      covered Action::Reset; cycles 135/136 the focus
+- [x] **Modal-close paths reset blink phase.** An earlier fix
+      covered `Action::Reset`; a follow-up covered the focus
       changes. Escape closing search/palette/hint/ssh
       overlays still left the cursor potentially invisible
       for up to one blink_interval. Centralized via new
       `reset_blink_phase` helper (5 call sites + 1 inline
       for the borrow-conflicted CursorBlinkingChange).
-- [x] **`font-size` clamps at parse-time too.** Cycle 118
-      clamped at renderer-time; cycle 131 added the
-      diagnostic; this cycle clamps at parse so
+- [x] **`font-size` clamps at parse-time too.** An earlier fix
+      clamped at renderer-time; a follow-up added the
+      diagnostic; this change clamps at parse so
       `cfg.font_size` and the renderer agree. `font: ...
       500pt` in `--check-config` now reads as `font: ...
       72pt` (with the malformed-value diagnostic still firing).
@@ -656,36 +659,38 @@
       max texture dimension.** A window stretched past 8192
       px used to silently fail surface.configure and freeze.
       Clamps now at device.limits().max_texture_dimension_2d.
-      Sibling to cycle 119's screenshot-side fix.
+      Sibling to the `--screenshot --cols`/`--rows` clamp's
+      screenshot-side fix.
 - [x] **Mouse focus changes also reset blink phase.**
-      Extracted cycle 135's pre/post into `focus_key()` +
+      Extracted the any-focus-changing-action pre/post snapshot into `focus_key()` +
       `note_focus_change(pre)` helpers; click-a-tab and
       click-a-pane now share the keyboard path's blink-
       reset behavior. Three call sites, one helper pair.
 - [x] **Any focus-changing action resets blink phase.**
-      Extends cycle 134 from `Action::Reset` to every action
+      Extends the `Action::Reset` blink-phase fix below to every action
       that flips which pane has focus (NextTab/PrevTab/
       GotoTab/FocusNext/Prev/Up/Down/Left/Right/ToggleZoom).
       Snapshot pre + compare post around the match; reset
       on diff. No per-arm decoration needed.
 - [x] **`Action::Reset` resets cursor blink phase too.**
-      Cycle-111 swept modals/selection but missed
+      The `Action::Reset` local-UI-state sweep swept modals/selection but missed
       `blink_on`/`last_blink`. Hit Reset on the off-half of
       the blink and the cursor stayed missing for up to one
       interval. Now `blink_on = true; last_blink = now()`
       alongside the existing sweep. Mirrors the
       CursorBlinkingChange handler.
 - [x] **`scrollback` clamped at INFINITE_SCROLLBACK (10 M
-      lines); over-cap flagged.** Sibling to cycle 132 but
-      this one was a memory footgun: `scrollback =
+      lines); over-cap flagged.** Sibling to the numeric-clamp
+      diagnostics below but this one was a memory footgun: `scrollback =
       100000000` would have reserved ~250 GB of history
-      rows on first PTY spawn. Cycle 133 clamps + adds the
+      rows on first PTY spawn. This clamps + adds the
       diagnostic. The three documented forms (`infinite`,
       `unlimited`, `0`) still resolve to the same cap.
       +1 test.
 - [x] **Other 4 clamped numerics warn out-of-range +
       `background-opacity` clamps at parse.** Sibling to
-      cycle 131. `background-opacity` had no clamp and could
+      the `--check-config` font-size range diagnostic below.
+      `background-opacity` had no clamp and could
       reach wgpu with undefined alpha; clamped to [0, 1] now.
       The four already-clamped fields (`unfocused-split-
       opacity`, `scroll-multiplier`, `minimum-contrast`,
@@ -693,10 +698,11 @@
       diagnostics so the user sees the silent clamp. +1
       test covering 9 out-of-range + 14 in-range/boundary.
 - [x] **`--check-config` flags `font-size` outside [5, 72].**
-      Cycle 118 added a runtime clamp; --check-config still
+      An earlier fix added a runtime clamp; --check-config still
       echoed `font: 500pt` verbatim with no mention of the
       silent runtime cap to 72pt. Now surfaced as malformed
-      (same pattern as cycle 124's palette index ≥ 16). +1
+      (same pattern as the `palette = N=#hex` index-≥-16
+      diagnostic). +1
       test covering all four out-of-range + four in-range.
 - [x] **`Mux::split` exits zoom (was hiding the other half).**
       Splitting a zoomed pane used to leave zoom on while
@@ -706,14 +712,13 @@
       intent. Extracted `insert_split(&mut Tab, new_id,
       dir)` helper; +1 test.
 - [x] **TESTING.md + INSTALL.md test counts caught up to
-      213 (was 20 / 33).** 80+ cycles of additions had
+      213 (was 20 / 33).** Extensive incremental additions had
       drifted past the testing docs. Rewrote TESTING.md
       with current counts (2/56/75/10/37/33 per crate),
-      broader category descriptions referencing the
-      audit-cycle pattern, and pointers to CHANGELOG.md
-      for per-cycle detail.
+      broader category descriptions, and pointers to CHANGELOG.md
+      for detailed history.
 - [x] **`--screenshot` pre-validates `.png` extension.**
-      Sibling to the cycle-106/107 CLI hard-fails. Bad
+      Sibling to the `--config`/`--working-directory` typo hard-fails. Bad
       extensions used to surface as a cryptic crate-internal
       error AFTER full GPU work; now caught up-front with a
       named error (case-insensitive `.png` ok).
@@ -721,15 +726,15 @@
       introspection surface.** Missing `--list-actions`,
       `--list-ssh-hosts`, `--screenshot`; `--list-keybinds`
       still claimed "default" not "effective"; `--config`
-      lacked the cycle-106 hard-fail caveat. All four lines
+      lacked the hard-fail-on-missing-path caveat. All four lines
       added/reworded. README and `--help` are now both
       truthful sources.
-- [x] **`--help` text catches up to cycles 103/105/106.**
-      `--list-keybinds` help said "default keymap" but it
-      now shows the effective map (cycle 103). `--config`
+- [x] **`--help` text catches up to the introspection-flag
+      changes.** `--list-keybinds` help said "default keymap" but it
+      now shows the effective map. `--config`
       help didn't mention `--list-keybinds` /
-      `--list-ssh-hosts` consumers (cycles 103/105) nor the
-      hard-fail on missing path (cycle 106). Both updated.
+      `--list-ssh-hosts` consumers nor the
+      hard-fail on missing path. Both updated.
 - [x] **README keybind table surfaces 9 hidden defaults +
       docs-drift guard.** SSH launcher, command palette,
       quick-select hints, split-auto, new window, pane zoom,
@@ -755,11 +760,13 @@
       from the new window with no warning. The spawn now
       passes `--config self.config_path` to the child.
 - [x] **`command =` clears, `ssh-host = empty=...` is
-      dropped.** Sibling to cycle 121. Empty `command` used
+      dropped.** Sibling to the empty-string-config-values fix
+      below. Empty `command` used
       to leave `Some("")` and break `shell_argv`; now
       clears to None and falls back to `$SHELL`. Half-empty
       `ssh-host = name=` / `= target` entries that
-      `--check-config` already flagged (cycle 88) are now
+      the `--check-config` ssh-host `name=target` diagnostic
+      already flagged are now
       also rejected at parse time so the runtime list and
       the diagnostic agree.
 - [x] **Empty string-config values stop silently breaking
@@ -777,15 +784,16 @@
       Logic extracted to pure `reap_tabs(&mut Vec<Tab>,
       &mut usize, &[u64])`. +1 test covers 5 scenarios.
 - [x] **`--screenshot` dynamically caps cells to fit the
-      wgpu 8192-per-side texture limit.** Cycle 69's static
-      `[20, 400]×[8, 200]` clamps were safe at small fonts but
+      wgpu 8192-per-side texture limit.** The earlier
+      `--screenshot --cols`/`--rows` clamp's static
+      `[20, 400]×[8, 200]` bounds were safe at small fonts but
       busted at 72pt cells (~90px tall × 200 rows = 18000px).
       New pure `cap_axis_cells(req, cell, chrome) -> u32`
       caps each axis runtime-aware; `capture_png` returns the
       actual rendered (cols, rows) so the CLI message says
       `capped from N×M for GPU texture limit at current font
       size` instead of lying. +1 test.
-- [x] **`Renderer::new` clamps `cfg.font_size`.** Cycle 73's
+- [x] **`Renderer::new` clamps `cfg.font_size`.** The earlier
       [5.0, 72.0] bound only fired through `set_font_size`
       (runtime); startup took `cfg.font_size` raw. Extreme
       configs (`font-size = 200`) booted oversize cells and
@@ -793,7 +801,7 @@
       `clamp_font_size(f32) -> f32` shared by both setters.
       Verified end-to-end: `font-size = 500` config renders.
 - [x] **Palette gained 5 missing actions + a drift guard.**
-      `ScrollLine{Up,Down}` (cycle 110), `ScrollPage{Up,Down}`,
+      `ScrollLine{Up,Down}`, `ScrollPage{Up,Down}`,
       `HintMode`, and `MoveTab{Left,Right}` had keybinds but
       no palette label — Ctrl+Shift+K couldn't reach them.
       New test `palette_includes_every_user_facing_action`
@@ -801,15 +809,15 @@
       (compile-time exhaustiveness) and asserts each one is
       either in the palette or in a curated `excluded` list
       with a rationale. Catches future drift the same way
-      cycle 104's drift test does for `--list-actions`.
+      the `--list-actions` drift test does.
 - [x] **Shadow-collision audit guards `defaults()`.** New
       `defaults_audit() -> (Bindings, Vec<Trigger>)` records
       every bind call; new test asserts `map.len() ==
       triggers.len()` and panics with the duplicate set if
-      not. Catches the class of bug cycle 115 fixed
-      one-shot, so a future re-introduction fails CI with a
+      not. Catches the class of bug the keybind shadow-collision
+      fix below addressed one-shot, so a future re-introduction fails CI with a
       named-offender message rather than going unnoticed.
-- [x] **Cycle-110 keybind collision fixed.** Cycle 110's
+- [x] **Keybind shadow collision fixed.**
       `Ctrl+Shift+Up/Down → ScrollLineUp/Down` was silently
       shadowing the older `Ctrl+Shift+Arrows → Resize<dir>`
       quartet for Up/Down (Left/Right still resized — half
@@ -848,8 +856,9 @@
       `Shift+PageUp/Down` and extreme `Shift+Home/End` —
       Alacritty / kitty / WezTerm all ship this chord. +1 test.
 - [x] **`Session::save` is atomic (write-temp-then-rename).**
-      Cycle 108 fixed the symptom of corrupted-session loads;
-      this fixes the cause. Old `fs::write` was non-atomic —
+      The corrupted-`session.json` backup fix below addressed
+      the symptom of corrupted-session loads; this fixes the
+      cause. Old `fs::write` was non-atomic —
       mid-write kettle death left a half-written file. New
       `save_to_path(s, p) -> io::Result<()>` writes to a
       `.tmp.<pid>.<nanos>` sibling, renames into place; pub
@@ -863,7 +872,8 @@
       `load_from_path(&Path) -> Option<Session>`; +3 tests
       (missing-silent, corrupted-renamed, happy-path-untouched).
 - [x] **`--working-directory /typo` hard-fails (exit 1).**
-      Sibling to cycle 106. Engine silently used `$HOME` when
+      Sibling to the `--config` typo hard-fail below. Engine
+      silently used `$HOME` when
       the directory didn't exist; CLI now distinguishes
       "no such file or directory" vs "not a directory" so the
       user sees which kind of typo it was.
@@ -907,7 +917,7 @@
       terminators both handled. +1 test.
 - [x] **OSC 104 (no-param) + OSC 110/111/112 reset
       conformance pins.** Set-side conformance was tested
-      across cycles 47/56/65/66; the matching reset-side path
+      across earlier conformance passes; the matching reset-side path
       (OSC 110/111/112 = reset default fg/bg/cursor; OSC 104
       with no params = reset *all* 256 palette indices) was
       exercised via alacritty/vte but not pinned in kettle, so
@@ -920,7 +930,7 @@
       sentinels / etc. Now grouped by section with the valid
       value ranges and enum variants per key, plus a header
       callout that `#` is full-line-only (no inline trailing
-      comments). New drift test (cycle-100 contract) strips
+      comments). New drift test strips
       comments and runs the activated keys through both
       `parse_collect` and `detect_malformed_values`; any new
       key forgotten or any example typo fails the test.
@@ -937,7 +947,7 @@
       setter but left the cached `font_family` field stale —
       glyphs kept rendering in the *old* family until restart.
       Same "reload swaps `self.cfg` but downstream caches are
-      stale" shape as the cycle-44+ cluster. New `Renderer::
+      stale" shape as earlier reload-cache-staleness fixes. New `Renderer::
       set_font_family` setter + factored `remeasure_cell` so the
       family and size setters share one re-measure path.
       Idempotent guard keeps steady-state reloads free. Covered
@@ -957,12 +967,13 @@
       (forgot the equals) or a left-over `[section]` header dropped
       with no warning. `detect_malformed_values` now scans the raw
       text and emits `missing \`=\` separator: "<line>"` for each
-      offender. Same shape as the cycle-70/84/85/86/87/88 silent-
-      fallback cascade, caught before parsing rather than after.
+      offender. Same shape as the earlier `--check-config`
+      malformed-value diagnostics' silent-fallback cascade,
+      caught before parsing rather than after.
       +1 test.
 - [x] **`kettle -e PROG` seeds the tab title from PROG basename.**
-      Cycle 93 fixed SSH; cycles 89/90 backfilled cwd-basename
-      for shells. The gap that remained: any *other* explicit
+      An earlier fix handled SSH; follow-ups backfilled the
+      cwd-basename fallback for shells. The gap that remained: any *other* explicit
       `-e` program (`htop`, `vim`, `tmux`, `python3 script.py`)
       stayed at "kettle" forever because most TUIs never emit
       OSC 2 and inherit the launching cwd (so cwd-basename gives
@@ -980,9 +991,10 @@
       via pure `kettle_core::scrollbar::should_scroll_on_output`
       (per-pane history-size diff; first frame is a no-op). +2 tests.
       Also added an OSC 4 set / OSC 104 reset round-trip conformance
-      test pairing with last cycle's OSC 4/10/11/12 query path.
+      test pairing with the `reply_for_query` OSC 4/10/11/12 query path.
 - [x] **Focused-pane border tints yellow on broadcast.**
-      Cycle-178 follow-up: the tab-bar accent works only when
+      Follow-up to the broadcast-mode tab-bar accent indicator
+      below: the tab-bar accent works only when
       the tab bar is visible. `tab-bar = auto` + single tab
       (default single-window) hides the bar — broadcast had no
       visual cue. Focused-pane border now flips from
@@ -995,37 +1007,43 @@
       (Ctrl+Shift+L would collide with the shell's form-feed).
       Matches kitty / iTerm2 / WezTerm convention.
 - [x] **Drag-and-drop routes through bracketed paste.**
-      Cycle-175 follow-up. Vim/fzf/mc with bracketed paste
+      Follow-up to the drag-and-drop shell-quoted-paste feature
+      below. Vim/fzf/mc with bracketed paste
       enabled used to interpret each char of the dropped path
       as a normal-mode command. Now wrapped in
       `\e[200~ … \e[201~` per-pane, matching the clipboard
       paste handler's behavior.
 - [x] **`Config::default_path` treats empty env vars as unset.**
-      Cycle-180 sibling for the config-path probe.
+      Sibling to the `home_dir_fallback` empty-env-var fix below,
+      applied to the config-path probe.
       `XDG_CONFIG_HOME=""` → relative `kettle/config` reading
       a stray config in CWD. Filter empty values; refactored
       to `default_path_from(lookup)` for unit testability. +1
       test.
 - [x] **`home_dir_fallback` treats empty env vars as unset.**
-      Cycle-162 follow-up. `HOME=""` (stripped CI container,
+      Follow-up to the stale-cwd-fallback-on-Windows fix below.
+      `HOME=""` (stripped CI container,
       misconfigured `unset HOME` parent) returned an empty
       PathBuf that flowed through to `cmd.cwd("")` — invalid
       empty path to the OS spawn. Filter empty values; probe
       continues to USERPROFILE / APPDATA. +1 test.
 - [x] **Visual indicator when broadcast mode is on.** Active tab's
       left-edge accent flips to theme yellow (palette[3]) when
-      broadcast is enabled — closes the loop on cycles 173/174.
+      broadcast is enabled — closes the loop on the broadcast
+      paste-distribution and scroll-on-keystroke fixes below.
       Inactive tabs stay normal (broadcast is per-active-tab,
-      cycle-112 invariant). No new config key.
+      an invariant since the broadcast-scoping fix). No new config key.
 - [x] **Session restore canonicalizes theme name same as parse.**
-      Cycle-176 sibling. Restore path used to re-store whatever
+      Sibling to the `--check-config` theme-name fix below.
+      Restore path used to re-store whatever
       lowercase/typo'd name the session file held; now routes
       through `Theme::find_name` so the invariant holds end-to-end.
 - [x] **`--check-config` prints the actual theme name in use.**
       Pre-fix, a typo'd `theme = TokyoNitght Night` had
       `cfg.theme_name` store the typo verbatim while `cfg.theme`
       silently fell back to the default — diagnostic disagreed
-      with runtime. Same shape as cycle 139 (font-size clamp).
+      with runtime. Same shape as the `font-size` clamp/diagnostic
+      mismatch fix.
       New `Theme::find_name` returns canonical casing on match,
       caller leaves `theme_name` at the default on miss. Bonus:
       `theme = tokyonight night` (lowercase) now normalizes to
@@ -1037,7 +1055,8 @@
       (close-escape-reopen) so the same output works on bash /
       zsh / fish / PowerShell 7+. +1 test.
 - [x] **Paste distributes to every pane in a broadcast group.**
-      Cycle 173 sibling. Paste IS input — same scoping as
+      Sibling to the broadcast-groups `scroll-on-keystroke` fix
+      below. Paste IS input — same scoping as
       `broadcast_write`. Per-pane `BRACKETED_PASTE` wrap so
       panes with different modes (vim vs shell) each get the
       right byte sequence. Chrome-only.
@@ -1047,8 +1066,9 @@
       scrolled-back pane stayed pinned to history while the
       bytes invisibly reached the remote shell. New
       `Mux::broadcast_scroll_to_bottom` matches `broadcast_write`'s
-      scope (cycle-112 leaf_ids). No new test — same chrome-only
-      pattern as cycle 151.
+      scope (the `leaf_ids` helper from the broadcast-scoping fix).
+      No new test — same chrome-only pattern as the
+      live-config-reload filter fix.
 - [x] **`Trigger::label` uses Plus/Minus/Equal for the punctuation
       keys.** `Ctrl++` (zoom in) showed as `Ctrl++` — ambiguous on
       first read. Parser already accepts `plus` / `minus` /
@@ -1063,16 +1083,16 @@
       coarse `font_ligatures` flag stayed stale) AND was silently
       ignored by the cosmic-text shaper. Lowercase the tag at
       parse time. +1 test.
-- [x] **`kettle --help` no longer leaks internal `cycle N` refs.**
-      `--list-keybinds` and `--config` doc comments shipped audit-
-      trail parentheticals in their `--help` output; rewrote in
-      plain English, dropped the cycle refs. `--config` description
-      now also covers the cycle-164 directory-rejection behavior
-      (which had been a silent change since cycle 164 landed).
+- [x] **`kettle --help` no longer leaks internal dev-note refs.**
+      `--list-keybinds` and `--config` doc comments shipped internal
+      dev-note parentheticals in their `--help` output; rewrote in
+      plain English, dropped the internal references. `--config` description
+      now also covers the `--config DIR` hard-error behavior
+      (which had been a silent, undocumented change).
       Regression test walks every clap Arg's help/long-help and
-      the top-level about/long-about, asserting no "cycle " token
-      leaks back in — same drift-guard shape as cycle 116's
-      defaults_has_no_shadow_collisions. +1 test.
+      the top-level about/long-about, asserting no `"cycle "`
+      token leaks back in — same drift-guard shape as the
+      shadow-collision audit's `defaults_has_no_shadow_collisions`. +1 test.
 - [x] **Theme bundling resists `.DS_Store` / `Thumbs.db` / editor
       backup junk.** `build.rs` only skipped exact `LICENSE` /
       `README.md`. A macOS / Windows checkout (or a maintainer who
@@ -1098,16 +1118,17 @@
       hard-coded the trigger column at 16 chars; `Ctrl+Shift+PageDown`
       (19) and `Ctrl+Shift+PageUp` (17) overflowed it. Now
       `width = max(16, longest)` — same shape as
-      `format_ssh_hosts` (cycle 105). +1 test pinning the
+      `format_ssh_hosts`. +1 test pinning the
       alignment contract.
-- [x] **`--config DIR` is now a hard error.** Cycle 106 caught
+- [x] **`--config DIR` is now a hard error.** The `--config`
+      typo hard-fail caught
       `--config /nonexistent` but `--config ~/.config/kettle`
       (where the user dropped the trailing `/config` filename)
       passed the existence check and silently fell back to defaults
       because `read_to_string` returned IsADirectory and the
       diagnostics path swallowed it as a `warn` log. Now the CLI
       hard-fails before any downstream code runs — same shape as
-      cycle 107's `--working-directory`. Extracted
+      the `--working-directory` typo hard-fail. Extracted
       `config_path_problem` as a pure helper; tested against the
       missing/dir/regular-file truth table. +1 test.
 - [x] **Keybind modifier parsing: Super-key aliases + strict
@@ -1130,7 +1151,7 @@
       kettle's launch directory. `home_dir_fallback(lookup)`
       probes `HOME` → `USERPROFILE` → `APPDATA`; `lookup` is a
       closure so the order is unit-testable without mutating env.
-      Same shape as cycle 159's macOS universal2 fix — Linux+macOS
+      Same shape as the macOS-universal2-build fix — Linux+macOS
       worked, Windows didn't. +1 test.
 - [x] **OS cursor matches every other GUI: arrow over chrome, I-beam
       only over text.** `sync_cursor_icon` showed the text I-beam
@@ -1153,24 +1174,26 @@
       `close_focused_promotes_sibling_in_two_pane_split`. v1.3.0.
 - [x] **Tab `✕` hover affordance** — red chip background +
       `CursorIcon::Pointer` on hover. Click handler was already
-      correct (cycle 134 hit-tests `seg.close`); the bug was purely
+      correct (hit-tests `seg.close`); the bug was purely
       visual. Two pure helpers (`hovered_close_button`,
       `tab_close_hover_icon`) keep the geometry + cursor decision
       unit-testable. v1.3.0.
 - [x] **Right-click opens a context menu** (Terminator / GNOME /
-      iTerm2 parity). Replaces the cycle-49 silent no-op with a
-      floating panel (Copy / Paste / sep / Split Right / Split Down /
-      Close Pane / sep / New Tab). Reuses the cycle-111 modal-overlay
+      iTerm2 parity). Replaces the earlier right-click-no-op behavior
+      with a floating panel (Copy / Paste / sep / Split Right / Split Down /
+      Close Pane / sep / New Tab). Reuses the existing modal-overlay
       infrastructure. Keyboard nav `↑↓ Tab` / `Enter Space` / `Esc`;
       mouse click on row dispatches; click outside dismisses. Pure
       `clamp_context_menu_anchor` so right-click near the bottom-
       right corner flips the panel up-and-left. Shift+right-click
-      preserves the cycle-49 extend-selection muscle memory. v1.3.0.
+      preserves the existing Shift+right-click extend-selection
+      muscle memory. v1.3.0.
 - [x] **Tab-bar activity / bell dots** (Terminator's Activity / Urgent
       Watcher). Per-`Tab` `last_output_at` / `last_seen_at` / `bell`
       fields + pure `classify_tab_activity` decision (active tab
       short-circuits to Normal — focused accent is enough). The
-      cycle-165 per-pane history detector also latches the tab's
+      `should_scroll_on_output` per-pane history detector also
+      latches the tab's
       output state; `TermEvent::Bell` latches the bell flag. Renderer
       paints a 6-px square in the lower-left of inactive segments:
       palette[3] yellow for Bell, palette[6] cyan for Output. v1.3.0.
@@ -1194,7 +1217,7 @@
       `tab_drag_active: bool` flag on App. Press in a tab segment (not ✕, not
       +) arms the drag; `CursorMoved` events compute the target index from the
       same rendered segment rects used for painting/hit-testing and call
-      `Mux::move_active_tab`; release disarms. v1.3.0, updated in cycle-956
+      `Mux::move_active_tab`; release disarms. v1.3.0; later updated
       so drag targeting could not drift from the rendered tab geometry.
 
 - [x] **Coordinated-disclosure policy + supply-chain automation.**
@@ -1202,54 +1225,56 @@
       vulnerability-reporting form and enumerates in-scope classes
       (PTY-to-host escape, OSC 52 read-leak, URI scheme abuse past
       `links::is_safe_url`, bracketed-paste injection, resource
-      exhaustion past the cycle-47/118 caps). Dependabot weekly Cargo
+      exhaustion past the clipboard-paste-size and font-size caps).
+      Dependabot weekly Cargo
       + Actions update PRs (patch/minor grouped per ecosystem); new
       `audit.yml` runs `rustsec/audit-check` on every Cargo.lock
       change + daily 06:00 UTC cron with the upstream-transitive
       `paste` advisory (RUSTSEC-2024-0436) on the ignore list. v1.2.1.
-- [x] **GitHub issue + PR templates aligned with the cycle pattern.**
+- [x] **GitHub issue + PR templates aligned with the contribution
+      workflow.**
       `.github/ISSUE_TEMPLATE/{config,bug_report,feature_request}.yml`
       + `.github/PULL_REQUEST_TEMPLATE.md`. `config.yml` disables blank
       issues, routes security at SECURITY.md, routes Q&A at
       Discussions. v1.2.1.
 - [x] **`--config` / `--working-directory` hard-fail smoke (all OSes).**
-      Cycle 106/107 had unit tests but no CI exit-code coverage —
+      Both hard-fails had unit tests but no CI exit-code coverage —
       a regression that silently fell back to defaults would have
       passed the unit tests and reached users. CLI smoke now asserts
       both typo'd flags exit nonzero plus the happy-path round-trip
       `--config /tmp/k.cfg --config-path`. Windows-parity smoke (basename
       match on `k\.cfg$` rather than full path) lands in the same
-      cycle. v1.2.1.
-- [x] **`--help` indented examples render verbatim.** The cycle 227
-      / 229 / 237 doc-comments contain indented `  kettle … > …`
+      change. v1.2.1.
+- [x] **`--help` indented examples render verbatim.** Several CLI
+      flags' doc-comments contain indented `  kettle … > …`
       example lines; without `verbatim_doc_comment` clap collapsed
       the leading spaces, flattening the examples into prose. New
       `cli_help_preserves_indented_code_examples` drift guard pins
-      all three flags via clap's `CommandFactory`. Same cycle fixes
+      all three flags via clap's `CommandFactory`. This change also fixes
       the zsh placement (the doc wrote to `~/.config/kettle/_kettle`,
       not on `$fpath`; now `"${fpath[1]}/_kettle"`). v1.2.1.
 
 - [x] **Packaging templates: Homebrew formula, AUR PKGBUILD, Nix
       flake.** Closes the macOS / Arch / NixOS install gaps the
-      cycle-253 curl|sh installer intentionally doesn't address.
+      curl|sh installer intentionally doesn't address.
       Each template lives under `packaging/{homebrew,arch,nix}/`
       with a README walking the per-platform submission /
       maintenance loop. Per-release maintenance is one line + one
-      sha256 bump (cycle-254 sidecars give the values). Same
+      sha256 bump (release sidecars give the values). Same
       template-in-source pattern: the PKGBUILD / formula / flake
       pin exact SHA-256s tied to a release, so they bump in the
       same PR as Cargo.toml.
-- [x] **Ghost-render of the dragged tab during reorder** (cycle 255).
-      The cycle-249 drag-to-reorder snapped the live bar to the new
+- [x] **Ghost-render of the dragged tab during reorder.**
+      The mouse-drag tab-reorder feature snapped the live bar to the new
       order at each boundary crossing but gave no "you're picking
       this tab up" affordance — the dragged segment teleported between
       positions. Now a translucent overlay copy of the active segment
       (background at 0.85 + matching accent strip + soft drop shadow)
       floats under the cursor while `tab_drag_active`. Anchor clamped
-      to the bar width via the same shape as the cycle-245 context-
-      menu anchor clamp.
-- [x] **Per-tab silence watcher** (Terminator parity, v1.3.3
-      cycle 252). Inactive tab whose unseen output stopped arriving
+      to the bar width via the same shape as the `clamp_context_menu_anchor`
+      clamp.
+- [x] **Per-tab silence watcher** (Terminator parity, v1.3.3).
+      Inactive tab whose unseen output stopped arriving
       for ≥ `tab-silence-threshold-ms` (default 10 s, clamped
       `[1000, 600_000]`) transitions from the cyan `Output` dot to a
       dim chrome-gray `Silent` dot. Pure `classify_tab_activity`
@@ -1259,75 +1284,76 @@
       saturation guard so a monotonic-clock skew between calls
       doesn't false-trigger Silent.
 
-## v1.4.0 → v1.7.0 — parity sweep (cycles 288-303, shipped)
+## v1.4.0 → v1.7.0 — parity sweep (shipped)
 
-- [x] **Smart selection** (iTerm2 parity, cycle 288). Double-click
-      expands to URL / file path / IPv4 / git SHA via the cycle-218
-      hint regex set instead of the under-/over-shooting alacritty
+- [x] **Smart selection** (iTerm2 parity). Double-click
+      expands to URL / file path / IPv4 / git SHA via the quick-select
+      hint-mode regex set instead of the under-/over-shooting alacritty
       Semantic word.
 - [x] **Triggers — regex match on PTY output fires window urgency**
-      (iTerm2 parity, cycles 289+290). `trigger = REGEX` config key
+      (iTerm2 parity). `trigger = REGEX` config key
       + 2 s throttle + window-focused gate + alternation-pattern-
       survives drift guard.
-- [x] **Named-workspace session** `--layout NAME` (Terminator parity,
-      cycle 291). `<config-dir>/layouts/<NAME>.json`. Path sanitized.
-- [x] **Named-config split** `--profile NAME` (Terminator + iTerm2,
-      cycle 292). `<config-dir>/profiles/<NAME>.config`. Composes
+- [x] **Named-workspace session** `--layout NAME` (Terminator parity).
+      `<config-dir>/layouts/<NAME>.json`. Path sanitized.
+- [x] **Named-config split** `--profile NAME` (Terminator + iTerm2).
+      `<config-dir>/profiles/<NAME>.config`. Composes
       with `--layout`.
-- [x] **Peacock accent** `accent-color` + `--accent COLOR` (cycle
-      293). One config knob cascades to tab strip, focused pane
+- [x] **Peacock accent** `accent-color` + `--accent COLOR`. One
+      config knob cascades to tab strip, focused pane
       border, dragged-tab ghost. Multi-window setups visually
       distinguishable.
 - [x] **Annotated screenshots** `--annotate TEXT` (iTerm2 caption
-      variant, cycle 294). Translucent bottom strip + caption.
+      variant). Translucent bottom strip + caption.
       Distinct from iTerm2's persistent in-terminal annotations
-      (those would be a multi-cycle thread).
+      (those would be a much larger, multi-part effort).
 - [x] **Status bar** `status-bar = off | top | bottom` (iTerm2 /
-      kitty parity, cycles 295+296). `HH:MM:SS UTC · theme name ·
+      kitty parity). `HH:MM:SS UTC · theme name ·
       focused pane title`. CPU/MEM widgets via `sysinfo` are a
       follow-up.
-- [x] **Vi-mode scrollback** (Alacritty parity, cycles 298-301).
+- [x] **Vi-mode scrollback** (Alacritty parity).
       `Ctrl+Shift+Space` enters; h/j/k/l/0/$/g/G/H/M/L + arrows;
       `v` visual selection; `y` yank to clipboard; Esc exit.
       Magenta hollow block at vi cursor + selection-background
       highlight for the visual range.
-- [x] **Remote-control IPC** (kitty `@` parity, cycle 302).
+- [x] **Remote-control IPC** (kitty `@` parity).
       `kettle --remote-send TEXT` writes to a notify-watched file;
       the running kettle's receiver dispatches `send-text TEXT` to
-      its focused pane. File IPC over the cycle-151 notify
+      its focused pane. File IPC over the live-config-reload notify
       watcher — cross-platform free; per-window socket addressing
       is a planned follow-up.
 - [x] **Quake dropdown** `--toggle` (Yakuake / Tilda / Ghostty
-      quick-terminal parity, cycle 303). Piggybacks on the cycle-
-      302 remote-control IPC; receiver flips
+      quick-terminal parity). Piggybacks on the
+      remote-control IPC; receiver flips
       `window.set_visible()` + `focus_window`. Users bind their
       compositor / DE / OS global hotkey to `kettle --toggle` —
       no cross-platform global-hotkey code in kettle.
 
-## v1.8.0 → v1.31.0 — Terminator-parity sweep (cycles 330-412, shipped)
+## v1.8.0 → v1.31.0 — Terminator-parity sweep (shipped)
 
-The big sweep. 82 cycles + 24 releases brought ALL 4 Bucket-D Terminator
+The big sweep. Eighty-two incremental changes across 24 releases brought
+ALL 4 Bucket-D Terminator
 feature trees to effectively-complete state. See
-`docs/TERMINATOR-AUDIT.md` for the per-sub-cycle audit + cumulative
+`docs/TERMINATOR-AUDIT.md` for the phase-by-phase audit + cumulative
 deliverables table. Highlights:
 
-- [x] **Lua scripting** (WezTerm + Terminator plugin parity, cycles 324-326,
-      365-378). `mlua` embedded; `kettle` API surface with `send_text`,
+- [x] **Lua scripting** (WezTerm + Terminator plugin parity).
+      `mlua` embedded; `kettle` API surface with `send_text`,
       `exec_action`, `notify`, `set_theme`, `on(event, callback)` event
       hooks (Startup/Bell/TabAdd/TabClose/Output), `add_url_handler`,
       `add_menu_item`. `~/.config/kettle/init.lua` auto-loads.
       `lua-sandbox = safe|trusted` config knob nils unsafe stdlib APIs
-      by default. ALL 13 docs/TERMINATOR-PLUGIN-DESIGN.md sub-cycles
+      by default. ALL 13 phases of docs/TERMINATOR-PLUGIN-DESIGN.md
       shipped.
 - [ ] **tmux `-CC` passthrough** (iTerm2 parity). A pure-parser foundation
-      (`kettle_vt::tmux_cc`) existed (cycles 327-328) but was never wired to a
+      (`kettle_vt::tmux_cc`) existed but was never wired to a
       live consumer and was **removed in v2.26.0** rather than carried as dead
       code. `docs/TMUX-CC-DESIGN.md` (retained as a proposal) lays out the
-      protocol design and the integration sub-cycles a future implementation
+      protocol design and the integration steps a future implementation
       would need (pane state plumbing, window-tab synthesis, input routing,
       layout-change, detach cleanup).
-- [x] **Detachable tabs cross-window drag** (Terminator parity, cycles
-      397-410). All 11 sub-cycles from `docs/TERMINATOR-DETACHABLE-TABS-
+- [x] **Detachable tabs cross-window drag** (Terminator parity).
+      All 11 phases from `docs/TERMINATOR-DETACHABLE-TABS-
       DESIGN.md` shipped: serialize_tab, extract/insert APIs, SCM_RIGHTS
       `fd_transport` module, drag-state FSM, winit cursor-leave/enter
       transitions, cancel path, Wayland keyboard-fallback
@@ -1335,29 +1361,28 @@ deliverables table. Highlights:
       + SCM_RIGHTS IPC path (`--tab-handoff-fd FD`) both end-to-end
       for the JSON payload. Live-PTY adoption (Terminal::from_raw_fd)
       is kettle-core internal opt, tracked separately.
-- [x] **Per-pane titlebar** (Terminator parity, cycles 379-407). All 10
-      sub-cycles from `docs/TERMINATOR-PANE-TITLEBAR-DESIGN.md`: bg quad
+- [x] **Per-pane titlebar** (Terminator parity). All 10
+      phases from `docs/TERMINATOR-PANE-TITLEBAR-DESIGN.md`: bg quad
       + title text + 3 color variants (transmit/receive/inactive) +
       size text + icon_bell + click hit-test → EditPaneTitle anchor +
       title_at_bottom flip + cell layout-shift + named broadcast
       groups (`Action::EditPaneGroup`).
-- [x] **Background image** (Terminator parity, cycles 380-396). Decoder
+- [x] **Background image** (Terminator parity). Decoder
       foundation, wgpu texture upload, 4 UV modes (stretch_and_fill,
       tile, center, scale), align horiz/vert, darkness compose,
       transparent path, CPU-side Gaussian blur (3-pass separable box
       blur).
 - [x] **Detachable-tabs design doc** (`docs/TERMINATOR-DETACHABLE-TABS-
-      DESIGN.md`) + **mux-server design doc** (`docs/MUX-SERVER-DESIGN.md`,
-      cycle 329) — architecture + sub-cycle roadmaps for the full
+      DESIGN.md`) + **mux-server design doc** (`docs/MUX-SERVER-DESIGN.md`)
+      — architecture + phase roadmaps for the full
       Terminator-detachable-mode + WezTerm-style attach/detach.
-- [x] 85 Terminator config keys parsed; ~65 fully behavior-wired
-      (cycles 331-360). All accept both kebab-case + underscore form.
-- [x] 20 new `Action::*` variants fully wired end-to-end (cycles 342,
-      384, 407).
+- [x] 85 Terminator config keys parsed; ~65 fully behavior-wired.
+      All accept both kebab-case + underscore form.
+- [x] 20 new `Action::*` variants fully wired end-to-end.
 
-## v1.32.0 → v1.43.0 — post-sweep production polish (cycles 411-553, shipped)
+## v1.32.0 → v1.43.0 — post-sweep production polish (shipped)
 
-One hundred thirty-one cycles + twelve releases hardening the
+One hundred thirty-one incremental changes + twelve releases hardening the
 plugin contract, ergonomics, doc-accuracy, doc-durability,
 build-time infrastructure (opt-in pre-commit hook + shellcheck
 gate), crates.io metadata polish, Linux-install icon-cache
@@ -1368,40 +1393,39 @@ breakdown.
 
 - [x] **Plugin-contract bug fixes** — six silent event-bypass sites
       across `new_tab` and `close_tab` paths now fire the canonical
-      `LuaEvent`. Remote-control IPC new-tab → `TabAdd` (cycle 423),
-      three `close_tab` paths → `TabClose` (cycle 424: SCM_RIGHTS
-      source, file-fallback source, ✕-click), two `new_tab` paths →
-      `TabAdd` (cycle 425: NewWindow fallback, exit-action=restart
+      `LuaEvent`. Remote-control IPC new-tab → `TabAdd`;
+      three `close_tab` paths → `TabClose` (SCM_RIGHTS
+      source, file-fallback source, ✕-click); two `new_tab` paths →
+      `TabAdd` (NewWindow fallback, exit-action=restart
       respawn). Plugins listening for tab-spawn / tab-close now see
       every trigger source.
-- [x] **exit-action = restart** fully end-to-end (cycles 418, 420).
-      Closes the cycle-357 "not yet implemented" warn; respawn uses
+- [x] **exit-action = restart** fully end-to-end.
+      Closes the earlier "not yet implemented" warn; respawn uses
       live grid (`self.grid_of(self.area())`) not hardcoded 80×24.
-- [x] **Helper unification** (cycles 426-428, 433). All six
+- [x] **Helper unification.** All six
       LuaCommand consumers (5 event hooks + menu-item) route through
       one `drain_lua_hook_commands` helper; only App::new early
       init stays inline (locals before `self` exists). Adding a
       sixth event is one `fire_event` call.
 - [x] **Docs as code** — ARCHITECTURE.md detachable-tabs + plugin +
-      bg-image flows upgraded ASCII → mermaid (cycles 421-422);
+      bg-image flows upgraded ASCII → mermaid;
       CONFIG.md gained a Terminator-parity-keys table covering ~30
-      cycles-331-410 keys (cycle 415); INSTALL.md SHA-256 pin
-      example bumped v1.3.4 → v1.35.0 (cycles 417, 429, 438);
-      audit-doc + ROADMAP tails extended with post-sweep summary
-      (cycles 431-432); `packaging/linux/kettle.1` man-page CLI
-      flag-doc fill-in (cycle 436) so `man kettle` matches
+      Terminator-parity keys; INSTALL.md SHA-256 pin
+      example bumped v1.3.4 → v1.35.0; audit-doc + ROADMAP tails
+      extended with post-sweep summary; `packaging/linux/kettle.1`
+      man-page CLI flag-doc fill-in so `man kettle` matches
       `kettle --help`.
-- [x] **Drift guards** — cycle 413 pinned 9 load-bearing Terminator-
+- [x] **Drift guards** — pinned 9 load-bearing Terminator-
       parity config keys in `print_default_config_round_trip`;
-      cycle 430 pinned the `kettle.notify` + `kettle.set_theme`
-      queue/drain contract; cycle 435 pinned
+      pinned the `kettle.notify` + `kettle.set_theme`
+      queue/drain contract; pinned
       `kettle.add_menu_item` + `kettle.add_url_handler` contracts;
-      cycle 446 pinned `kettle.config_path` return-type contract;
-      cycles 471-472 added 3 drift guards on the
+      pinned `kettle.config_path` return-type contract;
+      later added 3 more drift guards on the
       `extra_check_config_lines` helper covering all 7 opt-in
       echo branches.
       Workspace tests 308 → 322.
-- [x] **CI doc-warnings gate clean** (cycle 411) — `cargo doc
+- [x] **CI doc-warnings gate clean** — `cargo doc
       -D warnings` passes on `kettle-render` and `kettle-vt` after
       fixing 3 intra-doc link + bare-URL warnings.
 - [x] **Agent-first kettle** (v2.16.0) — three opt-in non-GUI entry
@@ -1448,9 +1472,10 @@ features list. What's left is genuinely-multi-week threads + polish.
       now reproduces the multi-tab click state and asserts a plain click does
       not show the drag ghost/highlight before movement crosses the drag
       threshold. It also diffs tab-bar screenshots and requires all press-time
-      pixel changes to stay inside the old/new active tab rectangles. Cycle-956
-      made tab drag targeting use the rendered segment rects. Cycle-962 restored
-      the original equal-width homogeneous layout. Cycle-964 removed the
+      pixel changes to stay inside the old/new active tab rectangles. An
+      earlier change made tab drag targeting use the rendered segment rects.
+      A follow-up restored
+      the original equal-width homogeneous layout. A later change removed the
       `homogeneous-tabbar` setting entirely: horizontal tabs always divide the
       available strip evenly, active tabs use the full segment fill, and tab
       titles use the full segment budget before ellipsizing. `just underline-scroll-smoke`
@@ -1581,18 +1606,18 @@ features list. What's left is genuinely-multi-week threads + polish.
       platform build/test/package-smoke paths. This CI evidence now complements
       the native Windows pass above but still does not replace Windows 11 WSL
       interactive desktop validation.
-- [x] **Interactive keybind editor in the settings overlay** (cycle 766) —
+- [x] **Interactive keybind editor in the settings overlay** —
       Keybinds category lists each action's current chord; Enter captures a new
       chord, binds it live, and appends a `keybind` line (via
       `kettle_config::append_keybind`, with `Trigger::label()` as the verified
       round-tripping serializer). Add semantics; unbinding a default is still a
       config-file edit.
-- [ ] tmux `-CC` post-parser integration (sub-cycles 3-7 per
+- [ ] tmux `-CC` post-parser integration (phases 3-7 per
       `docs/TMUX-CC-DESIGN.md`): pane-state plumbing, window-tab
       synthesis, input routing, layout-change, detach cleanup.
 - [ ] Detachable mux server (WezTerm parity) — a SEPARATE `kettle-muxd`
       binary that owns PTYs cross-process per `docs/MUX-SERVER-DESIGN.md`.
-      Distinct from the cycles 397-410 detachable-tabs work (which is
+      Distinct from the detachable-tabs cross-window-drag work (which is
       same-process source → fork → target). Multi-week. The
       protocol / transport / discovery / client **seam** the daemon
       depends on already shipped in the **kettle-ctl** crate (the
@@ -1610,14 +1635,15 @@ features list. What's left is genuinely-multi-week threads + polish.
       surface. It queues the existing live renderer readback, works in
       `agent-server=read-only`, and returns the saved PNG path.
 - [ ] Terminal::from_raw_fd in kettle-core for SCM_RIGHTS live-PTY
-      adoption (sub-cycle 7 final piece of detachable tabs). Internal
+      adoption (phase 7 of `docs/TERMINATOR-DETACHABLE-TABS-DESIGN.md`,
+      the final piece of detachable tabs). Internal
       optimization that preserves running shells across cross-window
       drag.
 - [ ] Persistent in-terminal annotations (iTerm2 parity, distinct
-      from the cycle-294 screenshot caption) — scrollback-position
-      metadata + sticky-note overlay + search-jump-to. Multi-cycle
-      (~4).
-- [ ] sysinfo CPU / MEM widgets for the cycle-295 status bar.
+      from the `--annotate` screenshot caption) — scrollback-position
+      metadata + sticky-note overlay + search-jump-to. A larger
+      effort (roughly 4 stages).
+- [ ] sysinfo CPU / MEM widgets for the `status-bar` status bar.
 - [ ] Native macOS menu bar (needs macOS-hands-on dev).
 - [ ] Code-signed / notarized macOS build; Windows MSI installer
       (needs Apple Developer cert / Windows code-signing cert).
@@ -1626,9 +1652,9 @@ features list. What's left is genuinely-multi-week threads + polish.
       latest tag).
 - [ ] Submit to nixpkgs proper so `nix-env -iA nixpkgs.kettle`
       works without the flake-input dance.
-- [ ] Broader `vttest` conformance sweep — per-test cycle.
+- [ ] Broader `vttest` conformance sweep — one test at a time.
 
-## Quality bar each cycle
+## Quality bar each change
 
 `cargo fmt` · `cargo clippy -D warnings` · `cargo build` · `cargo test` ·
 end-to-end run · docs updated · commit.

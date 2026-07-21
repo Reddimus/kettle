@@ -1,6 +1,6 @@
 # tmux `-CC` control-mode integration — design
 
-> Status: **NOT IMPLEMENTED.** The parser scaffold (cycle 327) was never wired to
+> Status: **NOT IMPLEMENTED.** The parser scaffold was never wired to
 > a live consumer and was removed in v2.26.0 rather than carried as dead code.
 > This doc is retained as a design *proposal* so a future contributor (or
 > future-me) can pick the protocol up without re-deriving it.
@@ -27,20 +27,20 @@ Every message is one line, `\n`-terminated, starting with `%`:
 - `%client-detached CLIENT` — client (maybe us) detached.
 - `%exit [REASON]` — control session ending.
 
-## kettle's integration plan (sub-cycles)
+## kettle's integration plan
 
-| # | Cycle | What ships | Status |
-|---|------|------|--------|
-| 1 | 327 | Pure-parser foundation (`kettle_vt::tmux_cc::TmuxControlParser`). Feed bytes, get `TmuxEvent`s. 11 unit tests pin every variant + edge cases (CRLF, partial lines, overflow). No App integration. | ❌ removed v2.26.0 (dead code) |
-| 2 | 328 | This doc. Roadmap so the remaining sub-cycles aren't lost to context decay. | ✅ shipped |
-| 3 | next | `Pane.tmux_control: Option<TmuxControlState>` flag. When set, the pane's PTY reader routes output through the parser before forwarding to alacritty_terminal. Pane gets a method `enter_tmux_control()` that flips the flag. | pending |
-| 4 | next+1 | Map tmux windows → kettle tabs. On `%window-add`, kettle synthesizes a new tab in the same window where the controller is running. On `%output`, the controlled-pane's bytes go to the corresponding kettle tab's first pane. On `%window-close`, close the kettle tab. | pending |
-| 5 | next+2 | Two-way: when the user types into a kettle pane that maps to a tmux window, kettle sends `send-keys -t %ID <keys>` to the tmux controller pane's PTY. Wires the cycle-298 vi-mode + cycle-302 remote-control similarly. | pending |
-| 6 | next+3 | `%layout-change` parser → kettle splits within the tab. tmux's layout format is `<id>,<WxH>,<X>,<Y>,<panes>` recursively. | pending |
-| 7 | next+4 | `%client-detached` + `%exit` cleanup. Close synthesized tabs when the control session ends; restore the controller pane to a normal terminal. | pending |
-| 8 | follow-up | Auto-detect entry: heuristic that watches PTY output for the `%begin 0 0 1\n` first-message marker tmux always emits and auto-flips `tmux_control`. Optional UX nicety vs explicit toggle. | optional |
+| # | What ships | Status |
+|---|------|--------|
+| 1 | Pure-parser foundation (`kettle_vt::tmux_cc::TmuxControlParser`). Feed bytes, get `TmuxEvent`s. 11 unit tests pin every variant + edge cases (CRLF, partial lines, overflow). No App integration. | ❌ removed v2.26.0 (dead code) |
+| 2 | This doc: the roadmap keeping the remaining stages from being lost to context decay. | ✅ shipped |
+| 3 | `Pane.tmux_control: Option<TmuxControlState>` flag. When set, the pane's PTY reader routes output through the parser before forwarding to alacritty_terminal. Pane gets a method `enter_tmux_control()` that flips the flag. | pending |
+| 4 | Map tmux windows → kettle tabs. On `%window-add`, kettle synthesizes a new tab in the same window where the controller is running. On `%output`, the controlled-pane's bytes go to the corresponding kettle tab's first pane. On `%window-close`, close the kettle tab. | pending |
+| 5 | Two-way: when the user types into a kettle pane that maps to a tmux window, kettle sends `send-keys -t %ID <keys>` to the tmux controller pane's PTY. Follows the same wiring pattern as the `vi_mode` key handler and the remote-command watcher. | pending |
+| 6 | `%layout-change` parser → kettle splits within the tab. tmux's layout format is `<id>,<WxH>,<X>,<Y>,<panes>` recursively. | pending |
+| 7 | `%client-detached` + `%exit` cleanup. Close synthesized tabs when the control session ends; restore the controller pane to a normal terminal. | pending |
+| 8 | Auto-detect entry: heuristic that watches PTY output for the `%begin 0 0 1\n` first-message marker tmux always emits and auto-flips `tmux_control`. Optional UX nicety vs explicit toggle. | optional |
 
-Each row is a self-contained cycle: lint/build/test green, drift guard added,
+Each row ships as a self-contained unit: lint/build/test green, drift guard added,
 commit, push. The thread closes when the user can run `tmux -CC` in a kettle
 pane and see tmux windows surfaced as kettle tabs with two-way input.
 
@@ -48,10 +48,10 @@ pane and see tmux windows surfaced as kettle tabs with two-way input.
 
 ### Parser lives in kettle-vt, not kettle-core
 
-The cycle-327 parser is pure: bytes in, events out, no Rust I/O. That matches
+The `TmuxControlParser` is pure: bytes in, events out, no Rust I/O. That matches
 kettle-vt's "vt + image-protocol parsers" charter rather than kettle-core's
 "PTY + alacritty_terminal" charter. The kettle-core side will consume the
-parser (cycle next+0) but the parser itself doesn't depend on alacritty_terminal.
+parser, but the parser itself doesn't depend on alacritty_terminal.
 
 ### `\nnn` octal decoding done in `parse_output`
 
@@ -75,7 +75,7 @@ tmux's `%begin/%end` blocks contain non-`%` lines (the multi-line response
 body). The parser doesn't yet track block state, so it surfaces those as
 `OutsideBlock` events; the consumer can attach them to the most-recent
 `%begin` it saw. This sidesteps a state machine that would be load-bearing
-for `%begin/%output/%end` interleaving — a future cycle can add the state
+for `%begin/%output/%end` interleaving — a future change can add the state
 tracking if a real consumer needs it.
 
 ### `Unknown` for forward-compat
@@ -86,7 +86,7 @@ preserves the raw line as `TmuxEvent::Unknown` so kettle can log + skip
 without losing data, rather than dropping bytes silently. The consumer
 chooses the diagnostic.
 
-## Why this is multi-cycle
+## Why this ships in stages
 
 The protocol parser is the easy part (200 lines + 11 tests). The hard parts
 are:
@@ -109,7 +109,7 @@ are:
   return to a normal terminal session.
 
 Each of those is a multi-day implementation. Shipping them all in a single
-session would be rushed; the sub-cycle plan lets each land as a small,
+session would be rushed; the staged plan above lets each land as a small,
 testable contract.
 
 ## What kettle SHOULD ship before declaring tmux integration done

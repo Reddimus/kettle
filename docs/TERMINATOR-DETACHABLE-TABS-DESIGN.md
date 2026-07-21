@@ -1,7 +1,7 @@
 # Detachable tabs (cross-window drag) — design
 
-> Status: design only (cycle 363). Implementation is multi-cycle because
-> it touches cross-process IPC (cycle 302), PTY ownership transfer,
+> Status: design only. Implementation spans multiple phases because
+> it touches cross-process IPC (the remote-control file IPC), PTY ownership transfer,
 > window-creation race conditions, and visual feedback during the drag.
 
 ## What it is
@@ -11,13 +11,13 @@ lets the user drag a tab from one window into another window — or
 into an empty area to spawn a NEW window. The tab's underlying PTYs
 move with it; running shells/builds/sessions don't restart.
 
-Kettle today has cycle-255's drag-to-reorder WITHIN one window's tab
+Kettle today has drag-to-reorder WITHIN one window's tab
 bar. Cross-window drag adds three new state machines layered on top.
 
-## Why it's multi-cycle
+## Why it's multi-phase
 
   1. **Cross-process state.** Each kettle window is a separate
-     process (cycle-302 IPC bridges them). A tab dragged from
+     process (the remote-control file IPC bridges them). A tab dragged from
      window A to window B means: process A serializes the tab
      (panes + split tree + scrollback + cwd + group); process B
      deserializes it + spawns surrogate panes that consume the
@@ -38,7 +38,7 @@ bar. Cross-window drag adds three new state machines layered on top.
      paths needed for failed drops.
 
   4. **Visual feedback during drag.** The tab being dragged
-     should follow the cursor (kettle's existing cycle-255 ghost
+     should follow the cursor (kettle's existing drag ghost
      handles the in-window case; cross-window needs a separate
      window-level overlay). On Wayland this isn't feasible (no
      global cursor tracking); on X11/macOS/Windows it's standard
@@ -73,7 +73,7 @@ Or drop on empty area → new Window C spawns with just t2.
 ```mermaid
 sequenceDiagram
     participant Source as Window A (source)
-    participant IPC as kettle IPC<br/>(cycle-302 file or socket)
+    participant IPC as kettle IPC<br/>(remote-control file or socket)
     participant Target as Window B (target)
 
     Source->>Source: user picks up tab t2<br/>(mouse-down + drag in titlebar)
@@ -99,19 +99,19 @@ sequenceDiagram
   - `crates/kettle-ui/src/app.rs`: drag hit-test on titlebar's
     drag-region (paired with the per-pane-titlebar design doc);
     cross-window IPC integration.
-  - Cycle-302 file IPC extension: new message types
+  - Remote-control file IPC extension: new message types
     `NewTabFromHandoff` + binary payload format.
 
-## Sub-cycle roadmap
+## Phase roadmap
 
 | # | Scope | Status |
 |---|------|--------|
-| 1 | This doc (363). Design + roadmap. No code. | ✅ |
+| 1 | This doc. Design + roadmap. No code. | ✅ |
 | 2 | Pure-data: tab serialization format. `kettle_ui::detach::SerializedTab` struct + bincode encode/decode + 10+ tests covering every field (split tree, panes, group, focus, last_seen, …). No IPC yet. | pending |
 | 3 | SCM_RIGHTS wrapper crate: `kettle_ipc_fd` with `send_fds(socket, fds)` + `recv_fds(socket) -> Vec<RawFd>`. Linux + macOS only; #[cfg(unix)] gated. | pending |
 | 4 | Mux API: `extract_tab(idx)` removes a tab WITHOUT dropping its panes' PTYs; `insert_tab(at, Tab, fds: Vec<RawFd>)` builds new Pane wrappers around adopted fds. Pure-test coverage for extract+insert roundtrip. | pending |
 | 5 | Drag state machine (`DragState::{Idle, Dragging{tab_idx, started_at}, …}`) in App. Hit-test on titlebar drag-region transitions Idle→Dragging. CursorMoved updates ghost position. | pending |
-| 6 | Cross-window cursor detection: query winit for whether cursor left this window (winit's `CursorLeft` event) + report position globally via cycle-302 IPC heartbeat. | pending |
+| 6 | Cross-window cursor detection: query winit for whether cursor left this window (winit's `CursorLeft` event) + report position globally via the remote-control IPC heartbeat. | pending |
 | 7 | Drop logic: cursor enters another kettle window's tab bar (or empty space) → send NewTabFromHandoff IPC + SCM_RIGHTS fd transfer + remove source tab. | pending |
 | 8 | New-window-on-drop: when cursor releases on empty space (not over any kettle window), source spawns a new kettle process with `--from-handoff PATH` flag + transfers fds via that path. | pending |
 | 9 | Cancel path: drag interrupted (Escape, app crash, IPC failure) restores source tab. | pending |
@@ -120,7 +120,7 @@ sequenceDiagram
 
 ## Architecture choices (rationale)
 
-### Why cycle-302 file IPC + SCM_RIGHTS instead of just file IPC
+### Why the remote-control file IPC needs SCM_RIGHTS, not just plain file IPC
 
 PTY file descriptors can't be serialized into a file. They're
 kernel-allocated handles tied to a process. SCM_RIGHTS over Unix
@@ -129,37 +129,38 @@ transfer. (Windows has the analogous `DuplicateHandle` + named-pipe
 combo but kettle's cross-window drag would Windows-stub for the
 first cut.)
 
-### Why a separate state machine, not piggyback on cycle-255
+### Why a separate state machine, not piggyback on the in-window drag-to-reorder handler
 
-Cycle-255's in-window tab drag is much simpler: it's a pointer that
+The in-window tab drag is much simpler: it's a pointer that
 indexes a Vec<Tab> + a swap-with-clamp on release. Cross-window drag
 has 5+ states (Idle, ArmedInside, DraggingInside, DraggingOutside,
 PendingDrop) + asynchronous IPC + failure modes (target window
 rejects, IPC times out, fd transfer fails). Modeling them all on
-the cycle-255 path would balloon its complexity.
+the in-window drag path would balloon its complexity.
 
 ### Why a separate process per kettle window
 
-Each kettle window is already a separate process (cycle-303
-remote-control). Adding mux-server (cycle 329) would centralize
+Each kettle window is already a separate process (the remote-control
+and dropdown-toggle infra already depend on this). Adding a
+mux-server (see docs/MUX-SERVER-DESIGN.md) would centralize
 PTY ownership in `kettle-muxd`, which sidesteps the cross-process
 fd transfer entirely (the daemon already owns the fds; "moving"
-a tab is just a Mux mutation). If cycle-329 ships first,
-this design becomes much simpler — sub-cycles 3 + 7 + 8 collapse
+a tab is just a Mux mutation). If the mux-server ships first,
+this design becomes much simpler — phases 3, 7, and 8 collapse
 into a single IPC mutation.
 
 ## Sequence of dependencies
 
 ```
-docs/TERMINATOR-PANE-TITLEBAR-DESIGN.md (cycle 362)
+docs/TERMINATOR-PANE-TITLEBAR-DESIGN.md
   └─ ships titlebar drag-region hit-test
-      └─ this design (363)
-          └─ depends on cycle-302 file IPC (already shipped)
-          └─ or on cycle-329 mux-server (simpler path; not yet shipped)
+      └─ this design
+          └─ depends on the remote-control file IPC (already shipped)
+          └─ or on the mux-server design (docs/MUX-SERVER-DESIGN.md) (simpler path; not yet shipped)
 ```
 
-If mux-server lands first, detachable tabs becomes a 3-cycle
-follow-up instead of an 11-cycle thread.
+If the mux-server lands first, detachable tabs becomes a 3-phase
+follow-up instead of an 11-phase thread.
 
 ## Acceptance test
 

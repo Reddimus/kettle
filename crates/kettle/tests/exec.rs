@@ -1,4 +1,4 @@
-//! Cycle 922–923 (agent-first A1) e2e: drive the real `kettle` binary's `exec`
+//! Agent-first (A1) e2e: drive the real `kettle` binary's `exec`
 //! subcommand under a real PTY and assert the agent-facing contract — piped
 //! stdout, exit-code propagation, timeout, stdin forwarding, strip-ansi, and
 //! `--json` events. Spawned via `std::process::Command` with piped stdio +

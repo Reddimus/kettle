@@ -1,8 +1,8 @@
 # Terminator `auto_theme.py` — auto-detect sunrise/sunset design
 
-> Status: partially shipped. Cycle 616 shipped the *manual* half of
+> Status: partially shipped. An earlier change shipped the *manual* half of
 > `plugins/auto_theme.py`: a `toggle_light_dark` chord plus
-> `light-theme` / `dark-theme` config keys. Later cycles added clock
+> `light-theme` / `dark-theme` config keys. Later work added clock
 > and sunrise/sunset scheduling. v2.25.1 wires OS appearance following
 > through winit's current window theme and `ThemeChanged` event; no
 > separate `dark-light` watcher task is required for the direct
@@ -29,7 +29,7 @@ End-state UX in kettle:
   numeric) that flips the theme on a wall-clock schedule and takes
   precedence over OS appearance changes.
 
-## Why multi-cycle
+## Why two layers
 
 Two layers, each non-trivial:
 
@@ -103,9 +103,9 @@ Plus a clock-time schedule shorthand: `theme-schedule = 18:00 dark,
 No watcher task is needed for OS appearance following; the event is already
 delivered on the main winit event loop.
 
-## Sub-cycle roadmap
+## Phase roadmap
 
-| Sub-cycle | What ships | Test coverage |
+| Phase | What ships | Test coverage |
 |-----------|-----------|---------------|
 | 1 | `ThemeMode` enum + `theme-mode` config key | Drift guard on parser arms |
 | 2 | Initial OS preference via winit `Window::theme()` | Source drift guard + manual e2e where supported |
@@ -159,12 +159,12 @@ theme-schedule-long = -122.4194
 
 - **Risk:** winit returns no initial theme or emits no theme-change event on
   some Linux compositor/window-system combinations. **Mitigation:** the
-  cycle-616 manual toggle and `theme-schedule` remain fallbacks. Detection is
+  `toggle_light_dark` manual toggle and `theme-schedule` remain fallbacks. Detection is
   opt-in via `theme-mode = auto`.
 - **Risk:** schedule task drifts if the system sleeps. **Mitigation:**
   recompute the next boundary from wall-clock on resume, not from
   a counted-down sleep.
 - **Risk:** lat/long config typo → bogus sunrise time. **Mitigation:**
   parse + validate ranges (lat ∈ [-90, 90], long ∈ [-180, 180]) at
-  --check-config time; flag bad values like the cycle-309 trigger
-  pattern validation.
+  --check-config time; flag bad values the same way `parse_trigger`
+  rejects a malformed keybind.

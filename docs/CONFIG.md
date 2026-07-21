@@ -166,7 +166,7 @@ PowerShell to see your installed distro names.
 > instead of opening a shell. To get a Linux *login* shell, ask for it
 > inside the distro: `command = wsl.exe -d Ubuntu -- bash -l`.
 
-### Terminator-parity keys (cycles 331-410)
+### Terminator-parity keys
 
 Both kebab-case (kettle convention) and underscore form (Terminator's
 own form, e.g. `show_titlebar`) are accepted for every key in this

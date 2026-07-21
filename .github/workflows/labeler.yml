@@ -21,14 +21,15 @@ permissions:
   contents: read
   pull-requests: write
 
-# Cycle 599: cancel superseded labeler runs on the same PR. Keying
-# by `pull_request.number` instead of `github.ref` (the cycles 597
-# + 598 idiom) because `pull_request_target` exposes `github.ref` as
-# the base branch (refs/heads/main) — same-ref keying would
-# cross-cancel labeler runs across ALL open PRs, which is wrong
-# (each PR needs its own latest-only run). PR-number keying gives
-# each PR its own concurrency group; a synchronize-event burst on
-# one PR cancels its own earlier runs but doesn't touch other PRs.
+# Cancel superseded labeler runs on the same PR. Keying
+# by `pull_request.number` instead of `github.ref` (the branch-ref
+# concurrency idiom used in ci.yml and friends) because
+# `pull_request_target` exposes `github.ref` as the base branch
+# (refs/heads/main) — same-ref keying would cross-cancel labeler
+# runs across ALL open PRs, which is wrong (each PR needs its own
+# latest-only run). PR-number keying gives each PR its own
+# concurrency group; a synchronize-event burst on one PR cancels its
+# own earlier runs but doesn't touch other PRs.
 concurrency:
   group: ${{ github.workflow }}-pr-${{ github.event.pull_request.number }}
   cancel-in-progress: true
@@ -37,7 +38,7 @@ jobs:
   label:
     name: Apply labels by changed paths
     runs-on: ubuntu-latest
-    # Cycle 600 budget cap. Vendored JS action, ~10 s real time;
+    # Budget cap. Vendored JS action, ~10 s real time;
     # 5 min handles a GitHub API rate-limit retry.
     timeout-minutes: 5
     steps:

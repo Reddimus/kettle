@@ -1,13 +1,13 @@
 -- ~/.config/kettle/init.lua
 --
 -- Example Lua script for kettle. Loaded with `kettle --lua-script
--- ~/.config/kettle/init.lua` (cycle 324). Demonstrates the
+-- ~/.config/kettle/init.lua`. Demonstrates the
 -- `kettle.*` namespace's most-used features. Copy what you need;
 -- delete the rest.
 --
 -- All paths through `kettle.*` are sandboxed by default
 -- (`lua-sandbox = safe` in config). The dangerous Lua stdlib
--- (os.execute, io.open, debug.*, ...) is nil'd. The cycle-601
+-- (os.execute, io.open, debug.*, ...) is nil'd. The Lua sandbox's
 -- resource caps bound runaway scripts:
 --   - kettle.send_text(s): s ≤ 1 MiB
 --   - kettle.notify(t, b): each field ≤ 8 KiB
@@ -16,8 +16,8 @@
 --
 -- Bypass the sandbox with `lua-sandbox = trusted` in config when
 -- you genuinely need the full Lua stdlib. Trusted mode is opt-in
--- and explicitly out of scope for the SECURITY.md cycle-447 Lua
--- sandbox escape policy.
+-- and explicitly out of scope for the SECURITY.md Lua sandbox
+-- escape policy.
 
 -------------------------------------------------------------------------------
 -- 1. Read-only introspection.
@@ -80,7 +80,7 @@ kettle.add_url_handler(
 -- 3. Event hooks (Terminator parity: `activitywatch.py` etc).
 --
 -- `kettle.on(event, fn)` fires the callback when the named event
--- happens. Supported events (cycle 365 + sub-cycles):
+-- happens. Supported events:
 --   - "startup"          → fires once after the first window paint
 --   - "tab_add"          → tab index appended; payload = new index
 --   - "tab_close"        → tab being closed; payload = closing index
@@ -138,7 +138,7 @@ kettle.add_menu_item("New window", function()
     kettle.exec_action("new_window")
 end)
 
--- Cycle 606 + 607: send the focused pane's title or open its cwd
+-- Send the focused pane's title or open its cwd
 -- in the file manager.
 kettle.add_menu_item("Insert pane name", function()
     kettle.exec_action("insert_pane_name")

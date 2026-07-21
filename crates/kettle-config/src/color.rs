@@ -55,7 +55,7 @@ impl Rgb {
 ///
 /// The spec allows **1–4 hex digits** per component, scaled by digit width so
 /// the value fills the channel range: `f` → `0xff`, `ff` → `0xff`, `fff` →
-/// `0xff`, `ffff` → `0xff`. Cycle 819 (audit): the old parser sliced the first
+/// `0xff`, `ffff` → `0xff`. The old parser sliced the first
 /// two bytes and read them as the whole value, so `rgb:f/8/0` (full red in X11)
 /// came out near-black `(15, 8, 0)` and 3-digit forms silently dropped a nibble.
 ///
@@ -116,7 +116,7 @@ mod tests {
         assert_eq!(Rgb::parse("grey"), Some(Rgb::new(190, 190, 190)));
     }
 
-    /// Cycle 819 (audit): X11/xterm `rgb:` components scale by digit width
+    /// X11/xterm `rgb:` components scale by digit width
     /// (1–4 hex digits), they aren't first-two-digits-truncated.
     #[test]
     fn rgb_components_scale_by_digit_width() {

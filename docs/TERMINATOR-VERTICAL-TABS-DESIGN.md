@@ -1,9 +1,9 @@
 # Terminator `tab-position = left / right` (vertical tabs) — design
 
-> Status: design only (cycle 633). The parser already accepts the
-> values (cycle 331 + cycle 628 logged the warn-fallback to top);
-> the render-layout change is a real chunk of work. This doc lays
-> out the architecture + sub-cycle roadmap.
+> Status: design only. The parser already accepts the
+> values, and the runtime already logs a warn-fallback to top for
+> them; the render-layout change is a real chunk of work. This doc
+> lays out the architecture + phased roadmap.
 
 ## What it is
 
@@ -25,7 +25,7 @@ End-state UX in kettle:
   pane resize / split logic uses the new content rect.
 - `tab-position = right` is the mirror.
 
-## Why multi-cycle
+## Why multi-phase
 
 Three cross-cutting changes:
 
@@ -36,7 +36,7 @@ Three cross-cutting changes:
    `(0, 0)..(window_w - tab_strip_w, window_h)` (right mode).
    Touch points: ~12 call sites across mux + app + renderer.
 
-2. **Tab-bar render rewrite**. The cycle-620 `compute_tab_segment_widths`
+2. **Tab-bar render rewrite**. The existing `compute_tab_segment_widths`
    helper assumes a horizontal strip + n equal segments. For vertical:
    - segment width = fixed strip width (~180 px)
    - segment height = `tab_bar_h` (constant)
@@ -72,8 +72,8 @@ Three cross-cutting changes:
 │      Right,  ← NEW                                                   │
 │  }                                                                   │
 │                                                                      │
-│  Parser already accepts the values (cycle 331); the runtime          │
-│  log::warn falls through to Top. Cycle 633 removes the warn          │
+│  Parser already accepts the values; the runtime                      │
+│  log::warn falls through to Top. This change removes the warn        │
 │  + wires the real layout.                                            │
 └──────────────────────────────────────────────────────────────────────┘
                                   │
@@ -103,11 +103,11 @@ Three cross-cutting changes:
 └──────────────────────────────────────────────────────────────────────┘
 ```
 
-## Sub-cycle roadmap
+## Phased roadmap
 
-| Sub-cycle | What ships | Test coverage |
+| Phase | What ships | Test coverage |
 |-----------|-----------|---------------|
-| 1 | `TabBarPos::Left` + `::Right` variants; parser already accepts (cycle 331/628). Default `Top` preserved. | Drift guard on round-trip |
+| 1 | `TabBarPos::Left` + `::Right` variants; parser already accepts them. Default `Top` preserved. | Drift guard on round-trip |
 | 2 | `App::content_rect()` pure helper that computes the pane-content rect from `(tab_bar_pos, tab_bar_visible, window_size)`. Plumb to all current callers. | Pure unit test on the 8 (4×2) cases |
 | 3 | `kettle_render::TabBarOrientation` enum + `paint_tab_bar` orientation parameter. Existing horizontal path becomes `Horizontal`. | Snapshot test on the existing horizontal output (regression) |
 | 4 | Vertical layout in `paint_tab_bar` for `VerticalLeft` + `VerticalRight` | Snapshot test on the new vertical output |
@@ -156,17 +156,17 @@ Same flow with `tab-position = right`.
 ## Risks + mitigations
 
 - **Risk:** existing horizontal-only assumptions leak through tests.
-  **Mitigation:** sub-cycle 3 is "no behavior change" — just adds
+  **Mitigation:** phase 3 is "no behavior change" — just adds
   the orientation enum + threads it. Existing snapshot tests run
   with `Horizontal` and must stay green.
 - **Risk:** hit-test math gets the +/- wrong on `Right` mode.
-  **Mitigation:** pure unit tests in sub-cycle 5 cover both Left
+  **Mitigation:** pure unit tests in phase 5 cover both Left
   and Right with synthetic cursors at edge positions.
 - **Risk:** vertical strip eats horizontal pixel budget on narrow
   windows (e.g., 80-column-wide). **Mitigation:** strip width is
-  configurable (cycle 633 sub-cycle 7); user with narrow terminal
+  configurable (phase 7); user with narrow terminal
   picks `tab-position = top` or smaller `tab-bar-width`.
-- **Risk:** Drag-reorder feedback (the cycle-255 drag-cursor-x
-  ghost preview) only knows about x-axis. **Mitigation:** sub-cycle
+- **Risk:** Drag-reorder feedback (the drag-cursor-x
+  ghost preview) only knows about x-axis. **Mitigation:** phase
   6 generalizes to `drag_cursor_axis` (x for horizontal, y for
   vertical).

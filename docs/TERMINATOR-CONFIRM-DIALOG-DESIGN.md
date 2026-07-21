@@ -2,8 +2,8 @@
 
 > Status: shipped as the close-confirmation primitive. The config key +
 > `AskBeforeClosing` enum are wired, CloseWindow / CloseTab / ClosePane route
-> through the prompt, keyboard navigation is supported, and cycle 944 added
-> mouse hit-testing for the visible bottom-bar buttons. A centered modal panel
+> through the prompt, keyboard navigation is supported, and mouse hit-testing
+> for the visible bottom-bar buttons is wired up. A centered modal panel
 > remains optional renderer polish; the functional `ask_before_closing` path is
 > complete.
 
@@ -27,13 +27,13 @@ End-state UX in kettle:
   no action.
 
 The primitive is reusable:
-- "Killing a running process — proceed?" (cycle X: when a pane has
+- "Killing a running process — proceed?" (when a pane has
   a non-shell foreground process)
-- "Unsaved layout — discard?" (cycle X: when reload would lose
+- "Unsaved layout — discard?" (when reload would lose
   uncommitted layout edits)
-- "Reset config to defaults?" (cycle X: `--reset-config` future flag)
+- "Reset config to defaults?" (`--reset-config` future flag)
 
-## Why multi-cycle
+## Why multiple phases
 
 Three concerns:
 
@@ -55,8 +55,8 @@ Three concerns:
    - On modal Cancel: just close the modal.
 
 3. **Generic + extensible**. The first user is
-   `ask_before_closing`. Sub-cycle 5 also wires `ClosePane` to use
-   it; sub-cycle 6 wires `CloseTab`. Future Bucket-X cycles add
+   `ask_before_closing`. Phase 5 also wires `ClosePane` to use
+   it; phase 6 wires `CloseTab`. Future work adds
    "kill running process" + "unsaved layout discard" as additional
    `ConfirmAction` variants.
 
@@ -141,9 +141,9 @@ fn should_prompt(mode: AskBeforeClosing, scope_count: usize) -> bool {
 
 Pure — testable in isolation.
 
-## Sub-cycle roadmap
+## Phase roadmap
 
-| Sub-cycle | What ships | Test coverage |
+| Phase | What ships | Test coverage |
 |-----------|-----------|---------------|
 | 1 | `should_prompt` pure helper + drift guard on all 3×{0..N} input shapes | Pure drift guard |
 | 2 | `ConfirmDialogState` + `ConfirmAction` enum + App field | Compiles + existing tests pass |
@@ -167,7 +167,7 @@ matrix; the dispatch wrapping needs 3 drift guards).
   with focus-on-Cancel is adequate.
 - **Toast-instead-of-modal**. Some users prefer a transient
   "Closing in 3..2..1 (Esc to cancel)" instead of a modal. v1
-  ships the modal; toast is a follow-up cycle on the same
+  ships the modal; toast is a follow-up on the same
   primitive.
 
 ## Acceptance test
@@ -201,16 +201,16 @@ $ kettle
 - **Risk:** modal blocks the entire window — what if the user has
   a long-running command they want to keep typing into? **Mitigation:**
   modals only fire on the Close family of actions. Other input flows
-  through. The cycle-X close action is already user-triggered, so
+  through. The close action is already user-triggered, so
   blocking is acceptable.
 - **Risk:** double-press of CloseWindow (`Q-Q`) accidentally
   bypasses the modal. **Mitigation:** the modal absorbs keystrokes
   while open; a second `Q` doesn't re-dispatch CloseWindow — it
   goes to the modal as an unhandled key.
-- **Risk:** the cycle-329 palette has its own overlay z-order;
+- **Risk:** the command palette has its own overlay z-order;
   confirm modal needs to render above it. **Mitigation:** explicit
   overlay-z-order list documented in `kettle_render`; confirm modal
   sits above palette + below the global cursor.
 - **Risk:** keyboard-only users can't see the focused button.
   **Mitigation:** focused button has a 2 px accent border. Same
-  visual treatment as the cycle-329 palette's selected row.
+  visual treatment as the command palette's selected row.

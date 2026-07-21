@@ -62,7 +62,7 @@ impl Trigger {
             // `kettle --list-keybinds` shows the default `Ctrl++` as
             // literally `Ctrl++` (three `+` characters: separator + key)
             // and the user can't tell whether the second `+` is the
-            // separator's repetition or the key itself. Cycle 170:
+            // separator's repetition or the key itself, so we
             // emit `Plus`/`Minus`/`Equal` so the row reads
             // `Ctrl+Plus  IncreaseFontSize`, matching how the user
             // would type the chord in their config file.
@@ -101,7 +101,7 @@ pub fn action_label(a: &Action) -> String {
     }
 }
 
-/// Dropdown-parity cycle: the display label of a trigger bound to `action`
+/// Dropdown parity: the display label of a trigger bound to `action`
 /// in the LIVE map (defaults + user overrides), for right-aligned shortcut
 /// hints in menus — a rebind shows the user's actual chord, never a
 /// hardcoded string. Deterministic despite the map's iteration order:
@@ -147,8 +147,7 @@ pub fn describe(bindings: &Bindings) -> Vec<String> {
     // hard-coded 16-char padding, so their action column landed one
     // or three columns to the right of every other row in
     // `--list-keybinds` — visually jarring even though every row
-    // had a trigger+action pair. Same shape as `format_ssh_hosts`
-    // in cycle 105.
+    // had a trigger+action pair. Same shape as `format_ssh_hosts`.
     let width = lines
         .iter()
         .map(|(t, _)| t.len())
@@ -199,25 +198,26 @@ pub enum Action {
     /// each split node's ratio becomes `leaves(a) / (leaves(a)+leaves(b))`.
     EqualizeSplits,
     ToggleZoom,
-    /// Cycle 695 Terminator parity (`key_help`).
+    /// Terminator parity (`key_help`).
     /// Terminator's F1 opens its HTML manual via `open_url`
     /// (xdg-open). kettle opens its README at the canonical
-    /// GitHub URL via the `open` crate — the same dispatch path
-    /// cycle-X URL clicks already use, so it works on
-    /// Linux/macOS/Windows without spawning a per-platform helper.
+    /// GitHub URL via the `open` crate — the same
+    /// `open::that_detached` dispatch path URL clicks already use,
+    /// so it works on Linux/macOS/Windows without spawning a
+    /// per-platform helper.
     ShowHelp,
-    /// Cycle 708 Terminator parity
+    /// Terminator parity
     /// (`terminatorlib/layoutlauncher.py`). Open the runtime
     /// layout picker — an overlay modal that lists saved
     /// layouts from `<config-dir>/layouts/*.json` (via
     /// `Session::list_layouts`). Type-to-filter; Enter spawns
     /// `kettle --layout NAME` as a new window. Same shape as
-    /// the cycle-329 command palette; uses
+    /// the `CommandPalette` overlay; uses
     /// `App::layout_picker_input: Option<(String, usize)>`.
     /// Closes the last Bucket-D plugin gap
     /// (`launcher.py` → layout overlay).
     OpenLayoutPicker,
-    /// Cycle 702 Terminator parity (`key_send_newline` /
+    /// Terminator parity (`key_send_newline` /
     /// Shift+Return). Writes a literal `\n` to the focused
     /// pane's PTY. Mostly useful for inserting a newline into a
     /// shell line-editor that's otherwise consuming Enter
@@ -226,7 +226,7 @@ pub enum Action {
     /// rationale removed since shipping this 4-line dispatch
     /// arm closes the row outright.
     SendNewline,
-    /// Cycle 696 Terminator parity (`key_preferences` /
+    /// Terminator parity (`key_preferences` /
     /// `key_preferences_keybindings`). Terminator's GUI
     /// Preferences dialog is config-file-driven for kettle, so
     /// the preferences keybind opens the user's config file in
@@ -237,15 +237,15 @@ pub enum Action {
     /// active config file to that pane's PTY too in case the
     /// user wants to switch editors mid-session.
     EditConfig,
-    /// Cycle 756: open the in-app **Settings overlay** — a keyboard-navigable
+    /// Open the in-app **Settings overlay** — a keyboard-navigable
     /// panel of the most-used config keys (font size, theme, scrollbar, bell,
     /// cursor, opacity, …) that persists changes live. Distinct from
     /// `EditConfig` (which opens the raw config file in `$EDITOR` for the long
     /// tail). This is the "settings menu for non-technical users" surface.
     OpenSettings,
-    /// Cycle 717 (Preferences submenu, C8): runtime-mutable
+    /// Preferences submenu (C8): runtime-mutable
     /// toggles that the Preferences ▸ right-click submenu wires
-    /// through `Config::persist_config_toggle` (cycle 716) so a
+    /// through `Config::persist_config_toggle` so a
     /// click both updates `self.cfg` AND writes the change back
     /// to `~/.config/kettle/config` atomically. Each variant
     /// targets one specific value; the submenu builder emits
@@ -262,7 +262,7 @@ pub enum Action {
     SetBellAttention,
     SetBellBoth,
     ToggleMouseHide,
-    /// Cycle 693 Terminator parity (`key_scaled_zoom`).
+    /// Terminator parity (`key_scaled_zoom`).
     /// Terminator's "scaled zoom" maximizes the active pane AND
     /// scales the font proportionally so text fills the larger
     /// area. Kettle pairs `Mux::toggle_zoom` with a 1.5× font-size
@@ -275,17 +275,17 @@ pub enum Action {
     StartSearch,
     ToggleBroadcastAll,
     ToggleBroadcastOff,
-    /// Cycle 681 (Terminator parity, named-groups sub-cycle 5 of
+    /// Terminator parity, phase 5 of
     /// [`TERMINATOR-NAMED-GROUPS-DESIGN.md`](
-    /// docs/TERMINATOR-NAMED-GROUPS-DESIGN.md)): toggle broadcast
+    /// docs/TERMINATOR-NAMED-GROUPS-DESIGN.md): toggle broadcast
     /// scope to `Group(focused_pane.group_name)`. When the focused
     /// pane has no group, log + no-op. Pressing again with the
     /// same group already set switches to Off (toggle semantics).
     /// Distinct from `ToggleBroadcastAll` (which sets Tab scope).
     ToggleBroadcastGroup,
-    /// Cycle 681: window-wide broadcast — every pane in every tab
+    /// Window-wide broadcast — every pane in every tab
     /// receives input. Terminator's true `broadcast_all`. Distinct
-    /// from the misnamed cycle-178 `ToggleBroadcastAll` which is
+    /// from the misnamed `ToggleBroadcastAll` which is
     /// actually per-tab.
     ToggleBroadcastWindow,
     ToggleFullscreen,
@@ -306,71 +306,70 @@ pub enum Action {
     /// Toggle vi-mode for the focused pane's scrollback (Alacritty
     /// parity). When on, kettle intercepts keyboard input for
     /// vi-style navigation (h/j/k/l + 0/$ + g/G + visual + yank).
-    /// Foundation cycle ships the entry + visible block cursor +
-    /// Esc exit; movement + visual / yank come in follow-up
-    /// sub-cycles.
+    /// This change ships the entry + visible block cursor +
+    /// Esc exit; movement + visual / yank come in a follow-up.
     ToggleViMode,
-    /// Cycle 342 Terminator parity (terminatorlib/terminal.py:key_rotate_cw):
+    /// Terminator parity (terminatorlib/terminal.py:key_rotate_cw):
     /// rotate the split tree clockwise.
     RotateCw,
-    /// Cycle 342 Terminator parity: rotate the split tree counter-clockwise.
+    /// Terminator parity: rotate the split tree counter-clockwise.
     RotateCcw,
-    /// Cycle 342 Terminator parity (key_toggle_scrollbar): runtime
+    /// Terminator parity (key_toggle_scrollbar): runtime
     /// show/hide of the scrollbar without editing config.
     ToggleScrollbar,
-    /// Cycle 941 Terminator parity (terminal_popup_menu.py "Read only"): toggle
+    /// Terminator parity (terminal_popup_menu.py "Read only"): toggle
     /// the focused pane's read-only state — user input is dropped while on.
     TogglePaneReadOnly,
-    /// Cycle 342 Terminator parity (key_edit_window_title): open an
+    /// Terminator parity (key_edit_window_title): open an
     /// inline overlay to edit the window title (OSC 0/2 equivalent).
     EditWindowTitle,
-    /// Cycle 342 Terminator parity (key_edit_tab_title): edit the
+    /// Terminator parity (key_edit_tab_title): edit the
     /// active tab's title.
     EditTabTitle,
-    /// Cycle 342 Terminator parity (key_edit_terminal_title): edit
+    /// Terminator parity (key_edit_terminal_title): edit
     /// the focused pane's title.
     EditPaneTitle,
-    /// Cycle 342 Terminator parity (key_insert_number): send the
+    /// Terminator parity (key_insert_number): send the
     /// focused pane's index as text input.
     InsertPaneNumber,
-    /// Cycle 342 Terminator parity (key_insert_padded): send the
+    /// Terminator parity (key_insert_padded): send the
     /// focused pane's index zero-padded.
     InsertPanePadded,
-    /// Cycle 606 Terminator parity (`insert_term_name.py` plugin):
+    /// Terminator parity (`insert_term_name.py` plugin):
     /// send the focused pane's title (Pane::title — what the chrome
     /// shows in the per-pane titlebar) as text input. Useful for
     /// scripts that want to label their output by which pane it
     /// came from, or for keyboard-driven copy-the-current-title
     /// workflows.
     InsertPaneName,
-    /// Cycle 607 Terminator parity (`dir_open.py` plugin →
+    /// Terminator parity (`dir_open.py` plugin →
     /// `CurrDirOpen` menu item): open the focused pane's current
     /// working directory in the OS file manager. Builds a
     /// `file://<cwd>` URI and routes through the existing
-    /// `Action::OpenUrl` machinery (cycle 374) so the
+    /// `Action::OpenUrl` machinery so the
     /// `is_safe_url` allowlist + custom-url-handler + Lua hook
     /// path all apply consistently — exactly like clicking a
     /// `file://...` hyperlink in pane output.
     OpenCwdInFileManager,
-    /// Cycle 342 Terminator parity (key_next_profile): cycle to the
+    /// Terminator parity (key_next_profile): cycle to the
     /// next named profile at runtime.
     NextProfile,
-    /// Cycle 342 Terminator parity (key_previous_profile): cycle to
+    /// Terminator parity (key_previous_profile): cycle to
     /// the previous named profile.
     PrevProfile,
-    /// Cycle 342 Terminator parity (key_zoom_in_all): increase font
+    /// Terminator parity (key_zoom_in_all): increase font
     /// size on every pane (broadcast variant of IncreaseFontSize).
     ZoomInAll,
-    /// Cycle 342 Terminator parity (key_zoom_out_all): decrease font
+    /// Terminator parity (key_zoom_out_all): decrease font
     /// size on every pane.
     ZoomOutAll,
-    /// Cycle 342 Terminator parity (key_zoom_normal_all): reset font
+    /// Terminator parity (key_zoom_normal_all): reset font
     /// size on every pane.
     ZoomNormalAll,
-    /// Cycle 342 Terminator parity (key_reset_clear): Reset (RIS)
+    /// Terminator parity (key_reset_clear): Reset (RIS)
     /// + ClearHistory composed.
     ResetAndClear,
-    /// Cycle 616 Terminator parity (`plugins/auto_theme.py`):
+    /// Terminator parity (`plugins/auto_theme.py`):
     /// runtime toggle between the configured `light-theme` and
     /// `dark-theme`. If the current theme matches `dark_theme`,
     /// switches to `light_theme`; otherwise switches to `dark_theme`.
@@ -378,7 +377,7 @@ pub enum Action {
     /// `warn`). Distinct from `NextTheme` / `PrevTheme` which walk
     /// the full bundled list.
     ToggleLightDark,
-    /// Cycle 621 Terminator parity (`plugins/logger.py`):
+    /// Terminator parity (`plugins/logger.py`):
     /// toggle the focused pane's per-pane session log. When off,
     /// opens a new file at `<cache>/kettle/logs/kettle-<secs>-<pid>.log`
     /// and starts tee-ing raw PTY bytes to it (no ANSI stripping —
@@ -386,71 +385,70 @@ pub enum Action {
     /// When on, closes the file. Per-pane state (per-tab and
     /// per-window). No-op + warn when the cache dir can't be created.
     ToggleSessionLog,
-    /// Cycle 640 Terminator parity (`plugins/terminalshot.py`,
-    /// sub-cycle 1 of [`TERMINATOR-TERMINALSHOT-DESIGN.md`](
+    /// Terminator parity (`plugins/terminalshot.py`,
+    /// phase 1 of [`TERMINATOR-TERMINALSHOT-DESIGN.md`](
     /// docs/TERMINATOR-TERMINALSHOT-DESIGN.md)): trigger a live-
-    /// window screenshot of the focused pane. Fully wired since
-    /// cycle 688 (wgpu surface readback + BGRA→RGBA conversion +
-    /// row-padding strip + image::ImageBuffer save) and cycle 689
-    /// (per-pane crop via focused-pane rect + toast notification
-    /// via `fire_notify`). PNG lands at the cycle-650
+    /// window screenshot of the focused pane. Wired end-to-end: wgpu
+    /// surface readback + BGRA→RGBA conversion + row-padding strip +
+    /// image::ImageBuffer save, plus per-pane crop via focused-pane
+    /// rect and a toast notification via `fire_notify`. PNG lands at
     /// `session_screenshot_path` (`<cache_dir>/<unix>-<pid>.png`,
     /// with the angle-bracket placeholders inside a code span so
     /// rustdoc doesn't read them as HTML tags).
     TakeScreenshot,
-    /// Cycle 642 Terminator parity (sub-cycle 1 of
+    /// Terminator parity (phase 1 of
     /// [`TERMINATOR-NAMED-GROUPS-DESIGN.md`](
     /// docs/TERMINATOR-NAMED-GROUPS-DESIGN.md)).
     /// `create_group` is Terminator's name for "prompt for a
     /// group name + assign it to the focused pane." Already wired
-    /// since cycle 407 as `Action::EditPaneGroup`; `CreateGroup`
+    /// as `Action::EditPaneGroup`; `CreateGroup`
     /// is the Terminator-spelled alias.
     CreateGroup,
-    /// Cycle 642 Terminator parity. Assign every pane in the
-    /// focused tab to a named broadcast group. Wired since cycle
-    /// 679 — opens the cycle-407 title-edit overlay with
-    /// `TitleEditScope::Group` + bulk-apply on confirm. cycle-683
-    /// also surfaces the action via the right-click context menu.
+    /// Terminator parity. Assign every pane in the
+    /// focused tab to a named broadcast group. Opens the
+    /// title-edit overlay (`EditPaneGroup`) with
+    /// `TitleEditScope::Group` + bulk-apply on confirm; also
+    /// surfaced via the right-click context menu.
     GroupTab,
-    /// Cycle 642 Terminator parity. Assign every pane in the
+    /// Terminator parity. Assign every pane in the
     /// focused window to a named broadcast group. Same wiring as
-    /// `GroupTab` (cycle 679/683) but with a window-wide scope.
+    /// `GroupTab` but with a window-wide scope.
     GroupWindow,
-    /// Cycle 642 Terminator parity. Bulk-clear the group on every
-    /// pane in the focused tab. Wired since cycle 679 — walks
+    /// Terminator parity. Bulk-clear the group on every
+    /// pane in the focused tab. Walks
     /// `mux.panes_in_focused_tab()` and clears `pane.group_name`
-    /// on each. Same dispatch surface as the cycle-683 right-click
+    /// on each. Same dispatch surface as the right-click
     /// "Ungroup This Tab" entry.
     UngroupTab,
-    /// Cycle 642 Terminator parity. Bulk-clear the group on every
+    /// Terminator parity. Bulk-clear the group on every
     /// pane in the focused window.
     UngroupWindow,
-    /// Cycle 342 Terminator parity (key_page_up_half): scroll up
+    /// Terminator parity (key_page_up_half): scroll up
     /// half a page.
     ScrollPageUpHalf,
-    /// Cycle 342 Terminator parity (key_page_down_half): scroll down
+    /// Terminator parity (key_page_down_half): scroll down
     /// half a page.
     ScrollPageDownHalf,
-    /// Cycle 342 Terminator parity (key_paste_selection): paste the
+    /// Terminator parity (key_paste_selection): paste the
     /// X11 primary selection (Linux-only; no-op on macOS/Windows).
     PastePrimary,
-    /// Cycle 342 Terminator parity (key_hide_window): toggle window
-    /// visibility in-process. Same effect as `kettle --toggle` (cycle
-    /// 303) via the remote-control IPC; this is the in-process keybind
+    /// Terminator parity (key_hide_window): toggle window
+    /// visibility in-process. Same effect as `kettle --toggle`
+    /// via the remote-control IPC; this is the in-process keybind
     /// equivalent for users who don't want to set up a global hotkey.
     ToggleWindowVisibility,
-    /// Cycle 384 (Terminator parity, detachable-tabs): move the focused tab
-    /// to a new kettle window. Since the multi-window cycle (C5) this is a
+    /// Terminator parity, detachable-tabs: move the focused tab
+    /// to a new kettle window. With multi-window support (C5) this is a
     /// LIVE in-process move — the tab's panes (PTYs, scrollback, running
     /// programs) transfer untouched to the new window; nothing respawns.
     /// Keyboard-driven equivalent of the drag tear-off (C6), and the only
     /// route on Wayland (no global cursor tracking). No-op on a 1-tab
     /// window.
     MoveTabToNewWindow,
-    /// Cycle 407 (Terminator parity, titlebar Bucket-D sub-cycle 8):
-    /// open the edit overlay for the focused pane's broadcast
-    /// group name. Same shape as EditPaneTitle but writes to
-    /// pane.group_name. Enter empty input → clear the group.
+    /// Terminator parity, titlebar Bucket-D: open the edit overlay
+    /// for the focused pane's broadcast group name. Same shape as
+    /// EditPaneTitle but writes to pane.group_name. Enter empty
+    /// input → clear the group.
     EditPaneGroup,
     OpenSsh,
     ReloadConfig,
@@ -460,44 +458,44 @@ pub enum Action {
     PrevTheme,
     /// Open the right-click context menu (Copy / Paste / Split Right /
     /// Split Down / Close Pane / New Tab) anchored at the click point.
-    /// Bound to bare right-click in cycle 245 — replacing the cycle-49
-    /// silent no-op that left first-time users confused. Shift+right-
+    /// Bound to bare right-click — replacing the earlier silent no-op
+    /// that left first-time users confused. Shift+right-
     /// click still extends the selection (xterm convention preserved).
     OpenContextMenu,
-    /// Cycle 247: restore the most-recently-closed tab (WezTerm /
+    /// Restore the most-recently-closed tab (WezTerm /
     /// browser convention). Pops the most recent entry from
     /// `Mux::closed_tabs` (bounded ring of 10) and re-spawns the same
     /// argv + OSC-7 cwd at the same tab index. No-op when the ring is
     /// empty. Bound to `Ctrl+Shift+T` by default — same chord
     /// WezTerm / Chrome / Firefox use for "reopen closed tab."
     UndoCloseTab,
-    /// Cycle 248: clone the focused pane's argv + OSC-7 cwd into a
+    /// Clone the focused pane's argv + OSC-7 cwd into a
     /// new tab (iTerm2's "Duplicate Tab"). An `ssh box` tab clones to
     /// another `ssh box` tab; a `kettle -e vim file` tab clones to a
     /// second vim. Empty argv falls back to the configured shell.
     DuplicateTab,
-    /// Cycle 248: clone the focused pane's argv + OSC-7 cwd into a
+    /// Clone the focused pane's argv + OSC-7 cwd into a
     /// right-side split of itself. Same logic as `DuplicateTab` but
     /// the new program lives in the same tab.
     DuplicatePane,
-    /// Cycle 809 (audit): open the release page for the pending update
-    /// banner (cycle 794) and dismiss it — the keyboard equivalent of
+    /// Open the release page for the pending update
+    /// banner and dismiss it — the keyboard equivalent of
     /// left-clicking the banner. No-op (debug-logged) when no banner is
     /// showing. Unbound by default: the banner is non-modal so grabbing a
     /// bare key (Enter/Esc) would steal it from the terminal, so keyboard
     /// access is opt-in via this bindable action instead.
     OpenUpdate,
-    /// Cycle 809 (audit): dismiss the pending update banner without opening
+    /// Dismiss the pending update banner without opening
     /// the release page — the keyboard equivalent of right-clicking the
     /// banner. No-op (debug-logged) when no banner is showing. Unbound by
     /// default (see `OpenUpdate`).
     DismissUpdate,
     GotoTab(u8),
-    /// Dropdown-parity cycle: open the Nth entry of the new-tab `▾` dropdown
+    /// Dropdown parity: open the Nth entry of the new-tab `▾` dropdown
     /// (0-based internally; the `new_tab_shell_N` config form is 1-based like
     /// `goto_tab:N`). Windows Terminal's Ctrl+Shift+1..9 profile shortcuts.
     NewTabShell(u8),
-    /// Dropdown-parity cycle: open the About panel (version + git hash,
+    /// Dropdown parity: open the About panel (version + git hash,
     /// update status, GitHub link) — the dropdown's bottom row, mirroring
     /// Windows Terminal's; also reachable from the command palette.
     About,
@@ -510,7 +508,7 @@ pub enum Action {
 /// `goto_tab:N` blurb — the parametric form can't be enumerated.
 ///
 /// Powers `kettle --list-actions`, the inverse of `Action::from_name`.
-/// A `--check-config` cycle (cycle 85) catches typos at validation time;
+/// A `--check-config` pass catches typos at validation time;
 /// `--list-actions` is the *forward* discovery for users writing a new
 /// keybind from scratch.
 ///
@@ -530,7 +528,7 @@ pub fn action_names() -> Vec<&'static str> {
         "next_tab",
         "previous_tab",
         "prev_tab",
-        // Cycle 614: Terminator names (config.py:133-134).
+        // Terminator names (config.py:133-134).
         "cycle_next",
         "cycle_prev",
         "move_tab_left",
@@ -547,7 +545,7 @@ pub fn action_names() -> Vec<&'static str> {
         "close_term",
         "close_window",
         "new_window",
-        // Cycle 614: Terminator name (config.py:195).
+        // Terminator name (config.py:195).
         "new_terminator",
         "focus_next",
         "go_next",
@@ -604,7 +602,7 @@ pub fn action_names() -> Vec<&'static str> {
         "group_win_toggle",
         "broadcast_off",
         "ungroup_all",
-        // Cycle 681 — named-groups runtime broadcast scope.
+        // Named-groups runtime broadcast scope.
         "broadcast_group",
         "broadcast-group",
         "toggle_broadcast_group",
@@ -635,7 +633,7 @@ pub fn action_names() -> Vec<&'static str> {
         "vi_mode",
         "vi",
         "scrollback_vi",
-        // Cycle 342 Terminator-parity action names.
+        // Terminator-parity action names.
         "rotate_cw",
         "rotate_ccw",
         "toggle_scrollbar",
@@ -657,24 +655,24 @@ pub fn action_names() -> Vec<&'static str> {
         "reset_zoom_all",
         "reset_clear",
         "reset_and_clear",
-        // Cycle 616 — auto_theme.py runtime toggle.
+        // auto_theme.py runtime toggle.
         "toggle_light_dark",
         "toggle-light-dark",
         "toggle_theme_variant",
         "toggle-theme-variant",
-        // Cycle 621 — logger.py runtime tap.
+        // logger.py runtime tap.
         "toggle_session_log",
         "toggle-session-log",
         "start_logger",
         "start-logger",
         "stop_logger",
         "stop-logger",
-        // Cycle 640 — terminalshot.py runtime trigger.
+        // terminalshot.py runtime trigger.
         "take_screenshot",
         "take-screenshot",
         "terminalshot",
         "screenshot",
-        // Cycle 642 — named broadcast groups (action surface).
+        // Named broadcast groups (action surface).
         "create_group",
         "create-group",
         "group_tab",
@@ -698,7 +696,6 @@ pub fn action_names() -> Vec<&'static str> {
         "hide_window",
         "toggle_window",
         "toggle_window_visibility",
-        // Cycle 384.
         "move_tab_to_new_window",
         "detach_tab",
         "edit_pane_group",
@@ -719,16 +716,16 @@ pub fn action_names() -> Vec<&'static str> {
         "prev_theme",
         "previous_theme",
         "reload_config",
-        // Cycle 809 (audit) — keyboard access to the update banner.
+        // Keyboard access to the update banner.
         "open_update",
         "open-update",
         "dismiss_update",
         "dismiss-update",
-        // Dropdown-parity cycle — the About panel.
+        // Dropdown parity — the About panel.
         "about",
         "show_about",
         "show-about",
-        // Cycle 918: these two bindable actions had `from_name` aliases + tests
+        // These two bindable actions had `from_name` aliases + tests
         // but were omitted from the discovery list, so `kettle --list-actions`
         // silently hid them. The reverse-coverage drift guard below now catches
         // any future omission.
@@ -743,18 +740,18 @@ pub fn action_names() -> Vec<&'static str> {
 }
 
 impl Action {
-    /// Cycle 326: opened to `pub` so kettle-ui's Lua engine can
+    /// Opened to `pub` so kettle-ui's Lua engine can
     /// translate `kettle.exec_action(name)` strings into Action
     /// variants at drain time. The set of accepted names + their
     /// aliases is the same as the keybind grammar.
     pub fn from_name(s: &str) -> Option<Action> {
         use Action::*;
-        // Cycle 147: lowercase before matching so `keybind =
+        // Lowercase before matching so `keybind =
         // ctrl+shift+c = Copy` resolves the same as `... = copy`.
-        // Pre-fix the capitalized spelling silently dropped (cycle
-        // 88's malformed-value check flagged it, but the runtime
-        // still didn't bind anything). Same shape as cycle 146's
-        // enum-key case-insensitivity.
+        // Before this fix the capitalized spelling was silently
+        // dropped — an earlier malformed-value check flagged it, but
+        // the runtime still didn't bind anything. Same pattern as
+        // `enum_keys_are_case_insensitive`.
         let lowered = s.trim().to_ascii_lowercase();
         Some(match lowered.as_str() {
             "copy_to_clipboard" | "copy" => Copy,
@@ -764,7 +761,7 @@ impl Action {
             "select_to_bottom" | "select-to-bottom" | "select_to_last_line" => SelectToBottom,
             "new_tab" => NewTab,
             "close_tab" => CloseTab,
-            // Cycle 614: `cycle_next` / `cycle_prev` are
+            // `cycle_next` / `cycle_prev` are
             // Terminator's names for "cycle to the next / previous
             // tab" (config.py:133-134, bound to Ctrl+Tab /
             // Ctrl+Shift+Tab). Equivalent semantics to kettle's
@@ -781,7 +778,7 @@ impl Action {
             "split_auto" => SplitAuto,
             "close_surface" | "close_pane" | "close_term" => ClosePane,
             "close_window" => CloseWindow,
-            // Cycle 614 Terminator parity: `new_terminator` is
+            // Terminator parity: `new_terminator` is
             // Terminator's name for "spawn a new top-level
             // window/instance" (config.py line 195, bound to
             // <Super>i by default). Kettle's `NewWindow` action
@@ -850,7 +847,7 @@ impl Action {
             | "toggle-broadcast-window"
             | "group_win_toggle"
             | "group-win-toggle" => ToggleBroadcastWindow,
-            // Cycle 700 Terminator parity
+            // Terminator parity
             // (terminatorlib/keybindings DEFAULTS):
             // `group_all_toggle` is Terminator's spelling for
             // "toggle group-all". Reuses the existing
@@ -871,7 +868,7 @@ impl Action {
             "jump_to_prompt_prev" | "prev_prompt" => JumpPrevPrompt,
             "jump_to_prompt_next" | "next_prompt" => JumpNextPrompt,
             "toggle_vi_mode" | "vi_mode" | "vi" | "scrollback_vi" => ToggleViMode,
-            // Cycle 342 Terminator-parity actions. Names match
+            // Terminator-parity actions. Names match
             // terminatorlib/terminal.py:key_<name> + the kebab-case
             // alias.
             "rotate_cw" | "rotate-cw" => RotateCw,
@@ -941,10 +938,10 @@ impl Action {
             "next_theme" => NextTheme,
             "prev_theme" | "previous_theme" => PrevTheme,
             "reload_config" => ReloadConfig,
-            // Cycle 809 (audit): keyboard access to the cycle-794 update banner.
+            // Keyboard access to the update banner.
             "open_update" | "open-update" => OpenUpdate,
             "dismiss_update" | "dismiss-update" => DismissUpdate,
-            // Dropdown-parity cycle: the About panel.
+            // Dropdown parity: the About panel.
             "about" | "show_about" | "show-about" => About,
             // `goto_tab:N` where N is 1-based (Terminator / kitty syntax —
             // "Alt+1 = first tab" is the user mental model). Internally we
@@ -968,7 +965,7 @@ impl Action {
                 {
                     return Some(GotoTab(n - 1));
                 }
-                // Dropdown-parity cycle: `new_tab_shell_N` (1-based) opens the
+                // Dropdown parity: `new_tab_shell_N` (1-based) opens the
                 // Nth new-tab `▾` dropdown entry — Windows Terminal's
                 // Ctrl+Shift+N profile shortcuts. Kebab accepted too.
                 if let Some(rest) = other
@@ -1003,7 +1000,7 @@ fn parse_key(s: &str) -> Option<Key> {
         "equal" => Key::Char('='),
         "space" => Key::Char(' '),
         _ => {
-            // Cycle 857 (audit): only F1..=F12 are real. The winit→Key bridge
+            // Only F1..=F12 are real. The winit→Key bridge
             // (app.rs) maps F1..F12 only; F0 and F13+ can never arrive, so a
             // binding to them was silently dead. Reject out-of-range so the
             // user's typo surfaces instead of binding to nothing. (`f13` then
@@ -1060,11 +1057,11 @@ pub fn parse_trigger(s: &str) -> Option<Trigger> {
         };
         if !added_mod {
             // Strict-mode rejection: a non-modifier in any but the
-            // last `+`-separated slot is a typo. The pre-cycle
+            // last `+`-separated slot is a typo. The earlier
             // implementation `parse_key(other)`'d every non-modifier
             // and overwrote `key` each loop iteration, so a typo'd
-            // modifier (`cttrl+t`, or `win+t` before cycle 163 added
-            // the alias) silently degraded to "plain key with no
+            // modifier (`cttrl+t`, or `win+t` before the `win` alias
+            // was added) silently degraded to "plain key with no
             // modifiers" — `keybind = win+t = new_tab` rebound plain
             // `t` to new_tab and the user got new tabs while typing
             // normally. Now the typo returns None and `--check-config`
@@ -1090,9 +1087,9 @@ pub fn defaults() -> Bindings {
 /// called `bind()` on (including duplicates). The bindings map already
 /// has cardinality `<= bind_calls.len()` by HashMap semantics; the
 /// test `defaults_has_no_shadow_collisions` asserts equality so a
-/// future binding that silently shadows an earlier one (the cycle-110
-/// bug — Ctrl+Shift+Up/Down landed on top of the Resize quartet) fails
-/// CI instead of going unnoticed. Pure, allocates one extra Vec; not
+/// future binding that silently shadows an earlier one (as once
+/// happened when Ctrl+Shift+Up/Down landed on top of the Resize
+/// quartet) fails CI instead of going unnoticed. Pure, allocates one extra Vec; not
 /// on the hot path.
 pub fn defaults_audit() -> (Bindings, Vec<Trigger>) {
     use Action::*;
@@ -1128,13 +1125,13 @@ pub fn defaults_audit() -> (Bindings, Vec<Trigger>) {
     bind(a, Down, FocusDown);
     bind(a, Left, FocusLeft);
     bind(a, Right, FocusRight);
-    // Resize splits with Shift+Arrows only — cycle 110 took
-    // `Ctrl+Shift+Up/Down` for `ScrollLineUp/Down`, so binding
+    // Resize splits with Shift+Arrows only — `Ctrl+Shift+Up/Down` is
+    // taken for `ScrollLineUp/Down`, so binding
     // `Ctrl+Shift+Left/Right` to Resize alone would have given an
     // inconsistent four-direction map (Up/Down scroll, Left/Right
     // resize). Drop the Ctrl+Shift+Arrows resize quartet entirely;
     // Shift+Arrows is the canonical Terminator-default chord. The
-    // README and keybind table reflect this from cycle 115 onward.
+    // README and keybind table reflect this.
     // Terminator-style Shift+Arrow split resize.
     let sh = Mods::SHIFT;
     bind(sh, Up, ResizeUp);
@@ -1179,7 +1176,7 @@ pub fn defaults_audit() -> (Bindings, Vec<Trigger>) {
     bind(sus, Char('g'), ToggleBroadcastOff);
     bind(Mods::empty(), F(11), ToggleFullscreen);
     bind(cs, Char('m'), ReloadConfig);
-    // Cycle 756: Ctrl+, opens the Settings overlay (VS Code / common
+    // Ctrl+, opens the Settings overlay (VS Code / common
     // convention). Ctrl+, is otherwise unused by shells, and the overlay is
     // also reachable from the right-click menu.
     bind(c, Char(','), OpenSettings);
@@ -1188,10 +1185,9 @@ pub fn defaults_audit() -> (Bindings, Vec<Trigger>) {
     bind(cs, Char('s'), OpenSsh);
     bind(cs, Char('k'), CommandPalette);
     bind(cs, Char('h'), HintMode);
-    // Ctrl+Shift+Space toggles vi-mode (Alacritty default). Foundation
-    // sub-cycle ships the entry + visible block cursor + Esc exit;
-    // h/j/k/l movement + visual selection + yank come in follow-up
-    // sub-cycles.
+    // Ctrl+Shift+Space toggles vi-mode (Alacritty default). This change
+    // ships the entry + visible block cursor + Esc exit;
+    // h/j/k/l movement + visual selection + yank come in a follow-up.
     bind(cs, Char(' '), ToggleViMode);
     bind(Mods::SHIFT, PageUp, ScrollPageUp);
     bind(Mods::SHIFT, PageDown, ScrollPageDown);
@@ -1216,7 +1212,7 @@ pub fn defaults_audit() -> (Bindings, Vec<Trigger>) {
     for n in 1u8..=9 {
         bind(a, Char((b'0' + n) as char), GotoTab(n - 1));
     }
-    // Dropdown-parity cycle (Windows Terminal's Ctrl+Shift+1..9 profile
+    // Dropdown parity (Windows Terminal's Ctrl+Shift+1..9 profile
     // shortcuts): open the Nth new-tab `▾` dropdown entry. Shift+digit
     // arrives as the US-shifted SYMBOL from winit (see the font-zoom
     // rationale above), so bind both spellings of each chord. None of
@@ -1244,7 +1240,7 @@ pub fn apply_keybind(map: &mut Bindings, value: &str) {
     if value.is_empty() {
         return;
     }
-    // Cycle 832 (audit): split on the LAST `=`, not the first. The trigger can
+    // Split on the LAST `=`, not the first. The trigger can
     // BE the `=` key (a shipped default binding), so `ctrl+==increase_font_size`
     // must parse as trigger `ctrl+=` / action `increase_font_size`. Action names
     // are `[a-z0-9_:-]` and never contain `=`, so the final `=` is unambiguously
@@ -1280,7 +1276,7 @@ pub(crate) fn is_unbind_token(s: &str) -> bool {
 mod tests {
     use super::*;
 
-    /// Cycle 857: only F1..=F12 are real keys (the winit→Key bridge maps no
+    /// Only F1..=F12 are real keys (the winit→Key bridge maps no
     /// others), so `parse_key` must reject F0 and F13+ rather than accept a
     /// binding that can never fire.
     #[test]
@@ -1292,7 +1288,7 @@ mod tests {
         assert_eq!(parse_key("f255"), None);
     }
 
-    /// Cycle 766: `Trigger::label()` must round-trip through `parse_trigger`
+    /// `Trigger::label()` must round-trip through `parse_trigger`
     /// for every `Key` variant — the interactive keybind editor uses `label()`
     /// as the config-file serializer (`keybind = <label>=<action>`), so a
     /// non-round-tripping label would persist a binding the parser can't read
@@ -1335,7 +1331,7 @@ mod tests {
 
     #[test]
     fn trigger_label_uses_named_tokens_for_plus_minus_equal() {
-        // Cycle 170: the parser accepts `ctrl+plus` / `ctrl+minus` /
+        // The parser accepts `ctrl+plus` / `ctrl+minus` /
         // `ctrl+equal` as named tokens for the punctuation keys
         // (line 354-356). `label()` should mirror that, otherwise
         // `kettle --list-keybinds` shows the default `Ctrl++`
@@ -1367,7 +1363,7 @@ mod tests {
         // The Super key has different names in different worlds —
         // `super` (X11), `cmd`/`command` (macOS), `win`/`windows`
         // (Windows), `meta` (historical X11 / Emacs), `logo` (Qt).
-        // All map to the same Mods::SUPER bit. Before cycle 163,
+        // All map to the same Mods::SUPER bit. Earlier,
         // only `super`/`cmd`/`command` were recognized; anything
         // else fell to `parse_key(other)` and silently degraded
         // the chord to a plain-key binding.
@@ -1411,8 +1407,8 @@ mod tests {
 
     #[test]
     fn action_from_name_is_case_insensitive() {
-        // Cycle 147: same pattern as cycle 146's enum-key case-
-        // insensitivity. A user writing `keybind = ctrl+shift+c =
+        // Same pattern as `enum_keys_are_case_insensitive`. A user
+        // writing `keybind = ctrl+shift+c =
         // Copy` (capitalized) used to silently drop the binding —
         // `from_name` returned None on the unrecognized case
         // variant, and apply_keybind's silent-skip path swallowed
@@ -1433,7 +1429,7 @@ mod tests {
         assert_eq!(Action::from_name("  paste  "), Some(Paste));
         // Real typos still return None.
         assert!(Action::from_name("Cpy").is_none());
-        // Cycle 809 (audit): the update-banner actions resolve from both the
+        // The update-banner actions resolve from both the
         // underscore and hyphen spellings, case-insensitively.
         assert_eq!(Action::from_name("open_update"), Some(OpenUpdate));
         assert_eq!(Action::from_name("OPEN-UPDATE"), Some(OpenUpdate));
@@ -1456,7 +1452,7 @@ mod tests {
 
     #[test]
     fn readme_documented_chords_are_actually_bound() {
-        // Cycle 125 promoted 9 default bindings into the README
+        // These 9 default bindings are documented in the README
         // keybind table (SSH launcher, command palette, hint mode,
         // jump-prompt, move-tab, zoom-pane, new-window, split-auto,
         // goto-tab). The README is documentation, not source-of-
@@ -1493,9 +1489,10 @@ mod tests {
 
     #[test]
     fn defaults_has_no_shadow_collisions() {
-        // Cycle-116 systemic guard. Cycle 115 caught a single shadow
-        // collision (Ctrl+Shift+Up/Down both bound to Resize *and*
-        // ScrollLine — second one silently wins). The class of bug is
+        // Systemic guard against shadow collisions. An earlier fix
+        // caught a single shadow collision (Ctrl+Shift+Up/Down both
+        // bound to Resize *and* ScrollLine — second one silently
+        // wins). The class of bug is
         // easy to reintroduce because `bind()` is `HashMap::insert()`
         // which doesn't warn on duplicates. `defaults_audit()` returns
         // both the final map AND the ordered list of every trigger
@@ -1573,16 +1570,16 @@ mod tests {
 
     #[test]
     fn scroll_line_up_down_bound_to_ctrl_shift_arrows() {
-        // Cycle-110 bindings: Alacritty / kitty / WezTerm all bind a
+        // Alacritty / kitty / WezTerm all bind a
         // chord for line-by-line scrollback navigation, but kettle
         // shipped only PageUp/PageDown (Shift) and Top/Bottom (Shift
         // Home/End). Ctrl+Shift+Up/Down fills the gap with the most
         // commonly-used chord across modern terminals.
         //
-        // Cycle 115 added a regression guard: this binding collided
-        // with the previous Ctrl+Shift+Arrows → Resize quartet, so
-        // the Resize-via-Ctrl+Shift+Arrows defaults were dropped
-        // entirely. Shift+Arrows is now the canonical resize chord
+        // This binding collided with the previous Ctrl+Shift+Arrows
+        // → Resize quartet, so the Resize-via-Ctrl+Shift+Arrows
+        // defaults were dropped entirely as a regression guard.
+        // Shift+Arrows is now the canonical resize chord
         // (the README and example config match).
         let d = defaults();
         let cs = Mods::CTRL | Mods::SHIFT;
@@ -1595,16 +1592,16 @@ mod tests {
             Some(&Action::ScrollLineDown)
         );
         // Page-scroll and jump-to-prompt still bound (regression guard;
-        // earlier cycles relied on these existing).
+        // other tests rely on these existing).
         assert!(d.contains_key(&Trigger::new(Mods::SHIFT, Key::PageUp)));
         assert_eq!(
             d.get(&Trigger::new(Mods::CTRL, Key::Up)),
             Some(&Action::JumpPrevPrompt),
             "JumpPrev/Next (Ctrl+Up/Down) must coexist with Ctrl+Shift+Up/Down"
         );
-        // Cycle-115 guards: the Ctrl+Shift+Arrows → Resize quartet is
-        // GONE (would silently shadow ScrollLineUp/Down). Shift+Arrows
-        // is the only resize chord now.
+        // Guards against the Ctrl+Shift+Arrows → Resize quartet
+        // returning (would silently shadow ScrollLineUp/Down).
+        // Shift+Arrows is the only resize chord now.
         assert!(
             !d.contains_key(&Trigger::new(cs, Key::Left)),
             "Ctrl+Shift+Left must NOT be bound (avoid Resize/Scroll inconsistency)"
@@ -1693,7 +1690,7 @@ mod tests {
         }
     }
 
-    /// Dropdown-parity cycle: `new_tab_shell_N` parses like the established
+    /// Dropdown parity: `new_tab_shell_N` parses like the established
     /// `switch_to_tab_N` shape — 1-based config form, 0-based variant, kebab
     /// alias accepted, 0 rejected.
     #[test]
@@ -1712,7 +1709,7 @@ mod tests {
         assert_eq!(Action::from_name("show-about"), Some(Action::About));
     }
 
-    /// Dropdown-parity cycle: Ctrl+Shift+1..9 must work on a US layout where
+    /// Dropdown parity: Ctrl+Shift+1..9 must work on a US layout where
     /// winit reports the SHIFTED symbol (the font-zoom precedent) — both the
     /// digit and its symbol map to the same NewTabShell entry.
     #[test]
@@ -1733,7 +1730,7 @@ mod tests {
         }
     }
 
-    /// Dropdown-parity cycle: `hint_label` reverse-lookup — prefers the
+    /// Dropdown parity: `hint_label` reverse-lookup — prefers the
     /// alphanumeric spelling of a chord and follows user rebinds.
     #[test]
     fn hint_label_prefers_alphanumeric_trigger_and_follows_rebinds() {
@@ -1784,7 +1781,7 @@ mod tests {
                 "action_names returned {n:?} but from_name rejects it"
             );
         }
-        // Cycle 918 reverse guard: these two bindable actions were accepted by
+        // Reverse guard: these two bindable actions were accepted by
         // `from_name` (each with a round-trip test) yet missing from
         // `action_names()`, so `kettle --list-actions` silently hid them. Pin
         // them so the omission can't recur. (The general reverse-coverage check —
@@ -1809,7 +1806,7 @@ mod tests {
 
     #[test]
     fn describe_reflects_user_overrides_and_unbinds() {
-        // Cycle-103 contract: `--list-keybinds --config FILE` should
+        // Contract: `--list-keybinds --config FILE` should
         // show the *effective* keymap, not the built-in defaults. The
         // pure `describe(&Bindings)` is what powers it; here we drive
         // it directly with a hand-built map to confirm: overrides
@@ -1851,7 +1848,7 @@ mod tests {
 
     #[test]
     fn describe_column_width_grows_to_fit_longest_trigger() {
-        // Cycle 165: `Ctrl+Shift+PageDown` (19 chars; move-tab-right) and
+        // `Ctrl+Shift+PageDown` (19 chars; move-tab-right) and
         // `Ctrl+Shift+PageUp` (17 chars; move-tab-left) used to overflow
         // the hard-coded 16-char padding, so their action column landed
         // one or three columns to the right of every other row — the
@@ -1964,7 +1961,7 @@ mod tests {
         let _ = unused;
     }
 
-    /// Cycle 832 (audit): the `=` key can itself be a trigger (a shipped
+    /// The `=` key can itself be a trigger (a shipped
     /// default), so a rebind line splits on the LAST `=`, not the first.
     #[test]
     fn apply_keybind_rebinds_the_equals_key() {
@@ -1998,7 +1995,7 @@ mod tests {
         }
     }
 
-    /// Cycle 614 drift guard. Terminator-spelling aliases for
+    /// Drift guard. Terminator-spelling aliases for
     /// kettle actions: a config copied verbatim from Terminator
     /// should bind without unknown-key warnings.
     ///   - `new_terminator` → `NewWindow`   (config.py:195)
@@ -2026,7 +2023,7 @@ mod tests {
         }
     }
 
-    /// Cycle 940 drift guard: Terminator's scroll/tab action spellings parse so
+    /// Drift guard: Terminator's scroll/tab action spellings parse so
     /// a verbatim Terminator keybinding config imports cleanly.
     #[test]
     fn from_name_accepts_terminator_scroll_and_tab_aliases() {
@@ -2063,7 +2060,7 @@ mod tests {
         assert!(Action::from_name("switch_to_tab_0").is_none());
     }
 
-    /// Cycle 640 drift guard: every alias for `take_screenshot`
+    /// Drift guard: every alias for `take_screenshot`
     /// parses to `Action::TakeScreenshot`. Terminator's
     /// `terminalshot.py` is the source of the `terminalshot` spelling;
     /// `screenshot` and `take-screenshot` are kettle-style short
@@ -2083,7 +2080,7 @@ mod tests {
         }
     }
 
-    /// Cycle 607 drift guard: each alias for the open-cwd-in-file-
+    /// Drift guard: each alias for the open-cwd-in-file-
     /// manager action round-trips. Terminator's `dir_open.py`
     /// plugin only exposes a menu item (no keybind name), so the
     /// kettle-native `open_cwd` short form is the canonical spelling
@@ -2104,7 +2101,7 @@ mod tests {
         }
     }
 
-    /// Cycle 606 drift guard: every alias the parser accepts for
+    /// Drift guard: every alias the parser accepts for
     /// `insert_pane_name` round-trips to the same Action variant.
     /// Terminator emits the `insert-term-name` signal (with hyphens
     /// AND `term`); kettle's preferred spelling is `insert_pane_name`.
@@ -2127,7 +2124,7 @@ mod tests {
         }
     }
 
-    /// Cycle 700 drift guard. Terminator's `*_toggle` broadcast
+    /// Drift guard. Terminator's `*_toggle` broadcast
     /// keybind names map onto kettle's existing broadcast-scope
     /// actions.
     #[test]
@@ -2148,7 +2145,7 @@ mod tests {
         }
     }
 
-    /// Cycle 696 drift guard. Terminator's `key_preferences`
+    /// Drift guard. Terminator's `key_preferences`
     /// and `key_preferences_keybindings` both resolve to
     /// `Action::EditConfig` via the documented aliases.
     #[test]
@@ -2169,7 +2166,7 @@ mod tests {
         }
     }
 
-    /// Cycle 702 drift guard. Terminator's `send_newline`
+    /// Drift guard. Terminator's `send_newline`
     /// keybind name resolves to `Action::SendNewline`.
     #[test]
     fn from_name_accepts_send_newline_aliases() {
@@ -2181,7 +2178,7 @@ mod tests {
         }
     }
 
-    /// Cycle 695 drift guard. Terminator's F1 `key_help`
+    /// Drift guard. Terminator's F1 `key_help`
     /// resolves to `Action::ShowHelp` via the documented aliases.
     #[test]
     fn from_name_accepts_show_help_aliases() {
@@ -2193,7 +2190,7 @@ mod tests {
         }
     }
 
-    /// Cycle 693 drift guard. Terminator's `scaled_zoom` keybind
+    /// Drift guard. Terminator's `scaled_zoom` keybind
     /// name (and the spelled aliases) parse to the new
     /// `Action::ScaledZoom` variant — zoom + 1.5× font scale.
     #[test]

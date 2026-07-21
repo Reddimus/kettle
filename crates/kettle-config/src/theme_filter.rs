@@ -46,7 +46,7 @@ pub(crate) fn is_bundled_theme_filename(name: &str) -> bool {
     if name.starts_with('.') {
         return false;
     }
-    // Emacs autosave / lock-file prefix patterns (cycle 187). An
+    // Emacs autosave / lock-file prefix patterns. An
     // unsaved-buffer autosave is `#name#` (sandwiched between two
     // literal `#`), an in-progress lock is `.#name` (already caught
     // by the dotfile branch). Bundled theme names never legitimately
@@ -55,7 +55,7 @@ pub(crate) fn is_bundled_theme_filename(name: &str) -> bool {
     if name.starts_with('#') {
         return false;
     }
-    // Microsoft Office lock-file prefix (cycle 190). When you open a
+    // Microsoft Office lock-file prefix. When you open a
     // `.docx`/`.xlsx`/`.pptx` from a network drive or shared folder,
     // Office writes a sibling hidden-style file `~$filename` to mark
     // the lock. Bundled themes never start with `~`. The `~`-suffix
@@ -69,7 +69,7 @@ pub(crate) fn is_bundled_theme_filename(name: &str) -> bool {
     // (0x0D) at the end is part of the literal name. Not a duplicate of
     // `Icon\u{d}`; that *was* the duplicate, removed for clippy.
     //
-    // Case-insensitive (cycle 186): NTFS is case-preserving but
+    // Case-insensitive: NTFS is case-preserving but
     // case-insensitive, so a Windows checkout / copy / Git Bash session
     // might store `THUMBS.DB` or `Desktop.ini` — same junk content,
     // different bytes. The editor-suffix check below is already
@@ -114,11 +114,11 @@ mod tests {
         assert!(!is_bundled_theme_filename(".gitkeep"));
         assert!(!is_bundled_theme_filename(".directory"));
         assert!(!is_bundled_theme_filename(".#emacs-lock"));
-        // Cycle 187: emacs autosave files are `#name#` — not a
-        // dotfile so the cycle-167 branch missed them.
+        // Emacs autosave files are `#name#` — not a
+        // dotfile, so the dotfile branch above misses them.
         assert!(!is_bundled_theme_filename("#TokyoNight Night#"));
         assert!(!is_bundled_theme_filename("#3024 Day#"));
-        // Cycle 190: Office lock files use `~$` prefix (`~$theme.docx`
+        // Office lock files use `~$` prefix (`~$theme.docx`
         // shape). Any `~`-prefix is also not a real theme name; the
         // `~`-suffix vim backup is caught by the suffix branch.
         assert!(!is_bundled_theme_filename("~$TokyoNight Night"));
@@ -127,7 +127,7 @@ mod tests {
         // Windows / Finder metadata that does NOT start with a dot.
         assert!(!is_bundled_theme_filename("Thumbs.db"));
         assert!(!is_bundled_theme_filename("desktop.ini"));
-        // Cycle 186: NTFS case-insensitive, so an upper- or mixed-case
+        // NTFS case-insensitive, so an upper- or mixed-case
         // form of the same file (a Windows checkout / Git Bash copy /
         // robocopy with mismatched casing) still has to be skipped.
         assert!(!is_bundled_theme_filename("THUMBS.DB"));

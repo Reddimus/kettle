@@ -16,7 +16,7 @@ pub struct Theme {
     pub cursor_text: Rgb,
     pub selection_background: Rgb,
     pub selection_foreground: Rgb,
-    /// Cycle 937: the theme's UI-chrome accent (focus border, active tab,
+    /// The theme's UI-chrome accent (focus border, active tab,
     /// status bar). Most themes don't declare one and default it to `palette[4]`
     /// (their ANSI blue, the conventional focus color) — including the shipped
     /// default TokyoNight Night, whose blue `#7aa2f7` is also the app icon's
@@ -67,7 +67,7 @@ impl Default for Theme {
 }
 
 impl Theme {
-    /// Cycle 872: a curated shortlist of the most popular terminal themes
+    /// A curated shortlist of the most popular terminal themes
     /// (rough popularity order), surfaced as the Settings → Appearance → Theme
     /// list of options — cycling them with ←/→ live-previews each. Every entry
     /// MUST be a bundled theme name (`popular_names_are_all_bundled` guards it).
@@ -131,7 +131,7 @@ impl Theme {
     /// Unspecified fields keep the default (Catppuccin Mocha) value.
     pub fn parse(text: &str) -> Theme {
         let mut t = Theme::default();
-        // Cycle 937: track whether the theme declared its own accent. Ghostty
+        // Track whether the theme declared its own accent. Ghostty
         // theme files don't define one, so a theme that doesn't (every bundled
         // theme except our Catppuccin Mocha, which carries an `accent` line)
         // gets `palette[4]` — its ANSI blue — as the conventional focus accent,
@@ -176,7 +176,7 @@ impl Theme {
     pub fn by_name(name: &str) -> Theme {
         // `eq_ignore_ascii_case` compares in place — no per-element
         // `to_ascii_lowercase` String alloc (this runs on every theme keypress
-        // / session restore over 500+ bundled names). Cycle 843 (audit).
+        // / session restore over 500+ bundled names).
         let want = name.trim();
         for (n, body) in BUNDLED_THEMES.iter() {
             if n.eq_ignore_ascii_case(want) {
@@ -190,7 +190,7 @@ impl Theme {
     /// (with the original casing the theme file ships under) for a
     /// case-insensitive user-typed name, or `None` if no bundled theme
     /// matches. Used by `Config::parse_collect` to keep `cfg.theme_name`
-    /// in sync with `cfg.theme` — pre-cycle-176, a user typing
+    /// in sync with `cfg.theme` — before this helper existed, a user typing
     /// `theme = TokyoNitght Night` (typo) had `cfg.theme_name` stored
     /// verbatim ("TokyoNitght Night") while `cfg.theme` silently fell
     /// back to the default, so `--check-config` showed a name the
@@ -217,7 +217,7 @@ impl Theme {
         // Case-insensitive + trimmed, mirroring `by_name`, so a config
         // like `theme = tokyonight night` still cycles from here. Operate on
         // BUNDLED_THEMES directly — no intermediate names Vec, no per-element
-        // lowercase alloc (cycle 843, audit).
+        // lowercase alloc.
         let want = current.trim();
         match BUNDLED_THEMES
             .iter()
@@ -248,7 +248,7 @@ mod tests {
     use super::Theme;
     use crate::color::Rgb;
 
-    /// Cycle 937: the theme's UI accent. Catppuccin Mocha = signature mauve
+    /// The theme's UI accent. Catppuccin Mocha = signature mauve
     /// (matches the icon); a theme that declares no `accent` line gets its ANSI
     /// blue `palette[4]`; an explicit `accent = #hex` line is honored.
     #[test]
@@ -268,8 +268,8 @@ mod tests {
         assert_eq!(t.accent, Rgb::new(0xaa, 0xbb, 0xcc));
     }
 
-    /// Cycle 919 (audit L6): `Theme::default()` is a hand-transcribed copy of the
-    /// bundled `Catppuccin Mocha` (cycle 917 made it the shipped default). Pin
+    /// `Theme::default()` is a hand-transcribed copy of the
+    /// bundled `Catppuccin Mocha` (it was previously the shipped default). Pin
     /// that the hard-coded fallback matches the bundled theme byte-for-byte, so a
     /// typo in the literal palette can't silently diverge the compile-time
     /// default from what `theme = Catppuccin Mocha` resolves to. (Theme has no
@@ -355,7 +355,7 @@ mod tests {
         );
     }
 
-    /// Cycle 843: `by_name`/`find_name` dropped their per-element
+    /// `by_name`/`find_name` dropped their per-element
     /// `to_ascii_lowercase` for `eq_ignore_ascii_case`. Guard that
     /// case/padding-insensitivity survives the rewrite.
     #[test]
@@ -377,7 +377,7 @@ mod tests {
         assert_eq!(Theme::find_name("no such theme zzz"), None);
     }
 
-    /// Cycle 873: the four Terminator-app built-in palettes (linux / xterm /
+    /// The four Terminator-app built-in palettes (linux / xterm /
     /// rxvt / ambience) are NOT in the upstream iTerm2-Color-Schemes collection
     /// kettle bundles, so they were hand-ported into `assets/themes/` to make
     /// "all Terminator themes" literally complete. Guard that they're bundled
@@ -406,7 +406,7 @@ mod tests {
         );
     }
 
-    /// Cycle 872: every curated Settings theme must resolve to a real bundled
+    /// Every curated Settings theme must resolve to a real bundled
     /// theme — otherwise the Settings → Theme list would offer a dead option
     /// that silently falls back to the default. Also guards against duplicates.
     #[test]
@@ -421,7 +421,7 @@ mod tests {
         }
     }
 
-    /// Cycle 883: the docs advertise "500+ bundled themes" — range-stable
+    /// The docs advertise "500+ bundled themes" — range-stable
     /// phrasing chosen so the exact count can't silently drift in the docs each
     /// time the bundle is re-synced. Guard the FLOOR so a catastrophic drop
     /// would fail CI rather than quietly contradict that claim. (Current bundle

@@ -6,7 +6,7 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 authors.workspace = true
-# Per-crate description (cycle 218): workspace.package's
+# Per-crate description: workspace.package's
 # description is the binary's blurb ("…GPU terminal emulator…") —
 # correct for `kettle` itself but misleading on every library
 # sub-crate. Each library crate overrides with what *it* does.
@@ -19,10 +19,10 @@ workspace = true
 bitflags = "2.11.1"
 kettle-state.workspace = true
 log.workspace = true
-# Cycle 309: `detect_malformed_values` validates `trigger = REGEX`
+# `detect_malformed_values` validates `trigger = REGEX`
 # patterns at --check-config time. The regex crate is already a
-# transitive workspace dep via kettle-core (cycle-218 hints) and
-# kettle-ui (cycle-290 trigger matching), so adding it here just
+# transitive workspace dep via kettle-core (hint-mode matching) and
+# kettle-ui (OutputTrigger matching), so adding it here just
 # imports the type — no new transitive deps. Cheaper than
 # reinventing a fragile syntactic regex sanity check.
 regex.workspace = true

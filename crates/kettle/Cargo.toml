@@ -25,7 +25,7 @@ path = "src/bin/kettle-console.rs"
 workspace = true
 
 [features]
-# Cycle 875: forwards kettle-ui's developer-only session recorder. OFF by
+# Forwards kettle-ui's developer-only session recorder. OFF by
 # default and absent from released/packaged builds; enable for local debugging
 # with `cargo build --features dev-record`.
 dev-record = ["kettle-ui/dev-record"]
@@ -33,20 +33,20 @@ dev-record = ["kettle-ui/dev-record"]
 [dependencies]
 anyhow.workspace = true
 clap = { version = "4.6.1", features = ["derive"] }
-# Cycle 237: bash/zsh/fish/elvish/powershell completion scripts
+# bash/zsh/fish/elvish/powershell completion scripts
 # emitted by `kettle --print-completions <shell>`. clap_complete
 # tracks clap itself so the MSRV constraints are aligned.
 clap_complete = "4.6"
 kettle-config.workspace = true
-# Cycle 922 (agent-first A1): `kettle exec` drives a real PTY headlessly
+# (agent-first A1) `kettle exec` drives a real PTY headlessly
 # (no GPU/window) via kettle-core directly — construct `Terminal`, stream the
 # verbatim output sidechannel to stdout, and answer the child's terminal
 # queries (DSR/DA1) off the event channel so TUIs don't hang.
-# Cycle 924: `asciicast` enables `kettle exec --record` (the session recorder,
+# `asciicast` enables `kettle exec --record` (the session recorder,
 # output-only here) in release builds — it's an audit feature, not dev-only.
 kettle-core = { workspace = true, features = ["asciicast"] }
 crossbeam-channel = "0.5.15"
-# Cycle 930 (agent-first A2): `kettle ctl` client + `kettle mcp` bridge connect
+# (agent-first A2) `kettle ctl` client + `kettle mcp` bridge connect
 # to a running kettle's control server over this crate's protocol + transport.
 kettle-ctl.workspace = true
 kettle-render.workspace = true
@@ -56,22 +56,23 @@ tracing-subscriber.workspace = true
 log.workspace = true
 notify-rust.workspace = true
 serde.workspace = true
-# Cycle 923 (agent-first A1): `kettle exec --json` NDJSON event stream; also
-# the JSON-RPC/MCP surface (cycle 931) and the ctl client (cycle 930).
+# (agent-first A1) `kettle exec --json` NDJSON event stream; also
+# the JSON-RPC/MCP surface and the ctl client.
 serde_json = "1"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
 [target.'cfg(windows)'.dependencies]
-# Cycle 868: kettle is a GUI-subsystem app (`#![cfg_attr(all(windows,
+# kettle is a GUI-subsystem app (`#![cfg_attr(all(windows,
 # not(test)), windows_subsystem = "windows")]` in main.rs), so NO console
 # is auto-allocated on Explorer/Start-menu launch (zero phantom-console
 # flash). When launched from a terminal, `attach_parent_console_if_needed`
 # attaches the parent console and reopens CONOUT$/CONIN$ ONLY for std
 # handles that weren't already inherited — so piped/redirected output
-# (`kettle --flag | grep`, `… > $PROFILE`) is never clobbered (the bug
-# that broke cycle 734). See `crates/kettle/src/main.rs` (~`fn main()`).
+# (`kettle --flag | grep`, `… > $PROFILE`) is never clobbered (the bug an
+# earlier unconditional-AttachConsole attempt introduced). See
+# `crates/kettle/src/main.rs` (~`fn main()`).
 #
 # windows-sys is a transitive dep already (wgpu / winit / sysinfo all pull
 # it), so this is a near-zero binary-size cost.
@@ -94,7 +95,7 @@ windows-sys = { version = "0.61", features = [
 # maintained fork of `winres` (which is unmaintained as of 2024).
 winresource = "0.1"
 
-# Cycle 287: `winresource` is a Windows-only build-dependency used
+# `winresource` is a Windows-only build-dependency used
 # from `build.rs` (not from any `src/` file), so cargo-machete
 # (which only scans `src/`) flags it as unused. The `package.metadata`
 # section is the standard escape hatch for known false positives.

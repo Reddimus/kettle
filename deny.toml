@@ -14,11 +14,11 @@
 # Match what release.yml + ci.yml build for.
 targets = [
   { triple = "x86_64-unknown-linux-gnu" },
-  # Cycle 782: aarch64-linux is built by release.yml (cycle 767) + checked by
-  # ci.yml (cycle 758), so the supply-chain graph must cover it too — the
-  # comment above promised "match what release.yml + ci.yml build for" but this
-  # triple had been omitted, so a Linux/ARM-only advisory or banned-dep pull-in
-  # could have slipped past `cargo deny`.
+  # aarch64-linux is built by release.yml and checked by ci.yml, so the
+  # supply-chain graph must cover it too — the comment above promised "match
+  # what release.yml + ci.yml build for" but this triple had been omitted, so
+  # a Linux/ARM-only advisory or banned-dep pull-in could have slipped past
+  # `cargo deny`.
   { triple = "aarch64-unknown-linux-gnu" },
   { triple = "x86_64-apple-darwin" },
   { triple = "aarch64-apple-darwin" },
@@ -30,7 +30,7 @@ no-default-features = false
 [output]
 feature-depth = 1
 
-# Advisories are handled by the cycle-244 dedicated audit workflow
+# Advisories are handled by the dedicated `audit.yml` workflow
 # (`rustsec/audit-check` on every Cargo.lock change + daily cron).
 # Listing the section here with permissive defaults keeps
 # `cargo deny check` happy without double-running the advisory scan.
@@ -64,7 +64,7 @@ ignore = [
 # here while it reached kettle via `image → rav1e → paste` (AVIF
 # decoder). Verified gone with `cargo tree -i paste` / `cargo tree
 # -i rav1e` (both return "did not match any packages"); the ignore
-# was made stale upstream-resolved + removed in cycle 444.
+# was made stale by the upstream resolution and was removed.
 
 [licenses]
 # SPDX expressions every workspace dep is allowed to carry. The
@@ -84,8 +84,8 @@ allow = [
   # `unicode-ident` etc. — DFS-style Unicode data tables.
   "Unicode-DFS-2016",
   "Unicode-3.0",
-  # Cycle 794: the Mozilla CA-certificate bundle (`webpki-roots`, the TLS trust
-  # anchors for the in-app update checker's rustls HTTPS GET) ships under the
+  # The Mozilla CA-certificate bundle (`webpki-roots`, the TLS trust anchors
+  # for the in-app update checker's rustls HTTPS GET) ships under the
   # Community Data License Agreement — a permissive *data-file* license, exactly
   # the "Mozilla CA bundle" case the section comment above anticipates.
   "CDLA-Permissive-2.0",

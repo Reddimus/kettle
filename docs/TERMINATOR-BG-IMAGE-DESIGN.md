@@ -1,14 +1,14 @@
 # Background image render — design
 
-> Status: design only (cycle 364). The implementation touches the wgpu
+> Status: design only. The implementation touches the wgpu
 > render pipeline + image decode + a blur shader; this doc lays out the
-> architecture so the work lands as bounded sub-cycles.
+> architecture so the work lands in bounded phases.
 
 ## What it is
 
 Terminator's `background_image = /path/to/wallpaper.jpg` +
 `background_type = image` renders a fullscreen image behind the
-terminal grid. Companion settings (cycle 341 config keys):
+terminal grid. Companion settings:
 
   - `background_image_mode = stretch_and_fill | tile | center | scale`
   - `background_image_align_horiz = left | center | right`
@@ -29,7 +29,7 @@ The use cases people actually care about:
   - Per-profile aesthetic (`--profile dev` ships a different image
     than `--profile present`).
 
-## Why it's multi-cycle
+## Why this is multi-phase
 
   1. **Image decode pipeline.** kettle needs a decoder for at least
      PNG, JPEG, and maybe WebP. The `image` crate handles all three
@@ -106,11 +106,11 @@ graph TB
   - `crates/kettle-core/`: no changes (config already in
     `kettle-config`).
 
-## Sub-cycle roadmap
+## Phased roadmap
 
 | # | Scope | Status |
 |---|------|--------|
-| 1 | This doc (364). Design + roadmap. No code. | ✅ |
+| 1 | This doc. Design + roadmap. No code. | ✅ |
 | 2 | Add `image` crate dep + write `bg_image::decode(path) -> Option<Rgba>` helper. Pure; tested with fixture PNGs of known checksums. | pending |
 | 3 | wgpu texture wrapper: `bg_image::BgImageBinding` holds a `wgpu::Texture` + `Sampler` + a `BindGroup`. Created on first image load; recreated on config-reload. | pending |
 | 4 | Render-pass integration: new `Renderer::render_bg_image()` method, called BEFORE pane rendering. Draws a fullscreen quad sampled from the texture. | pending |
@@ -119,8 +119,8 @@ graph TB
 | 7 | `background_darkness` overlay quad: tinted-black rect at alpha = (1.0 - darkness) drawn AFTER the bg image, BEFORE panes. | pending |
 | 8 | Resize handler: recompute UV coords on `Renderer::resize`. | pending |
 | 9 | Blur pass: `shaders/blur.wgsl` Gaussian; pre-render into an offscreen texture; sample THAT in the bg-image render-pass. | pending |
-| 10 | `background_type = transparent` path: skip the bg image; cells with `default_bg` background DON'T cover with a quad, letting the desktop show through. Companion to `background-opacity` (cycle-X). | pending |
-| 11 | Lazy reload: changing `background_image` via cycle-X `--reload-config` re-decodes + re-uploads without restart. | pending |
+| 10 | `background_type = transparent` path: skip the bg image; cells with `default_bg` background DON'T cover with a quad, letting the desktop show through. Companion to `background-opacity`. | pending |
+| 11 | Lazy reload: changing `background_image` via `--reload-config` re-decodes + re-uploads without restart. | pending |
 | 12 | End-to-end acceptance test: launch kettle with image config, `--screenshot`, compare key pixel regions against the source image (downsampled). | pending |
 
 ## Architecture choices (rationale)
@@ -131,7 +131,7 @@ graph TB
   - Supports every format kettle would reasonably accept
     (PNG/JPEG/WebP/GIF/TIFF/BMP).
   - Already a transitive dep of `glyphon` (the text-rendering crate
-    cycle-X uses) — adding direct usage costs nothing.
+    kettle already uses) — adding direct usage costs nothing.
 
 ### Why a separate blur shader vs sampling kernel inline
 

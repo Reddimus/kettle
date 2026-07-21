@@ -68,8 +68,8 @@ pub const WINDOW_WIDTH_MAX: u32 = 400;
 pub const WINDOW_HEIGHT_MIN: u32 = 8;
 pub const WINDOW_HEIGHT_MAX: u32 = 200;
 
-/// Parse the standard true/false aliases. Cycle 138 introduces this
-/// because every previous boolean config used `e.value != "false"`,
+/// Parse the standard true/false aliases. This exists because every
+/// previous boolean config used `e.value != "false"`,
 /// which silently treats "no", "off", "0", and "disabled" as `true`.
 /// Case-insensitive; whitespace already trimmed by the line tokenizer.
 /// Returns `None` on an unrecognized value so callers keep the prior
@@ -174,12 +174,12 @@ pub enum BellMode {
     Both,
 }
 
-/// Cycle 641 (Terminator parity, `plugins/auto_theme.py`, sub-cycle 1
+/// Terminator parity (`plugins/auto_theme.py`, phase 1
 /// of [`TERMINATOR-AUTO-THEME-DESIGN.md`](docs/TERMINATOR-AUTO-THEME-DESIGN.md)):
 /// theme-mode policy.
 ///
 /// - `Explicit` — use the `theme = …` value as kettle has always
-///   done. Default; cycle-616 behavior unchanged.
+///   done. Default; unchanged from kettle's original explicit-theme behavior.
 /// - `Light` — always use `light-theme`.
 /// - `Dark` — always use `dark-theme`.
 /// - `Auto` — follow the OS dark-mode preference when winit reports
@@ -194,7 +194,7 @@ pub enum ThemeMode {
     Auto,
 }
 
-/// Cycle 617 (Terminator parity, terminatorlib/config.py:117
+/// Terminator parity (terminatorlib/config.py:117
 /// `case_sensitive`): scrollback-search case-sensitivity mode.
 ///
 /// kettle defaults to `Smart` (ripgrep/vim semantics: case-
@@ -218,7 +218,7 @@ impl BellMode {
     pub fn attention(self) -> bool {
         matches!(self, BellMode::Attention | BellMode::Both)
     }
-    /// Cycle 619: compose two bell flavors (used by the Terminator-
+    /// Compose two bell flavors (used by the Terminator-
     /// compat `urgent_bell` + `visible_bell` arms which compose into
     /// kettle's unified `BellMode`). Idempotent: `compose(x, x) == x`.
     /// Pure.
@@ -275,13 +275,13 @@ pub enum TabBarMode {
 
 /// Where the tab bar sits.
 ///
-/// Cycle 647 (sub-cycle 1 of [`TERMINATOR-VERTICAL-TABS-DESIGN.md`](
-/// docs/TERMINATOR-VERTICAL-TABS-DESIGN.md)):
+/// Phase 1 of [`TERMINATOR-VERTICAL-TABS-DESIGN.md`](
+/// docs/TERMINATOR-VERTICAL-TABS-DESIGN.md)
 /// added `Left` and `Right` variants. The parser already accepted
-/// the values since cycle 331 + cycle 628 but routed them to a
+/// the values from earlier work but routed them to a
 /// `log::warn` + fallback to `Top`. Now they store the user's
 /// chosen orientation; the render-layer change to actually draw
-/// the strip vertically lands in sub-cycles 2-6 of the vertical-
+/// the strip vertically lands in later phases of the vertical-
 /// tabs design.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TabBarPos {
@@ -292,7 +292,7 @@ pub enum TabBarPos {
 }
 
 impl TabBarPos {
-    /// Cycle 647: is this a vertical-strip orientation?
+    /// Is this a vertical-strip orientation?
     /// Helper for the upcoming `App::content_rect` branch + the
     /// `paint_tab_bar` orientation dispatch.
     pub fn is_vertical(self) -> bool {
@@ -300,10 +300,10 @@ impl TabBarPos {
     }
 }
 
-/// Cycle 295 (iTerm2 / kitty parity): status-bar position. A thin
+/// iTerm2 / kitty parity: status-bar position. A thin
 /// strip showing HH:MM:SS · theme · focused pane title. Disabled by
 /// default — turning it on subtracts one row from each pane's grid,
-/// so chatty users with 80x24 budgets stay in control. Future cycle
+/// so chatty users with 80x24 budgets stay in control. A future update
 /// adds CPU / MEM widgets via `sysinfo`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum StatusBarMode {
@@ -313,7 +313,7 @@ pub enum StatusBarMode {
     Bottom,
 }
 
-/// Cycle 341 (Terminator parity, terminatorlib/config.py:118
+/// Terminator parity (terminatorlib/config.py:118
 /// `background_type`): background style.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum BackgroundType {
@@ -393,7 +393,7 @@ pub enum ChromeBackground {
     White,
 }
 
-/// Cycle 376 (Terminator plugin parity, plugin sub-cycle 12): Lua
+/// Terminator plugin parity: Lua
 /// sandbox level. `Safe` is the default — Lua plugins can still
 /// access the kettle.* APIs but the dangerous parts of the Lua
 /// stdlib (os.execute, io.open, os.exit, package.loadlib) are nil'd
@@ -405,7 +405,7 @@ pub enum LuaSandbox {
     Trusted,
 }
 
-/// Cycle 339 (Terminator parity, terminatorlib/config.py:73
+/// Terminator parity (terminatorlib/config.py:73
 /// `focus`): focus mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum FocusMode {
@@ -418,7 +418,7 @@ pub enum FocusMode {
     System,
 }
 
-/// Cycle 339 (Terminator parity, terminatorlib/config.py:75
+/// Terminator parity (terminatorlib/config.py:75
 /// `window_state`): initial window state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum WindowState {
@@ -475,7 +475,7 @@ pub enum GpuBackend {
     Gl,
 }
 
-/// Cycle 338 (Terminator parity, terminatorlib/config.py:107
+/// Terminator parity (terminatorlib/config.py:107
 /// `backspace_binding`): how Backspace key is encoded.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum BackspaceBinding {
@@ -490,7 +490,7 @@ pub enum BackspaceBinding {
     Automatic,
 }
 
-/// Cycle 338 (Terminator parity, terminatorlib/config.py:108
+/// Terminator parity (terminatorlib/config.py:108
 /// `delete_binding`): how Delete key is encoded.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum DeleteBinding {
@@ -505,7 +505,7 @@ pub enum DeleteBinding {
     Automatic,
 }
 
-/// Cycle 338 (Terminator parity, terminatorlib/config.py:71
+/// Terminator parity (terminatorlib/config.py:71
 /// `broadcast_default`): default broadcast scope when none set.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum BroadcastDefault {
@@ -513,14 +513,14 @@ pub enum BroadcastDefault {
     /// most-permissive mode).
     All,
     /// Broadcast within a per-tab group (kettle default — matches
-    /// the cycle-178 per-tab broadcast model).
+    /// kettle's per-tab broadcast model).
     #[default]
     Group,
     /// Don't broadcast (each pane gets its own input).
     Off,
 }
 
-/// Cycle 336 (Terminator parity, terminatorlib/config.py:118
+/// Terminator parity (terminatorlib/config.py:118
 /// `exit_action`): what to do when the shell process exits.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ExitAction {
@@ -534,7 +534,7 @@ pub enum ExitAction {
     Hold,
 }
 
-/// Cycle 928 (agent-first A2): whether kettle exposes its agent control server,
+/// Whether kettle exposes its agent control server,
 /// and at what privilege. OFF by default — the server is a local-IPC surface
 /// that lets another process read the screen and (in `Full`) drive the panes,
 /// so it must be opt-in. See docs/AGENT.md for the threat model.
@@ -561,7 +561,7 @@ impl AgentServer {
     }
 }
 
-/// Cycle 336 (Terminator parity, terminatorlib/config.py:79
+/// Terminator parity (terminatorlib/config.py:79
 /// `ask_before_closing`): when to show the close-confirmation dialog.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum AskBeforeClosing {
@@ -576,8 +576,8 @@ pub enum AskBeforeClosing {
     Never,
 }
 
-/// Cycle 664 (sub-cycle 4 of [`TERMINATOR-AUTO-THEME-DESIGN.md`](
-/// docs/TERMINATOR-AUTO-THEME-DESIGN.md)): theme-schedule policy
+/// Phase 4 of [`TERMINATOR-AUTO-THEME-DESIGN.md`](
+/// docs/TERMINATOR-AUTO-THEME-DESIGN.md): theme-schedule policy
 /// for the no-geolocation case.
 ///
 /// `Clock { dark_at, light_at }` flips between dark and light at
@@ -585,7 +585,7 @@ pub enum AskBeforeClosing {
 /// `theme-schedule = 18:00 dark, 06:00 light` reads as: dark from
 /// 18:00 to 06:00 the next day, light from 06:00 to 18:00.
 ///
-/// The sunrise/sunset variant (lat/long-driven) is a sub-cycle 5
+/// The sunrise/sunset variant (lat/long-driven) is a phase 5
 /// follow-up — needs a small solar-position computation that the
 /// `sunrise` crate handles, plus explicit-lat/long config keys.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -594,16 +594,16 @@ pub enum ThemeSchedule {
         dark_at: (u8, u8),
         light_at: (u8, u8),
     },
-    /// Cycle 669 (sub-cycle 6 of auto-theme design): switch theme
+    /// Phase 6 of the auto-theme design: switch theme
     /// at sunrise (→ light) and sunset (→ dark) computed from
     /// configured lat/long. Privacy posture: kettle does NOT
     /// do IP-geo or OS-location lookups — `theme-schedule-lat`
     /// and `theme-schedule-long` are supplied explicitly.
-    /// Solar-position math lands in sub-cycle 7.
+    /// Solar-position math lands in phase 7.
     SunriseSunset { lat: f64, long: f64 },
 }
 
-/// Cycle 664: pure decision for `ThemeSchedule::Clock`.
+/// Pure decision for `ThemeSchedule::Clock`.
 ///
 /// Given the current wall-clock time (hour, minute), returns:
 ///   - `Some(true)` — should be dark right now
@@ -618,8 +618,8 @@ pub enum ThemeSchedule {
 /// 4 representative shapes (normal day, wrap past midnight,
 /// exactly-on-boundary, dawn = dusk degenerate).
 pub fn schedule_decision_clock(now_hm: (u8, u8), schedule: ThemeSchedule) -> bool {
-    // Cycle 669: SunriseSunset variant has its own decision helper
-    // (sub-cycle 7); this helper only handles Clock. Defensive
+    // The SunriseSunset variant has its own decision helper
+    // (phase 7); this helper only handles Clock. Defensive
     // default-to-light for non-Clock to keep the caller pure.
     let ThemeSchedule::Clock { dark_at, light_at } = schedule else {
         return false;
@@ -642,7 +642,7 @@ pub fn schedule_decision_clock(now_hm: (u8, u8), schedule: ThemeSchedule) -> boo
     }
 }
 
-/// Cycle 664: parse a `theme-schedule = HH:MM dark, HH:MM light`
+/// Parse a `theme-schedule = HH:MM dark, HH:MM light`
 /// value into `Option<ThemeSchedule>`. Either tag-order is OK
 /// (`HH:MM light, HH:MM dark` works too); whitespace is flexible.
 ///
@@ -653,11 +653,11 @@ pub fn schedule_decision_clock(now_hm: (u8, u8), schedule: ThemeSchedule) -> boo
 /// Pure — string-in, optional-schedule-out. Unit-testable.
 pub fn parse_theme_schedule(value: &str) -> Option<ThemeSchedule> {
     let value = value.trim();
-    // Cycle 669: `theme-schedule = sunrise/sunset` is the
+    // `theme-schedule = sunrise/sunset` is the
     // sunrise-mode trigger. The actual lat/long live in their
     // own config keys (read by parse_collect); the value here
     // is a placeholder (0.0/0.0 until the caller patches them in).
-    // Sub-cycle 7 reconciles the post-parse lat/long override.
+    // Phase 7 reconciles the post-parse lat/long override.
     let lowered = value.to_ascii_lowercase();
     if matches!(
         lowered.as_str(),
@@ -698,8 +698,8 @@ pub fn parse_theme_schedule(value: &str) -> Option<ThemeSchedule> {
     Some(ThemeSchedule::Clock { dark_at, light_at })
 }
 
-/// Cycle 670 (sub-cycle 7 of [`TERMINATOR-AUTO-THEME-DESIGN.md`](
-/// docs/TERMINATOR-AUTO-THEME-DESIGN.md)): compute UTC sunrise +
+/// Phase 7 of [`TERMINATOR-AUTO-THEME-DESIGN.md`](
+/// docs/TERMINATOR-AUTO-THEME-DESIGN.md): compute UTC sunrise +
 /// sunset (seconds-of-day) for a given `day_of_year` (1..=366) +
 /// latitude + longitude. Uses the well-known NOAA simplified
 /// algorithm — accurate to ~1 minute at temperate latitudes,
@@ -762,7 +762,7 @@ pub fn sunrise_sunset_utc_secs(
     Some((wrap(sunrise_min), wrap(sunset_min)))
 }
 
-/// Cycle 670 (sub-cycle 7 of auto-theme design): pure decision
+/// Phase 7 of the auto-theme design: pure decision
 /// helper for `ThemeSchedule::SunriseSunset`. Returns
 /// `true` = should be dark, `false` = should be light.
 ///
@@ -806,8 +806,8 @@ pub fn schedule_decision_sunrise(
     }
 }
 
-/// Cycle 649 (sub-cycle 2 of [`TERMINATOR-AUTO-THEME-DESIGN.md`](
-/// docs/TERMINATOR-AUTO-THEME-DESIGN.md)): pure helper that picks
+/// Phase 2 of [`TERMINATOR-AUTO-THEME-DESIGN.md`](
+/// docs/TERMINATOR-AUTO-THEME-DESIGN.md): pure helper that picks
 /// the right theme name given the current `ThemeMode`, the
 /// configured `light_theme` / `dark_theme` / `theme_name` triple,
 /// and the detected OS dark-mode preference (Some(true)=dark,
@@ -825,7 +825,7 @@ pub fn schedule_decision_sunrise(
 /// - `Auto` with `None`: returns `None` (can't decide).
 ///
 /// Pure — no `&self`, no env, no clock; entirely a function of its
-/// 5 inputs. Sub-cycle 6 of the auto-theme design will call this
+/// 5 inputs. Phase 6 of the auto-theme design will call this
 /// from the App on `ThemeModeEvent::AutoUpdated`.
 pub fn resolve_theme_for_mode(
     mode: ThemeMode,
@@ -855,7 +855,7 @@ pub fn resolve_theme_for_mode(
 }
 
 impl AskBeforeClosing {
-    /// Cycle 638 (Terminator parity, sub-cycle 1 of
+    /// Terminator parity (phase 1 of
     /// [`TERMINATOR-CONFIRM-DIALOG-DESIGN.md`](docs/TERMINATOR-CONFIRM-DIALOG-DESIGN.md)):
     /// pure-decision helper — does a Close action with `scope_count`
     /// panes/tabs about to die need the confirm dialog?
@@ -865,7 +865,7 @@ impl AskBeforeClosing {
     ///   - `Always`             → always prompt
     ///   - `MultipleTerminals`  → prompt iff scope_count > 1
     ///
-    /// Sub-cycle 5+ wire this to the `Action::CloseWindow` /
+    /// Later phases wire this to the `Action::CloseWindow` /
     /// `CloseTab` / `ClosePane` dispatch. Pure — no `&self` shape
     /// needed; just the enum + count.
     pub fn should_prompt(self, scope_count: usize) -> bool {
@@ -1012,42 +1012,42 @@ pub struct Config {
     pub osc52: Osc52,
     pub tab_bar: TabBarMode,
     pub tab_bar_pos: TabBarPos,
-    /// Cycle 295: status-bar mode. See [`StatusBarMode`].
+    /// Status-bar mode. See [`StatusBarMode`].
     pub status_bar: StatusBarMode,
-    /// Cycle 332 (Terminator parity, terminatorlib/config.py:75
+    /// Terminator parity (terminatorlib/config.py:75
     /// `borderless`): hide OS window decorations. Useful for tiling
     /// window managers + Quake-style dropdown setups where the host
     /// chrome is redundant.
     pub borderless: bool,
-    /// Cycle 332 (Terminator parity, terminatorlib/config.py:78
+    /// Terminator parity (terminatorlib/config.py:78
     /// `always_on_top`): keep the kettle window above other
     /// windows. Best-effort per OS (Wayland respects compositor
     /// rules; X11 + macOS + Windows mostly honor it).
     pub always_on_top: bool,
-    /// Cycle 333 (Terminator parity, terminatorlib/config.py:111
+    /// Terminator parity (terminatorlib/config.py:111
     /// `allow_bold`): when false, suppress bold text rendering
     /// (everything renders plain regardless of SGR 1). Useful on
     /// monospace fonts that lack a bold companion.
     pub allow_bold: bool,
-    /// Cycle 333 (Terminator parity, terminatorlib/config.py:130
+    /// Terminator parity (terminatorlib/config.py:130
     /// `bold_is_bright`): when true, SGR 1 (bold) for indices
     /// 0-7 maps to the bright variant (8-15). xterm convention.
     pub bold_is_bright: bool,
-    /// Cycle 333 (Terminator parity, terminatorlib/config.py:120
+    /// Terminator parity (terminatorlib/config.py:120
     /// `link_single_click`): when true, single-click on a URL
     /// opens it (kettle default: Ctrl+click). PuTTY/iTerm2-style.
     pub link_single_click: bool,
-    /// Cycle 333 (Terminator parity, terminatorlib/config.py:91
+    /// Terminator parity (terminatorlib/config.py:91
     /// `clear_select_on_copy`): when true, the selection is
     /// deselected after Copy (default: keep selected, so user can
     /// re-copy).
     pub clear_select_on_copy: bool,
-    /// Cycle 334 (Terminator parity, terminatorlib/config.py:128
+    /// Terminator parity (terminatorlib/config.py:128
     /// `disable_mousewheel_zoom`): when true, Ctrl+wheel doesn't
     /// change font size (lets terminal-based scroll-wheel users
     /// avoid accidental zooms).
     pub disable_mousewheel_zoom: bool,
-    /// Cycle 334 (Terminator parity, terminatorlib/config.py:88
+    /// Terminator parity (terminatorlib/config.py:88
     /// `disable_mouse_paste`): when true, middle-click paste is
     /// disabled. Useful for terminal-of-last-resort use cases
     /// where you don't want clipboard content to leak in via
@@ -1057,22 +1057,22 @@ pub struct Config {
     /// bracketed paste. Single-line pastes and editor/agent panes that opt into
     /// bracketed paste continue without a prompt.
     pub clipboard_paste_protection: bool,
-    /// Cycle 334 (Terminator parity, terminatorlib/config.py:89
+    /// Terminator parity (terminatorlib/config.py:89
     /// `putty_paste_style`): when true, right-click pastes (PuTTY/
     /// Windows convention). When false, right-click opens the
     /// context menu (kettle default + Linux convention).
     pub putty_paste_style: bool,
-    /// Cycle 334 (Terminator parity, terminatorlib/config.py:90
+    /// Terminator parity (terminatorlib/config.py:90
     /// `smart_copy`): when true, Ctrl+Shift+C is a no-op when no
     /// selection exists (passes through to the shell). When false,
     /// the key is always consumed.
     pub smart_copy: bool,
-    /// Cycle 335 (Terminator parity, terminatorlib/config.py:93
+    /// Terminator parity (terminatorlib/config.py:93
     /// `invert_search`): when true, scrollback search goes from
     /// the bottom up (newest matches first) instead of the default
     /// top-down (oldest first).
     pub invert_search: bool,
-    /// Cycle 940 (Terminator parity): when true (default), scrollback search
+    /// Terminator parity: when true (default), scrollback search
     /// wraps around — advancing past the last match returns to the first. When
     /// false, Next stops at the last match and Previous stops at the first.
     pub search_wrap: bool,
@@ -1092,19 +1092,19 @@ pub struct Config {
     /// type-to-search prefix keep working. Set `false` to restore plain
     /// arrow-key navigation everywhere.
     pub vim_menu_nav: bool,
-    /// Cycle 617 (Terminator parity, terminatorlib/config.py:117
+    /// Terminator parity (terminatorlib/config.py:117
     /// `case_sensitive`): scrollback-search case-sensitivity
     /// override. kettle's default is `smart` (ripgrep/vim:
     /// insensitive until the pattern has any uppercase). `always`
     /// forces sensitive (Terminator's default), `never` forces
     /// insensitive.
     pub search_case_sensitive: SearchCaseSensitivity,
-    /// Cycle 335 (Terminator parity, terminatorlib/config.py:114
+    /// Terminator parity (terminatorlib/config.py:114
     /// `term`): TERM environment variable for spawned shells.
-    /// Default `xterm-256color` matches kettle's pre-cycle-335
+    /// Default `xterm-256color` matches kettle's original
     /// hardcoded value + Terminator's own default.
     pub term: String,
-    /// Cycle 335 (Terminator parity, terminatorlib/config.py:115
+    /// Terminator parity (terminatorlib/config.py:115
     /// `colorterm`): COLORTERM environment variable. Default
     /// `truecolor` signals 24-bit color support to programs that
     /// honor it (vim, nvim, tmux, ...).
@@ -1113,7 +1113,7 @@ pub struct Config {
     /// `env = KEY=VALUE`; applied before Kettle's terminal identity vars so
     /// `term` / `colorterm` remain the authoritative way to change those.
     pub env: Vec<(String, String)>,
-    /// Cycle 336 (Terminator parity, terminatorlib/config.py:122
+    /// Terminator parity (terminatorlib/config.py:122
     /// `login_shell`): when true, spawn the shell with `-l` (login
     /// shell semantics — reads /etc/profile, ~/.profile,
     /// ~/.bash_profile, ...). Default false matches Terminator.
@@ -1129,32 +1129,32 @@ pub struct Config {
     /// the native poll). Default `true`; `shell-integration = off` launches the
     /// shell untouched (rely on a manually-sourced `$PROFILE` integration).
     pub shell_integration: bool,
-    /// Cycle 336 (Terminator parity, terminatorlib/config.py:118
+    /// Terminator parity (terminatorlib/config.py:118
     /// `exit_action`): what to do when the shell process exits.
     pub exit_action: ExitAction,
-    /// Cycle 928 (agent-first A2): the agent control server mode
+    /// The agent control server mode
     /// (`off` | `read-only` | `full`). Default `off`. When enabled, kettle
     /// starts a local-IPC control server an AI agent (or `kettle ctl`/`kettle
     /// mcp`) can use to read the screen and drive panes. See docs/AGENT.md.
     pub agent_server: AgentServer,
-    /// Cycle 336 (Terminator parity, terminatorlib/config.py:79
+    /// Terminator parity (terminatorlib/config.py:79
     /// `ask_before_closing`): when to show the close-confirmation
     /// dialog on window close.
     /// Consumed by kettle-ui for close-window, close-tab, and close-pane
     /// confirmation prompts.
     pub ask_before_closing: AskBeforeClosing,
-    /// Cycle 337 (Terminator parity, terminatorlib/config.py:81
+    /// Terminator parity (terminatorlib/config.py:81
     /// `close_button_on_tab`): show ✕ on tabs.
     pub close_button_on_tab: bool,
-    /// Cycle 337 (Terminator parity, terminatorlib/config.py:97
+    /// Terminator parity (terminatorlib/config.py:97
     /// `new_tab_after_current_tab`): insert new tab after the
     /// currently-active tab (vs at the end).
     pub new_tab_after_current_tab: bool,
-    /// Cycle 337 (Terminator parity, terminatorlib/config.py:95
+    /// Terminator parity (terminatorlib/config.py:95
     /// `title_at_bottom`): per-pane titlebar position. No-op until
     /// the per-pane titlebar Bucket-D lands; config accepted now.
     pub title_at_bottom: bool,
-    /// Cycle 337 (Terminator parity, terminatorlib/config.py:82
+    /// Terminator parity (terminatorlib/config.py:82
     /// `scroll_tabbar`): scrollable tab bar for many-tabs windows.
     pub scroll_tabbar: bool,
     /// v2.26.0: minimum width (logical px) of a horizontal tab segment. Tabs
@@ -1163,36 +1163,36 @@ pub struct Config {
     /// overflows and — when `scroll_tabbar` (the default) — scrolls with `‹ ›`
     /// arrows + the mouse wheel. Clamped at parse.
     pub tab_min_width: f32,
-    /// Cycle 337 (Terminator parity, terminatorlib/config.py:77
+    /// Terminator parity (terminatorlib/config.py:77
     /// `hide_on_lose_focus`): hide window when it loses focus.
     /// Quake-style behavior. winit hint; partial OS support.
     pub hide_on_lose_focus: bool,
-    /// Cycle 337 (Terminator parity, terminatorlib/config.py:78
+    /// Terminator parity (terminatorlib/config.py:78
     /// `sticky`): show window on every workspace (X11 only;
     /// no-op on Wayland and most other platforms).
     pub sticky: bool,
-    /// Cycle 337 (Terminator parity, terminatorlib/config.py:76
+    /// Terminator parity (terminatorlib/config.py:76
     /// `hide_from_taskbar`): hide kettle from the OS taskbar.
     /// Linux-specific (X11 + Wayland support varies).
     pub hide_from_taskbar: bool,
-    /// Cycle 338 (Terminator parity, terminatorlib/config.py:107
+    /// Terminator parity (terminatorlib/config.py:107
     /// `backspace_binding`): how Backspace key is encoded.
     pub backspace_binding: BackspaceBinding,
-    /// Cycle 338 (Terminator parity, terminatorlib/config.py:108
+    /// Terminator parity (terminatorlib/config.py:108
     /// `delete_binding`): how Delete key is encoded.
     pub delete_binding: DeleteBinding,
-    /// Cycle 338 (Terminator parity, terminatorlib/config.py:71
+    /// Terminator parity (terminatorlib/config.py:71
     /// `broadcast_default`): default broadcast scope.
     pub broadcast_default: BroadcastDefault,
-    /// Cycle 338 (Terminator parity, terminatorlib/config.py:86
+    /// Terminator parity (terminatorlib/config.py:86
     /// `use_custom_url_handler`): use an external program for
     /// URL clicks instead of the OS default.
     pub use_custom_url_handler: bool,
-    /// Cycle 338 (Terminator parity, terminatorlib/config.py:87
+    /// Terminator parity (terminatorlib/config.py:87
     /// `custom_url_handler`): path to the custom URL handler.
     /// No-op unless `use_custom_url_handler` is true.
     pub custom_url_handler: String,
-    /// Cycle 699 (Terminator parity, terminatorlib/config.py
+    /// Terminator parity (terminatorlib/config.py
     /// `use_custom_command`): when false, ignore any
     /// `custom_command` / `command` / `shell` value and fall
     /// back to the user's $SHELL. Lets a Terminator profile
@@ -1200,44 +1200,45 @@ pub struct Config {
     /// parse-finalize so the order of `command =` and
     /// `use_custom_command =` in the file doesn't matter.
     pub use_custom_command: bool,
-    /// Cycle 338 (Terminator parity, terminatorlib/config.py:84
+    /// Terminator parity (terminatorlib/config.py:84
     /// `inactive_color_offset`): float 0.0-1.0 — unfocused-pane
     /// FG color dimming. kettle's `unfocused-split-opacity`
     /// applies to the whole pane; this is a separate FG-only
     /// dim. No-op until wired into the render layer.
     pub inactive_color_offset: f32,
-    /// Cycle 338 (Terminator parity, terminatorlib/config.py:85
+    /// Terminator parity (terminatorlib/config.py:85
     /// `inactive_bg_color_offset`): BG-only dim for unfocused
     /// panes. No-op until wired into the render layer.
     pub inactive_bg_color_offset: f32,
-    /// Cycle 339 (Terminator parity, terminatorlib/config.py:99
+    /// Terminator parity (terminatorlib/config.py:99
     /// `split_to_group`): new splits inherit the parent's broadcast
     /// group.
     pub split_to_group: bool,
-    /// Cycle 339 (Terminator parity, terminatorlib/config.py:100
+    /// Terminator parity (terminatorlib/config.py:100
     /// `autoclean_groups`): remove empty broadcast groups
     /// automatically.
     pub autoclean_groups: bool,
-    /// Cycle 339 (Terminator parity, terminatorlib/config.py:80
+    /// Terminator parity (terminatorlib/config.py:80
     /// `always_split_with_profile`): new splits inherit the
     /// parent pane's profile.
     pub always_split_with_profile: bool,
-    /// Cycle 339 (Terminator parity, terminatorlib/config.py:73
+    /// Terminator parity (terminatorlib/config.py:73
     /// `focus`): focus mode — click (default), sloppy (focus
     /// follows mouse), system (use the desktop's focus mode).
     ///
-    /// NOTE (corrected cycle 780): `sloppy` (focus-follows-mouse) **is**
+    /// NOTE: `sloppy` (focus-follows-mouse) **is**
     /// wired — the pane under the cursor is focused on every cursor move
-    /// (kettle-ui `app.rs`, cycle 360). `system` is treated like `click`
+    /// (kettle-ui `app.rs`). `system` is treated like `click`
     /// because winit doesn't expose the OS-level focus policy. Surfaced as
     /// an editable option in the Settings overlay (Behavior ▸ Focus mode).
-    /// (The old "no-op / not wired yet" note predated the cycle-360 impl.)
+    /// (An earlier "no-op / not wired yet" note here was stale by the
+    /// time `sloppy` was actually wired up.)
     pub focus: FocusMode,
-    /// Cycle 339 (Terminator parity, terminatorlib/config.py:74
+    /// Terminator parity (terminatorlib/config.py:74
     /// `handle_size`): split-divider grab width in px. -1 means
     /// "use the GTK/winit theme default."
     pub handle_size: i32,
-    /// Cycle 339 (Terminator parity, terminatorlib/config.py:75
+    /// Terminator parity (terminatorlib/config.py:75
     /// `window_state`): initial window state at launch.
     pub window_state: WindowState,
     /// `window-width` / `window_width`: initial terminal width in cells.
@@ -1273,128 +1274,128 @@ pub struct Config {
     /// `gpu-force-software` (v2.23.0): force wgpu's software/fallback adapter
     /// (`force_fallback_adapter`). Slow; for debugging GPU-driver issues.
     pub gpu_force_software: bool,
-    /// Cycle 339 (Terminator parity, terminatorlib/config.py:75
+    /// Terminator parity (terminatorlib/config.py:75
     /// `geometry_hinting`): resize in font-step increments.
     pub geometry_hinting: bool,
-    /// Cycle 339 (Terminator parity, terminatorlib/config.py:75
+    /// Terminator parity (terminatorlib/config.py:75
     /// `extra_styling`): load extra GTK CSS per-theme.
     /// kettle is wgpu+glyphon, not GTK — this is a no-op stub
     /// for config compatibility.
     pub extra_styling: bool,
-    /// Cycle 340 (Terminator parity, terminatorlib/config.py:103
+    /// Terminator parity (terminatorlib/config.py:103
     /// `force_no_bell`): suppress every bell flavor. Same as
     /// kettle's `bell = off` but as a separate bool flag.
     pub force_no_bell: bool,
-    /// Cycle 625 (Terminator parity extension, `plugins/logger.py`):
+    /// Terminator parity extension (`plugins/logger.py`):
     /// when true, the per-pane session log strips ANSI escape
     /// sequences (CSI / OSC / single-char ESC) before writing.
-    /// Default false preserves cycle-621 raw-stream behavior
+    /// Default false preserves the original raw-stream behavior
     /// (the log is `cat`-replayable in a terminal).
     pub log_strip_ansi: bool,
-    /// Cycle 641 (Terminator parity, `plugins/auto_theme.py`):
-    /// theme-mode policy. Default `Explicit` preserves cycle-616
+    /// Terminator parity (`plugins/auto_theme.py`):
+    /// theme-mode policy. Default `Explicit` preserves the original
     /// "use the `theme = …` value" behavior. `Light` / `Dark` /
     /// `Auto` are the Terminator AutoTheme modes. `Auto` follows the
     /// OS light/dark preference when winit reports one; an explicit
     /// `theme-schedule` overrides OS following.
     pub theme_mode: ThemeMode,
-    /// Cycle 664 (sub-cycle 4 of auto-theme design): wall-clock
+    /// Phase 4 of the auto-theme design: wall-clock
     /// schedule for switching between `light_theme` and `dark_theme`.
     /// `None` means no schedule (the default; user's `theme_mode`
     /// alone governs the choice). When `Some(Clock { dark_at,
-    /// light_at })`, the App's poll loop (sub-cycle 5 follow-up)
+    /// light_at })`, the App's poll loop (a phase 5 follow-up)
     /// will flip the theme on minute boundaries.
     ///
-    /// Cycle 669 (sub-cycle 6): `Some(SunriseSunset { lat, long })`
+    /// `Some(SunriseSunset { lat, long })`
     /// is the sunrise/sunset-driven variant; the actual lat/long
     /// come from `theme_schedule_lat` + `theme_schedule_long`
     /// fields below (post-process patches the variant once both
     /// halves of the config are parsed).
     pub theme_schedule: Option<ThemeSchedule>,
-    /// Cycle 669: latitude for sunrise/sunset-based theme schedule.
+    /// Latitude for sunrise/sunset-based theme schedule.
     /// Range `[-90.0, 90.0]`; outside this range parses as None +
     /// triggers a `--check-config` malformed-value diagnostic.
     pub theme_schedule_lat: Option<f64>,
-    /// Cycle 669: longitude for sunrise/sunset-based theme schedule.
+    /// Longitude for sunrise/sunset-based theme schedule.
     /// Range `[-180.0, 180.0]`.
     pub theme_schedule_long: Option<f64>,
-    /// Cycle 673 (sub-cycle 7 of vertical-tabs design): width of
+    /// Phase 7 of the vertical-tabs design: width of
     /// the vertical tab strip in pixels for `tab-bar-position =
     /// left`/`right`. Default 180.0 (Firefox-style sidebar).
     /// Range `[40.0, 600.0]`. No effect on horizontal layouts.
     pub tab_bar_width: f32,
-    /// Cycle 616 (Terminator parity, `plugins/auto_theme.py`):
+    /// Terminator parity (`plugins/auto_theme.py`):
     /// theme name to switch to on `Action::ToggleLightDark`
     /// when the current theme matches `dark_theme`. Empty
     /// string = unset (action is a no-op).
     pub light_theme: String,
-    /// Cycle 616 (Terminator parity, `plugins/auto_theme.py`):
+    /// Terminator parity (`plugins/auto_theme.py`):
     /// theme name to switch to on `Action::ToggleLightDark`
     /// when the current theme matches `light_theme`. Empty
     /// string = unset (action is a no-op). If neither is
     /// set, the toggle keybind silently no-ops.
     pub dark_theme: String,
-    /// Cycle 340 (Terminator parity, terminatorlib/config.py:101
+    /// Terminator parity (terminatorlib/config.py:101
     /// `icon_bell`): show the bell icon in the per-pane titlebar
     /// when a bell rings. No-op until the Bucket-D titlebar lands.
     pub icon_bell: bool,
-    /// Cycle 340 (Terminator parity, terminatorlib/config.py:96
+    /// Terminator parity (terminatorlib/config.py:96
     /// `show_titlebar`): show the per-pane titlebar widget. The
     /// titlebar itself is Bucket-D in docs/TERMINATOR-AUDIT.md.
     pub show_titlebar: bool,
-    /// Cycle 340 (Terminator parity, terminatorlib/config.py:131
+    /// Terminator parity (terminatorlib/config.py:131
     /// `title_hide_sizetext`): hide the WxH size annotation in
     /// the per-pane titlebar.
     pub title_hide_sizetext: bool,
-    /// Cycle 340 (Terminator parity, terminatorlib/config.py:142
+    /// Terminator parity (terminatorlib/config.py:142
     /// `title_use_system_font`): use the system font for the
     /// per-pane titlebar text.
     pub title_use_system_font: bool,
-    /// Cycle 340 (Terminator parity, terminatorlib/config.py:143
+    /// Terminator parity (terminatorlib/config.py:143
     /// `title_font`): explicit font (when title_use_system_font
     /// is false). Default `Sans 9`.
     pub title_font: String,
-    /// Cycle 340 title-color triplets (terminatorlib/config.py:132-141).
+    /// Terminator parity title-color triplets (terminatorlib/config.py:132-141).
     pub title_transmit_fg_color: Option<Rgb>,
     pub title_transmit_bg_color: Option<Rgb>,
     pub title_receive_fg_color: Option<Rgb>,
     pub title_receive_bg_color: Option<Rgb>,
     pub title_inactive_fg_color: Option<Rgb>,
     pub title_inactive_bg_color: Option<Rgb>,
-    /// Cycle 340 (Terminator parity, terminatorlib/config.py:127
+    /// Terminator parity (terminatorlib/config.py:127
     /// `cursor_color_default`): when true, the cursor uses the
     /// theme's foreground color (default kettle behavior).
     pub cursor_color_default: bool,
-    /// Cycle 340 (Terminator parity, terminatorlib/config.py:117
+    /// Terminator parity (terminatorlib/config.py:117
     /// `use_system_font`): use the OS system font.
     pub use_system_font: bool,
-    /// Cycle 340 (Terminator parity, terminatorlib/config.py:116
+    /// Terminator parity (terminatorlib/config.py:116
     /// `use_theme_colors`): use OS theme colors.
     pub use_theme_colors: bool,
-    /// Cycle 340 (Terminator parity, terminatorlib/config.py:144
+    /// Terminator parity (terminatorlib/config.py:144
     /// `http_proxy`): HTTP proxy URL for plugin HTTP requests.
     /// No-op until the plugin Bucket-D lands.
     pub http_proxy: String,
-    /// Cycle 341 (Terminator parity, terminatorlib/config.py:118
+    /// Terminator parity (terminatorlib/config.py:118
     /// `background_type`): background style.
     pub background_type: BackgroundType,
     /// `text-renderer` (v2.25.0): cell-locked grid rendering (default) vs the
     /// legacy continuous glyphon layout. See [`TextRenderer`].
     pub text_renderer: TextRenderer,
-    /// Cycle 341 (Terminator parity, terminatorlib/config.py:117
+    /// Terminator parity (terminatorlib/config.py:117
     /// `background_image`): path to background image. No-op
     /// until Bucket-D bg-image render lands.
     pub background_image: String,
-    /// Cycle 341 (Terminator parity, terminatorlib/config.py:119
+    /// Terminator parity (terminatorlib/config.py:119
     /// `background_image_mode`): tiling mode.
     pub background_image_mode: String,
-    /// Cycle 341 (Terminator parity, terminatorlib/config.py:120
+    /// Terminator parity (terminatorlib/config.py:120
     /// `background_image_align_horiz`): horizontal alignment.
     pub background_image_align_horiz: String,
-    /// Cycle 341 (Terminator parity, terminatorlib/config.py:121
+    /// Terminator parity (terminatorlib/config.py:121
     /// `background_image_align_vert`): vertical alignment.
     pub background_image_align_vert: String,
-    /// Cycle 341 (Terminator parity, terminatorlib/config.py:122
+    /// Terminator parity (terminatorlib/config.py:122
     /// `background_blur`): blur the background image.
     pub background_blur: bool,
     /// `background-animation`: how an animated background (a `Starfield` or an
@@ -1405,30 +1406,30 @@ pub struct Config {
     /// `background-image` or `Starfield` is set. Defaults to `Theme`. See
     /// [`ChromeBackground`].
     pub chrome_background: ChromeBackground,
-    /// Cycle 341 (Terminator parity, terminatorlib/config.py:106
+    /// Terminator parity (terminatorlib/config.py:106
     /// `background_darkness`): background image opacity (0.0 fully
     /// dark .. 1.0 untinted).
     pub background_darkness: f32,
-    /// Cycle 341 (Terminator parity, terminatorlib/config.py:93
+    /// Terminator parity (terminatorlib/config.py:93
     /// `cell_height`): vertical cell scaling (default 1.0).
     /// Applied by kettle-render as a multiplier on measured cell height.
     pub cell_height: f32,
-    /// Cycle 341 (Terminator parity, terminatorlib/config.py:94
+    /// Terminator parity (terminatorlib/config.py:94
     /// `cell_width`): horizontal cell scaling. Applied by kettle-render as a
     /// multiplier on measured cell width.
     pub cell_width: f32,
-    /// Cycle 341 (Terminator parity, terminatorlib/config.py:124
+    /// Terminator parity (terminatorlib/config.py:124
     /// `detachable_tabs`): allow dragging tabs between windows.
     /// When false, cross-window tab tear-off and the
     /// `move_tab_to_new_window` action are disabled; in-window tab switching
     /// and reordering remain available.
     pub detachable_tabs: bool,
-    /// Cycle 341 (Terminator parity, terminatorlib/config.py:96
+    /// Terminator parity (terminatorlib/config.py:96
     /// `putty_paste_style_source_clipboard`): when `putty_paste_
     /// style` is true, source right-click paste from the regular
     /// system clipboard instead of the X11 PRIMARY selection.
     pub putty_paste_style_source_clipboard: bool,
-    /// Cycle 376 (Terminator plugin parity, plugin sub-cycle 12):
+    /// Terminator plugin parity:
     /// Lua sandbox level.
     pub lua_sandbox: LuaSandbox,
     /// Opacity of unfocused split panes (1.0 = no dim).
@@ -1441,7 +1442,7 @@ pub struct Config {
     /// active pane's OSC title or "kettle"), `{cwd}` (active pane's cwd
     /// or empty), `{tab}` (1-based active tab index).
     pub window_title_format: String,
-    /// Cycle 934 (agent-first A4): prefix shown on a per-pane titlebar while an
+    /// Prefix shown on a per-pane titlebar while an
     /// agent control connection has the pane attached. Default `"[agent] "`
     /// (ASCII, no font-fallback risk). Empty disables the badge.
     pub agent_badge: String,
@@ -1465,10 +1466,10 @@ pub struct Config {
     /// `palette[4]`, the blue accent). Lets users tune the
     /// here-am-I indicator without re-themeing the whole palette.
     pub focused_split_color: Option<Rgb>,
-    /// Cycle 293 peacock parity. When set, this color overrides
+    /// Peacock parity. When set, this color overrides
     /// every "kettle accent" surface — active tab segment's accent
     /// strip, focused-pane border (unless `focused-split-color` is
-    /// also set; that wins for backward-compat), the cycle-255
+    /// also set; that wins for backward-compat), the
     /// dragged-tab ghost strip. Lets a user run multiple kettle
     /// windows (`--profile dev` + `--profile ops`) and tell them
     /// apart at a glance. `palette[4]` and `palette[3]` (broadcast
@@ -1476,16 +1477,16 @@ pub struct Config {
     /// the high-priority state isn't confused with a workspace
     /// identity color.
     pub accent_color: Option<Rgb>,
-    /// Cycle 937 (Peacock parity): `accent-color = auto` — derive a distinct
+    /// Peacock parity: `accent-color = auto` — derive a distinct
     /// chrome accent per *working directory* AND per window, so a new kettle
     /// window in a different project is a visually different color (VS Code
     /// Peacock style) while a given project stays consistent across launches;
     /// two live windows never share a hue while the theme's pool has a free
-    /// one (multi-window cycle). ON by default since the multi-window cycle —
+    /// one. ON by default since multi-window support landed —
     /// opt out with `accent-color = theme` (or `off`/`none`); an explicit
     /// `accent-color = <hex>` / `--accent` always wins and pins every window.
     pub accent_auto: bool,
-    /// Cycle 937: runtime-only seed for `accent_auto` (a hash of the window's
+    /// Runtime-only seed for `accent_auto` (a hash of the window's
     /// startup working directory). Set by the App at launch, NOT parsed from the
     /// config file; default 0 (the theme's signature accent for the home/seedless
     /// case). Kept on `Config` so the renderer can resolve the accent from `cfg`
@@ -1493,7 +1494,7 @@ pub struct Config {
     pub accent_seed: u64,
     /// Cursor blink half-period in milliseconds.
     pub cursor_blink_interval: u64,
-    /// Cycle 252: an inactive tab whose unseen output went quiet for
+    /// An inactive tab whose unseen output went quiet for
     /// at least this many milliseconds transitions from the
     /// `Output` indicator (cyan) to `Silent` (dim chrome). Default
     /// 10 s — long enough that a slow `cargo build` doesn't oscillate
@@ -1501,7 +1502,7 @@ pub struct Config {
     /// going quiet is noticed before the user switches tabs. Clamped
     /// `[1000, 600_000]` (1 s..10 min) at parse time.
     pub tab_silence_threshold_ms: u64,
-    /// Cycle 612 (Terminator parity, `command_notify.py` plugin):
+    /// Terminator parity (`command_notify.py` plugin):
     /// minimum command duration in ms before kettle fires a desktop
     /// notification on OSC 133 D (CommandEnd). The notification fires
     /// only when the kettle window doesn't have focus at the moment
@@ -1517,7 +1518,7 @@ pub struct Config {
     /// Stable update policy. `notify` is the privacy-preserving default; the
     /// first launch only stamps the throttle and performs no network request.
     pub update_policy: UpdatePolicy,
-    /// Cycle 918: restore the previous session's tabs/splits/working-dirs on
+    /// Restore the previous session's tabs/splits/working-dirs on
     /// launch. OFF by default — like every mainstream terminal (GNOME Terminal,
     /// Windows Terminal, kitty, Alacritty, WezTerm, iTerm2), a new window/instance
     /// opens FRESH (a single pane in the default cwd). Opt in with
@@ -1548,7 +1549,7 @@ pub struct Config {
     /// Explicit OpenType feature overrides (`font-feature`, repeatable),
     /// applied on top of the ligature toggle. Later entries win.
     pub font_features: Vec<FontFeature>,
-    /// Cycle 920: `None` = derive from the active theme (so the search /
+    /// `None` = derive from the active theme (so the search /
     /// quick-select highlight matches whatever theme is set, incl. the Catppuccin
     /// Mocha default — `search_background` falls back to `theme.palette[3]`, the
     /// theme's yellow; `search_foreground` to `theme.background`). An explicit
@@ -1560,7 +1561,7 @@ pub struct Config {
     pub shell: Option<String>,
     /// Named SSH targets: `ssh-host = name=user@host` (repeatable).
     pub ssh_hosts: Vec<(String, String)>,
-    /// Cycle 289 triggers (iTerm2 parity). Each entry is a regex
+    /// iTerm2-parity triggers. Each entry is a regex
     /// pattern matched against PTY output; when it fires while the
     /// pane is unfocused, the action runs. Repeatable via
     /// `trigger = REGEX` config lines (default action: Urgency).
@@ -1569,15 +1570,15 @@ pub struct Config {
     /// one trigger doesn't sink the whole config load — invalid
     /// patterns are logged via `log::warn!` and dropped.
     pub triggers: Vec<OutputTrigger>,
-    /// Cycle 611 (Terminator parity, `terminatorlib/plugins/
+    /// Terminator parity (`terminatorlib/plugins/
     /// custom_commands.py` → "Custom Commands" menu). User-defined
     /// right-click menu entries: each `menu-item = LABEL = CMD`
     /// config line appends one row. Clicking the row writes
     /// `CMD\n` to the focused pane's PTY (same shape as
-    /// `kettle.send_text` from cycle 325). Strictly additive on
+    /// `kettle.send_text`). Strictly additive on
     /// top of the built-in context menu items.
     ///
-    /// Distinct from the cycle-375 `kettle.add_menu_item(label,
+    /// Distinct from the `kettle.add_menu_item(label,
     /// callback)` Lua API: that one takes a callback for
     /// arbitrary Lua-side behavior; this one is config-file-only
     /// and sends literal text. Use this entry for plain
@@ -1585,7 +1586,7 @@ pub struct Config {
     pub menu_items: Vec<MenuItem>,
 }
 
-/// Cycle 611: a user-defined right-click menu entry from
+/// A user-defined right-click menu entry from
 /// `menu-item = LABEL = CMD`. The label is shown in the menu;
 /// the command is sent as PTY input + `\n` when the row is
 /// clicked. Plain text, no shell expansion or env substitution
@@ -1597,7 +1598,7 @@ pub struct MenuItem {
     pub command: String,
 }
 
-/// Cycle 289: one configured output-trigger rule. Plain-string
+/// One configured output-trigger rule. Plain-string
 /// `pattern` (compiled to `Regex` by kettle-core) + an action describing
 /// what should happen when output matches.
 ///
@@ -1620,7 +1621,7 @@ pub struct OutputTrigger {
     pub action: TriggerAction,
 }
 
-/// Cycle 289 trigger action. One enum so the config parser can grow
+/// Trigger action. One enum so the config parser can grow
 /// new variants without rippling through every call site. v1 ships
 /// the minimum:
 ///
@@ -1633,12 +1634,12 @@ pub struct OutputTrigger {
 pub enum TriggerAction {
     #[default]
     Urgency,
-    /// Cycle 622 (Terminator parity, `plugins/run_cmd_on_match.py`):
+    /// Terminator parity (`plugins/run_cmd_on_match.py`):
     /// spawn an external program when the trigger pattern matches.
     /// Argv form (no shell expansion at kettle's layer) — security
     /// posture is "treat the configured command as data, not a
     /// shell string." Capture groups are NOT substituted in v1
-    /// (a `$1`-substitution path is the natural next sub-cycle).
+    /// (a `$1`-substitution path is the natural next increment).
     ///
     /// The spawn is fire-and-forget: kettle does not wait for the
     /// child to exit, doesn't capture its stdout/stderr, and
@@ -1649,10 +1650,10 @@ pub enum TriggerAction {
     RunCommand(Vec<String>),
 }
 
-/// Cycle 622 helper: split a `trigger = REGEX :: cmd arg1 arg2`
+/// Splits a `trigger = REGEX :: cmd arg1 arg2`
 /// value into `(pattern, argv)`. Returns `None` when there's no
 /// `::` separator (caller treats the whole value as a plain
-/// Urgency trigger, preserving cycle-289 behavior).
+/// Urgency trigger, preserving that behavior).
 ///
 /// Argv is whitespace-split with no quote-escaping in v1 — kettle
 /// doesn't try to mimic the shell's quoting rules. A user who
@@ -1670,7 +1671,7 @@ pub fn parse_trigger_with_command(value: &str) -> Option<(String, Vec<String>)> 
     Some((pattern, argv))
 }
 
-/// Cycle 716 (Terminator menu UX, C7): atomic write-back for the
+/// Terminator menu UX (C7): atomic write-back for the
 /// in-menu Preferences toggles. Persists a `key = value` line to
 /// the user's config file with these contracts:
 ///
@@ -1729,7 +1730,7 @@ pub fn persist_config_toggle(path: &Path, key: &str, new_value: &str) -> std::io
         if let Some(line_key) = parse_line_key(line)
             && normalize_key(line_key) == needle
         {
-            // Cycle 779: only the FIRST matching line becomes the new
+            // Only the FIRST matching line becomes the new
             // value; any further duplicate lines for the same key are
             // dropped. Previously every match was rewritten, so a file
             // that already had two `cursor-blink = …` lines (or repeated
@@ -1771,7 +1772,7 @@ pub fn persist_config_toggle(path: &Path, key: &str, new_value: &str) -> std::io
     edit.commit(&out)
 }
 
-/// Cycle 766: append a `keybind = <trigger>=<action>` line to the user's config
+/// Append a `keybind = <trigger>=<action>` line to the user's config
 /// file, atomically and with the same first-write `.bak` backup as
 /// `persist_config_toggle`. `keybind` is *repeatable* (unlike the single-valued
 /// keys `persist_config_toggle` handles), so this appends rather than replaces —
@@ -1793,9 +1794,10 @@ pub fn append_keybind(path: &Path, trigger: &str, action: &str) -> std::io::Resu
     let edit = ConfigEdit::begin(path)?;
     let existing = &edit.document.text;
     // Drop any existing `keybind` line whose trigger is the SAME chord — a
-    // re-rebind should overwrite, not stack. Cycle 913 (audit): compare
+    // re-rebind should overwrite, not stack. Compare
     // SEMANTICALLY via `parse_trigger` (and split the value on the LAST `=`, like
-    // apply_keybind + the cycle-832 diagnostic), so the editor's canonical
+    // apply_keybind + the keybind malformed-value diagnostic in
+    // `detect_malformed_values`), so the editor's canonical
     // `Ctrl+Equal` and a hand-written `ctrl+=` count as the same trigger, and a
     // literal `=` chord (`ctrl+==action`) de-dups correctly. The old first-`=`
     // string compare missed both and accumulated a stale duplicate line.
@@ -1863,7 +1865,7 @@ fn ensure_blank_line_before_append(output: &mut String, line_ending: &str) {
     }
 }
 
-/// Cycle 716: extract the key from a `KEY = VALUE` config line.
+/// Extract the key from a `KEY = VALUE` config line.
 /// Returns `None` for blanks, comments, or malformed lines.
 fn parse_line_key(line: &str) -> Option<&str> {
     let trimmed = line.trim_start();
@@ -2180,7 +2182,7 @@ fn validate_single_line(label: &str, value: &str) -> std::io::Result<()> {
     Ok(())
 }
 
-/// Cycle 716: normalize a config-key name for comparison: lowercase
+/// Normalize a config-key name for comparison: lowercase
 /// the value and treat `-` as equivalent to `_`. So `cursor-blink`,
 /// `cursor_blink`, and `Cursor-Blink` all hash to the same key.
 fn normalize_key(k: &str) -> String {
@@ -2197,7 +2199,7 @@ impl Default for Config {
             font_size: 13.0,
             // v2.28.0 (user-requested): TokyoNight Night is the shipped default
             // theme (it is also the unknown-theme-name fallback, so default ==
-            // fallback). Was Catppuccin Mocha (cycle 917).
+            // fallback). Was Catppuccin Mocha.
             theme_name: "TokyoNight Night".to_string(),
             theme: Theme::by_name("TokyoNight Night"),
             scrollback: 10_000,
@@ -2320,7 +2322,7 @@ impl Default for Config {
             split_divider_color: None,
             focused_split_color: None,
             accent_color: None,
-            // Multi-window cycle: Peacock accents are the default — each
+            // Peacock accents are the default — each
             // window gets a distinct theme hue (`accent-color = theme` opts
             // back into the single static accent).
             accent_auto: true,
@@ -2330,15 +2332,15 @@ impl Default for Config {
             command_notify_threshold_ms: 5_000,
             copy_on_select: true,
             update_policy: UpdatePolicy::Notify,
-            restore_session: false, // cycle 918: fresh-by-default; opt in to restore
+            restore_session: false, // fresh-by-default; opt in to restore
             scroll_on_keystroke: true,
             scroll_on_output: false,
             mouse_hide_while_typing: true,
             word_delimiters: String::new(),
             font_ligatures: true,
             font_features: Vec::new(),
-            search_foreground: None, // cycle 920: derive from theme.background
-            search_background: None, // cycle 920: derive from theme.palette[3]
+            search_foreground: None, // derive from theme.background
+            search_background: None, // derive from theme.palette[3]
             keybinds: keybinds::defaults(),
             shell: None,
             ssh_hosts: Vec::new(),
@@ -2348,7 +2350,7 @@ impl Default for Config {
     }
 }
 
-/// Cycle 801: decode raw config-file bytes into text, honoring a leading
+/// Decode raw config-file bytes into text, honoring a leading
 /// byte-order mark. PowerShell 5.1's `>` redirect writes UTF-16 LE with a
 /// BOM, which plain UTF-8 reads reject — so a config created via the
 /// documented `kettle --print-default-config > config` one-liner in 5.1 was
@@ -2375,13 +2377,13 @@ fn decode_config_text(bytes: &[u8]) -> String {
     }
 }
 
-/// Cycle 937 (Peacock) / multi-window cycle: the theme's deduped pool of
+/// Peacock: the theme's deduped pool of
 /// distinct accent hues — the candidate set `peacock_accent` indexes, public
 /// so the multi-window LIVE dedupe can walk it (same project → same color,
 /// but two windows never share a hue while the pool has a free one).
 ///
 /// The spread covers the theme's most distinct hues, signature accent first.
-/// Dedup preserves order (cycle 942): for a theme without an explicit
+/// Dedup preserves order: for a theme without an explicit
 /// `accent` line `accent == palette[4]`, which would double blue's share and
 /// shrink the pool; palettes that repeat hues (magenta == bright magenta)
 /// collapse too. Pure; never empty.
@@ -2405,7 +2407,7 @@ pub fn peacock_pool(theme: &Theme) -> Vec<crate::color::Rgb> {
     candidates
 }
 
-/// Cycle 937 (Peacock): pick a distinct, theme-appropriate accent for `seed`
+/// Peacock: pick a distinct, theme-appropriate accent for `seed`
 /// (a hash of the window's working directory) from [`peacock_pool`]. Pure.
 fn peacock_accent(theme: &Theme, seed: u64) -> crate::color::Rgb {
     let candidates = peacock_pool(theme);
@@ -2413,7 +2415,7 @@ fn peacock_accent(theme: &Theme, seed: u64) -> crate::color::Rgb {
 }
 
 impl Config {
-    /// Cycle 937: the effective UI-chrome accent (focus border, active tab,
+    /// The effective UI-chrome accent (focus border, active tab,
     /// titlebars, menu/settings highlights), resolved in precedence:
     ///   1. an explicit `accent-color = <hex>` / `--accent` (`accent_color`),
     ///   2. `accent-color = auto` → a Peacock color varied by `accent_seed`
@@ -2451,7 +2453,7 @@ impl Config {
         Self::default_path_from(|k| std::env::var_os(k))
     }
 
-    /// Cycle 292: resolve a named-profile config path. Returns
+    /// Resolve a named-profile config path. Returns
     /// `<config-dir>/profiles/<sanitized>.config`. Name is sanitized to
     /// `[A-Za-z0-9._-]` so a `--profile ../../etc/passwd` can't
     /// traverse out of the profiles directory. Returns `None` if the
@@ -2459,7 +2461,7 @@ impl Config {
     ///
     /// Used by the kettle binary's `--profile NAME` flag: when set,
     /// kettle loads the named-profile config file instead of the
-    /// default `<config-dir>/config`. Distinct from cycle-291's
+    /// default `<config-dir>/config`. Distinct from
     /// `--layout` which switches the *session* file (tab tree)
     /// while keeping the same config.
     pub fn path_for_profile(name: &str) -> Option<PathBuf> {
@@ -2482,7 +2484,7 @@ impl Config {
         })
     }
 
-    /// Cycle 618 (Terminator parity, terminatorlib/terminator.py:
+    /// Terminator parity (terminatorlib/terminator.py:
     /// `key_next_profile` / `key_previous_profile`): enumerate the
     /// available profile files in `<config-dir>/profiles/`, sorted
     /// ascii-then-bytewise so the cycle order is deterministic
@@ -2527,7 +2529,7 @@ impl Config {
         names
     }
 
-    /// Cycle 618. Companion to `path_for_profile`: extract the profile
+    /// Companion to `path_for_profile`: extract the profile
     /// name from a config file path, if that path is shaped like one
     /// returned by `path_for_profile` (`<config-dir>/profiles/<name>.config`).
     /// Returns `None` for paths outside `profiles/` (e.g. the default
@@ -2548,21 +2550,21 @@ impl Config {
     /// rest of the parallel suite).
     ///
     /// Empty env-var values are treated as unset and the probe
-    /// continues to the next variable. Pre-cycle-181,
+    /// continues to the next variable. Previously,
     /// `XDG_CONFIG_HOME=""` (rare but possible in stripped CI
     /// containers or after a misconfigured `unset`/`export X=`)
     /// returned `Some(PathBuf::from(""))` from the first arm, and
     /// the final path became `"kettle/config"` — a *relative* path
     /// that could pick up a stray `kettle/config` file in whatever
     /// directory the user launched kettle from. Same shape as
-    /// cycle 180 (`home_dir_fallback`), applied here to the
+    /// `home_dir_fallback`, applied here to the
     /// config-path probe.
     pub(crate) fn default_path_from(
         lookup: impl Fn(&str) -> Option<std::ffi::OsString>,
     ) -> Option<PathBuf> {
         let var = |k: &str| lookup(k).filter(|v| !v.is_empty());
         // `XDG_CONFIG_HOME` is the explicit cross-platform override on every OS.
-        // Cycle 918 (config split-brain): the per-OS fallback then differs.
+        // Config split-brain: the per-OS fallback then differs.
         // On Windows the canonical per-user dir is `%APPDATA%\kettle` — a stray
         // `HOME` (git-bash / MSYS / WSL-interop all export one) must NOT redirect
         // the GUI to `~/.config`, or a Start-menu launch (no HOME) and a shell
@@ -2618,12 +2620,12 @@ impl Config {
     /// error → `(default(), [], [])`, same fallthrough as `load_from`,
     /// since the user already gets the error logged by `load_from`.
     ///
-    /// Cycle 586: bound the read at 1 MiB. Real configs top out around 50
+    /// Bound the read at 1 MiB. Real configs top out around 50
     /// KB (the bundled `docs/kettle.example.config` is 10 KB); 1 MiB is
     /// a ~20× margin over the bundled example and ~100× over typical
     /// user configs while staying small enough to detect a swap-attack
-    /// blob before any allocation. Same defense-in-depth shape as cycle
-    /// 585 (session.json) and cycle 584 (bg-image).
+    /// blob before any allocation. Same defense-in-depth shape as
+    /// `MAX_SESSION_BYTES` (session.json) and `MAX_BG_IMAGE_BYTES` (bg-image).
     pub fn load_from_with_diagnostics(path: &Path) -> (Config, Vec<String>, Vec<String>) {
         if let Ok(meta) = std::fs::metadata(path)
             && meta.len() > MAX_CONFIG_BYTES
@@ -2636,7 +2638,7 @@ impl Config {
             );
             return (Config::default(), Vec::new(), Vec::new());
         }
-        // Cycle 801: read bytes and decode by BOM rather than `read_to_string`,
+        // Read bytes and decode by BOM rather than `read_to_string`,
         // which hard-fails on a non-UTF-8 file. A Windows user who runs the
         // documented `kettle --print-default-config > config` in **PowerShell
         // 5.1** gets a UTF-16-LE-with-BOM file (5.1's `>` default encoding);
@@ -2672,7 +2674,7 @@ impl Config {
     /// independent of the apply loop so adding a new validated key is
     /// one line here, not a touch on every parse arm.
     /// Every boolean config key (both kebab- and snake-case spellings) that
-    /// `parse_collect` routes through `parse_bool`. Cycle 826 (audit): the
+    /// `parse_collect` routes through `parse_bool`. The
     /// `--check-config` diagnostic used to validate only 8 of these, so a typo
     /// in any of the other ~90 (`borderless = treu`, `login-shell = yse`)
     /// passed validation and then silently kept the default at runtime. Kept in
@@ -2792,7 +2794,7 @@ impl Config {
 
     pub fn detect_malformed_values(text: &str) -> Vec<String> {
         let mut bad = Vec::new();
-        // Strip the leading UTF-8 BOM (cycle 155 fixed it in
+        // Strip the leading UTF-8 BOM (also handled in
         // `parse::parse`; this function does its own raw scan so it
         // needs the same strip independently — otherwise a
         // BOM-prefixed config that's missing `=` on the first key
@@ -2818,8 +2820,8 @@ impl Config {
         }
         for e in parse::parse(text) {
             let v = &e.value;
-            // Cycle 158: empty values are documented (parse.rs) as
-            // "reset to default" semantics. Cycle 121/122 made the
+            // Empty values are documented (parse.rs) as
+            // "reset to default" semantics. The
             // string-keyed paths honor that explicitly; the bool /
             // enum / numeric arms all also fall through to defaults
             // on empty. Skip the per-key validity check for empty
@@ -2832,8 +2834,8 @@ impl Config {
             let ok = match e.key.as_str() {
                 // Padding: parse-only (no fixed runtime clamp). Big
                 // pads just shrink the rendered body area — the
-                // cycle-119 `cap_axis_cells` keeps screenshots safe.
-                // Cycle 895 (audit): require a FINITE value. The apply arm
+                // `cap_axis_cells` helper keeps screenshots safe.
+                // Require a FINITE value. The apply arm
                 // (`v.is_finite()`) rejects `inf`/`nan`, but `"inf".parse::
                 // <f32>()` succeeds, so the diagnostic said OK while the
                 // runtime silently kept the default — the exact mismatch
@@ -2849,8 +2851,8 @@ impl Config {
                 // Numerics with a *runtime clamp* — parse AND land
                 // inside the clamp range, otherwise the user's
                 // `--check-config` value disagreed with what the
-                // runtime actually used. Cycle 131 caught this for
-                // `font-size`; cycle 132 extends to every other
+                // runtime actually used. An earlier fix caught this
+                // for `font-size`; this extends to every other
                 // clamped numeric so the diagnostic surface is
                 // consistent. The runtime still clamps cleanly —
                 // the warning just stops the silent mismatch.
@@ -2873,9 +2875,9 @@ impl Config {
                 // "no cap" plus any non-negative integer up to
                 // `INFINITE_SCROLLBACK` (10 M lines). Values above
                 // would have allocated >100 GB of history rows
-                // (cycle 133 clamps them at parse, but flag the
+                // (clamped at parse, but flag the
                 // diagnostic too).
-                // Cycle 895 (audit): the apply arm accepts the
+                // The apply arm accepts the
                 // `scrollback-limit` alias too, so the diagnostic must
                 // recognise it — otherwise `scrollback-limit = 99999999999`
                 // bypassed the malformed-value warning entirely.
@@ -2888,12 +2890,12 @@ impl Config {
                     parse_byte_size(v).is_some_and(|n| n <= MAX_SCROLLBACK_BYTES)
                 }
                 // Same shape as the float-range checks above:
-                // parse_collect clamps to [50, 5000] (cycle X), so
+                // parse_collect clamps to [50, 5000], so
                 // `cursor-blink-interval = 99999` silently becomes
                 // 5000 — surface it now so the user's diagnostic
                 // matches their runtime.
                 "cursor-blink-interval" => v.parse::<u64>().is_ok_and(|n| (50..=5000).contains(&n)),
-                // Cycle 895 (audit): the notification thresholds are clamped at
+                // The notification thresholds are clamped at
                 // parse (`tab-silence` to [1000, 600000]; `command-notify` to
                 // [0, 86_400_000] with 0 = disable) but had no diagnostic, so an
                 // out-of-range value silently became something else. Bounds
@@ -2907,12 +2909,12 @@ impl Config {
                 | "command_notify_threshold" => {
                     v.parse::<u64>().is_ok_and(|n| n <= 86_400_000)
                 }
-                // Cycle 855 (audit): the remaining clamped/range-checked
+                // The remaining clamped/range-checked
                 // numerics. parse_collect clamps (or, for lat/long, silently
                 // discards) an out-of-range value, so without these the
                 // diagnostic said OK while the runtime used something else —
-                // the exact silent-fallback trap cycles 131/132 set out to
-                // close. Bounds mirror the parse_collect clamp/range arms.
+                // the exact silent-fallback trap the font-size clamp
+                // diagnostic (above) set out to close. Bounds mirror the parse_collect clamp/range arms.
                 "handle-size" | "handle_size" => {
                     v.parse::<i32>().is_ok_and(|n| (-1..=50).contains(&n))
                 }
@@ -2958,7 +2960,7 @@ impl Config {
                 // keep the default — same trap as the numeric keys.
                 "background"
                 | "foreground"
-                // Cycle 895 (audit): the apply path accepts the Terminator
+                // The apply path accepts the Terminator
                 // `background-color`/`foreground-color` (and `_color`) aliases,
                 // so a bad color under those spellings must be diagnosed too —
                 // otherwise `background-color = notacolor` silently kept the
@@ -2979,7 +2981,7 @@ impl Config {
                 | "split-divider-color"
                 | "focused-split-color"
                 | "split-divider-color-focused"
-                // Cycle 837 (audit): accent + per-pane titlebar colors were
+                // Accent + per-pane titlebar colors were
                 // silently keeping the default on a typo too.
                 | "title-transmit-bg-color"
                 | "title_transmit_bg_color"
@@ -2993,7 +2995,7 @@ impl Config {
                 | "title_receive_fg_color"
                 | "title-inactive-fg-color"
                 | "title_inactive_fg_color" => Rgb::parse(v).is_some(),
-                // Cycle 937: `accent-color` accepts a hex color, `auto`
+                // `accent-color` accepts a hex color, `auto`
                 // (Peacock — vary by working directory + window; the
                 // default), or `theme`/`off`/`none` (static theme accent).
                 "accent-color" | "accent_color" => {
@@ -3011,7 +3013,7 @@ impl Config {
                 // The action half also accepts the unbind sentinels
                 // (`unbind`, `none`, `null`, `false`, empty) — those
                 // mean "remove this default trigger", not "malformed".
-                // Cycle 832 (audit): split on the LAST `=` to agree with
+                // Split on the LAST `=` to agree with
                 // apply_keybind — else rebinding the `=` key (`ctrl+==…`) was
                 // both dropped AND flagged here as a false-positive "malformed".
                 "keybind" => v.rsplit_once('=').is_some_and(|(t, a)| {
@@ -3025,33 +3027,33 @@ impl Config {
                 // it's not in the bundled set (~512 themes including
                 // every Ghostty default). Case-insensitive match matches
                 // `Theme::by_name`'s resolution. (Empty value is
-                // pre-filtered by cycle 158's global skip above.)
+                // pre-filtered by the empty-value skip above.)
                 "theme" => {
-                    // Cycle 862 (audit): `find_name` compares with
+                    // `find_name` compares with
                     // `eq_ignore_ascii_case` — no per-name `to_ascii_lowercase`
                     // String alloc over the ~512 bundled themes (the sibling
-                    // light/dark arm already does this; cycle 843's alloc sweep
-                    // missed this mirror).
+                    // light/dark arm already does this; an earlier alloc-avoidance
+                    // pass missed this mirror).
                     Theme::find_name(v.trim()).is_some()
                 }
-                // Cycle 862 (audit): a malformed `theme-schedule` (bad HH:MM, bad
+                // A malformed `theme-schedule` (bad HH:MM, bad
                 // mode word, missing comma) makes `parse_theme_schedule` return
                 // None and the schedule is silently unset — but the lat/long
                 // sub-keys WERE diagnosed, so omitting the schedule string itself
                 // was inconsistent.
                 "theme-schedule" | "theme_schedule" => parse_theme_schedule(v).is_some(),
-                // Cycle 862 (audit): `ask-before-closing` typo silently fell back
+                // `ask-before-closing` typo silently fell back
                 // to the default with no warning.
                 "ask-before-closing" | "ask_before_closing" => matches!(
                     v.to_ascii_lowercase().as_str(),
                     "always" | "never" | "multiple" | "multiple-terminals" | "multiple_terminals"
                 ),
-                // Cycle 837 (audit): light/dark-theme must name a real bundled
-                // theme (cycle-616 auto-theme); a typo silently kept the prior.
+                // Light/dark-theme must name a real bundled
+                // theme (used by auto-theme); a typo silently kept the prior.
                 "light-theme" | "light_theme" | "dark-theme" | "dark_theme" => {
                     Theme::find_name(v.trim()).is_some()
                 }
-                // Cycle 837 (audit): enum keys whose apply arm has a
+                // Enum keys whose apply arm has a
                 // `_ => DefaultVariant` fallthrough — a typo silently took the
                 // default with no warning. Validate against the explicit variant
                 // set plus the default's conventional spelling.
@@ -3093,7 +3095,7 @@ impl Config {
                         "solid" | "image" | "starfield" | "transparent"
                     )
                 }
-                // Cycle 943 (audit): the three background-image placement enums
+                // The three background-image placement enums
                 // were stored verbatim and consumed by a renderer `match` with a
                 // silent `_ =>` fallback (mode falls back to stretch_and_fill;
                 // align falls back to center/middle) — a typo like `mode = tyle`
@@ -3145,12 +3147,12 @@ impl Config {
                 // the apply arms exactly.
                 // `cursor-style = beam` is the Alacritty spelling for
                 // the same vertical-bar cursor kettle calls `bar`.
-                // Cycle 142 accepts it as an alias so a user copying
+                // Accepts it as an alias so a user copying
                 // their Alacritty config doesn't get a silent
-                // fallback to Block. Cycle 146: case-insensitive so
+                // fallback to Block. Case-insensitive so
                 // `Block` / `BLOCK` etc. also pass (matching the
                 // parse_collect behavior).
-                // Cycle 895 (audit): include the `cursor-shape`/`cursor_shape`
+                // Include the `cursor-shape`/`cursor_shape`
                 // Terminator aliases (the apply arm accepts them) so a typo
                 // under those spellings is diagnosed instead of silently
                 // becoming Block; and add `ibeam`/`i-beam`, which the apply
@@ -3161,7 +3163,7 @@ impl Config {
                     v.to_ascii_lowercase().as_str(),
                     "block" | "underline" | "bar" | "beam" | "ibeam" | "i-beam"
                 ),
-                // Cycle 146: enum keys are case-insensitive so
+                // Enum keys are case-insensitive so
                 // `bell = OFF` validates the same as `bell = off`.
                 // Mirrors the parse_collect change so the diagnostic
                 // and runtime agree.
@@ -3183,13 +3185,13 @@ impl Config {
                         | "copy"
                 ),
                 // Boolean keys: accept the same alias set `parse_bool`
-                // recognizes (cycle 138). Pre-cycle, any non-"false"
+                // recognizes. Previously, any non-"false"
                 // string silently meant "true", so typos like
                 // `cursor-style-blink = no` quietly enabled the blink.
-                // Cycle 826 (audit): validate the WHOLE bool-key set (was only
+                // Validate the WHOLE bool-key set (was only
                 // 8 of ~100), so `borderless = treu` etc. are caught too.
                 k if Self::BOOL_KEYS.contains(&k) => parse_bool(v).is_some(),
-                // Cycle 826: enum keys that previously fell through to
+                // Enum keys that previously fell through to
                 // `_ => true` (silently kept their default on a typo).
                 "focus" => matches!(
                     v.to_ascii_lowercase().as_str(),
@@ -3233,8 +3235,8 @@ impl Config {
                     "off" | "none" | "false" | "auto" | "always"
                 ),
                 "tab-bar-position" | "tab-position" | "tab_position" => {
-                    // Cycle 331 + cycle 628 (Terminator parity,
-                    // terminatorlib/config.py:144 `tab_position` accepts
+                    // Terminator parity (terminatorlib/config.py:144
+                    // `tab_position` accepts
                     // top/left/right/bottom/hidden). kettle accepts top +
                     // bottom natively, treats `hidden` as the well-known
                     // alias for `tab-bar = off` (the separate visibility
@@ -3242,7 +3244,7 @@ impl Config {
                     // render-layer change (Bucket C in docs/TERMINATOR-AUDIT.md);
                     // accepted here so a config copied from Terminator doesn't
                     // fail --check-config, but the runtime falls through to
-                    // top with a log::warn. Cycle 628 added the Terminator-
+                    // top with a log::warn. Also added the Terminator-
                     // spelled `tab-position` / `tab_position` aliases (kettle
                     // canonical is `tab-bar-position`).
                     matches!(
@@ -3268,7 +3270,7 @@ impl Config {
                 // (`liga`, `+calt`, `cv01=2`, etc.). One bad token in
                 // the list is enough to flag — that token's silently
                 // dropped while the rest apply, leaving the user with
-                // a half-applied feature set. Cycle 913 (audit): skip
+                // a half-applied feature set. Skip
                 // empty/whitespace tokens so a trailing comma (`liga,`)
                 // or `liga, , calt` isn't a false-positive — the apply
                 // path already tolerates them (it `if let Some`-skips).
@@ -3284,8 +3286,8 @@ impl Config {
                     .is_some_and(|(n, t)| !n.trim().is_empty() && !t.trim().is_empty()),
                 // `palette = N=#hex` — both halves have to parse.
                 // `palette = N=#hex`: both halves must parse, AND N
-                // must fit the implementation's 0..=15 range. Cycle
-                // 124: indices 16..=255 are documented as belonging
+                // must fit the implementation's 0..=15 range.
+                // Indices 16..=255 are documented as belonging
                 // to the xterm 256-color extension but the runtime
                 // apply path only writes `theme.palette[0..16]`. A
                 // user writing `palette = 200=#ff0000` (expecting
@@ -3296,7 +3298,7 @@ impl Config {
                 // adding runtime support for 16..255 means a much
                 // bigger Theme/renderer refactor.
                 "palette" => {
-                    // Cycle 916 (file-by-file audit): parse_collect accepts BOTH
+                    // parse_collect accepts BOTH
                     // `palette = N=#hex` (single-slot override) AND `palette =
                     // NAME` (a Terminator-style named palette via Theme::find_name
                     // with `_`->` ` fallback). The diagnostic only knew the first
@@ -3311,7 +3313,7 @@ impl Config {
                             || Theme::find_name(&name.replace('_', " ")).is_some()
                     }
                 }
-                // Cycle 309: trigger patterns must be valid regex.
+                // Trigger patterns must be valid regex.
                 // Without this check, a malformed pattern like
                 // `trigger = [unclosed` parses (the config layer
                 // stores it as a plain string), `--check-config`
@@ -3322,8 +3324,8 @@ impl Config {
                 // check-config time so users see the issue before
                 // an event they expected to fire never does.
                 //
-                // Cycle (audit): mirror the apply path's split. A valid
-                // trigger is `REGEX :: command` (cycle 622) where ONLY
+                // Mirror the apply path's split. A valid
+                // trigger is `REGEX :: command` where ONLY
                 // the LHS before the `::` separator is the regex — the
                 // command can contain regex metacharacters freely.
                 // Validating the WHOLE value falsely flagged a line like
@@ -3352,7 +3354,7 @@ impl Config {
     pub fn parse_collect(text: &str) -> (Config, Vec<String>) {
         let mut cfg = Config::default();
         let mut explicit_palette: Vec<(usize, Rgb)> = Vec::new();
-        // Cycle (audit): explicit single-color overrides
+        // Explicit single-color overrides
         // (background / foreground / cursor block + glyph / selection
         // bg + fg) are stashed here during the parse loop and applied
         // AFTER the theme / `explicit_palette` re-apply block below, so
@@ -3368,7 +3370,7 @@ impl Config {
         let mut explicit_selection_bg: Option<Rgb> = None;
         let mut explicit_selection_fg: Option<Rgb> = None;
         let mut unknown: Vec<String> = Vec::new();
-        // Cycle 619: Terminator splits bell into two orthogonal
+        // Terminator splits bell into two orthogonal
         // bools (`visible_bell`, `urgent_bell`). Track them through
         // the parse loop and compose into `cfg.bell` at end-of-parse
         // so the result doesn't OR with kettle's default `Both`.
@@ -3425,12 +3427,12 @@ impl Config {
                 }
                 "font-size" => {
                     // Clamp at parse so `cfg.font_size` matches what the
-                    // renderer will actually use (the cycle-118
-                    // `clamp_font_size` is downstream). Without this,
+                    // renderer will actually use (`clamp_font_size` is
+                    // downstream). Without this,
                     // `--check-config` echoed e.g. `font: ... 500pt`
                     // while the runtime rendered at 72pt — confusing
-                    // diagnostics. Cycle-131 surfaces out-of-range as
-                    // a warning; cycle 139 makes the stored value
+                    // diagnostics. Surfaces out-of-range as
+                    // a warning, and makes the stored value
                     // match reality too. Parse-fail keeps the default.
                     if let Ok(v) = e.value.parse::<f32>()
                         && v.is_finite()
@@ -3457,8 +3459,8 @@ impl Config {
                     // resolves to the safety net, not the default.)
                     // Otherwise `--check-config` would echo
                     // `theme: TokyoNitght Night` while the runtime used a
-                    // different palette — same shape as cycle 139
-                    // (font-size clamp matches runtime). The
+                    // different palette — same shape as the font-size
+                    // clamp above (stored value matches runtime). The
                     // malformed-value diagnostic still flags the typo.
                     if !e.value.trim().is_empty() {
                         cfg.theme = Theme::by_name(&e.value);
@@ -3469,13 +3471,13 @@ impl Config {
                     }
                 }
                 "background" | "background-color" | "background_color" => {
-                    // Cycle 623 (Terminator parity): kettle's canonical key
+                    // Terminator parity: kettle's canonical key
                     // is `background`; `background-color` + `background_color`
                     // are accepted as compatibility aliases so a Terminator
                     // config copies in without rename. Same for `foreground`
                     // and the cursor / fullscreen keys below.
                     //
-                    // Cycle (audit): stash instead of writing
+                    // Stash instead of writing
                     // `cfg.theme.background` in place so a later `theme =`
                     // line can't clobber it (applied post-theme below).
                     if let Some(c) = Rgb::parse(&e.value) {
@@ -3518,7 +3520,7 @@ impl Config {
                     {
                         explicit_palette.push((i, c));
                     } else if !e.value.contains('=') {
-                        // Cycle 692 (Terminator parity, palette
+                        // Terminator parity (palette
                         // named-preset alias): Terminator accepts
                         // `palette = solarized_dark` as a named
                         // preset that picks the whole 16-slot
@@ -3529,7 +3531,7 @@ impl Config {
                         // shorthand for `theme = NAME` (best-
                         // effort: `solarized_dark` → `Solarized
                         // Darcula` or the closest bundled match
-                        // via the cycle-176 case-insensitive
+                        // via the case-insensitive
                         // find_name).
                         let v = e.value.trim();
                         // Try direct match first, then underscore
@@ -3562,7 +3564,7 @@ impl Config {
                     if v == "infinite" || v == "unlimited" || v == "0" {
                         cfg.scrollback = INFINITE_SCROLLBACK;
                     } else if let Ok(n) = v.parse::<usize>() {
-                        // Clamp at `INFINITE_SCROLLBACK` (cycle 133): a
+                        // Clamp at `INFINITE_SCROLLBACK`: a
                         // user with `scrollback = 100000000` would have
                         // allocated ~250 GB of history rows on the
                         // first PTY. The docstring on the constant
@@ -3578,7 +3580,7 @@ impl Config {
                         cfg.scrollback_bytes = n.min(MAX_SCROLLBACK_BYTES);
                     }
                 }
-                // Cycle 862 (audit): accept the bare `padding-x`/`-y` spellings
+                // Accept the bare `padding-x`/`-y` spellings
                 // as aliases. The malformed-value diagnostic already listed them
                 // as valid keys, so without these aliases a bare `padding-x`
                 // both passed `--check-config` AND warned "unrecognized key"
@@ -3614,20 +3616,20 @@ impl Config {
                     }
                 }
                 "cursor-style" | "cursor-shape" | "cursor_shape" => {
-                    // Cycle 623 (Terminator parity): Terminator's
+                    // Terminator parity: Terminator's
                     // `cursor_shape` is kettle's `cursor-style`. Same
                     // enum values (`block` / `underline` / `bar`).
                     cfg.cursor_style = match e.value.to_ascii_lowercase().as_str() {
                         "underline" => CursorStyle::Underline,
                         // `beam` is Alacritty's name for the same
-                        // vertical-bar cursor; cycle 142 added the
-                        // alias so Alacritty refugees don't get a
+                        // vertical-bar cursor; the
+                        // alias was added so Alacritty refugees don't get a
                         // silent Block fallback.
                         "bar" | "beam" | "ibeam" | "i-beam" => CursorStyle::Bar,
                         _ => CursorStyle::Block,
                     }
                 }
-                // Cycle 138: every boolean config key used `e.value !=
+                // Every boolean config key used `e.value !=
                 // "false"`, which silently treated "no" / "off" / "0" /
                 // "disabled" as `true` (because they're not the literal
                 // string "false"). A user writing `cursor-style-blink =
@@ -3639,7 +3641,7 @@ impl Config {
                 // the standard true/false aliases. Bad values keep the
                 // current value (no silent flip).
                 "cursor-style-blink" | "cursor-blink" | "cursor_blink" => {
-                    // Cycle 623 (Terminator parity, config.py:165
+                    // Terminator parity (config.py:165
                     // `cursor_blink`): Terminator's bool maps to
                     // kettle's `cursor-style-blink`. Default true
                     // matches both.
@@ -3648,7 +3650,7 @@ impl Config {
                     }
                 }
                 "bell" => {
-                    // Cycle 146: lowercase the value so `bell = OFF`
+                    // Lowercase the value so `bell = OFF`
                     // matches `bell = off`. Pre-fix any non-lowercase
                     // spelling silently fell into the catchall (→
                     // BellMode::Both). Same shape applied to the four
@@ -3680,10 +3682,10 @@ impl Config {
                     }
                 }
                 "tab-bar-position" | "tab-position" | "tab_position" => {
-                    // Cycle 331 + cycle 628 (Terminator parity,
-                    // terminatorlib/config.py:144 `tab_position`). Terminator
+                    // Terminator parity (terminatorlib/config.py:144
+                    // `tab_position`). Terminator
                     // accepts top/left/right/bottom/hidden. kettle:
-                    //   - `top` / `bottom`: native (cycle-X).
+                    //   - `top` / `bottom`: native.
                     //   - `hidden`: alias to `tab-bar = off` (the kettle
                     //     visibility-vs-position split — different keys).
                     //   - `left` / `right`: vertical tab bars require a
@@ -3710,13 +3712,13 @@ impl Config {
                     }
                 }
                 "borderless" => {
-                    // Cycle 332 (Terminator parity).
+                    // Terminator parity.
                     if let Some(b) = parse_bool(&e.value) {
                         cfg.borderless = b;
                     }
                 }
                 "always-on-top" | "always_on_top" => {
-                    // Cycle 332 (Terminator parity).
+                    // Terminator parity.
                     if let Some(b) = parse_bool(&e.value) {
                         cfg.always_on_top = b;
                     }
@@ -3849,7 +3851,7 @@ impl Config {
                         "always" => AskBeforeClosing::Always,
                         "never" => AskBeforeClosing::Never,
                         // Explicit so `--check-config` can tell a real value from
-                        // a typo (cycle 862, audit) instead of silently mapping
+                        // a typo instead of silently mapping
                         // everything to the default.
                         "multiple" | "multiple-terminals" | "multiple_terminals" => {
                             AskBeforeClosing::MultipleTerminals
@@ -3935,12 +3937,12 @@ impl Config {
                         cfg.use_custom_command = b;
                     }
                 }
-                // Cycle 699 Terminator parity
+                // Terminator parity
                 // (terminatorlib/config.py `enabled_plugins`):
                 // VTE plugin list. kettle's plugin model is
-                // cycle-324 Lua (loaded from `~/.config/kettle/
+                // Lua (loaded from `~/.config/kettle/
                 // kettle.lua` + per-profile `*.lua` siblings) +
-                // cycle-611 menu-item config keys. The Terminator
+                // menu-item config keys. The Terminator
                 // key is accepted without effect so a copied
                 // config doesn't trigger `--check-config` warnings.
                 "enabled-plugins" | "enabled_plugins" => {}
@@ -4049,7 +4051,7 @@ impl Config {
                     }
                 }
                 "full-screen" | "full_screen" => {
-                    // Cycle 623 (Terminator parity, config.py:159
+                    // Terminator parity (config.py:159
                     // `full_screen`): Terminator splits "should start
                     // fullscreen" into its own bool while kettle uses
                     // `window-state = fullscreen`. Compat alias: when
@@ -4081,7 +4083,7 @@ impl Config {
                     }
                 }
                 "audible-bell" | "audible_bell" => {
-                    // Cycle 626 (Terminator parity, config.py:214
+                    // Terminator parity (config.py:214
                     // `audible_bell`): kettle ships no audio bell
                     // surface yet (visual + window-attention only),
                     // so this key parses but is otherwise a Bucket E
@@ -4090,12 +4092,12 @@ impl Config {
                     // unknown-key warning at --check-config time).
                     // If a user wants the bell to fire, they should
                     // set `bell = attention` / `bell = visual` or
-                    // the cycle-619 `urgent_bell` / `visible_bell`
+                    // the `urgent_bell` / `visible_bell`
                     // compat aliases.
                     let _ = parse_bool(&e.value);
                 }
                 "visible-bell" | "visible_bell" => {
-                    // Cycle 619 (Terminator parity, config.py:215).
+                    // Terminator parity (config.py:215).
                     // Terminator splits bell into two orthogonal
                     // bools while kettle uses a unified enum; track
                     // the Terminator pair separately and compose at
@@ -4106,13 +4108,13 @@ impl Config {
                     }
                 }
                 "urgent-bell" | "urgent_bell" => {
-                    // Cycle 619 (Terminator parity, config.py:216).
+                    // Terminator parity (config.py:216).
                     if let Some(b) = parse_bool(&e.value) {
                         terminator_urgent_bell = Some(b);
                     }
                 }
                 "theme-mode" | "theme_mode" => {
-                    // Cycle 641 (Terminator parity, `plugins/auto_theme.py`).
+                    // Terminator parity (`plugins/auto_theme.py`).
                     // `system` / `follow-system` are accepted aliases because
                     // winit's window theme event is now the OS-following path.
                     cfg.theme_mode = match e.value.trim().to_ascii_lowercase().as_str() {
@@ -4123,13 +4125,13 @@ impl Config {
                     };
                 }
                 "theme-schedule" | "theme_schedule" => {
-                    // Cycle 664 (sub-cycle 4 of auto-theme design):
+                    // Phase 4 of the auto-theme design:
                     // `theme-schedule = HH:MM dark, HH:MM light`
                     // (whitespace flexible). The dark + light are
                     // role tags; either can come first. Garbage
                     // values leave theme_schedule as None.
                     //
-                    // Cycle 669 (sub-cycle 6): `theme-schedule =
+                    // Phase 6 of the auto-theme design: `theme-schedule =
                     // sunrise/sunset` enables the lat/long-driven
                     // variant. The lat/long come from the
                     // theme-schedule-lat + theme-schedule-long
@@ -4156,7 +4158,7 @@ impl Config {
                     }
                 }
                 "tab-bar-width" | "tab_bar_width" => {
-                    // Cycle 673 (vertical-tabs sub-cycle 7).
+                    // Phase 7 of the vertical-tabs design.
                     if let Ok(v) = e.value.trim().parse::<f32>()
                         && v.is_finite()
                     {
@@ -4402,8 +4404,8 @@ impl Config {
                 }
                 "accent-color" | "accent_color" => {
                     // `auto` = Peacock: vary the accent per working directory
-                    // and per window (the default since the multi-window
-                    // cycle). `theme` / `off` / `none` opt OUT — every window
+                    // and per window (the default since multi-window support
+                    // landed). `theme` / `off` / `none` opt OUT — every window
                     // uses the theme's static signature accent. A hex pins an
                     // explicit color (and skips the live dedupe).
                     let v = e.value.trim();
@@ -4440,7 +4442,7 @@ impl Config {
                         cfg.command_notify_threshold_ms = v.min(86_400_000);
                     }
                 }
-                // Cycle 699 Terminator parity
+                // Terminator parity
                 // (terminatorlib/config.py `copy_on_selection`):
                 // VTE per-profile "auto-copy selection to PRIMARY
                 // clipboard". Maps 1:1 onto kettle's existing
@@ -4468,7 +4470,7 @@ impl Config {
                         };
                     }
                 }
-                // Cycle 918: opt IN to restoring the last session on launch
+                // Opt IN to restoring the last session on launch
                 // (off by default — fresh windows, mainstream behavior).
                 "restore-session" | "restore_session" => {
                     if let Some(b) = parse_bool(&e.value) {
@@ -4485,7 +4487,7 @@ impl Config {
                         cfg.scroll_on_output = b;
                     }
                 }
-                // Cycle 698 Terminator parity
+                // Terminator parity
                 // (terminatorlib/config.py:249 `mouse_autohide`):
                 // VTE auto-hides the pointer while typing. kettle's
                 // existing `mouse_hide_while_typing` semantics
@@ -4516,7 +4518,7 @@ impl Config {
                         }
                     }
                 }
-                // Cycle 699 Terminator parity (terminatorlib/
+                // Terminator parity (terminatorlib/
                 // config.py `custom_command` + `use_custom_command`):
                 // VTE per-profile "run a specific command instead
                 // of the user's default shell". kettle's existing
@@ -4526,7 +4528,8 @@ impl Config {
                 // back to $SHELL.
                 "command" | "shell" | "custom_command" | "custom-command" => {
                     // Empty `command =` is "reset to default" (same
-                    // shape as cycle 121's font-family fix). Without
+                    // shape as the font-family empty-value handling
+                    // above). Without
                     // this, `Some("")` slips through to `shell_argv`
                     // which would spawn an empty program name and
                     // either fail with an unclear error or — worse —
@@ -4542,7 +4545,7 @@ impl Config {
                     // so they don't sneak into the runtime list and
                     // surface as an empty launcher row or a connection
                     // to "". `--check-config` already FLAGS these
-                    // (detect_malformed_values, cycle 88), but the
+                    // (detect_malformed_values), but the
                     // bad entries were still being pushed — the
                     // diagnostic and the runtime state disagreed.
                     if let Some((name, target)) = e.value.split_once('=') {
@@ -4553,8 +4556,8 @@ impl Config {
                     }
                 }
                 "trigger" => {
-                    // Cycle 289 base: `trigger = REGEX` fires Urgency.
-                    // Cycle 622 (Terminator parity, run_cmd_on_match.py):
+                    // Base: `trigger = REGEX` fires Urgency.
+                    // Terminator parity (run_cmd_on_match.py):
                     // `trigger = REGEX :: cmd arg1 arg2` extends the
                     // syntax with a `::` separator (two colons —
                     // chosen over `|` because pipe is a regex
@@ -4579,10 +4582,10 @@ impl Config {
                     }
                 }
                 "menu-item" | "menu_item" => {
-                    // Cycle 611 (Terminator parity, custom_commands.py):
+                    // Terminator parity (custom_commands.py):
                     // `menu-item = LABEL = CMD` appends a right-click
                     // menu entry that writes `CMD\n` to the focused
-                    // PTY on click. The cycle-X line-parser already
+                    // PTY on click. The config line-parser already
                     // consumed the first `=` to split key/value, so
                     // here we split `e.value` on the FIRST `=` again
                     // to get label vs command. A label with no `=`
@@ -4605,7 +4608,7 @@ impl Config {
         }
         for (i, c) in explicit_palette {
             if i < 16 {
-                // Cycle 942 (audit): a DERIVED accent (a theme without an
+                // A DERIVED accent (a theme without an
                 // explicit `accent` line snapshots `palette[4]` at parse
                 // time) must follow a config-level `palette = 4=#hex`
                 // override; an explicit theme accent (different from
@@ -4618,7 +4621,7 @@ impl Config {
                 cfg.theme.palette[i] = c;
             }
         }
-        // Cycle (audit): apply explicit single-color overrides AFTER the
+        // Apply explicit single-color overrides AFTER the
         // theme + palette re-apply above so they're order-independent —
         // `background = #ff0000` keeps the red whether the `theme =`
         // line comes before or after it. Precedence (highest first):
@@ -4641,7 +4644,7 @@ impl Config {
         if let Some(c) = explicit_selection_fg {
             cfg.theme.selection_foreground = c;
         }
-        // Cycle 619 (Terminator parity, config.py:215-216):
+        // Terminator parity (config.py:215-216):
         // compose `visible_bell` + `urgent_bell` into kettle's
         // unified `BellMode` when EITHER appears in the config
         // AND the canonical `bell =` was NOT explicitly set
@@ -4665,7 +4668,7 @@ impl Config {
             };
             cfg.bell = v.compose(u);
         }
-        // Cycle 613 (Terminator parity, terminatorlib/config.py
+        // Terminator parity (terminatorlib/config.py
         // `force_no_bell`): post-process override. When
         // `force_no_bell = true`, force the bell mode to Off
         // regardless of the `bell` config key. Equivalent to
@@ -4677,7 +4680,7 @@ impl Config {
         if cfg.force_no_bell {
             cfg.bell = BellMode::Off;
         }
-        // Cycle 699 (Terminator parity, terminatorlib/config.py
+        // Terminator parity (terminatorlib/config.py
         // `use_custom_command`): when false, ignore any
         // `custom_command` / `command` / `shell` value — Terminator
         // semantics let you keep `custom_command` defined in the
@@ -4686,7 +4689,7 @@ impl Config {
         if !cfg.use_custom_command {
             cfg.shell = None;
         }
-        // Cycle 669: patch the SunriseSunset variant with the
+        // Patch the SunriseSunset variant with the
         // parsed lat/long now that both halves of the config
         // are read. If lat OR long is missing, downgrade the
         // schedule to None (sunrise mode needs both halves).
@@ -4769,7 +4772,7 @@ mod config_tests {
 
     #[test]
     fn example_config_in_docs_uncommented_parses_with_zero_diagnostics() {
-        // Cycle-100: docs/kettle.example.config used to document 9 of the
+        // docs/kettle.example.config used to document 9 of the
         // ~35 settable keys. After the expansion it documents every key
         // the parser knows about; this test catches docs drift by
         // strip-commenting every `# key = value` line in the example and
@@ -4827,8 +4830,8 @@ mod config_tests {
         );
     }
 
-    /// Cycle 905 (audit): every config key documented in `docs/CONFIG.md`'s
-    /// Keys table that this cycle back-filled must be a key the parser actually
+    /// Every config key documented in `docs/CONFIG.md`'s
+    /// Keys table must be a key the parser actually
     /// recognizes — otherwise the docs claim a key that does nothing. Feeds a
     /// valid `key = value` for each and asserts the parser reports no unknown
     /// keys. (The example config has its own broader round-trip guard above.)
@@ -4872,7 +4875,7 @@ cell-height = 1.2\n";
         );
     }
 
-    /// Cycle 960 (audit): user-facing config docs must not regress shipped keys
+    /// User-facing config docs must not regress shipped keys
     /// back into the future-work table, and the main Keys table should not
     /// duplicate a primary row name.
     #[test]
@@ -4947,26 +4950,28 @@ cell-height = 1.2\n";
 
     #[test]
     fn user_facing_docs_have_no_internal_cycle_refs() {
-        // Cycle 168 caught the audit-trail-in-doc-string issue on the
-        // clap CLI surface (`kettle --help` was emitting "(cycle 103)"
-        // / "(cycle 106)" parentheticals — mysterious to end users).
-        // Cycle 172 extends the drift guard to the user-facing markdown
+        // This guard catches the audit-trail-in-doc-string issue on the
+        // clap CLI surface (`kettle --help` was emitting internal
+        // parenthetical annotations — mysterious to end users).
+        // The drift guard also covers the user-facing markdown
         // docs the README links to: CONFIG.md (config reference) and
         // INSTALL.md (per-OS install + from-source). README itself
-        // mentions the word "cycle" in legitimate prose ("cycle the
-        // themes at runtime", "the audit-cycle pattern"), so the
-        // check has to be tighter than "contains 'cycle '" — match
-        // the internal-ref shape `cycle <digit>` instead.
+        // mentions the word "cycle" in legitimate prose (e.g. "cycle
+        // the themes at runtime"), so the check has to be tighter
+        // than "contains 'cycle '" — match the internal-ref shape
+        // `cycle <digit>` instead.
         //
         // TESTING.md and ROADMAP.md are intentionally exempt — they're
-        // contributor-leaning docs where cycle refs serve as anchors
-        // to specific CHANGELOG entries, the same way they do in code
-        // comments. CONTRIBUTING.md documents the cycle-N pattern
-        // itself, so a literal reference there is part of the content.
+        // contributor-leaning docs where internal reference markers
+        // serve as anchors to specific CHANGELOG entries, the same way
+        // they do in code comments. CONTRIBUTING.md originally worked
+        // the same way, since it documented that marker format
+        // directly and a literal instance there was part of the
+        // content.
         //
-        // Cycle 179 also flags hardcoded `<N> workspace tests` /
-        // `<N> tests across` claims — these go stale every cycle
-        // (TESTING.md / ARCHITECTURE.md / INSTALL.md each had one
+        // This guard also flags hardcoded `<N> workspace tests` /
+        // `<N> tests across` claims — these go stale as the suite
+        // grows (TESTING.md / ARCHITECTURE.md / INSTALL.md each had one
         // that was off by 30-120 tests at the time of the audit).
         // Range-stable phrasings ("230+ tests", "an extensive
         // suite") don't drift; this guard fails the next time a
@@ -4977,36 +4982,35 @@ cell-height = 1.2\n";
             "README.md",
             "docs/CONFIG.md",
             "docs/INSTALL.md",
-            // Cycle 474: the example config is user-facing through
+            // The example config is user-facing through
             // `kettle --print-default-config > ~/.config/kettle/config`.
-            // Cycle refs inside it would leak into every user's
-            // bootstrap file — same drift-guard reasoning as the
+            // Internal reference markers inside it would leak into every
+            // user's bootstrap file — same drift-guard reasoning as the
             // markdown docs above.
             "docs/kettle.example.config",
-            // Cycle 475: the man page is user-facing via `man kettle`
-            // (cycle 282 + cycle 414 + cycle 436 land entries). Same
-            // reasoning — internal cycle refs leak into user-visible
-            // documentation.
+            // The man page is user-facing via `man kettle`. Same
+            // reasoning — internal reference markers leak into
+            // user-visible documentation.
             "packaging/linux/kettle.1",
-            // Cycle 596: SECURITY.md is user-facing via GitHub's
+            // SECURITY.md is user-facing via GitHub's
             // /security tab + the repo root listing. It already uses
-            // the hyphenated `cycle-NNN` form (per cycles 583 + 588's
-            // resource-cap documentation pass), which passes the
+            // the hyphenated `cycle-NNN` form, which passes the
             // space-digit scan below — adding the doc to the scan
             // list makes future drift explicit. Past contributors
             // shouldn't have to remember "SECURITY.md is user-facing,
-            // don't write `cycle 583` there".
+            // don't write `cycle NNN` there".
             "SECURITY.md",
-            // Cycle 741: docs/ARCHITECTURE.md + CONTRIBUTING.md were
-            // outside the scanned set when the cycle-179 guard was
+            // docs/ARCHITECTURE.md + CONTRIBUTING.md were
+            // outside the scanned set when this guard was
             // first introduced — they were considered developer-
-            // facing. After the cycle-741 doc cleanup pass both files
+            // facing. After a later doc cleanup pass both files
             // were re-scrubbed to leave only proper-noun hyphenated
-            // refs (`cycle-117 palette_includes_...` etc.), which
+            // refs (pointing at test names like
+            // `palette_includes_every_user_facing_action`), which
             // pass the space-digit scan. Adding them to the scan list
             // makes future regressions explicit at PR review time so
-            // a stray `(cycle 742)` parenthetical doesn't drift back
-            // into the prose.
+            // a stray internal-reference parenthetical doesn't drift
+            // back into the prose.
             "docs/ARCHITECTURE.md",
             "CONTRIBUTING.md",
         ] {
@@ -5032,7 +5036,7 @@ cell-height = 1.2\n";
                     );
                 }
             }
-            // Hardcoded test-count claims drift every cycle. Detect
+            // Hardcoded test-count claims drift over time. Detect
             // `<digit> workspace tests` and `<digit> tests across`
             // — the "230+" / "an extensive suite" phrasings don't
             // trigger because they don't have a digit immediately
@@ -5049,7 +5053,7 @@ cell-height = 1.2\n";
                         }
                         panic!(
                             "hardcoded test count in user-facing doc {} \
-                             (drifts every cycle — reword as `230+ tests` \
+                             (drifts over time — reword as `230+ tests` \
                              or `an extensive suite`): `{}`",
                             rel,
                             &text[start..(i + stale.len()).min(text.len())],
@@ -5060,13 +5064,172 @@ cell-height = 1.2\n";
         }
     }
 
+    #[test]
+    fn no_internal_cycle_refs_anywhere() {
+        // The repo's early development wove numbered audit bookkeeping
+        // markers through code comments, docs, scripts, and build
+        // files. Those markers were removed wholesale — provenance
+        // lives in git history and CHANGELOG.md, whose historical
+        // entries are the record the old markers pointed into (and
+        // which is therefore the one deliberate exemption below).
+        // This guard keeps the shapes from drifting back into any
+        // living source: it walks every workspace Rust file plus the
+        // doc/script/packaging text surfaces and fails on the numbered
+        // form (the marker word + space or hyphen + digits), the
+        // placeholder form (marker word + space or hyphen + a
+        // standalone `x`), and the `sub-`-prefixed form.
+        //
+        // The marker word is assembled at runtime so this test's own
+        // source cannot match itself.
+        let word_owned: String = ["cy", "cle"].concat();
+        let word = word_owned.as_bytes();
+
+        fn line_of(text: &[u8], off: usize) -> usize {
+            1 + text[..off].iter().filter(|&&b| b == b'\n').count()
+        }
+
+        let scan = |path: &std::path::Path, offenders: &mut Vec<String>| {
+            let Ok(raw) = std::fs::read(path) else {
+                return;
+            };
+            let lower: Vec<u8> = raw.iter().map(|b| b.to_ascii_lowercase()).collect();
+            for (i, w) in lower.windows(word.len()).enumerate() {
+                if w != word {
+                    continue;
+                }
+                // The plural form ("<word>s 331-410") is banned the
+                // same as the singular, so skip an optional `s`
+                // before looking at the separator.
+                let mut after = &lower[i + word.len()..];
+                if after.first() == Some(&b's') {
+                    after = &after[1..];
+                }
+                let numbered_or_placeholder = match (after.first(), after.get(1)) {
+                    (Some(&s), Some(&c)) if s == b' ' || s == b'-' => {
+                        c.is_ascii_digit()
+                            || (c == b'x'
+                                && !after.get(2).is_some_and(|b| b.is_ascii_alphanumeric()))
+                    }
+                    _ => false,
+                };
+                let sub_prefixed = i >= 4 && &lower[i - 4..i] == b"sub-";
+                if numbered_or_placeholder || sub_prefixed {
+                    let end = (i + 40).min(raw.len());
+                    offenders.push(format!(
+                        "{}:{}: {}",
+                        path.display(),
+                        line_of(&raw, i),
+                        String::from_utf8_lossy(&raw[i.saturating_sub(4)..end]).trim()
+                    ));
+                }
+            }
+        };
+
+        fn walk(dir: &std::path::Path, visit: &mut dyn FnMut(&std::path::Path)) {
+            let Ok(entries) = std::fs::read_dir(dir) else {
+                return;
+            };
+            for entry in entries.flatten() {
+                let p = entry.path();
+                if p.is_dir() {
+                    let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                    if name != "target" && name != ".git" {
+                        walk(&p, visit);
+                    }
+                } else {
+                    visit(&p);
+                }
+            }
+        }
+
+        let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let repo_root = manifest.join("../..");
+        let mut offenders: Vec<String> = Vec::new();
+
+        // Binary assets are the only skip class — everything textual
+        // is fair game, including extensionless files like the
+        // pre-commit hook and templated packaging inputs.
+        let is_binary = |p: &std::path::Path| {
+            let ext = p
+                .extension()
+                .and_then(|e| e.to_str())
+                .unwrap_or("")
+                .to_ascii_lowercase();
+            matches!(
+                ext.as_str(),
+                "png"
+                    | "jpg"
+                    | "jpeg"
+                    | "gif"
+                    | "ico"
+                    | "icns"
+                    | "bmp"
+                    | "ttf"
+                    | "otf"
+                    | "woff"
+                    | "woff2"
+                    | "zip"
+                    | "gz"
+                    | "tar"
+                    | "bin"
+                    | "exe"
+                    | "dll"
+            )
+        };
+
+        // Every Rust source and manifest in the workspace, including
+        // build scripts and integration tests.
+        walk(&repo_root.join("crates"), &mut |p| {
+            let ext = p.extension().and_then(|e| e.to_str()).unwrap_or("");
+            if ext == "rs" || ext == "toml" {
+                scan(p, &mut offenders);
+            }
+        });
+
+        // Living text surfaces. CHANGELOG.md is deliberately absent.
+        for rel in [
+            "README.md",
+            "CONTRIBUTING.md",
+            "SECURITY.md",
+            "CODE_OF_CONDUCT.md",
+            "AGENTS.md",
+            "CLAUDE.md",
+            "Justfile",
+            "flake.nix",
+            "Cargo.toml",
+            "deny.toml",
+            ".gitignore",
+            ".gitattributes",
+        ] {
+            let p = repo_root.join(rel);
+            if p.exists() {
+                scan(&p, &mut offenders);
+            }
+        }
+        for dir in ["docs", "scripts", "packaging", ".github", ".githooks"] {
+            walk(&repo_root.join(dir), &mut |p| {
+                if !is_binary(p) {
+                    scan(p, &mut offenders);
+                }
+            });
+        }
+
+        assert!(
+            offenders.is_empty(),
+            "internal audit-marker references must not reappear outside \
+             CHANGELOG.md; reword the rationale in timeless prose (see \
+             CONTRIBUTING.md):\n{}",
+            offenders.join("\n")
+        );
+    }
+
     // ────────────────────────────────────────────────────────────
-    // Cycle 235: consolidated drift guards for user-facing markdown.
+    // Consolidated drift guards for user-facing markdown.
     //
-    // Cycles 223/224 (image guard) and 232/233 (link guard) had
+    // The image guard and the link guard had
     // near-identical byte-walking scanners that differed only in
-    // which kind of `[…](path)` they matched. Cycle 233 added
-    // backtick-awareness to the link scanner; cycle 234 propagated
+    // which kind of `[…](path)` they matched. An earlier pass added
+    // backtick-awareness to the link scanner; a follow-up propagated
     // the same fix to the image scanner. With both behaviorally
     // identical except for the `!` prefix, consolidating into one
     // shared callback-driven walker is a clean refactor.
@@ -5172,9 +5335,9 @@ cell-height = 1.2\n";
 
     #[test]
     fn user_facing_doc_images_exist() {
-        // See `walk_md_refs` for the rationale. Cycle 223 introduced
-        // the README guard; 224 extended to docs/*.md; 234 added
-        // backtick-awareness; 235 consolidated with the link guard.
+        // See `walk_md_refs` for the rationale. An earlier pass introduced
+        // the README guard, later extended to docs/*.md, then added
+        // backtick-awareness, and finally consolidated with the link guard.
         let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
         let repo_root = manifest.join("../..");
         let mut readme_image_count = 0usize;
@@ -5193,7 +5356,7 @@ cell-height = 1.2\n";
                 assert!(
                     abs.exists(),
                     "{file_rel} references image `{path}` but `{}` does \
-                     not exist (cycle 223/224 drift guard)",
+                     not exist",
                     abs.display()
                 );
                 if file_rel == "README.md" {
@@ -5201,7 +5364,7 @@ cell-height = 1.2\n";
                 }
             });
         }
-        // Cycle 223's contract: README has at least one image embed.
+        // Contract: README has at least one image embed.
         assert!(
             readme_image_count >= 1,
             "expected ≥ 1 image embed in README; found {readme_image_count} \
@@ -5211,8 +5374,8 @@ cell-height = 1.2\n";
 
     #[test]
     fn user_facing_doc_md_cross_links_resolve() {
-        // See `walk_md_refs`. Cycle 232 introduced this; 233 made it
-        // backtick-aware; 235 consolidated with the image guard.
+        // See `walk_md_refs`. This guard was introduced for links, later
+        // made backtick-aware, then consolidated with the image guard.
         let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
         let repo_root = manifest.join("../..");
         let mut readme_link_count = 0usize;
@@ -5236,8 +5399,7 @@ cell-height = 1.2\n";
                 let abs = parent.join(no_frag);
                 assert!(
                     abs.exists(),
-                    "{file_rel} links to `{path}` but `{}` does not exist \
-                     (cycle 232 drift guard)",
+                    "{file_rel} links to `{path}` but `{}` does not exist",
                     abs.display()
                 );
                 if file_rel == "README.md" {
@@ -5245,7 +5407,7 @@ cell-height = 1.2\n";
                 }
             });
         }
-        // Cycle 232's contract: README has ≥ 3 .md cross-links.
+        // Contract: README has ≥ 3 .md cross-links.
         assert!(
             readme_link_count >= 3,
             "expected ≥ 3 .md cross-links in README; found {readme_link_count} \
@@ -5255,11 +5417,10 @@ cell-height = 1.2\n";
 
     #[test]
     fn workspace_metadata_policy() {
-        // Cycle 226 (extends cycles 213/218/225): the workspace
-        // pins one source of truth for every `[package]` field
-        // shared across crates, and the cycle-218 description
-        // override has its own rule. This guard prevents a
-        // "tidying" cycle from accidentally inverting either
+        // The workspace pins one source of truth for every `[package]` field
+        // shared across crates, and the description
+        // override below has its own rule. This guard prevents a
+        // "tidying" pass from accidentally inverting either
         // shape — every libary inherits, binary inherits except
         // description, every shared field actually inherits.
         //
@@ -5288,13 +5449,13 @@ cell-height = 1.2\n";
             assert!(
                 root.contains(field),
                 "workspace.package is missing the `{field}` line — \
-                 cycle 226 contract requires every shared metadata \
+                 this contract requires every shared metadata \
                  field to live in workspace.package"
             );
         }
 
         // 2) every crate inherits each field via `.workspace = true`.
-        // Description is the exception (library override; see cycle 218).
+        // Description is the exception (library override, verified below).
         let crates = [
             ("kettle-config", true),
             ("kettle-core", true),
@@ -5317,7 +5478,7 @@ cell-height = 1.2\n";
             ] {
                 assert!(
                     text.contains(inherit),
-                    "{name}: missing `{inherit}` — cycle 226 contract \
+                    "{name}: missing `{inherit}` — this contract \
                      requires every crate to inherit this field from \
                      workspace.package"
                 );
@@ -5327,12 +5488,12 @@ cell-height = 1.2\n";
                 assert!(
                     text.contains("\ndescription = \"kettle: "),
                     "{name}: library must override description with \
-                     `description = \"kettle: …\"` (cycle 218)"
+                     `description = \"kettle: …\"`"
                 );
                 assert!(
                     !text.contains("description.workspace = true"),
                     "{name}: library must NOT inherit description \
-                     (cycle 218 — would emit binary's blurb)"
+                     (would otherwise emit the binary's blurb)"
                 );
             } else {
                 // Binary: inherits description.
@@ -5340,13 +5501,13 @@ cell-height = 1.2\n";
                     text.contains("description.workspace = true"),
                     "kettle (binary): keeps `description.workspace = true` \
                      so the workspace blurb stays the single source of \
-                     truth for the binary's blurb (cycle 218)"
+                     truth for the binary's blurb"
                 );
             }
         }
     }
 
-    /// Cycle 918: session restore is OPT-IN (fresh windows by default, like
+    /// Session restore is OPT-IN (fresh windows by default, like
     /// mainstream terminals). Pin the default + that the bool key parses both
     /// spellings, so a regression to always-restore is caught.
     #[test]
@@ -5425,7 +5586,7 @@ cell-height = 1.2\n";
 
     #[test]
     fn default_path_falls_through_empty_env_vars() {
-        // Cycle 181 (sibling to cycle 180): `XDG_CONFIG_HOME=""`
+        // `XDG_CONFIG_HOME=""`
         // (stripped CI container, misconfigured unset/export) used to
         // return `Some(PathBuf::from(""))` from the first arm, and the
         // final path became `"kettle/config"` — a *relative* path that
@@ -5451,7 +5612,7 @@ cell-height = 1.2\n";
             Config::default_path_from(from(&[("XDG_CONFIG_HOME", "/x")])),
             Some(PathBuf::from("/x").join("kettle").join("config")),
         );
-        // Cycle 918 (config split-brain): the non-XDG fallback is now per-OS.
+        // Config split-brain fix: the non-XDG fallback is now per-OS.
         // On Unix, XDG empty + HOME set → `$HOME/.config/kettle/config`.
         #[cfg(not(windows))]
         assert_eq!(
@@ -5513,7 +5674,7 @@ cell-height = 1.2\n";
             ])),
             Some(PathBuf::from("/x").join("kettle").join("config")),
         );
-        // All set-but-empty → None (rather than the pre-cycle relative
+        // All set-but-empty → None (rather than the previous relative
         // `"kettle/config"`).
         assert_eq!(
             Config::default_path_from(from(&[
@@ -5529,13 +5690,13 @@ cell-height = 1.2\n";
 
     #[test]
     fn theme_name_matches_the_actually_loaded_palette() {
-        // Cycle 176: pre-fix, `parse_collect` did
+        // Pre-fix, `parse_collect` did
         //   cfg.theme_name = e.value.clone();      // typo preserved
         //   cfg.theme = Theme::by_name(&e.value);  // silent fallback
         // so a typo'd theme name had `--check-config` print
         // `theme: TokyoNitght Night` while the runtime used
         // TokyoNight Night's palette. Same docs/runtime mismatch shape
-        // as cycle 139 (font-size). Now: store the canonical bundled
+        // as the font-size fix. Now: store the canonical bundled
         // name (with original casing) when the lookup matches; leave
         // `theme_name` at the prior default when it misses.
         //
@@ -5567,7 +5728,7 @@ cell-height = 1.2\n";
 
     #[test]
     fn empty_value_resets_string_keys_to_their_default() {
-        // Cycle-121 contract. parse.rs's docstring promised "empty
+        // Contract: parse.rs's docstring promised "empty
         // value resets the key" but parse_collect unconditionally
         // assigned `cfg.font_family = e.value.clone()`, so a
         // `font-family =` line silently emptied the font name and
@@ -5617,7 +5778,7 @@ cell-height = 1.2\n";
         // skip-form is cheaper to implement and harder to mis-use.
         // (Users wanting a reset can simply remove the line.)
 
-        // Cycle 122 additions:
+        // Empty-value handling for `command`:
         // `command =` (empty) clears the override to None so the
         // engine falls back to the user's $SHELL — previously
         // Some("") slipped through to shell_argv and produced an
@@ -5630,7 +5791,7 @@ cell-height = 1.2\n";
         );
 
         // ssh-host with an empty name or empty target is silently
-        // dropped (matches detect_malformed_values — cycle 88 — which
+        // dropped (matches detect_malformed_values, which
         // flagged these for --check-config but the runtime list
         // still contained them).
         let c = Config::parse_text(
@@ -5795,7 +5956,7 @@ cell-height = 1.2\n";
 
     #[test]
     fn font_feature_tag_is_lowercased() {
-        // Cycle 169: OpenType feature tags are case-sensitive per spec and
+        // OpenType feature tags are case-sensitive per spec and
         // every standard tag is lowercase (`liga`, `clig`, `calt`, `cv01`,
         // `ss05`…). A user writing `font-feature = LIGA on` had their tag
         // stored verbatim as uppercase. Two consequences flowed from
@@ -5989,7 +6150,7 @@ cell-height = 1.2\n";
 
     #[test]
     fn borderless_and_always_on_top_parse() {
-        // Cycle 332 drift guard. Terminator's `borderless` +
+        // Drift guard for Terminator's `borderless` +
         // `always_on_top` config keys (terminatorlib/config.py:75
         // + 78). kettle accepts both true/false + the standard
         // `parse_bool` truthy/falsy aliases.
@@ -6077,7 +6238,7 @@ cell-height = 1.2\n";
 
     #[test]
     fn render_and_copy_bools_parse() {
-        // Cycle 333 drift guard. allow_bold defaults true (Terminator
+        // Drift guard: allow_bold defaults true (Terminator
         // default), others default false.
         let d = Config::default();
         assert!(d.allow_bold);
@@ -6096,7 +6257,7 @@ cell-height = 1.2\n";
 
     #[test]
     fn background_cell_detachable_parse() {
-        // Cycle 341 drift guard. Closes the remaining config-key
+        // Drift guard closing the remaining config-key
         // surface (background image + cell metrics + detachable
         // tabs + putty source).
         let d = Config::default();
@@ -6147,7 +6308,7 @@ cell-height = 1.2\n";
 
     #[test]
     fn bell_titlebar_misc_keys_parse() {
-        // Cycle 340 drift guard. Bell sub-flag aliases + per-pane
+        // Drift guard for bell sub-flag aliases + per-pane
         // titlebar color/font keys + system-font/theme-colors stubs
         // + http_proxy. All defaults match Terminator's defaults.
         let d = Config::default();
@@ -6187,7 +6348,7 @@ cell-height = 1.2\n";
 
     #[test]
     fn group_focus_handle_window_state_parse() {
-        // Cycle 339 drift guard.
+        // Drift guard.
         let d = Config::default();
         assert!(!d.split_to_group);
         assert!(d.autoclean_groups);
@@ -6411,7 +6572,7 @@ cell-height = 1.2\n";
 
     #[test]
     fn key_encoding_broadcast_url_offsets_parse() {
-        // Cycle 338 drift guard.
+        // Drift guard.
         let d = Config::default();
         assert_eq!(d.backspace_binding, BackspaceBinding::AsciiDel);
         assert_eq!(d.delete_binding, DeleteBinding::EscapeSequence);
@@ -6459,7 +6620,7 @@ cell-height = 1.2\n";
 
     #[test]
     fn tab_ux_and_window_state_bools_parse() {
-        // Cycle 337 drift guard. 8 bool config keys from
+        // Drift guard for 8 bool config keys from
         // terminatorlib/config.py:75-97.
         let d = Config::default();
         assert!(d.close_button_on_tab);
@@ -6490,7 +6651,7 @@ cell-height = 1.2\n";
 
     #[test]
     fn shell_exec_and_close_behavior_parse() {
-        // Cycle 336 drift guard.
+        // Drift guard.
         let d = Config::default();
         assert!(!d.login_shell);
         assert_eq!(d.exit_action, ExitAction::Close);
@@ -6529,7 +6690,7 @@ cell-height = 1.2\n";
         );
     }
 
-    /// Cycle 928 (agent-first A2): `agent-server` defaults OFF and parses the
+    /// `agent-server` defaults OFF and parses the
     /// three modes; a typo falls back to OFF (fail-safe — never silently
     /// enable a control surface). The `--check-config` validator pins the value
     /// set so a typo is reported, not silently defaulted.
@@ -6567,7 +6728,7 @@ cell-height = 1.2\n";
         );
     }
 
-    /// Cycle 939 (Terminator parity): `cursor_bg_color` (the block) aliases
+    /// Terminator parity: `cursor_bg_color` (the block) aliases
     /// `cursor-color` → theme.cursor; `cursor_fg_color` (the glyph under the
     /// cursor) → theme.cursor_text. Both spellings validate as colors.
     #[test]
@@ -6593,7 +6754,7 @@ cell-height = 1.2\n";
         );
     }
 
-    /// Cycle 937 + multi-window cycle: accent resolution + Peacock. Peacock
+    /// Accent resolution + Peacock (including multi-window support). Peacock
     /// (`auto`) is the DEFAULT now — seed 0 lands on the theme's signature
     /// accent (Mocha mauve), other seeds spread across the pool.
     /// `accent-color = theme` (or `off`/`none`) opts back into the static
@@ -6668,7 +6829,7 @@ cell-height = 1.2\n";
         );
     }
 
-    /// Cycle 942 (audit): a DERIVED theme accent (no explicit `accent` line →
+    /// A DERIVED theme accent (no explicit `accent` line →
     /// snapshots `palette[4]` at parse time) follows a config-level
     /// `palette = 4=#hex` override; an EXPLICIT theme accent stays put.
     #[test]
@@ -6706,7 +6867,7 @@ cell-height = 1.2\n";
 
     #[test]
     fn invert_search_and_env_strings_parse() {
-        // Cycle 335 drift guard.
+        // Drift guard.
         let d = Config::default();
         assert!(!d.invert_search);
         assert_eq!(d.term, "xterm-256color");
@@ -6735,7 +6896,7 @@ cell-height = 1.2\n";
 
     #[test]
     fn mouse_and_paste_bools_parse() {
-        // Cycle 334 drift guard. smart_copy defaults true (Terminator
+        // Drift guard: smart_copy defaults true (Terminator
         // default); others default false.
         let d = Config::default();
         assert!(!d.disable_mousewheel_zoom);
@@ -6761,14 +6922,14 @@ cell-height = 1.2\n";
 
     #[test]
     fn tab_bar_position_terminator_aliases() {
-        // Cycle 331 drift guard. Terminator's `tab_position` accepts
+        // Drift guard. Terminator's `tab_position` accepts
         // top/left/right/bottom/hidden; kettle maps them as:
         //   - top/bottom: native.
         //   - hidden: alias to `tab-bar = off`.
-        //   - left/right: cycle 647 promoted from warn-fallback-to-top
+        //   - left/right: promoted from warn-fallback-to-top
         //     to actual `TabBarPos::Left` / `TabBarPos::Right` storage.
         //     The render-layer change to draw vertical strips lands in
-        //     sub-cycles 2-6 of TERMINATOR-VERTICAL-TABS-DESIGN.md.
+        //     phases 2-6 of TERMINATOR-VERTICAL-TABS-DESIGN.md.
         let hidden = Config::parse_text("tab-bar-position = hidden");
         assert_eq!(hidden.tab_bar, TabBarMode::Off);
         let left = Config::parse_text("tab-bar-position = left");
@@ -6842,7 +7003,7 @@ cell-height = 1.2\n";
         assert!(!Config::parse_text("scroll-on-input = false").scroll_on_keystroke);
     }
 
-    /// Cycle 862 (audit): the bare `padding-x`/`-y` spellings the diagnostic
+    /// The bare `padding-x`/`-y` spellings the diagnostic
     /// already accepted must actually apply (and not warn as unknown) — they
     /// were drift: passed `--check-config` yet did nothing + warned "unknown".
     #[test]
@@ -6856,7 +7017,7 @@ cell-height = 1.2\n";
         );
     }
 
-    /// Cycle 943 (audit): `accent_color` (snake_case) was validated by
+    /// `accent_color` (snake_case) was validated by
     /// `detect_malformed_values` but the apply arm only handled
     /// `accent-color`, so `accent_color = #ff8800` passed `--check-config`,
     /// warned "unknown key", AND did nothing — the same validate-but-don't-
@@ -6880,7 +7041,7 @@ cell-height = 1.2\n";
         );
     }
 
-    /// Cycle 943 (audit): the three background-image placement enums fell back
+    /// The three background-image placement enums fell back
     /// silently in the renderer on a typo — now `detect_malformed_values` pins
     /// them so a typo fails `--check-config` while every documented value (and
     /// snake_case alias) passes.
@@ -6920,7 +7081,7 @@ cell-height = 1.2\n";
         assert!(ok.is_empty(), "all valid placement values: {ok:?}");
     }
 
-    /// Cycle 943 (audit): reverse-coverage guard — every key name the
+    /// Reverse-coverage guard — every key name the
     /// `detect_malformed_values` validator recognizes must ALSO be recognized
     /// (applied, not warned-as-unknown) by `parse_collect`. This is the test
     /// that would have caught F1 (`accent_color` validated but not applied):
@@ -7080,7 +7241,7 @@ cell-height = 1.2\n";
 
     #[test]
     fn trigger_detect_allows_regex_metachars_in_the_command_half() {
-        // Cycle (audit): the trigger detect arm validates only the LHS
+        // The trigger detect arm validates only the LHS
         // regex of `REGEX :: command`, mirroring the apply path. A valid
         // line whose COMMAND contains an unbalanced `[` must NOT be flagged
         // (the `[baz` is an argv token, not part of the pattern).
@@ -7145,7 +7306,7 @@ cell-height = 1.2\n";
         assert!(Config::detect_malformed_values("totally-unknown = x").is_empty());
     }
 
-    /// Cycle 826 (audit): the bool-key diagnostic must cover the WHOLE
+    /// The bool-key diagnostic must cover the WHOLE
     /// bool-key set, not just 8 of ~100. Round-trip every `BOOL_KEYS` entry
     /// (each must flag a bad value) so the list stays correctly wired, and
     /// spot-check the keys the audit named plus the newly-validated enum keys.
@@ -7204,7 +7365,7 @@ cell-height = 1.2\n";
             Config::detect_malformed_values("case-sensitive = ya\n").len(),
             1
         );
-        // Cycle 837: more enum keys that used to silently default on a typo —
+        // More enum keys that used to silently default on a typo —
         // each documented value passes; each typo flags exactly once.
         for (good, bad) in [
             ("exit-action = restart", "exit-action = clse"),
@@ -7218,7 +7379,7 @@ cell-height = 1.2\n";
             ("background-type = image", "background-type = imag"),
             ("lua-sandbox = trusted", "lua-sandbox = trused"),
             ("status-bar = bottom", "status-bar = botom"),
-            // Cycle 862: theme-schedule + ask-before-closing diagnostic gaps.
+            // theme-schedule + ask-before-closing diagnostic gaps.
             ("ask-before-closing = always", "ask-before-closing = alwyas"),
             (
                 "theme-schedule = 18:00 dark, 06:00 light",
@@ -7235,7 +7396,7 @@ cell-height = 1.2\n";
                 "{bad:?} should flag once"
             );
         }
-        // Cycle 837: color + theme-role keys.
+        // Color + theme-role keys.
         assert!(Config::detect_malformed_values("accent-color = #ff8800\n").is_empty());
         assert_eq!(
             Config::detect_malformed_values("accent-color = nope\n").len(),
@@ -7246,7 +7407,7 @@ cell-height = 1.2\n";
             Config::detect_malformed_values("dark-theme = NotARealTheme\n").len(),
             1
         );
-        // Cycle 855: clamped/range-checked numerics — an in-range value passes;
+        // Clamped/range-checked numerics — an in-range value passes;
         // an out-of-range one (which the runtime silently clamps/discards) is
         // flagged exactly once. Bounds mirror parse_collect.
         for (good, bad) in [
@@ -7277,7 +7438,7 @@ cell-height = 1.2\n";
 
     #[test]
     fn load_from_with_diagnostics_surfaces_both_unknown_and_malformed() {
-        // Cycle-99 contract: a reload via `Action::ReloadConfig` should
+        // Contract: a reload via `Action::ReloadConfig` should
         // give the user *some* signal that their typo wasn't applied.
         // `load_from` used to only `log::warn!` on unknown keys; bad
         // values silently dropped. The diagnostics variant returns both
@@ -7325,7 +7486,7 @@ cell-height = 1.2\n";
         let _ = std::fs::remove_dir(&dir);
     }
 
-    /// Cycle 586 drift guard: an oversized config file (swap-attack
+    /// Drift guard: an oversized config file (swap-attack
     /// scenario; out of strict SECURITY.md scope but defense-in-depth)
     /// must be refused via the metadata pre-check rather than read
     /// into RAM. Asserts the 1 MiB cap is enforced and the function
@@ -7362,7 +7523,7 @@ cell-height = 1.2\n";
 
     #[test]
     fn detect_malformed_values_skips_empty_values() {
-        // Cycle 158: empty values are documented as "reset to
+        // Empty values are documented as "reset to
         // default" in parse.rs and are honored by parse_collect.
         // The diagnostic used to disagree with the runtime —
         // theme = "" surfaced as "malformed value: theme = \"\""
@@ -7388,7 +7549,7 @@ cell-height = 1.2\n";
             "whitespace-only value should not flag: {ok:?}"
         );
         // Real typos with non-empty values still flag (regression
-        // guard for cycle 86/87/etc — empty skip mustn't swallow
+        // guard — empty skip mustn't swallow
         // typos).
         let bad = Config::detect_malformed_values("theme = NoSuchTheme\n");
         assert_eq!(bad.len(), 1, "unknown theme still flagged: {bad:?}");
@@ -7396,7 +7557,7 @@ cell-height = 1.2\n";
 
     #[test]
     fn detect_malformed_values_strips_bom_before_scanning() {
-        // Cycle 156 (sibling to cycle 155): a BOM-prefixed config
+        // A BOM-prefixed config
         // with a missing-`=` typo on the first key used to surface
         // the diagnostic with the BOM character mangled in (looks
         // like an unintended invisible-char in the user-facing
@@ -7601,7 +7762,7 @@ cell-height = 1.2\n";
 
     #[test]
     fn enum_keys_are_case_insensitive() {
-        // Cycle 146: bell / osc52 / tab-bar / tab-bar-position /
+        // bell / osc52 / tab-bar / tab-bar-position /
         // scrollbar / cursor-style all parsed `e.value.as_str()`
         // verbatim. So `bell = OFF` fell into the catchall →
         // BellMode::Both, with --check-config flagging it as
@@ -7636,7 +7797,7 @@ cell-height = 1.2\n";
         let c = Config::parse_text("scrollbar = Always");
         assert_eq!(c.scrollbar, ScrollbarMode::Always);
 
-        // cursor-style (cycle 142's `beam` works with any case too).
+        // cursor-style (the `beam` alias for `bar` works with any case too).
         let c = Config::parse_text("cursor-style = Underline");
         assert_eq!(c.cursor_style, CursorStyle::Underline);
         let c = Config::parse_text("cursor-style = BEAM");
@@ -7656,7 +7817,7 @@ cell-height = 1.2\n";
 
     #[test]
     fn cursor_style_accepts_beam_as_alacritty_alias_for_bar() {
-        // Cycle 142: a user copying their Alacritty config writes
+        // A user copying their Alacritty config writes
         // `cursor-style = beam`. Pre-fix, the catchall mapped that to
         // Block (since `beam` wasn't matched), and --check-config
         // flagged it as malformed. Now `beam` is an explicit alias
@@ -7682,7 +7843,7 @@ cell-height = 1.2\n";
 
     #[test]
     fn bool_keys_accept_yes_no_off_on_0_1_aliases() {
-        // Cycle 138. Pre-fix `cursor-style-blink = no` silently meant
+        // Pre-fix `cursor-style-blink = no` silently meant
         // `true` because the parser compared against literal "false"
         // and treated everything else as on. Same for every other
         // bool key. Now every standard alias works on both sides.
@@ -7698,7 +7859,7 @@ cell-height = 1.2\n";
         }
         // Unrecognized: silently keep the default (cursor_blink = true)
         // instead of silently flipping to true on every garbage value
-        // (pre-cycle behavior).
+        // (the previous behavior).
         let c = Config::parse_text("cursor-style-blink = wat");
         assert!(c.cursor_blink, "default (true) preserved on unrecognized");
         // And `--check-config` surfaces the typo:
@@ -7724,7 +7885,7 @@ cell-height = 1.2\n";
 
     #[test]
     fn scrollback_clamps_at_infinite_and_flags_above() {
-        // Cycle 133: a user with `scrollback = 100000000` (100 M
+        // A user with `scrollback = 100000000` (100 M
         // lines) used to land that value into cfg verbatim, which
         // alacritty_terminal would honor by reserving rows for an
         // ~250 GB history buffer on the first PTY spawn. Clamp at
@@ -7784,7 +7945,7 @@ cell-height = 1.2\n";
 
     #[test]
     fn detect_malformed_values_flags_clamped_numerics_out_of_range() {
-        // Cycle 132. Same shape as cycle 131's `font-size` fix,
+        // Same shape as the font-size out-of-range fix,
         // extended to the other clamped numeric fields:
         //
         //   background-opacity        [0.0, 1.0]
@@ -7828,7 +7989,7 @@ cell-height = 1.2\n";
         );
         assert!(ok.is_empty(), "all in-range pass: {ok:?}");
 
-        // Runtime clamp on background-opacity (cycle 132 added) —
+        // Runtime clamp on background-opacity —
         // even with the warning ignored, wgpu sees a safe alpha.
         let c = Config::parse_text("background-opacity = 2.5");
         assert_eq!(c.background_opacity, 1.0);
@@ -7836,7 +7997,7 @@ cell-height = 1.2\n";
         assert_eq!(c.background_opacity, 0.0);
     }
 
-    /// Cycle 895 (audit): the validator must cover every alias the apply
+    /// The validator must cover every alias the apply
     /// path accepts, with bounds that mirror the apply-arm clamps exactly.
     /// Before this, a bad value under an *alias* spelling slipped past
     /// `--check-config` (the diagnostic only knew the canonical key), and a
@@ -7888,8 +8049,8 @@ cell-height = 1.2\n";
 
     #[test]
     fn detect_malformed_values_flags_font_size_out_of_renderer_range() {
-        // Cycle 131: font-size = 500 silently clamps to 72 at the
-        // renderer (cycle 118's `clamp_font_size`); --check-config
+        // font-size = 500 silently clamps to 72 at the
+        // renderer (via `clamp_font_size`); --check-config
         // used to echo the raw value with no hint of the clamp.
         // Surface out-of-range values as malformed so the docs/UI
         // ("500pt") and the runtime ("72pt") finally agree.
@@ -7910,17 +8071,17 @@ cell-height = 1.2\n";
              font-size = 13.5\n",
         );
         assert!(ok.is_empty(), "all in-range: {ok:?}");
-        // Non-numeric still goes through the parse-fail path (cycle 70).
+        // Non-numeric still goes through the parse-fail path.
         let bad = Config::detect_malformed_values("font-size = abc\n");
         assert_eq!(bad.len(), 1);
     }
 
     #[test]
     fn detect_malformed_values_flags_palette_index_out_of_range() {
-        // Cycle 124: documented as 0..=255 but the runtime apply path
+        // Documented as 0..=255 but the runtime apply path
         // only writes the 0..=15 ANSI palette. Flag 16+ so the user's
         // typo doesn't silently no-op (the diagnostic is on the same
-        // surface as cycle 88's `ssh-host = name=` half-empty flag).
+        // surface as the ssh-host `name=` half-empty-value flag).
         let bad = Config::detect_malformed_values(
             "palette = 200=#ff0000\n\
              palette = 16=#abcdef\n\
@@ -8020,7 +8181,7 @@ cell-height = 1.2\n";
         assert!(!Config::parse_text("mouse-hide-while-typing = false").mouse_hide_while_typing);
         // Short `mouse-hide` alias also works.
         assert!(!Config::parse_text("mouse-hide = false").mouse_hide_while_typing);
-        // Cycle 698: Terminator `mouse_autohide` (terminatorlib
+        // Terminator `mouse_autohide` (terminatorlib
         // config.py:249) is accepted as an alias (both
         // underscore + hyphen spellings).
         assert!(!Config::parse_text("mouse_autohide = false").mouse_hide_while_typing);
@@ -8047,7 +8208,7 @@ cell-height = 1.2\n";
 
     #[test]
     fn status_bar_parses_off_top_bottom_with_aliases() {
-        // Cycle 295 drift guard. Default is Off (no row stolen from
+        // Drift guard. Default is Off (no row stolen from
         // the pane grid). Three explicit modes (off / top / bottom)
         // plus permissive aliases (`statusbar` no-dash, `true` / `on`
         // for bottom, `false` / `none` for off). Unknown values fall
@@ -8087,7 +8248,7 @@ cell-height = 1.2\n";
 
     #[test]
     fn trigger_parses_pattern_and_repeats() {
-        // Cycle 289 drift guard. `trigger = REGEX` accumulates into
+        // Drift guard. `trigger = REGEX` accumulates into
         // `Config::triggers` with action defaulting to Urgency. The
         // whole value is the pattern — no in-band action separator
         // (pipe `|` is a regex metacharacter, so alternation patterns
@@ -8114,11 +8275,11 @@ cell-height = 1.2\n";
         assert!(Config::parse_text("trigger =   \n").triggers.is_empty());
     }
 
-    /// Cycle 611 drift guard. `menu-item = LABEL = CMD` accumulates
+    /// Drift guard. `menu-item = LABEL = CMD` accumulates
     /// `MenuItem` rows used by the chrome to extend the right-click
     /// context menu (Terminator parity, `custom_commands.py`). The
     /// FIRST `=` in the line splits key/value (consumed by the
-    /// cycle-X line parser); the FIRST `=` of the value splits
+    /// config key/value line parser); the FIRST `=` of the value splits
     /// label/command. Subsequent `=` in the command are preserved
     /// (so `cmd = foo=bar` is a label "cmd" + command "foo=bar").
     /// Malformed lines (missing the value-side `=`, empty label,
@@ -8162,25 +8323,25 @@ cell-height = 1.2\n";
         );
         // `menu_item` (underscore) is accepted as an alias of
         // `menu-item` (kebab) — same convention as the rest of the
-        // grammar (cycle 175 underscore-vs-kebab cleanup).
+        // grammar (underscore-vs-kebab cleanup).
         let alias_cfg = Config::parse_text("menu_item = test = ls\n");
         assert_eq!(alias_cfg.menu_items.len(), 1);
         assert_eq!(alias_cfg.menu_items[0].label, "test");
     }
 
-    /// Cycle 611 drift guard for the check-config malformed-value
+    /// Drift guard for the check-config malformed-value
     /// surfacing. A `menu-item` line without a second `=` (or with
     /// empty label / command) should show up in the malformed list
     /// so the user sees the issue at `kettle --check-config` time
     /// rather than silently getting no menu row.
     ///
-    /// Cycle 612: doc continues after a paragraph break to satisfy
+    /// This doc continues after a paragraph break to satisfy
     /// clippy's `doc_list_item_without_indent` lint that fires
     /// when consecutive `///` lines after a single `#[test]` look
     /// like a list continuation.
     #[test]
     fn command_notify_threshold_parses_and_clamps() {
-        // body intentionally not changed by cycle 613; the test
+        // body intentionally not changed here; the test
         // continues below.
         assert_eq!(Config::default().command_notify_threshold_ms, 5_000);
         for alias in [
@@ -8198,7 +8359,7 @@ cell-height = 1.2\n";
         assert_eq!(cfg.command_notify_threshold_ms, 86_400_000);
     }
 
-    /// Cycle 858 (audit): `nan`/`inf` parse as valid `f32`, and `clamp(NaN)`
+    /// `nan`/`inf` parse as valid `f32`, and `clamp(NaN)`
     /// returns NaN — defeating the clamp's "keep the runtime safe" purpose. A
     /// non-finite value must be rejected, leaving the field at its finite
     /// default rather than poisoning rendering with NaN.
@@ -8216,10 +8377,10 @@ cell-height = 1.2\n";
         assert_eq!(cfg.tab_bar_width, def.tab_bar_width);
     }
 
-    /// Cycle 613 drift guard. `force-no-bell = true` overrides the
+    /// Drift guard. `force-no-bell = true` overrides the
     /// `bell` config key — Terminator-parity hard-off for users
     /// who want to silence every bell flavor with one key.
-    /// Pre-cycle-613 the key parsed but was a documented no-op.
+    /// Previously the key parsed but was a documented no-op.
     #[test]
     fn force_no_bell_overrides_bell_mode_to_off() {
         // `force-no-bell = true` alone → BellMode::Off.
@@ -8245,7 +8406,7 @@ cell-height = 1.2\n";
         assert_eq!(cfg.bell, BellMode::Visual);
     }
 
-    /// Cycle 616 drift guard. `light-theme` / `dark-theme` config
+    /// Drift guard. `light-theme` / `dark-theme` config
     /// keys store the *canonical* bundled name when the user-typed
     /// value matches one (so the toggle action can do exact-name
     /// matching against `cfg.theme_name`); both kebab + underscore
@@ -8255,7 +8416,7 @@ cell-height = 1.2\n";
     #[test]
     fn search_case_sensitive_parses_terminator_and_named_forms() {
         use SearchCaseSensitivity::*;
-        // Default is Smart (ripgrep semantics) — kettle's pre-617 behavior.
+        // Default is Smart (ripgrep semantics) — kettle's earlier behavior.
         assert_eq!(Config::default().search_case_sensitive, Smart);
         // Named modes (kettle convention).
         for (input, want) in [
@@ -8286,8 +8447,8 @@ cell-height = 1.2\n";
         assert_eq!(cfg.search_case_sensitive, Smart);
     }
 
-    /// Cycle 647 drift guard. `TabBarPos::is_vertical` + the
-    /// parser. Sub-cycle 1 of [`TERMINATOR-VERTICAL-TABS-DESIGN.md`](
+    /// Drift guard. `TabBarPos::is_vertical` + the
+    /// parser. Phase 1 of [`TERMINATOR-VERTICAL-TABS-DESIGN.md`](
     /// ../../../docs/TERMINATOR-VERTICAL-TABS-DESIGN.md).
     #[test]
     fn tab_bar_pos_left_right_parse_and_classify() {
@@ -8313,7 +8474,7 @@ cell-height = 1.2\n";
         assert_eq!(cfg.tab_bar_pos, TabBarPos::Bottom);
     }
 
-    /// Cycle 699 drift guard. Terminator `use_custom_command =
+    /// Drift guard. Terminator `use_custom_command =
     /// false` clears `cfg.shell` at parse-finalize so the
     /// otherwise-defined `command =` / `custom_command =` /
     /// `shell =` value falls back to $SHELL. Order-independent.
@@ -8337,11 +8498,11 @@ cell-height = 1.2\n";
         assert!(!cfg.copy_on_select);
         // enabled_plugins is recognized (parses without panic);
         // value is intentionally discarded since kettle's plugin
-        // model is cycle-324 Lua.
+        // model is Lua-based.
         let _ = Config::parse_text("enabled_plugins = LaunchpadBugURLHandler\n");
     }
 
-    /// Cycle 692 drift guard. `palette = NAME` (no `=` after)
+    /// Drift guard. `palette = NAME` (no `=` after)
     /// is a Terminator named-palette alias that kettle treats as
     /// `theme = NAME`. Underscore-spelled inputs (Terminator
     /// convention) get a `_` → ` ` fallback to match kettle's
@@ -8354,7 +8515,7 @@ cell-height = 1.2\n";
         // Underscore form → bundled name via space fallback.
         let cfg = Config::parse_text("palette = tokyonight_night\n");
         assert_eq!(cfg.theme_name, "TokyoNight Night");
-        // The cycle-X palette = N=#hex form still works for
+        // The `palette = N=#hex` per-slot form still works for
         // per-slot overrides (no regression).
         let cfg = Config::parse_text("palette = 4=#001122\n");
         assert_eq!(
@@ -8371,8 +8532,8 @@ cell-height = 1.2\n";
         assert_eq!(cfg.theme_name, default.theme_name);
     }
 
-    /// Cycle 673 drift guard. `tab-bar-width` config key parses
-    /// + clamps to `[40, 600]`. Sub-cycle 7 of vertical-tabs design.
+    /// Drift guard. `tab-bar-width` config key parses
+    /// + clamps to `[40, 600]`. Phase 7 of vertical-tabs design.
     #[test]
     fn tab_bar_width_parses_and_clamps() {
         // Default unchanged.
@@ -8394,7 +8555,7 @@ cell-height = 1.2\n";
         assert!((cfg.tab_bar_width - 180.0).abs() < f32::EPSILON);
     }
 
-    /// Cycle 670 drift guard. `sunrise_sunset_utc_secs` reproduces
+    /// Drift guard. `sunrise_sunset_utc_secs` reproduces
     /// the canonical NOAA fixtures within ~5 minutes (the algorithm
     /// is approximate but good enough for a theme-flip).
     #[test]
@@ -8439,7 +8600,7 @@ cell-height = 1.2\n";
         assert!(sunrise_sunset_utc_secs(172, 80.0, 0.0).is_none());
     }
 
-    /// Cycle 670 drift guard. `schedule_decision_sunrise`
+    /// Drift guard. `schedule_decision_sunrise`
     /// returns the right dark/light decision for fixed times.
     #[test]
     fn schedule_decision_sunrise_walks_windows() {
@@ -8466,7 +8627,7 @@ cell-height = 1.2\n";
         assert!(!schedule_decision_sunrise(12 * 3600, 172, 80.0, 0.0));
     }
 
-    /// Cycle 669 drift guard. `theme-schedule = sunrise/sunset`
+    /// Drift guard. `theme-schedule = sunrise/sunset`
     /// parses + the lat/long config keys patch the SunriseSunset
     /// variant at end-of-parse. If lat OR long is missing, the
     /// schedule downgrades to None (both halves required).
@@ -8551,9 +8712,9 @@ cell-height = 1.2\n";
         assert!(cfg.theme_schedule.is_none(), "long > 180 is invalid");
     }
 
-    /// Cycle 664 drift guard. `parse_theme_schedule` accepts
+    /// Drift guard. `parse_theme_schedule` accepts
     /// the `HH:MM dark, HH:MM light` config-value shape with
-    /// either tag-order. Sub-cycle 4 of auto-theme design.
+    /// either tag-order. Phase 4 of auto-theme design.
     #[test]
     fn parse_theme_schedule_walks_input_shapes() {
         use super::parse_theme_schedule;
@@ -8616,7 +8777,7 @@ cell-height = 1.2\n";
         assert!(parse_theme_schedule("").is_none(), "empty");
     }
 
-    /// Cycle 664 drift guard. `schedule_decision_clock` returns
+    /// Drift guard. `schedule_decision_clock` returns
     /// the right dark/light boolean given a `(now, schedule)` pair.
     #[test]
     fn schedule_decision_clock_walks_boundaries() {
@@ -8682,9 +8843,9 @@ cell-height = 1.2\n";
         assert!(!schedule_decision_clock((0, 0), degen));
     }
 
-    /// Cycle 649 drift guard. `resolve_theme_for_mode` is the
+    /// Drift guard. `resolve_theme_for_mode` is the
     /// pure helper that picks the next theme given the mode +
-    /// configured names + OS preference. Sub-cycle 2 of the
+    /// configured names + OS preference. Phase 2 of the
     /// auto-theme design.
     #[test]
     fn resolve_theme_for_mode_matrix() {
@@ -8736,10 +8897,10 @@ cell-height = 1.2\n";
         );
     }
 
-    /// Cycle 641 drift guard. `theme-mode` config parsing (sub-cycle
+    /// Drift guard. `theme-mode` config parsing (phase
     /// 1 of [`TERMINATOR-AUTO-THEME-DESIGN.md`](
     /// ../../../docs/TERMINATOR-AUTO-THEME-DESIGN.md)). Default
-    /// preserves cycle-616 behavior (`Explicit`); the 3 Terminator
+    /// stays `Explicit`, matching prior behavior; the 3 Terminator
     /// modes parse cleanly; aliases for `Auto` accommodate user
     /// muscle memory.
     #[test]
@@ -8768,9 +8929,9 @@ cell-height = 1.2\n";
         }
     }
 
-    /// Cycle 638 drift guard. `AskBeforeClosing::should_prompt` is
+    /// Drift guard. `AskBeforeClosing::should_prompt` is
     /// the pure decision behind the confirm-dialog primitive
-    /// (sub-cycle 1 of [`TERMINATOR-CONFIRM-DIALOG-DESIGN.md`](
+    /// (phase 1 of [`TERMINATOR-CONFIRM-DIALOG-DESIGN.md`](
     /// ../../../docs/TERMINATOR-CONFIRM-DIALOG-DESIGN.md)).
     /// Cover all 3 modes × edge-case scope counts (0, 1, 2, large).
     #[test]
@@ -8793,7 +8954,7 @@ cell-height = 1.2\n";
         assert!(MultipleTerminals.should_prompt(100));
     }
 
-    /// Cycle 628 drift guard. Terminator's `tab_position` is kettle's
+    /// Drift guard. Terminator's `tab_position` is kettle's
     /// `tab-bar-position`. A Terminator config that says
     /// `tab_position = bottom` (or `= hidden`) should now bind cleanly.
     #[test]
@@ -8825,12 +8986,12 @@ cell-height = 1.2\n";
         );
     }
 
-    /// Cycle 626 drift guard. Terminator's `audible_bell` doesn't
+    /// Drift guard. Terminator's `audible_bell` doesn't
     /// map to anything kettle ships (no audio surface yet), so the
     /// parser accepts the key without setting anything. The drift
     /// guard locks in two outcomes:
     ///   - the key is recognized (no unknown-key warning would
-    ///     appear in cycle-179's user-doc-drift surface), and
+    ///     appear in the `detect_malformed_values` diagnostic surface), and
     ///   - the rest of the config is unaffected (no spillover
     ///     into the unified `bell` mode).
     #[test]
@@ -8845,7 +9006,7 @@ cell-height = 1.2\n";
         // wins (audible-bell is a documented no-op).
         let cfg = Config::parse_text("bell = visual\naudible-bell = true\n");
         assert_eq!(cfg.bell, BellMode::Visual);
-        // The cycle-296 unknown-key surface should NOT flag this
+        // The `detect_malformed_values` unknown-key surface should NOT flag this
         // key. (We test by asking detect_malformed_values for the
         // diagnostic list — `audible-bell` should not appear.)
         let bad = Config::detect_malformed_values("audible-bell = true\n");
@@ -8855,7 +9016,7 @@ cell-height = 1.2\n";
         );
     }
 
-    /// Cycle 623 drift guard. Terminator-spelling aliases for kettle's
+    /// Drift guard. Terminator-spelling aliases for kettle's
     /// canonical color / cursor / fullscreen keys. A user copying a
     /// Terminator config should bind these without rename.
     #[test]
@@ -8924,7 +9085,7 @@ cell-height = 1.2\n";
         assert_eq!(cfg.window_state, WindowState::Maximise);
     }
 
-    /// Cycle 622 drift guard. `parse_trigger_with_command` is the
+    /// Drift guard. `parse_trigger_with_command` is the
     /// pure helper that splits a `trigger = REGEX :: CMD ARGS`
     /// value. Verify:
     ///   - `::` separator parsed (pattern + argv both non-empty)
@@ -8970,7 +9131,7 @@ cell-height = 1.2\n";
         // `:[:]` or `\x3a\x3a` to dodge the parser.
     }
 
-    /// Cycle 619 drift guard. Terminator splits the bell into two
+    /// Drift guard. Terminator splits the bell into two
     /// orthogonal bools (`visible_bell`, `urgent_bell`); kettle uses
     /// a unified `bell = off | visual | attention | both`. The
     /// compatibility parser arms compose the two Terminator-style
@@ -8992,7 +9153,7 @@ cell-height = 1.2\n";
         // false values leave the bell alone (idempotent default Off).
         let cfg = Config::parse_text("visible-bell = false\nurgent-bell = false\n");
         assert_eq!(cfg.bell, BellMode::Off);
-        // Precedence rule (cycle 619): an explicit canonical
+        // Precedence rule: an explicit canonical
         // `bell = <mode>` wins over Terminator-spelled compat
         // aliases REGARDLESS of file order. Mixing both spellings
         // is the rare hybrid-config case; the canonical key takes
@@ -9001,7 +9162,7 @@ cell-height = 1.2\n";
         assert_eq!(cfg.bell, BellMode::Visual);
         let cfg = Config::parse_text("visible-bell = true\nbell = attention\n");
         assert_eq!(cfg.bell, BellMode::Attention);
-        // force-no-bell still overrides everything (cycle 613).
+        // force-no-bell still overrides everything.
         let cfg = Config::parse_text(
             "visible-bell = true\n\
              urgent-bell = true\n\
@@ -9010,7 +9171,7 @@ cell-height = 1.2\n";
         assert_eq!(cfg.bell, BellMode::Off);
     }
 
-    /// Cycle 619 drift guard. The `BellMode::compose` helper is the
+    /// Drift guard. The `BellMode::compose` helper is the
     /// pure semantics behind the urgent/visible-bell arms. Round-trip
     /// every input pair, and verify idempotency.
     #[test]
@@ -9036,7 +9197,7 @@ cell-height = 1.2\n";
         }
     }
 
-    /// Cycle 618 drift guard. `profile_name_from_path` is the inverse of
+    /// Drift guard. `profile_name_from_path` is the inverse of
     /// `path_for_profile`: it should recover the bare profile name from
     /// a `<config-dir>/profiles/<name>.config` path, and return `None`
     /// for paths shaped any other way (default config, --config FILE
@@ -9101,7 +9262,7 @@ cell-height = 1.2\n";
         assert_eq!(cfg.light_theme, "TokyoNight Day");
     }
 
-    /// Cycle 611 drift guard for the --check-config malformed-value
+    /// Drift guard for the --check-config malformed-value
     /// surface. Missing label-side `=`, empty label, or empty
     /// command should each show up in the diagnostic list so the
     /// user sees the issue at `kettle --check-config` time rather
@@ -9126,7 +9287,7 @@ cell-height = 1.2\n";
 
     #[test]
     fn detect_malformed_values_flags_invalid_trigger_regex() {
-        // Cycle 309 drift guard. A malformed regex pattern like
+        // Drift guard. A malformed regex pattern like
         // `trigger = [unclosed` parses (the config layer stores it
         // as a plain string), `--check-config` USED to report OK,
         // then at runtime `compile_triggers` failed `Regex::new`
@@ -9145,7 +9306,7 @@ cell-height = 1.2\n";
             "expected 2 malformed-trigger entries, got: {bad:?}"
         );
         // Valid alternation patterns must NOT be flagged (load-
-        // bearing — the cycle-289 docs explicitly tell users to
+        // bearing — docs/CONFIG.md explicitly tells users to
         // write `(BUILD SUCCESSFUL|FAILED)`).
         let ok = Config::detect_malformed_values("trigger = (BUILD SUCCESSFUL|FAILED)\n");
         assert!(
@@ -9154,7 +9315,7 @@ cell-height = 1.2\n";
         );
     }
 
-    // Cycle 716 (C7) drift guards for `persist_config_toggle`.
+    // Drift guards for `persist_config_toggle`.
 
     fn tempdir_for(test_name: &str) -> std::path::PathBuf {
         let p = std::env::temp_dir().join(format!(
@@ -9170,7 +9331,7 @@ cell-height = 1.2\n";
         p
     }
 
-    /// Cycle 766: `append_keybind` appends a repeatable `keybind` line, the
+    /// `append_keybind` appends a repeatable `keybind` line, the
     /// written line parses back to the intended binding, and re-binding the
     /// SAME trigger overwrites rather than stacking. Backs the interactive
     /// keybind editor's persistence.
@@ -9222,7 +9383,7 @@ cell-height = 1.2\n";
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// Cycle 913 (audit): `append_keybind` de-dups SEMANTICALLY — re-binding the
+    /// `append_keybind` de-dups SEMANTICALLY — re-binding the
     /// same chord written in a different case (or a literal `=` chord) overwrites
     /// the old line instead of stacking a stale duplicate. The old first-`=`
     /// string compare missed these.
@@ -9261,7 +9422,7 @@ cell-height = 1.2\n";
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// Cycle 716: writing a new key into an empty config appends it.
+    /// Writing a new key into an empty config appends it.
     #[test]
     fn persist_config_toggle_appends_on_missing_key() {
         let dir = tempdir_for("append");
@@ -9295,7 +9456,7 @@ cell-height = 1.2\n";
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// Cycle 716: writing an existing key replaces only that line —
+    /// Writing an existing key replaces only that line —
     /// every comment, blank, and other key survives byte-for-byte.
     #[test]
     fn persist_config_toggle_preserves_user_comments_and_blank_lines() {
@@ -9332,7 +9493,7 @@ cell-height = 1.2\n";
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// Cycle 716: second write doesn't re-overwrite the .bak so the
+    /// A second write doesn't re-overwrite the .bak so the
     /// pre-toggle-session content stays forensically intact.
     #[test]
     fn persist_config_toggle_backup_only_on_first_write() {
@@ -9351,10 +9512,10 @@ cell-height = 1.2\n";
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// Cycle 896 (audit): contract point 5 — a write that would introduce a
+    /// Contract point 5 — a write that would introduce a
     /// malformed value is rejected and the previous content restored, instead
-    /// of leaving a corrupted config. The doc promised this for cycles but it
-    /// was never implemented.
+    /// of leaving a corrupted config. The doc promised this from the start but
+    /// it was never implemented.
     #[test]
     fn persist_config_toggle_rolls_back_on_malformed_value() {
         let dir = tempdir_for("rollback");
@@ -9395,7 +9556,7 @@ cell-height = 1.2\n";
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// Cycle 716: key normalization treats `cursor-blink` /
+    /// Key normalization treats `cursor-blink` /
     /// `cursor_blink` / `Cursor-Blink` as the same line so a user
     /// who hand-edited with underscores doesn't get a duplicate
     /// when the menu toggle uses hyphens.
@@ -9413,7 +9574,7 @@ cell-height = 1.2\n";
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// Cycle 779 drift guard. A config that already has duplicate lines
+    /// Drift guard. A config that already has duplicate lines
     /// for the same key must collapse to exactly ONE line after a toggle —
     /// previously every match was rewritten, so duplicates accumulated
     /// (file bloat). The parser is last-wins, so behavior was always
@@ -9450,7 +9611,7 @@ cell-height = 1.2\n";
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// Cycle 716: paths containing `..` are refused. The Preferences
+    /// Paths containing `..` are refused. The Preferences
     /// menu would never construct such a path, but a hostile or
     /// scripted call must not be able to escape the config dir.
     #[test]

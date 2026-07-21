@@ -1,4 +1,4 @@
-//! Cycle 928–930 (agent-first A2): the in-process control server.
+//! The in-process control server (agent-first A2).
 //!
 //! When `agent-server` is enabled, the App starts a [`CtlServer`]: an accept
 //! thread binds the kettle-ctl transport (Unix socket / Windows named pipe),

@@ -4,7 +4,7 @@
     kettle - Windows user-install (no admin / UAC required).
 
 .DESCRIPTION
-    Cycle 733: Windows equivalent of `scripts/install.sh`. Drops
+    Windows equivalent of `scripts/install.sh`. Drops
     everything into per-user paths so kettle shows up in Windows
     Search / Start menu - no system-wide changes, no admin.
 
@@ -170,7 +170,7 @@ if ($Uninstall) {
         if (Update-UserPath -Dir $Prefix -Remove) {
             Write-Output "  removed $Prefix from user PATH"
         }
-        # Cycle 736: also strip any -WithShellIntegration block we
+        # Also strip any -WithShellIntegration block we
         # appended to $PROFILE. Portable installs never add this block, so their
         # uninstall path must not remove integration owned by a default install.
         if (Test-Path $profilePath) {
@@ -397,7 +397,7 @@ $lnk.Description = "Fast, GPU-accelerated terminal emulator"
 $lnk.Save()
 Write-Output "  created Start menu shortcut: $shortcutPath"
 
-# Cycle 918: refresh the Windows icon cache. Explorer caches launcher icons by
+# Refresh the Windows icon cache. Explorer caches launcher icons by
 # path, and an in-place `kettle.ico` overwrite raises no change notification, so
 # a re-install with a CHANGED icon (e.g. the Catppuccin Mocha re-theme) would
 # otherwise keep showing the stale bitmap in Start / search / taskbar until the
@@ -433,11 +433,11 @@ if (-not $NoPath) {
     }
 }
 
-# Cycle 736: optional opt-in install of the PowerShell shell
+# Optional opt-in install of the PowerShell shell
 # integration snippet (kettle.ps1) into $PROFILE. The recommended
 # install path (vs. the bash/zsh/fish "kettle --shell-integration
 # powershell >> $PROFILE" one-liner) because that one-liner does NOT
-# work under SUBSYSTEM:WINDOWS (cycle 734 trade-off - PS doesn't
+# work under SUBSYSTEM:WINDOWS (a known trade-off: PS doesn't
 # read stdout from GUI processes). Idempotent: the snippet itself
 # has an internal $global:__kettle_prompt_installed guard, AND we
 # skip the Add-Content if the snippet's signature line is already

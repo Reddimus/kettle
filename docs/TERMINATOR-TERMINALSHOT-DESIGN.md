@@ -1,8 +1,8 @@
 # Terminator `terminalshot.py` port — design
 
-> Status: design only (cycle 630). The runtime live-window surface
-> readback machinery exceeds a single cycle, so this doc lays out the
-> architecture + sub-cycle roadmap. Same shape as
+> Status: design only. The runtime live-window surface
+> readback machinery spans more than one phase of work, so this doc
+> lays out the architecture + phase roadmap. Same shape as
 > [`TERMINATOR-REMOTE-DESIGN.md`](TERMINATOR-REMOTE-DESIGN.md),
 > [`TERMINATOR-DETACHABLE-TABS-DESIGN.md`](TERMINATOR-DETACHABLE-TABS-DESIGN.md),
 > [`TERMINATOR-PANE-TITLEBAR-DESIGN.md`](TERMINATOR-PANE-TITLEBAR-DESIGN.md),
@@ -22,17 +22,17 @@ End-state UX in kettle:
   picks "Take screenshot" from the right-click menu.
 - kettle captures the focused pane's current rendered content + saves
   it as a PNG to `<cache>/kettle/shots/kettle-<unix-secs>-<pid>.png`
-  (same path scheme as cycle-621's logger).
+  (same path scheme as the `session_log_path` helper).
 - A transient toast (using the existing notification surface) flashes
   the file path so the user can find it.
 
 The `--screenshot=PATH` / `--screenshot-menu=PATH` CLI flags already
-exist (cycle X). Those render a *synthetic content-free debug scene*
+exist. Those render a *synthetic content-free debug scene*
 headlessly — useful for visual regression testing but not for
 "snapshot what I'm looking at right now." This design fills the live-
 window readback gap.
 
-## Why multi-cycle
+## Why multiple phases
 
 Three cross-cutting changes:
 
@@ -62,7 +62,7 @@ Three cross-cutting changes:
      they see on-screen; sub-pixel border slop is fine.
 
 3. **Toast / notification path**. We already have notify-rust + the
-   cycle-612 desktop notification surface. The interactive action reports
+   `fire_notify` desktop notification helper. The interactive action reports
    that the capture was queued and its destination; control-plane callers get
    the worker's exact completion result. A second in-flight request is rejected
    explicitly instead of replacing the first.
@@ -106,15 +106,15 @@ thread. The worker uses a capacity-one synchronous channel and atomic busy
 latch. Readback is capped at 256 MiB and the GPU wait at five seconds.
 
 The PNG encoder is the same crate used by the existing `capture_png`
-function (cycle X) — `image` is already a transitive dep via
+function — `image` is already a transitive dep via
 kettle-render. No new deps.
 
-## Sub-cycle roadmap
+## Phase roadmap
 
-| Sub-cycle | What ships | Test coverage |
+| Phase | What ships | Test coverage |
 |-----------|-----------|---------------|
 | 1 | `Action::TakeScreenshot` enum variant + aliases (`take_screenshot` / `terminalshot` / `take-screenshot`) + dispatch arm queues request (no render-side wiring yet) | Unit test on from_name + palette inclusion |
-| 2 | `session_screenshot_path(unix_secs, pid, cache_dir)` pure helper (mirrors cycle-621 `session_log_path`) | Drift guard on path shape + relative-fallback |
+| 2 | `session_screenshot_path(unix_secs, pid, cache_dir)` pure helper (mirrors `session_log_path`) | Drift guard on path shape + relative-fallback |
 | 3 | `Renderer::pending_screenshot` slot + getter/setter; render_frame branches to intermediate-texture path when set | Compiles + existing snapshot tests pass |
 | 4 | wgpu copy_texture_to_buffer + map_async + PNG encode path | Mock wgpu via existing test infra? (may need manual e2e) |
 | 5 | Toast notification on save success/fail | Manual e2e |
@@ -126,7 +126,7 @@ hard to unit-test cleanly — relies on manual screenshot verification.
 
 ## What WON'T ship in v1
 
-- **In-place annotation**. The cycle-294 `--annotate` flag adds an
+- **In-place annotation**. The `--annotate` flag adds an
   annotation overlay to the headless screenshot path. Wiring the
   annotation surface into the live-capture path is a follow-up
   (mostly composing existing pieces).

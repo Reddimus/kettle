@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-# Cycle 711 (Terminator menu-UX sub-cycle): repro harness for the
-# right-click context menu.
+# Repro harness for the Terminator-style right-click
+# context menu.
 #
 # Launches a real kettle window, drives xdotool to right-click near
 # the screen center, waits a beat for the menu to paint, then captures
 # the whole screen via scrot. The resulting PNG lands in
-# target/menu-shots/ for diffing against prior runs as the C3-C9
-# context-menu sub-cycles land.
+# target/menu-shots/ for diffing against prior runs as further
+# context-menu work lands.
 #
 # Why interactive rather than --screenshot:
 #   kettle's --screenshot flag captures the surface at a single point

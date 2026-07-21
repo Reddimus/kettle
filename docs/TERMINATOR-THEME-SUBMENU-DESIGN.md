@@ -1,6 +1,6 @@
 # Terminator right-click theme submenu — design
 
-> Status: design only (cycle 634). The context menu (cycle 245)
+> Status: design only. The context menu
 > currently flat-lists Item + Separator + LuaItem + ConfigItem.
 > Adding a submenu for theme picking — a Terminator UX pattern
 > (`terminal_popup_menu.py`) — needs a hierarchical menu structure
@@ -10,11 +10,11 @@
 
 Terminator's right-click context menu has a "Profiles" submenu listing
 every configured profile; clicking one switches the focused pane's
-profile. kettle's profiles (cycle 242) are a runtime concept but
+profile. kettle's profiles are a runtime concept but
 there's no submenu UX for picking one — currently users either:
   - launch kettle with `--profile NAME`
   - bind `next_profile` / `prev_profile` to a chord
-  - use the cycle-329 command palette (full-screen overlay)
+  - use the command palette (full-screen overlay)
 
 A flyout submenu in the context menu would be the most discoverable
 UX for casual users: right-click → hover "Theme" → pick from list →
@@ -31,10 +31,10 @@ End-state UX in kettle:
   applies immediately, menu closes.
 
 Same pattern for "Profile ▸" (lists `<config-dir>/profiles/*.config`)
-and could be reused for Lua-registered nested menus in a future
-sub-cycle.
+and could be reused for Lua-registered nested menus as a
+follow-up.
 
-## Why multi-cycle
+## Why multiple changes
 
 Three cross-cutting changes:
 
@@ -61,7 +61,7 @@ Three cross-cutting changes:
    screen edge). Both panels need to render together; only the
    submenu's items respond to clicks while it's open.
 
-3. **State machine: parent vs submenu focus**. The cycle-245
+3. **State machine: parent vs submenu focus**. The
    `ContextMenuState` has a single `highlight: usize`. Extend to
    `(parent_highlight, submenu_highlight: Option<usize>)`. Hover
    on a `Submenu` row + delay → opens; hover off + delay → closes.
@@ -114,9 +114,9 @@ Three cross-cutting changes:
 └──────────────────────────────────────────────────────────────────────┘
 ```
 
-## Sub-cycle roadmap
+## Phased roadmap
 
-| Sub-cycle | What ships | Test coverage |
+| Phase | What ships | Test coverage |
 |-----------|-----------|---------------|
 | 1 | `ContextMenuItem::Submenu` variant + `item_is_dispatchable` + `max_chars` + `panel_h` updates to handle the new variant (no submenu opening yet — just renders `▸` glyph for now) | Drift guard on item-list traversal |
 | 2 | `SubmenuState` + hover delay state machine (~250 ms) | Pure unit test on the state transitions |
@@ -135,8 +135,8 @@ routing; the renderer paths use snapshot tests).
 
 - **Nested-nested submenus**. `Submenu { items: vec![Submenu { … }] }`
   is technically possible with the recursive enum, but v1 only renders
-  one level deep. Sub-cycles 1-9 hard-code single-level traversal.
-- **Search-within-submenu**. The cycle-329 command palette already
+  one level deep. Phases 1-9 hard-code single-level traversal.
+- **Search-within-submenu**. The command palette already
   has fuzzy search across themes/profiles/actions; users who want
   search go there. Submenu is for quick browsing.
 - **Keyboard-only operation**. The submenu is mouse-first (hover-
@@ -171,7 +171,7 @@ $ kettle
 - **Risk:** ~512 themes in a flyout overflow the viewport.
   **Mitigation:** the flyout panel has max-height = window.h - 40 px
   with a scrollable inner region (extends the existing
-  cycle-218 hint-mode scroll machinery). Themes alphabetical;
+  hint-mode scroll machinery). Themes alphabetical;
   type-ahead jumps to first match.
 - **Risk:** hover-delay timing varies across machines / OSes.
   **Mitigation:** 250 ms is the standard GNOME / KDE / macOS

@@ -1,8 +1,8 @@
 # Per-pane titlebar — design
 
-> Status: design only (cycle 362). End-state implementation is multi-cycle
+> Status: design only. End-state implementation spans multiple phases
 > because it touches layout math, render order, hit-testing, focus +
-> group indicators, and the cycle-354 Edit*Title overlay.
+> group indicators, and the Edit*Title overlay.
 
 ## What it is
 
@@ -15,11 +15,11 @@ each terminal containing:
   - The broadcast-group label (editable inline; click to assign).
   - Custom colors (transmit/receive/inactive variants).
 
-Kettle today shows ONE title bar — the global window title (cycle-X
-`window-title-format`) — plus the tab-bar with per-tab activity dots.
+Kettle today shows ONE title bar — the global window title
+(`window-title-format`) — plus the tab-bar with per-tab activity dots.
 Per-pane titlebars surface the same info AT THE PANE level.
 
-## Why it's multi-cycle
+## Why it's multi-phase
 
   1. **Layout math change.** Today, each pane's content area is the
      full rectangle minus padding. Adding a titlebar above each pane
@@ -49,16 +49,16 @@ Per-pane titlebars surface the same info AT THE PANE level.
      first place broadcast_group identity actually matters in
      the render layer.
 
-  5. **Edit-title overlay.** Cycle 354 ships placeholder direct
-     writes; the interactive overlay (text input + cursor + Enter
-     to apply) lives here. The titlebar becomes its own input
+  5. **Edit-title overlay.** `Action::EditPaneTitle` ships placeholder
+     direct writes today; the interactive overlay (text input + cursor
+     + Enter to apply) lives here. The titlebar becomes its own input
      widget when the user is editing.
 
 ## End-state UX
 
 ```
 ┌────────────────────────────────────────────────────────────────┐
-│  [tab1] [tab2 ●] [tab3 *]                                    + │  ← tab bar (cycle-X)
+│  [tab1] [tab2 ●] [tab3 *]                                    + │  ← tab bar
 ├────────────────────────────────────────────────────────────────┤
 │ vim notes.md             80×24       [g1]              ●       │  ← per-pane titlebar
 │                                                                │     (top-left: title;
@@ -85,9 +85,9 @@ graph TB
     E --> C
     F[Broadcast group] --> E
     G[On click in titlebar rect] --> H{Region?}
-    H -->|title text| I[Action::EditPaneTitle<br/>cycle 354 wires;<br/>overlay enters edit mode]
+    H -->|title text| I[Action::EditPaneTitle<br/>already wired;<br/>overlay enters edit mode]
     H -->|group label| J[Group-assign overlay]
-    H -->|drag region| K[Detachable tabs<br/>cycle DETACHABLE-TABS-DESIGN]
+    H -->|drag region| K[Detachable tabs<br/>see DETACHABLE-TABS-DESIGN]
 ```
 
 ### Files affected
@@ -101,18 +101,18 @@ graph TB
     the per-pane titlebar region; `handle_action` for `Action::Edit*Title`
     flips a new `editing_title: Option<TitleEditState>` field.
   - `crates/kettle-config/src/lib.rs`: existing title-* config fields
-    (cycle 340) get consumed by the render layer.
+    get consumed by the render layer.
 
-## Sub-cycle roadmap
+## Phase roadmap
 
 | # | Scope | Status |
 |---|------|--------|
-| 1 | This doc (362). Design + roadmap. No code. | ✅ |
+| 1 | This doc. Design + roadmap. No code. | ✅ |
 | 2 | `Pane.titlebar_height` field on Pane (computed from cfg.title_font metrics at startup + on config reload). Subtract from pane content rect in layout math; verify grid sizes match. | pending |
 | 3 | Renderer: `build_pane_titlebar(pane, focused, group)` emits the 3-quad chrome + 1 title-text area. Wire from `build_pane`. Honors `title_hide_sizetext`. | pending |
 | 4 | Color variants: select fg/bg from `cfg.title_{transmit,receive,inactive}_{fg,bg}_color` based on focused + broadcast-group membership. | pending |
 | 5 | Hit-testing: clicks on the titlebar rect intercepted in `on_mouse_input` before pane mouse-tracking. New `PaneRegion::Titlebar` discriminator. | pending |
-| 6 | Activity dot per-pane (mirrors cycle-246's tab-bar dot). Reuse the existing per-pane `last_output_at` tracking; new dot quad inside the titlebar. | pending |
+| 6 | Activity dot per-pane (mirrors the existing per-tab activity dot). Reuse the existing per-pane `last_output_at` tracking; new dot quad inside the titlebar. | pending |
 | 7 | Edit-title overlay: `editing_title: Option<TitleEditState>` field; KeyboardInput handler dispatches to it before normal key encoding when active. Enter applies + clears; Esc clears. | pending |
 | 8 | Inline group label edit: same shape as Edit-title but writes to `Pane.broadcast_group`. | pending |
 | 9 | `title_at_bottom` config wired: render the titlebar BELOW the pane content rect instead of above. | pending |
@@ -132,7 +132,7 @@ config is the single source.
 Terminator's `icon_bell` toggles whether the bell triggers a titlebar
 icon. kettle today maps bell → tab-bar dot (per-tab). With per-pane
 titlebars, the bell can render per-pane (the existing per-pane
-bell-state in cycle-246 generalizes).
+bell-state tracking generalizes).
 
 ### Why bottom rendering is a config knob, not a separate code path
 
@@ -145,7 +145,7 @@ parameter; no code duplication.
 Cross-window drag-and-drop (Terminator's `detachable_tabs`) needs
 this titlebar's drag-region as the trigger, but the cross-window
 state machine + IPC lives in its own Bucket-D thread (see
-`docs/TERMINATOR-DETACHABLE-TABS-DESIGN.md`). Sub-cycle 5's
+`docs/TERMINATOR-DETACHABLE-TABS-DESIGN.md`). Phase 5's
 hit-testing reserves the drag region; the actual detach implementation
 follows separately.
 

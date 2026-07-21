@@ -14,7 +14,7 @@ pub fn score(pattern: &str, candidate: &str) -> Option<i32> {
     if pattern.is_empty() {
         return Some(0);
     }
-    // Cycle 857 (audit): fold the pattern one char→one char, exactly as the
+    // Fold the pattern one char→one char, exactly as the
     // candidate side does below (`cc.to_lowercase().next()`). The old
     // `flat_map(to_lowercase)` expanded a multi-codepoint fold (e.g. `İ`→`i̇`,
     // `ß` stays) into several pattern chars while the candidate kept one per
@@ -84,7 +84,7 @@ pub fn best<'a, T>(pattern: &str, items: &'a [T], key: impl Fn(&T) -> &str) -> O
 mod tests {
     use super::*;
 
-    /// Cycle 857: a char whose `to_lowercase()` expands to multiple
+    /// A char whose `to_lowercase()` expands to multiple
     /// codepoints (`İ` → `i` + combining dot) must still fuzzy-match itself.
     /// The old asymmetric folding (multi-char pattern vs single-char candidate)
     /// made it never match.

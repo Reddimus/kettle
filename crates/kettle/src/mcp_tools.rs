@@ -1,4 +1,4 @@
-//! Cycle 932 (agent-first A3): the MCP tool registry.
+//! The MCP tool registry (agent-first A3).
 //!
 //! `kettle_run` runs a command headlessly via the A1 exec engine in-process.
 //! The other tools drive a running kettle via the A2 control client; when no

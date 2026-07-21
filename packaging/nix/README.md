@@ -74,7 +74,7 @@ be the single source of truth).
 
 - **Rust toolchain pinned to 1.89** via
   [oxalica/rust-overlay](https://github.com/oxalica/rust-overlay)
-  — matches the workspace MSRV declared in `Cargo.toml` (cycle 250).
+  — matches the workspace MSRV declared in `Cargo.toml`.
   Drift-proofs the Nix path against a nixpkgs Rust version bump.
 - **`postFixup` patches the rpath** with
   `pkgs.lib.makeLibraryPath runtimeLibs`. wgpu / winit / glyphon

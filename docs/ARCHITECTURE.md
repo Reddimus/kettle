@@ -527,9 +527,9 @@ The most recent additions:
 
 See [`docs/TERMINATOR-AUDIT.md`](TERMINATOR-AUDIT.md) for the full
 Terminator parity inventory; see [CHANGELOG.md](../CHANGELOG.md) for the
-per-cycle history.
+change-by-change history.
 
-### Plugin system (cycles 324, 365-378)
+### Plugin system
 
 ```mermaid
 flowchart TD
@@ -546,7 +546,7 @@ flowchart TD
 io.open, etc); `trusted` mode opt-in. See
 [`docs/TERMINATOR-PLUGIN-DESIGN.md`](TERMINATOR-PLUGIN-DESIGN.md).
 
-### Settings overlay + interactive keybind editor (cycles 756, 766)
+### Settings overlay + interactive keybind editor
 
 A keyboard-navigable, non-technical-friendly preferences panel — the overlay
 evolution of the right-click **Preferences ▸** submenu. Opens via **Ctrl+,** or
@@ -582,7 +582,7 @@ catalogue key degrades to "—" rather than panicking (`settings::read`,
 guarded by the `catalogue_keys_are_all_readable` drift test). See
 [`docs/SETTINGS.md`](SETTINGS.md) for the per-field reference.
 
-### Per-pane titlebar (cycles 379-407)
+### Per-pane titlebar
 
 Renders ONLY when a tab has >1 pane (single-pane tab uses the OS
 window title). Layout:
@@ -604,7 +604,7 @@ focuses the pane; click again opens `EditPaneTitle`. `EditPaneGroup`
 action edits the broadcast-group label. See
 [`docs/TERMINATOR-PANE-TITLEBAR-DESIGN.md`](TERMINATOR-PANE-TITLEBAR-DESIGN.md).
 
-### Background image (cycles 380-396)
+### Background image
 
 ```mermaid
 flowchart LR
@@ -743,5 +743,5 @@ Four notable invariants preserved by this flow:
   `--tab-handoff` loads were dead because `resumed()` `mem::take`'d
   the whole CLI-options struct before the gates read it.)
 
-See [`docs/ROADMAP.md`](ROADMAP.md) for the cycle-by-cycle ledger of
-session-restore hardening (cycles 411-420).
+See [`docs/ROADMAP.md`](ROADMAP.md) for the full ledger of
+session-restore hardening.

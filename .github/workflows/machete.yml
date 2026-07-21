@@ -1,14 +1,14 @@
 # cargo-machete — catch unused workspace dependencies before they land.
-# Pairs with the cycle-244 audit + cycle-264 deny workflows: every
+# Pairs with the audit + deny workflows: every
 # `cargo add` PR now passes through three supply-chain checks:
 #
 #   audit.yml      — RustSec security advisories
 #   deny.yml       — licenses, sources, banned crates
-#   machete.yml    — actually-used (this one, cycle 274)
+#   machete.yml    — actually-used (this one)
 #
 # Each one catches a class the others miss. cargo-machete in
 # particular finds dependencies declared in `Cargo.toml` but never
-# imported in source — a class cycle 274 caught 11 of in one pass
+# imported in source — a class an early run caught 11 of in one pass
 # (`log` in kettle-render + kettle-core, `serde` / `thiserror` /
 # `unicode-width` in kettle-core, `env_logger` / `kettle-vt` /
 # `raw-window-handle` / `toml` in kettle-ui). Adding the workflow
@@ -28,7 +28,7 @@ on:
       - "**/Cargo.toml"
       - "**/Cargo.lock"
       - ".github/workflows/machete.yml"
-  # Cycle 774: weekly cron so the README cargo-machete badge always has a
+  # Weekly cron so the README cargo-machete badge always has a
   # recent run to reflect. The push/PR triggers above are path-filtered to
   # Cargo manifests, so a long run of non-manifest commits would otherwise
   # leave the badge showing a stale state (or blank on a fresh branch) —
@@ -40,8 +40,8 @@ on:
 permissions:
   contents: read
 
-# Cycle 598: same concurrency block as ci.yml + actionlint.yml. A
-# weekly cron (added cycle 774, see above) but no release artifacts, purely diagnostic — cancel-in-progress
+# Same concurrency block as ci.yml + actionlint.yml. A
+# weekly cron (see above) but no release artifacts, purely diagnostic — cancel-in-progress
 # is strictly a budget win when a Cargo.toml-touching PR gets
 # multiple pushes in quick succession.
 concurrency:
@@ -52,7 +52,7 @@ jobs:
   machete:
     name: unused deps
     runs-on: ubuntu-latest
-    # Cycle 600 budget cap. cargo-machete runs in <1 min real time;
+    # Budget cap. cargo-machete runs in <1 min real time;
     # 10 min handles a cold rust-cache restore.
     timeout-minutes: 10
     steps:

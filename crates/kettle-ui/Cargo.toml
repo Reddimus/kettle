@@ -6,27 +6,29 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 authors.workspace = true
-# See `kettle-config/Cargo.toml` for the cycle-218 per-crate-description rationale.
+# See `kettle-config/Cargo.toml`: each crate's `description` overrides the
+# workspace default because that default describes the `kettle` binary, not
+# the library sub-crates.
 description = "kettle: winit app, tab/pane mux, Terminator-style splits, overlays (search/palette/themes), session save/restore"
 
 [lints]
 workspace = true
 
 [features]
-# Cycle 875: developer-only session recorder (asciicast-compatible trace of
-# output / resize / keystroke tokens / UI markers). Compiled OUT of released
-# and packaged builds — enable with `cargo build --features dev-record`. The
-# `--record <path>` CLI flag only exists in feature-enabled builds.
-# Cycle 924: the recorder lives in kettle-core now (`record.rs`); this feature
-# turns on `kettle-core/asciicast` so it compiles in. `crate::dev_record`
-# re-exports it, so call sites are unchanged.
+# Developer-only session recorder (asciicast-compatible trace of output /
+# resize / keystroke tokens / UI markers). Compiled OUT of released and
+# packaged builds — enable with `cargo build --features dev-record`. The
+# `--record <path>` CLI flag only exists in feature-enabled builds. The
+# recorder lives in kettle-core (`record.rs`); this feature turns on
+# `kettle-core/asciicast` so it compiles in. `crate::dev_record` re-exports
+# it, so call sites are unchanged.
 dev-record = ["kettle-core/asciicast"]
 
 [dependencies]
 accesskit = "0.24.1"
 accesskit_winit = "0.33.2"
 anyhow.workspace = true
-# Cycle 277: default-features off drops the `image_data` feature,
+# default-features off drops the `image_data` feature,
 # which transitively pulls `image` with default features (= every
 # format incl. avif/rav1e). kettle's clipboard surface is text-
 # only (selection copy / paste / OSC 52); no image-to-clipboard
@@ -35,7 +37,7 @@ anyhow.workspace = true
 arboard = { version = "3.6.1", default-features = false }
 crossbeam-channel = "0.5.15"
 fs4 = "1.1"
-# Cycle 752: decode the embedded PNG app icon into a winit window icon so
+# Decode the embedded PNG app icon into a winit window icon so
 # the title bar (system-menu glyph), taskbar button, and Alt-Tab show
 # kettle's icon for the *running* window. Only the `png` feature — the icon
 # assets are PNG. `image` is already built for the workspace (kettle-render
@@ -46,35 +48,34 @@ fs4 = "1.1"
 image = { version = "0.25.10", default-features = false, features = ["png"] }
 kettle-config.workspace = true
 kettle-core.workspace = true
-# Cycle 928 (agent-first A2): the App hosts the control server over kettle-ctl's
-# transport + protocol so an agent (or `kettle ctl`/`kettle mcp`) can read the
-# screen and drive panes. The protocol/transport live in the leaf crate so the
-# future kettle-muxd daemon can re-host the same server side.
+# The App hosts the control server over kettle-ctl's transport + protocol so
+# an agent (or `kettle ctl`/`kettle mcp`) can read the screen and drive panes.
+# The protocol/transport live in the leaf crate so the future kettle-muxd
+# daemon can re-host the same server side.
 kettle-ctl.workspace = true
 kettle-render.workspace = true
 kettle-state.workspace = true
 kettle-update.workspace = true
-# Cycle 655 (sub-cycle 6 of TERMINATOR-REMOTE-DESIGN.md): SSH /
-# Docker / Podman / kubectl session detection. Carries the sysinfo
-# dep into kettle-ui where the App's poll loop will live; non-UI
-# consumers stay isolated.
+# SSH / Docker / Podman / kubectl session detection, per
+# TERMINATOR-REMOTE-DESIGN.md. Carries the sysinfo dep into kettle-ui
+# where the App's poll loop will live; non-UI consumers stay isolated.
 kettle-remote.workspace = true
 log.workspace = true
-# Cycle 324: Lua scripting foundation. The `--lua-script PATH`
+# Lua scripting foundation. The `--lua-script PATH`
 # CLI flag executes a Lua file at startup with a `kettle`
 # namespace exposing the introspection surface. WezTerm parity.
-# Future sub-cycles add send_text + event hooks.
+# Future work adds send_text + event hooks.
 mlua.workspace = true
 notify = "8.2.0"
 notify-rust.workspace = true
 # 5.4.0 hardens launcher argument handling against option and shell injection.
 open = "5.4.0"
 pollster = "0.4.0"
-# Cycle 290: triggers (cycle 289 config) compile to `regex::Regex`
+# Triggers (`kettle_config::OutputTrigger`) compile to `regex::Regex`
 # in the App layer (not kettle-core) — the matching engine reads
 # the focused-pane viewport via the existing Mux API, no reader-
-# thread plumbing needed. Workspace-pinned via the cycle-264
-# deny.toml license allow-list.
+# thread plumbing needed. Workspace-pinned via deny.toml's license
+# allow-list.
 regex.workspace = true
 serde = { workspace = true, features = ["derive"] }
 serde_json = "1.0.149"
@@ -104,18 +105,18 @@ winit = { version = "0.30.13", default-features = false, features = [
     "wayland-csd-adwaita-notitle",
 ] }
 
-# Cycle 399: SCM_RIGHTS fd-passing for detachable-tabs Bucket-D
-# sub-cycle 3. Unix-only (Linux + macOS + BSDs); Windows + Wayland
-# get the Action::MoveTabToNewWindow keyboard-driven fallback.
+# SCM_RIGHTS fd-passing for detachable-tabs Bucket-D. Unix-only
+# (Linux + macOS + BSDs); Windows + Wayland get the
+# Action::MoveTabToNewWindow keyboard-driven fallback.
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
-# Cycle 745: ITaskbarList3 for OSC 9;4 taskbar progress (PowerShell 7 /
+# ITaskbarList3 for OSC 9;4 taskbar progress (PowerShell 7 /
 # Windows Terminal parity — `Write-Progress` + `winget` drive the taskbar
 # button). The `windows` crate gives safe COM wrappers; 0.62 is already in
 # the workspace lockfile, and the feature set is narrow + Windows-only, so
 # Linux/macOS builds are unaffected.
-# Cycle 869: `Win32_UI_WindowsAndMessaging` adds FlashWindowEx/FLASHWINFO/
+# `Win32_UI_WindowsAndMessaging` adds FlashWindowEx/FLASHWINFO/
 # FLASHW_STOP so `Taskbar::clear_attention` can reliably stop the Win11
 # taskbar flash on focus-gain (winit's request_user_attention(None) doesn't).
 # v2.19.0 (tear-off UX): `Win32_Graphics_Dwm` adds DwmGetWindowAttribute /
@@ -136,7 +137,7 @@ windows = { version = "0.62", features = [
 [dev-dependencies]
 tempfile = "3"
 
-# Cycle 768: objc2 / objc2-app-kit for the macOS `sticky = true` window
+# objc2 / objc2-app-kit for the macOS `sticky = true` window
 # behavior (NSWindowCollectionBehavior::CanJoinAllSpaces) that winit 0.30 no
 # longer exposes natively. Versions pinned to match winit 0.30's own
 # objc2-app-kit (0.2 / objc2 0.5) so the ObjC class types are compatible and

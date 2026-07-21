@@ -33,10 +33,10 @@ pub(crate) fn decode_with_budget(body: &str, budget: &GraphicsBudget) -> Option<
     if !inline {
         return None;
     }
-    // Cycle 916 (file-by-file audit): STANDARD base64 rejects embedded whitespace
-    // and `.trim()` only strips the ends, so a line-wrapped OSC-1337 body (raw
-    // newlines aren't ST, so they reach the decoder) silently failed. Strip all
-    // ASCII whitespace first.
+    // STANDARD base64 rejects embedded whitespace and `.trim()` only strips
+    // the ends, so a line-wrapped OSC-1337 body (raw newlines aren't ST, so
+    // they reach the decoder) silently failed. Strip all ASCII whitespace
+    // first.
     let _cleaned_reservation = budget.reserve_transient_cpu(b64.len().max(1))?;
     let mut cleaned = Vec::new();
     cleaned.try_reserve_exact(b64.len()).ok()?;

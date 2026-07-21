@@ -45,7 +45,7 @@ const MAX_ZEROWIDTH: usize = 4;
 pub struct SnapCell {
     /// Grid-absolute line — negative when scrolled into history, exactly as
     /// `display_iter` yields it. The renderer converts to a viewport row
-    /// with `line + display_offset` (cycle 912) where needed.
+    /// with `line + display_offset` where needed.
     pub line: i32,
     pub col: usize,
     pub c: char,

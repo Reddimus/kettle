@@ -57,7 +57,7 @@ package() {
 
     # XDG launcher + scalable icon + raster fallbacks so kettle
     # shows up in GNOME Activities / KDE Krunner / rofi the same
-    # way the cycle-0 install.sh wires it up at the user level.
+    # way install.sh wires it up at the user level.
     install -Dm644 packaging/linux/kettle.desktop \
         "${pkgdir}/usr/share/applications/kettle.desktop"
     install -Dm644 packaging/linux/kettle.svg \
@@ -81,11 +81,11 @@ package() {
     install -Dm644 README.md "${pkgdir}/usr/share/doc/kettle/README.md"
     install -Dm644 CHANGELOG.md "${pkgdir}/usr/share/doc/kettle/CHANGELOG.md"
 
-    # Cycle 279: man page so `man kettle` works after install.
+    # Man page so `man kettle` works after install.
     install -Dm644 packaging/linux/kettle.1 \
         "${pkgdir}/usr/share/man/man1/kettle.1"
 
-    # Cycle-230 shell-integration snippets so users can source them
+    # Shell-integration snippets so users can source them
     # directly rather than going through `kettle --shell-integration
     # <shell>` (which embeds the same bodies via include_str!).
     for sh in bash zsh fish; do

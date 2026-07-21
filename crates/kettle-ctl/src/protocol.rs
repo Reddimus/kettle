@@ -1,4 +1,4 @@
-//! Cycle 925 (agent-first A2): the control-plane wire protocol.
+//! The control-plane wire protocol.
 //!
 //! Newline-delimited JSON (one message per line). Versioned with a leading
 //! `"v"` field; the compatibility policy is **additive only** — new fields may
@@ -331,7 +331,7 @@ pub mod error_codes {
     pub const BAD_PARAMS: &str = "bad_params";
     /// The named pane does not exist (closed, or never existed).
     pub const NO_SUCH_PANE: &str = "no_such_pane";
-    /// A mutating method was called on a read-only server, OR (cycle 941) the
+    /// A mutating method was called on a read-only server, or the
     /// target pane was toggled read-only by the user (right-click "Read only"
     /// / `toggle_read_only`). The error message distinguishes the two; pane
     /// state is also visible as the `read_only` field in `list_panes`.

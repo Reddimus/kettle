@@ -13,7 +13,7 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  # Cycle 723 (2026-05-23): test-before-release gate. Before
+  # (2026-05-23): test-before-release gate. Before
   # release.yml started running `cargo test` the package job built
   # release artifacts blindly — if the tagged commit was a broken
   # one (rare, but possible if a hotfix branch was tagged without
@@ -57,7 +57,7 @@ jobs:
             exit 1
           fi
           echo "$GITHUB_REF_NAME is an annotated tag with a verified signature"
-      # Cycle 919 (audit L14): the tag ↔ Cargo.toml ↔ flake.nix ↔ CHANGELOG
+      # The tag ↔ Cargo.toml ↔ flake.nix ↔ CHANGELOG
       # consistency gate runs HERE in the single-Linux pretest — before any
       # per-OS package build — so a version mismatch fails fast and BLOCKS all
       # platform builds. Previously it lived in the package matrix gated on
@@ -76,14 +76,14 @@ jobs:
             echo "::error::either retag with v$CARGO_VER or bump Cargo.toml to $TAG_VER first"
             exit 1
           fi
-          # Cycle 286/765: CHANGELOG.md must carry the dated '## [X.Y.Z] —
+          # CHANGELOG.md must carry the dated '## [X.Y.Z] —
           # YYYY-MM-DD' section for this version (matches scripts/release.sh).
           if ! grep -qE "^## \[${TAG_VER}\] — [0-9]{4}-[0-9]{2}-[0-9]{2}\$" CHANGELOG.md; then
             echo "::error::tag $GITHUB_REF_NAME but CHANGELOG.md has no '## [$TAG_VER] — YYYY-MM-DD' section"
             echo "::error::promote the [Unreleased] block to '## [$TAG_VER] — YYYY-MM-DD' (with the date) before tagging"
             exit 1
           fi
-          # Cycle 550: flake.nix's hardcoded version must match (release.sh
+          # flake.nix's hardcoded version must match (release.sh
           # auto-bumps it; a forgotten bump should fail the release, not ship a
           # Nix derivation with wrong metadata).
           if [ -f flake.nix ]; then
@@ -112,17 +112,18 @@ jobs:
   package:
     name: package (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
-    # Cycle 723: package only runs after pretest passes. A red
+    # Package only runs after pretest passes. A red
     # `cargo test --workspace` blocks the per-OS builds before
     # they consume runner minutes.
     needs: pretest
-    # Cycle 600 budget cap. Release builds compile in --release mode
+    # Budget cap. Release builds compile in --release mode
     # (slow), bundle assets, hash, and upload — real time runs
     # ~25-40 min per OS. 75 min is ~2× headroom for a slow runner
     # without giving a hang the full 6-hour default. NOTE: unlike
-    # ci.yml (cycle 597), release.yml is NOT covered by cancel-in-
+    # ci.yml, release.yml is NOT covered by cancel-in-
     # progress concurrency — a release must always complete, never
-    # be canceled mid-upload (cycle-558 incident recovery).
+    # be canceled mid-upload (a lesson from the v1.43.0 partial
+    # release, which shipped macOS/Windows assets but no Linux one).
     timeout-minutes: 75
     strategy:
       fail-fast: false
@@ -134,7 +135,7 @@ jobs:
             artifact: kettle-macos-universal.zip
           - os: windows-latest
             artifact: kettle-windows-x86_64.zip
-          # Cycle 767: ARM64 Linux (Raspberry Pi 4/5, ARM servers/VPS, ARM
+          # ARM64 Linux (Raspberry Pi 4/5, ARM servers/VPS, ARM
           # laptops on Linux). Cross-compiled on the x86_64 ubuntu runner — the
           # ci.yml early-warning job proves this target builds. Windowing deps
           # load via dlopen, so only the GNU cross-linker is needed.
@@ -143,7 +144,7 @@ jobs:
             rust_target: aarch64-unknown-linux-gnu
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-      # Cycle 919 (audit L14): the tag ↔ Cargo.toml ↔ flake.nix ↔ CHANGELOG
+      # The tag ↔ Cargo.toml ↔ flake.nix ↔ CHANGELOG
       # consistency gate moved to the `pretest` job (single Linux, runs before
       # any per-OS build) so a version mismatch blocks ALL platform builds,
       # rather than letting macOS/Windows publish artifacts while only the Linux
@@ -158,15 +159,16 @@ jobs:
           sudo apt-get install -y pkg-config libfontconfig1-dev libfreetype6-dev \
             libx11-dev libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libxcb1-dev
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
-        # Cycle 838 (audit): key the cache per artifact so the two ubuntu-latest
+        # Key the cache per artifact so the two ubuntu-latest
         # legs (x86_64 + aarch64) don't share one cache and thrash each other's
         # target dir — mirrors how ci.yml keys its msrv/nightly/aarch64 legs.
         with:
           shared-key: ${{ matrix.artifact }}
-      # Build: macOS gets a real universal2 binary (cycle 159 — the
-      # artifact has been named `kettle-macos-universal.zip` since
-      # cycle 0 but the underlying binary was single-arch from
-      # whatever runner architecture macos-latest happened to be).
+      # Build: macOS gets a real universal2 binary — the
+      # artifact has been named `kettle-macos-universal.zip` since the
+      # project's earliest releases, but the underlying binary was
+      # single-arch from whatever runner architecture macos-latest
+      # happened to be until this build step fixed it.
       # Linux + Windows: native release build.
       - name: Build (macOS universal)
         if: runner.os == 'macOS'
@@ -184,7 +186,7 @@ jobs:
         if: runner.os != 'macOS' && matrix.rust_target == ''
         run: cargo build --release -p kettle
 
-      # Cycle 767: ARM64 Linux cross-build. The runner is x86_64; install the
+      # ARM64 Linux cross-build. The runner is x86_64; install the
       # aarch64 std + GNU cross-linker and build for the target, then copy the
       # binary to the host-build path so the unchanged Package (Linux) step
       # picks it up. Mirrors ci.yml's aarch64 early-warning job.
@@ -212,19 +214,19 @@ jobs:
           # ~/.local/ without any further steps.
           cp packaging/linux/kettle.desktop dist/kettle/packaging/linux/
           cp packaging/linux/kettle.svg     dist/kettle/packaging/linux/
-          # Cycle 773: no `|| true` here — a missing or renamed icon raster
+          # No `|| true` here — a missing or renamed icon raster
           # must FAIL the release loudly rather than silently ship an
           # iconless tarball. The 7 sizes are committed and regenerated by
           # scripts/gen-icons.sh, so the glob always matches in a clean tree.
           cp packaging/linux/kettle-*.png   dist/kettle/packaging/linux/
-          # Cycle 279: man page ships with the Linux tarball so the
+          # Man page ships with the Linux tarball so the
           # bundled install.sh can drop it into ~/.local/share/man/man1.
           cp packaging/linux/kettle.1       dist/kettle/packaging/linux/
           install -Dm755 scripts/install.sh dist/kettle/install.sh
-          # Cycle 230: also ship the OSC 133 shell-integration snippets
+          # Also ship the OSC 133 shell-integration snippets
           # so a user can read/customize them before sourcing. The same
-          # bodies are embedded into the binary via include_str! (cycle
-          # 229), so `./kettle/kettle --shell-integration bash >> ~/.bashrc`
+          # bodies are embedded into the binary via include_str!,
+          # so `./kettle/kettle --shell-integration bash >> ~/.bashrc`
           # works without these files; they're a discoverability +
           # source-of-truth aid, not a runtime requirement.
           cp -r shell-integration dist/kettle/
@@ -262,10 +264,10 @@ jobs:
           cp packaging/macos/Info.plist "$APP/Contents/Info.plist"
           cp target/release/kettle "$APP/Contents/MacOS/kettle"
           cp LICENSE NOTICE README.md CHANGELOG.md "$APP/Contents/Resources/"
-          # Cycle 230: shell-integration snippets in Resources/ so a
+          # Shell-integration snippets in Resources/ so a
           # macOS user can read them alongside the LICENSE / NOTICE
           # without needing the source tree. Same content as the
-          # binary's embedded copies (see cycle 229).
+          # binary's embedded copies.
           cp -r shell-integration "$APP/Contents/Resources/"
           (cd dist && zip -r ../${{ matrix.artifact }} kettle.app)
 
@@ -286,18 +288,18 @@ jobs:
           # if the user moves the .exe out of its install directory.
           Copy-Item packaging/windows/kettle.ico dist/kettle/
           Copy-Item LICENSE,NOTICE,README.md,CHANGELOG.md dist/kettle/
-          # Cycle 230: shell-integration snippets — useful for Windows
+          # Shell-integration snippets — useful for Windows
           # users running Git Bash, MSYS2, or WSL inside kettle on
           # ConPTY. Same files as on the other platforms.
           Copy-Item -Recurse shell-integration dist/kettle/
-          # Cycle 733: bundled install.ps1 puts kettle into
+          # Bundled install.ps1 puts kettle into
           # %LOCALAPPDATA%\Programs\kettle, creates a Start menu
           # shortcut (so Win-key search finds "kettle"), adds to user
           # PATH, and registers an Add/Remove Programs entry. Mirrors
-          # the cycle-0 Linux install.sh + the macOS .app bundle's
-          # Spotlight integration — pre-733 the Windows .zip was the
-          # only release artifact that didn't surface in the OS app
-          # launcher after the user extracted it.
+          # the Linux install.sh + the macOS .app bundle's
+          # Spotlight integration — before this script existed, the
+          # Windows .zip was the only release artifact that didn't
+          # surface in the OS app launcher after the user extracted it.
           Copy-Item scripts/install.ps1 dist/kettle/
           $version = (Select-String '^version = "([^"]+)"' Cargo.toml | Select-Object -First 1).Matches.Groups[1].Value
           python scripts/package-manifest.py generate `
@@ -307,7 +309,7 @@ jobs:
           Compress-Archive -Path dist/kettle/* -DestinationPath ${{ matrix.artifact }} -Force
 
       # Generate a SHA-256 sidecar for the artifact so users (and the
-      # cycle-253 `install-online.sh` one-liner) can verify a download
+      # `install-online.sh` one-liner) can verify a download
       # before extracting. Output format matches `sha256sum` / `shasum
       # -a 256` so the standard verification incantation works as-is:
       #     sha256sum -c kettle-linux-x86_64.tar.gz.sha256

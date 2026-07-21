@@ -54,24 +54,25 @@ pub fn links_with_cwd(term: &Term<EventProxy>, cwd: Option<&str>) -> Vec<Link> {
     let grid = term.grid();
     let cols = grid.columns();
     let rows = grid.screen_lines();
-    // Cycle 917 (#3, user-reported on native Ubuntu): scan the VISIBLE viewport,
-    // not the active screen. A visible viewport row `row` maps to grid line
+    // Scan the VISIBLE viewport, not the active screen (user-reported on
+    // native Ubuntu). A visible viewport row `row` maps to grid line
     // `row - display_offset` (alacritty addresses history with NEGATIVE lines);
     // `grid[Line(row)]` always read the active (bottom) screen, so scrolling
     // Claude Code up returned the active screen's links and the renderer painted
     // their underlines over the scrolled-back history ("leftover/ghost
-    // underlines"). Mirrors the cycle-912 decoration/selection conversion.
+    // underlines"). Mirrors the same grid-absolute-to-viewport conversion the
+    // renderer uses for cell decorations and selection.
     let off = grid.display_offset() as i32;
     let mut out: Vec<Link> = Vec::new();
-    // Cycle 762: reuse the URL-scan scratch buffers across every viewport row
-    // instead of allocating a String + Vec per row each time links are
-    // recomputed (every redraw). `.clear()` keeps the capacity.
+    // Reuse the URL-scan scratch buffers across every viewport row instead of
+    // allocating a String + Vec per row each time links are recomputed (every
+    // redraw). `.clear()` keeps the capacity.
     let mut text = String::with_capacity(cols);
     let mut col_of_byte: Vec<usize> = Vec::with_capacity(cols * 2);
 
     for row in 0..rows {
         let gl = row as i32 - off; // visible viewport row -> grid-absolute line
-        // Cycle 781: this row's OSC 8 links occupy `out[osc8_start..osc8_end]`.
+        // This row's OSC 8 links occupy `out[osc8_start..osc8_end]`.
         // The autodetect overlap check below scans only that slice instead of
         // all-rows `out`, turning an O(total_links)-per-match scan (→ O(n²) on a
         // link-dense viewport, e.g. a log full of URLs) into one bounded by this
@@ -282,7 +283,7 @@ pub fn is_safe_url(uri: &str) -> bool {
     };
     match scheme.to_ascii_lowercase().as_str() {
         "http" | "https" | "ftp" | "ftps" | "mailto" => !rest.is_empty(),
-        // Allow LOCAL files only (cycle 815) — never a remote authority.
+        // Allow LOCAL files only — never a remote authority.
         "file" => is_local_file_url(uri),
         _ => false,
     }
@@ -290,7 +291,7 @@ pub fn is_safe_url(uri: &str) -> bool {
 
 /// Whether a `file://` URI points at the local machine with no traversal.
 ///
-/// Cycle 815 (audit): the old check was `starts_with("file://") && !contains("..")`
+/// The old check was `starts_with("file://") && !contains("..")`
 /// — it blocked traversal but not a remote authority. `file://evil.example.com/share`
 /// passed, and on Windows `file://host/path` maps to the UNC `\\host\path`, so the
 /// OS opener transparently connects to `host` over SMB/WebDAV and leaks the user's
@@ -300,8 +301,8 @@ pub fn is_safe_url(uri: &str) -> bool {
 /// and reject any backslash / `file:////` / percent-encoded traversal that could
 /// smuggle an authority back in.
 fn is_local_file_url(uri: &str) -> bool {
-    // Cycle 916 (file-by-file audit): the scheme is matched case-insensitively
-    // upstream (is_safe_url lowercases it before the `file` arm), so accept
+    // The scheme is matched case-insensitively upstream (is_safe_url
+    // lowercases it before the `file` arm), so accept
     // `FILE://` / `File://` here too — a case-sensitive strip rejected valid
     // uppercase-scheme local files while the authority/traversal checks below
     // (which already use a lowercased copy) stayed intact.
@@ -356,7 +357,7 @@ mod tests {
         assert!(!is_safe_url("https:"), "scheme with empty target");
     }
 
-    /// Cycle 815 (audit) drift guard: `file://` must be local-only — a remote
+    /// Drift guard: `file://` must be local-only — a remote
     /// authority is a Windows NTLM-hash leak / SSRF vector from PTY output.
     #[test]
     fn file_url_is_local_only() {

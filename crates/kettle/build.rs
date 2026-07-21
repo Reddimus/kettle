@@ -14,12 +14,12 @@
 //! - `""` — source-tarball / vendored / no-git case. `concat!` of an
 //!   empty string is a no-op, so the call site doesn't need a cfg.
 //!
-//! Cycle history: 192 introduced the basic SHA capture; 195 added the
-//! `+dirty` marker and dropped cycle-192's `rerun-if-changed`
-//! restrictions (which prevented source edits from refreshing the
-//! marker). Now the script runs on every cargo build — ~20ms of git
-//! subprocess time, well under build-time noise, and worth it for the
-//! `+dirty` correctness.
+//! An earlier version of this script only captured the SHA; a later
+//! change added the `+dirty` marker and dropped that version's
+//! `rerun-if-changed` restrictions (which prevented source edits from
+//! refreshing the marker). Now the script runs on every cargo build —
+//! ~20ms of git subprocess time, well under build-time noise, and
+//! worth it for the `+dirty` correctness.
 
 use std::env;
 use std::path::PathBuf;
@@ -53,17 +53,17 @@ fn main() {
         }
     }
 
-    // Cycle 195 note: we want the script to re-run on every cargo
-    // build so the `+dirty` marker refreshes when ANY source edit
-    // lands — not just edits in this package's tree. Cargo's
-    // default behavior (no rerun-if directives) is to scan only
-    // THIS package's directory; an edit to kettle-ui or kettle-vt
-    // didn't trigger a re-run, so a SHA captured on a clean tree
-    // stayed in the binary across subsequent dirty workspace edits.
+    // We want the script to re-run on every cargo build so the
+    // `+dirty` marker refreshes when ANY source edit lands — not
+    // just edits in this package's tree. Cargo's default behavior
+    // (no rerun-if directives) is to scan only THIS package's
+    // directory; an edit to kettle-ui or kettle-vt didn't trigger
+    // a re-run, so a SHA captured on a clean tree stayed in the
+    // binary across subsequent dirty workspace edits.
     //
-    // Cycle 445: emit a `rerun-if-changed=NONEXISTENT_FORCE_RERUN`
-    // directive that points at a file Cargo can never stat. Per
-    // the build-script protocol, Cargo treats a missing path as
+    // Emit a `rerun-if-changed=NONEXISTENT_FORCE_RERUN` directive
+    // that points at a file Cargo can never stat. Per the
+    // build-script protocol, Cargo treats a missing path as
     // "always changed" and re-runs the script every time. The
     // two `git` invocations below are ~10ms total; running on
     // every cargo build is well under build-time noise.
@@ -79,7 +79,7 @@ fn main() {
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty());
 
-    // Cycle 195: tag the SHA with `+dirty` if the working tree has
+    // Tag the SHA with `+dirty` if the working tree has
     // uncommitted changes. Without this, a dev build with edits to
     // `src/main.rs` reports the same SHA as the clean tip — bug
     // reports against custom builds are indistinguishable from

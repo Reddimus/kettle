@@ -1,4 +1,4 @@
-//! Cycle 756: data model for the in-app **Settings overlay** — a
+//! Data model for the in-app **Settings overlay** — a
 //! keyboard-navigable, non-technical-friendly settings panel (Terminator
 //! parity, but native to kettle's overlay architecture). The overlay presents
 //! the most-used config keys grouped into categories; changing a field writes
@@ -46,7 +46,7 @@ pub enum FieldKind {
         step: i64,
         suffix: &'static str,
     },
-    /// Cycle 766: a rebindable keybinding. `action` is the canonical
+    /// A rebindable keybinding. `action` is the canonical
     /// `Action::from_name` token (e.g. `"split_right"`). The displayed value is
     /// the chord currently bound to that action (reverse-looked-up from
     /// `cfg.keybinds`); activating it enters capture mode and the next chord is
@@ -78,14 +78,14 @@ pub struct Category {
     pub fields: Vec<Field>,
 }
 
-/// Cycle 756: live navigation state while the settings overlay is open
+/// Live navigation state while the settings overlay is open
 /// (`App::settings_nav`). Indices into `categories()`; values are always read
 /// fresh from `Config`, so the overlay reflects external config reloads too.
 #[derive(Debug, Clone, Default)]
 pub struct SettingsNav {
     pub category: usize,
     pub field: usize,
-    /// Cycle 766: `true` while the focused Keybind field is waiting for the
+    /// `true` while the focused Keybind field is waiting for the
     /// user to press a chord to bind. The next non-modifier key press is
     /// captured as the new binding; Esc cancels.
     pub capturing: bool,
@@ -156,7 +156,7 @@ fn number(
     }
 }
 
-/// Cycle 766: a rebindable-keybinding field. `action` is the canonical action
+/// A rebindable-keybinding field. `action` is the canonical action
 /// token; `label` is the human row label.
 fn keybind(label: &'static str, action: &'static str) -> Field {
     Field {
@@ -194,7 +194,7 @@ pub fn categories(gpus: &[(String, String)]) -> Vec<Category> {
         Category {
             name: "Appearance",
             fields: vec![
-                // Cycle 872: the most popular themes as a cyclable list of
+                // The most popular themes as a cyclable list of
                 // options; ←/→ live-previews each (the settings handler persists
                 // + reloads on every step, so the theme applies instantly). The
                 // full 500+ bundle stays reachable via the right-click Theme
@@ -209,7 +209,7 @@ pub fn categories(gpus: &[(String, String)]) -> Vec<Category> {
                 number("Background opacity", "background-opacity", 20, 100, 5, "%"),
                 number("Window padding", "window-padding-x", 0, 40, 2, "px"),
                 choice(
-                    // Cycle 790 (audit E3): use the canonical `cursor-style`
+                    // Use the canonical `cursor-style`
                     // key (CONFIG.md's authoritative spelling) rather than the
                     // `cursor-shape` back-compat alias, so the overlay persists
                     // the canonical line and SETTINGS.md ↔ CONFIG.md ↔ catalogue
@@ -381,7 +381,7 @@ pub fn read(cfg: &Config, field: &Field) -> String {
         }
         FieldKind::Choice { values, labels } => {
             let cur = read_choice(cfg, field.key);
-            // Cycle 763: `labels.get(i)` (not `labels[i]`) so a catalogue entry
+            // `labels.get(i)` (not `labels[i]`) so a catalogue entry
             // with mismatched values/labels lengths degrades to the raw value
             // instead of panicking on an out-of-bounds index.
             values
@@ -489,13 +489,13 @@ pub fn next_value(cfg: &Config, field: &Field, dir: i32) -> String {
     }
 }
 
-/// Cycle 766: is this field a rebindable keybinding? The overlay handler uses
+/// Is this field a rebindable keybinding? The overlay handler uses
 /// this to route Enter/Space into chord-capture instead of the value-cycle path.
 pub fn is_keybind(field: &Field) -> bool {
     matches!(field.kind, FieldKind::Keybind { .. })
 }
 
-/// Cycle 766: the canonical action token for a keybind field (for capture +
+/// The canonical action token for a keybind field (for capture +
 /// persistence). `None` for non-keybind fields.
 pub fn keybind_action(field: &Field) -> Option<&'static str> {
     match field.kind {
@@ -580,7 +580,7 @@ fn read_choice(cfg: &Config, key: &str) -> String {
             BellMode::Both => "both",
         }
         .to_string(),
-        // Cycle 790 (audit E3): keyed on the canonical `cursor-style` to match
+        // Keyed on the canonical `cursor-style` to match
         // the catalogue field + CONFIG.md (was the `cursor-shape` alias).
         "cursor-style" => match cfg.cursor_style {
             CursorStyle::Block => "block",
@@ -615,7 +615,7 @@ fn read_choice(cfg: &Config, key: &str) -> String {
             kettle_config::ChromeBackground::White => "white",
         }
         .to_string(),
-        // Cycle 872: the live theme name (canonical bundled casing). When the
+        // The live theme name (canonical bundled casing). When the
         // current theme isn't in the curated POPULAR list, `read`'s Choice arm
         // falls back to showing this raw name, and ←/→ cycles into the list.
         "theme" => cfg.theme_name.clone(),
@@ -890,7 +890,7 @@ mod tests {
         assert_eq!(read(&cfg, &f), "auto");
     }
 
-    /// Cycle 789 drift guard (audit D3). `keybind_action` extracts the
+    /// Drift guard: `keybind_action` extracts the
     /// canonical action token the settings overlay routes into chord-capture
     /// (Enter on a keybind row). A refactor that renamed `FieldKind::Keybind`'s
     /// `action` field — or returned the token for the wrong variant — would

@@ -66,7 +66,7 @@ fn terminal_resize_changes(
     (current_grid != next_grid, current_cell != next_cell)
 }
 
-/// A `Write` sink that discards everything. Cycle 742: on `Terminal`
+/// A `Write` sink that discards everything. On `Terminal`
 /// teardown the PTY writer (the child's stdin / conin) is swapped for this
 /// so dropping the real writer closes the input handle immediately — an EOF
 /// nudge for shells that exit on stdin close — without leaving the field
@@ -172,7 +172,7 @@ pub type SharedTerm = Arc<Mutex<Term<EventProxy>>>;
 /// An *empty* env var (e.g., `HOME=""` — possible in stripped-down CI
 /// containers or after a misconfigured shell `unset HOME` / `export
 /// HOME=`) is treated as unset and the probe continues to the next
-/// variable. Pre-cycle-180, `var_os("HOME")` would return
+/// variable. Previously, `var_os("HOME")` would return
 /// `Some(OsString::new())` and this function returned `PathBuf::from("")`
 /// — `CommandBuilder::cwd("")` then fed an invalid empty path to the
 /// OS spawn call (which on Unix means "no cwd" but the intent here is
@@ -196,7 +196,7 @@ pub(crate) fn home_dir_fallback(
         .map(std::path::PathBuf::from)
 }
 
-/// Cycle 612 (Terminator parity, `command_notify.py` plugin): a single
+/// Terminator parity (`command_notify.py` plugin): a single
 /// completed-command event for the App's notification dispatcher. Built
 /// from the OSC 133 `OutputStart` → `CommandEnd` transition; the App
 /// uses `duration` + window focus to decide whether to fire a desktop
@@ -222,7 +222,7 @@ pub struct Terminal {
     term_config: TermConfig,
     scrollback_line_limit: usize,
     scrollback_byte_limit: usize,
-    // Cycle 742: `Option` so `Drop` can `.take()` and drop the master
+    // `Option` so `Drop` can `.take()` and drop the master
     // (ClosePseudoConsole on Windows / close the master fd on Unix) WITHOUT
     // moving a non-`Option` field out of `&mut self`. Always `Some` during
     // normal operation; only `None` transiently inside `Drop`.
@@ -230,7 +230,7 @@ pub struct Terminal {
     writer: Arc<Mutex<Box<dyn Write + Send>>>,
     child: Arc<Mutex<Box<dyn portable_pty::Child + Send + Sync>>>,
     reader_thread: Option<JoinHandle<()>>,
-    // Cycle 742: cooperative stop flag for the reader thread. `Drop` sets it
+    // Cooperative stop flag for the reader thread. `Drop` sets it
     // so the reader exits promptly during teardown instead of looping back
     // into another blocking PTY read once the pseudoconsole closes.
     stop: Arc<AtomicBool>,
@@ -244,17 +244,17 @@ pub struct Terminal {
     /// kitty relative placements, keyed by `(child img, child placement)`.
     pub relatives: Relatives,
     /// Absolute lines (history-aware) where OSC 133 prompts started.
-    /// Cycle 902 (audit): a `VecDeque` so the ring-buffer trim is an O(1)
+    /// A `VecDeque` so the ring-buffer trim is an O(1)
     /// `pop_front`, not a `Vec::drain(0..1)` that shifts all ~2048 elements on
     /// every prompt once full — this is the hot reader-thread path.
     pub prompts: Arc<Mutex<std::collections::VecDeque<i64>>>,
-    /// Cycle 612 (Terminator parity, `command_notify.py` plugin):
+    /// Terminator parity (`command_notify.py` plugin):
     /// OSC 133 OutputStart timestamp — set when `OutputStart` fires,
     /// cleared when the matching `CommandEnd` fires. The reader
     /// thread updates this; the App reads `command_finished` (below)
     /// to learn that a command completed + how long it took.
     pub output_started_at: Arc<Mutex<Option<std::time::Instant>>>,
-    /// Cycle 612: per-pane queue of completed-command events.
+    /// Per-pane queue of completed-command events.
     /// Populated by the reader thread on OSC 133 D (CommandEnd) when
     /// `output_started_at` is `Some`; drained by the App each tick
     /// to fire desktop notifications (if the window isn't focused
@@ -282,13 +282,13 @@ pub struct Terminal {
     /// [`current_dir_or_native`](Self::current_dir_or_native) prefers the live
     /// native poll; after a real report the reported cwd becomes authoritative.
     pub osc_cwd_seen: Arc<std::sync::atomic::AtomicBool>,
-    /// Cycle 745: latest OSC 9;4 progress state (drives the OS taskbar
+    /// Latest OSC 9;4 progress state (drives the OS taskbar
     /// indicator); `None` until the program reports progress / after clear.
     pub progress: Arc<Mutex<Option<Progress>>>,
     /// The argv this pane was launched with (empty = default shell);
     /// persisted so SSH/remote panes can be restored.
     pub argv: Vec<String>,
-    /// Cycle 621 (Terminator parity, `plugins/logger.py`): optional
+    /// Terminator parity (`plugins/logger.py`): optional
     /// per-pane session log. When `Some(file)`, the reader thread
     /// writes a copy of every raw PTY byte to the file (best-effort:
     /// I/O errors are swallowed so a full disk doesn't take down
@@ -297,10 +297,10 @@ pub struct Terminal {
     /// Private since v2.20.0 (P7): flip it via [`Terminal::set_log_file`]
     /// so `log_active` can never drift out of sync.
     log_file: Arc<Mutex<Option<std::fs::File>>>,
-    /// Cycle 625: when `true`, the logger strips ANSI escape
+    /// When `true`, the logger strips ANSI escape
     /// sequences (CSI / OSC / single-char ESC) from the bytes
     /// before writing — leaving plain-text-searchable logs.
-    /// Default `false` preserves the cycle-621 raw-stream
+    /// Default `false` preserves the raw-stream
     /// behavior (replayable via `cat <log>` in a terminal).
     pub log_strip_ansi: Arc<Mutex<bool>>,
     /// v2.20.0 (`shell_idle`, review fix): true once this pane has seen at
@@ -326,7 +326,7 @@ pub struct Terminal {
     out_gen: Arc<std::sync::atomic::AtomicU64>,
 }
 
-/// Cycle 743: pick Windows' default shell when the user configured no
+/// Pick Windows' default shell when the user configured no
 /// `command` / `shell`. Prefers PowerShell 7+ (`pwsh.exe`), then Windows
 /// PowerShell 5.1 (`powershell.exe`); returns `None` to let the caller fall
 /// back to portable_pty's default (`%ComSpec%` → `cmd.exe`). This matches
@@ -341,7 +341,7 @@ fn pick_windows_default_shell(
     ["pwsh.exe", "powershell.exe"].into_iter().find_map(resolve)
 }
 
-/// Cycle 743: full path of `exe` if it is a file on any `PATH` entry.
+/// Full path of `exe` if it is a file on any `PATH` entry.
 /// pwsh 7's installer adds `C:\Program Files\PowerShell\7` to `PATH`, and
 /// `powershell.exe` lives in `System32` (always on `PATH`), so a bare-name
 /// PATH walk resolves both without hard-coding install locations.
@@ -417,8 +417,8 @@ fn merge_windows_paths(
     }
 }
 
-/// Cycle 748: is `prog` the WSL launcher (`wsl` / `wsl.exe`, possibly given as
-/// a full path)? The cycle-343 `login_shell` flag prepends `-l` for POSIX
+/// Is `prog` the WSL launcher (`wsl` / `wsl.exe`, possibly given as
+/// a full path)? The `login_shell` flag prepends `-l` for POSIX
 /// `bash -l` login-shell semantics — but `wsl.exe -l` means **list
 /// distributions**: it would print the distro list and exit instead of opening
 /// an interactive shell. So the `-l` injection is suppressed for wsl. A user
@@ -439,7 +439,7 @@ fn is_wsl_launcher(prog: &str) -> bool {
 }
 
 /// Whether the platform's default shell (`default_prog`) accepts the POSIX `-l`
-/// login switch. Cycle 822 (audit): `false` on Windows, where `default_prog`
+/// login switch. `false` on Windows, where `default_prog`
 /// resolves to pwsh/powershell/cmd — none of which treat `-l` as a login flag —
 /// so `login-shell = true` must not inject it there. `true` everywhere else,
 /// where the default shell is a POSIX shell that honors `-l`.
@@ -449,7 +449,7 @@ const fn default_shell_accepts_login_flag() -> bool {
 
 /// Whether an EXPLICIT `command = <prog>` accepts the POSIX `-l` login switch.
 ///
-/// Cycle 840 (audit): the cycle-822 guard only covered the no-argv default-shell
+/// The `default_shell_accepts_login_flag` guard only covered the no-argv default-shell
 /// arm; the explicit-argv arm still injected `-l` for `wsl.exe` (where `-l`
 /// means "list distros") only via `!is_wsl_launcher`, leaving Windows-native
 /// shells (`pwsh`/`powershell`/`cmd`) to receive a `-l` they reject. Exclude
@@ -468,7 +468,7 @@ fn prog_accepts_login_flag(prog: &str) -> bool {
     !matches!(base, "pwsh" | "powershell" | "cmd")
 }
 
-/// Cycle 799: build the `WSLENV` value that propagates kettle's
+/// Build the `WSLENV` value that propagates kettle's
 /// terminal-identity env vars into a WSL distro. WSL only forwards Windows
 /// env vars listed in `WSLENV`; each is suffixed `/u` ("pass Windows→WSL
 /// only"). Preserves `existing` (the user's own WSLENV) verbatim and skips
@@ -510,11 +510,11 @@ fn child_wslenv(parent: &str, extra_env: &[(String, String)]) -> String {
     augment_wslenv(wslenv_base, &wslenv_vars)
 }
 
-/// Cycle 805: a shell choice for the new-tab `▾` dropdown — a display label and
+/// A shell choice for the new-tab `▾` dropdown — a display label and
 /// the argv to spawn for it.
 pub type ShellChoice = (String, Vec<String>);
 
-/// Cycle 805 / dropdown-parity cycle: auto-detect the shells to offer in
+/// Auto-detect the shells to offer in
 /// the new-tab dropdown, Windows-Terminal style (and in WT's order). Always
 /// returns at least one entry.
 /// - Windows: PowerShell (pwsh 7), Windows PowerShell, Command Prompt (each
@@ -551,7 +551,7 @@ pub fn detect_shells() -> Vec<ShellChoice> {
         .clone()
 }
 
-/// Dropdown-parity cycle: warm the `detect_shells` cache off the UI thread
+/// Dropdown parity: warm the `detect_shells` cache off the UI thread
 /// (the probes can block up to ~4s worst-case on a wedged WSL service + a
 /// slow vswhere). Spawned once from `App::resumed`.
 pub fn prewarm_shell_detection() {
@@ -570,7 +570,7 @@ fn detect_shells_windows(
     git_bash: impl Fn() -> Option<std::path::PathBuf>,
 ) -> Vec<ShellChoice> {
     let mut out: Vec<ShellChoice> = Vec::new();
-    // Dropdown-parity cycle: Windows Terminal's order (and its "PowerShell"
+    // Dropdown parity: Windows Terminal's order (and its "PowerShell"
     // label for pwsh 7 — was "PowerShell 7"). The order matters beyond looks:
     // `Ctrl+Shift+N` opens the Nth entry, matching WT's profile shortcuts.
     for (label, exe) in [
@@ -628,7 +628,7 @@ fn detect_shells_windows(
     out
 }
 
-/// Dropdown-parity cycle: what the vswhere probe learned about the newest
+/// Dropdown parity: what the vswhere probe learned about the newest
 /// Visual Studio. Built by the impure `vs_dev_info`, consumed by the pure
 /// `detect_shells_windows` (test-injectable).
 #[cfg(any(windows, test))]
@@ -695,7 +695,7 @@ fn vs_dev_powershell_argv(host: &str, install_path: &str) -> Vec<String> {
     ]
 }
 
-/// Dropdown-parity cycle: probe the newest VS via
+/// Dropdown parity: probe the newest VS via
 /// `%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe`
 /// (a fixed location Microsoft documents as stable). Worker thread + 2s
 /// timeout, same shape as `list_wsl_distros` — a hung probe must not freeze
@@ -791,7 +791,7 @@ fn git_bash_from_git_exe(git_exe: &std::path::Path) -> Vec<std::path::PathBuf> {
     out
 }
 
-/// Dropdown-parity cycle: locate Git Bash. Order: the Git-for-Windows
+/// Dropdown parity: locate Git Bash. Order: the Git-for-Windows
 /// registry key (HKLM → HKCU → the WOW6432Node 32-bit view), the well-known
 /// install dirs, then derive from a `git.exe` on `PATH`. All checks are
 /// local filesystem/registry reads (microseconds) — no worker thread needed.
@@ -871,7 +871,7 @@ fn detect_shells_unix(
     out
 }
 
-/// Cycle 805: parse distro names from `wsl.exe -l -q` output — one per line,
+/// Parse distro names from `wsl.exe -l -q` output — one per line,
 /// stripping a UTF-16 BOM artifact, surrounding whitespace, and trailing NULs,
 /// dropping blanks. Pure → unit-testable without wsl.exe (built in test or on
 /// Windows where `list_wsl_distros` calls it).
@@ -884,12 +884,12 @@ fn parse_wsl_distros(text: &str) -> Vec<String> {
         .collect()
 }
 
-/// Cycle 805: installed WSL distros via `wsl.exe -l -q` (bare names, no header).
+/// Installed WSL distros via `wsl.exe -l -q` (bare names, no header).
 /// Output is UTF-16-LE; decode then parse. Empty on any spawn/exit failure so a
 /// host without WSL simply offers no WSL entries.
 #[cfg(windows)]
 fn list_wsl_distros() -> Vec<String> {
-    // Cycle 834 (audit): run `wsl.exe -l -q` on a worker thread with a bounded
+    // Run `wsl.exe -l -q` on a worker thread with a bounded
     // wait. The dropdown that calls this (new-tab `▾`) runs on the UI thread, so
     // a wedged LxssManager — the very `Wsl/Service/E_UNEXPECTED` state that
     // freezes `wsl.exe` — would otherwise hang the whole window ("not
@@ -933,7 +933,7 @@ fn clamp_pty_dim(cell: u16, count: usize) -> u16 {
     (cell as u32 * count).min(u16::MAX as u32) as u16
 }
 
-/// Cycle 743: the default shell `CommandBuilder` when no `command` is
+/// The default shell `CommandBuilder` when no `command` is
 /// configured. Windows prefers pwsh 7 → Windows PowerShell → `%ComSpec%`;
 /// every other platform defers to portable_pty (which honors `$SHELL`).
 fn default_prog() -> CommandBuilder {
@@ -1041,11 +1041,11 @@ fn base64_standard(data: &[u8]) -> String {
     out
 }
 
-/// Cycle 902 (audit): cap on the OSC 133 prompt-mark ring. A long-lived shell
+/// Cap on the OSC 133 prompt-mark ring. A long-lived shell
 /// session emits one mark per prompt; without a cap the Vec grew unbounded.
 const MAX_PROMPT_MARKS: usize = 2048;
 
-/// Cycle 902 (audit): push an absolute prompt-start line into the bounded ring.
+/// Push an absolute prompt-start line into the bounded ring.
 /// Dedups against the most-recent mark (some shells emit OSC 133 `A` twice for a
 /// single prompt) and trims oldest-first with O(1) `pop_front` — the previous
 /// `Vec::drain(0..d)` shifted all ~2048 elements on every prompt once full, on
@@ -1120,7 +1120,7 @@ impl Terminal {
         )
     }
 
-    /// Cycle 343 Terminator parity: PTY spawn with explicit `TERM` +
+    /// Terminator parity: PTY spawn with explicit `TERM` +
     /// `COLORTERM` env override + `login_shell` flag (prepends `-l`
     /// to the shell argv to get login-shell semantics).
     ///
@@ -1128,7 +1128,7 @@ impl Terminal {
     /// `term` (terminatorlib/config.py:114) and `colorterm`
     /// (`:115`); `login_shell` is `:122`. Empty strings preserve
     /// kettle's existing default — same shape as the parse-side
-    /// fall-through (cycle 335).
+    /// fall-through.
     #[allow(clippy::too_many_arguments)]
     pub fn new_with_env(
         argv: &[String],
@@ -1173,7 +1173,7 @@ impl Terminal {
         )
     }
 
-    /// Cycle 378 (Terminator plugin parity, plugin sub-cycle 3): same
+    /// Terminator plugin parity: same
     /// as `new_with_env` plus an optional sidechannel that ships raw
     /// PTY-output bytes to the App for `LuaEvent::Output` dispatch.
     /// `None` keeps the zero-cost path for non-Lua kettle runs;
@@ -1201,7 +1201,7 @@ impl Terminal {
         output_tx: Option<PtyOutputSender>,
     ) -> Result<Terminal> {
         let pty = portable_pty::native_pty_system();
-        // Cycle 760: clamp the same way `resize()` does. The raw casts
+        // Clamp the same way `resize()` does. The raw casts
         // (`cols as u16`, `cell_w * cols as u16`) truncate a large grid and can
         // overflow the u16 multiply on a wide / HiDPI layout (e.g. cell_w=20 ×
         // cols=5000 = 100000, wraps); `clamp_pty_dim` saturates to u16::MAX so
@@ -1217,12 +1217,12 @@ impl Terminal {
             Some((prog, rest)) => {
                 let mut c = CommandBuilder::new(prog);
                 if login_shell && prog_accepts_login_flag(prog) {
-                    // Cycle 343: `-l` (POSIX-defined "shell that
+                    // `-l` (POSIX-defined "shell that
                     // reads /etc/profile + ~/.profile + login dotfiles
                     // before running interactively"). Goes BEFORE
                     // the user's argv args so a config like
                     // `command = bash -i` still works.
-                    // Cycle 748/840: skipped for `wsl.exe` (where `-l` lists
+                    // Skipped for `wsl.exe` (where `-l` lists
                     // distros) and Windows-native shells (pwsh/powershell/cmd
                     // reject it) via `prog_accepts_login_flag`.
                     c.arg("-l");
@@ -1234,7 +1234,7 @@ impl Terminal {
             }
             None => {
                 let mut c = default_prog_with_integration(shell_integration);
-                // Cycle 822 (audit): `-l` is the POSIX login-shell switch. On
+                // `-l` is the POSIX login-shell switch. On
                 // Windows `default_prog()` resolves to pwsh/powershell/cmd, none
                 // of which accept it (powershell.exe errors on an unknown arg,
                 // pwsh's `-Login` is reserved/no-op on Windows, cmd ignores it),
@@ -1255,7 +1255,7 @@ impl Terminal {
         for (name, value) in extra_env {
             cmd.env(name, value);
         }
-        // Cycle 343: honor cfg.term + cfg.colorterm (empty preserves
+        // Honor cfg.term + cfg.colorterm (empty preserves
         // kettle's default).
         cmd.env(
             "TERM",
@@ -1283,7 +1283,7 @@ impl Terminal {
         // time so a bumped `kettle/Cargo.toml` flows through with no
         // separate version string to keep in sync.
         cmd.env("TERM_PROGRAM_VERSION", env!("CARGO_PKG_VERSION"));
-        // Cycle 799 (audit): env vars set on the child's *Windows* process do
+        // Env vars set on the child's *Windows* process do
         // NOT cross into a WSL distro unless listed in `WSLENV`. Without this,
         // `COLORTERM` is silently dropped at the WSL boundary, so a program
         // inside WSL (Ubuntu) that decides truecolor support from `$COLORTERM`
@@ -1311,17 +1311,17 @@ impl Terminal {
                 // `HOME` then `USERPROFILE` then `APPDATA`, in that
                 // order, so all three platforms (Linux/macOS/Windows)
                 // converge on the same "user-home" intent. Same shape
-                // as cycle 159's macOS universal2 fix — Linux+macOS
+                // as an earlier macOS universal2 packaging fix — Linux+macOS
                 // worked, Windows didn't, the env var probe order is
                 // the difference.
-                // Cycle 185: also gate the fallback on `is_dir`. The env
+                // Also gate the fallback on `is_dir`. The env
                 // var could be set to something that exists but isn't a
                 // directory (an exotic `HOME=/etc/passwd` misconfig, or
                 // a path that's a regular file / symlink to a file) —
                 // `cmd.cwd` would then hand the OS spawn an invalid
                 // target. Treating that the same as "no home" lets
                 // `portable_pty` inherit kettle's launch directory
-                // (the same recovery as cycles 162/180 when no env
+                // (the same recovery as when no env
                 // var was set or it was empty).
                 if let Some(home) = home_dir_fallback(|k| std::env::var_os(k))
                     && home.is_dir()
@@ -1383,7 +1383,7 @@ impl Terminal {
         let relatives: Relatives = Arc::new(Mutex::new(std::collections::HashMap::new()));
         let prompts: Arc<Mutex<std::collections::VecDeque<i64>>> =
             Arc::new(Mutex::new(std::collections::VecDeque::new()));
-        // Cycle 612 (Terminator parity, `command_notify.py`):
+        // Terminator parity (`command_notify.py`):
         // per-pane OSC 133 OutputStart timestamp + completed-command
         // event queue. Reader thread writes; App polls each tick.
         let output_started_at: Arc<Mutex<Option<std::time::Instant>>> = Arc::new(Mutex::new(None));
@@ -1406,12 +1406,12 @@ impl Terminal {
         let osc_cwd_seen: Arc<std::sync::atomic::AtomicBool> =
             Arc::new(std::sync::atomic::AtomicBool::new(false));
         let osc_cwd_seen_for_struct = osc_cwd_seen.clone();
-        // Cycle 745: latest OSC 9;4 taskbar-progress state from this pane.
+        // Latest OSC 9;4 taskbar-progress state from this pane.
         // The reader thread writes it; the App polls the focused pane's value
         // each frame and drives the OS taskbar indicator (pwsh 7 parity).
         let progress_cell: Arc<Mutex<Option<Progress>>> = Arc::new(Mutex::new(None));
         let cell_px = Arc::new(Mutex::new((cell_w.max(1), cell_h.max(1))));
-        // Cycle 621 (Terminator parity, `plugins/logger.py`): per-pane
+        // Terminator parity (`plugins/logger.py`): per-pane
         // session log. Default None; `Action::ToggleSessionLog`
         // opens/closes it at runtime. The reader thread holds a
         // clone and writes raw PTY bytes when Some.
@@ -1420,13 +1420,13 @@ impl Terminal {
         let log_active: Arc<std::sync::atomic::AtomicBool> =
             Arc::new(std::sync::atomic::AtomicBool::new(false));
         let log_active_for_struct = log_active.clone();
-        // Cycle 625 (Terminator parity): when true, strip ANSI
+        // Terminator parity: when true, strip ANSI
         // escape sequences from the bytes before writing to the
-        // log file. Default false preserves cycle-621 raw-stream
+        // log file. Default false preserves the raw-stream
         // behavior.
         let log_strip_ansi: Arc<Mutex<bool>> = Arc::new(Mutex::new(false));
         let log_strip_ansi_for_struct = log_strip_ansi.clone();
-        // Cycle 742: teardown stop flag (see the `stop` struct field).
+        // Teardown stop flag (see the `stop` struct field).
         let stop = Arc::new(AtomicBool::new(false));
         // C4 (multi-window): per-pane output-generation counter (see the
         // `out_gen` struct field).
@@ -1495,7 +1495,7 @@ impl Terminal {
                             });
                     }
                     loop {
-                        // Cycle 742: bail out during teardown (Drop sets `stop`).
+                        // Bail out during teardown (Drop sets `stop`).
                         if stop.load(Ordering::Relaxed) {
                             break;
                         }
@@ -1514,7 +1514,7 @@ impl Terminal {
                                 if stop.load(Ordering::Relaxed) {
                                     break;
                                 }
-                                // Cycle 621 (Terminator parity, logger.py):
+                                // Terminator parity (logger.py):
                                 // per-pane session log tap. Best-effort —
                                 // I/O errors are swallowed so a full disk
                                 // doesn't crash the reader. Held lock is
@@ -1534,7 +1534,7 @@ impl Terminal {
                                         let _ = f.write_all(&buffer);
                                     }
                                 }
-                                // Cycle 378: ship raw PTY bytes to the
+                                // Ship raw PTY bytes to the
                                 // App via the output_tx sidechannel
                                 // (if any plugin subscriber is listening).
                                 // Skips the alloc entirely when no
@@ -1710,7 +1710,7 @@ impl Terminal {
                                                 let line = rc.cursor.point.line.0 as i64;
                                                 let abs = t.grid().history_size() as i64 + line;
                                                 if let Ok(mut m) = prompts.lock() {
-                                                    // Cycle 902 (audit): O(1)
+                                                    // O(1)
                                                     // bounded ring push (dedup +
                                                     // pop_front trim) — see
                                                     // push_prompt_mark.
@@ -1718,7 +1718,7 @@ impl Terminal {
                                                 }
                                             }
                                         }
-                                        // Cycle 612 (Terminator parity, command_notify.py):
+                                        // Terminator parity (command_notify.py):
                                         // OSC 133 OutputStart (C) marks the moment the
                                         // shell handed control to a user command. Record
                                         // the timestamp so the matching CommandEnd (D)
@@ -1735,7 +1735,7 @@ impl Terminal {
                                             output_start_seen
                                                 .store(true, std::sync::atomic::Ordering::Relaxed);
                                         }
-                                        // Cycle 612: OSC 133 CommandEnd (D). Pop the
+                                        // OSC 133 CommandEnd (D). Pop the
                                         // most-recent OutputStart timestamp, compute
                                         // the elapsed duration, push a CommandFinished
                                         // event for the App to drain. Bounded queue at
@@ -1787,7 +1787,7 @@ impl Terminal {
                                             osc_cwd_seen
                                                 .store(true, std::sync::atomic::Ordering::Relaxed);
                                         }
-                                        // Cycle 745: OSC 9;4 taskbar progress.
+                                        // OSC 9;4 taskbar progress.
                                         // Record the latest; the App polls it
                                         // and drives the OS taskbar indicator.
                                         Chunk::Progress(p) => {
@@ -1904,7 +1904,7 @@ impl Terminal {
         was
     }
 
-    /// Whether a session log is currently installed (cycle 621 toggle state).
+    /// Whether a session log is currently installed.
     pub fn log_enabled(&self) -> bool {
         self.log_active.load(std::sync::atomic::Ordering::Relaxed)
     }
@@ -1946,20 +1946,20 @@ impl Terminal {
             .or_else(|| self.current_dir())
     }
 
-    /// Cycle 745: latest OSC 9;4 taskbar-progress state reported by this pane
+    /// Latest OSC 9;4 taskbar-progress state reported by this pane
     /// (`None` if never reported, or explicitly cleared with state 0). The
     /// App polls the focused pane's value each frame to drive the OS taskbar.
     pub fn progress(&self) -> Option<Progress> {
         self.progress.lock().ok().and_then(|g| *g)
     }
 
-    /// Cycle 639 (Terminator parity, sub-cycle 1 of
+    /// Terminator parity (phase 1 of
     /// [`TERMINATOR-REMOTE-DESIGN.md`](docs/TERMINATOR-REMOTE-DESIGN.md)):
     /// PTY child PID accessor. Returns the OS pid of the shell that
     /// kettle spawned at pane creation. None means either:
     ///   - lock contention (extremely rare; the child mutex is held only
     ///     briefly by `child_exited`'s `try_wait` from `Mux::reap` and, on
-    ///     teardown, by the cycle-833 detached reaper thread's `wait` — the
+    ///     teardown, by the detached `kettle-pty-reaper` thread's `wait` — the
     ///     reader thread does NOT touch the child)
     ///   - the platform doesn't expose pids for this Child type
     ///     (Windows fallback path)
@@ -1970,7 +1970,7 @@ impl Terminal {
         self.child.lock().ok().and_then(|c| c.process_id())
     }
 
-    /// Cycle 612 (Terminator parity, `command_notify.py`): pop every
+    /// Terminator parity (`command_notify.py`): pop every
     /// `CommandFinished` event the reader thread queued since the
     /// previous call. The App drains this each tick to fire desktop
     /// notifications for long commands that completed while the
@@ -2008,7 +2008,7 @@ impl Terminal {
 
     /// Absolute prompt-start lines recorded via OSC 133.
     pub fn prompt_marks(&self) -> Vec<i64> {
-        // Cycle 902: `prompts` is now a VecDeque — collect to the Vec the
+        // `prompts` is now a VecDeque — collect to the Vec the
         // callers (jump-to-prompt nav) expect, preserving oldest→newest order.
         self.prompts
             .lock()
@@ -2042,7 +2042,7 @@ impl Terminal {
     pub fn has_running_animation(&self) -> bool {
         self.anims
             .lock()
-            // Cycle 916 (file-by-file audit): require a DISPLAYABLE frame, not
+            // Require a DISPLAYABLE frame, not
             // just the running flag. With all-zero gaps current_frame never
             // advances, yet a bare `running` check kept the UI scheduling a
             // ~30fps redraw forever for an animation that can never change.
@@ -2086,7 +2086,7 @@ impl Terminal {
                     runs.push(Vec::new());
                 }
                 let marks: Vec<char> = cell.zerowidth().map(|z| z.to_vec()).unwrap_or_default();
-                // Cycle 760: `runs` is non-empty here (we either just pushed an
+                // `runs` is non-empty here (we either just pushed an
                 // empty Vec or `contiguous` held with runs already non-empty).
                 // Use `if let` rather than `expect()` so the invariant can never
                 // panic the PTY reader thread (panic=abort) if a future refactor
@@ -2226,7 +2226,7 @@ impl Terminal {
         }
     }
 
-    /// Cycle 922 (agent-first A1): a cloneable, `Send + Sync` handle to the
+    /// Agent-first (A1): a cloneable, `Send + Sync` handle to the
     /// PTY's write side. `Terminal` itself is not `Sync` (it owns the
     /// `Send`-only master), so a worker thread (e.g. `kettle exec`'s stdin
     /// pump) can't share the whole engine — but it CAN hold a `PtyWriter` to
@@ -2288,7 +2288,7 @@ impl Terminal {
             .is_some()
     }
 
-    /// Cycle 922 (agent-first A1): kill the child immediately (best-effort).
+    /// Agent-first (A1): kill the child immediately (best-effort).
     /// Used by `kettle exec --timeout` when the deadline fires. Already-exited
     /// returns `Err` internally, which we swallow. The reader thread sees EOF
     /// when the master closes on drop, so no extra teardown is needed here.
@@ -2298,7 +2298,7 @@ impl Terminal {
         }
     }
 
-    /// Cycle 921 (agent-first A1): the child's exit status, if it has exited
+    /// Agent-first (A1): the child's exit status, if it has exited
     /// (non-blocking `try_wait`). `child_exited` discards the status; the
     /// headless `kettle exec` path needs it to propagate the child's exit code
     /// to its own process exit. `None` while the child is still running (or if
@@ -2317,7 +2317,7 @@ impl Terminal {
             .map(|st| st.exit_code())
     }
 
-    /// Cycle 921 (agent-first A1/A2): a plain-text snapshot of the grid.
+    /// Agent-first (A1/A2): a plain-text snapshot of the grid.
     /// Without extra scrollback, this is the visible viewport; with
     /// `scrollback_lines`, it returns that many history rows (newest history
     /// first in document order) followed by the active screen for command-output
@@ -2370,7 +2370,7 @@ pub fn screen_text_of(t: &Term<EventProxy>, scrollback_lines: usize) -> ScreenTe
     }
 }
 
-/// Cycle 921 (agent-first): the result of [`Terminal::screen_text`] — the
+/// Agent-first: the result of [`Terminal::screen_text`] — the
 /// joined plain text plus the grid geometry an agent needs to interpret it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ScreenText {
@@ -2389,13 +2389,13 @@ pub struct ScreenText {
 }
 
 impl Drop for Terminal {
-    /// Cycle 742: tear down the PTY WITHOUT ever blocking the calling thread.
+    /// Tear down the PTY WITHOUT ever blocking the calling thread.
     ///
     /// This runs on the UI thread — closing a pane drops the owned
     /// `Pane.term` (`Mux::close_focused` → `panes.remove`) — so blocking here
     /// freezes the whole window.
     ///
-    /// The pre-742 body `join()`ed the reader thread while the master PTY was
+    /// The previous body `join()`ed the reader thread while the master PTY was
     /// still alive. The reader sits in a blocking `read()` on the ConPTY
     /// conout pipe that only returns once the pseudoconsole is *closed* — but
     /// the master (hence `ClosePseudoConsole`) wasn't dropped until after this
@@ -2403,7 +2403,7 @@ impl Drop for Terminal {
     /// deadlocked. Windows then showed the window as "not responding", which
     /// users reported as a crash. (Reproduced on build 26200: close-split left
     /// the process alive with `Responding=false` for as long as it was sampled
-    /// — a hang, not a panic. See `target/cycle-742-repro.txt`.)
+    /// — a hang, not a panic. See `target/pty-drop-repro.txt`.)
     ///
     /// The fix mirrors how WezTerm (portable_pty's own author) and Alacritty
     /// drive teardown: signal stop, kill the child, close the writer (conin)
@@ -2418,7 +2418,7 @@ impl Drop for Terminal {
         // 1. Tell the reader to stop looping.
         self.stop.store(true, Ordering::Relaxed);
         // 2. Kill the child (best-effort; already-exited returns Err), then reap
-        //    it OFF the UI thread. Cycle 833 (audit): the pre-833 body kill()'d
+        //    it OFF the UI thread. The previous body kill()'d
         //    but never wait()'d on the close/quit path — `std::process::Child`'s
         //    Drop doesn't reap, and the only reaping path (`child_exited`
         //    →`try_wait`) runs from `Mux::reap` for LIVE panes only — so a long
@@ -2461,7 +2461,7 @@ impl EventProxy {
     }
 }
 
-/// Cycle 922 (agent-first A1): a cloneable, thread-safe handle to a PTY's write
+/// Agent-first (A1): a cloneable, thread-safe handle to a PTY's write
 /// side, obtained from [`Terminal::writer_handle`]. Lets a worker thread feed
 /// input to the child without sharing the (non-`Sync`) `Terminal`.
 #[derive(Clone)]
@@ -2477,7 +2477,7 @@ impl PtyWriter {
         }
     }
 
-    /// Cycle 922 (agent-first A1): close the PTY's input side, signalling EOF to
+    /// Agent-first (A1): close the PTY's input side, signalling EOF to
     /// the child's stdin WITHOUT killing it. Swapping the real writer `Box` for
     /// a discard sink drops the underlying master-write descriptor (the write
     /// end of the child's stdin pipe / ConPTY conin), so a read-until-EOF child
@@ -2492,7 +2492,7 @@ impl PtyWriter {
     }
 }
 
-/// Cycle 625 (Terminator parity, `plugins/logger.py` extension):
+/// Terminator parity (`plugins/logger.py` extension):
 /// strip ANSI escape sequences from a byte slice. Handles:
 ///   - CSI (Control Sequence Introducer): `ESC [ params final`
 ///     where final is in `0x40..=0x7e`.
@@ -2722,7 +2722,7 @@ mod placeholder_tile_placement_tests {
 #[cfg(test)]
 mod detect_shells_tests {
 
-    /// Cycle 834 (audit) drift guard. `list_wsl_distros` runs on the UI thread
+    /// Drift guard. `list_wsl_distros` runs on the UI thread
     /// (new-tab `▾`), so its `wsl.exe` call must stay BOUNDED — a wedged
     /// LxssManager (the `Wsl/Service/E_UNEXPECTED` freeze) otherwise hangs the
     /// window. Pin the worker-thread + `recv_timeout` shape at the source level
@@ -2754,7 +2754,7 @@ mod detect_shells_tests {
         assert!(super::parse_wsl_distros("\u{feff}\r\n  \r\n").is_empty());
     }
 
-    /// Dropdown-parity cycle: the full Windows menu in Windows Terminal's
+    /// Dropdown parity: the full Windows menu in Windows Terminal's
     /// order, with every probe succeeding. Runs on every platform — the
     /// builder is pure over injected closures.
     #[test]
@@ -2797,7 +2797,7 @@ mod detect_shells_tests {
         );
     }
 
-    /// Dropdown-parity cycle: hosts without VS / Git get no phantom rows.
+    /// Dropdown parity: hosts without VS / Git get no phantom rows.
     #[test]
     fn detect_shells_windows_skips_vs_and_git_when_absent() {
         let avail = |e: &str| matches!(e, "cmd.exe" | "pwsh.exe" | "wsl.exe");
@@ -2810,7 +2810,7 @@ mod detect_shells_tests {
         assert!(!got.iter().any(|(l, _)| l == "Git Bash"));
     }
 
-    /// Dropdown-parity cycle: the Developer PowerShell host prefers pwsh 7
+    /// Dropdown parity: the Developer PowerShell host prefers pwsh 7
     /// and falls back to Windows PowerShell.
     #[test]
     fn vs_dev_powershell_host_prefers_pwsh() {
@@ -2830,7 +2830,7 @@ mod detect_shells_tests {
         assert_eq!(argv[0], "powershell.exe");
     }
 
-    /// Dropdown-parity cycle: the dev-shell argvs are byte-pinned — these
+    /// Dropdown parity: the dev-shell argvs are byte-pinned — these
     /// strings are what actually spawns, so a drift here breaks the feature
     /// invisibly (the menu row would still render).
     #[test]
@@ -3023,7 +3023,7 @@ mod home_dir_tests {
 
     #[test]
     fn empty_env_var_value_falls_through_to_next() {
-        // Cycle 180: `HOME=""` (a deliberately empty env var — happens
+        // `HOME=""` (a deliberately empty env var — happens
         // in stripped-down CI containers and after a misconfigured
         // `unset HOME` / `export HOME=` in a parent shell) used to
         // return `Some(PathBuf::from(""))`. CommandBuilder::cwd("")
@@ -3053,7 +3053,7 @@ mod home_dir_tests {
         );
     }
 
-    /// Cycle 625 drift guard. `strip_ansi_bytes` is the pure ANSI-
+    /// Drift guard. `strip_ansi_bytes` is the pure ANSI-
     /// strip helper behind `log_strip_ansi`. Verify:
     ///   - CSI sequences (SGR / cursor moves / etc.) are removed
     ///   - OSC sequences (title, hyperlink, OSC 7) are removed,
@@ -3154,7 +3154,7 @@ mod conformance {
         p.advance(term, bytes);
     }
 
-    /// Cycle 882: feed bytes through the SAME two-stage path the PTY reader
+    /// Feed bytes through the SAME two-stage path the PTY reader
     /// thread uses — `Extractor::feed` then each `Chunk::Pass` →
     /// `Processor::advance` — so a test exercises kettle's REAL pipeline (the
     /// Extractor sits in front of the engine at runtime) instead of driving the
@@ -3250,7 +3250,7 @@ mod conformance {
         assert!(!term.mode().intersects(TermMode::KITTY_KEYBOARD_PROTOCOL));
     }
 
-    /// Cycle 909 (R1): a selection made while scrolled back must read the
+    /// R1: a selection made while scrolled back must read the
     /// VISIBLE (history) row, not the active-screen row at the same viewport
     /// index. This guards alacritty's `Selection` coordinate contract — it
     /// expects GRID-ABSOLUTE points (viewport − display_offset, via
@@ -3350,7 +3350,7 @@ mod conformance {
         );
     }
 
-    /// Cycle 921 (agent-first A1/A2): `screen_text_of` is the single sanctioned
+    /// Agent-first (A1/A2): `screen_text_of` is the single sanctioned
     /// grid scrape behind the control server's `read_screen` and `run_command`
     /// output slicing. Pin: document order (history first, then active screen),
     /// per-line right-trim, the scrollback request capped by available history,
@@ -3400,14 +3400,14 @@ mod conformance {
         );
     }
 
-    /// Cycle 917 (#3, user-reported on native Ubuntu): hyperlink/URL detection
+    /// User-reported on native Ubuntu: hyperlink/URL detection
     /// must scan the VISIBLE viewport, not the active screen, when scrolled back.
     /// `links()` indexed `grid[Line(row)]` for `row in 0..screen_lines` — always
     /// the active (bottom) screen regardless of `display_offset` — so scrolling
     /// Claude Code up painted the active screen's link underlines over the
     /// scrolled-back history ("leftover/ghost underlines from another scroll
     /// position"). The fix reads `Line(row - display_offset)`, matching the
-    /// cycle-912 decoration/selection conversion. This is the sibling that fix
+    /// decoration/selection `display_offset` conversion. This is the sibling that fix
     /// missed.
     #[test]
     fn links_while_scrolled_read_visible_viewport_not_active_screen() {
@@ -3482,7 +3482,7 @@ mod conformance {
         assert_eq!(web_links[0].uri, "https://example.test/a/b");
     }
 
-    /// Cycle 909 (R1): a real drag-select (Simple selection spanning rows) made
+    /// R1: a real drag-select (Simple selection spanning rows) made
     /// while scrolled to the top of history must copy the VISIBLE history rows,
     /// not the active screen — the exact action a user does when copying an
     /// earlier chunk of a long Claude Code / Codex conversation.
@@ -3520,7 +3520,7 @@ mod conformance {
         );
     }
 
-    /// Cycle 911 (e2e harness): replay an asciicast v2 trace — the format
+    /// E2e harness: replay an asciicast v2 trace — the format
     /// `record.rs` writes — through the REAL VT pipeline and assert the grid
     /// reflects it. This is the `.cast` record→replay regression path: a captured
     /// Claude Code / Codex / tmux session can be re-fed deterministically (no
@@ -3554,7 +3554,7 @@ mod conformance {
         );
     }
 
-    /// Cycle 924 (agent-first A1): the full record→replay round trip through the
+    /// Agent-first (A1): the full record→replay round trip through the
     /// PROMOTED `kettle_core::record::Recorder` — the same recorder that backs
     /// `kettle exec --record` and the GUI's `--record`. Record output via the
     /// real Recorder to a `.cast`, parse it back, replay through the grid, and
@@ -3595,7 +3595,7 @@ mod conformance {
         let _ = std::fs::remove_file(&path);
     }
 
-    /// Cycle 912 (R1 render completion): locks the contract kettle-render relies
+    /// R1 render completion: locks the contract kettle-render relies
     /// on to position per-cell bg / underline / strikeout / selection quads. The
     /// `display_iter` yields GRID-ABSOLUTE lines (negative when scrolled into
     /// history), and `viewport_row = grid_line + display_offset` recovers the
@@ -3909,15 +3909,15 @@ mod conformance {
         );
     }
 
-    /// Cycle 870: synchronized output (DEC private mode 2026 / BSU·ESU). While a
+    /// Synchronized output (DEC private mode 2026 / BSU·ESU). While a
     /// sync block is open the engine MUST buffer mutations so a renderer that
     /// locks the grid never samples a half-drawn frame; the buffered changes
     /// apply atomically on close. This is the property that lets well-behaved
     /// TUIs avoid the transient mid-repaint tearing a terminal would otherwise
     /// show. The bytes are fed through kettle's REAL pipeline (`feed_ex` →
     /// Extractor → Processor), so this also guards that a future `Extractor`
-    /// change cannot swallow the `?2026` toggles (cycle 882: was previously
-    /// fed straight to the Processor, bypassing the Extractor it claims to
+    /// change cannot swallow the `?2026` toggles (this test previously
+    /// fed bytes straight to the Processor, bypassing the Extractor it claims to
     /// guard).
     #[test]
     fn synchronized_update_defers_grid_mutation_until_close() {
@@ -4061,7 +4061,7 @@ mod conformance {
     fn sgr_underline_style_variants_set_distinct_flags() {
         // Five style bits in the engine: `\e[4m` (single), `\e[21m` or
         // `\e[4:2m` (double), `\e[4:3m` (curl), `\e[4:4m` (dotted),
-        // `\e[4:5m` (dashed). The renderer (cycle 81) reads these and
+        // `\e[4:5m` (dashed). The renderer reads these and
         // draws differently per style — this pins each one reaching the
         // engine's cell flags so a future engine bump can't silently
         // drop a variant.
@@ -4100,7 +4100,7 @@ mod conformance {
     fn sgr_58_sets_per_cell_underline_color() {
         // Neovim spell-check / git diff / lsp diagnostics emit per-cell
         // underline color via SGR 58. The engine stores it on the cell;
-        // the renderer reads it (cycle 80) so the squiggle color follows
+        // the renderer reads it so the squiggle color follows
         // the request instead of using the text fg. Confirms truecolor
         // form `\e[58;2;r;g;bm` reaches `cell.underline_color()`.
         use alacritty_terminal::vte::ansi::{Color as AnsiColor, Rgb as AnsiRgb};
@@ -4167,9 +4167,9 @@ mod conformance {
         // slots (default fg, default bg, cursor) so the renderer's
         // `resolve_query` reflects the override on the next frame. Without
         // this round-trip, OSC 12 (set cursor color) was a silent drop in
-        // the render path — see commit notes for cycle 56. Confirms the
-        // pair: OSC 4 set was tested in cycle 47; OSC 10/11/12 are the
-        // close siblings that use the same Colors slots.
+        // the render path. Confirms the
+        // pair: OSC 4 set is covered by `osc_color_set_query_reset_round_trip_through_engine`;
+        // OSC 10/11/12 are the close siblings that use the same Colors slots.
         for (input, idx) in &[
             (b"\x1b]10;rgb:11/22/33\x07" as &[u8], 256usize),
             (b"\x1b]11;rgb:44/55/66\x07", 257),
@@ -4198,8 +4198,8 @@ mod conformance {
         // documents this: "OSC 104 ; c → reset color number c (default
         // restore palette)." Tools like `colorls`/`zsh-colorize`'s
         // theme-changers emit it to undo their session-wide palette
-        // overrides on exit. The kettle conformance test from cycle 47
-        // covered only the indexed form (`\e]104;1\a`); pin the
+        // overrides on exit. The `osc_color_set_query_reset_round_trip_through_engine`
+        // test covered only the indexed form (`\e]104;1\a`); pin the
         // no-arg-resets-all branch too so it can't quietly regress
         // (e.g. if alacritty/vte upstream change the dispatch table).
         let (mut t, mut p, _rx) = harness_rx(8, 2);
@@ -4228,10 +4228,9 @@ mod conformance {
         // theme's defaults. Kettle's render path reads `t.colors()[256..=258]`
         // each frame; if the engine didn't honor these resets, a program
         // that did `\e]10;rgb:11/22/33\a` then `\e]110\a` to undo would
-        // leave the (red) override in place — a real bug class that
-        // matches the cycle-56/65/66 "set went through but reset was
-        // silently dropped" shape (cycles fixed the set path; this test
-        // pins the reset path so it can't regress in the other
+        // leave the (red) override in place — a real bug class where the
+        // set path gets fixed but the reset path silently stays broken
+        // (this test pins the reset path so it can't regress in the other
         // direction). Same loop covers all three indices in one
         // declarative table.
         for (idx, set, reset) in &[
@@ -4615,7 +4614,7 @@ mod conformance {
 
     #[test]
     fn sgr_individual_attribute_resets() {
-        // Cycle 238: VT conformance gap. SGR `set` codes are well
+        // VT conformance gap. SGR `set` codes are well
         // tested (`sgr_truecolor_bold_and_reset`,
         // `sgr_underline_dim_strike`, …) but the individual
         // attribute-*off* codes weren't:
@@ -4732,7 +4731,7 @@ mod teardown_tests {
     use super::*;
     use std::time::Duration;
 
-    /// Cycle 902 (audit): the OSC 133 prompt-mark ring must (a) dedup against
+    /// The OSC 133 prompt-mark ring must (a) dedup against
     /// the most-recent mark, (b) preserve insertion order, and (c) cap at
     /// `MAX_PROMPT_MARKS` by dropping the OLDEST — all with O(1) `pop_front`,
     /// not an O(n) `Vec::drain` on every prompt (the hot reader-thread path).
@@ -4792,7 +4791,7 @@ mod teardown_tests {
         );
     }
 
-    /// Cycle 921 (agent-first A1): `child_exit_code` must surface the child's
+    /// Agent-first (A1): `child_exit_code` must surface the child's
     /// real exit status once it exits — `kettle exec` propagates it as its own
     /// process exit code. Spawns a real PTY child that exits 3 and polls.
     #[test]
@@ -4974,9 +4973,9 @@ mod teardown_tests {
         );
     }
 
-    /// Cycle 742 regression guard (runtime). Dropping a `Terminal` whose
+    /// Regression guard (runtime). Dropping a `Terminal` whose
     /// child is alive and whose PTY reader is parked in a blocking `read()`
-    /// must return PROMPTLY. Pre-742 `Drop` `join()`ed the reader while the
+    /// must return PROMPTLY. The previous `Drop` `join()`ed the reader while the
     /// master was still open; on Windows ConPTY that join could never
     /// complete, so the UI thread (which owns the drop on a pane close)
     /// deadlocked and the window went "not responding". We run the drop on a
@@ -5028,12 +5027,12 @@ mod teardown_tests {
 
         assert!(
             done_rx.recv_timeout(Duration::from_secs(5)).is_ok(),
-            "Terminal::Drop blocked >5s — the cycle-742 reader-thread join \
+            "Terminal::Drop blocked >5s — the reader-thread join \
              deadlock has regressed (Drop must detach the reader, never join)"
         );
     }
 
-    /// Cycle 742 regression guard (source, deterministic / cross-platform).
+    /// Regression guard (source, deterministic / cross-platform).
     /// `Terminal::Drop` must DETACH the reader thread, never `join()` it: a
     /// future refactor that re-adds `.join()` reintroduces the Windows
     /// UI-thread deadlock. Inspect just the `fn drop` body so doc comments
@@ -5058,14 +5057,14 @@ mod teardown_tests {
         assert!(
             !body.contains(".join("),
             "Terminal::Drop must NOT join the PTY reader — joining on the UI \
-             thread deadlocks on a blocked ConPTY read (cycle 742)"
+             thread deadlocks on a blocked ConPTY read"
         );
-        // Cycle 833: Drop must also REAP the killed child off-thread so it
+        // Drop must also REAP the killed child off-thread so it
         // doesn't leak a <defunct> zombie on Unix/macOS — and must do so in a
         // detached reaper (no blocking wait on the UI thread).
         assert!(
             body.contains("kettle-pty-reaper") && body.contains("c.wait()"),
-            "Drop must reap the killed child in a detached reaper thread (cycle 833)"
+            "Drop must reap the killed child in a detached reaper thread"
         );
     }
 }
@@ -5074,7 +5073,7 @@ mod teardown_tests {
 mod login_flag_tests {
     use super::{default_shell_accepts_login_flag, prog_accepts_login_flag};
 
-    /// Cycle 840 (audit): an explicit `command = …` only gets `-l` for a POSIX
+    /// An explicit `command = …` only gets `-l` for a POSIX
     /// shell — never wsl.exe (where `-l` lists distros) or a Windows-native
     /// shell (pwsh/powershell/cmd reject it).
     #[test]
@@ -5096,7 +5095,7 @@ mod login_flag_tests {
         assert!(!prog_accepts_login_flag("wsl"));
     }
 
-    /// Cycle 822 (audit) drift guard. The spawn path gates the default-shell
+    /// Drift guard. The spawn path gates the default-shell
     /// `-l` injection on this fn, so pinning its value pins the behavior: `-l`
     /// is POSIX-only and must never reach the Windows default shell.
     #[test]
@@ -5171,7 +5170,7 @@ mod default_shell_tests {
         assert!(!is_powershell(Path::new("/usr/bin/bash")));
     }
 
-    /// Cycle 743: pwsh 7 wins when both it and Windows PowerShell are present
+    /// Pwsh 7 wins when both it and Windows PowerShell are present
     /// (matches Windows Terminal's default).
     #[test]
     fn prefers_pwsh_over_windows_powershell() {
@@ -5248,7 +5247,7 @@ mod default_shell_tests {
 mod wsl_launcher_tests {
     use super::is_wsl_launcher;
 
-    /// Cycle 748: the `login_shell` `-l` injection must be suppressed for the
+    /// The `login_shell` `-l` injection must be suppressed for the
     /// WSL launcher (bare name, `.exe`, full path, any case) because
     /// `wsl.exe -l` lists distros instead of opening a shell.
     #[test]
