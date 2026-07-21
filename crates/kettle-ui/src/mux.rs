@@ -1454,6 +1454,16 @@ impl Mux {
         self.panes.get_mut(&id)
     }
 
+    /// The focused pane's launching argv (empty if none). Read-only, so the
+    /// paste / drag-drop path can pick shell-appropriate path quoting and WSL
+    /// translation without taking a `&mut` borrow of the pane.
+    pub(crate) fn focused_argv(&self) -> Vec<String> {
+        self.active_focus()
+            .and_then(|id| self.panes.get(&id))
+            .map(|p| p.argv.clone())
+            .unwrap_or_default()
+    }
+
     /// Terminator parity, terminatorlib/terminal.py:key_rotate_cw:
     /// rotate the focused leaf's parent split by flipping its direction
     /// (Horizontal ↔ Vertical) and optionally swapping its children.
@@ -2638,6 +2648,125 @@ fn launch_cwd(mut argv: Vec<String>, raw_cwd: Option<String>) -> (Vec<String>, O
     }
 }
 
+/// Which family of shell a pane's argv launches, for path quoting. WSL panes
+/// run a POSIX shell in-distro; native Windows panes run PowerShell or cmd.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PaneShellKind {
+    /// bash/zsh/fish/… (incl. anything launched through `wsl`).
+    Posix,
+    /// Windows PowerShell / PowerShell 7 (`pwsh`).
+    PowerShell,
+    /// Legacy `cmd.exe`.
+    Cmd,
+}
+
+/// Classify a pane's launch argv into a [`PaneShellKind`]. A WSL launcher is
+/// POSIX (the in-distro shell); `pwsh`/`powershell` and `cmd` are matched by
+/// argv[0] basename. An empty argv means the configured default shell — POSIX
+/// everywhere except Windows, where the built-in default is a Windows shell.
+/// Unknown programs default to POSIX (the portable, most common case). Pure.
+pub(crate) fn shell_kind_for_argv(argv: &[String]) -> PaneShellKind {
+    if argv_is_wsl(argv) {
+        return PaneShellKind::Posix;
+    }
+    match argv0_base_lower(argv).as_str() {
+        "pwsh" | "powershell" => PaneShellKind::PowerShell,
+        "cmd" => PaneShellKind::Cmd,
+        "" if cfg!(windows) => PaneShellKind::PowerShell,
+        _ => PaneShellKind::Posix,
+    }
+}
+
+/// Translate a Windows path to the WSL path a Linux shell can open, or `None`
+/// if it is not a Windows-style path (already POSIX / unrecognized). Handles
+/// drive paths (`C:\Users\me\v.mp4` → `/mnt/c/Users/me/v.mp4`) and the WSL UNC
+/// shares Explorer produces for in-distro files (`\\wsl.localhost\Ubuntu\home\
+/// me\v` and the legacy `\\wsl$\…` → `/home/me/v`). Pure.
+pub(crate) fn windows_path_to_wsl(p: &std::path::Path) -> Option<String> {
+    let s = p.to_string_lossy();
+    // `\\wsl.localhost\<distro>\rest` or `\\wsl$\<distro>\rest` → `/rest`
+    // (drop the distro component; the pane's own distro is what matters).
+    for prefix in [
+        r"\\wsl.localhost\",
+        r"\\wsl$\",
+        "//wsl.localhost/",
+        "//wsl$/",
+    ] {
+        if let Some(rest) = s.strip_prefix(prefix) {
+            let rest = rest.replace('\\', "/");
+            let after_distro = rest.split_once('/').map(|(_, r)| r).unwrap_or("");
+            return Some(format!("/{after_distro}"));
+        }
+    }
+    // Drive-letter path `X:\…` / `X:/…`.
+    let b = s.as_bytes();
+    if b.len() >= 2 && b[1] == b':' && b[0].is_ascii_alphabetic() {
+        let drive = (b[0] as char).to_ascii_lowercase();
+        let rest = s[2..].replace('\\', "/");
+        let rest = rest.strip_prefix('/').unwrap_or(&rest);
+        return Some(format!("/mnt/{drive}/{rest}"));
+    }
+    None
+}
+
+/// Quote a single path string for one shell family so the user can press Enter
+/// without hand-escaping. POSIX/PowerShell wrap in single quotes (POSIX escapes
+/// an embedded `'` as `'\''`; PowerShell doubles it to `''`); cmd wraps in
+/// double quotes (Windows filenames cannot contain `"`, so this is lossless).
+/// Always quotes, even plain paths, for predictable output. Pure.
+pub(crate) fn quote_path_for(kind: PaneShellKind, s: &str) -> String {
+    match kind {
+        PaneShellKind::Posix => {
+            let mut out = String::with_capacity(s.len() + 2);
+            out.push('\'');
+            for ch in s.chars() {
+                if ch == '\'' {
+                    out.push_str("'\\''");
+                } else {
+                    out.push(ch);
+                }
+            }
+            out.push('\'');
+            out
+        }
+        PaneShellKind::PowerShell => {
+            let mut out = String::with_capacity(s.len() + 2);
+            out.push('\'');
+            for ch in s.chars() {
+                if ch == '\'' {
+                    out.push_str("''");
+                } else {
+                    out.push(ch);
+                }
+            }
+            out.push('\'');
+            out
+        }
+        PaneShellKind::Cmd => format!("\"{s}\""),
+    }
+}
+
+/// Format OS file paths (from a clipboard file-list or a drag-drop) into text
+/// to feed the focused pane: translate to the pane's WSL path when it runs
+/// WSL, quote each for the pane's shell family, and space-join multiple paths.
+/// Pure so the whole rule is unit-tested.
+pub(crate) fn format_paths_for_paste(argv: &[String], paths: &[std::path::PathBuf]) -> String {
+    let wsl = argv_is_wsl(argv);
+    let kind = shell_kind_for_argv(argv);
+    paths
+        .iter()
+        .map(|p| {
+            let s = if wsl {
+                windows_path_to_wsl(p).unwrap_or_else(|| p.to_string_lossy().into_owned())
+            } else {
+                p.to_string_lossy().into_owned()
+            };
+            quote_path_for(kind, &s)
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 fn collect_ids(n: &Node, out: &mut Vec<u64>) {
     match n {
         Node::Leaf(id) => out.push(*id),
@@ -3556,6 +3685,105 @@ mod node_tests {
             Some("/mnt/c/other".into()),
         );
         assert_eq!(argv, s(&["wsl.exe", "--cd", "/home/me"]));
+    }
+
+    #[test]
+    fn shell_kind_for_argv_classifies_families() {
+        let s = |a: &[&str]| a.iter().map(|x| x.to_string()).collect::<Vec<_>>();
+        assert_eq!(shell_kind_for_argv(&s(&["wsl.exe"])), PaneShellKind::Posix);
+        assert_eq!(
+            shell_kind_for_argv(&s(&["wsl", "-d", "Ubuntu"])),
+            PaneShellKind::Posix
+        );
+        assert_eq!(shell_kind_for_argv(&s(&["bash"])), PaneShellKind::Posix);
+        assert_eq!(
+            shell_kind_for_argv(&s(&[r"C:\Windows\System32\pwsh.exe"])),
+            PaneShellKind::PowerShell
+        );
+        assert_eq!(
+            shell_kind_for_argv(&s(&["powershell.exe"])),
+            PaneShellKind::PowerShell
+        );
+        assert_eq!(shell_kind_for_argv(&s(&["cmd.exe"])), PaneShellKind::Cmd);
+        // Unknown program → POSIX (portable default).
+        assert_eq!(shell_kind_for_argv(&s(&["fish"])), PaneShellKind::Posix);
+    }
+
+    #[test]
+    fn windows_path_to_wsl_translates_drive_and_unc() {
+        use std::path::Path;
+        assert_eq!(
+            windows_path_to_wsl(Path::new(r"C:\Users\me\v.mp4")).as_deref(),
+            Some("/mnt/c/Users/me/v.mp4")
+        );
+        // Lowercased drive, forward-slash input also accepted.
+        assert_eq!(
+            windows_path_to_wsl(Path::new("D:/data/x")).as_deref(),
+            Some("/mnt/d/data/x")
+        );
+        // WSL UNC share → in-distro absolute path (distro component dropped).
+        assert_eq!(
+            windows_path_to_wsl(Path::new(r"\\wsl.localhost\Ubuntu\home\me\v.mp4")).as_deref(),
+            Some("/home/me/v.mp4")
+        );
+        assert_eq!(
+            windows_path_to_wsl(Path::new(r"\\wsl$\Debian\etc\hosts")).as_deref(),
+            Some("/etc/hosts")
+        );
+        // Already-POSIX / unrecognized → None (caller keeps the original).
+        assert_eq!(windows_path_to_wsl(Path::new("/home/me/v.mp4")), None);
+    }
+
+    #[test]
+    fn quote_path_for_escapes_per_shell() {
+        // POSIX: wrap in single quotes, embedded ' → '\''
+        assert_eq!(
+            quote_path_for(PaneShellKind::Posix, "/foo bar/baz.txt"),
+            "'/foo bar/baz.txt'"
+        );
+        assert_eq!(
+            quote_path_for(PaneShellKind::Posix, "/foo'bar"),
+            r"'/foo'\''bar'"
+        );
+        // PowerShell: single quotes, embedded ' doubled to ''
+        assert_eq!(
+            quote_path_for(PaneShellKind::PowerShell, "/foo'bar"),
+            "'/foo''bar'"
+        );
+        // cmd: double quotes (paths can't contain ").
+        assert_eq!(
+            quote_path_for(PaneShellKind::Cmd, r"C:\a b\c.txt"),
+            "\"C:\\a b\\c.txt\""
+        );
+        // Multibyte survives, still quoted.
+        assert_eq!(
+            quote_path_for(PaneShellKind::Posix, "/路径/file.txt"),
+            "'/路径/file.txt'"
+        );
+    }
+
+    #[test]
+    fn format_paths_for_paste_translates_and_quotes_by_pane() {
+        use std::path::PathBuf;
+        let s = |a: &[&str]| a.iter().map(|x| x.to_string()).collect::<Vec<_>>();
+        // WSL pane: Windows path → /mnt/c and POSIX-quoted.
+        assert_eq!(
+            format_paths_for_paste(&s(&["wsl.exe"]), &[PathBuf::from(r"C:\Users\me\clip.mp4")]),
+            "'/mnt/c/Users/me/clip.mp4'"
+        );
+        // Native PowerShell pane: no translation, PowerShell quoting.
+        assert_eq!(
+            format_paths_for_paste(&s(&["pwsh.exe"]), &[PathBuf::from(r"C:\Users\me\clip.mp4")]),
+            "'C:\\Users\\me\\clip.mp4'"
+        );
+        // Multiple paths (CF_HDROP multi-select) → space-joined.
+        assert_eq!(
+            format_paths_for_paste(
+                &s(&["bash"]),
+                &[PathBuf::from("/a/one.txt"), PathBuf::from("/a/two.txt")]
+            ),
+            "'/a/one.txt' '/a/two.txt'"
+        );
     }
 
     #[test]
