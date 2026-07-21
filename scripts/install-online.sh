@@ -63,14 +63,14 @@ case "$(uname -s)" in
     ;;
 esac
 
-# Cycle 767: pick the artifact for this CPU. x86_64 and aarch64 (ARM64:
+# Pick the artifact for this CPU. x86_64 and aarch64 (ARM64:
 # Raspberry Pi 4/5, ARM servers/VPS, ARM laptops on Linux) both ship a
 # prebuilt tarball; anything else builds from source.
 case "$(uname -m)" in
   x86_64 | amd64) ASSET="kettle-linux-x86_64.tar.gz" ;;
   aarch64 | arm64) ASSET="kettle-linux-aarch64.tar.gz" ;;
   *)
-    # Cycle 793 (audit F1): name the supported arches and give 32-bit users a
+    # Name the supported arches and give 32-bit users a
     # real path instead of a dead end. wgpu/glyphon have no tier-1 support on
     # armv7l/i686, so a source build there is experimental — say so, and point
     # at the support-tier matrix + a zero-build Nix sandbox to try first.
@@ -96,9 +96,9 @@ for cmd in curl tar uname mktemp; do
   fi
 done
 
-# Cycle 725: detect the SHA-256 verifier UP FRONT, not after the
+# Detect the SHA-256 verifier UP FRONT, not after the
 # download. On a minimal container image (e.g. `docker run -it ubuntu`)
-# `sha256sum` lives in `coreutils` which may be missing; pre-cycle-725
+# `sha256sum` lives in `coreutils` which may be missing; previously
 # the script would download the ~5 MB tarball, hit the verify step,
 # print "SHA-256 verification FAILED" and exit — making it look like
 # a corrupted download. Bail BEFORE download so the user fixes the
@@ -176,7 +176,7 @@ SHA_FILE="${TMP}/${ASSET}.sha256"
 if curl -fL -o "$SHA_FILE" "$SHA_URL" 2>/dev/null; then
   # sha256sum reads `<hex>  <filename>` and looks for the file relative
   # to the cwd. Run it in $TMP so the bare filename matches.
-  # Cycle 590: split tool-availability and verification-result so the
+  # Split tool-availability and verification-result so the
   # error diagnostic is accurate. Pre-fix, a system without sha256sum
   # AND without shasum would print "SHA-256 verification FAILED"
   # implying tampering, when actually the verification couldn't run.
@@ -203,7 +203,7 @@ if curl -fL -o "$SHA_FILE" "$SHA_URL" 2>/dev/null; then
     exit 1
   fi
 else
-  # No sidecar — older release predating the cycle-254 sha256 publish.
+  # No sidecar — older release predating the v1.3.4 sha256 sidecar publish.
   # Warn but continue so the one-liner still installs v1.3.0..v1.3.3.
   echo "kettle install-online.sh: no .sha256 sidecar found for ${VERSION} — skipping verification." >&2
   echo "Releases from v1.3.4 onward publish checksums; pin to a newer version with KETTLE_VERSION." >&2

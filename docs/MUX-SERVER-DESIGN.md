@@ -5,8 +5,8 @@
 > has already shipped in the **kettle-ctl** crate (the agent control plane —
 > see [AGENT.md](AGENT.md)). What remains is the daemon itself: the binary that
 > re-hosts the server side and owns PTYs cross-process. That is a genuine
-> multi-week thread; this doc is the architecture + sub-cycle roadmap so the
-> work can land as a series of small, testable cycles instead of one heroic
+> multi-week thread; this doc is the architecture + phased roadmap so the
+> work can land as a series of small, testable steps instead of one heroic
 > push.
 
 ## What it is
@@ -140,7 +140,7 @@ Client → server:
 - `4` **NewTab / NewWindow / Split**: user-action requests.
 - `5` **Bye**: client detaching cleanly.
 
-Same line-prefixed framing as cycle-302 remote-control's text
+Same line-prefixed framing as kettle-ctl's NDJSON remote-control
 protocol, just binary + bidirectional. Use `bincode` or hand-rolled
 serde for the payloads.
 
@@ -153,11 +153,11 @@ serde for the payloads.
   compat (add new message types; client negotiates feature flags in
   Hello).
 
-## Sub-cycle roadmap
+## Phased roadmap
 
-| # | Cycle | Scope |
+| # | When | Scope |
 |---|------|------|
-| 1 | (this doc, 329) | Design + roadmap. No code. |
+| 1 | this doc | Design + roadmap. No code. |
 | 2 | next | Hand-roll the wire protocol as a pure module: `kettle-mux-proto` crate with `Message` enum, `Encoder` + `Decoder`, 30+ unit tests covering every message type, partial-frame handling, version mismatch. |
 | 3 | next+1 | Server skeleton: `kettle-muxd` binary that opens a Unix socket, accepts connections, runs the Hello handshake. No PTYs yet. |
 | 4 | next+2 | Move `kettle_core::Terminal` ownership into the server. PTYs spawn there; their output streams to connected clients via `PaneOutput`. |
@@ -166,7 +166,7 @@ serde for the payloads.
 | 7 | next+5 | Scrollback replay on attach. Server caches the last N MB per pane (configurable; default 1 MB); sends a `Scrollback` message right after Hello. |
 | 8 | next+6 | Auth: per-session token written to a file alongside the socket on first launch; client reads + sends in Hello. Same shape as how Jupyter notebooks auth their HTTP server. |
 | 9 | next+7 | Graceful detach: client sends `Bye`; server closes the connection without killing PTYs. PTYs survive until `--shutdown` is sent. |
-| 10 | next+8 | Multi-client support: two `kettle --attach` simultaneously see the same panes + see each others' input (cycle-178-style broadcast inherently). |
+| 10 | next+8 | Multi-client support: two `kettle --attach` simultaneously see the same panes + see each others' input (the same fan-out as kettle's existing per-tab broadcast). |
 | 11 | next+9 | Cross-machine: SSH-tunnel the Unix socket. Document the `ssh -L` recipe. |
 | 12 | next+10 | systemd user-unit for the server. `systemctl --user enable kettle-muxd` brings it up on login. |
 | 13 | next+11 | End-to-end acceptance test: server up, attach, type, detach, reattach, verify scrollback continuity. |
@@ -198,7 +198,7 @@ doesn't exist) but the lifecycles stay separated.
 ### Why not just use tmux as the mux
 
 A `kettle + tmux` combo gives most of this for free: tmux owns the
-PTYs + the mux state; kettle's tmux-cc integration (cycle 327+) lets
+PTYs + the mux state; kettle's tmux-cc integration lets
 kettle render tmux's state. Many users won't need a separate kettle
 mux server.
 
@@ -209,7 +209,7 @@ The reason kettle ships its own anyway:
 - Native config sharing: a `--profile dev` config applies to both the
   server's panes + the client's chrome without a tmux-config detour.
 - Native key-binding semantics: keystrokes go to the server with
-  their full xterm-modifier-table encoding (cycle 24+), not the lossy
+  their full xterm-modifier-table encoding, not the lossy
   tmux `send-keys` form.
 
 These each matter for users invested in kettle's specific features.
@@ -226,7 +226,7 @@ These each matter for users invested in kettle's specific features.
   binary length-prefixed `PaneOutput` frame sketched below would remain a
   muxd-internal high-bandwidth stream where the NDJSON line protocol is the
   wrong fit. This partially satisfies the "hand-roll the wire protocol"
-  sub-cycle in the roadmap table below — the request / response / event shape
+  phase in the roadmap table below — the request / response / event shape
   exists; the high-rate binary framing does not.
 - The standalone `kettle-muxd` daemon — **not yet**. The implementation is
   real multi-week work and shipping a non-functional `--serve` flag would

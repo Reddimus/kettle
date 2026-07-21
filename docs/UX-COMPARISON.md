@@ -58,21 +58,21 @@ Legend: ✅ implemented · 🟡 partial · ⛔ not yet · — n/a.
 | Configurable divider color | ✅ `split-divider-color` | 🟡 | 🟡 | ✅ `split` color | 🟡 (GTK theme) | — |
 | Broadcast / group input | ✅ `Super+G` (tab bar + pane border tint warn) | ⛔ | ✅ `multi-input` | ✅ `ActivateKeyTable` | ✅ `broadcast_all` (origin) | ⛔ |
 | **Right-click context menu** | ✅ floating panel, 8 entries (v1.3.0/v1.3.2) | ⛔ | ⛔ | 🟡 | ✅ origin | ⛔ |
-| **Smart selection (regex double-click)** | ✅ URL / path / IPv4 / git SHA (cycle 288) | ⛔ | ⛔ | 🟡 `pattern` | ⛔ | ⛔ (iTerm2 origin) |
+| **Smart selection (regex double-click)** | ✅ URL / path / IPv4 / git SHA | ⛔ | ⛔ | 🟡 `pattern` | ⛔ | ⛔ (iTerm2 origin) |
 | **Command palette** | ✅ `Ctrl+Shift+K`, fuzzy, 41 commands | ✅ origin | 🟡 (`kitten hints`) | 🟡 (Lua) | ⛔ | ⛔ |
 | **Quick-select / URL hints** | ✅ `Ctrl+Shift+H` (v1.0) | ⛔ | ✅ `kitten hints` origin | ✅ `QuickSelect` | ⛔ | ⛔ |
 | **Search overlay** | ✅ `Ctrl+Shift+F`, regex + smart-case + reveal-into-scrollback | ✅ | ✅ | ✅ | ✅ | ✅ |
 | **Shell integration (OSC 133)** | ✅ bundled `kettle --shell-integration <shell>` + `Ctrl+Up/Down` jump | ✅ | ✅ | ✅ | ⛔ | 🟡 |
 | **SSH launcher** | ✅ `Ctrl+Shift+S` fuzzy, configured + freeform | ⛔ | ⛔ | ⛔ | 🟡 (`ssh-host` plugin) | ⛔ |
-| **Vi-mode for scrollback** | ✅ `Ctrl+Shift+Space` (cycles 298-301) | ⛔ | ⛔ | ⛔ | ⛔ | ✅ origin |
-| **Remote-control IPC** | ✅ `kettle --remote-send TEXT` (cycle 302) | ⛔ | ✅ `kitty @` origin | 🟡 (Lua API) | ⛔ | ⛔ |
-| **Quake / dropdown toggle** | ✅ `kettle --toggle` (cycle 303) | ✅ quick-terminal origin | ⛔ | ⛔ | ⛔ | ⛔ |
-| **Triggers (regex → urgency)** | ✅ `trigger = REGEX` (cycles 289-290) | ⛔ | ⛔ | 🟡 (Lua) | ⛔ | ⛔ (iTerm2 origin) |
-| **Named layout / profile** | ✅ `--layout NAME` + `--profile NAME` (291-292) | 🟡 | 🟡 | 🟡 (workspace via Lua) | ✅ (origin) | ⛔ |
+| **Vi-mode for scrollback** | ✅ `Ctrl+Shift+Space` | ⛔ | ⛔ | ⛔ | ⛔ | ✅ origin |
+| **Remote-control IPC** | ✅ `kettle --remote-send TEXT` | ⛔ | ✅ `kitty @` origin | 🟡 (Lua API) | ⛔ | ⛔ |
+| **Quake / dropdown toggle** | ✅ `kettle --toggle` | ✅ quick-terminal origin | ⛔ | ⛔ | ⛔ | ⛔ |
+| **Triggers (regex → urgency)** | ✅ `trigger = REGEX` | ⛔ | ⛔ | 🟡 (Lua) | ⛔ | ⛔ (iTerm2 origin) |
+| **Named layout / profile** | ✅ `--layout NAME` + `--profile NAME` | 🟡 | 🟡 | 🟡 (workspace via Lua) | ✅ (origin) | ⛔ |
 | **Session restore (multi-window)** | ✅ opt-in; every window's tabs + outer geometry, clamped to the live monitor layout (v2.18.0) | 🟡 | 🟡 (`--session` startup file) | 🟡 (Lua/plugin) | ✅ (layouts origin) | ⛔ |
 | **Peacock accent-color** | ✅ per-window auto hue, on by default (v2.18.0); pin with `accent-color`/`--accent`, opt out via `accent-color = theme` | ⛔ | ⛔ | ⛔ | ⛔ | ⛔ (Peacock-for-VSC origin) |
-| **Annotated screenshots** | ✅ `--annotate TEXT` (cycle 294, caption variant) | ⛔ | ⛔ | ⛔ | ⛔ | ⛔ |
-| **Status bar widget** | ✅ `status-bar = top\|bottom` (cycles 295-296) | ⛔ | ✅ origin | ✅ Lua | ⛔ | ⛔ |
+| **Annotated screenshots** | ✅ `--annotate TEXT` (caption variant) | ⛔ | ⛔ | ⛔ | ⛔ | ⛔ |
+| **Status bar widget** | ✅ `status-bar = top\|bottom` | ⛔ | ✅ origin | ✅ Lua | ⛔ | ⛔ |
 | **Cursor** | ✅ block/bar/underline | ✅ | ✅ | ✅ | ✅ | ✅ |
 | Hollow when unfocused | ✅ | 🟡 | ✅ | ✅ | 🟡 | ✅ (origin) |
 | Blink interval config | ✅ `cursor-blink-interval` ms | ✅ | ✅ | ✅ | ✅ | ✅ (origin, 750) |
@@ -197,21 +197,21 @@ Future → Done since the v1.0 cut of this matrix"):
   unfocused-pane dimming, pane zoom, per-pane scrollbar, split-
   divider color, cursor-blink interval, copy-on-select, tab-bar
   position, `--screenshot` offscreen capture — the original v1.0
-  cycle.
+  batch.
 - Command palette (`Ctrl+Shift+K`) — Ghostty/kitty parity.
 - Quick-select hint mode (`Ctrl+Shift+H`) — kitty / WezTerm parity.
 - SSH launcher (`Ctrl+Shift+S`) — kettle-original fuzzy launcher.
 - Search overlay (`Ctrl+Shift+F`) with regex + smart-case +
   reveal-into-scrollback.
-- Tab-bar mouse-wheel cycling (cycle ~135).
+- Tab-bar mouse-wheel cycling.
 - Minimum-contrast adjustment (`minimum-contrast`, WezTerm parity).
-- Background opacity + transparent rendering (cycle 148/149).
+- Background opacity + transparent rendering.
 - Shell integration / OSC 133 jump-to-prompt (`Ctrl+Up`/`Down`) +
   bundled `kettle --shell-integration <bash|zsh|fish>` snippets.
 - Drag-and-drop file paths (shell-quoted, bracketed-paste-safe,
   broadcast-aware) — kitty/WezTerm/iTerm2 parity.
 - Block (rectangular) selection — iTerm2/Alacritty/WezTerm parity.
-- v1.3.0 batch (UX cycle): `Ctrl+Shift+W` close-pane fix, tab `✕`
+- v1.3.0 batch: `Ctrl+Shift+W` close-pane fix, tab `✕`
   hover affordance, right-click context menu (Terminator/GNOME/
   iTerm2), tab-bar activity / bell dots (Terminator), undo-close-
   tab (WezTerm), duplicate tab / pane (iTerm2), mouse-drag tab
@@ -222,30 +222,30 @@ Future → Done since the v1.0 cut of this matrix"):
   for the install paths, SHA-256 sidecars on every release artifact
   for supply-chain integrity.
 
-**Shipped in v1.4.0 → v1.7.0** (cycles 288–303, all in `main`):
+**Shipped in v1.4.0 → v1.7.0** (all in `main`):
 
-- **Smart selection** (iTerm2 parity, cycle 288) — double-click
+- **Smart selection** (iTerm2 parity) — double-click
   expands to URL / file path / IPv4 / git SHA.
-- **Triggers** (iTerm2 parity, cycles 289–290) — `trigger = REGEX`
+- **Triggers** (iTerm2 parity) — `trigger = REGEX`
   fires `window.request_user_attention(Critical)`.
-- **`--layout NAME`** (Terminator parity, cycle 291) — named-
+- **`--layout NAME`** (Terminator parity) — named-
   workspace session restore.
-- **`--profile NAME`** (Terminator + iTerm2 parity, cycle 292) —
+- **`--profile NAME`** (Terminator + iTerm2 parity) —
   named-config split.
-- **`accent-color`** (Peacock-for-VS-Code parity, cycle 293) —
+- **`accent-color`** (Peacock-for-VS-Code parity) —
   multi-window visual ID via one config knob.
-- **`--annotate TEXT`** (iTerm2 caption variant, cycle 294) —
+- **`--annotate TEXT`** (iTerm2 caption variant) —
   bottom-strip overlay on `--screenshot` output.
-- **Status bar** (iTerm2 / kitty parity, cycles 295–296) — clock ·
+- **Status bar** (iTerm2 / kitty parity) — clock ·
   theme · pane title.
-- **Vi-mode for the scrollback** (Alacritty parity, cycles
-  298–301) — `Ctrl+Shift+Space` enters; h/j/k/l/0/$/g/G/H/M/L +
+- **Vi-mode for the scrollback** (Alacritty parity) —
+  `Ctrl+Shift+Space` enters; h/j/k/l/0/$/g/G/H/M/L +
   arrows; `v` visual selection; `y` yank; Esc exit.
-- **Remote-control IPC** (kitty `@` parity, cycle 302) —
+- **Remote-control IPC** (kitty `@` parity) —
   `kettle --remote-send TEXT` via notify-watched command file.
 - **Quake dropdown** (Yakuake / Tilda / Ghostty quick-terminal
-  parity, cycle 303) — `kettle --toggle` flips window visibility
-  via the cycle-302 IPC; users bind their OS / DE / compositor
+  parity) — `kettle --toggle` flips window visibility
+  via the remote-control IPC; users bind their OS / DE / compositor
   global hotkey.
 
 **Shipped in v2.18.0** (multi-window + Windows Terminal parity):
@@ -291,20 +291,20 @@ Future → Done since the v1.0 cut of this matrix"):
   Multi-week scope; touches the PTY abstraction, the session
   protocol, and the auth surface.
 - **tmux `-CC` passthrough** (iTerm2 parity). Large; embeds the
-  tmux control protocol inside kettle. ~5 cycles.
+  tmux control protocol inside kettle. XL effort.
 - **Lua scripting** (WezTerm parity). Embed `mlua`, expose a
   `kettle` API table (`send_text`, `set_tab_title`, event hooks).
-  ~4-6 cycles.
+  XL effort.
 - **Persistent in-terminal annotations** (iTerm2 — distinct from
   the v1.4.0 screenshot caption). Scrollback-position metadata +
-  sticky-note overlay + search-jump-to. ~4 cycles.
+  sticky-note overlay + search-jump-to. L effort.
 - **Native macOS menu bar**. Needs macOS to test interactively;
-  separate cycle once a maintainer with macOS commits to drive it.
+  a separate effort once a maintainer with macOS commits to drive it.
 - **Code-signed / notarized macOS build; Windows MSI installer.**
   Needs Apple Developer / Windows code-signing certificates; not
   doable from the public CI matrix.
 - **Background blur / translucency on macOS / Windows** — kettle
-  already honors `background-opacity` on Linux (cycle 148/149);
+  already honors `background-opacity` on Linux;
   the per-OS Vibrancy / DWM blur extension is desktop-shell-
   specific and not yet wired through winit.
 - **Source-build AUR companion** (`kettle`, no `-bin` suffix) and
@@ -346,7 +346,7 @@ v2.20.0 decision gate shipped, the rest are tracked.
 | Regex capture-group substitution in `trigger = REGEX :: cmd` | Terminator `run_cmd_on_match` parity completion | `{n}` tokens (`{0}` = whole match) substitute match groups per argv element — open-file-at-line style automation, command stays data not shell | high · S |
 | `equalize_splits` action | Ghostty / Terminator | One action rebalances every split in the tab to equal ratios | low · S |
 
-### Next-cycle headliners (tracked)
+### Upcoming headliners (tracked)
 
 - **Kitty keyboard protocol (CSI-u progressive enhancement)** — the single
   biggest TUI-compat unlock left: Neovim, fish 4.x, helix, kakoune, zellij

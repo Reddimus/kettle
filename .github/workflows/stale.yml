@@ -28,7 +28,7 @@ permissions:
 jobs:
   stale:
     runs-on: ubuntu-latest
-    # Cycle 600 budget cap. stale-bot scans issues + PRs; ~2 min on
+    # Budget cap: stale-bot scans issues + PRs; ~2 min on
     # a healthy repo (kettle's issue count stays low). 10 min handles
     # a one-time large backlog scan without giving a runaway 6 hours.
     timeout-minutes: 10

@@ -1,19 +1,20 @@
 # Contributing to kettle
 
-kettle is built one *audit cycle* at a time — each cycle picks one bug or
-parity gap, fixes it with a durable implementation, pins the contract with
-a test, and lands behind the full gate. This file explains how a cycle
-looks so a new contributor can land their first change the same shape as
-the existing 440+ in [CHANGELOG.md](CHANGELOG.md).
+kettle is built one bounded change at a time — each change picks one bug
+or parity gap, fixes it with the smallest durable implementation, pins
+the contract with a test, and lands behind the full gate. This file
+explains how a change like that looks so a new contributor can land
+their first PR the same shape as the existing 440+ entries in
+[CHANGELOG.md](CHANGELOG.md).
 
 Participation in this project — issues, PRs, discussions, code review —
 is governed by the project [Code of Conduct](CODE_OF_CONDUCT.md). For
 confidential vulnerability reports see [`SECURITY.md`](SECURITY.md)
 instead.
 
-## The audit cycle
+## Anatomy of a change
 
-Each cycle has the same shape:
+Each change has the same shape:
 
 1. **Find one bounded bug.** Read the source for a *silent-fallback*
    pattern (`_ => Default`, `if let Ok(v) = parse() { ... }`,
@@ -23,43 +24,43 @@ Each cycle has the same shape:
    user-facing effect when broken.
 2. **Extract a pure helper if applicable.** Logic that depends only
    on its arguments (no `&self`, no I/O) is easier to test than a
-   chrome wiring change. Many cycles' "real" change is the helper;
-   the wiring is two lines. See `kettle-config::keybinds::parse_bool`,
+   chrome wiring change. For many changes the "real" work is the
+   helper; the wiring is two lines. See `kettle-config::parse_bool`,
    `kettle-render::cap_axis_cells`, and
    `kettle-render::clamp_font_size` for examples.
 3. **Wire it in.** Call the helper from the chrome path. Keep the
    call site small — the helper does the work.
 4. **Pin the contract with a test — and add a drift guard if the
    bug class can recur.** Hand-rolled scenarios that would have
-   failed pre-fix. Most cycles add 1–3 assertions; the workspace
-   test suite grows ~1/cycle (currently 319+, see
-   `cargo test --workspace`).
+   failed pre-fix. Most changes add 1–3 assertions; the workspace
+   test suite grows by roughly one test per change (currently 319+,
+   see `cargo test --workspace`).
 
    A **drift guard** is a separate test that catches *the next
    time someone reintroduces the same shape of bug* — not just
    the specific instance you fixed. Drift guards are how kettle
-   stays consistent across 440+ cycles without regressing. Three
+   stays consistent across 440+ changes without regressing. Three
    kinds you'll see in the codebase:
 
    - **Exhaustive-match guards.** When a new `Action` variant is
-     added, the cycle-117 `palette_includes_every_user_facing_action`
+     added, the `palette_includes_every_user_facing_action`
      test fails at compile time until the variant is categorized
      (palette entry / excluded with rationale). Same shape:
-     cycle-220 `defaults_has_no_shadow_collisions`,
-     cycle-219 `cli_help_text_has_no_internal_cycle_refs`.
+     `defaults_has_no_shadow_collisions`,
+     `cli_help_text_has_no_internal_cycle_refs`.
    - **Drift-against-source guards.** Tests that read a Markdown
      doc or a source string and assert it stays consistent with
-     a contract — e.g. cycle-232 cross-link drift between docs,
-     cycle-241 `cli_help_preserves_indented_code_examples` (walks
+     a contract — e.g. `user_facing_doc_md_cross_links_resolve`
+     (every user-facing doc's `.md` cross-links stay resolvable),
+     `cli_help_preserves_indented_code_examples` (walks
      clap's `CommandFactory` and asserts indented examples survive
      verbatim).
    - **Pixel / output guards.** Render-pipeline regressions are
-     hard to catch with logic tests — cycle-251's
-     `tests/menu_visual.rs` renders to PNG and asserts pixel-color
-     invariants so the v1.3.0/v1.3.1 blank-menu regression class
-     can't recur.
+     hard to catch with logic tests — `tests/menu_visual.rs`
+     renders to PNG and asserts pixel-color invariants so the
+     v1.3.0/v1.3.1 blank-menu regression class can't recur.
 
-   If your cycle's bug class is bounded ("a typo here" — no drift
+   If your change's bug class is bounded ("a typo here" — no drift
    guard needed) say so in the CHANGELOG paragraph. If it's
    structural ("`_ => Default` silent fallback") add the guard.
 
@@ -91,7 +92,7 @@ Each cycle has the same shape:
    `screenshot` / `menu` / `bench` / `install` / `uninstall` /
    `run` / `clean`). `just deny` (`cargo deny check`) and
    `just machete` (`cargo machete`) mirror the supply-chain CI
-   workflows so a stale-ignore like cycle-444 caught is caught
+   workflows so a stale dependency-ignore entry is caught
    at the local pre-flight. `just gauntlet-strict` chains
    gauntlet + deny + machete for release-cut pre-flight.
    The CI matrix on `main` runs the same on Linux / macOS / Windows
@@ -124,8 +125,8 @@ Each cycle has the same shape:
    ```
 
    The hook exists because a doc-list overindentation regression
-   landed across several cycles without anyone running clippy —
-   the hook catches that class at commit time.
+   landed more than once without anyone running clippy — the
+   hook catches that class at commit time.
    The hook header comment in `.githooks/pre-commit` enumerates
    exactly which path categories trigger the gauntlet vs which
    skip it; bypass per-commit with `git commit --no-verify`.
@@ -158,9 +159,9 @@ crates/
 Each crate has its own tests. Anything pure (logic with no `&self` / I/O)
 should live in the crate it most belongs to and have unit tests there.
 
-## What makes a good cycle
+## What makes a good change
 
-- **The bug is bounded.** "fix font rendering" isn't a cycle; "the
+- **The bug is bounded.** "fix font rendering" isn't bounded; "the
   surface alpha-mode is hardcoded to `caps.alpha_modes[0]` which is
   usually `Opaque`, so `background-opacity = 0.5` had no visible
   effect" is. Bounded means the fix touches one or two files, the
@@ -168,9 +169,9 @@ should live in the crate it most belongs to and have unit tests there.
 
 - **The fix is durable.** No "TODO: revisit this" or `unwrap()` on
   things that can fail in normal use. If the bug class can recur
-  (e.g., HashMap insertion shadow-collisions in defaults, cycle
-  116), add a *drift guard* — a test that fails the next time
-  someone reintroduces the same shape of bug.
+  (e.g., HashMap insertion shadow-collisions in defaults), add a
+  *drift guard* — a test that fails the next time someone
+  reintroduces the same shape of bug.
 
 - **There's a test you'd want even without the bug.** Tests pin
   contracts. The `defaults_has_no_shadow_collisions` test isn't
@@ -214,7 +215,7 @@ Done.
   the file:line of the fix.
 - **Pick a `_ => {}` arm in the codebase.** Trace what it ignores,
   identify whether the silent fallback is a real bug or
-  intentional. If real, that's your cycle.
+  intentional. If real, that's your change.
 - **Or look at `docs/ROADMAP.md`'s "Next" list.** Some explicit
   larger features (detachable mux server, native macOS menu bar,
   broader `vttest` conformance sweep) are listed there.
@@ -233,6 +234,20 @@ Done.
 - **Tests live next to the code they test** (`#[cfg(test)] mod`),
   not in `tests/`. Workspace-wide tests don't exist; each crate
   is self-contained.
+
+## Mass mechanical changes
+
+Bulk, no-semantic-effect cleanups (formatting passes, rename sweeps,
+doc-comment rewrites) are recorded in `.git-blame-ignore-revs` so they
+don't obscure `git blame` for everything they touch. Run once per
+checkout:
+
+```sh
+git config blame.ignoreRevsFile .git-blame-ignore-revs
+```
+
+GitHub's blame view honors the file automatically, no local setup
+needed there.
 
 ## Releasing
 

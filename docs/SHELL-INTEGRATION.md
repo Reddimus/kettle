@@ -141,7 +141,7 @@ end
 
 ### PowerShell — add to `$PROFILE`
 
-Cycle 730 added a PowerShell snippet (`shell-integration/kettle.ps1`)
+The PowerShell snippet (`shell-integration/kettle.ps1`) is
 emitted by `kettle --shell-integration powershell`. Works on
 Windows PowerShell 5.1+ (preinstalled on Windows 10+) and on
 PowerShell Core 7+ (any OS). To find your profile path:

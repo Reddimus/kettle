@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# kettle — pre-commit hook (opt-in; cycle 494)
+# kettle — pre-commit hook (opt-in)
 #
 # Runs the local-only quality gate kettle's CONTRIBUTING.md
 # recommends ("a green `just gauntlet` locally is the same gate
@@ -28,15 +28,15 @@
 #
 #     git commit --no-verify -m "..."
 #
-# Cycle 493 caught a doc-list clippy regression that cycles 484-
-# 492 had landed without running clippy. This hook makes the
+# A doc-list clippy regression once landed across several commits
+# without anyone running clippy locally. This hook makes the
 # regression class catchable at commit time rather than at the
 # next manual `just gauntlet` invocation.
 
 set -euo pipefail
 
 # Detect doc-only commits (skip the heavy gate for them).
-# Cycle 496: include D (deletions) in the filter — a commit that
+# Include D (deletions) in the filter — a commit that
 # ONLY deletes .rs files would otherwise skip the gate, but
 # deleting code can break the build (lost call site, broken
 # import, etc).
@@ -49,17 +49,17 @@ if [ -z "$non_doc" ]; then
     exit 0
 fi
 
-# Code paths touched — run the quality gate. Cycle 502: log
-# elapsed time so a contributor running a slow-clippy commit
-# knows it's the linter taking 30-90s on a cold cache, not a
-# hung hook. Warm-cache incremental rebuilds finish in <5s.
+# Code paths touched — run the quality gate. Log elapsed time so
+# a contributor running a slow-clippy commit knows it's the
+# linter taking 30-90s on a cold cache, not a hung hook.
+# Warm-cache incremental rebuilds finish in <5s.
 start_sec=$(date +%s)
 
-# Cycle 517: if any shell scripts are touched, run shellcheck
-# against the changed scripts. Catches the cycle-516 bug class
-# (backticks inside double-quoted echo running as command
-# substitution) at commit time. Skipped silently if shellcheck
-# isn't installed — same opt-in spirit as the hook itself.
+# If any shell scripts are touched, run shellcheck against the
+# changed scripts. Catches bugs such as backticks inside a
+# double-quoted echo running as command substitution, at commit
+# time. Skipped silently if shellcheck isn't installed — same
+# opt-in spirit as the hook itself.
 shell_changes=$(git diff --cached --name-only --diff-filter=ACMRD \
     | grep -E '^(scripts/|\.githooks/)' \
     || true)
@@ -73,10 +73,10 @@ echo "pre-commit: running cargo fmt --check + cargo clippy + cargo test + cargo 
 cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
-# Cycle 728: rustdoc gate. Pre-728 the local gauntlet skipped
-# `cargo doc -D warnings`; cycle-722's `<unix>-<pid>` placeholder
-# in a doc comment slipped past local clippy (which doesn't run
-# rustdoc lints) and only failed in CI's `cargo doc` step. The
+# Rustdoc gate. The local gauntlet used to skip
+# `cargo doc -D warnings`; a `<unix>-<pid>` placeholder in a doc
+# comment slipped past local clippy (which doesn't run rustdoc
+# lints) and only failed in CI's `cargo doc` step. The
 # CONTRIBUTING.md promise was that local gauntlet = CI gate; this
 # closes that gap. Catches `rustdoc::invalid-html-tags` +
 # `rustdoc::broken-intra-doc-links` at commit time.

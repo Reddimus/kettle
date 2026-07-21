@@ -1,9 +1,9 @@
 # Terminator plugin system — design
 
-> Status: design only (cycle 361). The implementation pairs naturally with
-> the cycle-324 Lua scripting foundation; this doc lays out the
-> architecture + sub-cycle roadmap so the work lands as a series of small,
-> testable cycles instead of one heroic push.
+> Status: design only. The implementation pairs naturally with the existing
+> Lua scripting foundation (`crates/kettle-ui/src/lua.rs`); this doc lays
+> out the architecture + phased roadmap so the work lands as a series of
+> small, testable phases instead of one heroic push.
 
 ## What it is
 
@@ -23,27 +23,27 @@ Bundled plugins kettle should replicate:
 
 | Terminator plugin            | Capability        | kettle equivalent |
 |------------------------------|-------------------|-------------------|
-| `activitywatch.py`           | MenuItem + watch  | ✅ cycle-246 tab-bar activity dot |
-| `inactivitywatch.py`         | MenuItem + watch  | ✅ cycle-X silence-watcher dot |
-| `command_notify.py`          | watch             | partial via cycle-289 triggers |
-| `save_last_session_layout.py`| Plugin            | ✅ cycle-X session.json |
-| `save_user_session_layout.py`| MenuItem          | ✅ cycle-291 `--layout NAME` |
-| `url_handlers.py` (Launchpad)| URLHandler        | partial via cycle-218 hint mode |
-| `mousefree_url_handler.py`   | Plugin            | ✅ cycle-218 hint mode |
-| `run_cmd_on_match.py`        | URLHandler        | partial via cycle-289 triggers |
+| `activitywatch.py`           | MenuItem + watch  | ✅ tab-bar activity dot |
+| `inactivitywatch.py`         | MenuItem + watch  | ✅ silence-watcher dot |
+| `command_notify.py`          | watch             | partial via output triggers |
+| `save_last_session_layout.py`| Plugin            | ✅ session.json |
+| `save_user_session_layout.py`| MenuItem          | ✅ `--layout NAME` |
+| `url_handlers.py` (Launchpad)| URLHandler        | partial via hint mode |
+| `mousefree_url_handler.py`   | Plugin            | ✅ hint mode |
+| `run_cmd_on_match.py`        | URLHandler        | partial via output triggers |
 | `custom_commands.py`         | MenuItem          | NEW — needs plugin system |
 | `remote.py`                  | watch             | NEW — needs plugin system |
 | `logger.py`                  | MenuItem          | NEW — needs plugin system |
-| `terminalshot.py`            | MenuItem          | ✅ cycle-294 `--screenshot --annotate` |
+| `terminalshot.py`            | MenuItem          | ✅ `--screenshot --annotate` |
 | `dir_open.py`                | MenuItem          | NEW — needs plugin system |
-| `insert_term_name.py`        | MenuItem          | partial via cycle-345 `InsertPaneNumber` |
+| `insert_term_name.py`        | MenuItem          | partial via `InsertPaneNumber` |
 | `auto_theme.py`              | MenuItem          | NEW — needs plugin system |
 | `maven.py`                   | URLHandler        | E (domain-specific; user-supplied) |
 
 ## Why kettle uses Lua instead of Python
 
 Terminator plugins are Python modules; kettle's runtime is Rust + a
-vendored Lua 5.4 (cycle 324). Reasons:
+vendored Lua 5.4. Reasons:
 
   - **No Python dependency.** Shipping a Python interpreter to every
     kettle user (~30 MB on Linux, more on macOS/Windows) doubles the
@@ -51,8 +51,8 @@ vendored Lua 5.4 (cycle 324). Reasons:
   - **Single-threaded ergonomics.** Lua's coroutines + mlua's `Send`
     feature handle the kettle event loop's threading model cleanly.
     Python's GIL + asyncio would be a constant friction.
-  - **kettle already has Lua.** Cycle 324 vendored mlua + a `kettle.*`
-    namespace; cycles 325-326 added `send_text` + `exec_action`.
+  - **kettle already has Lua.** An earlier change vendored mlua + a
+    `kettle.*` namespace; a follow-up added `send_text` + `exec_action`.
     Extending that surface is incremental.
 
 ## End-state UX
@@ -114,25 +114,24 @@ graph LR
 
 Where today's code lives:
 
-  - `crates/kettle-ui/src/lua.rs`: `LuaEngine` + `LuaCommand` queue
-    (cycles 324-326). The event-hook registry lives here.
+  - `crates/kettle-ui/src/lua.rs`: `LuaEngine` + `LuaCommand` queue.
+    The event-hook registry lives here.
   - `crates/kettle-ui/src/app.rs`: `App::pending_lua_actions` /
-    `App::pending_lua_send` drain (cycles 325-326). Event dispatch
-    extends this.
+    `App::pending_lua_send` drain. Event dispatch extends this.
 
-## Sub-cycle roadmap
+## Phased roadmap
 
 | # | Scope | Status |
 |---|------|--------|
-| 1 | This doc (361). Design + roadmap. No code. | ✅ |
+| 1 | This doc. Design + roadmap. No code. | ✅ |
 | 2 | `kettle.on(event, callback)` foundation. New `LuaEvent` enum with one variant: `Startup`. Registry on `LuaEngine`; dispatch on App resumed. | pending |
 | 3 | `LuaEvent::Output(pane_id, bytes)` — wire the existing PTY-output loop to fire this event after each chunk drained. Throttle: max 100 fires/sec to bound Lua-callback overhead. | pending |
-| 4 | `LuaEvent::TabAdd/TabClose/PaneAdd/PaneClose` — fire from Mux mutations. | ✅ `tab_add` / `tab_close` (cycle 424), `pane_close` (cycle 750 — `kettle.on('pane_close', function(pane_id) … end)`, fires from every ClosePane path before the pane's PTY teardown); `pane_add` still pending |
+| 4 | `LuaEvent::TabAdd/TabClose/PaneAdd/PaneClose` — fire from Mux mutations. | ✅ `tab_add` / `tab_close`, `pane_close` (`kettle.on('pane_close', function(pane_id) … end)`, fires from every ClosePane path before the pane's PTY teardown); `pane_add` still pending |
 | 5 | `LuaEvent::Bell(pane_id)` — fire when TermEvent::Bell arrives. | pending |
-| 6 | `LuaEvent::UrlMatched(url, captures)` — fire from cycle-218 hint mode + cycle-X Ctrl-click path. | pending |
+| 6 | `LuaEvent::UrlMatched(url, captures)` — fire from hint mode + the Ctrl-click path. | pending |
 | 7 | `kettle.notify(text)` — desktop notification via `notify-rust` crate. | pending |
-| 8 | `kettle.add_menu_item(label, callback)` — extend cycle-245 context menu with Lua-supplied entries. New menu state field; menu render appends after the default entries. | pending |
-| 9 | `kettle.add_url_handler(name, pattern, callback)` — extend cycle-218 hint mode + Ctrl-click to consult registered handlers before falling through to system open. | pending |
+| 8 | `kettle.add_menu_item(label, callback)` — extend the context menu with Lua-supplied entries. New menu state field; menu render appends after the default entries. | pending |
+| 9 | `kettle.add_url_handler(name, pattern, callback)` — extend hint mode + Ctrl-click to consult registered handlers before falling through to system open. | pending |
 | 10 | `kettle.set_theme(name)` — runtime theme switch via existing `NextTheme` infrastructure. | pending |
 | 11 | Per-plugin porting: rewrite each of the 6 NEW plugins (custom_commands, remote, logger, dir_open, auto_theme, command_notify) as Lua modules shipped under `~/.config/kettle/plugins/*.lua` template files. Auto-load alongside `init.lua`. | pending |
 | 12 | Sandboxing decisions: which Lua stdlib bindings are exposed (os.execute? io.open?), error containment (one plugin's runtime error doesn't crash kettle), config-knob to disable plugins entirely. | pending |

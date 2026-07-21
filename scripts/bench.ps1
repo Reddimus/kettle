@@ -4,7 +4,7 @@
     scripts/bench.ps1 — reproduce the docs/PERFORMANCE.md numbers on Windows.
 
 .DESCRIPTION
-    Cycle 730: PowerShell-native equivalent of scripts/bench.sh. Uses
+    PowerShell-native equivalent of scripts/bench.sh. Uses
     System.Diagnostics.Process for wall-clock and PeakWorkingSet64
     instead of GNU `/usr/bin/time -f`, which doesn't exist on Windows.
 
@@ -12,7 +12,7 @@
     measurements 5 times each:
       - `kettle --version`         (cold-cache startup floor)
       - `kettle --screenshot`      (full GPU pipeline boot + render)
-      - `kettle --screenshot-menu` (cycle-251 menu pass)
+      - `kettle --screenshot-menu` (GPU pipeline + menu render pass)
 
     Output format per row: `<wall-clock>s, <peak working-set in MB>`
     so the spread across runs is visible at a glance. Pipe to a file
@@ -97,7 +97,7 @@ function Invoke-Bench {
 
 Invoke-Bench '--version (startup floor)' @('--version')
 Invoke-Bench '--screenshot (GPU pipeline + render)' @('--screenshot', "$env:TEMP\kettle-bench.png")
-Invoke-Bench '--screenshot-menu (cycle-251 menu pass)' @('--screenshot-menu', "$env:TEMP\kettle-bench-menu.png")
+Invoke-Bench '--screenshot-menu (with menu render pass)' @('--screenshot-menu', "$env:TEMP\kettle-bench-menu.png")
 
 Write-Output ""
 Write-Output "==> done. See docs/PERFORMANCE.md for the published baseline."

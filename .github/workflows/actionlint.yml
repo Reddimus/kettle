@@ -5,14 +5,14 @@
 #     doesn't add ~30 s to every code-only PR.
 #   - Runs the bundled `shellcheck` check on every `run: |` block
 #     across all workflows in one pass — catches a dash-vs-bash
-#     bug like cycle-253's (the bundled install.sh's
-#     `set -o pipefail` was a Bash-only construct invoked via sh)
-#     before the PR ships.
+#     bug like the one in the bundled install.sh (`set -o pipefail`
+#     was a Bash-only construct invoked via sh) before the PR ships.
 #   - Rejects mutable action references and catches malformed workflow
 #     syntax before a workflow actually runs.
 #
 # Linux-only runner. The check is platform-agnostic and one OS is
-# enough — same rationale as the cycle-219 rustdoc-on-Linux-only job.
+# enough — same rationale as the CI workflow's Rustdoc (Linux, warnings
+# denied) job.
 name: actionlint
 
 on:
@@ -31,11 +31,12 @@ on:
 permissions:
   contents: read
 
-# Cycle 598: cancel superseded runs on the same ref. Same shape as
-# cycle 597's ci.yml concurrency block — no cron trigger here, no
-# release artifacts, purely diagnostic, so cancel-in-progress is
-# strictly a budget win. Workflow-files churn is rare but a rebase
-# of a workflow-touching PR used to queue duplicate runs.
+# Cancel superseded runs on the same ref. Same shape as ci.yml's
+# concurrency block (added for the GitHub Actions budget-exhaustion
+# incident) — no cron trigger here, no release artifacts, purely
+# diagnostic, so cancel-in-progress is strictly a budget win.
+# Workflow-files churn is rare but a rebase of a workflow-touching
+# PR used to queue duplicate runs.
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
@@ -44,7 +45,7 @@ jobs:
   actionlint:
     name: lint workflows
     runs-on: ubuntu-latest
-    # Cycle 600 budget cap. actionlint binary + scan runs in <30 s;
+    # Budget cap: actionlint binary + scan runs in <30 s;
     # 5 min is generous and still well below the 360-min default.
     timeout-minutes: 5
     steps:

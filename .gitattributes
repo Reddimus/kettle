@@ -1,7 +1,7 @@
 # Normalize line endings to LF for all text files so cross-platform builds and
 # line-ending-sensitive `include_str!` drift tests are deterministic. The GitHub
 # Windows runner checks out with `autocrlf`, which turned LF-committed source
-# into CRLF and broke a multi-line `\n` source-scan drift test (cycle 885) —
+# into CRLF and broke a multi-line `\n` source-scan drift test —
 # the `build (windows-latest)` CI job had been red since v2.8.0 as a result.
 * text=auto eol=lf
 

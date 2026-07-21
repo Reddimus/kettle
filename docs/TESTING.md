@@ -28,13 +28,13 @@ allowed threshold fail the gate.
 ## What's covered (automated)
 
 **900+ tests across the workspace** — see
-[CHANGELOG.md](../CHANGELOG.md) for the per-cycle additions
-(cycle-288 → 303 feature sweep, cycles 330-410 Terminator-parity
-sweep, cycles 411-438 production-polish run, cycles 576-587 resource-
-cap defense-in-depth sweep, etc.). The workspace grows by 1–3
-tests per audit cycle, so per-crate counts below are
+[CHANGELOG.md](../CHANGELOG.md) for the full history of additions
+(feature sweeps, Terminator-parity work, production-polish passes,
+resource-cap defense-in-depth sweeps, etc.). The workspace grows by 1–3
+tests per feature landed, so per-crate counts below are
 range-stable phrasings rather than exact figures — run
-`cargo test --workspace` for today's number. Cycle-179's drift
+`cargo test --workspace` for today's number. The
+`user_facing_docs_have_no_internal_cycle_refs` drift
 guard scans user-facing docs for hardcoded "N workspace tests"
 claims that go stale; TESTING.md is exempt from that scan
 (contributor-leaning doc) but follows the same range-stable
@@ -43,7 +43,7 @@ discipline here.
 - **kettle-vt** (80+ tests): plain-text passthrough is byte-exact;
   iTerm2 / Sixel / kitty (incl. zlib-less RGBA + chunked reassembly)
   decode to the right pixels; OSC 7 / OSC 133 are consumed and
-  surrounding text still passes; OSC 1 → OSC 2 rewrite (cycle 102) so
+  surrounding text still passes; OSC 1 → OSC 2 rewrite so
   vim/tmux/ranger short-titles set the tab title; a sequence delivered
   one byte at a time still yields exactly one image; an ~8 MiB
   interleaved stream passes through intact in well under 5 s
@@ -56,21 +56,21 @@ discipline here.
 - **kettle-config** (190+ tests): TokyoNight Night is the verified shipped
   default theme (the self-contained `Theme::default()` fallback palette is
   Catppuccin Mocha); Ghostty `key = value` overrides, repeats, `palette`
-  (0..=15 + cycle-124 out-of-range diagnostic), `infinite` scrollback,
+  (0..=15 + out-of-range diagnostic), `infinite` scrollback,
   `ssh-host`; the bundled theme set has >400 entries incl. "TokyoNight
   Night"; Terminator default keybinds and trigger parsing; the
-  cycle-104 `from_name` ↔ `action_names` round-trip drift guard; the
-  cycle-116 `defaults_has_no_shadow_collisions` audit (no
-  HashMap-shadowed bindings); the cycle-117 palette-completeness drift
+  `from_name` ↔ `action_names` round-trip drift guard; the
+  `defaults_has_no_shadow_collisions` audit (no
+  HashMap-shadowed bindings); the palette-completeness drift
   guard (now also covering `OpenContextMenu` / `UndoCloseTab` /
-  `DuplicateTab` / `DuplicatePane` from v1.3.0); the cycle-100
-  example-config drift guard; the cycle-125 README-keybind regression guard;
+  `DuplicateTab` / `DuplicatePane` from v1.3.0); the
+  example-config drift guard; the README-keybind regression guard;
   persistence preserves encoding, newline convention, comments, permissions,
   first-write backups, and symlinked dotfile targets while refusing
   non-regular/oversized files, newly malformed edits, and external changes
   observed by the final pre-stage comparison;
-  cycle-99/108/109 session load/save atomic + corruption-backup contracts;
-  cycle-121/122 empty-value resets for every string-config key; cycle-118
+  session load/save atomic + corruption-backup contracts;
+  empty-value resets for every string-config key;
   `clamp_font_size` bounds.
 
 - **kettle-state**: creates and replaces private state without leaving staging
@@ -84,7 +84,7 @@ discipline here.
   grid/cursor/SGR/mode state across a broad `vttest`-style sweep —
   text + `\r\n` + CUP addressing, erase-line/erase-display, SGR
   truecolor + bold + reset + dim/underline (4:3) + strikeout +
-  double-underline + curly + dashed + dotted (plus the cycle-243
+  double-underline + curly + dashed + dotted (plus the
   SGR individual attribute-off codes 22/23/24/27/29), tab stops +
   carriage return, alt-screen + bracketed-paste private modes,
   DECSTBM scroll region, DEC special-graphics line-drawing charset,
@@ -95,16 +95,16 @@ discipline here.
   via SO/SI, RIS, EL/ED/ECH, CHA/HPA/VPA, DECSC-restores-SGR, SU/SD,
   DECSCUSR cursor shape, NEL/IND/RI, DECID, cursor-blink mode ?12,
   CHT/CBT tab nav, DECSET 1049 alt-screen, DECSET 2026 sync output),
-  OSC 4 palette query + 104 reset (cycle 101), OSC 10/11/12 default
-  fg/bg/cursor set + 110/111/112 reset siblings (cycle 101), OSC 8
+  OSC 4 palette query + 104 reset, OSC 10/11/12 default
+  fg/bg/cursor set + 110/111/112 reset siblings, OSC 8
   hyperlink cell-carry, OSC 52 clipboard copy + paste policies,
   wide CJK (2 cells + spacer) + wide-char wrap, combining-mark
   zero-width.
 
 - **kettle-render** (110+ unit tests + visual integration tests):
   truncate respects display columns (not chars), the
-  `clamp_font_size` floor/ceiling/NaN/∞ contract (cycle 118), the
-  `cap_axis_cells` GPU-texture safety guard (cycle 119), color
+  `clamp_font_size` floor/ceiling/NaN/∞ contract, the
+  `cap_axis_cells` GPU-texture safety guard, color
   resolve / dim / minimum-contrast WCAG math, the offscreen GPU
   pipeline self-test (real wgpu pipelines compile + render through
   Vulkan/Metal/DX12), shared-image source-rectangle UV validation,
@@ -114,7 +114,7 @@ discipline here.
   PowerShell-style prompt lines through the cell-locked glyph pipeline,
   toggles only the block cursor between two offscreen frames, and
   asserts every non-cursor prompt pixel remains unchanged. The
-  cycle-251 `tests/menu_visual.rs`
+  `tests/menu_visual.rs`
   integration test renders both `DebugScene::Default` and
   `DebugScene::ContextMenu` PNGs via `capture_png_with`, then
   asserts ≥ 1000 pixels differ between the two AND ≥ 200 fg-leaning
@@ -129,21 +129,21 @@ discipline here.
   gaps/overlap, `remove_leaf` collapses to the sibling, nested
   splits keep every leaf; `Node::leaf_ids` DFS-order +
   `nth_leaf`/`leaf_index_of` symmetry; `close_tab_at` and
-  `close_window` (cycle 113) tab-reaping with active-index
-  bookkeeping; cycle-120 `reap_tabs` keeps focus on the same tab
-  after a pane death; cycle-240 `close_focused_promotes_sibling_in_two_pane_split`
+  `close_window` tab-reaping with active-index
+  bookkeeping; `reap_tabs` keeps focus on the same tab
+  after a pane death; `close_focused_promotes_sibling_in_two_pane_split`
   (the v1.3.0 fix for `Ctrl+Shift+W` closing whole tabs);
-  cycle-251 `next_context_menu_highlight_skips_separators_and_disabled`
+  `next_context_menu_highlight_skips_separators_and_disabled`
   + `clamp_context_menu_anchor_keeps_panel_on_screen`;
-  cycle-246 `classify_tab_activity_picks_the_right_indicator`
-  + cycle-252 `classify_tab_activity_transitions_to_silent_after_threshold`;
-  cycle-247 `closed_tab_ring_bounded_and_lifo`;
-  cycle-249 `tab_drag_target_index_clamps_to_strip`;
-  cycle-241 `hovered_close_button_finds_only_the_close_rect_hits`
+  `classify_tab_activity_picks_the_right_indicator`
+  + `classify_tab_activity_transitions_to_silent_after_threshold`;
+  `closed_tab_ring_bounded_and_lifo`;
+  `tab_drag_target_index_clamps_to_strip`;
+  `hovered_close_button_finds_only_the_close_rect_hits`
   + `tab_close_hover_icon_overrides_chrome_default`;
-  selection-autoscroll ladder; cwd-basename tab-title fallback
-  (cycle 89); the SSH and `-e PROG` initial-pane-title heuristics
-  (cycle 93 / cycle 95); session JSON round-trips, durable private save,
+  selection-autoscroll ladder; cwd-basename tab-title fallback;
+  the SSH and `-e PROG` initial-pane-title heuristics;
+  session JSON round-trips, durable private save,
   symlink refusal, permission tightening, and corruption/oversize backup
   contracts; xterm modifier encoding + paste payload bracketing +
   injection-guard.
@@ -191,17 +191,17 @@ discipline here.
   followed by application to every mapped window while preserving per-window
   runtime zoom on a no-op reload.
 
-- **kettle** (binary, 50+ tests): clap argv parsing for the cycle-30
-  `-e` + `-d` + `--config` combination; the cycle-105
+- **kettle** (binary, 50+ tests): clap argv parsing for the
+  `-e` + `-d` + `--config` combination; the
   `format_ssh_hosts` table renderer (sort + column alignment +
-  empty fallback); the cycle-219
+  empty fallback); the
   `cli_help_text_has_no_internal_cycle_refs` audit-trail leak
-  guard; the cycle-241
+  guard; the
   `cli_help_preserves_indented_code_examples` drift guard that
   pins `verbatim_doc_comment` on every flag with an indented
   example block (the bug the v1.2.1 patch landed against).
 
-## End-to-end harness: selection, copy & `.cast` replay (cycles 909–911)
+## End-to-end harness: selection, copy & `.cast` replay
 
 The no-PTY conformance harness in `kettle-core/src/term.rs` (`harness()` +
 `feed_ex()`) builds a real `Term` and drives the **same Extractor → Processor →
@@ -210,7 +210,7 @@ whole interactive session (Claude Code, Codex CLI, AstroNvim, tmux) can be
 replayed deterministically in CI.
 
 **Selection / copy across scrollback.** Mouse selection involves three
-coordinate spaces; the bug fixed in cycle 909 was a missing `− display_offset`
+coordinate spaces; the bug here was a missing `− display_offset`
 when converting a click to the grid-absolute point alacritty's `Selection`
 expects, so copying an earlier chunk *while scrolled up* (the constant motion in
 a long Claude Code conversation) read the wrong rows:
@@ -218,7 +218,7 @@ a long Claude Code conversation) read the wrong rows:
 ```mermaid
 flowchart LR
     M["Mouse pixel (x, y)"] -->|"px_to_cell:<br/>− rect, padding, titlebar"| V["Viewport cell (row, col)"]
-    V -->|"viewport_point_to_grid:<br/>− display_offset  ⟵ cycle 909"| G["Grid-absolute Point"]
+    V -->|"viewport_point_to_grid:<br/>− display_offset"| G["Grid-absolute Point"]
     G --> S["alacritty Selection"]
     S -->|"selection_to_string / to_range"| C["Clipboard text + highlight rect"]
 ```
@@ -239,7 +239,7 @@ drives the same grid harness with Codex/Claude-style `path/to/file.rs:line:col`
 output and verifies that pane-cwd-relative paths become local `file://` links
 without splitting URL text into extra file links.
 
-**Output coalescing (cycle 910).** Apps that repaint without DEC 2026
+**Output coalescing.** Apps that repaint without DEC 2026
 synchronized output (Claude Code toggles `?25l/?25h` ~1750×/session and never
 opens 2026) can be snapshot mid-repaint under load — the transient "cursor above
 the prompt". kettle caps PTY-output paints to one per `OUTPUT_FRAME_BUDGET`
@@ -424,14 +424,14 @@ These need a real display and are run by hand (or on real hardware):
     platform-local recipes before changing renderer defaults or tab/underline
     interaction code.
 
-## Pattern: audit-driven cycles
+## Pattern: audit-driven hardening
 
-kettle's test count grows mostly via "audit cycles" — each cycle finds a
-silent-fallback bug, parity gap, or docs-drift on a specific surface,
+kettle's test count grows mostly through targeted bug hunts — each pass
+finds a silent-fallback bug, parity gap, or docs-drift on a specific surface,
 extracts a pure helper if applicable, wires it in, and pins the contract
-with a test. See [CHANGELOG.md](../CHANGELOG.md) for the per-cycle list;
+with a test. See [CHANGELOG.md](../CHANGELOG.md) for the full list;
 the pattern is documented in `### Tests` and `### Fixed` entries that
-name the shape of bug each cycle caught.
+name the shape of bug each pass caught.
 
 ## CI
 
@@ -443,7 +443,7 @@ name the shape of bug each cycle caught.
   catches broken intra-doc-links, malformed examples; rustdoc is
   platform-agnostic so one runner suffices).
 - A **headless GPU smoke** under Xvfb + software Vulkan on Linux.
-- The cycle-236 **`--screenshot` end-to-end** + cycle-251
+- The **`--screenshot` end-to-end** +
   **`--screenshot-menu` visual regression** smokes on Linux
   (both run the release binary under `LIBGL_ALWAYS_SOFTWARE=1`).
 - A CLI smoke on every OS: `--version` SHA-regex,
@@ -453,13 +453,13 @@ name the shape of bug each cycle caught.
   round-trip, `--shell-integration <bash|zsh|fish>` snippets,
   `--print-completions <bash|zsh|fish>` scripts,
   `--config /<typo>` + `--working-directory /<typo>` hard-fail
-  exit codes (cycle 241), happy-path basename round-trip
-  (Windows path-translation parity, cycle 241c).
-- Cycle-250 **MSRV verification job** — pinned `dtolnay/rust-
+  exit codes, happy-path basename round-trip
+  (Windows path-translation parity).
+- The **MSRV verification job** — pinned `dtolnay/rust-
   toolchain@1.89` builds + tests the workspace at the declared
   floor, catches a future transitive-dep MSRV bump at PR time
   instead of release time.
-- Cycle-220 **iconutil / ico packaging smoke** on macOS and
+- The **iconutil / ico packaging smoke** on macOS and
   Windows runners — verifies the .icns / .ico build assets stay
   intact on every push (not just release tags).
 - The Windows installer smoke covers both portable install/uninstall and an
@@ -476,7 +476,7 @@ name the shape of bug each cycle caught.
 
 Separate workflows:
 
-- `.github/workflows/audit.yml` (cycle 244) — `rustsec/audit-
+- `.github/workflows/audit.yml` — `rustsec/audit-
   check` on every Cargo.lock change + daily 06:00 UTC cron.
 - `.github/workflows/release.yml` — mandatory Windows, macOS, Linux x86_64,
   and Linux aarch64 packaging on every verified `v*` tag. One protected

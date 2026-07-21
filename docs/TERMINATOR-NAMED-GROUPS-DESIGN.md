@@ -1,9 +1,9 @@
 # Terminator named broadcast groups — design
 
-> Status: design only (cycle 631). Named broadcast groups (Terminator
+> Status: design only. Named broadcast groups (Terminator
 > `create_group` / `group_tab` / `group_win` / `ungroup_*`) require
 > per-pane group-name state + a group-scoped broadcast policy. This
-> doc lays out the architecture + sub-cycle roadmap. Same shape as
+> doc lays out the architecture + phase roadmap. Same shape as
 > the existing Bucket D design docs.
 
 ## What it is
@@ -30,17 +30,17 @@ End-state UX in kettle:
 - Done: focus another tab, press `Ctrl+Shift+Alt+G` → all groupings
   cleared.
 
-kettle currently has *per-tab broadcast* (cycle 178) and *broadcast-all*
-(cycle X) but no *named groups*. Per-tab is "broadcast within this tab
+kettle currently has *per-tab broadcast* (`BroadcastScope::Tab`) and
+*broadcast-all* (`BroadcastScope::All`) but no *named groups*. Per-tab is "broadcast within this tab
 only"; broadcast-all is "every pane in every tab." Named groups are
 finer-grained: "every pane I tagged with `fleet`, even across tabs."
 
-## Why multi-cycle
+## Why this needs multiple changes
 
 Three cross-cutting changes:
 
 1. **Per-pane group state**. New `pub group: Option<String>` field on
-   `Pane` (kettle-ui/mux). The cycle-407 `pane.group_name` field
+   `Pane` (kettle-ui/mux). The `pane.group_name` field
    already exists as part of the title-edit overlay — this design
    *promotes* that field from "display-only" to "broadcast-scoping."
    Renames `group_name` → `group` to match Terminator vocabulary.
@@ -51,7 +51,7 @@ Three cross-cutting changes:
    `Group(name)` variant scopes broadcast to all panes with
    `pane.group == Some(name)`.
 
-3. **Group-management overlay**. The cycle-369 title-edit overlay
+3. **Group-management overlay**. The title-edit overlay
    (`TitleEditState`) already has a `Group` scope. Extend it to
    support:
    - Empty input → clear the group (ungroup_this_pane)
@@ -70,14 +70,14 @@ Three cross-cutting changes:
 │  Action::CreateGroup       — open group-edit overlay (prompt)        │
 │  Action::UngroupTab        — clear group on focused-tab panes        │
 │  Action::UngroupWindow     — clear group on focused-window panes     │
-│  Action::UngroupAll        — already exists (cycle X)                │
+│  Action::UngroupAll        — already exists                          │
 └──────────────────────────────────────────────────────────────────────┘
                                   │
                                   ▼
 ┌──────────────────────────────────────────────────────────────────────┐
 │ kettle_ui::mux::Pane                                                 │
 │                                                                      │
-│  pub group: Option<String>     ← renamed from group_name (cycle 407) │
+│  pub group: Option<String>     ← renamed from group_name             │
 └──────────────────────────────────────────────────────────────────────┘
                                   │
                                   ▼
@@ -108,13 +108,13 @@ Three cross-cutting changes:
 └──────────────────────────────────────────────────────────────────────┘
 ```
 
-## Sub-cycle roadmap
+## Phase roadmap
 
-| Sub-cycle | What ships | Test coverage |
+| Phase | What ships | Test coverage |
 |-----------|-----------|---------------|
 | 1 | Rename `Pane::group_name` → `Pane::group` (mechanical) | existing tests pass |
 | 2 | `BroadcastScope::Group(String)` variant + `broadcast_targets` impl | pure unit tests on synthetic Pane vecs |
-| 3 | `Action::CreateGroup` dispatch — reuses cycle-407 title-edit overlay with `TitleEditScope::Group`. Apply on Enter: writes input → focused-pane `group`. | drift guard on the apply path |
+| 3 | `Action::CreateGroup` dispatch — reuses the title-edit overlay with `TitleEditScope::Group`. Apply on Enter: writes input → focused-pane `group`. | drift guard on the apply path |
 | 4 | `Action::GroupTab` / `GroupWindow` — prompt for a name then bulk-assign | drift guard |
 | 5 | `Action::UngroupTab` / `UngroupWindow` — bulk-clear | drift guard |
 | 6 | Renderer titlebar group-pill (deterministic color hash) | snapshot test on the pill placement |
@@ -127,11 +127,11 @@ Estimated test growth: +8-10 (broadcast_targets edge cases + apply paths).
 
 - **Cross-window groups**. Terminator has a single process so all
   windows share the group registry. kettle is single-window per
-  process (cycle-302 IPC connects multiple instances). v1 ships
+  process (kettle-ctl's IPC transport already connects multiple instances). v1 ships
   in-window groups only; cross-window grouping via IPC is a follow-up.
 - **Persistent groups in session**. Restored sessions don't carry
-  group assignments in v1 — the cycle-X session.json format would
-  need a `group` field per pane. Follow-up sub-cycle.
+  group assignments in v1 — the session.json format would
+  need a `group` field per pane. A follow-up.
 - **Group-scoped color**. Terminator's title pill takes a color from
   a fixed palette indexed by group hash. v1 ships the same hash-derived
   color; users wanting palette overrides get a follow-up.
@@ -165,11 +165,11 @@ $ kettle
   and types fast, each keystroke fans out 100x to the PTY layer.
   **Mitigation:** the existing per-pane PTY write queue already
   bounds backpressure; broadcast just iterates. Pre-existing
-  protection from cycle-178 broadcast-all.
+  protection from the broadcast-all path (`BroadcastScope::All`).
 - **Risk:** group-name collisions with reserved scopes (`tab`, `all`,
   `off`). **Mitigation:** the typed name is data, not a config-key
   parse; collisions are impossible at the type level (`Group(String)`
   is distinct from `Tab` variant).
 - **Risk:** title-edit overlay key bindings overlap with group-edit.
-  **Mitigation:** `TitleEditScope::Group` already exists since
-  cycle 407 — same overlay, scoped variant. Reused, not duplicated.
+  **Mitigation:** `TitleEditScope::Group` already exists — same
+  overlay, scoped variant. Reused, not duplicated.

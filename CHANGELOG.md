@@ -6,6 +6,16 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+  ### Changed
+  - **Internal cycle-numbered dev-log references removed from all living
+    sources.** Roughly 2,600 numbered audit-cycle bookkeeping references in
+    code comments, docs, scripts, and build files were reworded into timeless
+    prose that preserves each rationale. Historical changelog entries and git
+    subjects are unchanged and remain the provenance record. A new repo-wide
+    drift guard (`no_internal_cycle_refs_anywhere`) keeps the pattern from
+    returning, and the mechanical scrub commits are listed in
+    `.git-blame-ignore-revs` so `git blame` skips them.
+
 ## [2.36.4] — 2026-07-16
 
   ### Fixed

@@ -16,7 +16,7 @@
         overlays = [ (import rust-overlay) ];
         pkgs = import nixpkgs { inherit system overlays; };
 
-        # Pin to the workspace MSRV (1.89, cycle 250) so a `nix build`
+        # Pin to the workspace MSRV (1.89) so a `nix build`
         # uses exactly the toolchain CI verifies on every PR. Drift-
         # proofs the Nix path against a nixpkgs Rust version bump.
         rustToolchain = pkgs.rust-bin.stable."1.89.0".default;
@@ -74,8 +74,8 @@
           '';
 
           # Skip the offscreen GPU self-test during `nix build` —
-          # the Nix sandbox has no Vulkan-capable GPU, the cycle-205
-          # offscreen pipeline would fail. CI on a real runner still
+          # the Nix sandbox has no Vulkan-capable GPU, the offscreen
+          # GPU self-test would fail. CI on a real runner still
           # exercises it.
           checkFlags = [
             "--skip=gpu_tests::gpu_pipelines_compile_and_render_offscreen"

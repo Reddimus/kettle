@@ -14,7 +14,7 @@ LANCZOS downscale) and writes:
     CI asserts the resolution count)
 
 Why Pillow and not rsvg-convert: the Windows dev host has no rsvg/
-ImageMagick/icotool, and the cycle-919 Pillow reproduction was never
+ImageMagick/icotool, and an earlier Pillow-based reproduction was never
 committed — this script makes the icon pipeline reproducible everywhere
 Python + Pillow exist (`pip install Pillow`). `scripts/gen-icons.sh`
 remains the rsvg-convert path for Linux hosts; either rasterizer is fine,

@@ -118,17 +118,17 @@ if [[ "${UNINSTALL}" -eq 1 ]]; then
     "${PREFIX}/share/kettle/install.json" \
     "${PREFIX}/share/kettle/install-real.sh"
   rm -rf "${PREFIX}/share/kettle/shell-integration"
-  # Cycle 531: remove ${PREFIX}/share/kettle/ if it ends up empty
+  # Remove ${PREFIX}/share/kettle/ if it ends up empty
   # after the install.sh copy is gone. `rmdir` is non-recursive +
   # only succeeds on empty dirs — so a future addition (e.g.,
   # `${PREFIX}/share/kettle/themes/`) wouldn't be silently nuked,
-  # but the bare cycle-530 dir gets cleaned up cleanly. Failure
+  # but the bare directory gets cleaned up cleanly. Failure
   # is harmless: a user with extra files in there keeps them.
   rmdir "${PREFIX}/share/kettle" 2>/dev/null || true
   if command -v update-desktop-database >/dev/null 2>&1; then
     update-desktop-database "${APP_DIR}" 2>/dev/null || true
   fi
-  # Cycle 543: symmetric to cycle 540's install-side cleanup —
+  # Symmetric to the install-side icon-cache guard below —
   # if ${ICON_BASE} has no index.theme (the user-local hicolor
   # case), only rebuild the cache when there IS a theme to cache.
   # Otherwise the cache reference goes stale referencing now-
@@ -233,7 +233,7 @@ install -Dm755 "${BIN_SRC}" "${BIN_DIR}/kettle"
 # `TryExec` plus themed `Icon=kettle` (the shape distro packages rely
 # on, since the package manager keeps PATH + icon-theme.cache fresh).
 # For this no-sudo *user* install we rewrite them to exact installed
-# paths — see the cycle-756 note below the icon copy for the full why.
+# paths — see the note below the icon copy for the full why.
 install -Dm644 "${REPO_ROOT}/packaging/linux/kettle.desktop" "${APP_DIR}/kettle.desktop"
 
 # 3) Icons.
@@ -252,12 +252,12 @@ done
 # icon-theme.cache — so the Super-key / Activities search showed a blank
 # tile even though the PNGs were correctly in place and 8-bit (verified:
 # `Gtk.IconTheme` resolves + loads `kettle`, but gnome-shell does not).
-# Cycle 540 removed the gtk-update-icon-cache call to avoid leaving a
+# An earlier change removed the gtk-update-icon-cache call to avoid leaving a
 # *broken* cache, but its assumption that GNOME would then directory-scan
 # the icon by name was wrong for gnome-shell. An absolute path sidesteps
 # icon-theme resolution entirely: the launcher icon renders regardless of
 # cache state, and — unlike generating a user-level cache — it can't go
-# stale and hide other apps' icons (the exact cycle-540 footgun). The
+# stale and hide other apps' icons (the same footgun as before). The
 # `#` sed delimiter avoids clashing with the `/`s in the path. System
 # (`--prefix=/usr`) installs get a valid absolute path too; distro
 # packages keep the themed `Icon=kettle` since their post-install hooks
@@ -312,7 +312,7 @@ if [[ -n "${RECORD_DIR}" ]]; then
   sed -i "s#^Exec=.*\$#Exec=/usr/bin/env ${RECORD_REPL} ${BIN_REPL}#" "${APP_DIR}/kettle.desktop"
 fi
 
-# 3b) Man page (cycle 279) — `man kettle` works after install if
+# 3b) Man page — `man kettle` works after install if
 # /usr/share/man/<...>/man1 (or the user's $MANPATH) is searched. Many
 # distros pre-include ~/.local/share/man via /etc/manpath.config; if
 # not, the user can `export MANPATH=~/.local/share/man:$MANPATH`.
@@ -321,13 +321,13 @@ if [[ -f "${MAN_SRC}" ]]; then
   install -Dm644 "${MAN_SRC}" "${MAN_DIR}/kettle.1"
 fi
 
-# 3c) Cycle 530: drop a fresh copy of this install.sh into
+# 3c) Drop a fresh copy of this install.sh into
 # ${PREFIX}/share/kettle/ so `${PREFIX}/share/kettle/install.sh
 # --uninstall` always points at the version that matched the
 # binary. Without this, a contributor running `scripts/install.sh`
 # from the repo would leave any pre-existing
-# ${PREFIX}/share/kettle/install.sh stale (e.g., from the cycle-
-# 253 tarball-install flow), and a later `--uninstall` would run
+# ${PREFIX}/share/kettle/install.sh stale (e.g., from an earlier
+# tarball-install flow), and a later `--uninstall` would run
 # a different version of the script than the binary it's removing.
 # Works in both tarball and repo modes: ${SCRIPT_DIR}/install.sh
 # = the script that's currently running.
@@ -388,7 +388,7 @@ trap - EXIT INT TERM
 if command -v update-desktop-database >/dev/null 2>&1; then
   update-desktop-database "${APP_DIR}" 2>/dev/null || true
 fi
-# Cycle 540: only run gtk-update-icon-cache when the target dir has
+# Only run gtk-update-icon-cache when the target dir has
 # an index.theme file. Without one, gtk-update-icon-cache prints "No
 # theme index file." (suppressed by 2>/dev/null) but still creates
 # an empty/broken cache file (~584 bytes). That broken cache stops
@@ -406,7 +406,7 @@ if command -v gtk-update-icon-cache >/dev/null 2>&1 \
     && [ -f "${ICON_BASE}/index.theme" ]; then
   gtk-update-icon-cache -f "${ICON_BASE}" 2>/dev/null || true
 fi
-# Clean up the broken empty cache cycle-253-era installs left in
+# Clean up the broken empty cache that installs predating this guard left in
 # ${ICON_BASE}/icon-theme.cache (only safe to remove when the dir
 # has no index.theme — otherwise it's a real cache for a real theme).
 if [ ! -f "${ICON_BASE}/index.theme" ] && [ -f "${ICON_BASE}/icon-theme.cache" ]; then

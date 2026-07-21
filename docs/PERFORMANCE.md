@@ -233,7 +233,7 @@ that ran on every blink frame) but remains far above Alacritty/WezTerm:
 each blink frame still rebuilds the full quad list and glyphon vertex
 data. The fix is row-level damage tracking + persistent GPU cell buffers
 — the tracked follow-up below. Startup (~2.2 s) is GPU-adapter init +
-the embedded font set + 500 themes, untouched this cycle and now tracked
+the embedded font set + 500 themes, untouched by this change and now tracked
 with a number against it.
 
 ### Input latency
@@ -359,7 +359,7 @@ reference platforms:
 
 Reproducible:
 - Linux / macOS: `scripts/bench.sh` (GNU `time -f '%e %M'` based).
-- Windows: `scripts/bench.ps1` (cycle 730: `System.Diagnostics.Process`
+- Windows: `scripts/bench.ps1` (`System.Diagnostics.Process`
   based; uses `PeakWorkingSet64` for peak memory, captured at exit).
 
 Both scripts build a release binary if one isn't present, then run
@@ -368,7 +368,7 @@ for each invocation.
 
 ## Numbers
 
-### Linux baseline (v1.3.8 + cycle 277, commit `1026858`)
+### Linux baseline (v1.3.8, commit `1026858`)
 
 > Captured at v1.3.8 (the Linux box wasn't available for a re-bench at later
 > cuts). There's been no major architectural change to the render/startup paths
@@ -378,12 +378,12 @@ for each invocation.
 
 | Measurement | Value | Notes |
 |---|---:|---|
-| Release binary size | 24.7 MB | Includes embedded JetBrains Mono Nerd Font + ~500 themes. Cycle 277 trimmed ~6 MB by narrowing `image` features to PNG/JPEG/GIF (was pulling AVIF/`rav1e` + EXR + WebP + HDR + TIFF + …) and disabling `arboard`'s image-clipboard default feature |
+| Release binary size | 24.7 MB | Includes embedded JetBrains Mono Nerd Font + ~500 themes. Trimmed ~6 MB by narrowing `image` features to PNG/JPEG/GIF (was pulling AVIF/`rav1e` + EXR + WebP + HDR + TIFF + …) and disabling `arboard`'s image-clipboard default feature |
 | `kettle --version` startup | < 10 ms wall, 5.0 MB peak RSS | Cold (no warm pages); 5 runs all rounded to 0.00 s |
 | `kettle --screenshot OUT.png` | ≈ 250–270 ms wall, 236 MB peak RSS | Includes wgpu adapter init, offscreen Vulkan device, font system load, full GPU text + quad pipelines |
 | `kettle --screenshot-menu OUT.png` | ≈ 240–250 ms wall, 236 MB peak RSS | Same as above + the second TextRenderer / menu_quads pass; identical memory footprint, ~10 ms faster on the GPU pipeline warmup pattern |
 
-### Windows 11 reference (captured at v1.46.0 + cycle 730)
+### Windows 11 reference (captured at v1.46.0)
 
 > Captured on a Surface Book 3 (Intel Iris Plus Graphics, x64,
 > Windows 11 build 26200) the day the v1.46.0 release was cut (a fixed data
@@ -399,17 +399,17 @@ for each invocation.
 
 | Measurement | Value | Notes |
 |---|---:|---|
-| Release binary size | 21.3 MB (22,370,304 bytes) | `kettle.exe` MSVC release build with embedded Win11 .ico via `winresource`. Slightly smaller than the Linux x86_64 binary (24.7 MB) — likely because MSVC's `panic=abort` codegen + LTO eliminates more unwind tables than gnu-stable did at cycle 277 |
+| Release binary size | 21.3 MB (22,370,304 bytes) | `kettle.exe` MSVC release build with embedded Win11 .ico via `winresource`. Slightly smaller than the Linux x86_64 binary (24.7 MB) — likely because MSVC's `panic=abort` codegen + LTO eliminates more unwind tables than gnu-stable did in the Linux baseline build above |
 | `kettle --version` startup | ≈ 95-110 ms wall, 4-9 MB peak working set | Cold process spawn floor. Higher than Linux's <10 ms because Windows CreateProcess pays Defender real-time scan + image-load overhead. After warm-cache (Defender has hashed the .exe), drops to ~50-70 ms |
 | `kettle --screenshot OUT.png` | ≈ 2.1-3.0 s wall, 377-389 MB peak working set | wgpu Vulkan adapter init + offscreen device + font system load + first font-atlas glyph upload. The first run is the slowest (~3 s — Defender cold-scan); runs 2-5 settle to 2.1-2.2 s |
-| `kettle --screenshot-menu OUT.png` | ≈ 2.0-2.1 s wall, 381-389 MB peak working set | Same as above + the cycle-251 menu render pass. Peak WS higher than Linux software-Vulkan (236 MB) because Windows DX12/Vulkan adapter via wgpu keeps more state resident in the process's WS than Mesa software-Vulkan does on Linux. On a real-GPU Linux box with a hardware Vulkan driver, the comparable Windows-vs-Linux number is expected to be much closer |
+| `kettle --screenshot-menu OUT.png` | ≈ 2.0-2.1 s wall, 381-389 MB peak working set | Same as above + the second TextRenderer / menu_quads pass. Peak WS higher than Linux software-Vulkan (236 MB) because Windows DX12/Vulkan adapter via wgpu keeps more state resident in the process's WS than Mesa software-Vulkan does on Linux. On a real-GPU Linux box with a hardware Vulkan driver, the comparable Windows-vs-Linux number is expected to be much closer |
 
 ## What the numbers mean
 
 - **Startup is fast.** `--version` is a single `clap::Parser::parse`
   + a `println!`; under 10 ms on Linux. Windows adds process-spawn
   + Defender real-time scan overhead the first time the .exe is
-  invoked from a directory (the cycle-730 install advice "add the
+  invoked from a directory (the install advice to "add the
   unzip folder to PATH" lets Defender hash + cache the binary once,
   after which startup matches the Linux floor).
 - **GPU init is the screenshot cost.** ~250 ms wall for a single
@@ -480,7 +480,7 @@ cargo build --release -p kettle
 just bench
 ```
 
-`scripts/bench.ps1` (cycle 730) needs PowerShell 5.1+ (preinstalled on
+`scripts/bench.ps1` needs PowerShell 5.1+ (preinstalled on
 Windows 10+) or PowerShell Core 7+. No external dependencies — uses
 the .NET `System.Diagnostics.Process` API directly.
 
@@ -519,7 +519,7 @@ that methodology is pinned down.
 - **`/usr/bin/time -v` for RSS** (Linux/macOS): `Maximum resident
   set size` reports peak resident memory in KB; we convert to MB
   in the table above.
-- **`PeakWorkingSet64` for working set** (Windows, cycle 730): the
+- **`PeakWorkingSet64` for working set** (Windows): the
   .NET `Process.PeakWorkingSet64` property is populated by Win32
   `PSAPI.GetProcessMemoryInfo` and is comparable to Linux's max
   RSS — peak resident pages in physical memory for the lifetime

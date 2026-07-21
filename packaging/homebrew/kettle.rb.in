@@ -42,9 +42,9 @@ class Kettle < Formula
 
   livecheck do
     # `latest_release` follows the same `/releases/latest` redirect
-    # the cycle-253 `install-online.sh` uses to resolve the current
-    # version — kettle ships one binary per tag, no point releases
-    # of older majors, so this is the right canonical signal.
+    # `install-online.sh` uses to resolve the current version —
+    # kettle ships one binary per tag, no point releases of older
+    # majors, so this is the right canonical signal.
     url :stable
     strategy :github_latest
   end
@@ -64,14 +64,14 @@ class Kettle < Formula
       # the binary + LICENSE + NOTICE + README + CHANGELOG +
       # packaging assets at the root.
       bin.install "kettle/kettle"
-      # Cycle 279: man page so `man kettle` works after install.
+      # Install the man page so `man kettle` works after install.
       if File.exist?("kettle/packaging/linux/kettle.1")
         man1.install "kettle/packaging/linux/kettle.1"
       end
       # Keep the XDG launcher + icons so a `brew install`-ed kettle
       # also shows up in GNOME Activities / Ubuntu Super-key search
-      # on Homebrew-on-Linux users (Linuxbrew). Same paths the
-      # cycle-0 `install.sh` writes to.
+      # on Homebrew-on-Linux users (Linuxbrew). Same paths
+      # `install.sh` writes to.
       share = prefix/"share"
       (share/"applications").install "kettle/packaging/linux/kettle.desktop"
       (share/"icons/hicolor/scalable/apps").install "kettle/packaging/linux/kettle.svg"
@@ -94,7 +94,7 @@ class Kettle < Formula
 
   test do
     # Smoke test: the binary boots, prints its version, and exits
-    # cleanly. The version string follows cycle-192's format —
+    # cleanly. The version string follows the format
     # `kettle X.Y.Z (sha12)` on a git checkout, `kettle X.Y.Z` on a
     # vendored / tarball build. The version may differ at build time
     # if homebrew bumps the formula independently of the upstream

@@ -6,6 +6,6 @@ Cargo.lock.orig
 .DS_Store
 
 # Per-developer Claude Code state (memory, project metadata). Not
-# kettle source. Added in cycle 310 after `scripts/release.sh` flagged
-# the untracked directory.
+# kettle source. Added after `scripts/release.sh` flagged the
+# untracked directory.
 .claude/

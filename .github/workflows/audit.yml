@@ -47,7 +47,7 @@ jobs:
   audit:
     name: cargo audit
     runs-on: ubuntu-latest
-    # Cycle 600 budget cap. cargo-audit completes in <2 min; 10 min
+    # Budget cap. cargo-audit completes in <2 min; 10 min
     # is 5× headroom for a slow advisory-DB fetch.
     timeout-minutes: 10
     steps:
