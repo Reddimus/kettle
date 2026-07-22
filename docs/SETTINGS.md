@@ -69,7 +69,8 @@ the panel. See [BACKGROUNDS.md](BACKGROUNDS.md).
 | Copy on select | `copy-on-select` | on / off |
 | Hide mouse while typing | `mouse-hide-while-typing` | on / off |
 | Focus mode | `focus` | click · follows-mouse · system |
-| Check for updates | `update-check` | on / off |
+| Updates | `update-policy` | off · notify · install automatically (default: auto) |
+| Update check (hours) | `update-check-interval-hours` | 1–720 h — how often the background check runs (default 24 = daily) |
 | Vim menu navigation | `vim-menu-nav` | on / off — hjkl & friends in menus/overlays (see [Navigating](#navigating)) |
 
 **Tabs** (v2.28.0)

@@ -352,20 +352,19 @@ struct Cli {
     #[arg(long, value_name = "FD", verbatim_doc_comment)]
     tab_handoff_fd: Option<i32>,
 
-    /// Developer-only: record this session to an asciicast-compatible trace at
-    /// PATH (replays with `asciinema play`). Captures terminal output, resizes,
-    /// keystroke *tokens* (never raw typed characters by default), and UI
-    /// markers. Only exists in builds made with `--features dev-record`; never
-    /// on by default. Also honored via the `KETTLE_RECORD` env var.
-    #[cfg(feature = "dev-record")]
+    /// Record this session to an asciicast-compatible trace at PATH (replays
+    /// with `asciinema play`). Captures terminal output, resizes, keystroke
+    /// *tokens* (never raw typed characters by default), and UI markers. Off
+    /// unless requested; also honored via the `KETTLE_RECORD` env var and the
+    /// persistent `record`/`record-dir` config keys. Output is captured
+    /// verbatim — review a trace before sharing it. See docs/RECORDING.md.
     #[arg(long, value_name = "PATH", verbatim_doc_comment)]
     record: Option<std::path::PathBuf>,
 
-    /// Developer-only: create a private recording directory if needed and
-    /// write every launch to a new collision-safe asciicast file within it.
-    /// Also honored via `KETTLE_RECORD_DIR`. Explicit `--record` and legacy
-    /// `KETTLE_RECORD` take precedence. `--features dev-record` only.
-    #[cfg(feature = "dev-record")]
+    /// Create a private recording directory if needed and write every launch to
+    /// a new collision-safe asciicast file within it. Also honored via
+    /// `KETTLE_RECORD_DIR` and the `record-dir` config key. Explicit `--record`
+    /// and legacy `KETTLE_RECORD` take precedence.
     #[arg(
         long,
         value_name = "DIRECTORY",
@@ -374,10 +373,10 @@ struct Cli {
     )]
     record_dir: Option<std::path::PathBuf>,
 
-    /// Developer-only: with --record, capture RAW typed characters instead of
-    /// redacted key tokens. WARNING: the trace can then contain typed passwords;
-    /// leave it off unless you need byte-exact input. `--features dev-record`.
-    #[cfg(feature = "dev-record")]
+    /// With --record, capture RAW typed characters instead of redacted key
+    /// tokens. WARNING: the trace can then contain typed passwords; leave it off
+    /// unless you need byte-exact input. The window title shows `[REC RAW]` while
+    /// active. Also honored via `KETTLE_RECORD_RAW_INPUT` / `record-raw-input`.
     #[arg(long, verbatim_doc_comment)]
     record_raw_input: bool,
 
@@ -697,7 +696,6 @@ fn crash_log_path(
 /// 2. explicit `--record-dir DIRECTORY`
 /// 3. legacy `KETTLE_RECORD` file/existing-directory behavior
 /// 4. `KETTLE_RECORD_DIR`, which always has directory semantics
-#[cfg(feature = "dev-record")]
 fn resolve_record_target(
     explicit: Option<std::path::PathBuf>,
     explicit_directory: Option<std::path::PathBuf>,
@@ -729,7 +727,6 @@ fn resolve_record_target(
     }
 }
 
-#[cfg(feature = "dev-record")]
 fn recording_activation_key(target: &kettle_core::record::RecordingTarget) -> String {
     use kettle_core::record::RecordingTarget;
 
@@ -747,7 +744,6 @@ fn recording_activation_key(target: &kettle_core::record::RecordingTarget) -> St
     format!("{kind}:{:016x}", stable_path_hash(&absolute))
 }
 
-#[cfg(feature = "dev-record")]
 fn stable_path_hash(path: &std::path::Path) -> u64 {
     #[cfg(unix)]
     let bytes: Vec<u8> = {
@@ -1693,14 +1689,16 @@ fn main() -> anyhow::Result<()> {
     {
         anyhow::bail!("-e/--exec: program name is empty");
     }
-    #[cfg(feature = "dev-record")]
+    // One-shot recording overrides from the CLI/env. These win over the
+    // persistent `record`/`record-dir`/`record-raw-input` config keys, which the
+    // app resolves when no explicit target is given here (config isn't parsed at
+    // this point — only its path is). See docs/RECORDING.md.
     let record = resolve_record_target(
         cli.record,
         cli.record_dir,
         std::env::var_os("KETTLE_RECORD"),
         std::env::var_os("KETTLE_RECORD_DIR"),
     );
-    #[cfg(feature = "dev-record")]
     let record_raw_input = cli.record_raw_input
         || std::env::var("KETTLE_RECORD_RAW_INPUT")
             .map(|value| {
@@ -1711,14 +1709,10 @@ fn main() -> anyhow::Result<()> {
             })
             .unwrap_or(false);
     let activation_identity = kettle_ctl::activation::LaunchIdentity {
-        #[cfg(feature = "dev-record")]
+        // Config-driven recording is identical across bare launches (same config
+        // file), so only an explicit CLI/env target affects launch identity.
         recording_key: record.as_ref().map(recording_activation_key),
-        #[cfg(not(feature = "dev-record"))]
-        recording_key: None,
-        #[cfg(feature = "dev-record")]
         record_raw_input: record.is_some() && record_raw_input,
-        #[cfg(not(feature = "dev-record"))]
-        record_raw_input: false,
     };
     let activation = if bare_gui_launch && !cli.new_process {
         let cwd = std::env::current_dir()
@@ -1760,13 +1754,10 @@ fn main() -> anyhow::Result<()> {
         lua_script: cli.lua_script,
         tab_handoff: cli.tab_handoff,
         tab_handoff_fd: cli.tab_handoff_fd,
-        #[cfg(feature = "dev-record")]
         record,
-        // Bool-PARSE the env var — `is_some()`
-        // turned `=0`/`=false`/empty all ON, the opposite of intent, silently
-        // enabling raw keystroke (password) capture into the trace. Only an
-        // explicit truthy value enables it. (dev-record feature only.)
-        #[cfg(feature = "dev-record")]
+        // Bool-PARSE the env var — `is_some()` turned `=0`/`=false`/empty all
+        // ON, the opposite of intent, silently enabling raw keystroke (password)
+        // capture into the trace. Only an explicit truthy value enables it.
         record_raw_input,
     })
 }
@@ -1988,7 +1979,7 @@ mod activation_cli_tests {
     }
 }
 
-#[cfg(all(test, feature = "dev-record"))]
+#[cfg(test)]
 mod record_target_tests {
     use super::{Cli, recording_activation_key, resolve_record_target};
     use clap::Parser;
@@ -2586,18 +2577,10 @@ mod tests {
         );
         // Internal/handoff-only flags + ones documented by their short form
         // (`--exec` is documented as `-e`) that the man page intentionally omits.
-        // `record` / `record-raw-input` only exist under the developer-only
-        // `dev-record` feature and are intentionally absent from the public man
-        // page, so they must be excluded here too (else the guard reds under
-        // `cargo test -p kettle --features dev-record`).
-        let allow_missing: &[&str] = &[
-            "tab-handoff",
-            "tab-handoff-fd",
-            "exec",
-            "record",
-            "record-dir",
-            "record-raw-input",
-        ];
+        // The `--record*` flags are now a shipped, runtime feature and MUST be
+        // documented in the man page (see docs/RECORDING.md), so they are no
+        // longer excluded here.
+        let allow_missing: &[&str] = &["tab-handoff", "tab-handoff-fd", "exec"];
         let cmd = Cli::command();
         let missing: Vec<String> = cmd
             .get_arguments()

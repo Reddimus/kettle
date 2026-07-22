@@ -314,16 +314,22 @@ pub enum UserEvent {
         tag: String,
         url: String,
     },
-    /// An opt-in automatic update completed. Existing windows keep running the
+    /// An automatic update completed. Existing windows keep running the
     /// current image; the next kettle launch uses the installed release.
+    /// `first_time` is set on the first automatic install so the UI can show a
+    /// one-time "auto-update is on; disable with `update-policy = off`" note.
     UpdateInstalled {
         tag: String,
         staged: bool,
+        first_time: bool,
     },
-    /// An opt-in automatic update failed after a newer signed release was found.
+    /// An automatic update failed after a newer signed release was found.
     UpdateFailed {
         message: String,
     },
+    /// The recurring in-session update timer fired; re-run the due check with
+    /// the current config so a long-lived window keeps itself current.
+    UpdateCheckTick,
 }
 
 /// Decode kettle's embedded PNG into a winit window icon for the
@@ -1235,7 +1241,6 @@ fn cwd_is_local(cwd: &str) -> bool {
 /// recorded by name — they aren't secret. A bare printable character is recorded
 /// only as a redacted class glyph unless raw-input was opted into, so a typed
 /// password never lands in the trace (its keystroke count + timing still do).
-#[cfg(feature = "dev-record")]
 fn dev_record_key(
     rec: &mut crate::dev_record::Recorder,
     key: &winit::keyboard::Key,
@@ -1632,20 +1637,51 @@ fn window_title(template: &str, pane_title: &str, cwd: &str, tab: usize) -> Stri
     window_title_with_home(template, pane_title, cwd, home.as_deref(), tab)
 }
 
-#[cfg(feature = "dev-record")]
+/// Expand a leading `~` / `~/…` in a config-file path to the user's home dir.
+/// Config values (unlike `--record-dir` / `KETTLE_RECORD_DIR`, which a shell
+/// expands before Kettle sees them) are never shell-expanded, so a literal
+/// `record-dir = ~/.cache/kettle/records` would otherwise create a `~`-named
+/// directory under the launch CWD. Falls back to the raw path if `HOME` /
+/// `USERPROFILE` is unset.
+fn expand_user_path(path: &std::path::Path) -> std::path::PathBuf {
+    expand_user_path_with(path, crate::mux::home_dir_string())
+}
+
+/// Pure core of [`expand_user_path`], parameterized on the home dir for testing.
+fn expand_user_path_with(path: &std::path::Path, home: Option<String>) -> std::path::PathBuf {
+    let Some(s) = path.to_str() else {
+        return path.to_path_buf();
+    };
+    if (s == "~" || s.starts_with("~/"))
+        && let Some(home) = home.filter(|h| !h.is_empty())
+    {
+        let mut expanded = std::path::PathBuf::from(home);
+        if let Some(rest) = s.strip_prefix("~/") {
+            expanded.push(rest);
+        }
+        return expanded;
+    }
+    path.to_path_buf()
+}
+
 const RECORDING_TITLE_SUFFIX: &str = " [REC]";
-#[cfg(feature = "dev-record")]
+// A distinct suffix while RAW keystroke capture is active, so literal-keystroke
+// (potentially password-capturing) recording is never visually silent.
+const RECORDING_RAW_TITLE_SUFFIX: &str = " [REC RAW]";
 const RECORDING_LIMIT_TITLE_SUFFIX: &str = " [REC LIMIT]";
-#[cfg(feature = "dev-record")]
 const RECORDING_ERROR_TITLE_SUFFIX: &str = " [REC ERROR]";
 
-#[cfg(feature = "dev-record")]
 fn recording_window_title(
     mut title: String,
     status: Option<crate::dev_record::RecordStatus>,
+    raw_input: bool,
 ) -> String {
     match status {
-        Some(crate::dev_record::RecordStatus::Recording) => title.push_str(RECORDING_TITLE_SUFFIX),
+        Some(crate::dev_record::RecordStatus::Recording) => title.push_str(if raw_input {
+            RECORDING_RAW_TITLE_SUFFIX
+        } else {
+            RECORDING_TITLE_SUFFIX
+        }),
         Some(crate::dev_record::RecordStatus::LimitReached) => {
             title.push_str(RECORDING_LIMIT_TITLE_SUFFIX)
         }
@@ -1657,7 +1693,6 @@ fn recording_window_title(
     title
 }
 
-#[cfg(feature = "dev-record")]
 fn effective_record_status(
     recorder: Option<crate::dev_record::RecordStatus>,
     start_failed: bool,
@@ -1665,7 +1700,6 @@ fn effective_record_status(
     recorder.or(start_failed.then_some(crate::dev_record::RecordStatus::IoError))
 }
 
-#[cfg(feature = "dev-record")]
 fn activation_recording_available(
     required: bool,
     status: Option<crate::dev_record::RecordStatus>,
@@ -2956,18 +2990,16 @@ pub struct App {
     /// C4: Quit semantics — drop every window and exit, regardless of how
     /// many are open.
     quit_requested: bool,
-    /// Developer session recorder (asciicast trace). `Some` only in
-    /// a `dev-record` feature build when `--record PATH` / `KETTLE_RECORD` was
-    /// given; compiled out entirely of shipped builds.
-    #[cfg(feature = "dev-record")]
+    /// Session recorder (asciicast trace). `Some` when recording is active for
+    /// this window — requested via `--record PATH` / `KETTLE_RECORD` or the
+    /// persistent `record = on` config key. `None` (the default) records
+    /// nothing at zero cost.
     recorder: Option<crate::dev_record::Recorder>,
     /// A requested recorder that failed before construction still needs a
     /// persistent visible error state; there is no `Recorder` to carry it.
-    #[cfg(feature = "dev-record")]
     recording_start_failed: bool,
     /// Desktop notifications are edge-triggered so a stopped recorder does
     /// not emit one notification per redraw or stale-flush timer tick.
-    #[cfg(feature = "dev-record")]
     recording_error_reported: bool,
     proxy: EventLoopProxy<UserEvent>,
     /// Private, bounded bare-launch activation inbox. The IPC thread waits for
@@ -3197,7 +3229,6 @@ impl App {
             .map(crate::activation_server::ActivationInbox::drain)
             .unwrap_or_default();
         for request in pending {
-            #[cfg(feature = "dev-record")]
             if !activation_recording_available(
                 request.request.requires_recording(),
                 self.recording_status(),
@@ -3214,7 +3245,6 @@ impl App {
                 .is_ok();
             if opened {
                 log::info!("bare-launch activation opened a new window");
-                #[cfg(feature = "dev-record")]
                 if let Some(recorder) = self.recorder.as_mut() {
                     recorder.record_marker("kettle:activation_window");
                 }
@@ -3450,10 +3480,15 @@ impl App {
         // App can fire LuaEvent::Output. Set before the Mux moves
         // into the struct.
         let lua_output_subscribed = lua_engine.is_some();
-        // Also subscribe to per-pane PTY output when a dev recording
-        // is requested, so the recorder can tee output into the asciicast trace.
-        #[cfg(feature = "dev-record")]
-        let lua_output_subscribed = lua_output_subscribed || startup.record.is_some();
+        // Also subscribe to per-pane PTY output when recording is requested for
+        // this launch — either the one-shot CLI/env target (`startup.record`) OR
+        // the persistent `record = on` config key (`initial_cfg.record`) — so the
+        // recorder can tee output into the asciicast trace. The first pane is
+        // spawned (with this flag baked in) BEFORE the recorder starts in
+        // `resumed_inner`, so a missing config check here would leave the `o`
+        // (terminal output) channel permanently empty while still showing `[REC]`.
+        let recording_requested = startup.record.is_some() || initial_cfg.record.enabled();
+        let lua_output_subscribed = lua_output_subscribed || recording_requested;
         // BUG FIX: an earlier version misread Terminator's
         // `broadcast_default` config key. The Terminator semantics
         // are: when the user ENABLES broadcast (via a chord), what
@@ -3484,11 +3519,11 @@ impl App {
         let mux = {
             let mut m = Mux::new();
             m.lua_output_subscribed = lua_output_subscribed;
-            // A dev recording needs a lossless output channel so
-            // the asciicast trace can't drop chunks under a fast burst.
-            #[cfg(feature = "dev-record")]
+            // A recording needs a lossless output channel so the asciicast
+            // trace can't drop chunks under a fast burst (CLI/env target or the
+            // `record = on` config key — see `recording_requested` above).
             {
-                m.record_lossless = startup.record.is_some();
+                m.record_lossless = recording_requested;
             }
             m
         };
@@ -3508,11 +3543,8 @@ impl App {
             native_theme_synced: None,
             pending_window_close: false,
             quit_requested: false,
-            #[cfg(feature = "dev-record")]
             recorder: None,
-            #[cfg(feature = "dev-record")]
             recording_start_failed: false,
-            #[cfg(feature = "dev-record")]
             recording_error_reported: false,
             proxy,
             activation,
@@ -3627,7 +3659,6 @@ impl App {
     /// plugins load) should call this. Centralizes the plugin-
     /// contract dispatch so future new_tab callers can't drift.
     fn fire_tab_add_event(&mut self, ws: &mut WindowState) {
-        #[cfg(feature = "dev-record")]
         if let Some(rec) = self.recorder.as_mut() {
             rec.record_marker("kettle:tab_add");
         }
@@ -3642,7 +3673,6 @@ impl App {
     /// listening for tab_close see every close regardless of
     /// trigger source.
     fn fire_tab_close_event(&mut self, closing_idx: usize) {
-        #[cfg(feature = "dev-record")]
         if let Some(rec) = self.recorder.as_mut() {
             rec.record_marker("kettle:tab_close");
         }
@@ -4953,7 +4983,6 @@ impl App {
         // Record that a paste happened and its length — NEVER the
         // pasted content (a common secret vector). The per-key hook captures
         // the Ctrl+V chord; this marker captures the size without the bytes.
-        #[cfg(feature = "dev-record")]
         if let Some(rec) = self.recorder.as_mut() {
             rec.record_marker(&format!("kettle:paste len={}", text.chars().count()));
         }
@@ -5159,7 +5188,6 @@ impl App {
         output_chunks: Vec<(u64, Vec<u8>)>,
     ) {
         for (pane_id, bytes) in output_chunks {
-            #[cfg(feature = "dev-record")]
             if let Some(rec) = self.recorder.as_mut() {
                 rec.record_output(&bytes);
             }
@@ -5168,7 +5196,6 @@ impl App {
             }
             self.drain_lua_hook_commands("output hook");
         }
-        #[cfg(feature = "dev-record")]
         self.sync_recording_state(
             _ws,
             "Session recording stopped because the recording file could not be written.",
@@ -5501,7 +5528,6 @@ impl App {
     /// `mux.reap()` and on close so both consumers keep their tail. Recorder
     /// events batch through a BufWriter (~250ms interval flush); clean close
     /// paths flush via `finish()`.
-    #[cfg(feature = "dev-record")]
     fn flush_recorder_output(&mut self, ws: &mut WindowState) {
         // Always drain what's queued right now (cheap, non-blocking).
         self.drain_recorder_output_once(ws);
@@ -5540,7 +5566,6 @@ impl App {
     /// the recorder and Lua once. Returns whether any bytes were captured.
     /// Keep this active after recorder startup failure: Lua may still be
     /// subscribed to the same destructive channel.
-    #[cfg(feature = "dev-record")]
     fn drain_recorder_output_once(&mut self, ws: &mut WindowState) -> bool {
         // Collect first (immutable borrow of the panes), then dispatch through
         // `self` after that borrow ends.
@@ -5557,7 +5582,6 @@ impl App {
         got
     }
 
-    #[cfg(feature = "dev-record")]
     fn recording_status(&self) -> Option<crate::dev_record::RecordStatus> {
         effective_record_status(
             self.recorder.as_ref().map(|rec| rec.status()),
@@ -5567,7 +5591,6 @@ impl App {
 
     /// Reflect terminal recorder failures in both persistent window state and
     /// an edge-triggered desktop notification during the same event-loop turn.
-    #[cfg(feature = "dev-record")]
     fn sync_recording_state(&mut self, ws: &mut WindowState, io_error_body: &str) {
         if self.recording_status() == Some(crate::dev_record::RecordStatus::IoError)
             && !self.recording_error_reported
@@ -5602,11 +5625,12 @@ impl App {
             .unwrap_or_default();
         let tab = ws.mux.active + 1;
         let want = window_title(&self.cfg.window_title_format, title, &cwd, tab);
-        // An always-visible recording indicator in the title bar so
-        // the dev recorder is never silently capturing. Keep it ASCII because
-        // Linux window-manager title fonts do not reliably carry symbol glyphs.
-        #[cfg(feature = "dev-record")]
-        let want = recording_window_title(want, self.recording_status());
+        // An always-visible recording indicator in the title bar so the
+        // recorder is never silently capturing (and `[REC RAW]` when raw
+        // keystroke capture is on). Keep it ASCII because Linux window-manager
+        // title fonts do not reliably carry symbol glyphs.
+        let raw = self.recorder.as_ref().is_some_and(|rec| rec.raw_input());
+        let want = recording_window_title(want, self.recording_status(), raw);
         let want = sanitize_native_window_title(&want);
         if self.gpu_software_fallback {
             format!("{want} - software rendering (GPU unavailable)")
@@ -6535,7 +6559,6 @@ impl App {
         self.sync_window_title(ws);
         // Capture a just-exited pane's final output before reap drops
         // its sidechannel — otherwise the shell's last line is lost from the trace.
-        #[cfg(feature = "dev-record")]
         self.flush_recorder_output(ws);
         if ws.mux.reap() {
             return;
@@ -10574,17 +10597,14 @@ impl App {
             .as_ref()
             .map(|c| c.mode())
             .unwrap_or(kettle_config::AgentServer::Off);
-        // Annotate the dev-record trace with each agent action (cheap; the
-        // recorder only exists in dev-record builds with --record).
+        // Annotate the session trace with each agent action when recording
+        // (cheap; only when a recorder is active).
         // v2.20.0 (review fix): wait_for's internal read_screen probes are
         // NOT annotated — a 300s wait at 50ms polls would land ~6000
         // markers; the wait itself is visible via the client's own calls.
-        #[cfg(feature = "dev-record")]
         if !internal_probe && let Some(rec) = self.recorder.as_mut() {
             rec.record_marker(&format!("kettle:agent {} conn={conn_id}", req.method));
         }
-        #[cfg(not(feature = "dev-record"))]
-        let _ = internal_probe;
         if !req.params.is_null() && !req.params.is_object() {
             let _ = reply.send(Response::err(
                 req.id,
@@ -14773,7 +14793,6 @@ impl App {
         // Same Mux construction flags as run_with — process-global decisions.
         let mut mux = Mux::new();
         mux.lua_output_subscribed = self.lua_engine.is_some();
-        #[cfg(feature = "dev-record")]
         {
             mux.lua_output_subscribed |= self.recorder.is_some();
             mux.record_lossless = self.recorder.is_some();
@@ -15679,12 +15698,34 @@ impl App {
         // overrides. Pinned by `startup_is_not_taken_wholesale` below.
         let cmd_override = self.startup.command.take();
         let cwd_override = self.startup.cwd.take();
-        #[cfg(feature = "dev-record")]
-        let dev_record = self
-            .startup
-            .record
-            .clone()
-            .map(|p| (p, self.startup.record_raw_input));
+        // Resolve the session recording target for this launch: an explicit
+        // `--record`/`--record-dir`/`KETTLE_RECORD*` override (in
+        // `self.startup.record`) wins; otherwise the persistent `record = on`
+        // config key records into `record-dir` (default `<config-dir>/recordings`).
+        let dev_record = if let Some(target) = self.startup.record.clone() {
+            Some((target, self.startup.record_raw_input))
+        } else if self.cfg.record.enabled() {
+            // `record-dir` from the config file is NOT shell-expanded, so honor a
+            // leading `~`. Unset falls back to `<config-dir>/recordings`, resolved
+            // from `Config::default_path()` (the base config dir, never a
+            // `--profile` subdir) so it matches the documented default.
+            self.cfg
+                .record_dir
+                .as_deref()
+                .map(expand_user_path)
+                .or_else(|| {
+                    Config::default_path()
+                        .and_then(|p| p.parent().map(|dir| dir.join("recordings")))
+                })
+                .map(|dir| {
+                    (
+                        kettle_core::record::RecordingTarget::Directory(dir),
+                        self.cfg.record_raw_input,
+                    )
+                })
+        } else {
+            None
+        };
         // Agent-first A2: the `--agent-server` override for the
         // control-server start further down (after the first paint).
         let startup_agent_server = self.startup.agent_server;
@@ -15940,14 +15981,13 @@ impl App {
         // `request_redraw` — so visible startup windows receive terminal
         // content immediately after renderer + pane setup. The follow-up
         // `request_redraw` schedules the next normal frame.
-        // Start the developer session recorder now that the grid
-        // exists (only a `dev-record` build with `--record` / `KETTLE_RECORD`;
-        // opts captured above before `startup` was consumed).
-        // Dev-record completeness: start it BEFORE the first
+        // Start the session recorder now that the grid exists (when requested
+        // via `--record` / `KETTLE_RECORD` or the `record = on` config key;
+        // resolved above before `startup` was consumed).
+        // Recorder completeness: start it BEFORE the first
         // `redraw()` below — `redraw()` runs the first `drain_events()`, which
         // tees PTY output into the trace; starting the recorder *after* it
         // dropped the session's opening output (e.g. a fast `-e cmd`'s line).
-        #[cfg(feature = "dev-record")]
         if let Some((target, raw)) = dev_record {
             let (cols, rows) = self.grid_of(ws, self.area(ws));
             match crate::dev_record::Recorder::start_target(&target, cols as u16, rows as u16, raw)
@@ -15972,12 +16012,15 @@ impl App {
             w.request_redraw();
         }
         // Check only after first paint. The signed-feed worker skips the first
-        // launch, applies the 24-hour shared throttle, and honors off/notify/auto.
+        // launch, applies the shared per-interval throttle, and honors
+        // off/notify/auto. A recurring timer re-checks a long-lived window.
         crate::update_check::maybe_spawn_check(
             self.proxy.clone(),
             env!("CARGO_PKG_VERSION"),
             self.cfg.update_policy,
+            self.cfg.update_check_interval_hours,
         );
+        crate::update_check::spawn_update_check_timer(self.proxy.clone());
         // Warm the shell-detection cache (wsl.exe /
         // vswhere probes, bounded ~2s each) off the UI thread so the first
         // dropdown open / Ctrl+Shift+N press doesn't pay it.
@@ -16062,22 +16105,44 @@ impl App {
                     w.request_redraw();
                 }
             }
-            UserEvent::UpdateInstalled { tag, staged } => {
-                if staged {
-                    fire_notify(
-                        "kettle update staged",
-                        &format!("{tag} will install after every Kettle window is closed"),
-                    );
+            UserEvent::UpdateInstalled {
+                tag,
+                staged,
+                first_time,
+            } => {
+                let when = if staged {
+                    "will install after every Kettle window is closed"
                 } else {
-                    fire_notify(
-                        "kettle update installed",
-                        &format!("{tag} is ready and will be used the next time kettle starts"),
-                    );
-                }
+                    "is ready and will be used the next time kettle starts"
+                };
+                let title = if staged {
+                    "kettle update staged"
+                } else {
+                    "kettle update installed"
+                };
+                // On the first automatic install, tell the user auto-update is
+                // on and how to opt out (oh-my-zsh style, one time only).
+                let body = if first_time {
+                    format!(
+                        "{tag} {when}. kettle keeps itself up to date automatically; \
+                         set `update-policy = off` in your config to disable this."
+                    )
+                } else {
+                    format!("{tag} {when}")
+                };
+                fire_notify(title, &body);
             }
             UserEvent::UpdateFailed { message } => {
                 log::warn!("automatic update failed: {message}");
                 fire_notify("kettle update failed", &message);
+            }
+            UserEvent::UpdateCheckTick => {
+                crate::update_check::maybe_spawn_check(
+                    self.proxy.clone(),
+                    env!("CARGO_PKG_VERSION"),
+                    self.cfg.update_policy,
+                    self.cfg.update_check_interval_hours,
+                );
             }
         }
     }
@@ -16097,7 +16162,6 @@ impl App {
                 // before exit (Drop also flushes). `finish()` only flushes
                 // recorder events already written; it cannot pull the shared
                 // sidechannel or deliver its tail to Lua.
-                #[cfg(feature = "dev-record")]
                 {
                     self.flush_recorder_output(ws);
                     // C4: the recorder spans the whole session — finish it
@@ -16137,7 +16201,6 @@ impl App {
                 }
                 self.apply_window_resize(ws, size.width, size.height);
                 // Record the new grid size into the asciicast trace.
-                #[cfg(feature = "dev-record")]
                 if self.recorder.is_some() {
                     let (cols, rows) = self.grid_of(ws, self.area(ws));
                     if let Some(rec) = self.recorder.as_mut() {
@@ -17236,7 +17299,6 @@ impl App {
                 }
                 // Non-interactive UI-state marker (OS-driven focus
                 // change — a transition the PTY output stream can't show).
-                #[cfg(feature = "dev-record")]
                 if let Some(rec) = self.recorder.as_mut() {
                     rec.record_marker(if f {
                         "kettle:focus_in"
@@ -17430,7 +17492,6 @@ impl App {
                 // modal/early-return path consumes it, so the trace captures
                 // every key. Pasted content never reaches here — it's a `paste`
                 // marker (see the paste sites), never raw bytes.
-                #[cfg(feature = "dev-record")]
                 {
                     let mods = ws.mods;
                     if let Some(rec) = self.recorder.as_mut() {
@@ -17702,7 +17763,6 @@ impl App {
         // Drain trailing recorder output before reap removes a
         // just-exited pane (covers the shell-exit → process-exit close path,
         // e.g. a fast `-e cmd` session).
-        #[cfg(feature = "dev-record")]
         self.flush_recorder_output(ws);
         if ws.mux.reap() && ws.window.is_some() {
             self.save_session(ws);
@@ -17921,7 +17981,6 @@ impl App {
         // The recorder's interval flush is event-driven, so a burst followed
         // by silence left its buffered tail unflushed until the next event;
         // flush here when stale and, while dirty, wake at the deadline.
-        #[cfg(feature = "dev-record")]
         {
             let recorder_status_changed = if let Some(rec) = self.recorder.as_mut() {
                 let before = rec.status();
@@ -18640,7 +18699,6 @@ mod tests {
     /// Drift guard (dev-record completeness). Redraw and close-time
     /// drains destructively consume one shared output channel, so both must fan
     /// out through the same recorder + Lua dispatcher before panes disappear.
-    #[cfg(feature = "dev-record")]
     #[test]
     fn recorder_output_flushed_before_reap_and_on_close() {
         let src = include_str!("app.rs");
@@ -21061,12 +21119,43 @@ mod tests {
         );
     }
 
-    #[cfg(feature = "dev-record")]
+    #[test]
+    fn record_dir_tilde_is_expanded_to_home() {
+        use super::expand_user_path_with;
+        use std::path::{Path, PathBuf};
+        let home = Some("/home/k".to_string());
+        // `~` and `~/...` expand; a bare-relative or absolute path is untouched.
+        assert_eq!(
+            expand_user_path_with(Path::new("~/.cache/kettle/records"), home.clone()),
+            PathBuf::from("/home/k/.cache/kettle/records")
+        );
+        assert_eq!(
+            expand_user_path_with(Path::new("~"), home.clone()),
+            PathBuf::from("/home/k")
+        );
+        assert_eq!(
+            expand_user_path_with(Path::new("/abs/records"), home.clone()),
+            PathBuf::from("/abs/records")
+        );
+        // `~user` (no slash) is NOT expanded — only `~`/`~/`.
+        assert_eq!(
+            expand_user_path_with(Path::new("~bob/x"), home),
+            PathBuf::from("~bob/x")
+        );
+        // No home → the raw path (never a stray `~` dir under CWD is *created*
+        // here, but expansion simply no-ops so the caller sees the literal).
+        assert_eq!(
+            expand_user_path_with(Path::new("~/x"), None),
+            PathBuf::from("~/x")
+        );
+    }
+
     #[test]
     fn recording_window_title_suffix_is_ascii_safe() {
         use super::{
-            RECORDING_ERROR_TITLE_SUFFIX, RECORDING_LIMIT_TITLE_SUFFIX, RECORDING_TITLE_SUFFIX,
-            activation_recording_available, effective_record_status, recording_window_title,
+            RECORDING_ERROR_TITLE_SUFFIX, RECORDING_LIMIT_TITLE_SUFFIX, RECORDING_RAW_TITLE_SUFFIX,
+            RECORDING_TITLE_SUFFIX, activation_recording_available, effective_record_status,
+            recording_window_title,
         };
         use crate::dev_record::RecordStatus;
 
@@ -21092,22 +21181,31 @@ mod tests {
             true,
             Some(RecordStatus::IoError)
         ));
-        assert_eq!(recording_window_title("kettle".to_string(), None), "kettle");
         assert_eq!(
-            recording_window_title("kettle".to_string(), Some(RecordStatus::Recording)),
-            "kettle [REC]"
+            recording_window_title("kettle".to_string(), None, false),
+            "kettle"
         );
         assert_eq!(
-            recording_window_title("kettle".to_string(), Some(RecordStatus::LimitReached)),
+            recording_window_title("kettle".to_string(), Some(RecordStatus::Recording), false),
+            "kettle [REC]"
+        );
+        // Raw keystroke capture gets its own visible suffix.
+        assert_eq!(
+            recording_window_title("kettle".to_string(), Some(RecordStatus::Recording), true),
+            "kettle [REC RAW]"
+        );
+        assert_eq!(
+            recording_window_title("kettle".to_string(), Some(RecordStatus::LimitReached), true),
             "kettle [REC LIMIT]"
         );
         assert_eq!(
-            recording_window_title("kettle".to_string(), Some(RecordStatus::IoError)),
+            recording_window_title("kettle".to_string(), Some(RecordStatus::IoError), false),
             "kettle [REC ERROR]"
         );
         assert!(
             [
                 RECORDING_TITLE_SUFFIX,
+                RECORDING_RAW_TITLE_SUFFIX,
                 RECORDING_LIMIT_TITLE_SUFFIX,
                 RECORDING_ERROR_TITLE_SUFFIX
             ]

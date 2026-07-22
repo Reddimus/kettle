@@ -1,48 +1,58 @@
-# Developer session recorder (`dev-record`)
+# Session recording
 
-A maintainer-only GUI diagnostics recorder, **compiled out of every released /
-packaged GUI build**. It writes an [asciicast v2](https://docs.asciinema.org/manual/asciicast/v2/)
-trace of a Kettle session that replays with `asciinema play`. The shared,
-output-only writer remains available to the released `kettle exec --record`
-command; automatic GUI recording does not.
+Kettle can record a session to an [asciicast v2](https://docs.asciinema.org/manual/asciicast/v2/)
+trace that replays with `asciinema play`. Recording is a **runtime toggle
+present in every build** — off by default, enabled per-launch with a flag or
+persistently with a config key. (The same asciicast writer also backs the
+headless `kettle exec --record` command.)
+
+> **Recording captures on-screen output verbatim.** A terminal cannot tell a
+> secret from normal output, so review a `.cast` before sharing it. See
+> [Privacy](#privacy) below.
 
 ## Enabling
 
-The recorder only exists in builds made with the `dev-record` Cargo feature:
+Per-launch (one-shot, wins over the config keys):
 
 ```sh
-cargo run --features dev-record -- --record /tmp/session.cast
-# or:
-KETTLE_RECORD=/tmp/session.cast cargo run --features dev-record
-# create the directory if missing and allocate a unique cast:
-cargo run --features dev-record -- --record-dir /tmp/kettle-records
-KETTLE_RECORD_DIR=/tmp/kettle-records cargo run --features dev-record
+kettle --record /tmp/session.cast
+# or via the environment:
+KETTLE_RECORD=/tmp/session.cast kettle
+# create the directory if missing and allocate a unique cast per launch:
+kettle --record-dir /tmp/kettle-records
+KETTLE_RECORD_DIR=/tmp/kettle-records kettle
 ```
 
-On Linux maintainer machines, the user-local launcher can be synced to a
-dev-record build so Ubuntu/GNOME Super-key launches record automatically:
+Persistently, in your config file (`<config-dir>/kettle/config`):
 
-```sh
-just install-local-dev-record
+```ini
+record = on
+# where traces are written (default <config-dir>/recordings):
+record-dir = ~/.cache/kettle/records
 ```
 
-By default this writes traces under `~/.cache/kettle/records`; pass
-the directory as the recipe argument to use a different local location:
-
-```sh
-just install-local-dev-record /path/to/records
-```
-
-Target precedence is fixed: `--record`, `--record-dir`, legacy
-`KETTLE_RECORD`, then `KETTLE_RECORD_DIR`. `--record PATH` and
-`KETTLE_RECORD=PATH` preserve their historical behavior: an existing directory
+Target precedence is fixed: `--record`, `--record-dir`, `KETTLE_RECORD`,
+`KETTLE_RECORD_DIR`, then the `record`/`record-dir` config keys. `--record PATH`
+and `KETTLE_RECORD=PATH` preserve historical behavior: an existing directory
 gets managed-directory behavior, while any other path is an explicit file.
-`--record-dir` and `KETTLE_RECORD_DIR` always mean a directory, including when
-it does not exist yet. Empty environment variables are ignored.
+`--record-dir` / `KETTLE_RECORD_DIR` / `record-dir` always mean a directory,
+including when it does not exist yet. Empty environment variables are ignored.
+`record = on` with no explicit path records into `<config-dir>/recordings`.
 
-Released binaries (and anything built without the feature) contain **none** of
-the GUI recording flag, hooks, or automatic launcher behavior. Recording is
-never on by default and never starts on first launch.
+On Linux, a **source install** can wire a recording directory into the Super-key
+launcher so desktop launches record automatically:
+
+```sh
+just install-recording                 # ~/.cache/kettle/records
+just install-recording /path/to/records
+# equivalently: ./scripts/install.sh --record-dir=/path/to/records
+```
+
+This sets `KETTLE_RECORD_DIR` in the generated `.desktop` entry. It is refused on
+a self-updating **release** install because the `.desktop` `Exec=` line is
+regenerated from the template on every update, which would silently drop the
+wiring — use the config key `record = on` there instead (it lives in the config
+file and survives updates, the same effect).
 
 ## Storage bounds and ownership
 
@@ -65,17 +75,8 @@ first and never removes an active file. Pre-existing `session-*.cast` files,
 unrelated files, symlinks, and unrecognized names are not managed or deleted.
 If active/unreadable files keep the managed namespace above its budget,
 recording continues and the condition is logged rather than deleting uncertain
-data.
-Kettle refuses a symbolic-link recording file or directory. The Linux
-installer also rejects a symbolic-link directory and verifies that
-`--skip-build --record-dir` points to a binary that actually contains the
-`dev-record` feature before marking the install `local-dev-record`.
-
-Source installs are marked `local-dev` or `local-dev-record`; only release
-tarball/online installs are marked `stable`. The signed self-updater refuses a
-local development marker so it cannot replace a feature build with a public
-binary and silently disable recording. Re-run `just install-local-dev-record`
-from the checkout to update the installed development build.
+data. Kettle refuses a symbolic-link recording file or directory, and the Linux
+installer refuses a symbolic-link `--record-dir`.
 
 Bare Super-key/desktop launches join the existing primary Kettle process and
 open another window in its shared recording. The activation handshake compares
@@ -85,15 +86,15 @@ instead of silently recording to the wrong destination or changing redaction.
 Use `kettle --new-process` when an intentionally isolated default session is
 needed.
 
-> **Shared recorder.** The trace writer now lives in `kettle-core` behind the
-> `asciicast` feature, so it backs two front-ends: the GUI's `--record` (full
-> trace — output, input tokens, and `m` markers) and the new headless
-> `kettle exec --record run.cast` (output-only — no window, no keystroke or
-> marker channel). Both use the same 512 MiB event boundary, no-link checks,
-> and private-file writer. `kettle exec` fails closed with status 125 if the
-> requested file cannot be secured before the child is started; a later
-> disk/write failure stops capture without killing an already running child.
-> See [AGENT.md](AGENT.md) for `kettle exec`.
+> **Shared recorder.** The trace writer lives in `kettle-core` (the `asciicast`
+> feature, compiled into every build), so it backs two front-ends: the GUI's
+> `--record` / `record = on` (full trace — output, input tokens, and `m`
+> markers) and the headless `kettle exec --record run.cast` (output-only — no
+> window, no keystroke or marker channel). Both use the same 512 MiB event
+> boundary, no-link checks, and private-file writer. `kettle exec` fails closed
+> with status 125 if the requested file cannot be secured before the child is
+> started; a later disk/write failure stops capture without killing an already
+> running child. See [AGENT.md](AGENT.md) for `kettle exec`.
 
 ## What it captures
 
@@ -125,8 +126,10 @@ the child's `ECHO` flag), so the recorder is conservative by default:
   before sharing it.**
 - **Keystrokes are redacted to tokens.** A typed password is recorded as its
   length + timing (`······`), never the characters. `--record-raw-input`
-  (or `KETTLE_RECORD_RAW_INPUT=1`) opts into literal capture — ⚠ the trace can
-  then contain typed secrets; leave it off unless you need byte-exact input.
+  (`KETTLE_RECORD_RAW_INPUT=1`, or `record-raw-input = on`) opts into literal
+  capture — ⚠ the trace can then contain typed secrets; leave it off unless you
+  need byte-exact input. The window title shows **`[REC RAW]`** while raw
+  capture is active so it is never silent.
 - **Pasted content is never recorded** — only a `kettle:paste len=N` marker.
 - The native window title carries **`[REC]`** while capture is active and
   retains the limit/I/O stop states described above. Borderless and fullscreen

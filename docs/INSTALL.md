@@ -54,7 +54,7 @@ Pin a specific version (recommended for reproducible installs):
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/Reddimus/kettle/main/scripts/install-online.sh \
-  | KETTLE_VERSION=v2.36.6 sh
+  | KETTLE_VERSION=v2.37.0 sh
 ```
 
 System-wide install (writes to a custom prefix; needs the
@@ -89,17 +89,17 @@ Requires Rust ≥ 1.89 (the workspace MSRV).
 
 An in-tree source install is marked `local-dev`, so `kettle update` will not
 replace it with a stable binary. Rebuild and rerun `./scripts/install.sh` to
-refresh it. Maintainers who want every Ubuntu Super-key launch recorded can use:
+refresh it. To make every Ubuntu Super-key launch record automatically (the
+same effect as `record = on` in the config file, which every build supports):
 
 ```sh
-just install-local-dev-record
+just install-recording
 # or choose another private directory, including one whose path contains spaces:
-just install-local-dev-record "$HOME/Kettle recordings"
+just install-recording "$HOME/Kettle recordings"
 ```
 
-That build and launcher use the `local-dev-record` marker and
-`KETTLE_RECORD_DIR`; see [DEV-RECORD.md](DEV-RECORD.md) for privacy, limits, and
-retention behavior.
+That launcher wires `KETTLE_RECORD_DIR` into the `.desktop` entry; see
+[RECORDING.md](RECORDING.md) for privacy, limits, and retention behavior.
 
 ### From a downloaded release tarball
 
@@ -273,14 +273,14 @@ one-shot, the `kettle ctl` control client, `kettle mcp`) and its threat model.
 
 ### Verifying a download (SHA-256)
 
-Every release from **v1.3.4** onward ships a `.sha256` sidecar (current latest: v2.36.6)
+Every release from **v1.3.4** onward ships a `.sha256` sidecar (current latest: v2.37.0)
 generated on the same CI runner as the artifact. Verify a tarball
 before extracting it:
 
 ```sh
 # Linux / WSL
-curl -fLO https://github.com/Reddimus/kettle/releases/download/v2.36.6/kettle-linux-x86_64.tar.gz
-curl -fLO https://github.com/Reddimus/kettle/releases/download/v2.36.6/kettle-linux-x86_64.tar.gz.sha256
+curl -fLO https://github.com/Reddimus/kettle/releases/download/v2.37.0/kettle-linux-x86_64.tar.gz
+curl -fLO https://github.com/Reddimus/kettle/releases/download/v2.37.0/kettle-linux-x86_64.tar.gz.sha256
 sha256sum -c kettle-linux-x86_64.tar.gz.sha256
 # → kettle-linux-x86_64.tar.gz: OK
 ```

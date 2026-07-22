@@ -270,18 +270,19 @@ install-local: release
     powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/install.ps1
     @echo "local install synced to the current release build"
 
-# Linux maintainer install: build the GUI with the developer-only recorder
-# feature and make the desktop launcher record each Super-key launch into a
-# local asciicast directory. This is intentionally not the public release path.
+# Linux install that auto-records each Super-key launch into a local asciicast
+# directory (the desktop launcher gets KETTLE_RECORD_DIR wired in). Recording
+# now ships in every build, so this is a normal release build — equivalently,
+# set `record = on` + `record-dir` in the config file.
 [unix]
-install-local-dev-record RECORD_DIR=(env_var("HOME") / ".cache/kettle/records"):
-    cargo build --release -p kettle --features dev-record
+install-recording RECORD_DIR=(env_var("HOME") / ".cache/kettle/records"):
+    cargo build --release -p kettle
     ./scripts/install.sh --skip-build --record-dir={{quote(RECORD_DIR)}}
-    @printf 'local dev-record install synced to %s\n' {{quote(RECORD_DIR)}}
+    @printf 'recording install synced to %s\n' {{quote(RECORD_DIR)}}
 
 [windows]
-install-local-dev-record:
-    @echo "install-local-dev-record is a Linux maintainer helper."
+install-recording:
+    @echo "install-recording is a Linux helper; on Windows set 'record = on' in the config."
 
 # === Misc ==========================================================
 

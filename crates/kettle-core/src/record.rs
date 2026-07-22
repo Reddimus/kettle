@@ -24,7 +24,7 @@
 //! Privacy: terminal OUTPUT is VERBATIM and cannot be redacted — a terminal
 //! can't tell a secret from normal output, so anything printed/echoed on
 //! screen lands in cleartext. Review/scrub a `.cast` before sharing it (see
-//! docs/DEV-RECORD.md).
+//! docs/RECORDING.md).
 
 use std::fs::File;
 use std::io::{BufWriter, Seek, Write};
@@ -292,7 +292,7 @@ impl Recorder {
     /// Privacy: this is VERBATIM and cannot be redacted — a terminal can't tell
     /// a secret from normal output, so anything printed/echoed on screen lands
     /// in the trace in cleartext. Review/scrub a `.cast` before sharing it (see
-    /// docs/DEV-RECORD.md).
+    /// docs/RECORDING.md).
     pub fn record_output(&mut self, bytes: &[u8]) {
         if self.status != RecordStatus::Recording {
             return;
