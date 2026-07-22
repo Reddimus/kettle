@@ -805,8 +805,13 @@ fn cache_dir_from_env<F: Fn(&str) -> Option<String>>(get: F) -> Option<std::path
 /// edge once it scrolls past the first page). Pure — no `&self`, no renderer, no
 /// winit — so it is unit-testable.
 struct TabStripLayout {
-    /// Uniform per-tab width.
+    /// Per-tab width for every tab EXCEPT the last one.
     width: f32,
+    /// Width of the LAST tab. Equal to `width` in every layout except the
+    /// full-width-aligned one, where the last tab yields the trailing `▾`/`+`
+    /// button reservation so the other tab boundaries land on the same grid as
+    /// vertical pane splits.
+    last_width: f32,
     /// On-screen left x per tab, or `None` when scrolled out of view.
     xs: Vec<Option<f32>>,
     /// Left x of the `‹` / `›` scroll buttons when the bar overflows.
@@ -818,6 +823,7 @@ fn tab_strip_layout(
     n: usize,
     active: usize,
     strip: f32,
+    trailing_reserve: f32,
     arrow_w: f32,
     min_w: f32,
     scroll: bool,
@@ -825,15 +831,39 @@ fn tab_strip_layout(
     let n = n.max(1);
     let strip = strip.max(1.0);
     let min_w = min_w.max(1.0);
+    let reserve = trailing_reserve.max(0.0);
+    // Preferred layout: divide the FULL bar width (the button-trimmed `strip`
+    // PLUS the trailing `▾`/`+` reservation) evenly, so tab boundaries fall on
+    // the same grid as vertical pane splits — with 2 tabs the tab1/tab2
+    // boundary lands at the window centre, in line with a 50/50 split's
+    // divider. Only the LAST tab is shortened to yield the button reservation
+    // (its right edge stops at `strip`); every other tab is `even_full` wide.
+    // Used whenever the shortened last tab still clears `min_w` (so no tab is
+    // driven below the floor). `reserve == 0` degrades to plain even fill.
+    let full = strip + reserve;
+    let even_full = full / n as f32;
+    let last_full = even_full - reserve;
+    if last_full >= min_w {
+        let xs = (0..n).map(|i| Some(i as f32 * even_full)).collect();
+        return TabStripLayout {
+            width: even_full,
+            last_width: last_full,
+            xs,
+            arrow_left: None,
+            arrow_right: None,
+        };
+    }
     let even = strip / n as f32;
     if !scroll || even >= min_w {
-        // Fits, or scrolling disabled: tabs divide the strip evenly and fill it,
-        // left-packed. (With scrolling off and many tabs, width may fall below
-        // min_w — they just keep shrinking, no overflow scroll.)
+        // Full-width alignment would shrink the last tab below `min_w`, so fall
+        // back to the original behavior: tabs divide the button-trimmed `strip`
+        // evenly and fill it, left-packed. (With scrolling off and many tabs,
+        // width may fall below min_w — they just keep shrinking, no overflow.)
         let width = even;
         let xs = (0..n).map(|i| Some(i as f32 * width)).collect();
         return TabStripLayout {
             width,
+            last_width: width,
             xs,
             arrow_left: None,
             arrow_right: None,
@@ -862,6 +892,7 @@ fn tab_strip_layout(
         .collect();
     TabStripLayout {
         width,
+        last_width: width,
         xs,
         arrow_left: Some(0.0),
         arrow_right: Some(strip - arrow_w),
@@ -4184,6 +4215,7 @@ impl App {
             n,
             active,
             strip,
+            button_w,
             height,
             self.cfg.tab_min_width,
             self.cfg.scroll_tabbar,
@@ -4191,7 +4223,6 @@ impl App {
         // Tabs scrolled out of view are parked off-screen (kept in the segment
         // list, idx-indexed, so reorder / dock / ghost logic is undisturbed).
         const OFFSCREEN_X: f32 = -100_000.0;
-        let seg_w = layout.width;
         let now = std::time::Instant::now();
         let silence = std::time::Duration::from_millis(self.cfg.tab_silence_threshold_ms);
         let segments: Vec<TabSeg> = labels
@@ -4221,6 +4252,14 @@ impl App {
                         }
                     })
                     .unwrap_or(RenderTabActivity::Normal);
+                // The last tab yields the trailing `▾`/`+` button reservation
+                // in the full-width-aligned layout, so it is narrower than the
+                // rest; every other layout has `last_width == width`.
+                let seg_w = if i + 1 == n {
+                    layout.last_width
+                } else {
+                    layout.width
+                };
                 let rect = (x, y, seg_w, height);
                 let close = (x + seg_w - height, y, height, height);
                 TabSeg {
@@ -15123,9 +15162,12 @@ impl App {
             let (mid, c) = if vertical {
                 (bh * 0.5, cy)
             } else {
+                // The tab1/tab2 boundary is the FULL band centre (the tab strip
+                // divides the full width so its boundaries align with pane
+                // splits — see `tab_strip_layout`), not the button-trimmed
+                // strip centre; the slot flip must sit on that same boundary.
                 let (bx, _, bw, _) = band;
-                let arrow_w = if new_tab_dropdown_visible() { bh } else { 0.0 };
-                (bx + tab_segment_strip_width(bw, bh, arrow_w) * 0.5, cx)
+                (bx + bw * 0.5, cx)
             };
             Some(if c < mid { 0 } else { 1 })
         }
@@ -21714,19 +21756,22 @@ mod tests {
     #[test]
     fn tab_strip_layout_fills_and_overflows() {
         use super::tab_strip_layout;
+        // (No trailing button reserve here so this drift guard keeps exercising
+        // the fill/overflow behavior directly; the full-width-aligned path with
+        // a real reserve is covered by the alignment test below.)
         // Few tabs on a wide strip FILL the bar — 2 tabs each take half (no max
         // cap), left-packed, no arrows.
-        let l = tab_strip_layout(2, 0, 1920.0, 24.0, 120.0, true);
+        let l = tab_strip_layout(2, 0, 1920.0, 0.0, 24.0, 120.0, true);
         assert_eq!(l.width, 960.0);
         assert_eq!(l.xs, vec![Some(0.0), Some(960.0)]);
         assert!(l.arrow_left.is_none() && l.arrow_right.is_none());
         // Even division also fills for more tabs while above the min floor.
         assert_eq!(
-            tab_strip_layout(4, 0, 800.0, 24.0, 120.0, true).width,
+            tab_strip_layout(4, 0, 800.0, 0.0, 24.0, 120.0, true).width,
             200.0
         );
         // Many tabs: overflow → min width, arrows, only whole tabs shown.
-        let l = tab_strip_layout(20, 0, 800.0, 24.0, 120.0, true);
+        let l = tab_strip_layout(20, 0, 800.0, 0.0, 24.0, 120.0, true);
         assert_eq!(l.width, 120.0);
         assert!(l.arrow_left.is_some() && l.arrow_right.is_some());
         let visible = l.xs.iter().filter(|x| x.is_some()).count();
@@ -21736,14 +21781,47 @@ mod tests {
         );
         assert_eq!(l.xs[0], Some(24.0), "active tab 0 visible at the left");
         // Active near the end is pinned into view; early tabs scroll off.
-        let l = tab_strip_layout(20, 19, 800.0, 24.0, 120.0, true);
+        let l = tab_strip_layout(20, 19, 800.0, 0.0, 24.0, 120.0, true);
         assert!(l.xs[19].is_some(), "active tab 19 must be visible");
         assert!(l.xs[0].is_none(), "early tabs scrolled off");
         // Scrolling disabled: no arrows; width may fall below min (just shrinks).
-        let l = tab_strip_layout(20, 0, 800.0, 24.0, 120.0, false);
+        let l = tab_strip_layout(20, 0, 800.0, 0.0, 24.0, 120.0, false);
         assert!(l.arrow_left.is_none() && l.arrow_right.is_none() && l.width < 120.0);
         // Degenerate (no tabs): panic-safe, one slot.
-        assert_eq!(tab_strip_layout(0, 0, 100.0, 24.0, 120.0, true).xs.len(), 1);
+        assert_eq!(
+            tab_strip_layout(0, 0, 100.0, 0.0, 24.0, 120.0, true)
+                .xs
+                .len(),
+            1
+        );
+    }
+
+    /// The 2-tab boundary must line up with a centered vertical pane split so
+    /// the split divider visually continues the tab boundary. With the trailing
+    /// `▾`/`+` reservation, tabs divide the FULL bar width and only the last tab
+    /// is shortened.
+    #[test]
+    fn tab_strip_layout_aligns_boundary_with_split_seam() {
+        use super::{tab_segment_strip_width, tab_strip_layout};
+        let w = 1000.0_f32; // window / content width
+        let h = 24.0_f32; // tab-bar height == each button's side
+        let reserve = 2.0 * h; // `▾` + `+`
+        let strip = tab_segment_strip_width(w, h, h); // button-trimmed strip
+        let l = tab_strip_layout(2, 0, strip, reserve, h, 120.0, true);
+        // tab1/tab2 boundary at the window centre …
+        assert_eq!(l.xs, vec![Some(0.0), Some(w / 2.0)]);
+        // … which is exactly where a 50/50 vertical split's divider sits
+        // (`mux::Node::layout`: `x + round(content_w * ratio)`, content_w == w).
+        assert_eq!(l.xs[1], Some((w * 0.5).round()));
+        // tab 1 is a full half; tab 2 yields the button reservation.
+        assert_eq!(l.width, w / 2.0);
+        assert_eq!(l.last_width, w / 2.0 - reserve);
+        // The last tab's right edge stops exactly at the button strip.
+        assert_eq!(l.xs[1].unwrap() + l.last_width, strip);
+        // A window too narrow for the shortened last tab to clear min_w falls
+        // back to plain strip packing (no zero/negative last tab).
+        let narrow = tab_strip_layout(2, 0, 200.0, reserve, h, 120.0, true);
+        assert!(narrow.last_width > 0.0 && (narrow.last_width - narrow.width).abs() < 0.01);
     }
 
     /// Link/path overlay underlines must follow focused output immediately.
