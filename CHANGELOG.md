@@ -6,7 +6,16 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
-## [2.36.5] — 2026-07-21
+  ### Fixed
+  - **With 2 tabs, the tab boundary now lines up with a centered vertical
+    split.** The tab strip was packed flush-left into the width left of the
+    trailing `▾`/`+` buttons, so the tab1/tab2 boundary sat one tab-bar-height
+    left of the window centre while a 50/50 split's divider sits at the centre —
+    the split line didn't continue the tab boundary. Tabs now divide the FULL
+    bar width (so their boundaries fall on the same grid as pane splits for any
+    tab count); only the last tab is shortened to yield the button reservation.
+    The re-dock slot hit-test and the synthetic README hero/showcase scene use
+    the same centre, and `docs/images/kettle-hero.png` was regenerated to match.
 
   ### Added
   - **Copying a file in the OS file manager and pasting it into a pane now

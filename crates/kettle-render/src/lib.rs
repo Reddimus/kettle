@@ -6976,27 +6976,28 @@ pub fn capture_png_with_annotation(
         // always line up with the glyphs. The old fixed 240px segments were
         // ~2× wider than the ~120px labels, so the second tab's text floated
         // inside the first tab's highlight.
-        let tab_text_left = 8.0_f32;
-        // v2.31.0: tabs FILL the bar (the live v2.28.0 layout), NOT the old
-        // compact label-width tabs — the README hero/showcase must reflect the
-        // current style. Each tab takes an equal share of the strip (minus the
-        // trailing `+` button); the title is left-aligned and the ✕ sits at the
-        // tab's right edge, padded with spaces between. Monospace, so a label's
-        // pixel width is its char count × `cw` and `tab_cols` chars == `tab_w` px.
+        let tab_text_left = 0.0_f32;
+        // Tabs FILL the bar (the live layout), NOT old compact label-width tabs —
+        // the README hero/showcase must reflect the current style. v2.36.6: tabs
+        // divide the FULL bar width so the tab1/tab2 boundary lands on the split
+        // centre (`split_x`), so the vertical split divider visually continues
+        // the tab boundary — matching the live full-width `tab_strip_layout`.
+        // Only the last tab yields the trailing `+` button. Monospace, so a
+        // label's pixel width is its char count × `cw`.
         let tabplus_label = "  +  ";
         let plus_w = tabplus_label.chars().count() as f32 * cw;
-        let tab_w = (((wf - tab_text_left - plus_w) / 2.0).max(cw)).floor();
-        let tab_cols = (tab_w / cw).max(1.0) as usize;
-        let fill_tab = |title: &str| -> String {
+        // Tab 1 spans [0, split_x]; tab 2 spans [split_x, wf - plus_w].
+        let w0 = (split_x - tab_text_left).max(cw).floor();
+        let w1 = (wf - plus_w - split_x).max(cw).floor();
+        let fill_tab = |title: &str, cols: usize| -> String {
             let head = format!(" {title}");
             let tail = "✕ ";
             let used = head.chars().count() + tail.chars().count();
-            let gap = tab_cols.saturating_sub(used);
+            let gap = cols.saturating_sub(used);
             format!("{head}{}{tail}", " ".repeat(gap))
         };
-        let tab0_label = fill_tab("1: zsh");
-        let tab1_label = fill_tab("2: ssh prod");
-        let (w0, w1) = (tab_w, tab_w);
+        let tab0_label = fill_tab("1: zsh", (w0 / cw).max(1.0) as usize);
+        let tab1_label = fill_tab("2: ssh prod", (w1 / cw).max(1.0) as usize);
         q.push(rect(0.0, 0.0, wf, tab_h, theme.palette[8], 1.0));
         // Active tab 0: themed background + a 2px left accent bar (live style).
         // Cascade through the resolved accent so peacock + the theme's
