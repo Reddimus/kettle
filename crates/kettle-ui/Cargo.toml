@@ -70,7 +70,7 @@ notify = "8.2.0"
 notify-rust.workspace = true
 # 5.4.0 hardens launcher argument handling against option and shell injection.
 open = "5.4.0"
-pollster = "0.4.0"
+pollster = "1.0.1"
 # Triggers (`kettle_config::OutputTrigger`) compile to `regex::Regex`
 # in the App layer (not kettle-core) — the matching engine reads
 # the focused-pane viewport via the existing Mux API, no reader-

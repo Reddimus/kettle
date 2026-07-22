@@ -21,7 +21,7 @@ image = { version = "0.25.10", default-features = false, features = ["png", "jpe
 kettle-config.workspace = true
 kettle-core.workspace = true
 log.workspace = true
-pollster = "0.4.0"
+pollster = "1.0.1"
 raw-window-handle = "0.6.2"
 unicode-width.workspace = true
 wgpu = "30.0.0"
