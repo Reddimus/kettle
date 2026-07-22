@@ -14,7 +14,6 @@ use winit::event_loop::EventLoopProxy;
 
 use crate::app::UserEvent;
 
-const DEFAULT_INTERVAL_SECS: u64 = 24 * 60 * 60;
 const MAX_CACHE_BYTES: usize = 256 * 1024;
 const PACKAGED: bool = option_env!("KETTLE_PACKAGED").is_some();
 static CHECK_IN_FLIGHT: AtomicBool = AtomicBool::new(false);
@@ -67,6 +66,11 @@ struct UpdateCache {
     latest_tag: Option<String>,
     #[serde(default)]
     dismissed_version: Option<String>,
+    /// Set once the first automatic (`update-policy = auto`) install has been
+    /// announced, so the one-time "Kettle now keeps itself up to date; disable
+    /// with `update-policy = off`" heads-up fires exactly once per install.
+    #[serde(default)]
+    auto_update_announced: bool,
 }
 
 fn is_due(now: u64, last_check: u64, interval_secs: u64) -> bool {
@@ -110,16 +114,22 @@ fn save_cache(cache: &UpdateCache) {
     }
 }
 
-/// Run at most once per day after the first launch. `Auto` installs only into
-/// an official installer-owned layout and never restarts this running process.
+/// Run at most once per `interval_hours` (default 24 = daily) after the first
+/// launch. `Auto` installs only into an official installer-owned layout and
+/// never restarts this running process. Safe to call repeatedly (e.g. from the
+/// recurring [`spawn_update_check_timer`] tick): the shared cache + file lock
+/// make the due check idempotent across every window and process.
 pub fn maybe_spawn_check(
     proxy: EventLoopProxy<UserEvent>,
     current: &'static str,
     policy: UpdatePolicy,
+    interval_hours: u32,
 ) {
     if PACKAGED || policy == UpdatePolicy::Off {
         return;
     }
+    // Floored at 1h so a misconfigured 0 can't turn into a busy network loop.
+    let interval_secs = u64::from(interval_hours.max(1)).saturating_mul(3600);
     if CHECK_IN_FLIGHT.swap(true, Ordering::AcqRel) {
         return;
     }
@@ -145,7 +155,7 @@ pub fn maybe_spawn_check(
         save_cache(&cache);
         return;
     }
-    if !is_due(now, cache.last_check, DEFAULT_INTERVAL_SECS) {
+    if !is_due(now, cache.last_check, interval_secs) {
         return;
     }
     let dismissed = cache.dismissed_version.clone();
@@ -181,9 +191,23 @@ pub fn maybe_spawn_check(
                                     outcome.disposition,
                                     kettle_update::InstallDisposition::Staged { .. }
                                 );
+                                // One-time heads-up that auto-update is on and
+                                // how to opt out — fired on the first automatic
+                                // install only (oh-my-zsh style informational
+                                // note, never a blocking prompt). Reuse the
+                                // `cache` already loaded + persisted above (with
+                                // the fresh last_check/latest_tag) rather than a
+                                // second load — a failed reload would wipe that
+                                // throttle state and spuriously re-announce.
+                                let first_time = !cache.auto_update_announced;
+                                if first_time {
+                                    cache.auto_update_announced = true;
+                                    save_cache(&cache);
+                                }
                                 let _ = proxy.send_event(UserEvent::UpdateInstalled {
                                     tag: update.tag,
                                     staged,
+                                    first_time,
                                 });
                             }
                             Err(kettle_update::UpdateError::UnmanagedInstall(reason)) => {
@@ -221,6 +245,35 @@ pub fn maybe_spawn_check(
         });
 }
 
+/// Cadence at which the in-session timer re-attempts a due check. Decoupled
+/// from the configured update interval: each tick just calls `maybe_spawn_check`,
+/// which re-throttles against the persisted per-interval cache. A fixed hourly
+/// nudge keeps a long-lived window current without polling the network hourly.
+const RECHECK_TICK_SECS: u64 = 60 * 60;
+static TIMER_STARTED: AtomicBool = AtomicBool::new(false);
+
+/// Spawn (once per process) a lightweight timer thread that nudges the event
+/// loop to re-run the due check every hour, so a window left open for days keeps
+/// current instead of only checking on window resume. The app handles the
+/// resulting `UpdateCheckTick` by calling `maybe_spawn_check` with the *current*
+/// config (policy + interval), so config edits take effect without a restart.
+pub fn spawn_update_check_timer(proxy: EventLoopProxy<UserEvent>) {
+    if PACKAGED || TIMER_STARTED.swap(true, Ordering::AcqRel) {
+        return;
+    }
+    let _ = std::thread::Builder::new()
+        .name("kettle-update-timer".into())
+        .spawn(move || {
+            loop {
+                std::thread::sleep(std::time::Duration::from_secs(RECHECK_TICK_SECS));
+                // Stop ticking once the event loop is gone (all windows closed).
+                if proxy.send_event(UserEvent::UpdateCheckTick).is_err() {
+                    break;
+                }
+            }
+        });
+}
+
 pub fn record_dismissed(tag: &str) {
     let mut cache = load_cache().unwrap_or_default();
     cache.dismissed_version = Some(tag.to_string());
@@ -251,11 +304,14 @@ pub fn run_blocking_check(current: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{CheckLockAttempt, DEFAULT_INTERVAL_SECS, UpdateCache, is_due};
+    use super::{CheckLockAttempt, UpdateCache, is_due};
+
+    /// The daily default (`update-check-interval-hours = 24`) in seconds.
+    const DAY: u64 = 24 * 60 * 60;
 
     #[test]
     fn due_check_skips_first_launch_and_handles_clock_skew() {
-        let day = DEFAULT_INTERVAL_SECS;
+        let day = DAY;
         assert!(!is_due(1_000_000, 0, day));
         assert!(!is_due(1_000_000, 1_000_000 - day + 1, day));
         assert!(is_due(1_000_000, 1_000_000 - day, day));
@@ -269,13 +325,27 @@ mod tests {
             last_check: 1_700_000_000,
             latest_tag: Some("v2.35.0".into()),
             dismissed_version: Some("v2.35.0".into()),
+            auto_update_announced: true,
         };
         let json = serde_json::to_string(&cache).unwrap();
         let back: UpdateCache = serde_json::from_str(&json).unwrap();
         assert_eq!(back.last_check, cache.last_check);
+        assert!(back.auto_update_announced);
+        // A pre-v2.37 cache file without the new field still parses (defaults).
         let partial: UpdateCache = serde_json::from_str(r#"{"last_check":42}"#).unwrap();
         assert_eq!(partial.last_check, 42);
         assert_eq!(partial.latest_tag, None);
+        assert!(!partial.auto_update_announced);
+    }
+
+    #[test]
+    fn cadence_is_tunable() {
+        // A configured interval scales the due window; the daily default is 24h.
+        let hour = 3_600;
+        assert_eq!(DAY, 24 * hour);
+        // 6h cadence: due after 6h, not before.
+        assert!(is_due(100 * hour, 100 * hour - 6 * hour, 6 * hour));
+        assert!(!is_due(100 * hour, 100 * hour - 6 * hour + 1, 6 * hour));
     }
 
     #[test]

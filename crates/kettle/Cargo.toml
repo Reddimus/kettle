@@ -24,12 +24,6 @@ path = "src/bin/kettle-console.rs"
 [lints]
 workspace = true
 
-[features]
-# Forwards kettle-ui's developer-only session recorder. OFF by
-# default and absent from released/packaged builds; enable for local debugging
-# with `cargo build --features dev-record`.
-dev-record = ["kettle-ui/dev-record"]
-
 [dependencies]
 anyhow.workspace = true
 clap = { version = "4.6.1", features = ["derive"] }

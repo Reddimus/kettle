@@ -1,12 +1,11 @@
-//! Developer-only session recorder (Cargo feature `dev-record`,
-//! compiled OUT of released / packaged builds).
+//! Session recorder wiring for the GUI. A runtime toggle present in every build
+//! (config `record = on` / `--record` / `KETTLE_RECORD*`), not a compile-time
+//! feature.
 //!
-//! The recorder itself was promoted to
-//! `kettle_core::record` so it is shared by the GUI's `--record` (this
-//! `dev-record` feature) and `kettle exec --record`. This module is now a thin
-//! re-export, so every existing `crate::dev_record::Recorder` /
-//! `crate::dev_record::printable_token` call site keeps resolving unchanged.
-//! The `dev-record` feature turns on `kettle-core/asciicast`, which is what
-//! actually compiles the recorder in.
+//! The recorder engine lives in `kettle_core::record` (compiled in via
+//! `kettle-core/asciicast`, which kettle-ui enables unconditionally) so it is
+//! shared by the GUI's `--record` and `kettle exec --record`. This module is a
+//! thin re-export, so every `crate::dev_record::Recorder` /
+//! `crate::dev_record::printable_token` call site resolves unchanged.
 
 pub use kettle_core::record::{RecordStatus, Recorder, printable_token};

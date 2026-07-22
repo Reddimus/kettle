@@ -259,7 +259,7 @@ flowchart LR
 Guarded by the pure `output_paint_coalesces_within_frame_budget` (kettle-ui).
 
 **`.cast` replay.** `replays_asciicast_v2_output_into_grid` parses an asciicast
-v2 trace — the exact format [`docs/DEV-RECORD.md`](DEV-RECORD.md)'s recorder
+v2 trace — the exact format [`docs/RECORDING.md`](RECORDING.md)'s recorder
 writes — and feeds its `o` (output) events through the harness, asserting grid
 text + SGR state. A scrubbed recording of a real agent session can therefore be
 committed as a regression fixture and re-fed without a PTY or auth.
@@ -468,11 +468,10 @@ name the shape of bug each pass caught.
   empty argument list, working directory, registry entry, and cleanup. Sentinel
   state also verifies a portable uninstall cannot remove default-install
   shortcut, registry, PATH, or PowerShell profile state.
-- **`dev-record` feature build** — the automatic GUI recording flags, input
-  tokens, markers, and status UI are compiled out of shipped builds. The shared
-  output-only writer remains in releases for `kettle exec --record`. CI
-  separately runs clippy and the GUI hook tests with `--features dev-record` so
-  the gated launcher path cannot bit-rot. See [DEV-RECORD.md](DEV-RECORD.md).
+- **Session recording** — recording is a runtime toggle (`record = on` /
+  `--record`) compiled into every build, so the default build/clippy/test
+  exercise the GUI recording flags, input tokens, markers, and status UI
+  directly (no separate feature leg). See [RECORDING.md](RECORDING.md).
 
 Separate workflows:
 

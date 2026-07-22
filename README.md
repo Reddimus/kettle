@@ -118,16 +118,21 @@ and **WezTerm** into one tool.
   type to filter every action, `Tab`/`↑↓` to select, `Enter` to run.
 - **Live theme switching** — cycle the 500+ bundled themes at runtime
   (palette: "Next/Previous theme", or `next_theme`/`prev_theme` binds).
-- **Authenticated updates** — `kettle update` verifies a dedicated Ed25519-
+- **Authenticated auto-updates** — Kettle keeps itself current in the
+  background (oh-my-zsh style). `kettle update` verifies a dedicated Ed25519-
   signed stable manifest plus the selected archive's exact size and SHA-256,
   then transactionally updates an official Windows or Linux installer layout.
   It never elevates or restarts running windows; Windows uses an out-of-process
   helper after every Kettle process closes instead of trying to replace a mapped
-  executable. The default `update-policy = notify` performs a quiet once-a-day
-  check; use `off` or opt into background installation with `auto`, and use
+  executable. The default `update-policy = auto` installs updates in the
+  background (daily check, tunable via `update-check-interval-hours`); set
+  `notify` for a banner-only reminder or `off` to opt out, and use
   `kettle --check-update` for an explicit check. Package-manager, source, and
   manually managed binaries are refused rather than overwritten. See
   [Updating Kettle](docs/UPDATES.md).
+- **Session recording** — record any session to an asciicast trace with
+  `--record PATH` or `record = on` in the config (off by default; keystrokes
+  redacted, output captured verbatim — see [Recording](docs/RECORDING.md)).
 - **Cross-platform** — one codebase for Windows 11, Linux (X11/Wayland) and
   macOS, via `winit` + `portable-pty` (ConPTY on Windows).
 
@@ -156,7 +161,7 @@ curl -fsSL https://raw.githubusercontent.com/Reddimus/kettle/main/scripts/instal
 Then search **"kettle"** in GNOME Activities / KDE Krunner / Ubuntu's
 Super-key, or run `kettle` from any shell on your `$PATH`.
 
-Pin a specific version: `KETTLE_VERSION=v2.36.6 sh` instead of `sh`.
+Pin a specific version: `KETTLE_VERSION=v2.37.0 sh` instead of `sh`.
 System-wide install: `KETTLE_PREFIX=/usr/local sh` (needs write access).
 Uninstall later: `~/.local/share/kettle/install.sh --uninstall`.
 

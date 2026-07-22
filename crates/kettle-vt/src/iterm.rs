@@ -56,8 +56,22 @@ pub(crate) fn decode_with_budget(body: &str, budget: &GraphicsBudget) -> Option<
 
 #[cfg(test)]
 mod tests {
-    use super::decode;
+    use super::decode_with_budget;
+    use crate::graphics_limits::{GraphicsBudget, GraphicsLimits};
+    use crate::image::ImageData;
     use base64::Engine;
+
+    /// Decode with an ISOLATED graphics budget. The public `decode()` uses the
+    /// process-shared default budget, so under cargo's parallel test runner a
+    /// concurrent test's live transient-CPU reservation could starve this one's
+    /// `reserve_transient_cpu` and make a well-formed image decode to `None` —
+    /// an intermittent flake. An isolated per-call account removes the
+    /// contention while exercising the exact same decode logic.
+    fn decode(body: &str) -> Option<ImageData> {
+        let budget =
+            GraphicsBudget::isolated(GraphicsLimits::default()).expect("isolated graphics budget");
+        decode_with_budget(body, &budget)
+    }
 
     /// Encode a solid `w`×`h` RGBA PNG (the wire format an iTerm2 client
     /// sends), matching the helper used in `image.rs`'s decoder tests.

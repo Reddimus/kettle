@@ -6,6 +6,63 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+## [2.37.0] — 2026-07-22
+
+  ### Added
+  - **Session recording is now a runtime toggle in every build.** Recording a
+    Kettle session to an asciicast trace no longer needs a special
+    `--features dev-record` build — the `--record PATH` / `--record-dir DIR` /
+    `--record-raw-input` flags and the `KETTLE_RECORD*` env vars ship in every
+    binary, plus new persistent config keys `record = off|on`,
+    `record-dir = <path>` (default `<config-dir>/recordings`), and
+    `record-raw-input = off|on`. Off by default. Keystrokes stay redacted to
+    tokens; raw-keystroke capture remains a separate explicit opt-in and now
+    shows a distinct **`[REC RAW]`** window-title indicator so it is never
+    silent. Every existing privacy guardrail is preserved (verbatim-output
+    caveat, `0600`/`0700` permissions, symlink refusal, 512 MiB / 50-file /
+    5 GiB bounds, `[REC]` title, never-uploaded). See
+    [docs/RECORDING.md](docs/RECORDING.md).
+  - **A recording-enabled install now self-updates normally.** Because recording
+    is a runtime toggle rather than a compile-time feature, `kettle update` (and
+    automatic updates) work on any official `stable` install with recording on
+    via the `record = on` config key (which survives updates) — the old
+    `local-dev-record` install channel that blocked updates is retired (legacy
+    markers are still recognized and refused). The Linux `--record-dir` launcher
+    wiring remains a source-install convenience (it's refused on a self-updating
+    release install, which would drop it on the next update).
+  - **Configurable update cadence** via `update-check-interval-hours` (default
+    24 = daily; floored at 1), and an hourly in-session re-check so a window left
+    open for days stays current without a restart.
+
+  ### Changed
+  - **Automatic updates are on by default (`update-policy = auto`).** Kettle now
+    keeps itself current in the background, oh-my-zsh style: a daily check
+    installs newer signed releases (applied in place on Linux, staged on Windows
+    until every window closes). The first automatic install shows a one-time
+    notification explaining how to opt out (`update-policy = off`); the previous
+    `notify` (banner-only) and `off` modes remain available. The first launch
+    still performs no network request, and `KETTLE_PACKAGED` builds still opt out
+    entirely for downstream distributions.
+  - The GUI settings overlay gains an **Update check (hours)** field; recording
+    stays config/CLI-driven (not a one-click toggle) to avoid accidentally
+    enabling verbatim capture.
+  - Retired the compile-time `dev-record` machinery that existed only to keep the
+    recorder out of shipped builds: the `dev-record` Cargo feature, its separate
+    CI clippy/test leg, the `install.sh --record-dir` feature sniff, and the
+    `just install-local-dev-record` recipe (now `just install-recording`, a
+    normal build). Net reduction in special-case code.
+
+  ### Fixed
+  - **Flaky `kettle-vt` iTerm2 image-decode test.** `iterm::tests` decoded
+    through the public `decode()`, which draws on the process-shared graphics
+    budget, so a concurrent test's transient-CPU reservation could intermittently
+    starve a well-formed decode to `None`. The tests now use an isolated
+    per-call budget, removing the contention (no runtime behavior change).
+
+  ### Dependencies
+  - Routine Dependabot bumps (GitHub Actions, cargo patch/minor group, and
+    `pollster` 0.4→1.0) merged since 2.36.6.
+
 ## [2.36.6] — 2026-07-22
 
   ### Fixed

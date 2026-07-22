@@ -15,8 +15,11 @@
 #   ./scripts/install.sh           # cargo build --release && install
 #   ./scripts/install.sh --skip-build   # use an existing target/release/kettle
 #   ./scripts/install.sh --record-dir=$HOME/.cache/kettle/records
-#                                 # source checkout only: build with dev-record
-#                                 # and record launcher sessions
+#                                 # auto-record every launcher session into DIR
+#                                 # (wires KETTLE_RECORD_DIR into the .desktop
+#                                 # entry; recording ships in every build). The
+#                                 # same effect is available via `record = on`
+#                                 # + `record-dir` in the config file.
 #   ./scripts/install.sh --prefix=/usr  # system install (needs sudo / writable prefix)
 #
 # Uninstall:
@@ -84,8 +87,17 @@ else
   BIN_SRC="${REPO_ROOT}/target/release/kettle"
 fi
 
+# The `--record-dir` launcher wiring only survives on a source (`local-dev`)
+# install: it lives in the .desktop `Exec=` line, which the signed self-updater
+# regenerates from the pristine template on every update (dropping the env var).
+# A release-tarball install is `stable` and self-updates, so refuse the combo and
+# steer to the config key `record = on`, which lives in the config file and DOES
+# survive updates. (Recording ships in every build regardless.)
 if [[ "${TARBALL_MODE}" -eq 1 && -n "${RECORD_DIR}" ]]; then
-  echo "error: --record-dir requires a source checkout and a dev-record feature build" >&2
+  echo "error: --record-dir wires recording into the desktop launcher, which a" >&2
+  echo "       self-updating release install would drop on its next update." >&2
+  echo "       Set 'record = on' (and optionally 'record-dir = <path>') in your" >&2
+  echo "       kettle config instead — that survives updates. See docs/RECORDING.md." >&2
   exit 2
 fi
 
@@ -147,11 +159,7 @@ fi
 
 if [[ "${TARBALL_MODE}" -eq 0 && "${SKIP_BUILD}" -eq 0 ]]; then
   echo "Building kettle (release)…"
-  if [[ -n "${RECORD_DIR}" ]]; then
-    ( cd "${REPO_ROOT}" && cargo build --release -p kettle --features dev-record )
-  else
-    ( cd "${REPO_ROOT}" && cargo build --release -p kettle )
-  fi
+  ( cd "${REPO_ROOT}" && cargo build --release -p kettle )
 fi
 
 if [[ ! -x "${BIN_SRC}" ]]; then
@@ -185,15 +193,8 @@ if [[ "${BIN_DIR}/kettle" == *"="* ]]; then
 fi
 
 if [[ -n "${RECORD_DIR}" ]]; then
-  BIN_HELP=$("${BIN_SRC}" --help 2>/dev/null) || {
-    echo "error: could not inspect the selected kettle binary for dev-record support" >&2
-    exit 1
-  }
-  if ! grep -q -- '--record-dir' <<<"${BIN_HELP}"; then
-    echo "error: --record-dir requires a kettle binary built with --features dev-record" >&2
-    echo "       rebuild it or omit --skip-build" >&2
-    exit 1
-  fi
+  # Recording ships in every build, so no feature check is needed — just wire
+  # KETTLE_RECORD_DIR into the launcher after validating the directory below.
   if [[ -L "${RECORD_DIR}" ]]; then
     echo "error: recording directory must not be a symbolic link: ${RECORD_DIR}" >&2
     exit 1
@@ -352,9 +353,10 @@ case "$(uname -m)" in
 esac
 KETTLE_VERSION=$("${BIN_DIR}/kettle" --version 2>/dev/null | awk 'NR == 1 { print $2 }')
 KETTLE_VERSION=${KETTLE_VERSION:-unknown}
-if [[ -n "${RECORD_DIR}" ]]; then
-  INSTALL_CHANNEL="local-dev-record"
-elif [[ "${TARBALL_MODE}" -eq 1 ]]; then
+# Recording no longer affects the channel — it's a runtime toggle present in
+# every build. A release tarball is `stable` (self-updates); a source checkout
+# is `local-dev` (rebuild to update), whether or not it auto-records.
+if [[ "${TARBALL_MODE}" -eq 1 ]]; then
   INSTALL_CHANNEL="stable"
 else
   INSTALL_CHANNEL="local-dev"

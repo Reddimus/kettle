@@ -54,9 +54,8 @@ mod fd_transport;
 // FSM; the App's mouse-handler advances it on MouseDown / Move /
 // Up. Cross-platform (no Unix-specific code).
 mod detach;
-// Developer-only session recorder (asciicast trace). Compiled out of
-// released / packaged builds via the `dev-record` Cargo feature.
-#[cfg(feature = "dev-record")]
+// Session recorder (asciicast trace). A runtime toggle present in every build
+// (config `record = on` / `--record`); re-exports `kettle_core::record`.
 mod dev_record;
 
 pub use app::App;
@@ -141,14 +140,14 @@ pub struct Options {
     /// `agent-server` config for THIS launch (`off`|`read-only`|`full`). `None`
     /// = use the config value (default off).
     pub agent_server: Option<kettle_config::AgentServer>,
-    /// Developer session-recorder file or managed directory target. Writes an
-    /// asciicast-compatible trace. Only present in `dev-record` feature builds.
-    #[cfg(feature = "dev-record")]
+    /// One-shot session-recorder file or managed directory target from the
+    /// CLI/env (`--record`/`--record-dir`/`KETTLE_RECORD*`). Writes an
+    /// asciicast-compatible trace. `None` here falls back to the persistent
+    /// `record`/`record-dir` config keys.
     pub record: Option<kettle_core::record::RecordingTarget>,
     /// With `record`, capture RAW typed characters in `i` events
     /// (`--record-raw-input`). Off by default — keystrokes are redacted tokens,
     /// not literal characters, so typed secrets aren't written to the trace.
-    #[cfg(feature = "dev-record")]
     pub record_raw_input: bool,
 }
 

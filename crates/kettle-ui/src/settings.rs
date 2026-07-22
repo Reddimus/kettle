@@ -289,6 +289,14 @@ pub fn categories(gpus: &[(String, String)]) -> Vec<Category> {
                     &["off", "notify", "auto"],
                     &["off", "notify", "install automatically"],
                 ),
+                number(
+                    "Update check (hours)",
+                    "update-check-interval-hours",
+                    1,
+                    720,
+                    1,
+                    "h",
+                ),
                 // v2.20.0: hjkl navigation in menus/overlays (default ON).
                 toggle("Vim menu navigation", "vim-menu-nav"),
                 choice(
@@ -682,6 +690,7 @@ fn read_number(cfg: &Config, key: &str) -> i64 {
         "scrollback-bytes" => (cfg.scrollback_bytes / 1_000_000) as i64,
         "tab-min-width" => cfg.tab_min_width.round() as i64,
         "scrollbar-width" => cfg.scrollbar_width.round() as i64,
+        "update-check-interval-hours" => cfg.update_check_interval_hours as i64,
         _ => 0,
     }
 }

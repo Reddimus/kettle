@@ -13,11 +13,11 @@ description = "kettle: PTY + alacritty_terminal VT glue, scrollback search, hype
 workspace = true
 
 [features]
-# The asciicast v2 session recorder (`record.rs`), promoted here from
-# kettle-ui's `dev-record`. OFF by default; enabled by kettle-ui's
-# `dev-record` feature (GUI `--record`) and unconditionally by the bin
-# crate (`kettle exec --record`). Pulls in serde_json for JSON escaping
-# and fs4 for cross-platform active-cast locks.
+# The asciicast v2 session recorder (`record.rs`). OFF by default at the
+# kettle-core level; enabled unconditionally by both kettle-ui (GUI `--record`
+# / `record = on`, a runtime toggle in every build) and the bin crate
+# (`kettle exec --record`). Pulls in serde_json for JSON escaping and fs4 for
+# cross-platform active-cast locks.
 asciicast = ["dep:serde_json", "dep:log", "dep:fs4"]
 
 [dependencies]

@@ -538,6 +538,10 @@ fn detect_managed_install_at(executable: &Path) -> Result<ManagedInstall, Update
             "the installer marker does not match this kettle build".to_string(),
         ));
     }
+    // `local-dev-record` is a legacy channel from when recording was a
+    // compile-time feature; recording is now a runtime toggle in every build, so
+    // installers no longer write it. It is still recognized here so any such
+    // marker already on disk keeps refusing self-update (rebuild from source).
     if matches!(marker.channel.as_str(), "local-dev" | "local-dev-record") {
         return Err(UpdateError::UnmanagedInstall(
             "this is a local development install; rebuild and reinstall it from its source checkout"

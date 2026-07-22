@@ -300,6 +300,43 @@ send text + run commands. OFF by default. See
 .B docs/AGENT.md
 for the threat model.
 .TP
+.BI \-\-record \ PATH
+Record this session to an asciicast-compatible trace at
+.I PATH
+(replay with
+.BR "asciinema play" ).
+Captures terminal output, resizes, redacted keystroke tokens, and UI markers.
+Also honored via the
+.B KETTLE_RECORD
+environment variable and the persistent
+.B record = on
+config key. Output is captured verbatim \(em review a trace before sharing it.
+See
+.B docs/RECORDING.md .
+.TP
+.BI \-\-record\-dir \ DIRECTORY
+Write every launch to a new collision-safe asciicast file inside
+.IR DIRECTORY .
+Also honored via
+.B KETTLE_RECORD_DIR
+and the
+.B record\-dir
+config key.
+.B \-\-record
+and
+.B KETTLE_RECORD
+take precedence.
+.TP
+.B \-\-record\-raw\-input
+With
+.BR \-\-record ,
+capture RAW typed characters instead of redacted key tokens.
+.B WARNING:
+the trace can then contain typed passwords; leave it off unless you need
+byte-exact input. The window title shows
+.B [REC RAW]
+while active.
+.TP
 .BI \-\-accent \ COLOR
 Pin this window's chrome tint (peacock parity) to the
 named or hex color. Accepts

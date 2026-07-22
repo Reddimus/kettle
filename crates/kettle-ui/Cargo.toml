@@ -14,16 +14,6 @@ description = "kettle: winit app, tab/pane mux, Terminator-style splits, overlay
 [lints]
 workspace = true
 
-[features]
-# Developer-only session recorder (asciicast-compatible trace of output /
-# resize / keystroke tokens / UI markers). Compiled OUT of released and
-# packaged builds — enable with `cargo build --features dev-record`. The
-# `--record <path>` CLI flag only exists in feature-enabled builds. The
-# recorder lives in kettle-core (`record.rs`); this feature turns on
-# `kettle-core/asciicast` so it compiles in. `crate::dev_record` re-exports
-# it, so call sites are unchanged.
-dev-record = ["kettle-core/asciicast"]
-
 [dependencies]
 accesskit = "0.24.1"
 accesskit_winit = "0.33.2"
@@ -47,7 +37,13 @@ fs4 = "1.1"
 # WM_SETICON — hence this runtime path.
 image = { version = "0.25.10", default-features = false, features = ["png"] }
 kettle-config.workspace = true
-kettle-core.workspace = true
+# `asciicast` is enabled unconditionally: the GUI session recorder is a
+# runtime toggle (config `record = on` / `--record`) present in every build,
+# not a compile-time feature. The recorder engine lives in kettle-core
+# (`record.rs`); this feature compiles it in. fs4/log/serde_json (its other
+# deps) are already unconditional kettle-ui dependencies, so this adds no new
+# crates to the graph.
+kettle-core = { workspace = true, features = ["asciicast"] }
 # The App hosts the control server over kettle-ctl's transport + protocol so
 # an agent (or `kettle ctl`/`kettle mcp`) can read the screen and drive panes.
 # The protocol/transport live in the leaf crate so the future kettle-muxd

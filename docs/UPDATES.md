@@ -33,7 +33,7 @@ helper only after every Kettle process has exited.
 | The same Windows executable launched from WSL | Supported through Windows interop |
 | Ubuntu/Linux x86_64 installed by the bundled `install.sh` or online installer | Supported |
 | Ubuntu/Linux aarch64 installed by the bundled installer | Supported |
-| Local source or `just install-local-dev-record` build | Refused; rebuild and reinstall from that checkout |
+| Local source build (`local-dev` marker) | Refused; rebuild and reinstall from that checkout |
 | Cargo, distro package, Homebrew, AUR, Nix, or manually copied binary | Refused; update with its owner |
 | macOS app | Use the release page or Homebrew; in-app replacement is not yet supported |
 
@@ -41,11 +41,12 @@ Official installers write a small ownership marker beside the managed layout.
 The updater derives the install prefix from the running executable and requires
 that marker to match Kettle, the stable channel, and the current Rust target.
 It never searches `PATH` for another copy and never elevates privileges.
-Repository installs deliberately use a `local-dev` marker, or
-`local-dev-record` when the launcher enables development recording. Refusing
-those channels prevents the stable updater from replacing a locally featured
-binary or rewriting its launcher. Only an extracted release tarball or the
-online installer writes a `stable` marker.
+Repository installs deliberately use a `local-dev` marker (recording no longer
+affects the channel — it is a runtime toggle in every build; the legacy
+`local-dev-record` marker is still recognized and refused for older installs).
+Refusing those channels prevents the stable updater from replacing a
+source-built binary or rewriting its launcher. Only an extracted release
+tarball or the online installer writes a `stable` marker.
 
 On Windows, the updater writes a bounded pending record inside the
 installer-owned prefix containing the target version and the size/SHA-256 of
@@ -69,19 +70,30 @@ launch in a handoff loop.
 
 ## Automatic policy
 
-The default is a passive notification check at most once every 24 hours. The
-first launch only creates the throttle state and performs no network request.
+The default is `auto`: Kettle keeps itself current in the background,
+oh-my-zsh style. It checks at most once per day (tunable), and when a newer
+signed release is found it installs it — applied on Linux immediately (running
+windows keep the old mapped image until they exit) and staged on Windows until
+every Kettle window closes, then used on the next launch. The first launch only
+creates the throttle state and performs no network request; the first automatic
+install shows a one-time notification explaining how to opt out.
 
 ```ini
+update-policy = auto      # default: install in the background, use after next restart
+update-policy = notify    # only show a passive new-version banner
 update-policy = off       # no automatic network request
-update-policy = notify    # default: show a passive new-version banner
-update-policy = auto      # install in the background, use after next restart
+
+# How often the background check may contact the feed, in hours (default 24 =
+# daily; floored at 1). `update-policy = off` disables checking regardless.
+update-check-interval-hours = 24
 ```
 
-The legacy `update-check = true|false` setting remains compatible and maps to
-`notify|off`. If both settings exist, `update-policy` wins regardless of order.
-Builds produced with `KETTLE_PACKAGED` disable automatic checks so a downstream
-distribution can own update policy. Explicit CLI checks still work.
+A window left open for many days is re-checked on an hourly in-session timer
+(still bounded by the configured interval), so it stays current without a
+restart. The legacy `update-check = true|false` setting remains compatible and
+maps to `notify|off`. If both settings exist, `update-policy` wins regardless of
+order. Builds produced with `KETTLE_PACKAGED` disable automatic checks so a
+downstream distribution can own update policy. Explicit CLI checks still work.
 
 ## Verification and recovery
 

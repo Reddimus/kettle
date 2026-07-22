@@ -282,6 +282,29 @@ impl PasteFiles {
     }
 }
 
+/// Whether the GUI session recorder is armed at launch (`record = on`). `Off`
+/// (the default) records nothing; `On` starts an asciicast recording for the
+/// window session, written into the configured `record-dir`. Recording captures
+/// on-screen output verbatim — a terminal cannot tell a secret from normal
+/// output — so review a trace before sharing it. The one-shot `--record` /
+/// `--record-dir` launch flags override this policy for a single launch. See
+/// docs/RECORDING.md.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum RecordMode {
+    /// Do not record automatically (default).
+    #[default]
+    Off,
+    /// Record the session to the configured recording directory.
+    On,
+}
+
+impl RecordMode {
+    /// Should recording start automatically at launch?
+    pub fn enabled(self) -> bool {
+        matches!(self, RecordMode::On)
+    }
+}
+
 /// When the tab bar is shown.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TabBarMode {
@@ -1033,6 +1056,21 @@ pub struct Config {
     /// Paste a clipboard file list (e.g. a file copied in Explorer) as a
     /// shell-quoted path (default: on). See [`PasteFiles`].
     pub paste_files: PasteFiles,
+    /// Arm the GUI session recorder at launch (`record = on`). Off by default.
+    /// Recording captures on-screen output verbatim; typed keystrokes are
+    /// redacted to tokens unless [`Config::record_raw_input`] is on. The window
+    /// title carries `[REC]` while active. See [`RecordMode`] and
+    /// docs/RECORDING.md.
+    pub record: RecordMode,
+    /// Directory that `record = on` writes per-session asciicast traces into.
+    /// Unset resolves to `<config-dir>/recordings`. Ignored when recording is
+    /// off or an explicit `--record PATH` is given for the launch.
+    pub record_dir: Option<PathBuf>,
+    /// Capture RAW typed characters (including passwords) instead of redacted
+    /// key tokens while recording. A SEPARATE, explicit opt-in from `record`;
+    /// off by default. The window title shows `[REC RAW]` while active so
+    /// literal-keystroke capture is never silent.
+    pub record_raw_input: bool,
     pub tab_bar: TabBarMode,
     pub tab_bar_pos: TabBarPos,
     /// Status-bar mode. See [`StatusBarMode`].
@@ -1538,9 +1576,14 @@ pub struct Config {
     pub command_notify_threshold_ms: u64,
     /// Auto-copy the selection to the clipboard on release.
     pub copy_on_select: bool,
-    /// Stable update policy. `notify` is the privacy-preserving default; the
-    /// first launch only stamps the throttle and performs no network request.
+    /// Stable update policy. `auto` is the default (keep Kettle current in the
+    /// background, oh-my-zsh style); the first launch only stamps the throttle
+    /// and performs no network request. Set `update-policy = off` to opt out.
     pub update_policy: UpdatePolicy,
+    /// How often the background update check may contact the release feed, in
+    /// hours (default 24 = daily). Floored at 1 to avoid hammering the feed.
+    /// `update-policy = off` disables checking entirely regardless of this.
+    pub update_check_interval_hours: u32,
     /// Restore the previous session's tabs/splits/working-dirs on
     /// launch. OFF by default — like every mainstream terminal (GNOME Terminal,
     /// Windows Terminal, kitty, Alacritty, WezTerm, iTerm2), a new window/instance
@@ -2235,6 +2278,9 @@ impl Default for Config {
             bell: BellMode::Both,
             osc52: Osc52::Copy,
             paste_files: PasteFiles::On,
+            record: RecordMode::Off,
+            record_dir: None,
+            record_raw_input: false,
             tab_bar: TabBarMode::Always,
             tab_bar_pos: TabBarPos::Top,
             status_bar: StatusBarMode::Off,
@@ -2355,7 +2401,8 @@ impl Default for Config {
             tab_silence_threshold_ms: 10_000,
             command_notify_threshold_ms: 5_000,
             copy_on_select: true,
-            update_policy: UpdatePolicy::Notify,
+            update_policy: UpdatePolicy::Auto,
+            update_check_interval_hours: 24,
             restore_session: false, // fresh-by-default; opt in to restore
             scroll_on_keystroke: true,
             scroll_on_output: false,
@@ -2728,6 +2775,8 @@ impl Config {
         "clipboard_paste_protection",
         "close-button-on-tab",
         "close_button_on_tab",
+        "record-raw-input",
+        "record_raw_input",
         "copy-on-select",
         "copy-on-selection",
         "copy_on_select",
@@ -3212,6 +3261,11 @@ impl Config {
                     v.to_ascii_lowercase().as_str(),
                     "off" | "none" | "disabled" | "false" | "0" | "on" | "enabled" | "true" | "1"
                 ),
+                "record" => matches!(
+                    v.trim().to_ascii_lowercase().as_str(),
+                    "off" | "none" | "disabled" | "false" | "0" | "on" | "enabled" | "true" | "1"
+                        | "yes"
+                ),
                 // Boolean keys: accept the same alias set `parse_bool`
                 // recognizes. Previously, any non-"false"
                 // string silently meant "true", so typos like
@@ -3288,6 +3342,12 @@ impl Config {
                     v.trim().to_ascii_lowercase().as_str(),
                     "off" | "notify" | "auto"
                 ),
+                "update-check-interval-hours" | "update_check_interval_hours" => {
+                    // Mirror the apply-arm `.max(1)` clamp: `0` is silently
+                    // floored to 1 at runtime, so flag it rather than letting
+                    // `--check-config` disagree with the effective value.
+                    v.trim().parse::<u32>().is_ok_and(|n| n >= 1)
+                }
                 "resize-overlay" | "resize_overlay" => matches!(
                     v.to_ascii_lowercase().as_str(),
                     "never" | "off" | "false" | "always" | "on" | "true" | "after-first"
@@ -3706,6 +3766,25 @@ impl Config {
                     cfg.paste_files = match e.value.to_ascii_lowercase().as_str() {
                         "off" | "none" | "disabled" | "false" | "0" => PasteFiles::Off,
                         _ => PasteFiles::On,
+                    }
+                }
+                "record" => {
+                    cfg.record = match e.value.trim().to_ascii_lowercase().as_str() {
+                        "on" | "true" | "1" | "enabled" | "yes" => RecordMode::On,
+                        _ => RecordMode::Off,
+                    }
+                }
+                "record-dir" | "record_dir" => {
+                    let dir = e.value.trim();
+                    cfg.record_dir = if dir.is_empty() {
+                        None
+                    } else {
+                        Some(PathBuf::from(dir))
+                    };
+                }
+                "record-raw-input" | "record_raw_input" => {
+                    if let Some(b) = parse_bool(&e.value) {
+                        cfg.record_raw_input = b;
                     }
                 }
                 "tab-bar" => {
@@ -4490,8 +4569,18 @@ impl Config {
                     cfg.update_policy = match e.value.trim().to_ascii_lowercase().as_str() {
                         "off" => UpdatePolicy::Off,
                         "auto" => UpdatePolicy::Auto,
+                        "notify" => UpdatePolicy::Notify,
+                        // Unrecognized value: fall back to the conservative
+                        // notify-only behavior rather than silently
+                        // auto-installing on a typo. Flagged by
+                        // `detect_malformed_values`.
                         _ => UpdatePolicy::Notify,
                     };
+                }
+                "update-check-interval-hours" | "update_check_interval_hours" => {
+                    if let Ok(hours) = e.value.trim().parse::<u32>() {
+                        cfg.update_check_interval_hours = hours.max(1);
+                    }
                 }
                 // Backward compatibility for pre-v2.35 boolean configs. The
                 // canonical key above wins even when this alias appears later.
@@ -6190,6 +6279,96 @@ cell-height = 1.2\n";
         assert_eq!(
             Config::parse_text("paste-files = bogus").paste_files,
             PasteFiles::On
+        );
+    }
+
+    #[test]
+    fn record_policy_parsing_and_default() {
+        // Off by default: a fresh install never records unless asked.
+        let d = Config::default();
+        assert_eq!(d.record, RecordMode::Off);
+        assert!(!d.record.enabled());
+        assert_eq!(d.record_dir, None);
+        assert!(!d.record_raw_input);
+
+        assert!(Config::parse_text("record = on").record.enabled());
+        assert!(Config::parse_text("record = true").record.enabled());
+        assert!(!Config::parse_text("record = off").record.enabled());
+        // Unknown value falls back to the (off) default — never silently record.
+        assert_eq!(Config::parse_text("record = bogus").record, RecordMode::Off);
+
+        assert_eq!(
+            Config::parse_text("record-dir = /tmp/casts").record_dir,
+            Some(PathBuf::from("/tmp/casts"))
+        );
+        // Empty value clears the directory back to the resolved default.
+        assert_eq!(Config::parse_text("record-dir =").record_dir, None);
+
+        // Raw-input is a separate, strictly bool-parsed opt-in.
+        assert!(Config::parse_text("record-raw-input = on").record_raw_input);
+        assert!(!Config::parse_text("record-raw-input = off").record_raw_input);
+        // A typo does NOT enable raw capture (guards the password footgun).
+        assert!(!Config::parse_text("record-raw-input = yse").record_raw_input);
+
+        // Malformed enum/bool values are flagged for --check-config.
+        assert!(
+            Config::detect_malformed_values("record = bogus")
+                .iter()
+                .any(|m| m.contains("record"))
+        );
+        assert!(
+            Config::detect_malformed_values("record-raw-input = maybe")
+                .iter()
+                .any(|m| m.contains("record-raw-input"))
+        );
+    }
+
+    #[test]
+    fn update_policy_defaults_to_auto_with_tunable_cadence() {
+        // Default-on auto-update (oh-my-zsh style), daily cadence.
+        let d = Config::default();
+        assert_eq!(d.update_policy, UpdatePolicy::Auto);
+        assert_eq!(d.update_check_interval_hours, 24);
+
+        assert_eq!(
+            Config::parse_text("update-policy = off").update_policy,
+            UpdatePolicy::Off
+        );
+        assert_eq!(
+            Config::parse_text("update-policy = notify").update_policy,
+            UpdatePolicy::Notify
+        );
+        // A typo is conservative: notify-only, never silent auto-install.
+        assert_eq!(
+            Config::parse_text("update-policy = bogus").update_policy,
+            UpdatePolicy::Notify
+        );
+
+        assert_eq!(
+            Config::parse_text("update-check-interval-hours = 6").update_check_interval_hours,
+            6
+        );
+        // Floored at 1 so a 0 can't turn into a busy-loop against the feed.
+        assert_eq!(
+            Config::parse_text("update-check-interval-hours = 0").update_check_interval_hours,
+            1
+        );
+        // Non-numeric is ignored (keeps the default) and flagged.
+        assert_eq!(
+            Config::parse_text("update-check-interval-hours = soon").update_check_interval_hours,
+            24
+        );
+        assert!(
+            Config::detect_malformed_values("update-check-interval-hours = soon")
+                .iter()
+                .any(|m| m.contains("update-check-interval-hours"))
+        );
+        // `0` is silently floored to 1 at runtime, so --check-config must flag it
+        // rather than reporting clean while the effective value differs.
+        assert!(
+            Config::detect_malformed_values("update-check-interval-hours = 0")
+                .iter()
+                .any(|m| m.contains("update-check-interval-hours"))
         );
     }
 

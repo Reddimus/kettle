@@ -61,23 +61,9 @@ jobs:
       - name: Live UI helper self-test (Unix)
         if: runner.os != 'Windows'
         run: python3 scripts/check-live-ui-smoke.py self-test
-      # The developer-only session recorder lives behind the
-      # `dev-record` Cargo feature (compiled OUT of shipped builds), so the
-      # default build/clippy/test above never exercise it. Build, lint and test
-      # it explicitly so the gated code + hooks can't silently bit-rot.
-      - name: dev-record feature (clippy + tests)
-        run: |
-          cargo clippy -p kettle --features dev-record --all-targets -- -D warnings
-          # Run ALL kettle-ui tests under the feature, not just
-          # the `dev_record::` module — the dev_record completeness guard test
-          # `recorder_output_flushed_before_reap_and_on_close` lives in
-          # `app::tests::`, so the old narrow filter compiled it but never ran it.
-          cargo test -p kettle-ui --features dev-record
-          # Audit (v2.32.0): the `kettle` crate's dev-record-gated tests — the
-          # v2.31.0 `resolve_record_target` `record_target_tests` and the
-          # man-page-flag guard's `--record`/`--record-raw-input` exclusions —
-          # only compile under the feature, so run them here too or they bit-rot.
-          cargo test -p kettle --features dev-record
+      # The session recorder is now a runtime toggle (config `record = on` /
+      # `--record`) compiled into every build, so the default build/clippy/test
+      # above exercise it directly — no separate feature leg is needed.
       # Verify the Justfile parses on every OS — catches
       # platform-gating typos (e.g. `[wndows]` instead of `[windows]`)
       # or `tempdir()`-builtin removal at CI time instead of a

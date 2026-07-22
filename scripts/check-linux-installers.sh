@@ -19,7 +19,7 @@ if [ ! -x target/release/kettle ]; then
 fi
 
 tmp_root=$(mktemp -d /tmp/kettle-install-smoke.XXXXXX)
-normal_binary="${tmp_root}/kettle-release-no-dev-record"
+normal_binary="${tmp_root}/kettle-release"
 cp target/release/kettle "${normal_binary}"
 cleanup() {
   cp "${normal_binary}" target/release/kettle 2>/dev/null || true
@@ -147,11 +147,6 @@ assert_installed_prefix "$direct_prefix" "local-dev"
 assert_uninstalled_prefix "$direct_prefix"
 echo "linux-installer check: direct custom-prefix install/uninstall OK"
 
-if ./scripts/install.sh --skip-build "--prefix=${tmp_root}/must-refuse" \
-    "--record-dir=${tmp_root}/normal-binary-records" >/dev/null 2>&1; then
-  fail "normal release binary was accepted as a dev-record install"
-fi
-
 symlink_target="${tmp_root}/symlink target"
 symlink_record="${tmp_root}/symlink records"
 mkdir -p "${symlink_target}"
@@ -161,21 +156,23 @@ if ./scripts/install.sh "--prefix=${tmp_root}/must-refuse-symlink" \
   fail "installer accepted a symlink as the recording directory"
 fi
 
-cargo build --release -p kettle --features dev-record
+# A source-checkout install with --record-dir now needs no special build
+# (recording ships in every binary); it stays `local-dev` (self-update refused,
+# rebuild to update) and wires KETTLE_RECORD_DIR into the launcher.
 dev_prefix="${tmp_root}/dev back\\slash % dollar\$ quote\" tick\`"
 record_dir="${tmp_root}/record back\\slash % dollar\$ quote\" tick\`"
 ./scripts/install.sh --skip-build "--prefix=${dev_prefix}" "--record-dir=${record_dir}" \
   > "${tmp_root}/dev-install.out"
-assert_installed_prefix "$dev_prefix" "local-dev-record" "$record_dir"
+assert_installed_prefix "$dev_prefix" "local-dev" "$record_dir"
 [ "$(stat -c '%a' "$record_dir")" = "700" ] \
-  || fail "development recording directory is not mode 0700"
+  || fail "recording directory is not mode 0700"
 assert_desktop_launch_argv "$dev_prefix" "$record_dir"
 "${dev_prefix}/share/kettle/install.sh" --uninstall > "${tmp_root}/dev-uninstall.out"
 assert_uninstalled_prefix "$dev_prefix"
-echo "linux-installer check: spaced dev-record prefix/install/uninstall OK"
+echo "linux-installer check: spaced recording prefix/install/uninstall OK"
 
-# Restore the exact non-dev release binary for the simulated public bundle and
-# for any CI smoke that follows this script.
+# Restore the exact release binary for the simulated public bundle and for any
+# CI smoke that follows this script.
 cp "${normal_binary}" target/release/kettle
 
 # Exercise the release-tarball layout without requiring a published tag. Only
@@ -186,10 +183,15 @@ cp "${normal_binary}" "${bundle}/kettle"
 cp scripts/install.sh "${bundle}/install.sh"
 cp -R packaging/linux "${bundle}/packaging/linux"
 cp -R shell-integration "${bundle}/shell-integration"
-if "${bundle}/install.sh" --skip-build --record-dir="${tmp_root}/invalid" \
-  > /dev/null 2>&1; then
-  fail "release-tarball installer accepted the source-only --record-dir option"
+
+# A release-tarball (`stable`) install must refuse --record-dir: the launcher
+# env wiring would be dropped on the next self-update, so users are steered to
+# the update-surviving `record = on` config key instead.
+if "${bundle}/install.sh" --skip-build --prefix="${tmp_root}/tarball-refuse-record" \
+    --record-dir="${tmp_root}/tarball-records" > /dev/null 2>&1; then
+  fail "release-tarball installer accepted --record-dir (would be lost on self-update)"
 fi
+
 tarball_prefix="${tmp_root}/tarball"
 "${bundle}/install.sh" --skip-build "--prefix=${tarball_prefix}" \
   > "${tmp_root}/tarball-install.out"
