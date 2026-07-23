@@ -3510,7 +3510,7 @@ mod tests {
         header.set_size(payload.len() as u64);
         header.set_cksum();
         archive
-            .append_data(&mut header, "kettle/payload", payload.as_slice())
+            .append_data(&mut header, "kettle/payload", payload)
             .unwrap();
         archive.into_inner().unwrap().finish().unwrap();
     }

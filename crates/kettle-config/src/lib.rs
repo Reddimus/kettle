@@ -7905,37 +7905,12 @@ cell-height = 1.2\n";
         let _ = std::fs::remove_dir(&dir);
     }
 
-    #[cfg(unix)]
-    #[test]
-    fn load_from_with_diagnostics_does_not_follow_symlinks() {
-        use std::os::unix::fs::symlink;
-
-        let dir = std::env::temp_dir().join(format!(
-            "kettle-load-from-diag-symlink-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_nanos())
-                .unwrap_or(0)
-        ));
-        std::fs::create_dir_all(&dir).expect("tmp dir");
-        let target = dir.join("target-config");
-        let link = dir.join("linked-config");
-        // The symlink target is a legitimate, parseable config; if the
-        // reader followed the link this would return the customized
-        // font size instead of the default.
-        std::fs::write(&target, "font-size = 42\n").expect("write target");
-        symlink(&target, &link).expect("symlink");
-        let (cfg, unknown, malformed) = Config::load_from_with_diagnostics(&link);
-        let default_cfg = Config::default();
-        assert_eq!(
-            cfg.font_size, default_cfg.font_size,
-            "a symlinked config path must not be followed"
-        );
-        assert!(unknown.is_empty());
-        assert!(malformed.is_empty());
-        let _ = std::fs::remove_dir_all(&dir);
-    }
+    // NB: startup config loading deliberately DOES follow a symlink to its
+    // regular-file target (dotfile managers rely on it, and the write path
+    // already does) — see `startup_load_follows_symlinked_config_to_regular_target`.
+    // The `O_NOFOLLOW` hardening lives one layer down in `read_config_bytes`
+    // / `ConfigDocument::read`, guarded by
+    // `config_reads_reject_symlinks_and_external_symlink_replacements`.
 
     #[test]
     fn detect_malformed_values_skips_empty_values() {

@@ -443,24 +443,68 @@ impl Drop for OwnedSid {
 /// verifying ownership.
 #[cfg(windows)]
 fn owned_by_current_user(path: &std::path::Path) -> bool {
-    let Some(current) = current_user_sid() else {
-        return false;
-    };
     let Some(owner) = path_owner_sid(path) else {
         return false;
     };
-    // SAFETY: both SIDs were produced by a successful query above and their
-    // owning buffers (held alive by `current`/`owner`) are still in scope.
-    unsafe { windows_sys::Win32::Security::EqualSid(current.sid(), owner.sid()) != 0 }
+    // A path is "ours" if its owner SID is one this process's token would
+    // stamp on objects it creates. For an ordinary user that is the token
+    // USER SID; for an elevated/admin process Windows defaults new objects'
+    // owner to the Administrators group — the token OWNER SID — so a directory
+    // this very process just created is owned by Administrators, not the user
+    // (this is exactly what breaks on an elevated CI runner). Accept either,
+    // which is the same OW (owner) / BA (Administrators) trust the control
+    // named pipe's DACL already grants.
+    for ours in [current_user_sid(), current_owner_sid()]
+        .into_iter()
+        .flatten()
+    {
+        // SAFETY: both SIDs were produced by a successful query and their
+        // owning buffers (held alive by `ours`/`owner`) are still in scope.
+        if unsafe { windows_sys::Win32::Security::EqualSid(ours.sid(), owner.sid()) != 0 } {
+            return true;
+        }
+    }
+    false
 }
 
-/// The current process token's user SID, via `OpenProcessToken` +
-/// `GetTokenInformation(TokenUser)` (the standard two-call size-then-fill
-/// pattern: the first call fails but reports the required buffer size).
+/// The current process token's user SID (the identity behind the token).
 #[cfg(windows)]
 fn current_user_sid() -> Option<OwnedSid> {
+    use windows_sys::Win32::Security::{TOKEN_USER, TokenUser};
+    // SAFETY: for a `TokenUser` query `GetTokenInformation` writes a
+    // `TOKEN_USER` at the start of the buffer; its `.User.Sid` points inside
+    // that same buffer, kept alive by the returned `OwnedSid::TokenBuffer`.
+    token_information_sid(TokenUser, |buffer| unsafe {
+        (*buffer.cast::<TOKEN_USER>()).User.Sid
+    })
+}
+
+/// The current process token's default OWNER SID — the SID Windows stamps as
+/// owner on new objects the process creates. Equal to the user SID for an
+/// ordinary token, but the Administrators group SID for an elevated token.
+#[cfg(windows)]
+fn current_owner_sid() -> Option<OwnedSid> {
+    use windows_sys::Win32::Security::{TOKEN_OWNER, TokenOwner};
+    // SAFETY: for a `TokenOwner` query `GetTokenInformation` writes a
+    // `TOKEN_OWNER` at the start of the buffer; its `.Owner` points inside
+    // that same buffer, kept alive by the returned `OwnedSid::TokenBuffer`.
+    token_information_sid(TokenOwner, |buffer| unsafe {
+        (*buffer.cast::<TOKEN_OWNER>()).Owner
+    })
+}
+
+/// Query the current process token via `OpenProcessToken` +
+/// `GetTokenInformation` (the standard two-call size-then-fill pattern: the
+/// first call fails but reports the required buffer size), then extract the
+/// SID from the filled buffer with `sid_of`. The buffer is retained in the
+/// returned `OwnedSid` so the SID pointer it hands back stays valid.
+#[cfg(windows)]
+fn token_information_sid(
+    info_class: windows_sys::Win32::Security::TOKEN_INFORMATION_CLASS,
+    sid_of: impl Fn(*const u8) -> PSID,
+) -> Option<OwnedSid> {
     use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
-    use windows_sys::Win32::Security::{GetTokenInformation, TOKEN_QUERY, TOKEN_USER, TokenUser};
+    use windows_sys::Win32::Security::{GetTokenInformation, TOKEN_QUERY};
     use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 
     let mut token: HANDLE = std::ptr::null_mut();
@@ -474,7 +518,7 @@ fn current_user_sid() -> Option<OwnedSid> {
     // required size; `needed` is a valid output pointer. This call is
     // expected to fail (ERROR_INSUFFICIENT_BUFFER) — only `needed` matters.
     unsafe {
-        GetTokenInformation(token, TokenUser, std::ptr::null_mut(), 0, &mut needed);
+        GetTokenInformation(token, info_class, std::ptr::null_mut(), 0, &mut needed);
     }
     if needed == 0 {
         // SAFETY: `token` is the valid handle opened above.
@@ -489,7 +533,7 @@ fn current_user_sid() -> Option<OwnedSid> {
     let ok = unsafe {
         GetTokenInformation(
             token,
-            TokenUser,
+            info_class,
             buffer.as_mut_ptr().cast(),
             needed,
             &mut written,
@@ -500,10 +544,7 @@ fn current_user_sid() -> Option<OwnedSid> {
     if ok == 0 {
         return None;
     }
-    // SAFETY: `buffer` was just filled by a successful `GetTokenInformation`
-    // call for `TokenUser`, which the API documents as writing a `TOKEN_USER`
-    // at the start of the buffer.
-    let sid = unsafe { (*buffer.as_ptr().cast::<TOKEN_USER>()).User.Sid };
+    let sid = sid_of(buffer.as_ptr().cast());
     if sid.is_null() {
         return None;
     }
