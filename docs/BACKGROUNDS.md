@@ -121,7 +121,7 @@ chrome-background = auto
 | `background-darkness` | `0.0` fully dark … `1.0` no tint (default `0.5`) |
 | `background-animation` | `always` (default), `when-focused` (battery-friendly), `off` (freeze on frame 1) — applies to the starfield and animated images alike |
 
-**Performance.** Frames decode once at load (bounded to 256 MB / 512 frames; a
+**Performance.** Frames decode once at load (bounded to 128 MiB / 128 frames; a
 larger file degrades gracefully to a shorter loop, never an OOM). Playback just
 swaps an already-uploaded GPU texture, and `when-focused` parks the animation
 clock entirely when you tab away — so an animated wallpaper adds **zero idle

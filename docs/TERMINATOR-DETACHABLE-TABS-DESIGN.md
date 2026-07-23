@@ -1,8 +1,17 @@
 # Detachable tabs (cross-window drag) — design
 
-> Status: design only. Implementation spans multiple phases because
-> it touches cross-process IPC (the remote-control file IPC), PTY ownership transfer,
-> window-creation race conditions, and visual feedback during the drag.
+> Status: **Shipped, via a different architecture than sketched below.**
+> Cross-window tab tear-off shipped twice: first as the cross-process
+> design this doc describes (file-fallback `--tab-handoff PATH` +
+> `SCM_RIGHTS` live PTY transfer, v1.30.0), then superseded in v2.19.0
+> by an in-process `detach_tab → open_window(AdoptTab)` model (the
+> "multi-window effort", C6) that moves live PTYs across windows in
+> one process with no serialization or socket handoff. See
+> `crates/kettle-ui/src/detach.rs`, whose own header explains the
+> in-process FSM replaced the cross-process IPC machinery described
+> here. The user-visible end state (drag a tab into another window,
+> or empty space to spawn one, PTYs keep running) matches this doc;
+> the plumbing does not. Kept as the historical design record.
 
 ## What it is
 

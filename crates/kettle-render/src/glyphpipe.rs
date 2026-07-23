@@ -111,6 +111,28 @@ pub struct GlyphSlot {
     pub top: i32,
 }
 
+/// A cached slot entry plus the frame `epoch` it was last touched at, so the
+/// cache can find and evict the coldest entries once it's full instead of
+/// refusing every new glyph from then on (see `GlyphPipeline::ensure_glyph`).
+struct CachedSlot {
+    slot: Option<GlyphSlot>,
+    last_used: u64,
+}
+
+/// Pick the `n` keys with the smallest `last_used` value out of `ages` — the
+/// least-recently-touched entries. Generic over the key type so the eviction
+/// *policy* is unit-testable with plain keys, without needing a real
+/// `CacheKey` (which can only be constructed from a loaded font face).
+fn lru_victims<K: Copy>(ages: impl Iterator<Item = (K, u64)>, n: usize) -> Vec<K> {
+    if n == 0 {
+        return Vec::new();
+    }
+    let mut by_age: Vec<(u64, K)> = ages.map(|(k, age)| (age, k)).collect();
+    by_age.sort_unstable_by_key(|&(age, _)| age);
+    by_age.truncate(n);
+    by_age.into_iter().map(|(_, k)| k).collect()
+}
+
 /// A single-format atlas texture with a trivial shelf packer. Append-only +
 /// grow-by-doubling-height with a content-preserving copy, so a glyph's pixel
 /// coords never move once placed (instances stay valid across a grow).
@@ -392,7 +414,11 @@ pub struct GlyphPipeline {
     mask: Atlas,
     bind_group: wgpu::BindGroup,
     bg_dirty: bool,
-    slots: HashMap<CacheKey, Option<GlyphSlot>>,
+    slots: HashMap<CacheKey, CachedSlot>,
+    /// Frame counter bumped once per `upload`. Stamped onto a slot on every
+    /// `ensure_glyph` touch (hit or miss) so `evict_lru` can tell which slots
+    /// are cold once the cache needs to make room.
+    epoch: u64,
     max_dim: u32,
     instances: wgpu::Buffer,
     capacity: usize,
@@ -564,6 +590,7 @@ impl GlyphPipeline {
             bind_group,
             bg_dirty: false,
             slots: HashMap::new(),
+            epoch: 0,
             max_dim: device.limits().max_texture_dimension_2d,
             instances,
             capacity,
@@ -617,19 +644,58 @@ impl GlyphPipeline {
         key: CacheKey,
         rasterize: impl FnOnce() -> Option<RasterGlyph<'r>>,
     ) -> Option<GlyphSlot> {
-        if let Some(slot) = self.slots.get(&key) {
-            return *slot;
+        if let Some(cached) = self.slots.get_mut(&key) {
+            cached.last_used = self.epoch;
+            return cached.slot;
         }
         // Once the append-only atlases are saturated, caching an unbounded
-        // stream of misses would still grow this map. Refuse new keys at a
-        // deterministic ceiling; existing cached glyphs remain available.
+        // stream of misses would still grow this map forever. Bound it at a
+        // deterministic ceiling, but instead of refusing every new glyph from
+        // then on, evict the coldest (least-recently-touched) slots first to
+        // make room. A glyph that's still being drawn gets `last_used`
+        // refreshed by the hit branch above every single frame it appears, so
+        // eviction only ever reclaims combinations that stopped being drawn a
+        // while ago — a long session that floods through many distinct glyphs
+        // (unicode/emoji streaming, repeated zoom-driven subpixel bins)
+        // self-heals instead of permanently losing glyph rendering once the
+        // cap is first hit.
         const MAX_GLYPH_SLOTS: usize = 131_072;
         if self.slots.len() >= MAX_GLYPH_SLOTS {
-            return None;
+            // Evict down to 7/8 capacity rather than one slot at a time, so
+            // the O(n log n) age scan amortizes over the next ~16K misses
+            // instead of running on every single insert once the cache is
+            // steady-state at the cap.
+            let target = MAX_GLYPH_SLOTS - MAX_GLYPH_SLOTS / 8;
+            self.evict_lru(self.slots.len().saturating_sub(target));
         }
         let slot = self.rasterize_into_atlas(device, queue, rasterize);
-        self.slots.insert(key, slot);
+        self.slots.insert(
+            key,
+            CachedSlot {
+                slot,
+                last_used: self.epoch,
+            },
+        );
         slot
+    }
+
+    /// Evict the `n` coldest slots (smallest `last_used` epoch). This doesn't
+    /// (and can't cheaply) reclaim their atlas pixels — the shelf packer is
+    /// append-only, so freed map entries don't free atlas space — but that's
+    /// still a strict improvement over refusing the glyph outright: the
+    /// common case (a glyph combination that's gone cold) frees a map slot at
+    /// no rendering cost, and the rare case (an evicted glyph reappears) just
+    /// pays what an ordinary cache miss already pays — a re-rasterize and a
+    /// fresh atlas allocation — rather than rendering as permanent blank
+    /// space for the rest of the session.
+    fn evict_lru(&mut self, n: usize) {
+        let victims: Vec<CacheKey> = lru_victims(
+            self.slots.iter().map(|(&k, cached)| (k, cached.last_used)),
+            n,
+        );
+        for key in victims {
+            self.slots.remove(&key);
+        }
     }
 
     fn rasterize_into_atlas<'r>(
@@ -702,6 +768,12 @@ impl GlyphPipeline {
         screen: [f32; 2],
         data: &[GlyphInstance],
     ) {
+        // Bump the frame counter once per frame, matching every `ensure_glyph`
+        // touch this frame having already stamped `last_used` with the *prior*
+        // value — the next frame's misses (if any) evict against this new
+        // value, so a slot untouched since is unambiguously older than one
+        // touched this frame.
+        self.epoch = self.epoch.saturating_add(1);
         if self.bg_dirty {
             self.bind_group = Self::make_bg(
                 device,
@@ -847,5 +919,61 @@ mod tests {
         assert_eq!(&bytes[16..24], bytemuck::bytes_of(&i.uv));
         assert_eq!(&bytes[24..40], bytemuck::bytes_of(&i.color));
         assert_eq!(&bytes[40..44], bytemuck::bytes_of(&i.kind));
+    }
+
+    /// `lru_victims` picks the smallest-epoch entries — the ones `evict_lru`
+    /// should reclaim first when the glyph slot cache is full. Uses plain
+    /// `u32` keys (a real `CacheKey` can only be constructed from a loaded
+    /// font face, which needs a real font — see the drift guard below for the
+    /// wiring into `GlyphPipeline` itself).
+    #[test]
+    fn lru_victims_picks_the_coldest_keys() {
+        let ages = vec![(10u32, 3u64), (11, 1), (12, 4), (13, 1), (14, 5)];
+        let mut victims = lru_victims(ages.into_iter(), 2);
+        victims.sort_unstable();
+        // Keys 11 and 13 share the minimum epoch (1); everything else is
+        // strictly newer, so they're the only valid pick for n = 2.
+        assert_eq!(victims, vec![11, 13]);
+    }
+
+    #[test]
+    fn lru_victims_zero_is_a_no_op() {
+        let ages = vec![(1u32, 0u64), (2, 1)];
+        assert!(lru_victims(ages.into_iter(), 0).is_empty());
+    }
+
+    #[test]
+    fn lru_victims_caps_at_the_available_entry_count() {
+        let ages = vec![(1u32, 5u64), (2, 2)];
+        // Asking for more victims than exist must not panic or duplicate.
+        let mut victims = lru_victims(ages.into_iter(), 10);
+        victims.sort_unstable();
+        assert_eq!(victims, vec![1, 2]);
+    }
+
+    /// Drift guard (eviction-not-refusal fix). `ensure_glyph` must evict cold
+    /// slots to make room once `MAX_GLYPH_SLOTS` is hit, not silently return
+    /// `None` for every new glyph from then on — the latter turns a long
+    /// session's rare glyph combinations (unicode/emoji floods, zoom-driven
+    /// subpixel bins) into permanent blank space with no recovery short of an
+    /// explicit font-setting change. Exercising the real cache end-to-end
+    /// needs a live GPU device to rasterize into (`rasterize_into_atlas`), so
+    /// pin the wiring at the source level instead, mirroring the `imgpipe.rs`
+    /// ABA guard.
+    #[test]
+    fn ensure_glyph_evicts_instead_of_refusing_at_the_cap() {
+        let src = include_str!("glyphpipe.rs");
+        assert!(
+            src.contains("self.evict_lru("),
+            "ensure_glyph must evict cold slots when MAX_GLYPH_SLOTS is reached"
+        );
+        assert!(
+            src.contains("cached.last_used = self.epoch"),
+            "a cache hit must refresh last_used so a glyph still on screen is never evicted"
+        );
+        assert!(
+            src.contains("self.epoch = self.epoch.saturating_add(1)"),
+            "upload must advance the frame epoch so `last_used` ages actually separate over time"
+        );
     }
 }

@@ -827,7 +827,11 @@ fn install_panic_hook() {
 /// attach the parent console and wire up ONLY the std handles that aren't
 /// already inherited — so a piped/redirected stdout (`kettle --flag | grep`,
 /// `… > $PROFILE`), the trap that broke the earlier unconditional-reopen
-/// approach, is left untouched. On an
+/// approach, is left untouched. This applies to stdin too: `echo y | kettle
+/// update` (stdout/stderr left as the plain console) must keep the piped
+/// stdin intact so `std::io::stdin().is_terminal()` downstream (e.g.
+/// `update_cli`'s `--yes` guard) still sees a pipe, not a freshly reopened
+/// CONIN$ console handle. On an
 /// Explorer/Start-menu launch there is no parent console, so this is a no-op
 /// and kettle stays a pure GUI app: no console window, no flash.
 #[cfg(windows)]
@@ -882,8 +886,14 @@ fn attach_parent_console_if_needed() {
     unsafe {
         let out = GetStdHandle(STD_OUTPUT_HANDLE);
         let err = GetStdHandle(STD_ERROR_HANDLE);
+        let stdin_handle = GetStdHandle(STD_INPUT_HANDLE);
         let out_ok = is_inherited(out);
         let err_ok = is_inherited(err);
+        // Same inherited-handle check as out/err: a piped `some-cmd | kettle
+        // …` stdin is a real pipe handle here and must NOT be replaced by
+        // CONIN$ below, or the piped input is silently discarded in favor of
+        // the parent console's keyboard input.
+        let in_ok = is_inherited(stdin_handle);
         // Piped / redirected: leave the inherited handles alone so `| grep`
         // and `> file` keep working. THIS early-return is the guard that
         // prevents re-breaking the Windows CI stdout smoke test.
@@ -921,9 +931,17 @@ fn attach_parent_console_if_needed() {
                 SetStdHandle(STD_ERROR_HANDLE, h);
             }
         }
-        let h = open(CONIN);
-        if h != INVALID_HANDLE_VALUE {
-            SetStdHandle(STD_INPUT_HANDLE, h);
+        // Guarded exactly like out/err above: only reopen CONIN$ when stdin
+        // wasn't already a valid inherited handle. Without this guard, every
+        // terminal launch that needs an out/err reopen (the common case —
+        // any plain, non-redirected launch) would unconditionally overwrite
+        // an already-piped stdin with the parent console's input, even
+        // though stdin needed no fixing at all.
+        if !in_ok {
+            let h = open(CONIN);
+            if h != INVALID_HANDLE_VALUE {
+                SetStdHandle(STD_INPUT_HANDLE, h);
+            }
         }
     }
 }
@@ -1611,14 +1629,8 @@ fn main() -> anyhow::Result<()> {
             .clone()
             .or_else(default_remote_file)
             .ok_or_else(|| anyhow::anyhow!("could not resolve default remote-file path"))?;
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
+        let mut f = open_remote_command_file(&path)?;
         use std::io::Write;
-        let mut f = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&path)?;
         f.write_all(b"toggle-window\n")?;
         return Ok(());
     }
@@ -1634,20 +1646,14 @@ fn main() -> anyhow::Result<()> {
             .clone()
             .or_else(default_remote_file)
             .ok_or_else(|| anyhow::anyhow!("could not resolve default remote-file path"))?;
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
         // Each line is one command: `send-text <TEXT>\n`. Escape any
         // embedded newlines as `\\n` so a multi-line payload doesn't
         // get re-parsed as multiple commands. The receiver decodes
         // `\\n` back to `\n` before writing to the PTY.
         let encoded = text.replace('\n', "\\n");
         let line = format!("send-text {encoded}\n");
+        let mut f = open_remote_command_file(&path)?;
         use std::io::Write;
-        let mut f = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&path)?;
         f.write_all(line.as_bytes())?;
         return Ok(());
     }
@@ -1770,6 +1776,72 @@ fn main() -> anyhow::Result<()> {
 /// `Config::default_path`.
 fn default_remote_file() -> Option<std::path::PathBuf> {
     kettle_config::Config::default_path().and_then(|p| p.parent().map(|d| d.join("remote.cmd")))
+}
+
+/// Open (creating if needed) the remote-command file that `--toggle` and
+/// `--remote-send` append control lines to, and create its parent directory
+/// too — the default path lives under the kettle config directory, which may
+/// not exist yet on a first run.
+///
+/// Every line appended here is literal, potentially sensitive text: the
+/// exact payload a user asked to type into their terminal via
+/// `--remote-send TEXT`. Per the workspace's control-message handling rule,
+/// this must be permission-restricted rather than left to the ambient process
+/// umask — a shared multi-user Unix host with the common `022` umask would
+/// otherwise create this file world-readable (mode 644), letting any other
+/// local user read every command ever sent until the watching kettle process
+/// consumes and truncates the file.
+///
+/// Unix: parent directory is created (if needed) at `0700` and the file at
+/// `0600`, set explicitly rather than relying on the umask. `set_permissions`
+/// runs even on an already-existing file — `OpenOptions::mode` only applies
+/// the mode bits when the OS actually creates a new inode, so a file left
+/// over from before this fix (or from a custom `--remote-file` path with a
+/// wider ambient umask) is tightened on next use too, not just newly created
+/// files.
+/// Windows: no mode bits to set — NTFS has no umask/mode-word concept. The
+/// file inherits its ACL from the parent directory, which for the default
+/// path is `%APPDATA%\kettle` — already scoped to the owning user by Windows'
+/// default per-profile ACL. This assumption only holds for that default
+/// path; a `--remote-file` pointed at a directory with a loosened ACL is not
+/// re-tightened here.
+fn open_remote_command_file(path: &std::path::Path) -> std::io::Result<std::fs::File> {
+    if let Some(parent) = path.parent() {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::DirBuilderExt;
+            std::fs::DirBuilder::new()
+                .recursive(true)
+                .mode(0o700)
+                .create(parent)?;
+            // As with the file mode below: `DirBuilder::mode` only governs
+            // permissions the OS assigns at creation time (and is still
+            // subject to the process umask for the bits it does set). A
+            // parent directory left over from before this fix — or one that
+            // already existed for an unrelated reason — is untouched by
+            // `create()`, so pin it down explicitly too.
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700))?;
+        }
+        #[cfg(not(unix))]
+        {
+            std::fs::create_dir_all(parent)?;
+        }
+    }
+    let mut options = std::fs::OpenOptions::new();
+    options.create(true).append(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let file = options.open(path)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+    }
+    Ok(file)
 }
 
 /// Resolve the effective config file path from
@@ -2212,6 +2284,20 @@ mod tests {
             assert!(
                 src.contains(needle),
                 "missing inherited-handle guard token: {needle}"
+            );
+        }
+        // The stdin-specific guard: `attach_parent_console_if_needed` must
+        // also skip reopening CONIN$ when stdin is already an inherited pipe
+        // (`echo y | kettle update`), the same shape of bug the out/err
+        // guard above was added to fix. Without `if !in_ok` gating the
+        // CONIN$ reopen, any terminal launch that needs an out/err reopen
+        // (i.e. most terminal launches) unconditionally clobbers a piped
+        // stdin with the parent console's keyboard input.
+        for needle in ["in_ok", "if !in_ok"] {
+            assert!(
+                src.contains(needle),
+                "missing stdin inherited-handle guard token: {needle} \
+                 (piped stdin would be silently clobbered by CONIN$ reopen)"
             );
         }
         // Belt-and-suspenders: the earlier console-hide hack must be gone —
@@ -2904,5 +2990,73 @@ mod tests {
             text.contains("scrot") && text.contains("xdotool"),
             "harness must reference both scrot + xdotool"
         );
+    }
+
+    /// `open_remote_command_file` must not rely on the process umask: the
+    /// remote-command file carries literal `--remote-send TEXT` payloads, so
+    /// on a shared Unix host with a `022` umask it must still come out
+    /// owner-only (0600), inside an owner-only (0700) parent directory,
+    /// rather than the world-readable 644/755 the umask alone would produce.
+    /// Gated `#[cfg(unix)]` for the same reason as
+    /// `scripts_menu_shot_exists_and_executable` above: `PermissionsExt::mode`
+    /// doesn't exist on non-Unix targets.
+    #[cfg(unix)]
+    #[test]
+    fn open_remote_command_file_is_permission_restricted() {
+        use super::open_remote_command_file;
+        use std::os::unix::fs::PermissionsExt;
+        // PID + nanos, matching the collision-avoidance pattern used by
+        // `config_path_problem_catches_missing_and_directory` above.
+        let base = std::env::temp_dir().join(format!(
+            "kettle-remote-cmd-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        // A nested, not-yet-created parent dir — exercises the
+        // `create_dir_all`-equivalent path, not just the file mode.
+        let nested_parent = base.join("nested").join("kettle");
+        let path = nested_parent.join("remote.cmd");
+
+        // Simulate a permissive `022` umask by starting from wide-open perms
+        // on a freshly-made ancestor dir; the helper must still tighten what
+        // it creates below that ancestor regardless of the ambient umask.
+        std::fs::create_dir_all(&base).unwrap();
+        std::fs::set_permissions(&base, std::fs::Permissions::from_mode(0o777)).unwrap();
+
+        let file = open_remote_command_file(&path).expect("open_remote_command_file");
+        drop(file);
+
+        let dir_mode = std::fs::metadata(&nested_parent)
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(
+            dir_mode, 0o700,
+            "remote-command parent dir must be owner-only (0700), got {dir_mode:o}"
+        );
+        let file_mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(
+            file_mode, 0o600,
+            "remote-command file must be owner-only (0600), got {file_mode:o}"
+        );
+
+        // Re-opening an already-existing file (created before this fix, or
+        // widened by some external umask) must also be tightened back down —
+        // `OpenOptions::mode` only applies to a newly-created inode, so the
+        // explicit `set_permissions` after `open` is load-bearing here.
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let file = open_remote_command_file(&path).expect("re-open existing file");
+        drop(file);
+        let reopened_mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(
+            reopened_mode, 0o600,
+            "re-opening a pre-existing wider-mode file must re-tighten it to 0600, got {reopened_mode:o}"
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
     }
 }

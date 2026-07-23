@@ -1273,15 +1273,23 @@ pub struct Config {
     pub inactive_bg_color_offset: f32,
     /// Terminator parity (terminatorlib/config.py:99
     /// `split_to_group`): new splits inherit the parent's broadcast
-    /// group.
+    /// group. Parsed and validated for forward-compat (see
+    /// `docs/CONFIG.md`'s "genuine future work" table) but **not yet
+    /// read anywhere** — it needs kettle's named broadcast groups
+    /// (Bucket D) formalized first, so wiring it lives in
+    /// `kettle-ui`'s pane-split path alongside `BroadcastScope::Group`,
+    /// not here.
     pub split_to_group: bool,
     /// Terminator parity (terminatorlib/config.py:100
     /// `autoclean_groups`): remove empty broadcast groups
-    /// automatically.
+    /// automatically. Same forward-compat-stub status as
+    /// `split_to_group` above — parsed, not yet consumed.
     pub autoclean_groups: bool,
     /// Terminator parity (terminatorlib/config.py:80
     /// `always_split_with_profile`): new splits inherit the
-    /// parent pane's profile.
+    /// parent pane's profile. Parsed for forward-compat only — needs
+    /// the profile concept formalized in the pane-split path first
+    /// (see `docs/CONFIG.md`); not yet read anywhere.
     pub always_split_with_profile: bool,
     /// Terminator parity (terminatorlib/config.py:73
     /// `focus`): focus mode — click (default), sloppy (focus
@@ -1339,9 +1347,13 @@ pub struct Config {
     /// `geometry_hinting`): resize in font-step increments.
     pub geometry_hinting: bool,
     /// Terminator parity (terminatorlib/config.py:75
-    /// `extra_styling`): load extra GTK CSS per-theme.
-    /// kettle is wgpu+glyphon, not GTK — this is a no-op stub
-    /// for config compatibility.
+    /// `extra_styling`): in Terminator, loads extra GTK CSS per-theme
+    /// — moot in kettle (wgpu+glyphon, not GTK). Reinterpreted per
+    /// `docs/CONFIG.md`'s "genuine future work" table as "render
+    /// bold/italic with styled-font features even when the palette
+    /// lacks variants" — a real, not-yet-implemented render feature,
+    /// so kept parsed for forward-compat rather than dropped; not yet
+    /// read anywhere.
     pub extra_styling: bool,
     /// Terminator parity (terminatorlib/config.py:103
     /// `force_no_bell`): suppress every bell flavor. Same as
@@ -1425,17 +1437,34 @@ pub struct Config {
     pub title_inactive_bg_color: Option<Rgb>,
     /// Terminator parity (terminatorlib/config.py:127
     /// `cursor_color_default`): when true, the cursor uses the
-    /// theme's foreground color (default kettle behavior).
+    /// theme's foreground color (default kettle behavior). Parsed and
+    /// validated so a Terminator config round-trips without erroring,
+    /// but permanently a no-op by design (see `docs/CONFIG.md`'s
+    /// "won't implement" table): Terminator's two-key design
+    /// (`cursor-color = X` plus this flag to opt back out of it) is
+    /// confusing, so kettle's equivalent is simply setting/removing
+    /// `cursor-color = …` — no separate boolean is ever consulted.
     pub cursor_color_default: bool,
     /// Terminator parity (terminatorlib/config.py:117
-    /// `use_system_font`): use the OS system font.
+    /// `use_system_font`): use the OS system font. Parsed for
+    /// forward-compat only (see `docs/CONFIG.md`'s "genuine future
+    /// work" table, alongside `title_font`/`title_use_system_font`) —
+    /// needs a multi-cycle per-pane font system before it's read
+    /// anywhere.
     pub use_system_font: bool,
     /// Terminator parity (terminatorlib/config.py:116
-    /// `use_theme_colors`): use OS theme colors.
+    /// `use_theme_colors`): use OS theme colors. Same forward-compat-
+    /// stub status as `use_system_font` above — parsed, not yet
+    /// consumed.
     pub use_theme_colors: bool,
     /// Terminator parity (terminatorlib/config.py:144
     /// `http_proxy`): HTTP proxy URL for plugin HTTP requests.
-    /// No-op until the plugin Bucket-D lands.
+    /// Permanently a no-op by design (see `docs/CONFIG.md`'s "won't
+    /// implement" table), not merely "not yet": kettle has no
+    /// plugin-HTTP layer, and the self-updater's HTTPS requests are
+    /// process-wide and intentionally don't inherit a per-profile
+    /// terminal setting. Kept parse-only so a Terminator config
+    /// doesn't trip the unknown-key diagnostic.
     pub http_proxy: String,
     /// Terminator parity (terminatorlib/config.py:118
     /// `background_type`): background style.
@@ -2691,39 +2720,58 @@ impl Config {
     /// error → `(default(), [], [])`, same fallthrough as `load_from`,
     /// since the user already gets the error logged by `load_from`.
     ///
-    /// Bound the read at 1 MiB. Real configs top out around 50
-    /// KB (the bundled `docs/kettle.example.config` is 10 KB); 1 MiB is
-    /// a ~20× margin over the bundled example and ~100× over typical
-    /// user configs while staying small enough to detect a swap-attack
-    /// blob before any allocation. Same defense-in-depth shape as
-    /// `MAX_SESSION_BYTES` (session.json) and `MAX_BG_IMAGE_BYTES` (bg-image).
+    /// Reads through the same hardened `read_config_bytes` helper the
+    /// edit path (`ConfigDocument::read`, used by `persist_config_toggle` /
+    /// `append_keybind`) uses, rather than a raw `std::fs::metadata` +
+    /// `std::fs::read`. That matters here specifically because this is the
+    /// path every normal startup and every `ReloadConfig` goes through: a
+    /// separate `metadata()` size check followed by a plain `read()` is a
+    /// classic TOCTOU (the file can grow between the two calls, so the cap
+    /// below was only advisory) and gave no protection if the resolved path
+    /// is, or is swapped for, a FIFO or other special file — `std::fs::read`
+    /// would then block or stream unbounded instead of erroring. Bound the
+    /// read at 1 MiB. Real configs top out around 50 KB (the bundled
+    /// `docs/kettle.example.config` is 10 KB); 1 MiB is a ~20× margin over
+    /// the bundled example and ~100× over typical user configs while
+    /// staying small enough to detect a swap-attack blob before any
+    /// allocation. Same defense-in-depth shape as `MAX_SESSION_BYTES`
+    /// (session.json) and `MAX_BG_IMAGE_BYTES` (bg-image).
     pub fn load_from_with_diagnostics(path: &Path) -> (Config, Vec<String>, Vec<String>) {
-        if let Ok(meta) = std::fs::metadata(path)
-            && meta.len() > MAX_CONFIG_BYTES
-        {
-            log::warn!(
-                "config file {} is {} bytes (cap {MAX_CONFIG_BYTES}); \
-                 refusing to load — using defaults",
-                path.display(),
-                meta.len()
-            );
-            return (Config::default(), Vec::new(), Vec::new());
-        }
-        // Read bytes and decode by BOM rather than `read_to_string`,
-        // which hard-fails on a non-UTF-8 file. A Windows user who runs the
-        // documented `kettle --print-default-config > config` in **PowerShell
-        // 5.1** gets a UTF-16-LE-with-BOM file (5.1's `>` default encoding);
-        // `read_to_string` rejected it as invalid UTF-8, so the config was
-        // silently dropped and the user's settings just "didn't apply" with no
-        // visible reason. `decode_config_text` honors the UTF-16 LE/BE BOMs and
-        // otherwise decodes UTF-8 lossily (more forgiving than the old hard
-        // fail on a single stray byte).
-        match std::fs::read(path) {
+        // Decode by BOM rather than `read_to_string`, which hard-fails on a
+        // non-UTF-8 file. A Windows user who runs the documented `kettle
+        // --print-default-config > config` in **PowerShell 5.1** gets a
+        // UTF-16-LE-with-BOM file (5.1's `>` default encoding); `read_to_string`
+        // rejected it as invalid UTF-8, so the config was silently dropped and
+        // the user's settings just "didn't apply" with no visible reason.
+        // `decode_config_text` honors the UTF-16 LE/BE BOMs and otherwise
+        // decodes UTF-8 lossily (more forgiving than a hard fail on a single
+        // stray byte).
+        //
+        // Resolve a symlinked config to its regular-file target first, exactly
+        // as `ConfigEdit::begin` does before writing. Dotfile managers (GNU
+        // Stow, chezmoi, a manual `ln -s`) routinely make
+        // `$XDG_CONFIG_HOME/kettle/config` a symlink into a tracked repo; the
+        // low-level `read_config_bytes` reader is deliberately `O_NOFOLLOW`, so
+        // without this the read and write paths would disagree — edits would
+        // land on the real target while startup silently loaded all defaults.
+        // Fall back to the raw path when canonicalization fails (a missing
+        // config, the common case, then yields the NotFound handled below as
+        // defaults; a non-regular target is rejected by the reader itself).
+        let read_path = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+        match read_config_bytes(&read_path) {
             Ok(bytes) => {
                 let text = decode_config_text(&bytes);
                 let (cfg, unknown) = Self::parse_collect(&text);
                 let malformed = Self::detect_malformed_values(&text);
                 (cfg, unknown, malformed)
+            }
+            // `read_config_bytes` folds the size + cap into the error
+            // message itself (`InvalidData`), so surface it as-is rather
+            // than re-deriving the byte count from a second `metadata()`
+            // call.
+            Err(e) if e.kind() == std::io::ErrorKind::InvalidData => {
+                log::warn!("{e}; using defaults");
+                (Config::default(), Vec::new(), Vec::new())
             }
             Err(e) => {
                 log::warn!("could not read config {}: {e}", path.display());
@@ -6586,6 +6634,68 @@ cell-height = 1.2\n";
         );
     }
 
+    /// Drift guard: `split_to_group`, `autoclean_groups`,
+    /// `always_split_with_profile`, `cursor_color_default`,
+    /// `use_system_font`, `use_theme_colors`, `extra_styling`, and
+    /// `http_proxy` are parsed, validated, and stored on `Config` but
+    /// (as of this writing) never *read* anywhere outside this file's
+    /// own parse/default/test code — `docs/CONFIG.md`'s "Terminator-parity
+    /// config keys by disposition" table is the single source of truth for
+    /// *why* each one is inert (permanent by-design divergence vs. genuine
+    /// forward-compat future-work) and is the required companion read
+    /// before "wiring one up" or "just deleting it" — either is wrong
+    /// without checking that table first. This guard doesn't (and can't,
+    /// from a config-parsing test) verify runtime behavior; it pins that
+    /// the honest "why this is a no-op" doc comment stays attached to each
+    /// field's declaration so a future edit can't silently drop the
+    /// disclosure and leave the field looking like a live, wired setting.
+    #[test]
+    fn dead_terminator_stub_fields_document_their_own_inertness() {
+        let src = include_str!("lib.rs");
+        for (field_decl, marker) in [
+            ("pub split_to_group: bool", "not yet\n    /// read anywhere"),
+            ("pub autoclean_groups: bool", "forward-compat-stub status"),
+            (
+                "pub always_split_with_profile: bool",
+                "not yet read anywhere",
+            ),
+            (
+                "pub cursor_color_default: bool",
+                "permanently a no-op by design",
+            ),
+            ("pub use_system_font: bool", "forward-compat only"),
+            (
+                "pub use_theme_colors: bool",
+                "forward-compat-\n    /// stub",
+            ),
+            ("pub extra_styling: bool", "not yet\n    /// read anywhere"),
+            ("pub http_proxy: String", "Permanently a no-op by design"),
+        ] {
+            let decl_pos = src.find(field_decl).unwrap_or_else(|| {
+                panic!("field declaration `{field_decl}` not found in lib.rs — did it get renamed or removed? Check docs/CONFIG.md's disposition table before changing it")
+            });
+            // The marker must appear in the doc-comment block directly
+            // above the declaration, not merely somewhere earlier in the
+            // file — search a bounded window immediately preceding it.
+            // This file is full of multi-byte characters (em dashes,
+            // arrows, ...), so a raw byte offset can land mid-character;
+            // walk back to the nearest char boundary rather than let the
+            // slice panic.
+            let mut window_start = decl_pos.saturating_sub(700);
+            while window_start > 0 && !src.is_char_boundary(window_start) {
+                window_start -= 1;
+            }
+            let window = &src[window_start..decl_pos];
+            assert!(
+                window.contains(marker),
+                "expected the doc comment directly above `{field_decl}` to \
+                 contain {marker:?}, marking it as an intentionally inert \
+                 Terminator-parity stub (see docs/CONFIG.md); doc comment \
+                 window was: {window:?}"
+            );
+        }
+    }
+
     #[test]
     fn group_focus_handle_window_state_parse() {
         // Drift guard.
@@ -7728,9 +7838,9 @@ cell-height = 1.2\n";
 
     /// Drift guard: an oversized config file (swap-attack
     /// scenario; out of strict SECURITY.md scope but defense-in-depth)
-    /// must be refused via the metadata pre-check rather than read
-    /// into RAM. Asserts the 1 MiB cap is enforced and the function
-    /// falls through to Config::default() rather than allocating.
+    /// must be refused by the bounded `read_config_bytes` reader rather
+    /// than read into RAM. Asserts the 1 MiB cap is enforced and the
+    /// function falls through to Config::default() rather than allocating.
     #[test]
     fn load_from_with_diagnostics_rejects_oversize_config() {
         let dir = std::env::temp_dir().join(format!(
@@ -7760,6 +7870,47 @@ cell-height = 1.2\n";
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_dir(&dir);
     }
+
+    /// The primary startup/reload load path (`load_from_with_diagnostics`,
+    /// via `load_from`/`load()`) must go through the same hardened
+    /// `read_config_bytes` reader as the edit path, not a bare
+    /// `std::fs::read`. A non-regular file at the resolved config path
+    /// (directory, FIFO, device node, ...) must be refused rather than
+    /// blocking or streaming unbounded, and must fall through to
+    /// `Config::default()` exactly like a missing file — never panic or
+    /// hang the caller (every real caller in `kettle`/`kettle-ui` guards
+    /// with `.exists()` first, but the guard and the read are two
+    /// separate syscalls, so a TOCTOU swap for a special file must still
+    /// be handled safely here).
+    #[test]
+    fn load_from_with_diagnostics_rejects_non_regular_config_path() {
+        let dir = std::env::temp_dir().join(format!(
+            "kettle-load-from-diag-non-regular-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        // Use the directory itself as the "config path": a directory is
+        // the one non-regular-file shape that's trivially constructible
+        // on every platform (FIFOs are Unix-only; see the symlink-specific
+        // test below for Unix's other special-file guard).
+        std::fs::create_dir_all(&dir).expect("tmp dir");
+        let (cfg, unknown, malformed) = Config::load_from_with_diagnostics(&dir);
+        let default_cfg = Config::default();
+        assert_eq!(cfg.font_size, default_cfg.font_size);
+        assert!(unknown.is_empty(), "no diagnostics for a refused path");
+        assert!(malformed.is_empty(), "no diagnostics for a refused path");
+        let _ = std::fs::remove_dir(&dir);
+    }
+
+    // NB: startup config loading deliberately DOES follow a symlink to its
+    // regular-file target (dotfile managers rely on it, and the write path
+    // already does) — see `startup_load_follows_symlinked_config_to_regular_target`.
+    // The `O_NOFOLLOW` hardening lives one layer down in `read_config_bytes`
+    // / `ConfigDocument::read`, guarded by
+    // `config_reads_reject_symlinks_and_external_symlink_replacements`.
 
     #[test]
     fn detect_malformed_values_skips_empty_values() {
@@ -10055,6 +10206,39 @@ cell-height = 1.2\n";
                 .is_symlink()
         );
         assert!(!path.with_extension("bak").exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Regression guard: a dotfile-manager setup where the config file is a
+    /// symlink into a tracked repo must still load on startup. The low-level
+    /// reader is `O_NOFOLLOW`, so `load_from_with_diagnostics` resolves the
+    /// link to its regular target first — the read path must agree with the
+    /// write path (`ConfigEdit::begin`), which already follows the link.
+    #[cfg(unix)]
+    #[test]
+    fn startup_load_follows_symlinked_config_to_regular_target() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempdir_for("startup-symlink-follow");
+        let target = dir.join("real-config");
+        let link = dir.join("config");
+        std::fs::write(&target, "font-size = 17\n").unwrap();
+        symlink(&target, &link).unwrap();
+
+        let (cfg, _unknown, _malformed) = super::Config::load_from_with_diagnostics(&link);
+        assert_eq!(
+            cfg.font_size, 17.0,
+            "a symlinked config must be read through, not silently defaulted"
+        );
+
+        // A symlink whose target is a directory (not a regular file) still
+        // degrades to defaults rather than erroring the whole load.
+        let dir_target = dir.join("a-directory");
+        std::fs::create_dir(&dir_target).unwrap();
+        let bad_link = dir.join("config-to-dir");
+        symlink(&dir_target, &bad_link).unwrap();
+        let (defaulted, _, _) = super::Config::load_from_with_diagnostics(&bad_link);
+        assert_eq!(defaulted.font_size, Config::default().font_size);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

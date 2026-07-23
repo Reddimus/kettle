@@ -19,6 +19,7 @@ import shutil
 import struct
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import zlib
@@ -1116,6 +1117,54 @@ def notification_command(title: str, body: str, marker: str) -> str:
     )
 
 
+def cwd_title_command(
+    expected_path: str,
+    title: str,
+    marker: str,
+    *,
+    sleep_seconds: int = 5,
+    windows: Optional[bool] = None,
+) -> str:
+    """Build a command that `cd`s into `expected_path`, reports it as the
+    pane's cwd, sets `title` via OSC 2, emits `marker`, then sleeps so the
+    reported cwd/title stay put while the smoke polls
+    `list_panes`/`ui_geometry`.
+
+    Windows: `Set-Location` into the fixture dir, then report `$PWD.Path`
+    (native, backslash-separated, exactly what `Set-Location` resolved to)
+    via OSC 9;9 — the ConEmu/Windows Terminal "set working directory"
+    convention kettle's VT engine takes VERBATIM, no `file://` URI encoding
+    or separator translation (see `kettle-vt::extract::parse_osc9_9`). That
+    keeps the reported cwd byte-identical to `expected_path` (also
+    native-backslash), which matters because `abbreviate_home` does a
+    literal `$HOME`-prefix string match. Mirrors `notification_command`'s
+    `[Console]::Write` shape.
+    POSIX: `cd` then `printf`, reporting via OSC 7 (`file://` URI) and
+    substituting the shell's own `$PWD`, as the pre-existing Unix-only
+    smokes already did.
+
+    `windows` follows `agent_auth_command`'s override pattern: `None` (the
+    default at every call site) defers to the real host, while an explicit
+    `True`/`False` lets `live_helper_selftest` exercise both command shapes
+    from a single host OS.
+    """
+    use_windows = platform.system() == "Windows" if windows is None else windows
+    if use_windows:
+        return (
+            f"Set-Location {shell_quote(expected_path)}; "
+            "$esc=[char]27; $bel=[char]7; "
+            "[Console]::Write($esc + ']9;9;\"' + $PWD.Path + '\"' + $bel + $esc + ']2;' + "
+            f"{shell_quote(title)} + $bel); "
+            f"Write-Output {shell_quote(marker)}; "
+            f"Start-Sleep -Seconds {sleep_seconds}"
+        )
+    return (
+        f"cd {shell_quote(expected_path)}; "
+        f"printf '\\033]7;file://localhost%s\\007\\033]2;{title}\\007"
+        f"{marker}\\n' \"$PWD\"; sleep {sleep_seconds}"
+    )
+
+
 def env_flag(name: str) -> bool:
     value = os.environ.get(name, "").strip().lower()
     return value not in ("", "0", "false", "no", "off")
@@ -1271,6 +1320,37 @@ def live_helper_selftest() -> None:
     assert agent_output_contains_marker(success, output_marker, done_marker, marker)
     assert done_marker_status(f"{done_marker}:17", done_marker) == 17
     assert done_marker_status("no completion marker", done_marker) is None
+
+    # cwd_title_command: the tab-title/split-titlebar fixtures used to be
+    # POSIX-only. Exercise both command shapes from whichever host actually
+    # runs this self-test, the same `windows=`-override pattern
+    # `agent_auth_command` already uses above.
+    cwd_marker = "KETTLE_CWD_TITLE_TEST_MARKER"
+    cwd_title = "..PI-1/platform"
+    win_cwd_command = cwd_title_command(
+        r"C:\Users\test\kettle-fixture", cwd_title, cwd_marker, windows=True
+    )
+    posix_cwd_command = cwd_title_command(
+        "/tmp/kettle-fixture", cwd_title, cwd_marker, windows=False
+    )
+    # Windows: OSC 9;9 (native path, verbatim) + OSC 2, NOT the OSC 7
+    # `file://` URI shape (which would require a separator/percent-encoding
+    # translation `abbreviate_home`'s literal `$HOME`-prefix match can't
+    # tolerate).
+    assert "Set-Location" in win_cwd_command
+    assert "[Console]::Write" in win_cwd_command
+    assert "]9;9;" in win_cwd_command
+    assert "]2;" in win_cwd_command
+    assert "file://" not in win_cwd_command
+    assert f"Write-Output {shell_quote(cwd_marker)}" in win_cwd_command
+    assert "Start-Sleep -Seconds 5" in win_cwd_command
+    # POSIX: unchanged `cd` + `printf` OSC 7 shape.
+    assert "printf" in posix_cwd_command
+    assert "file://localhost" in posix_cwd_command
+    assert "Set-Location" not in posix_cwd_command
+    assert "[Console]::Write" not in posix_cwd_command
+    assert f"{cwd_marker}\\n" in posix_cwd_command
+    assert "sleep 5" in posix_cwd_command
 
 
 def nvim_marker_command(marker: str, configured: bool) -> str:
@@ -2239,12 +2319,6 @@ def run_interaction(kettle: str, root: Path) -> Path:
 
 
 def run_tab_title(kettle: str, root: Path) -> Path:
-    if platform.system() == "Windows":
-        out = root / f"tab-title-{time.strftime('%Y%m%d-%H%M%S')}"
-        out.mkdir(parents=True, exist_ok=True)
-        (out / "skipped.txt").write_text("tab-title smoke skipped on Windows\n")
-        return out
-
     out = root / f"tab-title-{time.strftime('%Y%m%d-%H%M%S')}"
     out.mkdir(parents=True, exist_ok=True)
     cfg = out / "config"
@@ -2271,13 +2345,11 @@ def run_tab_title(kettle: str, root: Path) -> Path:
     home = os.path.expanduser("~")
     expected_display = "~" + expected_path[len(home) :] if expected_path.startswith(home + os.sep) else expected_path
     marker = "KETTLE_TAB_TITLE_READY"
-    command = (
-        f"cd {shell_quote(expected_path)}; "
-        "printf '\\033]7;file://localhost%s\\007\\033]2;..PI-1/platform\\007"
-        f"{marker}\\n' \"$PWD\"; sleep 5"
-    )
+    title = "..PI-1/platform"
+    command = cwd_title_command(expected_path, title, marker)
+    extra_args = ["-e", "powershell.exe", "-NoLogo", "-NoProfile"] if platform.system() == "Windows" else []
 
-    with LiveKettle(kettle, cfg, out / "kettle.log") as live:
+    with LiveKettle(kettle, cfg, out / "kettle.log", extra_args=extra_args) as live:
         live.ctl("send_text", params={"text": command + "\n"})
         panes: Dict[str, object] = {}
         for _ in range(50):
@@ -2286,7 +2358,7 @@ def run_tab_title(kettle: str, root: Path) -> Path:
             focused = [p for p in pane_rows if isinstance(p, dict) and p.get("focused")]
             if (
                 len(focused) == 1
-                and focused[0].get("title") == "..PI-1/platform"
+                and focused[0].get("title") == title
                 and focused[0].get("cwd") == expected_path
             ):
                 break
@@ -2317,12 +2389,12 @@ def run_tab_title(kettle: str, root: Path) -> Path:
     if len(focused) != 1:
         raise SystemExit(f"tab-title smoke: expected one focused pane, got {focused}")
     pane = focused[0]
-    if pane.get("title") != "..PI-1/platform":
+    if pane.get("title") != title:
         raise SystemExit(f"tab-title smoke: raw pane title did not preserve shell title: {pane}")
     if pane.get("cwd") != expected_path:
         raise SystemExit(
-            f"tab-title smoke: pane cwd did not track OSC 7: got {pane.get('cwd')!r}, "
-            f"expected {expected_path!r}"
+            f"tab-title smoke: pane cwd did not track the shell-reported cwd: "
+            f"got {pane.get('cwd')!r}, expected {expected_path!r}"
         )
 
     tab_rows = tabs.get("tabs", [])
@@ -2347,12 +2419,6 @@ def run_tab_title(kettle: str, root: Path) -> Path:
 
 
 def run_split_titlebar(kettle: str, root: Path) -> Path:
-    if platform.system() == "Windows":
-        out = root / f"split-titlebar-{time.strftime('%Y%m%d-%H%M%S')}"
-        out.mkdir(parents=True, exist_ok=True)
-        (out / "skipped.txt").write_text("split-titlebar smoke skipped on Windows\n")
-        return out
-
     out = root / f"split-titlebar-{time.strftime('%Y%m%d-%H%M%S')}"
     out.mkdir(parents=True, exist_ok=True)
     cfg = out / "config"
@@ -2375,18 +2441,26 @@ def run_split_titlebar(kettle: str, root: Path) -> Path:
         )
         + "\n"
     )
-    nested = Path("/tmp") / f"kettle-split-titlebar-{os.getpid()}" / "Repos" / "SPI-1" / "flight-event-line-server-go"
+    # v2.38.2: `tempfile.gettempdir()` rather than a hardcoded POSIX `/tmp` —
+    # the latter is not a valid anchor on Windows (pathlib treats it as
+    # drive-relative to whatever the current drive happens to be), which is
+    # why this fixture used to be written Windows-out instead of
+    # Windows-supported.
+    nested = (
+        Path(tempfile.gettempdir())
+        / f"kettle-split-titlebar-{os.getpid()}"
+        / "Repos"
+        / "SPI-1"
+        / "flight-event-line-server-go"
+    )
     nested.mkdir(parents=True, exist_ok=True)
     expected_path = str(nested)
     marker = "KETTLE_SPLIT_TITLEBAR_READY"
     truncated_title = "..PI-1/flight-event-line-server-go"
-    command = (
-        f"cd {shell_quote(expected_path)}; "
-        "printf '\\033]7;file://localhost%s\\007\\033]2;"
-        f"{truncated_title}\\007{marker}\\n' \"$PWD\"; sleep 5"
-    )
+    command = cwd_title_command(expected_path, truncated_title, marker)
+    extra_args = ["-e", "powershell.exe", "-NoLogo", "-NoProfile"] if platform.system() == "Windows" else []
 
-    with LiveKettle(kettle, cfg, out / "kettle.log") as live:
+    with LiveKettle(kettle, cfg, out / "kettle.log", extra_args=extra_args) as live:
         live.ctl("send_text", params={"text": command + "\n"})
         for _ in range(50):
             initial = live.json_ctl("list_panes")

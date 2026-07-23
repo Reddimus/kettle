@@ -95,3 +95,70 @@ results after output, resize, or query changes.
 
 These are sourced from the two audit run outputs and the synthesis plans; pick
 them up in priority order (robustness/correctness before perf before polish).
+
+## v2.39.0 full-repository audit (2026-07-23)
+
+The whole-repository audit recorded in
+[AUDIT-2026-07-23-FULL.md](AUDIT-2026-07-23-FULL.md) confirmed 59 findings and
+shipped 52. The seven below were deliberately deferred as multi-session refactors
+or cross-crate plumbing that should not be rushed into one release:
+
+- **`app.rs` god-file split (24.7k lines).** Extract along the seams the
+  `Action` enum already implies — `action_dispatch`, drag/menu modules reusing
+  the `detach.rs` pattern, `session_glue` (ctl/MCP/recorder wiring), and
+  `window_lifecycle` — keeping `App` as a struct plus small `impl App` blocks
+  split across files. Best paired with making per-event handlers return a typed
+  `Outcome` list (pure deciders + thin applier) so the source-text drift guards
+  become behavioural unit tests. Supersedes the earlier `app.rs` entry above.
+- **`kettle-render/src/lib.rs` module split.** The remaining ~11k-line file still
+  interleaves the `impl Renderer` frame pipeline with overlay/menu data types,
+  GPU adapter selection, the screenshot capture pipeline, and text-fit geometry
+  helpers, even though eight sibling submodules were already carved out. Extract
+  in isolation order: `gpu.rs` (adapter selection, no `Renderer` state) →
+  `screenshot.rs` → `overlays.rs` (data structs) → `text_fit.rs` (pure helpers).
+- **OSC 52 selection target (`p`/`s` vs `c`).** `TermEvent::ClipboardStore/Load`
+  carry an `alacritty_terminal::term::ClipboardType`; route `Selection` through
+  the existing arboard `LinuxClipboardKind::Primary` path used by
+  `copy_selection`/`paste_primary`. Needs the event→handler plumbing, not an
+  `app.rs`-local change. (Overlaps the older OSC 52 entry above.)
+- **OSC 133 prompt marks desync once scrollback wraps.** Absolute line numbers
+  drift after the grid's history ring hits `max_scroll_limit`
+  (`total_lines()`/`history_size()` both cap). Needs an anchor that survives the
+  ring cap rather than a raw absolute line index.
+- **Global kitty `a=d,d=f` animation clear is dropped.** `kitty.rs` clears its
+  own frame/anim state but the clear never reaches the renderer (only `id != 0`
+  stores round-trip), so cleared animations keep playing. Needs a
+  `Chunk::PtyReply`-style clear signal across the vt→render boundary.
+- **State/lock-file `0600` is a no-op on Windows.** A correct ACL needs new
+  `windows-sys` `Win32_Security` / `Win32_Security_Authorization` features and a
+  `SetNamedSecurityInfoW` owner-only DACL on the lock/state files.
+- **Command palette / layout picker / SSH launcher stay single-line bars.** Fold
+  them into the responsive, multi-row layout the search bar gained in v2.38.0
+  (also makes room for per-row keybind hints). Extends the vertical-list-pickers
+  entry above.
+- **Clone-safe non-blocking ctl write (`kettle-ctl` transport).** The audit
+  finding that `write_all_until` toggles `O_NONBLOCK` on the shared open file
+  description (so a concurrently-used `try_clone`d sibling could observe
+  `WouldBlock` during a write) is real, but the attempted fix — dropping the
+  fd flag and relying on per-`send` `MSG_DONTWAIT` — hangs on macOS, which does
+  not reliably honor `MSG_DONTWAIT` on AF_UNIX stream sockets (a full send
+  buffer blocks forever instead of returning `WouldBlock`). The fd-level
+  `O_NONBLOCK` guard is therefore retained. A clone-safe rewrite must keep the
+  fd blocking and achieve per-write non-blocking another way — e.g. `poll`ing
+  `POLLOUT` before each `send` on a still-blocking fd, or writing through a
+  dup'd fd whose flags are private — verified on real macOS. The client's
+  request/response is exclusive today, so the shared-flag window is not
+  currently reachable.
+- **Update-archive extract residual on Linux (post-fix hardening).** v2.39.0
+  closed the verify/extract TOCTOU on Windows outright (a mandatory
+  `LockFileEx` range lock) and closed the delete-and-recreate variant on Linux
+  (verify and extract now read the *same* handle, not a re-opened path). What
+  remains on Linux is an in-place overwrite of the *same inode* by a same-user
+  process that already holds a writable fd on the private `0600` temp archive,
+  in the narrow window between the hash read and the extract read — no privilege
+  boundary is crossed (the attacker is already the same user). The complete
+  guarantee is to stop reading the archive from disk twice: read it once into
+  memory (bounded by the existing 256 MiB `MAX_ARTIFACT_BYTES` cap), hash that
+  buffer, and extract from a `std::io::Cursor` over it. Deferred as a clean but
+  non-trivial refactor of `verify_sha256`/`extract_archive` in
+  `crates/kettle-update/src/install.rs`.

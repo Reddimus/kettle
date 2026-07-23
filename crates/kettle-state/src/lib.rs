@@ -7,7 +7,7 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
@@ -163,10 +163,38 @@ pub fn atomic_create_new(
         Err(error) if error.kind() == io::ErrorKind::AlreadyExists => return Ok(false),
         Err(error) => return Err(error),
     }
-    fs::remove_file(&staged_path)?;
+    // `destination` now durably owns the staged content via the hard link:
+    // the create has already succeeded regardless of what happens to the
+    // staged temporary name from here on. Disarm `cleanup` immediately so a
+    // transient failure to remove the now-redundant staged link (observed on
+    // Windows when antivirus/indexing software briefly holds a just-created
+    // file open) cannot make this function report failure for an operation
+    // that already durably succeeded, and cannot leave a stray duplicate of
+    // (potentially sensitive) state on disk with nothing left to retry it.
     cleanup.0 = None;
+    remove_staged_best_effort(&staged_path);
     sync_parent(parent)?;
     Ok(true)
+}
+
+/// Best-effort removal of a staged temporary file whose content has already
+/// been durably published under its destination (via a hard link). A short,
+/// bounded retry loop absorbs transient sharing violations; any failure that
+/// survives it is intentionally swallowed; the caller's operation already
+/// succeeded and the staged name is now a harmless, otherwise-unreferenced
+/// duplicate rather than the only copy of the data.
+fn remove_staged_best_effort(path: &Path) {
+    const ATTEMPTS: u32 = 5;
+    for attempt in 0..ATTEMPTS {
+        match fs::remove_file(path) {
+            Ok(()) => return,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return,
+            Err(_) if attempt + 1 < ATTEMPTS => {
+                std::thread::sleep(Duration::from_millis(10 * u64::from(attempt + 1)));
+            }
+            Err(_) => return,
+        }
+    }
 }
 
 fn create_staged_file(
@@ -218,16 +246,30 @@ impl Drop for TempCleanup {
 }
 
 /// An exclusive advisory lock released when this value is dropped.
+#[derive(Debug)]
 pub struct ExclusiveFileLock {
     file: File,
 }
 
 impl ExclusiveFileLock {
     /// Block until an exclusive lock on `path` is acquired.
+    ///
+    /// This blocks indefinitely: a holder that is merely stuck (suspended,
+    /// debugger-attached) rather than crashed keeps every other caller
+    /// waiting forever with no diagnostic. Prefer [`Self::acquire_timeout`]
+    /// for call sites that must surface a stuck lock as an actionable error
+    /// instead of an indefinite hang.
     pub fn acquire(path: &Path) -> io::Result<Self> {
         let file = open_lock_file(path)?;
         fs4::FileExt::lock(&file)?;
         Ok(Self { file })
+    }
+
+    /// Poll for an exclusive lock on `path`, giving up with an
+    /// `io::ErrorKind::TimedOut` error once `timeout` elapses instead of
+    /// blocking forever.
+    pub fn acquire_timeout(path: &Path, timeout: Duration) -> io::Result<Self> {
+        poll_with_timeout(path, timeout, Self::try_acquire)
     }
 
     /// Attempt to acquire an exclusive lock without blocking.
@@ -248,16 +290,28 @@ impl Drop for ExclusiveFileLock {
 }
 
 /// A shared advisory lock released when this value is dropped.
+#[derive(Debug)]
 pub struct SharedFileLock {
     file: File,
 }
 
 impl SharedFileLock {
     /// Block until a shared lock on `path` is acquired.
+    ///
+    /// This blocks indefinitely; see [`ExclusiveFileLock::acquire`] for why
+    /// [`Self::acquire_timeout`] is preferable at call sites that must not
+    /// hang forever behind a stuck exclusive holder.
     pub fn acquire(path: &Path) -> io::Result<Self> {
         let file = open_lock_file(path)?;
         fs4::FileExt::lock_shared(&file)?;
         Ok(Self { file })
+    }
+
+    /// Poll for a shared lock on `path`, giving up with an
+    /// `io::ErrorKind::TimedOut` error once `timeout` elapses instead of
+    /// blocking forever.
+    pub fn acquire_timeout(path: &Path, timeout: Duration) -> io::Result<Self> {
+        poll_with_timeout(path, timeout, Self::try_acquire)
     }
 
     /// Attempt to acquire a shared lock without blocking.
@@ -274,6 +328,38 @@ impl SharedFileLock {
 impl Drop for SharedFileLock {
     fn drop(&mut self) {
         let _ = fs4::FileExt::unlock(&self.file);
+    }
+}
+
+/// Poll `try_once` with capped exponential backoff until it yields a value
+/// or `timeout` elapses, in which case a distinct `io::ErrorKind::TimedOut`
+/// error is returned. This gives lock call sites a bounded-wait option
+/// between `acquire`'s indefinite block and `try_acquire`'s instant failure,
+/// so a holder that is stuck rather than crashed surfaces as an actionable
+/// error instead of silently wedging every other caller forever.
+fn poll_with_timeout<T>(
+    path: &Path,
+    timeout: Duration,
+    mut try_once: impl FnMut(&Path) -> io::Result<Option<T>>,
+) -> io::Result<T> {
+    let deadline = Instant::now() + timeout;
+    let mut backoff = Duration::from_millis(1);
+    loop {
+        if let Some(value) = try_once(path)? {
+            return Ok(value);
+        }
+        let now = Instant::now();
+        if now >= deadline {
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                format!(
+                    "timed out after {timeout:?} waiting for a lock on {}",
+                    path.display()
+                ),
+            ));
+        }
+        std::thread::sleep(backoff.min(deadline - now));
+        backoff = (backoff * 2).min(Duration::from_millis(100));
     }
 }
 
@@ -572,6 +658,45 @@ mod tests {
     }
 
     #[test]
+    fn acquire_timeout_returns_immediately_when_uncontended() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.lock");
+        let started = Instant::now();
+        let lock = ExclusiveFileLock::acquire_timeout(&path, Duration::from_secs(5)).unwrap();
+        // No holder was contending, so this must not consume any meaningful
+        // slice of the generous timeout budget.
+        assert!(started.elapsed() < Duration::from_secs(1));
+        drop(lock);
+    }
+
+    #[test]
+    fn acquire_timeout_gives_up_on_a_stuck_holder_instead_of_hanging() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.lock");
+        let holder = ExclusiveFileLock::acquire(&path).unwrap();
+
+        let error =
+            ExclusiveFileLock::acquire_timeout(&path, Duration::from_millis(50)).unwrap_err();
+
+        assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+        drop(holder);
+        // The lock is genuinely released once the stuck holder goes away.
+        assert!(ExclusiveFileLock::try_acquire(&path).unwrap().is_some());
+    }
+
+    #[test]
+    fn shared_acquire_timeout_gives_up_behind_an_exclusive_holder() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.lock");
+        let holder = ExclusiveFileLock::acquire(&path).unwrap();
+
+        let error = SharedFileLock::acquire_timeout(&path, Duration::from_millis(50)).unwrap_err();
+
+        assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+        drop(holder);
+    }
+
+    #[test]
     fn shared_locks_coexist_and_block_an_exclusive_lock() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("state.lock");
@@ -608,5 +733,37 @@ mod tests {
             fs::metadata(target).unwrap().permissions().mode() & 0o777,
             0o644
         );
+    }
+
+    #[test]
+    fn atomic_create_new_leaves_no_stray_staged_file_beside_the_destination() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.bak");
+        assert!(atomic_create_new(&path, b"data", AtomicWriteOptions::PRIVATE).unwrap());
+        assert!(fs::read_dir(dir.path()).unwrap().all(|entry| {
+            !entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .contains(".tmp.")
+        }));
+    }
+
+    #[test]
+    fn remove_staged_best_effort_removes_an_existing_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("staged.tmp");
+        fs::write(&path, b"redundant once hard-linked to its destination").unwrap();
+        remove_staged_best_effort(&path);
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn remove_staged_best_effort_tolerates_an_already_missing_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("never-created.tmp");
+        // Must return promptly without panicking: the caller's operation
+        // already succeeded, so there is nothing left to report.
+        remove_staged_best_effort(&path);
     }
 }

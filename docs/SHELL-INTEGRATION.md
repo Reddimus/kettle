@@ -148,42 +148,30 @@ PowerShell Core 7+ (any OS). To find your profile path:
 `echo $PROFILE`, then `code $PROFILE` to edit (it may not exist yet
 — PowerShell will create it on first save).
 
+Unlike bash/zsh/fish, there's no minimal inline snippet for
+PowerShell here — the real prompt-wrapper (stash-and-forward the
+user's existing `prompt` function, restore OSC 7 cwd reporting,
+guard against a throwing prompt) is easy to get subtly wrong by
+hand. **Always install it with the one-liner:**
+
 ```powershell
-if (-not $global:__kettle_prompt_installed) {
-    # Stash the user's pre-existing `prompt` so the kettle wrapper
-    # calls into it (preserves starship / oh-my-posh / posh-git).
-    $global:__kettle_original_prompt = (Get-Item function:prompt -ErrorAction SilentlyContinue)
-
-    function global:prompt {
-        $code = $LASTEXITCODE
-        if ($null -eq $code) { $code = 0 }
-        $esc = [char]27; $bel = [char]7
-        # D (last exit) + A (this prompt's start).
-        [Console]::Write("$esc]133;D;$code$bel$esc]133;A$bel")
-        $rendered = if ($null -ne $global:__kettle_original_prompt) {
-            & $global:__kettle_original_prompt
-        } else {
-            "PS $($ExecutionContext.SessionState.Path.CurrentLocation)$('>' * ($NestedPromptLevel + 1)) "
-        }
-        [Console]::Write("$esc]133;B$bel")   # B = end of prompt.
-        return $rendered
-    }
-
-    # C = command started. PSReadLine ships with PS 5.1+ on Windows;
-    # silently skipped if the user has it disabled.
-    if (Get-Module -ListAvailable PSReadLine) {
-        Set-PSReadLineKeyHandler -Key Enter -ScriptBlock {
-            [Console]::Write([char]27 + ']133;C' + [char]7)
-            [Microsoft.PowerShell.PSConsoleReadLine]::AcceptLine()
-        }
-    }
-    $global:__kettle_prompt_installed = $true
-}
+kettle --shell-integration powershell >> $PROFILE
 ```
 
-The `$global:__kettle_prompt_installed` flag makes the snippet
-idempotent: re-sourcing `$PROFILE` (after a config tweak, after a
-new shell session loads it) won't stack multiple prompt wrappers.
+(A pre-2.30-ish hand-transcription of this snippet that captures
+`Get-Item function:prompt` directly, instead of its `.ScriptBlock`,
+and calls it back with `&` — with no `try`/`catch` — will recurse
+forever the moment the wrapper redefines `prompt`, since `&` on a
+`FunctionInfo` re-resolves the *live* `prompt` function rather than
+invoking a frozen copy. `shell-integration/kettle.ps1` fixes this by
+capturing `.ScriptBlock` and wrapping the callback in `try`/`catch`;
+always regenerate from the one-liner above rather than copying an
+inline snippet by hand.)
+
+The generated snippet guards itself with a
+`$global:__kettle_prompt_installed` flag, so re-sourcing `$PROFILE`
+(after a config tweak, after a new shell session loads it) won't
+stack multiple prompt wrappers.
 
 ## Marks
 

@@ -36,6 +36,22 @@ use std::sync::{Arc, Mutex};
 /// with massive headroom and stops the bomb shape early.
 const MAX_LUA_SEND_TEXT_BYTES: usize = 1 << 20;
 
+/// Aggregate cap (bytes) on the SUM of every currently-queued
+/// `SendText` command's payload, independent of `MAX_LUA_SEND_TEXT_BYTES`
+/// (per-call) and `MAX_PENDING_COMMANDS` (per-entry-count). Without this,
+/// a script could stay under both existing caps yet still bankrupt kettle:
+/// `for i=1,1024 do kettle.send_text(string.rep('X', 1<<20)) end` queues
+/// 1024 commands (well under the 1024-entry cap) each exactly at the
+/// 1 MiB per-call cap, and `pending_lua_send` (app.rs) concatenates every
+/// queued `SendText` into one growing `Vec<u8>` before writing it to the
+/// PTY in a single call — roughly a 1 GiB allocation. 8 MiB (8×the
+/// per-call cap) covers pasting several large snippets back to back with
+/// real headroom while making the aggregate-bomb shape impossible: past
+/// this cap, `bounded_push` drops further `SendText` pushes (loud
+/// `log::warn`, same silent-drop contract as the other Lua caps) until
+/// `drain_commands` resets the running total.
+const MAX_LUA_PENDING_SEND_BYTES: usize = 8 << 20;
+
 /// Per-call cap on `kettle.notify(title, body)`. Real
 /// desktop notifications are tiny (titles ~30 chars, bodies a
 /// sentence or two). 8 KiB per field is ~100× over realistic
@@ -70,27 +86,62 @@ static LUA_EVENTS_WARNED: AtomicBool = AtomicBool::new(false);
 static LUA_MENU_WARNED: AtomicBool = AtomicBool::new(false);
 static LUA_URL_WARNED: AtomicBool = AtomicBool::new(false);
 
-/// Locked push with queue-length cap. All four
-/// `kettle.*` side-effect callbacks route through this so the
-/// `MAX_PENDING_COMMANDS` invariant is enforced exactly once,
-/// not duplicated four times. Returns `Ok(())` whether or not
-/// the push succeeded — from Lua's perspective the call is
-/// best-effort and dropping past the cap is preferable to
-/// raising an error that user scripts don't expect to handle.
-/// A poisoned mutex is the only hard error (it means kettle is
-/// already in an unrecoverable state — surface it).
-fn bounded_push(pending: &Mutex<Vec<LuaCommand>>, cmd: LuaCommand) -> mlua::Result<()> {
-    let mut v = pending
+/// Backing store for the Lua side-effect command queue. Holds the
+/// command list plus a running total of bytes queued via `SendText`
+/// specifically, so `bounded_push` can enforce `MAX_LUA_PENDING_SEND_BYTES`
+/// (an aggregate cap) alongside `MAX_PENDING_COMMANDS` (an entry-count cap)
+/// without a second lock or a separate atomic that could drift out of sync
+/// with the actual queue contents. Both fields live behind the same
+/// `Mutex`, so a push that updates one always sees a consistent view of
+/// the other.
+#[derive(Default)]
+struct PendingQueue {
+    commands: Vec<LuaCommand>,
+    /// Sum of `s.len()` for every `LuaCommand::SendText(s)` currently
+    /// in `commands`. Reset to 0 whenever `commands` is drained (the
+    /// bytes it was tracking no longer exist in the queue).
+    send_text_bytes: usize,
+}
+
+/// Locked push with queue-length AND (for `SendText`)
+/// aggregate-byte caps. All four `kettle.*` side-effect callbacks route
+/// through this so the `MAX_PENDING_COMMANDS` invariant is enforced
+/// exactly once, not duplicated four times. Returns `Ok(())` whether or
+/// not the push succeeded — from Lua's perspective the call is
+/// best-effort and dropping past a cap is preferable to raising an error
+/// that user scripts don't expect to handle. A poisoned mutex is the
+/// only hard error (it means kettle is already in an unrecoverable
+/// state — surface it).
+fn bounded_push(pending: &Mutex<PendingQueue>, cmd: LuaCommand) -> mlua::Result<()> {
+    let mut q = pending
         .lock()
         .map_err(|e| mlua::Error::external(format!("pending mutex: {e}")))?;
-    if v.len() >= MAX_PENDING_COMMANDS {
+    if q.commands.len() >= MAX_PENDING_COMMANDS {
         log::warn!(
             "lua command queue saturated at {MAX_PENDING_COMMANDS}; dropping {:?}",
             std::mem::discriminant(&cmd)
         );
         return Ok(());
     }
-    v.push(cmd);
+    // Aggregate byte cap only applies to SendText: it's the only
+    // variant whose payload both scales with a hostile loop AND gets
+    // concatenated into one unbounded buffer downstream (app.rs's
+    // pending_lua_send). Checked (and, on admission, accounted) under
+    // the same lock as the length check above so the two invariants
+    // can never observe a torn intermediate state.
+    if let LuaCommand::SendText(ref s) = cmd {
+        let prospective_total = q.send_text_bytes.saturating_add(s.len());
+        if prospective_total > MAX_LUA_PENDING_SEND_BYTES {
+            log::warn!(
+                "lua send_text queue saturated at {} aggregate bytes (cap {MAX_LUA_PENDING_SEND_BYTES}); dropping {} more bytes",
+                q.send_text_bytes,
+                s.len()
+            );
+            return Ok(());
+        }
+        q.send_text_bytes = prospective_total;
+    }
+    q.commands.push(cmd);
     Ok(())
 }
 
@@ -214,9 +265,11 @@ const DEFAULT_MAX_HOOK_FIRES: u64 = 128;
 
 pub struct LuaEngine {
     lua: Lua,
-    /// Side-effect commands queued by Lua functions. Drained by
-    /// the App after exec_file returns.
-    pending: Arc<Mutex<Vec<LuaCommand>>>,
+    /// Side-effect commands queued by Lua functions (plus the
+    /// running `SendText` byte total used to enforce
+    /// `MAX_LUA_PENDING_SEND_BYTES`). Drained by the App after
+    /// exec_file returns.
+    pending: Arc<Mutex<PendingQueue>>,
     /// Instruction-budget watchdog. `hook_fires` counts how
     /// many times the every-N-instructions hook has fired since the current
     /// top-level Lua invocation began (reset by `arm_budget`); when it exceeds
@@ -351,7 +404,7 @@ impl LuaEngine {
             )
             .context("install Lua instruction-budget hook")?;
         }
-        let pending: Arc<Mutex<Vec<LuaCommand>>> = Arc::new(Mutex::new(Vec::new()));
+        let pending: Arc<Mutex<PendingQueue>> = Arc::new(Mutex::new(PendingQueue::default()));
         let kettle_tbl = lua.create_table().context("create kettle table")?;
         // Expose values as callable functions (not bare strings) so
         // user scripts use the conventional `kettle.version()` form.
@@ -384,8 +437,10 @@ impl LuaEngine {
         // focused pane's PTY. Lua-side it looks synchronous, but
         // the actual PTY write happens once the script returns —
         // a kettle script can't observe its own typing.
-        // Per-call cap on `s` (MAX_LUA_SEND_TEXT_BYTES)
-        // and global cap on the queue length (MAX_PENDING_COMMANDS)
+        // Per-call cap on `s` (MAX_LUA_SEND_TEXT_BYTES), global cap
+        // on the queue length (MAX_PENDING_COMMANDS), AND an aggregate
+        // cap on the SUM of every queued SendText's bytes
+        // (MAX_LUA_PENDING_SEND_BYTES, enforced inside bounded_push)
         // — see the constants above for the threat-model rationale.
         let pending_for_send = Arc::clone(&pending);
         kettle_tbl
@@ -730,11 +785,15 @@ impl LuaEngine {
 
     /// Drain pending side-effect commands queued by Lua
     /// during the most recent script execution. Returns whatever
-    /// the script accumulated; the buffer is reset.
+    /// the script accumulated; the buffer (and the `SendText`
+    /// aggregate-byte counter it was gating) is reset.
     pub fn drain_commands(&self) -> Vec<LuaCommand> {
         self.pending
             .lock()
-            .map(|mut v| std::mem::take(&mut *v))
+            .map(|mut q| {
+                q.send_text_bytes = 0;
+                std::mem::take(&mut q.commands)
+            })
             .unwrap_or_default()
     }
 
@@ -1481,5 +1540,76 @@ mod tests {
             "queue must cap at MAX_PENDING_COMMANDS, not {}",
             cmds.len()
         );
+    }
+
+    /// The aggregate SUM of queued `SendText` bytes must cap at
+    /// `MAX_LUA_PENDING_SEND_BYTES`, independent of the per-call cap
+    /// (`MAX_LUA_SEND_TEXT_BYTES`) and the per-entry-count cap
+    /// (`MAX_PENDING_COMMANDS`). Reproduces the audit scenario almost
+    /// verbatim: a script that queues many commands each individually
+    /// under the per-call cap, and far fewer than the entry-count cap,
+    /// but whose combined payload would otherwise be huge once
+    /// concatenated at the App's PTY-write step.
+    #[test]
+    fn send_text_queue_caps_aggregate_bytes() {
+        let eng = LuaEngine::new("Default").expect("init");
+        let chunk = super::MAX_LUA_SEND_TEXT_BYTES; // exactly at the per-call cap.
+        let calls = (super::MAX_LUA_PENDING_SEND_BYTES / chunk) + 1; // one call past the aggregate cap.
+        eng.eval_str(&format!(
+            "for _ = 1, {calls} do kettle.send_text(string.rep('X', {chunk})) end; return true"
+        ))
+        .expect("script runs (over-cap sends drop silently, they don't error)");
+        let cmds = eng.drain_commands();
+        let expected_admitted = super::MAX_LUA_PENDING_SEND_BYTES / chunk;
+        assert_eq!(
+            cmds.len(),
+            expected_admitted,
+            "expected exactly {expected_admitted} full-size sends admitted before the \
+             aggregate cap saturates, got {} (queue: lengths {:?})",
+            cmds.len(),
+            cmds.iter()
+                .map(|c| match c {
+                    LuaCommand::SendText(s) => s.len(),
+                    other => panic!("unexpected non-SendText command: {other:?}"),
+                })
+                .collect::<Vec<_>>()
+        );
+        let total: usize = cmds
+            .iter()
+            .map(|c| match c {
+                LuaCommand::SendText(s) => s.len(),
+                _ => unreachable!(),
+            })
+            .sum();
+        assert!(
+            total <= super::MAX_LUA_PENDING_SEND_BYTES,
+            "aggregate queued bytes {total} exceeded the cap {}",
+            super::MAX_LUA_PENDING_SEND_BYTES
+        );
+
+        // While the aggregate cap is saturated, even a tiny SendText is
+        // dropped — the cap gates the running total, not just individual
+        // oversized calls.
+        eng.eval_str(&format!(
+            "for _ = 1, {calls} do kettle.send_text(string.rep('X', {chunk})) end \
+             kettle.send_text('tiny'); return true"
+        ))
+        .expect("script runs");
+        let cmds2 = eng.drain_commands();
+        assert!(
+            cmds2
+                .iter()
+                .all(|c| !matches!(c, LuaCommand::SendText(s) if s == "tiny")),
+            "a tiny send_text must still be dropped once the aggregate byte \
+             cap is already saturated: {cmds2:?}"
+        );
+
+        // Drain resets the running total: after draining, the queue can
+        // accept fresh SendText bytes up to the cap again.
+        eng.eval_str("kettle.send_text('post-drain')")
+            .expect("eval");
+        let cmds3 = eng.drain_commands();
+        assert_eq!(cmds3.len(), 1);
+        assert!(matches!(&cmds3[0], LuaCommand::SendText(s) if s == "post-drain"));
     }
 }

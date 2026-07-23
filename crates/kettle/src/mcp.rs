@@ -17,6 +17,16 @@ const MCP_PROTOCOL_VERSION: &str = "2025-11-25";
 const MCP_COMPAT_VERSION: &str = "2025-06-18";
 const MAX_MCP_REQUEST_BYTES: usize = 1024 * 1024;
 const MAX_MCP_RESPONSE_BYTES: usize = 768 * 1024;
+// A 1 MiB line can pack roughly a million `[`/`{` characters, and byte size
+// alone does not bound parser recursion depth. `serde_json`'s own recursive-
+// descent parser refuses to recurse past its internal default (128, absent
+// the opt-in `unbounded_depth` feature), but that is an implementation
+// detail of a dependency this crate does not own: a future Cargo feature-
+// unification change elsewhere in the workspace could silently disable it.
+// Reject over-nested input ourselves, before it ever reaches
+// `serde_json::from_str`, so the stdio loop's recursion bound is explicit and
+// independent of how `serde_json` happens to be compiled.
+const MAX_JSON_NESTING_DEPTH: u32 = 64;
 const TOOL_WORKERS: usize = 4;
 const TOOL_QUEUE_CAPACITY: usize = 16;
 const SERVER_NOT_INITIALIZED: i64 = -32002;
@@ -133,6 +143,14 @@ pub fn run_mcp() -> i32 {
                 continue;
             }
         };
+        if json_nesting_too_deep(text, MAX_JSON_NESTING_DEPTH) {
+            let _ = responses_tx.send(error_response(
+                Value::Null,
+                -32700,
+                &format!("JSON nesting exceeds {MAX_JSON_NESTING_DEPTH} levels"),
+            ));
+            continue;
+        }
         let message: Value = match serde_json::from_str(text) {
             Ok(message) => message,
             Err(error) => {
@@ -584,6 +602,43 @@ fn write_message(writer: &mut impl Write, message: &Value) -> std::io::Result<()
     writer.flush()
 }
 
+/// Scan raw (not-yet-parsed) JSON text for `{`/`[` nesting deeper than
+/// `limit`, without allocating or recursing. Bracket characters inside JSON
+/// string literals (including escaped quotes and backslashes) are skipped so
+/// they are never mistaken for structural nesting; this only needs to track
+/// "am I inside a string" well enough to find the real closing quote, not to
+/// fully validate escape sequences, since malformed strings are still caught
+/// by `serde_json::from_str` afterwards.
+fn json_nesting_too_deep(text: &str, limit: u32) -> bool {
+    let mut depth: u32 = 0;
+    let mut in_string = false;
+    let mut escaped = false;
+    for byte in text.bytes() {
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if byte == b'\\' {
+                escaped = true;
+            } else if byte == b'"' {
+                in_string = false;
+            }
+            continue;
+        }
+        match byte {
+            b'"' => in_string = true,
+            b'{' | b'[' => {
+                depth += 1;
+                if depth > limit {
+                    return true;
+                }
+            }
+            b'}' | b']' => depth = depth.saturating_sub(1),
+            _ => {}
+        }
+    }
+    false
+}
+
 #[derive(Debug)]
 enum ReadLineError {
     TooLarge,
@@ -898,6 +953,60 @@ mod tests {
         let fallback: Value = serde_json::from_slice(&output).unwrap();
         assert!(fallback["id"].is_null());
         assert_eq!(fallback["error"]["code"], -32603);
+    }
+
+    #[test]
+    fn json_nesting_rejects_only_past_the_limit() {
+        // Exactly at the limit: allowed.
+        let at_limit = format!("{}{}", "[".repeat(64), "]".repeat(64));
+        assert!(!json_nesting_too_deep(&at_limit, 64));
+        // One level past the limit: rejected.
+        let over_limit = format!("{}{}", "[".repeat(65), "]".repeat(65));
+        assert!(json_nesting_too_deep(&over_limit, 64));
+        // Mixed object/array nesting is counted the same way.
+        let mixed = "{\"a\":".repeat(65) + "1" + &"}".repeat(65);
+        assert!(json_nesting_too_deep(&mixed, 64));
+        // A shallow, realistic request is never affected.
+        let request = json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"kettle_run","arguments":{"command":["echo","hi"]}}});
+        assert!(!json_nesting_too_deep(&request.to_string(), 64));
+    }
+
+    #[test]
+    fn json_nesting_ignores_brackets_inside_strings() {
+        // A million-bracket string body must not itself be counted as
+        // structural nesting: only real, unescaped structural brackets do.
+        let text = format!("{{\"text\":\"{}\"}}", "[".repeat(1_000_000));
+        assert!(!json_nesting_too_deep(&text, 64));
+        // An escaped quote inside a string must not prematurely end the
+        // string and let a following bracket be miscounted as structural.
+        let escaped_quote = "{\"a\":\"\\\"[[[[\", \"b\":1}";
+        assert!(!json_nesting_too_deep(escaped_quote, 2));
+    }
+
+    #[test]
+    fn deeply_nested_line_is_rejected_before_parsing() {
+        let (jobs_tx, _jobs_rx) = crossbeam_channel::bounded(1);
+        let (responses_tx, responses_rx) = crossbeam_channel::bounded(1);
+        let pending = Arc::new(Mutex::new(HashMap::new()));
+        let mut lifecycle = Lifecycle::Ready;
+        let text = format!(
+            "{{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"ping\",\"params\":{}",
+            "[".repeat(1_000_000)
+        );
+        // This mirrors the stdio loop's own depth check, run against a line
+        // that would otherwise need a million-deep parser recursion.
+        assert!(json_nesting_too_deep(&text, MAX_JSON_NESTING_DEPTH));
+        // The loop never even reaches `dispatch_message` for such a line; a
+        // well-formed, shallow message on the same lifecycle still works.
+        dispatch_message(
+            json!({"jsonrpc":"2.0","id":1,"method":"ping"}),
+            &mut lifecycle,
+            &jobs_tx,
+            &responses_tx,
+            &pending,
+        );
+        let response = responses_rx.recv().unwrap();
+        assert_eq!(response["result"], json!({}));
     }
 
     #[test]

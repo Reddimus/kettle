@@ -1,8 +1,14 @@
 # Per-pane titlebar — design
 
-> Status: design only. End-state implementation spans multiple phases
-> because it touches layout math, render order, hit-testing, focus +
-> group indicators, and the Edit*Title overlay.
+> Status: **Shipped in v1.30.0** (all 10 Bucket-D titlebar phases
+> complete, closed by the `EditPaneGroup` action + `[group-name]`
+> prefix), with later refinements (theme-accent focus color, cwd-aware
+> title fitting, emoji/tofu-box glyph fixes). See `show_titlebar` /
+> `title_hide_sizetext` in `crates/kettle-config/src/lib.rs` and
+> `pane_titlebar_buffers` / `fit_pane_titlebar_title` in
+> `crates/kettle-render/src/lib.rs`. This doc is kept as the
+> historical design record; the phase roadmap below describes what
+> was built.
 
 ## What it is
 

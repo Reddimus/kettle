@@ -1,13 +1,14 @@
 # Terminator `remote.py` port — design
 
-> Status: design only. The runtime PID + process-tree walking
-> machinery is too large to land in one pass, so this doc lays out the architecture
-> + the phase roadmap so the implementation lands as a series of small
-> testable phases instead of one heroic push. Same shape as
-> [`TERMINATOR-PLUGIN-DESIGN.md`](TERMINATOR-PLUGIN-DESIGN.md),
-> [`TERMINATOR-DETACHABLE-TABS-DESIGN.md`](TERMINATOR-DETACHABLE-TABS-DESIGN.md),
-> [`TERMINATOR-PANE-TITLEBAR-DESIGN.md`](TERMINATOR-PANE-TITLEBAR-DESIGN.md),
-> [`TERMINATOR-BG-IMAGE-DESIGN.md`](TERMINATOR-BG-IMAGE-DESIGN.md).
+> Status: **Shipped in v1.46.0.** Every phase below landed — PID
+> plumbing, `detect_ssh`, `detect_container` (Docker/Podman/kubectl/
+> lxc), the `sysinfo`-backed `detect_remote_with` process-tree walk,
+> and `clone_session_command`/`clone_session_label` behind the
+> "Clone session" context-menu entry. See
+> `crates/kettle-remote/src/lib.rs`, whose own module header tracks
+> the phase history as closed. This doc is kept as the historical
+> design record; the phase roadmap below describes what was built,
+> not what remains outstanding.
 
 ## What it is
 

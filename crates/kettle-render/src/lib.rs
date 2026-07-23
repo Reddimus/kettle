@@ -577,7 +577,11 @@ pub struct ConfirmDialogButton {
 /// field values. The UI computes labels/values (reading `Config`); the renderer
 /// just paints a centered panel — a row of category tabs, then label/value
 /// rows for the active category, with the focused row highlighted.
-#[derive(Debug, Clone)]
+// `PartialEq` (audit P1b fix): lets the renderer memoize
+// `settings_display_lines`'s output against the last `SettingsOverlay` it was
+// computed from, instead of re-running a `format!()` per display line on
+// every painted frame the Settings overlay stays open.
+#[derive(Debug, Clone, PartialEq)]
 pub struct SettingsOverlay {
     /// Category tab names, in order.
     pub categories: Vec<String>,
@@ -597,7 +601,7 @@ pub struct SettingsOverlay {
 }
 
 /// One settings row — a human label and its current value string.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct SettingsRow {
     pub label: String,
     pub value: String,
@@ -1156,13 +1160,31 @@ pub struct Renderer {
     /// across openings to amortize allocation; trimmed when the row
     /// count shrinks for a smaller menu.
     context_menu_buffers: Vec<TextBuffer>,
+    /// v2.38.2 P1b: last text shaped into each `context_menu_buffers` slot —
+    /// same equality gate `tab_texts`/`hint_texts` use, so a static open menu
+    /// doesn't re-shape every row on every blink/hover redraw.
+    context_menu_texts: Vec<String>,
     /// Dropdown-parity: one buffer per row's right-aligned shortcut
     /// hint (empty-hint rows shape nothing). Pooled like its sibling.
     context_menu_hint_buffers: Vec<TextBuffer>,
+    /// v2.38.2 P1b: last text shaped into each `context_menu_hint_buffers` slot.
+    context_menu_hint_texts: Vec<String>,
     /// One text buffer per display line of the settings overlay
     /// (title, category tabs, field rows, footer). Grown + truncated like the
     /// context-menu pool.
     settings_buffers: Vec<TextBuffer>,
+    /// v2.38.2 P1b: last text shaped into each `settings_buffers` slot. Moving
+    /// the focused row only changes 2 of N lines (the old/new `▸` mark), so
+    /// this catches what the whole-overlay `settings_lines_cache` gate below
+    /// can't: it still recomputes `lines` on ANY overlay change, but the
+    /// per-row reshape is skipped for every row whose text is unaffected.
+    settings_texts: Vec<String>,
+    /// v2.38.2 P1b: memoizes `settings_display_lines(set)` — a `format!()`
+    /// per display line — keyed on the last `SettingsOverlay` it was computed
+    /// from. `None`/mismatched source means `settings_lines_cache` is stale
+    /// (or never populated) and must be recomputed.
+    settings_lines_source: Option<SettingsOverlay>,
+    settings_lines_cache: Vec<String>,
     tabbar_buffer: TextBuffer,
     /// The `▾` new-tab dropdown-arrow glyph, in its own buffer
     /// (drawn left of `+`) so it lands precisely in `new_tab_menu` and the `+`
@@ -1182,6 +1204,15 @@ pub struct Renderer {
     /// One buffer, N positions via per-tab `TextArea` instances.
     tab_close_buffer: TextBuffer,
     search_buffer: TextBuffer,
+    /// v2.38.2 P1b: last text shaped into `search_buffer`. Shared across the
+    /// search / command-palette / layout-picker / ssh-launcher / edit-title /
+    /// confirm-dialog / update-banner bars — only one of those `else if`
+    /// branches paints per frame, so a single cache is enough (unlike the
+    /// per-row pools above, there's no risk of comparing one overlay's label
+    /// against a different overlay's stale cache: whichever branch runs next
+    /// simply re-shapes once, the same one-time cost a fresh buffer already
+    /// pays on the first frame it opens).
+    search_buffer_text: String,
     /// Status-bar text. Single line, reused every frame
     /// via `set_text` — same one-buffer pattern `tabbar_buffer` uses
     /// for tab labels. Stays at length 0 when the status bar is off.
@@ -1250,6 +1281,19 @@ pub struct Renderer {
     /// succeeds (the loaded wallpaper never re-decodes) or while no bg image is
     /// configured.
     bg_image_retry_at: Option<std::time::Instant>,
+    /// Lazy, single-consumer decode worker (same shape as
+    /// `screenshot_worker`): offloads `bg_image::decode_bg_image_frames_with_blur`
+    /// off the render thread so an animated/blurred wallpaper's decode+blur
+    /// (tens of ms per frame, up to 128 frames) never stalls a frame the
+    /// winit event loop and every window's render pass depend on.
+    bg_image_worker: Option<BgImageWorker>,
+    /// The `(path, blur_radius)` key of the job currently in flight on
+    /// `bg_image_worker`, if any. Lets `apply_bg_image_worker_result` discard
+    /// a stale result (config changed again before the first decode
+    /// finished) instead of overwriting a newer request's outcome, and lets
+    /// `request_bg_image_reload` avoid resubmitting the same job every frame
+    /// while it's still decoding.
+    bg_image_pending: Option<(String, u32)>,
 
     /// `Arc<str>` so `render_frame_with_status`'s per-frame
     /// `self.font_family.clone()` (needed to satisfy the borrow checker while
@@ -1401,6 +1445,124 @@ enum ScreenshotSubmitError {
     Disconnected(Box<ScreenshotJob>),
 }
 
+/// One background-image decode request: the configured path plus the
+/// resolved blur radius (0 when `background-blur` is off). Pure CPU input —
+/// no GPU handles — so it's trivially `Send` across the worker thread
+/// boundary, unlike `ScreenshotJob`.
+struct BgImageJob {
+    path: String,
+    blur_radius: u32,
+}
+
+/// The decoded frames for a finished `BgImageJob`. Carries the request's key
+/// back alongside the result so the render thread can tell a fresh result
+/// from a stale one (the config may have moved on to a different image/blur
+/// while this job was still decoding).
+struct BgImageResult {
+    path: String,
+    blur_radius: u32,
+    /// Empty when the decode failed (bad path, unsupported format, decode
+    /// error) — mirrors the synchronous path's `None => Vec::new()` handling
+    /// so `apply_bg_image_worker_result` can reuse the same
+    /// failed-decode-caches-the-key self-heal behavior.
+    frames: Vec<bg_image::BgFrame>,
+}
+
+/// Lazy, single-consumer background-image decode worker. Mirrors
+/// `ScreenshotWorker`'s shape (a `busy` flag guarding a capacity-1 job
+/// channel) but adds a result channel: unlike a screenshot save, a finished
+/// decode has to feed data back into `render_frame` rather than just log a
+/// side effect.
+struct BgImageWorker {
+    sender: std::sync::mpsc::SyncSender<BgImageJob>,
+    receiver: std::sync::mpsc::Receiver<BgImageResult>,
+    busy: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+enum BgImageSubmitError {
+    /// A different job is still decoding on the worker thread. The caller
+    /// should just wait — `apply_bg_image_worker_result` will pick up the
+    /// in-flight job's result once it lands, and `request_bg_image_reload`
+    /// will resubmit for the (still-current) desired key on a later frame.
+    Busy,
+    /// The worker thread exited (e.g. panicked mid-decode). The caller
+    /// drops the worker so the next reload attempt spawns a fresh one.
+    Disconnected,
+}
+
+impl BgImageWorker {
+    fn start() -> std::io::Result<Self> {
+        let (sender, job_rx) = std::sync::mpsc::sync_channel::<BgImageJob>(1);
+        let (result_tx, receiver) = std::sync::mpsc::channel::<BgImageResult>();
+        let busy = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let worker_busy = busy.clone();
+        std::thread::Builder::new()
+            .name("kettle-bg-image".to_string())
+            .spawn(move || {
+                while let Ok(job) = job_rx.recv() {
+                    // Same decode+blur helper the old synchronous path called
+                    // inline in `render_frame` — only WHERE it runs changed.
+                    let frames =
+                        bg_image::decode_bg_image_frames_with_blur(&job.path, job.blur_radius)
+                            .unwrap_or_default();
+                    let delivered = result_tx.send(BgImageResult {
+                        path: job.path,
+                        blur_radius: job.blur_radius,
+                        frames,
+                    });
+                    worker_busy.store(false, std::sync::atomic::Ordering::Release);
+                    if delivered.is_err() {
+                        // The Renderer (and its `BgImageWorker`) was dropped —
+                        // no one is left to hand results to.
+                        break;
+                    }
+                }
+            })
+            .map_err(|error| {
+                std::io::Error::new(
+                    error.kind(),
+                    format!("could not create background-image decode worker: {error}"),
+                )
+            })?;
+        Ok(Self {
+            sender,
+            receiver,
+            busy,
+        })
+    }
+
+    fn try_submit(&self, job: BgImageJob) -> Result<(), BgImageSubmitError> {
+        if self
+            .busy
+            .compare_exchange(
+                false,
+                true,
+                std::sync::atomic::Ordering::AcqRel,
+                std::sync::atomic::Ordering::Acquire,
+            )
+            .is_err()
+        {
+            return Err(BgImageSubmitError::Busy);
+        }
+        match self.sender.try_send(job) {
+            Ok(()) => Ok(()),
+            Err(std::sync::mpsc::TrySendError::Full(_)) => {
+                self.busy.store(false, std::sync::atomic::Ordering::Release);
+                Err(BgImageSubmitError::Busy)
+            }
+            Err(std::sync::mpsc::TrySendError::Disconnected(_)) => {
+                self.busy.store(false, std::sync::atomic::Ordering::Release);
+                Err(BgImageSubmitError::Disconnected)
+            }
+        }
+    }
+
+    /// Non-blocking: `None` when no decode has finished since the last poll.
+    fn try_recv(&self) -> Option<BgImageResult> {
+        self.receiver.try_recv().ok()
+    }
+}
+
 fn finish_live_screenshot(job: ScreenshotJob) -> Result<std::path::PathBuf, String> {
     let ScreenshotJob {
         device,
@@ -1462,10 +1624,49 @@ fn finish_live_screenshot(job: ScreenshotJob) -> Result<std::path::PathBuf, Stri
     use image::{ImageBuffer, Rgba};
     let image: ImageBuffer<Rgba<u8>, _> = ImageBuffer::from_raw(out_w, out_h, out_pixels)
         .ok_or_else(|| "screenshot image buffer shape is invalid".to_string())?;
+    // A terminal screenshot can contain the same class of transient
+    // secrets a terminal session can (a password briefly echoed, an API
+    // key, a private diff) that `kettle-core`'s `record.rs` already
+    // protects by chmod'ing `.cast` files to `0o600`. Opening the PNG
+    // ourselves with owner-only permissions (rather than letting
+    // `ImageBuffer::save`'s internal `File::create` pick up the process
+    // umask, typically `0o644` on a `022` umask) closes that gap for the
+    // render crate's screenshot path too.
+    let file = create_private_screenshot_file(&prepared.request.out_path)
+        .map_err(|error| format!("screenshot output file could not be opened: {error}"))?;
+    let mut writer = std::io::BufWriter::new(file);
     image
-        .save(&prepared.request.out_path)
+        .write_to(&mut writer, image::ImageFormat::Png)
         .map_err(|error| format!("PNG save failed: {error}"))?;
+    std::io::Write::flush(&mut writer).map_err(|error| format!("PNG save failed: {error}"))?;
     Ok(prepared.request.out_path)
+}
+
+/// Opens `path` for writing with owner-only permissions where the platform
+/// supports it (Unix `0o600`), creating it if absent and truncating any
+/// existing content. Used for screenshot PNGs, which — like recordings —
+/// may capture private on-screen content; see the call site in
+/// `finish_live_screenshot`.
+fn create_private_screenshot_file(path: &std::path::Path) -> std::io::Result<std::fs::File> {
+    let mut options = std::fs::OpenOptions::new();
+    // `create_new` (O_CREAT | O_EXCL, CREATE_NEW on Windows) is the security
+    // boundary here, not the earlier `validate_screenshot_path` pre-check in
+    // the ctl handler. That pre-check runs synchronously when the request
+    // arrives, but the file is not opened until this worker thread runs, up to
+    // `LIVE_SCREENSHOT_TIMEOUT` (5s) later once the GPU capture maps — a wide
+    // check-then-use window. `O_EXCL` closes it atomically: if anything (a
+    // regular file, or a symlink planted into the window to redirect the write
+    // at, say, `~/.ssh/authorized_keys`) already exists at `path`, the open
+    // fails with `AlreadyExists` rather than following it and truncating the
+    // target. A brand-new inode also means the `mode(0o600)` below is the
+    // file's exact permission with no pre-existing bits to re-harden.
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.mode(0o600);
+    }
+    options.open(path)
 }
 
 fn crop_screenshot(
@@ -1517,7 +1718,7 @@ fn crop_screenshot(
 
 #[cfg(test)]
 mod live_screenshot_tests {
-    use super::crop_screenshot;
+    use super::{create_private_screenshot_file, crop_screenshot};
 
     fn pixels(width: u32, height: u32) -> Vec<u8> {
         (0..width * height)
@@ -1557,6 +1758,147 @@ mod live_screenshot_tests {
     fn crop_rejects_short_source_buffers() {
         let error = crop_screenshot(2, 2, vec![0; 4], Some((0.0, 0.0, 2.0, 2.0))).unwrap_err();
         assert_eq!(error, "screenshot source buffer is shorter than expected");
+    }
+
+    // Privacy hardening (audit): a screenshot can capture the same class of
+    // transient secrets a `.cast` recording can (kettle-core/src/record.rs
+    // chmods those to 0o600) — the PNG file must land with the same
+    // owner-only permissions regardless of the process umask.
+    #[cfg(unix)]
+    #[test]
+    fn private_screenshot_file_is_created_owner_only() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("shot.png");
+        let file = create_private_screenshot_file(&path).expect("open");
+        let mode = file.metadata().expect("metadata").permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "screenshot file must be owner-read/write only");
+    }
+
+    /// The write is `create_new` (O_EXCL): anything already at the path — a
+    /// leftover file or, in the threat model, a symlink planted into the
+    /// check-then-use window to redirect the write at a sensitive file — must
+    /// make the open fail with `AlreadyExists` rather than being followed or
+    /// truncated. This is the atomic half of the screenshot path-traversal fix
+    /// (the ctl-side `validate_screenshot_path` pre-check is only a fast-fail).
+    #[test]
+    fn private_screenshot_file_refuses_a_pre_existing_path() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("shot.png");
+        std::fs::write(&path, b"stale").expect("seed file");
+        let err = create_private_screenshot_file(&path).expect_err("must refuse an existing path");
+        assert_eq!(err.kind(), std::io::ErrorKind::AlreadyExists);
+        assert_eq!(
+            std::fs::read(&path).expect("original file untouched"),
+            b"stale",
+            "an existing file at the path must not be truncated or overwritten"
+        );
+    }
+
+    /// The same O_EXCL guarantee, exercised against a symlink: a planted
+    /// symlink at the output path must not be followed to overwrite its target.
+    #[cfg(unix)]
+    #[test]
+    fn private_screenshot_file_refuses_to_follow_a_symlink() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let sensitive = dir.path().join("sensitive");
+        std::fs::write(&sensitive, b"secret").expect("seed target");
+        let link = dir.path().join("shot.png");
+        std::os::unix::fs::symlink(&sensitive, &link).expect("plant symlink");
+        let err = create_private_screenshot_file(&link).expect_err("must refuse a symlink");
+        assert_eq!(err.kind(), std::io::ErrorKind::AlreadyExists);
+        assert_eq!(
+            std::fs::read(&sensitive).expect("symlink target untouched"),
+            b"secret",
+            "the symlink target must not be truncated through the followed link"
+        );
+    }
+}
+
+/// The async background-image decode worker (audit fix: `render_frame` must
+/// never block the render thread on `decode_bg_image_frames_with_blur` — see
+/// `Renderer::request_bg_image_reload` / `Renderer::apply_bg_image_worker_result`).
+/// Pure CPU + `std::sync::mpsc`, so — unlike `ScreenshotWorker`, which needs a
+/// real `wgpu::Device` — this is fully unit-testable without a GPU.
+#[cfg(test)]
+mod bg_image_worker_tests {
+    use super::{BgImageJob, BgImageWorker};
+
+    /// A nonexistent path decodes to an empty frame list (mirrors the old
+    /// synchronous path's `None => Vec::new()` handling) rather than blocking
+    /// or panicking — and the result must arrive on `try_recv` carrying back
+    /// the same `(path, blur_radius)` key the job was submitted with, which is
+    /// exactly what `apply_bg_image_worker_result` keys its stale-result check
+    /// on.
+    #[test]
+    fn worker_delivers_a_keyed_result_for_a_failed_decode() {
+        let worker = BgImageWorker::start().expect("worker thread should start");
+        let path = "/definitely/does/not/exist/kettle-test-wallpaper.png".to_string();
+        assert!(
+            worker
+                .try_submit(BgImageJob {
+                    path: path.clone(),
+                    blur_radius: 8,
+                })
+                .is_ok(),
+            "first submit on an idle worker must succeed"
+        );
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let result = loop {
+            if let Some(result) = worker.try_recv() {
+                break result;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "worker did not deliver a result within the timeout"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        };
+
+        assert_eq!(result.path, path);
+        assert_eq!(result.blur_radius, 8);
+        assert!(
+            result.frames.is_empty(),
+            "a decode failure must deliver an empty frame list, not block or panic"
+        );
+    }
+
+    /// `try_submit` while a job is still in flight must report `Busy` rather
+    /// than silently dropping or blocking — `request_bg_image_reload` relies
+    /// on this to decide whether to (re)submit.
+    #[test]
+    fn worker_reports_busy_for_a_second_submit_before_the_first_completes() {
+        let worker = BgImageWorker::start().expect("worker thread should start");
+        assert!(
+            worker
+                .try_submit(BgImageJob {
+                    path: "/definitely/does/not/exist/kettle-test-wallpaper-a.png".to_string(),
+                    blur_radius: 0,
+                })
+                .is_ok()
+        );
+        // Best-effort race: submit again immediately. Either the first job
+        // already finished (busy flag cleared) and this succeeds, or it's
+        // still in flight and this reports Busy — both are valid outcomes;
+        // what must NOT happen is a panic or a silently dropped job.
+        let _ = worker.try_submit(BgImageJob {
+            path: "/definitely/does/not/exist/kettle-test-wallpaper-b.png".to_string(),
+            blur_radius: 0,
+        });
+        // Drain whatever results land within the timeout so the test doesn't
+        // leak an assertion about ordering — the key behavior under test is
+        // "no panic, no hang", already exercised above.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let mut seen = 0;
+        while seen < 1 && std::time::Instant::now() < deadline {
+            if worker.try_recv().is_some() {
+                seen += 1;
+            } else {
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+        }
+        assert!(seen >= 1, "at least the first submitted job must complete");
     }
 }
 
@@ -1863,14 +2205,20 @@ impl Renderer {
             tab_buffers: Vec::new(),
             hint_buffers: Vec::new(),
             context_menu_buffers: Vec::new(),
+            context_menu_texts: Vec::new(),
             context_menu_hint_buffers: Vec::new(),
+            context_menu_hint_texts: Vec::new(),
             settings_buffers: Vec::new(),
+            settings_texts: Vec::new(),
+            settings_lines_source: None,
+            settings_lines_cache: Vec::new(),
             tabbar_buffer,
             new_tab_arrow_buffer,
             scroll_left_buffer,
             scroll_right_buffer,
             tab_close_buffer,
             search_buffer,
+            search_buffer_text: String::new(),
             status_bar_buffer,
             quads,
             overlay_quads,
@@ -1882,6 +2230,8 @@ impl Renderer {
             starfield_started: std::time::Instant::now(),
             bg_image_cache: None,
             bg_image_retry_at: None,
+            bg_image_worker: None,
+            bg_image_pending: None,
             font_family: cfg.font_family.as_str().into(),
             font_size,
             metrics,
@@ -2211,6 +2561,103 @@ impl Renderer {
         self.render_frame_with_status_and_pre_present(panes, tabbar, cfg, overlay, status, || {})
     }
 
+    /// (Re)submit a background-image decode to `bg_image_worker`, starting
+    /// the worker thread on first use. A no-op when a job for this exact
+    /// `(path, blur_radius)` key is already in flight, so a `need_reload ==
+    /// true` frame that fires every frame while the decode is still running
+    /// (a large/animated wallpaper can take well over one frame at 60 fps)
+    /// doesn't flood the worker's capacity-1 job channel with redundant work.
+    fn request_bg_image_reload(&mut self, path: &str, blur_radius: u32) {
+        if self
+            .bg_image_pending
+            .as_ref()
+            .is_some_and(|(p, b)| p == path && *b == blur_radius)
+        {
+            return;
+        }
+        if self.bg_image_worker.is_none() {
+            match BgImageWorker::start() {
+                Ok(worker) => self.bg_image_worker = Some(worker),
+                Err(error) => {
+                    log::warn!("could not start background-image decode worker: {error}");
+                    return;
+                }
+            }
+        }
+        let Some(worker) = self.bg_image_worker.as_ref() else {
+            return;
+        };
+        match worker.try_submit(BgImageJob {
+            path: path.to_string(),
+            blur_radius,
+        }) {
+            Ok(()) => self.bg_image_pending = Some((path.to_string(), blur_radius)),
+            Err(BgImageSubmitError::Busy) => {
+                // A different job is still decoding (shouldn't normally
+                // happen given the key check above, but config could churn
+                // faster than the worker drains) — this frame keeps showing
+                // the previous wallpaper (or none); retried next frame.
+            }
+            Err(BgImageSubmitError::Disconnected) => {
+                // Worker thread exited — drop it so the NEXT reload attempt
+                // spawns a fresh one instead of submitting into a dead
+                // channel every frame.
+                self.bg_image_worker = None;
+            }
+        }
+    }
+
+    /// Drain any finished background-image decode(s) and, for one that
+    /// matches the currently-pending `(path, blur_radius)` key, install it
+    /// into `bg_image_cache` — the same failure-throttle / success-clears-
+    /// throttle bookkeeping the old synchronous path did inline. A result
+    /// whose key no longer matches `bg_image_pending` (the config moved on
+    /// to a different image/blur — or off background images entirely —
+    /// before this decode finished) is silently discarded: a fresh request
+    /// for the current key has already been queued.
+    fn apply_bg_image_worker_result(&mut self) {
+        let Some(worker) = self.bg_image_worker.as_ref() else {
+            return;
+        };
+        while let Some(result) = worker.try_recv() {
+            let is_current = self
+                .bg_image_pending
+                .as_ref()
+                .is_some_and(|(p, b)| *p == result.path && *b == result.blur_radius);
+            if !is_current {
+                continue;
+            }
+            self.bg_image_pending = None;
+            let (frames, gaps): (Vec<kettle_core::ImageData>, Vec<u32>) = result
+                .frames
+                .into_iter()
+                .filter_map(|f| {
+                    kettle_core::ImageData::new_with_budget(
+                        f.image.width,
+                        f.image.height,
+                        f.image.rgba,
+                        &self.graphics_budget,
+                    )
+                    .map(|img| (img, f.gap_ms))
+                })
+                .unzip();
+            // On failure, throttle the next retry; on success, clear it so
+            // the loaded wallpaper never re-decodes.
+            self.bg_image_retry_at = if frames.is_empty() {
+                Some(std::time::Instant::now() + std::time::Duration::from_secs(3))
+            } else {
+                None
+            };
+            self.bg_image_cache = Some(BgImageAnim {
+                path: result.path,
+                blur: result.blur_radius,
+                frames,
+                gaps,
+                started: std::time::Instant::now(),
+            });
+        }
+    }
+
     /// Live-window renderer variant. `pre_present` is invoked after drawing
     /// and queue submission, immediately before the surface is presented. The
     /// winit caller uses this seam for `Window::pre_present_notify`; offscreen
@@ -2276,6 +2723,20 @@ impl Renderer {
                 self.new_tab_arrow_text.clear();
                 self.status_bar_text.clear();
                 self.resize_overlay_text.clear();
+                // v2.38.2 P1b: the context-menu/settings/search-family caches
+                // added alongside the equality gates below have the exact
+                // same font-staleness hazard — unlike `hint_texts` (whose
+                // pool truncates to 0 whenever `hint_labels` empties, so it
+                // self-invalidates on next open), these overlays' buffer
+                // pools are only touched while the overlay is OPEN, so a
+                // font-family reload that lands while one is closed (or that
+                // doesn't change the label text) would otherwise leave a
+                // stale cache pointing at glyphs shaped in the old family.
+                self.context_menu_texts.clear();
+                self.context_menu_hint_texts.clear();
+                self.settings_texts.clear();
+                self.settings_lines_source = None;
+                self.search_buffer_text.clear();
             }
         }
         // Ensure one text buffer per pane.
@@ -2481,42 +2942,22 @@ impl Renderer {
                 }
             };
             if need_reload {
-                // v2.21.x: decode ALL frames (one for a still image; many for an
-                // animated GIF/APNG/WebP). Store the (path, blur) key
-                // even when decode fails (empty `frames`) so the stale wallpaper
-                // stops rendering for a now-broken path and we don't re-decode
-                // the failing file every frame.
-                let (frames, gaps): (Vec<kettle_core::ImageData>, Vec<u32>) =
-                    match bg_image::decode_bg_image_frames_with_blur(&want, blur_radius) {
-                        Some(fs) => fs
-                            .into_iter()
-                            .filter_map(|f| {
-                                kettle_core::ImageData::new_with_budget(
-                                    f.image.width,
-                                    f.image.height,
-                                    f.image.rgba,
-                                    &self.graphics_budget,
-                                )
-                                .map(|img| (img, f.gap_ms))
-                            })
-                            .unzip(),
-                        None => (Vec::new(), Vec::new()),
-                    };
-                // On failure, throttle the next retry; on
-                // success, clear it so the loaded wallpaper never re-decodes.
-                self.bg_image_retry_at = if frames.is_empty() {
-                    Some(std::time::Instant::now() + std::time::Duration::from_secs(3))
-                } else {
-                    None
-                };
-                self.bg_image_cache = Some(BgImageAnim {
-                    path: want.clone(),
-                    blur: blur_radius,
-                    frames,
-                    gaps,
-                    started: std::time::Instant::now(),
-                });
+                // (Re)decode ALL frames (one for a still image; many for an
+                // animated GIF/APNG/WebP) — but off the render thread: an
+                // animated + blurred wallpaper's decode+blur can run tens of
+                // ms PER FRAME (up to 128 frames), which used to run inline
+                // here and stall the winit event loop + every window's render
+                // pass for the whole duration. `request_bg_image_reload`
+                // just (re)submits the job to `bg_image_worker`; the result
+                // lands on a LATER frame via `apply_bg_image_worker_result`
+                // below, same key-caching / failure-throttle semantics as
+                // the old synchronous path.
+                self.request_bg_image_reload(&want, blur_radius);
             }
+            // Pick up a finished decode (if any) before selecting the frame
+            // to display. A no-op (cheap `try_recv`) on every frame where no
+            // background image is configured or nothing has finished yet.
+            self.apply_bg_image_worker_result();
             // v2.21.x: select the frame to display now. A still image (1 frame)
             // or `background-animation = off` shows frame 0; otherwise the
             // playback clock loops through frames at their own gaps. Focus does
@@ -2645,6 +3086,11 @@ impl Renderer {
             // session. Re-enabling re-decodes via the need_reload path above.
             self.bg_image_cache = None;
             self.bg_image_retry_at = None; // reset the self-heal throttle
+            // A still-in-flight decode for the old path/blur is now
+            // irrelevant — its result (once it lands) is discarded by
+            // `apply_bg_image_worker_result`'s key check rather than
+            // resurrecting a wallpaper the config no longer wants.
+            self.bg_image_pending = None;
         }
 
         // v2.23.0: the opaque fill color for the window chrome strips (tab bar,
@@ -3292,12 +3738,18 @@ impl Renderer {
             ));
             self.search_buffer
                 .set_size(Some(sw), Some(geometry.reserved_height));
-            self.search_buffer.set_text(
-                &label,
-                &Attrs::new().family(Family::Name(&family)),
-                Shaping::Advanced,
-                None,
-            );
+            // v2.38.2 P1b: same equality gate as the other chrome buffers —
+            // only one of this `if`/`else if` chain's arms runs per frame, so
+            // a single cache is enough (see `search_buffer_text`'s doc comment).
+            if self.search_buffer_text != label {
+                self.search_buffer.set_text(
+                    &label,
+                    &Attrs::new().family(Family::Name(&family)),
+                    Shaping::Advanced,
+                    None,
+                );
+                self.search_buffer_text = label;
+            }
             self.search_buffer
                 .shape_until_scroll(&mut self.font_system, false);
         } else if let Some(q) = &overlay.search_query {
@@ -3325,12 +3777,18 @@ impl Renderer {
             let label = fit_single_line_label(&label, overlay_label_cols(sw, cw));
             self.search_buffer.set_metrics(metrics);
             self.search_buffer.set_size(Some(sw), Some(bar_h));
-            self.search_buffer.set_text(
-                &label,
-                &Attrs::new().family(Family::Name(&family)),
-                Shaping::Advanced,
-                None,
-            );
+            // v2.38.2 P1b: same equality gate as the other chrome buffers —
+            // only one of this `if`/`else if` chain's arms runs per frame, so
+            // a single cache is enough (see `search_buffer_text`'s doc comment).
+            if self.search_buffer_text != label {
+                self.search_buffer.set_text(
+                    &label,
+                    &Attrs::new().family(Family::Name(&family)),
+                    Shaping::Advanced,
+                    None,
+                );
+                self.search_buffer_text = label;
+            }
             self.search_buffer
                 .shape_until_scroll(&mut self.font_system, false);
         } else if let Some(q) = &overlay.palette_query {
@@ -3345,12 +3803,18 @@ impl Renderer {
             let label = fit_single_line_label(&label, overlay_label_cols(sw, cw));
             self.search_buffer.set_metrics(metrics);
             self.search_buffer.set_size(Some(sw), Some(bar_h));
-            self.search_buffer.set_text(
-                &label,
-                &Attrs::new().family(Family::Name(&family)),
-                Shaping::Advanced,
-                None,
-            );
+            // v2.38.2 P1b: same equality gate as the other chrome buffers —
+            // only one of this `if`/`else if` chain's arms runs per frame, so
+            // a single cache is enough (see `search_buffer_text`'s doc comment).
+            if self.search_buffer_text != label {
+                self.search_buffer.set_text(
+                    &label,
+                    &Attrs::new().family(Family::Name(&family)),
+                    Shaping::Advanced,
+                    None,
+                );
+                self.search_buffer_text = label;
+            }
             self.search_buffer
                 .shape_until_scroll(&mut self.font_system, false);
         } else if let Some(q) = &overlay.layout_picker_query {
@@ -3368,12 +3832,18 @@ impl Renderer {
             let label = fit_single_line_label(&label, overlay_label_cols(sw, cw));
             self.search_buffer.set_metrics(metrics);
             self.search_buffer.set_size(Some(sw), Some(bar_h));
-            self.search_buffer.set_text(
-                &label,
-                &Attrs::new().family(Family::Name(&family)),
-                Shaping::Advanced,
-                None,
-            );
+            // v2.38.2 P1b: same equality gate as the other chrome buffers —
+            // only one of this `if`/`else if` chain's arms runs per frame, so
+            // a single cache is enough (see `search_buffer_text`'s doc comment).
+            if self.search_buffer_text != label {
+                self.search_buffer.set_text(
+                    &label,
+                    &Attrs::new().family(Family::Name(&family)),
+                    Shaping::Advanced,
+                    None,
+                );
+                self.search_buffer_text = label;
+            }
             self.search_buffer
                 .shape_until_scroll(&mut self.font_system, false);
         } else if let Some(q) = &overlay.ssh_query {
@@ -3388,12 +3858,18 @@ impl Renderer {
             let label = fit_single_line_label(&label, overlay_label_cols(sw, cw));
             self.search_buffer.set_metrics(metrics);
             self.search_buffer.set_size(Some(sw), Some(bar_h));
-            self.search_buffer.set_text(
-                &label,
-                &Attrs::new().family(Family::Name(&family)),
-                Shaping::Advanced,
-                None,
-            );
+            // v2.38.2 P1b: same equality gate as the other chrome buffers —
+            // only one of this `if`/`else if` chain's arms runs per frame, so
+            // a single cache is enough (see `search_buffer_text`'s doc comment).
+            if self.search_buffer_text != label {
+                self.search_buffer.set_text(
+                    &label,
+                    &Attrs::new().family(Family::Name(&family)),
+                    Shaping::Advanced,
+                    None,
+                );
+                self.search_buffer_text = label;
+            }
             self.search_buffer
                 .shape_until_scroll(&mut self.font_system, false);
         } else if let Some(edit) = &overlay.edit_title {
@@ -3420,12 +3896,18 @@ impl Renderer {
             self.search_buffer.set_metrics(metrics);
             self.search_buffer
                 .set_size(Some(edit.rect.2), Some(edit.rect.3));
-            self.search_buffer.set_text(
-                &label,
-                &Attrs::new().family(Family::Name(&family)),
-                Shaping::Advanced,
-                None,
-            );
+            // v2.38.2 P1b: same equality gate as the other chrome buffers —
+            // only one of this `if`/`else if` chain's arms runs per frame, so
+            // a single cache is enough (see `search_buffer_text`'s doc comment).
+            if self.search_buffer_text != label {
+                self.search_buffer.set_text(
+                    &label,
+                    &Attrs::new().family(Family::Name(&family)),
+                    Shaping::Advanced,
+                    None,
+                );
+                self.search_buffer_text = label;
+            }
             self.search_buffer
                 .shape_until_scroll(&mut self.font_system, false);
         } else if let Some(dlg) = &overlay.confirm_dialog {
@@ -3476,12 +3958,18 @@ impl Renderer {
             let label = fit_single_line_label(&label, overlay_label_cols(sw, cw));
             self.search_buffer.set_metrics(metrics);
             self.search_buffer.set_size(Some(sw), Some(bar_h));
-            self.search_buffer.set_text(
-                &label,
-                &Attrs::new().family(Family::Name(&family)),
-                Shaping::Advanced,
-                None,
-            );
+            // v2.38.2 P1b: same equality gate as the other chrome buffers —
+            // only one of this `if`/`else if` chain's arms runs per frame, so
+            // a single cache is enough (see `search_buffer_text`'s doc comment).
+            if self.search_buffer_text != label {
+                self.search_buffer.set_text(
+                    &label,
+                    &Attrs::new().family(Family::Name(&family)),
+                    Shaping::Advanced,
+                    None,
+                );
+                self.search_buffer_text = label;
+            }
             self.search_buffer
                 .shape_until_scroll(&mut self.font_system, false);
         } else if let Some((tag, url)) = &overlay.update_available {
@@ -3529,12 +4017,18 @@ impl Renderer {
             let label = fit_single_line_label(&label, overlay_label_cols(sw, cw));
             self.search_buffer.set_metrics(metrics);
             self.search_buffer.set_size(Some(sw), Some(bar_h));
-            self.search_buffer.set_text(
-                &label,
-                &Attrs::new().family(Family::Name(&family)),
-                Shaping::Advanced,
-                None,
-            );
+            // v2.38.2 P1b: same equality gate as the other chrome buffers —
+            // only one of this `if`/`else if` chain's arms runs per frame, so
+            // a single cache is enough (see `search_buffer_text`'s doc comment).
+            if self.search_buffer_text != label {
+                self.search_buffer.set_text(
+                    &label,
+                    &Attrs::new().family(Family::Name(&family)),
+                    Shaping::Advanced,
+                    None,
+                );
+                self.search_buffer_text = label;
+            }
             self.search_buffer
                 .shape_until_scroll(&mut self.font_system, false);
         }
@@ -3745,16 +4239,32 @@ impl Renderer {
                 let b = TextBuffer::new(&mut self.font_system, metrics);
                 self.context_menu_buffers.push(b);
             }
+            // v2.38.2 P1b: label cache lives and dies with `context_menu_buffers`
+            // but grows off ITS OWN length (like `tab_texts`/`tab_buffers`), not
+            // the buffer pool's — so the font-family invalidation above (which
+            // clears only the `_texts` caches, not the heavier buffer pools) can't
+            // desync the two into different lengths and panic on indexing below.
+            while self.context_menu_texts.len() < menu.rows.len() {
+                // Empty sentinel — same trick `hint_buffers`/`hint_texts` use —
+                // so a fresh slot's first fill isn't skipped by the equality
+                // gate below (unless the row's own label is also empty).
+                self.context_menu_texts.push(String::new());
+            }
             while self.context_menu_hint_buffers.len() < menu.rows.len() {
                 let b = TextBuffer::new(&mut self.font_system, metrics);
                 self.context_menu_hint_buffers.push(b);
+            }
+            while self.context_menu_hint_texts.len() < menu.rows.len() {
+                self.context_menu_hint_texts.push(String::new());
             }
             // Shrink to the current row count so a small
             // menu after a large one (common with dynamic Lua menus) doesn't
             // keep the peak's worth of shaped-glyph buffers. The field doc
             // promised this trim; the code never did it until now.
             self.context_menu_buffers.truncate(menu.rows.len());
+            self.context_menu_texts.truncate(menu.rows.len());
             self.context_menu_hint_buffers.truncate(menu.rows.len());
+            self.context_menu_hint_texts.truncate(menu.rows.len());
             // Approximate widest row (label + right-aligned hint) so the
             // panel fits without wrapping; the renderer doesn't try to
             // measure precisely because the labels are short and we pad
@@ -3783,23 +4293,33 @@ impl Renderer {
                 let buf = &mut self.context_menu_buffers[i];
                 buf.set_metrics(metrics);
                 buf.set_size(Some(panel_w), Some(row_h));
-                buf.set_text(
-                    &row.label,
-                    &Attrs::new().family(Family::Name(&family)),
-                    Shaping::Advanced,
-                    None,
-                );
+                // v2.38.2 P1b: re-shape only when the row's label actually
+                // changed — an open menu previously re-shaped every row on
+                // every blink/hover-driven redraw even though its rows are
+                // byte-stable while it stays open.
+                if self.context_menu_texts[i] != row.label {
+                    buf.set_text(
+                        &row.label,
+                        &Attrs::new().family(Family::Name(&family)),
+                        Shaping::Advanced,
+                        None,
+                    );
+                    self.context_menu_texts[i].clone_from(&row.label);
+                }
                 buf.shape_until_scroll(&mut self.font_system, false);
                 if !row.hint.is_empty() {
                     let hb = &mut self.context_menu_hint_buffers[i];
                     hb.set_metrics(metrics);
                     hb.set_size(Some(panel_w), Some(row_h));
-                    hb.set_text(
-                        &row.hint,
-                        &Attrs::new().family(Family::Name(&family)),
-                        Shaping::Advanced,
-                        None,
-                    );
+                    if self.context_menu_hint_texts[i] != row.hint {
+                        hb.set_text(
+                            &row.hint,
+                            &Attrs::new().family(Family::Name(&family)),
+                            Shaping::Advanced,
+                            None,
+                        );
+                        self.context_menu_hint_texts[i].clone_from(&row.hint);
+                    }
                     hb.shape_until_scroll(&mut self.font_system, false);
                 }
             }
@@ -3807,27 +4327,52 @@ impl Renderer {
 
         // Settings-overlay row buffers (one per display line).
         if let Some(set) = &overlay.settings {
-            let lines = settings_display_lines(set);
+            // v2.38.2 P1b: `settings_display_lines` runs a `format!()` per
+            // display line — memoize its output against the last
+            // `SettingsOverlay` it was computed from instead of rebuilding
+            // every painted frame (the settings panel, like the context
+            // menu, sits open across blink/hover-driven redraws with nothing
+            // actually changing).
+            if self.settings_lines_source.as_ref() != Some(set) {
+                self.settings_lines_cache = settings_display_lines(set);
+                self.settings_lines_source = Some(set.clone());
+            }
+            let lines = &self.settings_lines_cache;
             while self.settings_buffers.len() < lines.len() {
                 let b = TextBuffer::new(&mut self.font_system, metrics);
                 self.settings_buffers.push(b);
             }
+            // v2.38.2 P1b: grows off ITS OWN length, not `settings_buffers`' —
+            // same reasoning as `context_menu_texts` above (the font-family
+            // invalidation clears only the `_texts` cache, so the two pools
+            // must each regrow independently or indexing below could panic).
+            while self.settings_texts.len() < lines.len() {
+                self.settings_texts.push(String::new());
+            }
             self.settings_buffers.truncate(lines.len());
+            self.settings_texts.truncate(lines.len());
             // Panel width fits the content but never exceeds the surface
             // (so it stays usable in a small window); see the matching clamp
             // in the quad/area pass below.
-            let panel_w = (settings_panel_cols(&lines) * cw + 48.0).min((sw - 40.0).max(120.0));
+            let panel_w = (settings_panel_cols(lines) * cw + 48.0).min((sw - 40.0).max(120.0));
             let row_h = ch + 6.0;
             for (i, line) in lines.iter().enumerate() {
                 let buf = &mut self.settings_buffers[i];
                 buf.set_metrics(metrics);
                 buf.set_size(Some(panel_w), Some(row_h));
-                buf.set_text(
-                    line,
-                    &Attrs::new().family(Family::Name(&family)),
-                    Shaping::Advanced,
-                    None,
-                );
+                // v2.38.2 P1b: moving the focused row only changes 2 of N
+                // lines (the old/new `▸` mark) — this per-row gate spares the
+                // other N-2 rows a reshape even on a frame where the overlay
+                // memoization above DID recompute `lines`.
+                if self.settings_texts[i] != *line {
+                    buf.set_text(
+                        line,
+                        &Attrs::new().family(Family::Name(&family)),
+                        Shaping::Advanced,
+                        None,
+                    );
+                    self.settings_texts[i].clone_from(line);
+                }
                 buf.shape_until_scroll(&mut self.font_system, false);
             }
         }
@@ -4332,9 +4877,16 @@ impl Renderer {
         // the menu pipeline (dim backdrop + panel + accent border + focused-row
         // highlight as quads; one TextArea per display line).
         if let Some(set) = &overlay.settings {
-            let lines = settings_display_lines(set);
+            // v2.38.2 P1b: reuse the buffer-prep pass's memoized lines rather
+            // than running `settings_display_lines` (one `format!()` per
+            // display line) a SECOND time per frame — the two passes already
+            // shared a comment promising they "call this off the same
+            // `settings_display_lines` output, keeping them in lockstep";
+            // `self.settings_lines_cache` was just (re)computed for this
+            // exact `set` above, in the same `render_frame` call.
+            let lines = &self.settings_lines_cache;
             let row_h = ch + 6.0;
-            let panel_w = (settings_panel_cols(&lines) * cw + 48.0).min((sw - 40.0).max(120.0));
+            let panel_w = (settings_panel_cols(lines) * cw + 48.0).min((sw - 40.0).max(120.0));
             let panel_h = (lines.len() as f32 * row_h + 24.0).min((sh - 40.0).max(80.0));
             let px = ((sw - panel_w) * 0.5).max(0.0);
             let py = ((sh - panel_h) * 0.5).max(0.0);
@@ -5184,12 +5736,14 @@ impl Renderer {
             //
             // Underline style: alacritty exposes five style bits —
             // UNDERLINE, DOUBLE_UNDERLINE, UNDERCURL, DOTTED_UNDERLINE,
-            // DASHED_UNDERLINE — all reached via `Flags::ALL_UNDERLINES`.
-            // Today: plain / curl / dotted / dashed all draw as a single
-            // 1-px line at the cell bottom; DOUBLE_UNDERLINE draws two
-            // stacked lines (the visually-distinct case). Wave / dotted
-            // / dashed visual styles want a shader path and are deferred
-            // — the presence/absence cue is what matters most.
+            // DASHED_UNDERLINE — all reached via `Flags::ALL_UNDERLINES`, and
+            // mutually exclusive (alacritty_terminal clears the others
+            // whenever SGR 4 sets a new sub-style; see `term/mod.rs`'s
+            // `Attr::Underline*` arms). `push_underline_quads` now gives
+            // each style a visually distinct shape (audit fix — see its doc
+            // comment for the undercurl approximation's limits) instead of
+            // collapsing all five to the same 1px line; DOUBLE_UNDERLINE's
+            // extra stacked line is still added separately below.
             if flags.intersects(Flags::ALL_UNDERLINES) {
                 let line_color = sc
                     .underline_color
@@ -5197,10 +5751,7 @@ impl Renderer {
                     .unwrap_or(fg);
                 let x = ox + col as f32 * cw;
                 let y = oy + vrow as f32 * ch;
-                quads.push(rect(x, y + ch - 2.0, cw, 1.0, line_color, 1.0));
-                if flags.contains(Flags::DOUBLE_UNDERLINE) {
-                    quads.push(rect(x, y + ch - 4.0, cw, 1.0, line_color, 1.0));
-                }
+                push_underline_quads(quads, x, y, cw, ch, col, flags, line_color);
             }
             if flags.contains(Flags::STRIKEOUT) {
                 quads.push(rect(
@@ -7055,6 +7606,272 @@ fn rect(x: f32, y: f32, w: f32, h: f32, c: Rgb, a: f32) -> QuadInstance {
             c.b as f32 / 255.0,
             a,
         ],
+    }
+}
+
+/// Compatibility fix (audit): draws one cell's underline segment(s),
+/// differentiating the `Flags::ALL_UNDERLINES` style bits instead of
+/// collapsing UNDERLINE / UNDERCURL / DOTTED_UNDERLINE / DASHED_UNDERLINE to
+/// the same straight 1px line. This renderer's only chrome/cell primitive is
+/// the axis-aligned quad (`QuadInstance`/`rect`), so every style here is built
+/// from small rects rather than a real path/curve:
+///
+/// - UNDERCURL is approximated as a stepped zigzag (a triangle wave built
+///   from 1px-tall quads) spanning a 2-cell period, using `col` (the run's
+///   ABSOLUTE grid column, not cell-local) to phase each cell's 4 segments
+///   into the right quarter of that period — so a run of undercurl cells
+///   shows one continuous wave rather than every cell independently
+///   restarting the same little tent shape. It is NOT a smooth sine curve —
+///   that needs a dedicated shader/SDF path in `quad.rs` (out of scope for a
+///   pure-quad fix) — but it IS visually distinct from a straight line,
+///   which is the actual gap this fixes: docs/RESEARCH.md + docs/TESTING.md
+///   hold undercurl to a "must work" bar for Neovim/AstroNvim LSP
+///   diagnostics (`DiagnosticUnderlineError`/`SpellBad` etc. bind
+///   `gui=undercurl`), and those diagnostics were rendering pixel-identical
+///   to a plain hyperlink underline before this fix.
+/// - DOTTED_UNDERLINE / DASHED_UNDERLINE tile short marks with gaps across
+///   the cell (sparser + shorter marks for dotted, longer + denser for
+///   dashed), phased on the absolute `x` pixel position rather than `col` (a
+///   mark width in px doesn't generally divide `cw` evenly, unlike
+///   undercurl's cw-sized segments) — genuinely just gapped lines, so these
+///   need no curve approximation.
+#[allow(clippy::too_many_arguments)]
+fn push_underline_quads(
+    quads: &mut Vec<QuadInstance>,
+    x: f32,
+    y: f32,
+    cw: f32,
+    ch: f32,
+    col: usize,
+    flags: Flags,
+    color: Rgb,
+) {
+    let base_y = y + ch - 2.0;
+    if flags.contains(Flags::UNDERCURL) {
+        const STEPS_PER_CELL: usize = 4;
+        // A symmetric 8-step (2-cell) triangle wave, amplitude 2px around
+        // the baseline: rises 0→1→2, falls 2→1→0→-1→-2, rises back to 0.
+        // Amplitude is capped at 2px because the underline band itself is
+        // only ~2-4px tall on typical cell sizes — a larger amplitude would
+        // collide with the glyph above or the row below.
+        const OFFSETS: [f32; 8] = [0.0, 1.0, 2.0, 1.0, 0.0, -1.0, -2.0, -1.0];
+        let seg_w = (cw / STEPS_PER_CELL as f32).max(1.0);
+        for i in 0..STEPS_PER_CELL {
+            // `col` phases each cell into its quarter of the shared 8-step
+            // period, so cell N+1 continues cell N's wave instead of every
+            // cell restarting at step 0.
+            let phase = (col * STEPS_PER_CELL + i) % OFFSETS.len();
+            let seg_x = x + i as f32 * seg_w;
+            // The last segment eats any rounding remainder so the segments
+            // tile the FULL cell width with no sub-pixel gap at the right
+            // edge (cw isn't necessarily an exact multiple of STEPS_PER_CELL).
+            let this_w = if i + 1 == STEPS_PER_CELL {
+                (x + cw - seg_x).max(1.0)
+            } else {
+                seg_w
+            };
+            quads.push(rect(
+                seg_x,
+                base_y + OFFSETS[phase],
+                this_w,
+                1.0,
+                color,
+                1.0,
+            ));
+        }
+    } else if flags.contains(Flags::DOTTED_UNDERLINE) {
+        // Short marks (1px) with a 2px gap.
+        push_gapped_line(quads, x, base_y, cw, 3.0, 1.0, color);
+    } else if flags.contains(Flags::DASHED_UNDERLINE) {
+        // Longer marks (3.5px) with a denser 6px pitch — reads as "dashed"
+        // rather than "dotted" at a glance.
+        push_gapped_line(quads, x, base_y, cw, 6.0, 3.5, color);
+    } else {
+        // Plain UNDERLINE (and DOUBLE_UNDERLINE's primary line, below) —
+        // unchanged solid line.
+        quads.push(rect(x, base_y, cw, 1.0, color, 1.0));
+    }
+    if flags.contains(Flags::DOUBLE_UNDERLINE) {
+        quads.push(rect(x, y + ch - 4.0, cw, 1.0, color, 1.0));
+    }
+}
+
+/// Tiles `mark_w`-wide, 1px-tall quads at `pitch` intervals across
+/// `[x, x + cw)`, phased on the absolute `x` pixel position (not the cell's
+/// local origin) so a run of same-styled cells shows one continuous gapped
+/// line rather than each cell restarting the pattern at its own left edge.
+fn push_gapped_line(
+    quads: &mut Vec<QuadInstance>,
+    x: f32,
+    y: f32,
+    cw: f32,
+    pitch: f32,
+    mark_w: f32,
+    color: Rgb,
+) {
+    if pitch <= 0.0 || cw <= 0.0 {
+        return;
+    }
+    let end = x + cw;
+    let mut sx = (x / pitch).floor() * pitch;
+    while sx < end {
+        let seg_x = sx.max(x);
+        let seg_end = (sx + mark_w).min(end);
+        if seg_end > seg_x {
+            quads.push(rect(seg_x, y, seg_end - seg_x, 1.0, color, 1.0));
+        }
+        sx += pitch;
+    }
+}
+
+/// Compatibility fix (audit): underline styles must no longer render
+/// pixel-identical to a plain line. Pure functions, no GPU needed.
+#[cfg(test)]
+mod underline_style_tests {
+    use super::{Flags, push_underline_quads};
+    use kettle_config::Rgb;
+
+    const COLOR: Rgb = Rgb::new(200, 60, 60);
+    const X: f32 = 100.0;
+    const Y: f32 = 0.0;
+    const CW: f32 = 12.0;
+    const CH: f32 = 20.0;
+
+    fn quads_for(flags: Flags, col: usize) -> Vec<super::QuadInstance> {
+        let mut quads = Vec::new();
+        push_underline_quads(&mut quads, X, Y, CW, CH, col, flags, COLOR);
+        quads
+    }
+
+    #[test]
+    fn plain_underline_is_a_single_full_width_line() {
+        let quads = quads_for(Flags::UNDERLINE, 0);
+        assert_eq!(quads.len(), 1, "plain underline is exactly one quad");
+        assert_eq!(quads[0].pos, [X, Y + CH - 2.0]);
+        assert_eq!(quads[0].size, [CW, 1.0]);
+    }
+
+    #[test]
+    fn double_underline_adds_a_second_stacked_line() {
+        let quads = quads_for(Flags::DOUBLE_UNDERLINE, 0);
+        assert_eq!(
+            quads.len(),
+            2,
+            "double underline draws the primary line plus one extra"
+        );
+        assert_eq!(quads[1].pos, [X, Y + CH - 4.0]);
+    }
+
+    #[test]
+    fn undercurl_is_a_multi_segment_zigzag_not_a_straight_line() {
+        let quads = quads_for(Flags::UNDERCURL, 0);
+        assert!(
+            quads.len() > 1,
+            "undercurl must be built from more than one segment"
+        );
+        // At least two distinct y positions — a straight line (the pre-fix
+        // behavior) has only one, which is exactly the bug this fixes.
+        let ys: std::collections::BTreeSet<i32> =
+            quads.iter().map(|q| (q.pos[1] * 1000.0) as i32).collect();
+        assert!(
+            ys.len() > 1,
+            "undercurl segments must vary in y (a zigzag), not sit on one line"
+        );
+        // Segments must tile the full cell width with no gap (unlike dotted/
+        // dashed, a curl is a continuous — if stepped — line).
+        let total_w: f32 = quads.iter().map(|q| q.size[0]).sum();
+        assert!(
+            (total_w - CW).abs() < 0.01,
+            "undercurl segments must cover the full cell width: got {total_w}, want {CW}"
+        );
+    }
+
+    #[test]
+    fn undercurl_phase_spans_a_two_cell_period_instead_of_resetting_every_cell() {
+        // The wave's period is 2 cells: an even column rises (0, 1, 2, 1) and
+        // the next odd column falls (0, -1, -2, -1) — continuing the SAME
+        // wave — rather than every cell independently redrawing the
+        // identical little tent shape (which would show a seam at every
+        // cell edge instead of one continuous squiggle).
+        let ys_at = |col: usize| -> Vec<f32> {
+            quads_for(Flags::UNDERCURL, col)
+                .iter()
+                .map(|q| q.pos[1])
+                .collect()
+        };
+        let col0 = ys_at(0);
+        let col1 = ys_at(1);
+        let col2 = ys_at(2);
+        assert_ne!(
+            col0, col1,
+            "adjacent columns must continue the wave, not repeat the same shape"
+        );
+        assert_eq!(
+            col0, col2,
+            "the wave period is 2 cells, so column N and N+2 must match"
+        );
+        // Both halves of the period still start exactly on the baseline (a
+        // proper wave crosses zero at its period boundaries) — verifies the
+        // OFFSETS table is a real symmetric wave, not an arbitrary jump.
+        assert_eq!(col0[0], base_y_for_test());
+        assert_eq!(col1[0], base_y_for_test());
+    }
+
+    fn base_y_for_test() -> f32 {
+        Y + CH - 2.0
+    }
+
+    #[test]
+    fn dotted_and_dashed_both_leave_gaps_and_differ_from_each_other() {
+        let dotted = quads_for(Flags::DOTTED_UNDERLINE, 0);
+        let dashed = quads_for(Flags::DASHED_UNDERLINE, 0);
+        assert!(dotted.len() > 1, "dotted must be more than one mark");
+        assert!(dashed.len() > 1, "dashed must be more than one mark");
+        let dotted_w: f32 = dotted.iter().map(|q| q.size[0]).sum();
+        let dashed_w: f32 = dashed.iter().map(|q| q.size[0]).sum();
+        assert!(
+            dotted_w < CW,
+            "dotted marks must leave visible gaps (not cover the full width)"
+        );
+        assert!(
+            dashed_w < CW,
+            "dashed marks must leave visible gaps (not cover the full width)"
+        );
+        // Dashed marks are individually longer than dotted marks — the two
+        // styles must be visually distinguishable from each other, not just
+        // from a plain/undercurl line.
+        let dotted_mark_w = dotted[0].size[0];
+        let dashed_mark_w = dashed[0].size[0];
+        assert!(
+            dashed_mark_w > dotted_mark_w,
+            "dashed marks ({dashed_mark_w}) must be longer than dotted marks ({dotted_mark_w})"
+        );
+    }
+
+    /// `QuadInstance` only derives `Pod`/`Zeroable` (needed for the GPU
+    /// upload), not `PartialEq`/`Debug` — extract the two fields this test
+    /// cares about into a comparable/printable shape instead.
+    fn shape_of(quads: &[super::QuadInstance]) -> Vec<([f32; 2], [f32; 2])> {
+        quads.iter().map(|q| (q.pos, q.size)).collect()
+    }
+
+    #[test]
+    fn dotted_dashed_and_undercurl_are_all_pairwise_distinct_shapes() {
+        // The actual regression this whole fix targets: before it, these
+        // four styles (plus DOUBLE) all produced the exact same single
+        // full-width quad. None of the "distinctive" styles may do that now.
+        let plain = shape_of(&quads_for(Flags::UNDERLINE, 0));
+        for (name, flags) in [
+            ("undercurl", Flags::UNDERCURL),
+            ("dotted", Flags::DOTTED_UNDERLINE),
+            ("dashed", Flags::DASHED_UNDERLINE),
+        ] {
+            let styled = shape_of(&quads_for(flags, 0));
+            assert_ne!(
+                styled, plain,
+                "{name} must render differently from a plain underline"
+            );
+        }
     }
 }
 
