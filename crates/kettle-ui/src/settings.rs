@@ -307,6 +307,19 @@ pub fn categories(gpus: &[(String, String)]) -> Vec<Category> {
                 ),
             ],
         },
+        Category {
+            name: "Search",
+            fields: vec![
+                toggle("Wrap at boundaries", "search-wrap"),
+                choice(
+                    "Case mode",
+                    "search-case-sensitive",
+                    &["smart", "always", "never"],
+                    &["Smart", "Match", "Ignore"],
+                ),
+                toggle("Invert default direction", "invert-search"),
+            ],
+        },
         // v2.28.0 (audit): a dedicated Tabs page surfacing the tab-bar keys that
         // were previously config-file-only. `tab-bar-position` offers only
         // top/bottom — left/right (vertical bars) parse but don't render yet, so
@@ -563,6 +576,8 @@ fn read_bool(cfg: &Config, key: &str) -> bool {
         "close-button-on-tab" => cfg.close_button_on_tab,
         "scroll-tabbar" => cfg.scroll_tabbar,
         "detachable-tabs" => cfg.detachable_tabs,
+        "search-wrap" => cfg.search_wrap,
+        "invert-search" => cfg.invert_search,
         _ => false,
     }
 }
@@ -600,6 +615,12 @@ fn read_choice(cfg: &Config, key: &str) -> String {
             FocusMode::Click => "click",
             FocusMode::Sloppy => "sloppy",
             FocusMode::System => "system",
+        }
+        .to_string(),
+        "search-case-sensitive" => match cfg.search_case_sensitive {
+            kettle_config::SearchCaseSensitivity::Smart => "smart",
+            kettle_config::SearchCaseSensitivity::Always => "always",
+            kettle_config::SearchCaseSensitivity::Never => "never",
         }
         .to_string(),
         // v2.23.0 background controls.

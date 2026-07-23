@@ -43,8 +43,11 @@ tracked here so they are not lost.
   live reload now fires an edge-triggered desktop notification listing the
   ignored malformed lines (`should_notify_malformed` + `load_reloaded_config`).
 - Keybind-capture should warn when reassigning an in-use chord; Settings
-  GPU/padding writes should surface a persist failure; overlay text inputs need
-  caret movement / Home/End / paste.
+  GPU/padding writes should surface a persist failure. Search now has a
+  grapheme-aware editor with selection, caret/word movement, Home/End, and
+  bounded paste; the command palette, layout picker, and other older text
+  overlays still need that editor behavior consolidated behind one shared
+  component.
 
 ## Performance (measure first)
 
@@ -55,6 +58,40 @@ tracked here so they are not lost.
   painting one).
 - Per-window `FontSystem` sharing; lazy system-font load on first frame. Both are
   speculative — profile on the maintainer's machine before implementing.
+
+## Search follow-up and platform evidence
+
+The two-track search audit is recorded in
+[AUDIT-2026-07-22-SEARCH.md](AUDIT-2026-07-22-SEARCH.md): track A covers every
+search-owning file/crate, public contract, cap, and complexity boundary; track B
+covers the 88-frame report, Xvfb/XTest reproduction, Terminator comparison, and
+live UI states. The implementation addresses the reproduced signed-history and
+soft-wrap failures, but the following evidence cannot be inferred from Ubuntu
+unit tests and remains explicit release-environment work until recorded there:
+
+- native Windows 11/ConPTY keyboard, IME, DPI, accessibility, and live renderer
+  exercise (plus Windows 11 WSL shell/TUI flow);
+- macOS native modifier, IME, accessibility, and Metal live-window exercise;
+- installed-release desktop-launch verification after the signed release is
+  available, including the Ubuntu Super-key launcher and the user's recording
+  configuration;
+- deeper authenticated Codex CLI / Claude Code CLI and configured AstroNvim
+  sessions beyond deterministic fixtures, where installed credentials and
+  configuration are external prerequisites.
+
+Moving retained-history traversal to a worker is deliberately deferred pending
+profiling. The current event-loop design advances through nominal 1000-line
+ranges after a 500 ms idle deadline but performs only one bounded core work
+slice per turn, preserves cursor progress under continuous output, and uses a
+quiet-period verification only for non-navigation work. Output-interrupted
+explicit navigation stays Results limited until the user retries. Query/reflow
+changes invalidate work by scan token. One engine
+call and one aggregate core slice are each capped at 64 KiB text; the aggregate
+slice additionally yields after 262,144 inspected cells or 256 complete logical
+haystacks. One logical haystack is capped at 256 rows, 64 KiB, and 262,144
+cells, and one projection at 65,536 spans. Any threaded alternative must
+snapshot safely without holding the terminal lock across UI work or applying
+results after output, resize, or query changes.
 
 These are sourced from the two audit run outputs and the synthesis plans; pick
 them up in priority order (robustness/correctness before perf before polish).

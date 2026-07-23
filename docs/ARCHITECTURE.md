@@ -96,6 +96,14 @@ forward-compat seam for the optional `kettle-muxd` session daemon (see
 [MUX-SERVER-DESIGN.md](MUX-SERVER-DESIGN.md)): when `kettle-muxd` lands it can
 re-host the same server side as `kind = "muxd"` without breaking any client.
 
+App-owned modal input stays distinct from pane input. `send_keys` encodes keys
+through the active terminal modes and writes them to the PTY;
+`dispatch_ui_key` accepts a bounded, pre-parsed batch only while a supported
+Kettle modal is open and never enters the PTY path. `ui_geometry` exposes the
+search bar's rectangles, focused control, modes, status, target pane, and
+truncation flag; its Search object deliberately omits the query and matched
+terminal text.
+
 ## In-process multi-window
 
 Since v2.18.0 every kettle window lives in one process. `App` holds
@@ -190,6 +198,86 @@ putting a user path on the wire.
   4 KiB, and version, filename identity, PID, and `#rrggbb` fields are validated
   before a claim participates in color selection.
   `accent-color = theme|off|none` opts out; a hex value pins one color.
+
+## Search architecture
+
+Search crosses core, UI, and renderer boundaries without materializing the
+whole scrollback buffer:
+
+- **`kettle-core` owns matching.** `CompiledSearch` validates strict Rust
+  regex syntax and the 4096-byte UTF-8 input cap, then runs
+  `regex-automata`'s meta engine over a bounded terminal-grid adapter. The meta
+  engine retains Rust leftmost-first behavior and Unicode assertions such as
+  word boundaries. Compilation admits at most 512 KiB of Thompson NFA, 256 KiB
+  of one-pass state, a 256 KiB hybrid cache, and 40 KiB of DFA state. It uses
+  `WhichCaptures::Implicit`, so only the implicit whole-match capture is built;
+  subgroup captures are unnecessary because the UI consumes grid spans, not
+  capture values. A syntactically valid expression that exceeds an engine
+  ceiling is **Pattern too complex**, distinct from Invalid pattern. Public
+  `SearchPoint`/`SearchSpan` coordinates use signed lines so historical rows
+  (negative in the engine's coordinate system) are not discarded. Bounds,
+  direction, wrap outcome, layout snapshots, scan tokens, and truncation are
+  explicit values rather than sentinel integers. Materialization maps soft
+  wraps, wide cells, combining marks, variation selectors, and ZWJ sequences
+  back to grid spans. Regex matches that consume no bytes are suppressed in
+  the engine's single leftmost-first pass; consequently, a nullable alternative
+  that wins with an empty match can shadow a later consuming alternative at
+  the same position.
+- **`kettle-ui` owns interaction and scheduling.** Each `WindowState` has one
+  search state and an in-memory per-pane query map; moving between panes does
+  not leak a query into another pane, and no search state is process-global.
+  The Unicode editor moves, selects, and deletes by grapheme boundary. A scan
+  token combines pane output generation, query revision, and terminal layout.
+  Query changes and reflow restart work from a fresh viewport anchor. Plain PTY
+  output preserves and advances an existing chunk cursor so a continuously
+  writing process cannot starve deep-history search. Because rows can drift,
+  only a non-navigation scan schedules fresh verification after 500 ms quiet.
+  If output interrupts an explicit Previous/Next operation, its ordering cannot
+  be reconstructed by the default-direction retry; it remains Results limited
+  until the user explicitly retries navigation.
+- **Work is hybrid and bounded.** Typing searches at most 1000 physical lines
+  around the viewport immediately. When that finds nothing, a 500 ms idle
+  deadline advances through nominal 1000-line history ranges, with at most one
+  bounded core work slice per event-loop turn; explicit Next/Previous starts
+  the same resumable traversal immediately. Nearby highlights cover the visible
+  viewport plus 100 physical lines on each side.
+  One synchronous regex invocation receives at most 64 KiB of UTF-8. One
+  bounded core call has the same 64 KiB aggregate text ceiling plus limits of
+  262,144 inspected terminal cells and 256 complete logical-line haystacks.
+  Reaching an aggregate work ceiling returns an exact continuation at the first
+  unscanned hard logical line; it never splits a complete logical line, never
+  sets Results limited, and the UI resumes it on a later event-loop turn. The
+  nearby phase, background traversal, and visible projection each run at most
+  one such core work slice per turn; visible projection yields to foreground
+  navigation and resumes on the next turn.
+
+  A single soft-wrapped logical haystack is separately capped at 256 physical
+  rows, 64 KiB of UTF-8, and 262,144 inspected cells (including spacer/context
+  inspection). Reaching one of those capacities inside the logical line is an
+  accuracy barrier: exact matches wholly before it may still be painted, but
+  traversal stops immediately, returns no continuation past uninspected cells,
+  and reports **Results limited** instead of a definitive first, last, wrap, or
+  miss. One projection retains at most 65,536 spans. Retained search memory is
+  therefore independent of total history size.
+- **`kettle-render` owns layout and drawing.** One responsive bottom lane uses
+  one row on wide windows and as many additional rows as needed on narrow
+  windows, so every control remains present without painting over pane cells,
+  the status bar, or update banner. Highlight
+  projection consumes sorted signed spans in a single pass with the visible
+  cells (`O(cells + spans)`). The active result uses the theme search colors;
+  nearby results use the normal selection treatment. The bar intentionally
+  renders statuses such as Searching, Match, Wrapped, Start, End, No match,
+  Invalid pattern, Pattern too complex, Query too long, and Results limited
+  rather than an eagerly computed global count.
+
+Opening captures a viewport-relative anchor. Closing preserves the selected
+match at the same screen row (or restores the pre-open offset when there was no
+selection), which prevents the bar's reserved rows from making content jump.
+Wrap, case mode (Smart/Match/Ignore), and invert are persisted through the same
+config transaction as Settings. All editor and navigation input is handled
+before pane encoding, so it is not forwarded to tmux, AstroNvim, Codex CLI,
+Claude Code CLI, or other programs in the PTY. Native keyboard, IME,
+accessibility, and renderer behavior still requires platform-specific evidence.
 
 ## Per-pane data flow
 

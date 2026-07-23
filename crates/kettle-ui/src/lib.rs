@@ -35,6 +35,7 @@ mod input;
 mod lua;
 mod mux;
 mod runtime_diagnostics;
+mod search_input;
 mod session;
 mod settings;
 // In-app "newer release available" checker (notify-only). Kept a

@@ -1013,6 +1013,36 @@ def live_shell_command(live: LiveKettle, command: str, marker: str, timeout_ms: 
     live.wait_for_text(marker, timeout_ms=timeout_ms, quiet_ms=250)
 
 
+def wait_for_search_result(
+    live: LiveKettle,
+    expected_text: str,
+    *,
+    timeout_s: float = 12.0,
+) -> Tuple[Dict[str, object], Dict[str, object]]:
+    """Wait for Search to focus and reveal one exact scrollback fixture row."""
+    deadline = time.monotonic() + timeout_s
+    last_geometry: Dict[str, object] = {}
+    last_screen: Dict[str, object] = {}
+    while time.monotonic() < deadline:
+        last_geometry = live.json_ctl("ui_geometry")
+        last_screen = live.json_ctl("read_screen")
+        search = last_geometry.get("search")
+        if (
+            isinstance(search, dict)
+            and search.get("has_match") is True
+            and search.get("status") in {"Match", "Wrapped"}
+            and expected_text in screen_text(last_screen)
+        ):
+            return last_geometry, last_screen
+        time.sleep(0.05)
+    raise SystemExit(
+        "search-history smoke: timed out waiting for a focused historical match: "
+        f"expected={expected_text!r} search={last_geometry.get('search')} "
+        f"display_offset={last_screen.get('display_offset')} "
+        f"screen={screen_text(last_screen)!r}"
+    )
+
+
 def command_with_marker(command: str, marker: str) -> str:
     split = max(1, len(marker) // 2)
     left = marker[:split]
@@ -1579,6 +1609,215 @@ def run_agent_tui(kettle: str, root: Path) -> Path:
         raise SystemExit("agent-tui smoke: no probes ran")
     (out / "analysis.json").write_text(
         json.dumps({"probes": probes, "states": states}, indent=2) + "\n"
+    )
+    return out
+
+
+def run_search_history(kettle: str, root: Path) -> Path:
+    """Exercise Ctrl+Shift+F against matches that exist only in scrollback."""
+    out = root / f"search-history-{time.strftime('%Y%m%d-%H%M%S')}"
+    out.mkdir(parents=True, exist_ok=True)
+    cfg = out / "config"
+    cfg.write_text(
+        "\n".join(
+            [
+                "agent-server = full",
+                "text-renderer = grid",
+                "tab-bar = always",
+                "status-bar = off",
+                "restore-session = false",
+                "update-check = false",
+                "record = off",
+                "background = #090909",
+                "foreground = #f5f5f5",
+                "minimum-contrast = 0",
+                "window-padding-x = 8",
+                "window-padding-y = 8",
+                "window-width = 100",
+                "window-height = 30",
+                "scrollback = 5000",
+                "scrollback-bytes = 0",
+                "search-wrap = true",
+                "invert-search = false",
+                "search-case-sensitive = always",
+            ]
+        )
+        + "\n"
+    )
+
+    query = "KETTLE_SEARCH_HISTORY_HIT"
+    fixtures = [
+        "KETTLE_SEARCH_HISTORY_HIT_OLD",
+        "KETTLE_SEARCH_HISTORY_HIT_MIDDLE",
+        "KETTLE_SEARCH_HISTORY_HIT_NEW",
+    ]
+    done = "KETTLE_SEARCH_HISTORY_FIXTURE_DONE"
+    if platform.system() == "Windows":
+        fill_command = (
+            "$esc=[char]27; [Console]::Write($esc + '[2J' + $esc + '[3J' + $esc + '[H'); "
+            "1..1800 | ForEach-Object { "
+            "if ($_ -eq 75) { Write-Output ('KETTLE_SEARCH_' + 'HISTORY_HIT_OLD') } "
+            "elseif ($_ -eq 1050) { Write-Output ('KETTLE_SEARCH_' + 'HISTORY_HIT_MIDDLE') } "
+            "elseif ($_ -eq 1650) { Write-Output ('KETTLE_SEARCH_' + 'HISTORY_HIT_NEW') } "
+            "else { 'KETTLE_SEARCH_FILL_{0:D4}' -f $_ } }; "
+            "Write-Output ('KETTLE_SEARCH_HISTORY_FIXTURE_' + 'DONE')"
+        )
+        extra_args = ["-e", "powershell.exe", "-NoLogo", "-NoProfile"]
+    else:
+        fill_command = (
+            "printf '\\033[2J\\033[3J\\033[H'; "
+            "for i in $(seq 1 1800); do case \"$i\" in "
+            "75) printf '%s%s\\n' KETTLE_SEARCH_ HISTORY_HIT_OLD ;; "
+            "1050) printf '%s%s\\n' KETTLE_SEARCH_ HISTORY_HIT_MIDDLE ;; "
+            "1650) printf '%s%s\\n' KETTLE_SEARCH_ HISTORY_HIT_NEW ;; "
+            "*) printf 'KETTLE_SEARCH_FILL_%04d\\n' \"$i\" ;; esac; done; "
+            "printf '%s%s\\n' KETTLE_SEARCH_HISTORY_FIXTURE_ DONE"
+        )
+        extra_args = []
+
+    states: List[Dict[str, object]] = []
+    with LiveKettle(kettle, cfg, out / "kettle.log", extra_args=extra_args) as live:
+        live_shell_command(live, fill_command, done, timeout_ms=20000)
+        bottom = live.json_ctl("read_screen")
+        (out / "bottom.screen.json").write_text(json.dumps(bottom, indent=2) + "\n")
+        if int(bottom.get("display_offset", -1)) != 0:
+            raise SystemExit(
+                "search-history smoke: fixture did not settle at the live bottom: "
+                f"display_offset={bottom.get('display_offset')}"
+            )
+        if int(bottom.get("history_size", 0)) < 1700:
+            raise SystemExit(
+                "search-history smoke: fixture did not create enough scrollback: "
+                f"history_size={bottom.get('history_size')}"
+            )
+        if query in screen_text(bottom):
+            raise SystemExit("search-history smoke: a search fixture is still visible at the bottom")
+        states.append(capture_live_state(live, out, "bottom"))
+
+        binding = live.json_ctl(
+            "dispatch_keybind",
+            {"logical": "f", "mods": "ctrl+shift"},
+        )
+        (out / "ctrl-shift-f.dispatch.json").write_text(
+            json.dumps(binding, indent=2) + "\n"
+        )
+        if binding.get("dispatched") is not True or binding.get("action") != "StartSearch":
+            raise SystemExit(
+                "search-history smoke: Ctrl+Shift+F did not resolve to StartSearch: "
+                f"{binding}"
+            )
+
+        opened = live.json_ctl("ui_geometry")
+        (out / "search-open.geometry.json").write_text(json.dumps(opened, indent=2) + "\n")
+        search_open = opened.get("search")
+        if not isinstance(search_open, dict) or not modal_open(opened, "search"):
+            raise SystemExit("search-history smoke: Ctrl+Shift+F did not open Search")
+        expected_controls = {
+            "editor",
+            "previous",
+            "next",
+            "wrap",
+            "case",
+            "invert",
+            "close",
+        }
+        controls = {
+            str(control.get("name"))
+            for control in search_open.get("controls", [])
+            if isinstance(control, dict)
+        }
+        if controls != expected_controls:
+            raise SystemExit(
+                "search-history smoke: search controls do not match the interactive surface: "
+                f"{sorted(controls)}"
+            )
+
+        typed = live.json_ctl("dispatch_ui_key", {"keys": list(query)})
+        (out / "query.dispatch.json").write_text(json.dumps(typed, indent=2) + "\n")
+        if int(typed.get("keys", 0)) != len(query) or typed.get("open") is not True:
+            raise SystemExit(f"search-history smoke: query input was not fully applied: {typed}")
+
+        old_geo, old_screen = wait_for_search_result(live, fixtures[0])
+        (out / "old.geometry.json").write_text(json.dumps(old_geo, indent=2) + "\n")
+        (out / "old.screen.json").write_text(json.dumps(old_screen, indent=2) + "\n")
+        states.append(capture_live_state(live, out, "old-match"))
+
+        live.json_ctl("dispatch_ui_key", {"keys": ["enter"]})
+        middle_geo, middle_screen = wait_for_search_result(live, fixtures[1])
+        (out / "middle.geometry.json").write_text(json.dumps(middle_geo, indent=2) + "\n")
+        (out / "middle.screen.json").write_text(json.dumps(middle_screen, indent=2) + "\n")
+        states.append(capture_live_state(live, out, "middle-match"))
+
+        live.json_ctl("dispatch_ui_key", {"keys": ["enter"]})
+        new_geo, new_screen = wait_for_search_result(live, fixtures[2])
+        (out / "new.geometry.json").write_text(json.dumps(new_geo, indent=2) + "\n")
+        (out / "new.screen.json").write_text(json.dumps(new_screen, indent=2) + "\n")
+        states.append(capture_live_state(live, out, "new-match"))
+
+        live.json_ctl("dispatch_ui_key", {"keys": ["shift+enter"]})
+        reverse_geo, reverse_screen = wait_for_search_result(live, fixtures[1])
+        (out / "reverse.geometry.json").write_text(json.dumps(reverse_geo, indent=2) + "\n")
+        (out / "reverse.screen.json").write_text(json.dumps(reverse_screen, indent=2) + "\n")
+        states.append(capture_live_state(live, out, "reverse-middle-match"))
+
+        offsets = [
+            int(old_screen.get("display_offset", 0)),
+            int(middle_screen.get("display_offset", 0)),
+            int(new_screen.get("display_offset", 0)),
+        ]
+        if not (offsets[0] > offsets[1] > offsets[2] > 0):
+            raise SystemExit(
+                "search-history smoke: forward navigation did not move oldest-to-newest "
+                f"through scrollback: offsets={offsets}"
+            )
+        reverse_offset = int(reverse_screen.get("display_offset", 0))
+        if reverse_offset <= offsets[2]:
+            raise SystemExit(
+                "search-history smoke: Shift+Enter did not navigate back toward older history: "
+                f"new={offsets[2]} reverse={reverse_offset}"
+            )
+
+        for label, geometry in [
+            ("old", old_geo),
+            ("middle", middle_geo),
+            ("new", new_geo),
+            ("reverse", reverse_geo),
+        ]:
+            search = geometry.get("search")
+            if not isinstance(search, dict) or search.get("has_match") is not True:
+                raise SystemExit(f"search-history smoke: {label} result lost focused-match state")
+            if query in json.dumps(search):
+                raise SystemExit("search-history smoke: ui_geometry exposed the private query")
+
+        live.json_ctl("dispatch_ui_key", {"keys": ["escape"]})
+        closed = live.json_ctl("ui_geometry")
+        (out / "search-closed.geometry.json").write_text(json.dumps(closed, indent=2) + "\n")
+        if modal_open(closed, "search"):
+            raise SystemExit("search-history smoke: Escape did not close Search")
+
+    (out / "analysis.json").write_text(
+        json.dumps(
+            {
+                "platform": platform.system(),
+                "display": os.environ.get("DISPLAY"),
+                "wayland_display": os.environ.get("WAYLAND_DISPLAY"),
+                "keybind": binding,
+                "query_bytes": len(query.encode("utf-8")),
+                "fixture_lines": 1800,
+                "history_size": int(bottom.get("history_size", 0)),
+                "forward_offsets": offsets,
+                "reverse_offset": reverse_offset,
+                "statuses": [
+                    old_geo["search"]["status"],  # type: ignore[index]
+                    middle_geo["search"]["status"],  # type: ignore[index]
+                    new_geo["search"]["status"],  # type: ignore[index]
+                    reverse_geo["search"]["status"],  # type: ignore[index]
+                ],
+                "states": states,
+            },
+            indent=2,
+        )
+        + "\n"
     )
     return out
 
@@ -2319,6 +2558,7 @@ def main() -> int:
             "zoom-keybind",
             "underline",
             "agent-tui",
+            "search-history",
             "interaction",
             "self-test",
             "all",
@@ -2364,6 +2604,9 @@ def main() -> int:
     if args.case in ("agent-tui", "all"):
         out = run_agent_tui(args.kettle, root)
         print(f"agent-tui smoke: OK artifacts={out}")
+    if args.case in ("search-history", "all"):
+        out = run_search_history(args.kettle, root)
+        print(f"search-history smoke: OK artifacts={out}")
     if args.case in ("interaction", "all"):
         out = run_interaction(args.kettle, root)
         print(f"interaction smoke: OK artifacts={out}")

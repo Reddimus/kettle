@@ -112,7 +112,7 @@ fn build_params(args: &CtlArgs) -> Result<Value, String> {
     if let Some(re) = &args.regex {
         map.insert("regex".into(), Value::String(re.clone()));
     }
-    // v2.20.0: `--keys "escape,ctrl+c"` → the `send_keys` token array.
+    // `--keys "escape,ctrl+c"` → the `send_keys` / `dispatch_ui_key` token array.
     if let Some(keys) = &args.keys {
         let arr: Vec<Value> = keys
             .split(',')
@@ -205,6 +205,10 @@ fn pretty(method: &str, result: &Value) -> String {
         "send_keys" => format!(
             "sent {} keys ({} bytes) to pane {}\n",
             result["keys"], result["bytes"], result["pane"]
+        ),
+        "dispatch_ui_key" => format!(
+            "dispatched {} keys to the {} modal in window {} (open: {})\n",
+            result["keys"], result["modal"], result["window"], result["open"]
         ),
         "send_mouse" => format!(
             "sent mouse {} at [{}, {}] to window {} (handled: {})\n",

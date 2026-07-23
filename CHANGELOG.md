@@ -6,6 +6,57 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+## [2.38.0] — 2026-07-22
+
+  ### Added
+  - **Search now has a responsive Terminator-style bottom bar.**
+    `Ctrl+Shift+F` exposes Previous, Next, Wrap, case mode
+    (**Smart / Match / Ignore**), Invert, and Close controls around a
+    grapheme-aware editor. Wrap/case/invert persist through both the bar and the
+    new Settings → Search page; queries are remembered per pane within each
+    window. Enter/Shift+Enter follow/opposite the configured direction, while
+    F3/Shift+F3 remain literal Next/Previous.
+  - **Search is deterministically agent-testable without corrupting a running
+    TUI.** The full control server and MCP bridge add `dispatch_ui_key`, a
+    bounded modal-only key path that never writes PTY bytes. `ui_geometry` adds
+    query-free Search control rectangles, status, target, modes, and
+    match/truncation metadata.
+
+  ### Changed
+  - Scrollback patterns now use `regex-automata`'s meta engine with strict Rust
+    regex semantics and a 4096-byte UTF-8 cap; invalid syntax is reported
+    instead of silently falling back to a literal. Valid expressions that
+    exceed the 512 KiB NFA ceiling report **Pattern too complex**. Search keeps
+    only the implicit whole-match capture, with 256 KiB one-pass and hybrid
+    cache ceilings and a 40 KiB DFA ceiling. Zero-width results are suppressed
+    in the engine's single leftmost-first pass, so a winning empty alternative
+    can shadow a later consuming alternative at the same position. The bar
+    reports status rather than an eager global match count.
+  - Typing targets a nearby 1000-line range immediately and continues through
+    nominal 1000-line ranges after 500 ms idle. Each event-loop turn runs at
+    most one synchronous bounded work slice, which processes at most 64 KiB of
+    UTF-8 and inspects at most 262,144 cells and 256 complete logical-line
+    haystacks. Exact work-budget
+    yields resume on a later event-loop turn without becoming Results limited.
+    One logical haystack is additionally capped at 256 physical rows, 64 KiB,
+    and 262,144 inspected cells; hitting a capacity boundary inside it is an
+    immediate **Results limited** barrier that search never skips. Nearby
+    projection is capped at 65,536 match spans.
+  - Continuous output no longer starves chunk progress. A non-navigation scan
+    verifies drift after 500 ms quiet; an explicit Previous/Next interrupted by
+    output remains **Results limited** until the user retries that navigation.
+
+  ### Fixed
+  - **Historical and soft-wrapped search matches are highlighted and navigated
+    correctly.** Search coordinates now preserve negative scrollback lines and
+    account for the viewport display offset; bounded logical-line matching maps
+    combining marks, variation selectors, ZWJ sequences, wide cells, and
+    soft-wrap boundaries back to exact grid spans. Closing Search keeps the
+    selected result anchored instead of snapping the viewport.
+  - The byte-by-byte iTerm2 image extractor regression test now uses an
+    isolated graphics budget, closing the remaining parallel-test race without
+    changing production process-wide resource accounting.
+
 ## [2.37.0] — 2026-07-22
 
   ### Added

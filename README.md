@@ -79,8 +79,19 @@ and **WezTerm** into one tool.
   reload.
 - **Bundled JetBrains Mono Nerd Font** — AstroNvim icons render with zero
   setup.
-- **Search overlay** — `Ctrl+Shift+F`, real regex with **smart-case**
-  (case-insensitive until you type an uppercase), highlight + cycle.
+- **Scrollback search** — `Ctrl+Shift+F` opens a Terminator-style bottom bar
+  with Previous / Next, Wrap, Case (**Smart / Match / Ignore**), Invert, and
+  Close controls. Patterns use strict Rust regex syntax (invalid expressions
+  are reported, never silently treated as literals), are capped at 4096 UTF-8
+  bytes, and highlight soft-wrapped and historical matches while you type.
+  Work proceeds in bounded chunks, with **Results limited** reported whenever
+  a pathological logical line, the 65,536-span projection cap, or live output
+  interrupting an explicit navigation prevents an exact ordering claim; retry
+  interrupted Previous/Next, while ordinary work-budget yields resume
+  transparently. Syntactically valid expressions that exceed the bounded
+  regex-engine budget report **Pattern too complex**. Search reports status
+  instead of precomputing a misleading global match count, so very large or
+  infinite scrollback stays responsive.
 - **Hyperlinks** — OSC 8, URL autodetection, and cwd-aware local file-path
   links for agent/editor output, underlined with hover and opened with
   `Ctrl`/`Cmd`+click.
@@ -161,7 +172,7 @@ curl -fsSL https://raw.githubusercontent.com/Reddimus/kettle/main/scripts/instal
 Then search **"kettle"** in GNOME Activities / KDE Krunner / Ubuntu's
 Super-key, or run `kettle` from any shell on your `$PATH`.
 
-Pin a specific version: `KETTLE_VERSION=v2.37.0 sh` instead of `sh`.
+Pin a specific version: `KETTLE_VERSION=v2.38.0 sh` instead of `sh`.
 System-wide install: `KETTLE_PREFIX=/usr/local sh` (needs write access).
 Uninstall later: `~/.local/share/kettle/install.sh --uninstall`.
 
@@ -228,8 +239,10 @@ three platforms.
 3. **Split** with `Ctrl+Shift+O` (top/bottom) or `Ctrl+Shift+E`
    (left/right), cycle panes with `Ctrl+Shift+N` / `P`, and open a new
    tab with `Ctrl+Shift+T`.
-4. **Search** the screen with `Ctrl+Shift+F` (regex, smart-case), or open
-   the **command palette** with `Ctrl+Shift+K` to fuzzy-find any action.
+4. **Search** the screen and scrollback with `Ctrl+Shift+F`. Type a Rust regex,
+   press `Enter` / `Shift+Enter` for the default / opposite direction, and use
+   the bar's Wrap, Smart / Match / Ignore, and Invert controls as needed. Open
+   the **command palette** with `Ctrl+Shift+K` to fuzzy-find any app action.
 5. **Configure** it: run `kettle --write-default-config` to drop a fully
    commented starter config at the right path (it creates the folder for you
    and won't overwrite an existing config) — edits live-reload the moment you
@@ -358,6 +371,10 @@ claude mcp add kettle -- kettle mcp   # register kettle as MCP tools for Claude 
   enough to drive interactive TUIs (vim, htop, tmux) end-to-end. The server is
   **off by default**; `read-only` reads, `full` also sends/runs. Local IPC only
   (Unix socket / Windows named pipe, current-user).
+- Search diagnostics use a separate `dispatch_ui_key` method, so an agent can
+  exercise Kettle's open search bar without sending those keys to the pane's
+  PTY. The `ui_geometry.search` object reports control rectangles, mode and
+  status, but intentionally omits the query and matched terminal text.
 - **`kettle mcp`** exposes all of the above as Model Context Protocol tools, so
   Claude Code / Codex get kettle as native tools.
 
@@ -375,6 +392,7 @@ model.
 - [docs/ROADMAP.md](docs/ROADMAP.md) — what's done / next
 - [docs/TESTING.md](docs/TESTING.md) — test suite + CI
 - [docs/AUDIT-2026-07.md](docs/AUDIT-2026-07.md) — Windows reliability investigation + tracked-tree audit
+- [docs/AUDIT-2026-07-22-SEARCH.md](docs/AUDIT-2026-07-22-SEARCH.md) — frame-by-frame search regression evidence + implementation audit
 - [docs/PERFORMANCE.md](docs/PERFORMANCE.md) — measured startup / memory / render numbers
 - [CHANGELOG.md](CHANGELOG.md) — release history
 - [docs/CONFIG.md](docs/CONFIG.md) — every config key

@@ -47,7 +47,7 @@ bell indicators, inline images (sixel, kitty graphics, iTerm2
 inline image protocols), OSC 8 hyperlinks, OSC 133
 shell-integration jump-to-prompt, ligatures, infinite scrollback,
 fuzzy-search overlays (command palette, themes, SSH-host
-launcher), undo close tab, duplicate tab/pane, per-window accent
+launcher), strict-regex scrollback search, undo close tab, duplicate tab/pane, per-window accent
 colors, and broadcast / group-input mode.
 .PP
 Without arguments
@@ -430,11 +430,11 @@ Piped or redirected stdin is forwarded to the child on Unix and WSL. An
 interactive terminal stdin is left attached to the caller, and native Windows
 ConPTY stdin forwarding remains disabled.
 .TP
-.B kettle ctl \fIMETHOD\fR \fR[\fB\-\-pane \fIN\fR] [\fB\-\-json \fIJSON\fR] [\fB\-\-text \fITEXT\fR] [\fB\-\-pid \fIPID\fR] [\fB\-\-raw\fR]
+.B kettle ctl \fIMETHOD\fR \fR[\fB\-\-pane \fIN\fR] [\fB\-\-json \fIJSON\fR] [\fB\-\-text \fITEXT\fR] [\fB\-\-keys \fIKEYS\fR] [\fB\-\-pid \fIPID\fR] [\fB\-\-raw\fR]
 Drive a running kettle's agent control server.
 .I METHOD
 is one of
-.BR get_state ", " list_tabs ", " list_panes ", " read_screen ", " read_cells ", " ui_geometry ", " screenshot ", " send_text ", " send_keys ", " dispatch_keybind ", " send_mouse ", " resize_window ", " perform_action ", " wait_for ", " run_command ,
+.BR get_state ", " list_tabs ", " list_panes ", " read_screen ", " read_cells ", " ui_geometry ", " screenshot ", " send_text ", " send_keys ", " dispatch_keybind ", " dispatch_ui_key ", " send_mouse ", " resize_window ", " perform_action ", " wait_for ", " run_command ,
 or
 .B events
 to stream the event feed. The target kettle must run with
@@ -450,6 +450,11 @@ is the text for
 .B send_text
 or the command line for
 .BR run_command ;
+.B \-\-keys
+is a comma-separated token list for
+.B send_keys
+or
+.BR dispatch_ui_key ;
 .B \-\-pid
 selects a specific kettle (else the newest running server); and
 .B \-\-raw
@@ -597,7 +602,26 @@ config entry if you want a hotkey).
 command palette (fuzzy actions)
 .TP
 .B Ctrl+Shift+F
-find in scrollback (regex + smart-case)
+open the Terminator-style scrollback-search bar. Patterns use strict Rust regex
+syntax and are capped at 4096 UTF-8 bytes. The bar provides Previous, Next,
+Wrap, Case (Smart / Match / Ignore), Invert, and Close. Enter / Shift+Enter
+search in the default / opposite direction; F3 / Shift+F3 always search next /
+previous. Invalid patterns are reported, not treated as literals. The status
+does not precompute a global match count. Valid patterns that exceed the
+512-KiB NFA ceiling report
+.BR Pattern " " too " " complex ;
+the engine also caps one-pass state and the hybrid cache at 256 KiB each and
+DFA state at 40 KiB, retaining only the implicit whole-match capture. It reports
+.B Results limited
+when a 256-row, 262,144-inspected-cell, or 64-KiB logical-line capacity, an
+output-interrupted explicit navigation, or the 65,536-span projection bound
+prevents an exact ordering claim. Each engine call and aggregate bounded call
+has a 64-KiB text ceiling; aggregate work also yields after 262,144 cells or 256
+complete logical haystacks. Those exact yields resume without a warning.
+Matches that consume no bytes are suppressed in the normal leftmost-first pass,
+so a winning nullable alternative can shadow a later consuming alternative at
+the same position. Only non-navigation drift gets an automatic 500-ms quiet
+verification; retry Previous/Next after interrupted navigation.
 .TP
 .B Ctrl+Shift+H
 URL / path quick-select hints
@@ -732,6 +756,15 @@ docs at
 .UR https://github.com/Reddimus/kettle/blob/main/docs/CONFIG.md
 .UE
 for the full reference.
+.PP
+Search behavior is configured with
+.BR search\-wrap ,
+.BR search\-case\-sensitive
+(`smart`, `always`, or `never`; displayed as Smart, Match, Ignore), and
+.BR invert\-search .
+The same controls are available under Settings > Search and persist
+immediately. Search input is Kettle-owned UI chrome and is never forwarded to
+the active PTY.
 .
 .SH ENVIRONMENT
 .TP

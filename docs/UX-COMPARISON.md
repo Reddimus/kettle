@@ -61,7 +61,7 @@ Legend: ✅ implemented · 🟡 partial · ⛔ not yet · — n/a.
 | **Smart selection (regex double-click)** | ✅ URL / path / IPv4 / git SHA | ⛔ | ⛔ | 🟡 `pattern` | ⛔ | ⛔ (iTerm2 origin) |
 | **Command palette** | ✅ `Ctrl+Shift+K`, fuzzy, 41 commands | ✅ origin | 🟡 (`kitten hints`) | 🟡 (Lua) | ⛔ | ⛔ |
 | **Quick-select / URL hints** | ✅ `Ctrl+Shift+H` (v1.0) | ⛔ | ✅ `kitten hints` origin | ✅ `QuickSelect` | ⛔ | ⛔ |
-| **Search overlay** | ✅ `Ctrl+Shift+F`, regex + smart-case + reveal-into-scrollback | ✅ | ✅ | ✅ | ✅ | ✅ |
+| **Search overlay** | ✅ `Ctrl+Shift+F`; Terminator-style bottom bar; strict regex; Smart/Match/Ignore; wrap/invert; signed history + bounded soft-wrap highlights; incremental scan + Results limited | ✅ | ✅ | ✅ | ✅ | ✅ |
 | **Shell integration (OSC 133)** | ✅ bundled `kettle --shell-integration <shell>` + `Ctrl+Up/Down` jump | ✅ | ✅ | ✅ | ⛔ | 🟡 |
 | **SSH launcher** | ✅ `Ctrl+Shift+S` fuzzy, configured + freeform | ⛔ | ⛔ | ⛔ | 🟡 (`ssh-host` plugin) | ⛔ |
 | **Vi-mode for scrollback** | ✅ `Ctrl+Shift+Space` | ⛔ | ⛔ | ⛔ | ⛔ | ✅ origin |
@@ -201,8 +201,11 @@ Future → Done since the v1.0 cut of this matrix"):
 - Command palette (`Ctrl+Shift+K`) — Ghostty/kitty parity.
 - Quick-select hint mode (`Ctrl+Shift+H`) — kitty / WezTerm parity.
 - SSH launcher (`Ctrl+Shift+S`) — kettle-original fuzzy launcher.
-- Search overlay (`Ctrl+Shift+F`) with regex + smart-case +
-  reveal-into-scrollback.
+- Search overlay (`Ctrl+Shift+F`) with a responsive Terminator-style bottom bar,
+  strict Rust regex, Smart/Match/Ignore, Wrap/Invert, Unicode editing, and
+  bounded reveal/highlighting across signed scrollback and soft wraps. It uses
+  status-only progress, including Results limited at safety boundaries, rather
+  than an eager global count.
 - Tab-bar mouse-wheel cycling.
 - Minimum-contrast adjustment (`minimum-contrast`, WezTerm parity).
 - Background opacity + transparent rendering.
@@ -503,7 +506,7 @@ are marked, so the 11 shipped features occupy 13 "now" rows.
 | Sudo terminfo wrapper | Ghostty | ⛔ | low | S | reject | Exists to compensate for Ghostty's custom TERM; kettle ships xterm-256color, so it is moot by design. |
 | SSH integration (ssh-env / ssh-terminfo / `+ssh` wrapper) | Ghostty | ⛔ | low | M | reject | Solves the custom-TERM problem kettle does not have; COLORTERM forwarding is blocked by sshd AcceptEnv anyway. |
 | Command-finished events: exit code + duration | both | ✅ | high | S | reject | Anchor row: kettle already exceeds both upstreams; snippet upgrades compound this strength. |
-| Scrollback search (Ghostty parity check) | Ghostty | ✅ | low | S | reject | kettle arguably leads (regex + smart-case); the off-render-thread search architecture is the only steal. |
+| Scrollback search (Ghostty parity check) | Ghostty | ✅ | low | S | reject | Kettle has strict regex plus bounded incremental signed-history scans; moving matching off the UI thread remains a measure-first option, not an unverified win. |
 | Rectangle selection + `window-save-state` | Ghostty | ✅ | low | S | reject | Both at or beyond parity; recorded so the matrix shows the areas were audited, not skipped. |
 | Position-independent shaped-run cache | Ghostty | 🟡 | low | M | reject | The new per-line skip already eliminates the steady-state cost; a run-level cache would fight cosmic-text. |
 | Renderer thread with draw timers (120fps tick, blink timer) | Ghostty | 🟡 | low | XL | reject | The single-event-loop model is load-bearing for tear-off; off-thread wgpu reintroduces the race class just eliminated. |
@@ -511,7 +514,7 @@ are marked, so the 11 shipped features occupy 13 "now" rows.
 | Profiles system (named profiles, cycling, split inheritance) | Terminator | ✅ | low | S | reject | Done; confirms the earlier parity claim holds. |
 | Zoom/maximize (incl. scaled zoom) + rotate splits | Terminator | ✅ | low | S | reject | Confirmed shipped, including the obscure scaled variant. |
 | Custom commands menu + URL handlers + plugin system | Terminator | ✅ | low | S | reject | The Lua hook surface structurally covers the plugin system. Nothing to take. |
-| Search overlay (case toggle, invert/backward) | Terminator | ✅ | low | S | reject | At or above parity; smart-case is a superset. |
+| Search overlay (case toggle, invert/backward) | Terminator | ✅ | low | S | adopt | Terminator-style bottom controls landed with persistent Smart/Match/Ignore, Wrap, Invert, Previous/Next, and Close; Kettle deliberately omits an eager global count. |
 | Window behavior flags (sticky / hide_from_taskbar / etc.) | Terminator | 🟡 | low | M | reject | Blocked on winit; documented accepted divergence — re-check on winit upgrades. |
 | `http_proxy` per-profile wiring | Terminator | 🟡 | low | S | reject | Semantically void in kettle's architecture; the parse-only stub is the correct end state. |
 | Per-handler context-menu verbs (nameopen/namecopy) | Terminator | ⛔ | low | M | reject | Polish on a power-user niche of a power-user feature; poor value/effort ratio. |

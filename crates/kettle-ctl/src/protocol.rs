@@ -73,6 +73,7 @@ pub enum Method {
     Subscribe,
     SendText,
     SendKeys,
+    DispatchUiKey,
     DispatchKeybind,
     SendMouse,
     ResizeWindow,
@@ -83,7 +84,7 @@ pub enum Method {
 
 impl Method {
     /// Complete method table, used by tests and diagnostics.
-    pub const ALL: [Self; 16] = [
+    pub const ALL: [Self; 17] = [
         Self::GetState,
         Self::ListTabs,
         Self::ListPanes,
@@ -94,6 +95,7 @@ impl Method {
         Self::Subscribe,
         Self::SendText,
         Self::SendKeys,
+        Self::DispatchUiKey,
         Self::DispatchKeybind,
         Self::SendMouse,
         Self::ResizeWindow,
@@ -115,6 +117,7 @@ impl Method {
             "subscribe" => Self::Subscribe,
             "send_text" => Self::SendText,
             "send_keys" => Self::SendKeys,
+            "dispatch_ui_key" => Self::DispatchUiKey,
             "dispatch_keybind" => Self::DispatchKeybind,
             "send_mouse" => Self::SendMouse,
             "resize_window" => Self::ResizeWindow,
@@ -138,6 +141,7 @@ impl Method {
             Self::Subscribe => "subscribe",
             Self::SendText => "send_text",
             Self::SendKeys => "send_keys",
+            Self::DispatchUiKey => "dispatch_ui_key",
             Self::DispatchKeybind => "dispatch_keybind",
             Self::SendMouse => "send_mouse",
             Self::ResizeWindow => "resize_window",
@@ -153,6 +157,7 @@ impl Method {
             Self::Screenshot
             | Self::SendText
             | Self::SendKeys
+            | Self::DispatchUiKey
             | Self::DispatchKeybind
             | Self::SendMouse
             | Self::ResizeWindow

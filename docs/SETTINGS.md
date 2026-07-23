@@ -25,9 +25,9 @@ With **`vim-menu-nav`** on (the default), the panel also takes vim keys:
 jump to the first/last option, and `Ctrl+d`/`Ctrl+u` move half a page. The
 same scheme works in the right-click context menu and the new-tab dropdown
 (`h` closes / pops a submenu, `l` drills in or activates), `y`/`n` answer
-confirm dialogs, and text-input overlays with a selection (palette, search's
-match stepping, layout picker) use `Ctrl+j`/`Ctrl+k` (or `Ctrl+n`/`Ctrl+p`)
-so plain letters keep typing. Turn it off with `vim-menu-nav = false`.
+confirm dialogs, and text-input overlays with a selection (palette, search,
+layout picker) use `Ctrl+j`/`Ctrl+k` (or `Ctrl+n`/`Ctrl+p`) for stepping so
+plain letters keep typing. Turn it off with `vim-menu-nav = false`.
 
 Every change applies **immediately** and is written to your config file (shown
 by `kettle --config-path`), so it survives restarts. There's nothing to "save".
@@ -72,6 +72,25 @@ the panel. See [BACKGROUNDS.md](BACKGROUNDS.md).
 | Updates | `update-policy` | off · notify · install automatically (default: auto) |
 | Update check (hours) | `update-check-interval-hours` | 1–720 h — how often the background check runs (default 24 = daily) |
 | Vim menu navigation | `vim-menu-nav` | on / off — hjkl & friends in menus/overlays (see [Navigating](#navigating)) |
+
+**Search**
+
+| Option | Config key | Notes |
+|---|---|---|
+| Wrap at boundaries | `search-wrap` | on / off — when on, Next after the last result wraps to the first (and Previous wraps in reverse) |
+| Case mode | `search-case-sensitive` | **Smart** (ignore case until uppercase) · **Match** (always case-sensitive) · **Ignore** (always case-insensitive) |
+| Invert default direction | `invert-search` | on / off — flips `Enter` to backward and `Shift+Enter` to forward; explicit Next / Previous do not change |
+
+These are the same persistent controls shown in the `Ctrl+Shift+F` bottom bar.
+The bar also has Previous, Next, and Close controls and a grapheme-aware editor.
+It accepts strict Rust regular expressions up to 4096 UTF-8 bytes and reports a
+compact state instead of an eager global match count. Valid expressions beyond
+the engine-size ceiling show **Pattern too complex**. **Results limited** means
+a pathological logical line, output-interrupted explicit navigation, or the
+65,536-span nearby projection made ordering uncertain; ordinary work-budget
+yields resume without that warning. See
+[CONFIG.md#scrollback-search](CONFIG.md#scrollback-search) for shortcuts,
+history-scan bounds, and TUI behavior.
 
 **Tabs** (v2.28.0)
 

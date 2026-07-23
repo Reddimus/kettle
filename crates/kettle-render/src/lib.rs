@@ -81,13 +81,67 @@ fn load_bundled_font(font_system: &mut FontSystem, face: &'static [u8]) {
         .load_font_source(fontdb::Source::Binary(Arc::new(face)));
 }
 
-/// A search match in a pane's viewport (grid coords, pre-scrolled).
-#[derive(Clone, Copy)]
+/// A search match in a pane's viewport.
+///
+/// `row` is always a viewport row, never an Alacritty grid line. Grid lines are
+/// signed because history lives above line zero; callers should use
+/// [`HighlightRect::from_grid_span`] instead of casting a grid line to `usize`.
+/// Keeping that projection at this boundary prevents historical matches from
+/// disappearing while the viewport is scrolled back.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct HighlightRect {
     pub col: usize,
     pub row: usize,
     pub width: usize,
     pub active: bool,
+}
+
+impl HighlightRect {
+    /// Project a signed, grid-absolute match into the current viewport.
+    ///
+    /// Returns `None` when the span is above or below the visible screen. The
+    /// addition is performed in `i64`, so a malicious/buggy offset cannot wrap
+    /// a negative history line into a huge positive row.
+    pub fn from_grid_span(
+        grid_line: i32,
+        display_offset: usize,
+        screen_lines: usize,
+        col: usize,
+        width: usize,
+        active: bool,
+    ) -> Option<Self> {
+        let row = i64::from(grid_line) + i64::try_from(display_offset).ok()?;
+        let row = usize::try_from(row).ok()?;
+        (row < screen_lines).then_some(Self {
+            col,
+            row,
+            width: width.max(1),
+            active,
+        })
+    }
+}
+
+/// Streaming lookup for sorted, non-overlapping viewport spans. The snapshot
+/// cell walk and this cursor both move forward, keeping foreground projection
+/// O(visible cells + visible spans) instead of O(cells × matches).
+fn search_highlight_at(
+    highlights: &[HighlightRect],
+    cursor: &mut usize,
+    row: i32,
+    col: usize,
+) -> Option<bool> {
+    let row = usize::try_from(row).ok()?;
+    while let Some(span) = highlights.get(*cursor) {
+        let end = span.col.saturating_add(span.width.max(1));
+        if span.row < row || (span.row == row && end <= col) {
+            *cursor += 1;
+        } else {
+            break;
+        }
+    }
+    let span = highlights.get(*cursor)?;
+    (span.row == row && col >= span.col && col < span.col.saturating_add(span.width.max(1)))
+        .then_some(span.active)
 }
 
 /// A hyperlink underline in a pane's viewport (grid coords).
@@ -223,12 +277,206 @@ pub struct ImePreedit {
     pub col: usize,
 }
 
+/// Case policy shown by the search bar and applied by the UI's search engine.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SearchCaseMode {
+    /// Match case only when the query contains an uppercase character.
+    #[default]
+    Smart,
+    /// Always match case.
+    Match,
+    /// Always ignore case.
+    Ignore,
+}
+
+impl SearchCaseMode {
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Smart => "Smart",
+            Self::Match => "Match",
+            Self::Ignore => "Ignore",
+        }
+    }
+}
+
+/// Bounded semantic search feedback. Deliberately carries no unbounded regex
+/// error string: diagnostic details belong in logs, while chrome stays stable
+/// and cannot expose the query through accessibility/automation snapshots.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SearchStatus {
+    #[default]
+    Typing,
+    Searching,
+    Match,
+    Wrapped,
+    Start,
+    End,
+    NoMatch,
+    Limited,
+    Invalid,
+    TooComplex,
+    TooLong,
+}
+
+impl SearchStatus {
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Typing => "Type to search",
+            Self::Searching => "Searching…",
+            Self::Match => "Match",
+            Self::Wrapped => "Wrapped",
+            Self::Start => "Start reached",
+            Self::End => "End reached",
+            Self::NoMatch => "No match",
+            Self::Limited => "Results limited",
+            Self::Invalid => "Invalid pattern",
+            Self::TooComplex => "Pattern too complex",
+            Self::TooLong => "Query too long",
+        }
+    }
+}
+
+/// Focusable elements in the search lane. This renderer-owned enum is shared
+/// by paint geometry, pointer hit-testing, and the UI's AccessKit projection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum SearchControl {
+    #[default]
+    Editor,
+    Previous,
+    Next,
+    Wrap,
+    Case,
+    Invert,
+    Close,
+}
+
+impl SearchControl {
+    pub const ALL: [Self; 7] = [
+        Self::Editor,
+        Self::Previous,
+        Self::Next,
+        Self::Wrap,
+        Self::Case,
+        Self::Invert,
+        Self::Close,
+    ];
+
+    pub const fn accessible_label(self) -> &'static str {
+        match self {
+            Self::Editor => "Search expression",
+            Self::Previous => "Previous match",
+            Self::Next => "Next match",
+            Self::Wrap => "Wrap search",
+            Self::Case => "Search case mode",
+            Self::Invert => "Invert default search direction",
+            Self::Close => "Close search",
+        }
+    }
+}
+
+/// Full renderer projection for the in-window search lane.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SearchOverlay {
+    /// Stable pane identity owning the terminal-coordinate highlight spans.
+    /// Chrome remains window-local, but a focus change must never project one
+    /// pane's signed grid coordinates onto another pane.
+    pub target_pane: Option<u64>,
+    pub query: String,
+    /// UTF-8 byte offset of the editor caret. Invalid offsets are clamped to the
+    /// nearest preceding character boundary during paint.
+    pub cursor_byte: usize,
+    /// Optional UTF-8 byte range selected in the editor.
+    pub selection: Option<(usize, usize)>,
+    /// Number of display columns intentionally hidden on the left.
+    pub horizontal_scroll: usize,
+    pub wrap: bool,
+    pub case_mode: SearchCaseMode,
+    pub invert: bool,
+    pub status: SearchStatus,
+    pub focused: SearchControl,
+}
+
+impl Default for SearchOverlay {
+    fn default() -> Self {
+        Self {
+            target_pane: None,
+            query: String::new(),
+            cursor_byte: 0,
+            selection: None,
+            horizontal_scroll: 0,
+            wrap: true,
+            case_mode: SearchCaseMode::Smart,
+            invert: false,
+            status: SearchStatus::Typing,
+            focused: SearchControl::Editor,
+        }
+    }
+}
+
+/// Shared paint/input/accessibility geometry for the reserved search lane.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SearchBarGeometry {
+    pub rect: Rect4,
+    pub rows: usize,
+    pub reserved_height: f32,
+    pub label: Rect4,
+    pub editor: Rect4,
+    pub previous: Rect4,
+    pub next: Rect4,
+    pub wrap: Rect4,
+    pub case_mode: Rect4,
+    pub invert: Rect4,
+    pub status: Rect4,
+    pub close: Rect4,
+}
+
+impl SearchBarGeometry {
+    pub const fn control_rect(self, control: SearchControl) -> Rect4 {
+        match control {
+            SearchControl::Editor => self.editor,
+            SearchControl::Previous => self.previous,
+            SearchControl::Next => self.next,
+            SearchControl::Wrap => self.wrap,
+            SearchControl::Case => self.case_mode,
+            SearchControl::Invert => self.invert,
+            SearchControl::Close => self.close,
+        }
+    }
+
+    /// Resolve a pointer position using the exact rectangles used for paint.
+    pub fn hit_test(self, x: f32, y: f32) -> Option<SearchControl> {
+        SearchControl::ALL.into_iter().find(|control| {
+            let (rx, ry, rw, rh) = self.control_rect(*control);
+            rw > 0.0 && rh > 0.0 && x >= rx && x < rx + rw && y >= ry && y < ry + rh
+        })
+    }
+
+    /// Terminal content rectangle after reserving the lane. The x/width are
+    /// unchanged; height saturates at zero for extremely short surfaces.
+    pub fn content_rect(self, surface_width: f32, surface_height: f32) -> Rect4 {
+        (
+            0.0,
+            0.0,
+            surface_width.max(0.0),
+            (surface_height - self.reserved_height).max(0.0),
+        )
+    }
+}
+
 /// Search-bar + hyperlink overlay state.
 #[derive(Default)]
 pub struct Overlay {
+    /// Rich v2.38 search-lane projection. When present it takes precedence over
+    /// the legacy `search_query` fields below.
+    pub search: Option<SearchOverlay>,
+    /// Compatibility shim for callers predating [`SearchOverlay`]. New callers
+    /// should leave these three fields at their defaults.
     pub search_query: Option<String>,
     pub search_count: usize,
     pub search_index: usize,
+    /// Visible, non-overlapping match spans in `(row, col)` order. Keeping this
+    /// list viewport-bounded lets both quad paint and glyph recoloring stay
+    /// linear in visible work.
     pub highlights: Vec<HighlightRect>,
     pub links: Vec<LinkRect>,
     /// Quick-select hint labels (drawn over the focused pane).
@@ -2716,6 +2964,10 @@ impl Renderer {
                 ));
             }
 
+            let pane_has_search = overlay
+                .search
+                .as_ref()
+                .map_or(pv.focused, |search| search.target_pane == Some(pv.id));
             any_pane_text_changed |= self.build_pane(
                 i,
                 pv,
@@ -2725,6 +2977,11 @@ impl Renderer {
                 overlay.cursor_visible,
                 overlay.vi_cursor,
                 overlay.vi_visual_anchor,
+                if pane_has_search {
+                    &overlay.highlights
+                } else {
+                    &[]
+                },
                 &mut quads,
                 pane_titlebar_h,
                 // The whole-surface clear color so build_pane can
@@ -2794,8 +3051,9 @@ impl Renderer {
                 ));
             }
 
-            // Search highlights are drawn over the focused pane.
-            if pv.focused {
+            // Search coordinates belong to the pane captured when the lane
+            // opened, even if focus changes through automation or pane reap.
+            if pane_has_search {
                 for hl in &overlay.highlights {
                     quads.push(rect(
                         rx + pad_x + hl.col as f32 * cw,
@@ -2811,7 +3069,7 @@ impl Renderer {
                         } else {
                             theme.selection_background
                         },
-                        0.85,
+                        1.0,
                     ));
                 }
                 // Quick-select hint label chips.
@@ -2924,12 +3182,112 @@ impl Renderer {
             ));
         }
 
-        // Search/modal single-line overlay. Most overlays live at the bottom;
-        // title edit and update banners carry explicit chrome rects so their
-        // background and glyphs cannot drift apart.
+        // Search uses a responsive RESERVED lane. The app subtracts the public
+        // `search_bar_geometry(...).reserved_height` from pane layout; paint and
+        // hit-testing then consume these exact same rectangles. Other legacy
+        // modals remain single-line overlays.
         let mut have_search = false;
         let mut search_rect = (0.0, sh - (ch + 10.0), sw, ch + 10.0);
-        if let Some(q) = &overlay.search_query {
+        let mut search_text_top = None;
+        if let Some(search) = &overlay.search {
+            have_search = true;
+            let geometry = search_bar_geometry(sw, sh, cw, ch);
+            search_rect = geometry.rect;
+            let row_h = geometry.reserved_height / geometry.rows.max(1) as f32;
+            search_text_top = Some(geometry.rect.1 + ((row_h - ch) * 0.5).max(0.0));
+            let accent = cfg.search_background.unwrap_or(theme.palette[3]);
+
+            quads.push(rect(
+                geometry.rect.0,
+                geometry.rect.1,
+                geometry.rect.2,
+                geometry.rect.3,
+                theme.palette[8],
+                0.98,
+            ));
+            // A distinct editor well survives low-contrast themes. All button
+            // rectangles get a subtle surface; the focused one uses the same
+            // accent as the active terminal match.
+            quads.push(rect(
+                geometry.editor.0,
+                geometry.editor.1 + 2.0,
+                geometry.editor.2,
+                (geometry.editor.3 - 4.0).max(1.0),
+                theme.background,
+                0.72,
+            ));
+            for control in SearchControl::ALL {
+                let control_rect = geometry.control_rect(control);
+                if control != SearchControl::Editor {
+                    quads.push(rect(
+                        control_rect.0,
+                        control_rect.1 + 2.0,
+                        control_rect.2,
+                        (control_rect.3 - 4.0).max(1.0),
+                        if search.focused == control {
+                            accent
+                        } else {
+                            theme.background
+                        },
+                        if search.focused == control {
+                            0.92
+                        } else {
+                            0.28
+                        },
+                    ));
+                }
+            }
+            if search.focused == SearchControl::Editor {
+                // A two-pixel underline leaves query glyphs unobscured while
+                // still giving the editor a strong keyboard-focus affordance.
+                quads.push(rect(
+                    geometry.editor.0,
+                    geometry.editor.1 + geometry.editor.3 - 2.0,
+                    geometry.editor.2,
+                    2.0,
+                    accent,
+                    1.0,
+                ));
+            }
+            if let Some((a, b)) = search.selection {
+                let (start, end) = if a <= b { (a, b) } else { (b, a) };
+                if start != end {
+                    let start_col = search_query_column(&search.query, start)
+                        .saturating_sub(search.horizontal_scroll);
+                    let end_col = search_query_column(&search.query, end)
+                        .saturating_sub(search.horizontal_scroll);
+                    let inner_cols = (geometry.editor.2 / cw).floor().max(2.0) as usize - 2;
+                    let start_col = start_col.min(inner_cols);
+                    let end_col = end_col.min(inner_cols);
+                    if end_col > start_col {
+                        quads.push(rect(
+                            geometry.editor.0 + (start_col + 1) as f32 * cw,
+                            geometry.editor.1 + 2.0,
+                            (end_col - start_col) as f32 * cw,
+                            (geometry.editor.3 - 4.0).max(1.0),
+                            theme.selection_background,
+                            1.0,
+                        ));
+                    }
+                }
+            }
+
+            let label = search_bar_text(search, geometry, cw);
+            self.search_buffer.set_metrics(Metrics::new(
+                metrics.font_size,
+                row_h.max(metrics.font_size),
+            ));
+            self.search_buffer
+                .set_size(Some(sw), Some(geometry.reserved_height));
+            self.search_buffer.set_text(
+                &label,
+                &Attrs::new().family(Family::Name(&family)),
+                Shaping::Advanced,
+                None,
+            );
+            self.search_buffer
+                .shape_until_scroll(&mut self.font_system, false);
+        } else if let Some(q) = &overlay.search_query {
             have_search = true;
             let bar_h = ch + 10.0;
             search_rect = (0.0, sh - bar_h, sw, bar_h);
@@ -2945,17 +3303,12 @@ impl Renderer {
                 (false, false) => "(Enter next · Shift+Enter prev · Esc close)",
                 (false, true) => "(Enter prev · Shift+Enter next · Esc close)",
             };
-            let label = format!(
-                "  search: {}_    [{}/{}]   {}",
-                q,
-                if overlay.search_count == 0 {
-                    0
-                } else {
-                    overlay.search_index + 1
-                },
-                overlay.search_count,
-                nav_hint
-            );
+            let status = if overlay.search_count == 0 {
+                SearchStatus::NoMatch.label()
+            } else {
+                SearchStatus::Match.label()
+            };
+            let label = format!("  search: {q}_    {status}   {nav_hint}");
             let label = fit_single_line_label(&label, overlay_label_cols(sw, cw));
             self.search_buffer.set_metrics(metrics);
             self.search_buffer.set_size(Some(sw), Some(bar_h));
@@ -3140,7 +3493,18 @@ impl Renderer {
             } else {
                 0.0
             };
-            let bar_y = update_banner_top(sh, bar_h, bottom_tabbar_h, bottom_status_h);
+            let bottom_search_h = overlay
+                .search
+                .as_ref()
+                .map(|_| search_bar_geometry(sw, sh, cw, ch).reserved_height)
+                .unwrap_or(0.0);
+            let bar_y = update_banner_top_with_reserved(
+                sh,
+                bar_h,
+                bottom_tabbar_h,
+                bottom_status_h,
+                bottom_search_h,
+            );
             search_rect = (0.0, bar_y, sw, bar_h);
             let (banner_bg, banner_accent) = update_banner_chrome_colors(theme);
             quads.push(rect(0.0, bar_y, sw, bar_h, banner_bg, 0.96));
@@ -3777,7 +4141,8 @@ impl Renderer {
             areas.push(TextArea {
                 buffer: &self.search_buffer,
                 left: search_rect.0,
-                top: search_rect.1 + ((search_rect.3 - ch) * 0.5).max(0.0),
+                top: search_text_top
+                    .unwrap_or(search_rect.1 + ((search_rect.3 - ch) * 0.5).max(0.0)),
                 scale: 1.0,
                 bounds: TextBounds {
                     left: search_rect.0 as i32,
@@ -4021,7 +4386,8 @@ impl Renderer {
         // without a following prepare would clear the in-use set and let a
         // later prepare evict still-displayed glyphs out from under the cached
         // vertices.
-        let overlay_open = overlay.search_query.is_some()
+        let overlay_open = overlay.search.is_some()
+            || overlay.search_query.is_some()
             || !overlay.hint_labels.is_empty()
             || overlay.ime_preedit.is_some()
             || overlay.ssh_query.is_some()
@@ -4519,6 +4885,7 @@ impl Renderer {
         cursor_visible: bool,
         vi_cursor: Option<(usize, usize)>,
         vi_visual_anchor: Option<(usize, usize)>,
+        search_highlights: &[HighlightRect],
         quads: &mut Vec<QuadInstance>,
         // Terminator parity, per-pane-titlebar Bucket-D,
         // phase 2 of TERMINATOR-PANE-TITLEBAR-DESIGN.md: extra top offset for cell content
@@ -4622,6 +4989,7 @@ impl Renderer {
         // The style of the run currently being appended to (`spans[n - 1]`), or
         // `None` when the next char must open a new run.
         let mut cur: Option<(Rgb, bool, bool)> = None;
+        let mut search_highlight_cursor = 0usize;
 
         // Terminator parity, cursor_fg_color / cursor_bg_color: a
         // focused SOLID block cursor renders the block in `theme.cursor`
@@ -4733,6 +5101,20 @@ impl Renderer {
             // index. No-op when bold isn't set.
             if bold && cfg.bold_is_bright {
                 fg = color::bright_for_bold(fg, theme);
+            }
+            // The same search pair drives the match background quads and the
+            // terminal glyphs above them. Active matches use the configured
+            // search fg/bg; inactive matches reuse the theme selection pair.
+            // `search_highlight_at` advances once through sorted visible spans,
+            // so this adds no match-count multiplier to the hot cell walk.
+            if let Some(active) =
+                search_highlight_at(search_highlights, &mut search_highlight_cursor, vrow, col)
+            {
+                fg = if active {
+                    cfg.search_foreground.unwrap_or(theme.background)
+                } else {
+                    theme.selection_foreground
+                };
             }
             // Recolor the glyph sitting under a focused solid block cursor.
             // The second arm catches a cursor parked on the spacer half of a
@@ -6075,6 +6457,334 @@ pub fn settings_hit_test(
     SettingsHit::Inert
 }
 
+/// Compute the responsive, bottom-reserved search lane.
+///
+/// Wide surfaces use one row. Narrow surfaces keep the editor and Close on the
+/// first row and wrap every other control onto as many rows as needed. Nothing
+/// is silently omitted, which gives keyboard, pointer, and accessibility users
+/// the same control set at every supported window size.
+pub fn search_bar_geometry(
+    surface_width: f32,
+    surface_height: f32,
+    cell_width: f32,
+    cell_height: f32,
+) -> SearchBarGeometry {
+    let zero = (0.0, 0.0, 0.0, 0.0);
+    if !surface_width.is_finite()
+        || !surface_height.is_finite()
+        || !cell_width.is_finite()
+        || !cell_height.is_finite()
+        || surface_width <= 0.0
+        || surface_height <= 0.0
+        || cell_width <= 0.0
+        || cell_height <= 0.0
+    {
+        return SearchBarGeometry {
+            rect: zero,
+            rows: 1,
+            reserved_height: 0.0,
+            label: zero,
+            editor: zero,
+            previous: zero,
+            next: zero,
+            wrap: zero,
+            case_mode: zero,
+            invert: zero,
+            status: zero,
+            close: zero,
+        };
+    }
+
+    const LABEL: usize = 7;
+    const PREVIOUS: usize = 8;
+    const NEXT: usize = 8;
+    const WRAP: usize = 10;
+    const CASE: usize = 14;
+    const INVERT: usize = 11;
+    // Wide mode must fit every bounded status label without ellipsis. Narrow mode may shrink and
+    // wrap the status lane along with the other secondary controls.
+    const STATUS: usize = 19;
+    const CLOSE: usize = 7;
+    const EDITOR_MIN: usize = 12;
+    const WIDE_MIN: usize =
+        2 + LABEL + PREVIOUS + NEXT + WRAP + CASE + INVERT + STATUS + CLOSE + EDITOR_MIN + 8;
+
+    let columns = (surface_width / cell_width).floor().max(1.0) as usize;
+    let pad = usize::from(columns >= 4);
+    let right = columns.saturating_sub(pad);
+    let (
+        label_pos,
+        editor_pos,
+        previous_pos,
+        next_pos,
+        wrap_pos,
+        case_pos,
+        invert_pos,
+        status_pos,
+        close_pos,
+        rows,
+    ) = if columns >= WIDE_MIN {
+        let mut col = pad;
+        let mut place = |width: usize| {
+            let here = col;
+            col += width + 1;
+            (here, 0, width)
+        };
+        let label_pos = place(LABEL);
+        // All fixed controls plus their inter-control gaps have already been
+        // budgeted by WIDE_MIN; the editor gets every surplus column.
+        let editor_width = EDITOR_MIN + (columns - WIDE_MIN);
+        let editor_pos = place(editor_width);
+        let previous_pos = place(PREVIOUS);
+        let next_pos = place(NEXT);
+        let wrap_pos = place(WRAP);
+        let case_pos = place(CASE);
+        let invert_pos = place(INVERT);
+        let status_pos = place(STATUS);
+        let close_pos = (col, 0, CLOSE.min(right.saturating_sub(col)).max(1));
+        (
+            label_pos,
+            editor_pos,
+            previous_pos,
+            next_pos,
+            wrap_pos,
+            case_pos,
+            invert_pos,
+            status_pos,
+            close_pos,
+            1,
+        )
+    } else {
+        // The editor and Close are invariant. The label collapses before either
+        // interactive element; at a physically one-column width Close gets its
+        // own row so neither hit target overlaps or disappears.
+        let inner = right.saturating_sub(pad).max(1);
+        let close_on_own_row = inner == 1;
+        let close_width = CLOSE.min((inner / 3).max(1));
+        let label_width = if inner >= 24 {
+            LABEL
+        } else if inner >= 14 {
+            2 // compact "? " label, populated by the text builder
+        } else {
+            0
+        };
+        let gaps = usize::from(label_width > 0) + usize::from(!close_on_own_row);
+        let editor_width = inner
+            .saturating_sub(label_width + usize::from(!close_on_own_row) * close_width + gaps)
+            .max(1);
+        let label_pos = (pad, 0, label_width);
+        let editor_col = pad + label_width + usize::from(label_width > 0);
+        let editor_pos = (editor_col, 0, editor_width);
+        let close_pos = if close_on_own_row {
+            (pad, 1, 1)
+        } else {
+            (
+                (editor_col + editor_width + 1).min(right.saturating_sub(1)),
+                0,
+                close_width.min(right.max(1)),
+            )
+        };
+
+        // Pack the secondary row(s) with deterministic source order. Each
+        // component may shrink on exceptionally narrow windows, but none is
+        // hidden. Status is geometry, not a focusable control.
+        let desired = [PREVIOUS, NEXT, WRAP, CASE, INVERT, STATUS];
+        let usable = inner.max(1);
+        let mut packed = [(0usize, 0usize, 1usize); 6];
+        let mut row = if close_on_own_row { 2 } else { 1 };
+        let mut col = pad;
+        for (idx, wanted) in desired.into_iter().enumerate() {
+            let width = wanted.min(usable).max(1);
+            if col > pad && col + width > right {
+                row += 1;
+                col = pad;
+            }
+            packed[idx] = (col, row, width);
+            col = col.saturating_add(width + 1);
+        }
+        let [
+            previous_pos,
+            next_pos,
+            wrap_pos,
+            case_pos,
+            invert_pos,
+            status_pos,
+        ] = packed;
+        (
+            label_pos,
+            editor_pos,
+            previous_pos,
+            next_pos,
+            wrap_pos,
+            case_pos,
+            invert_pos,
+            status_pos,
+            close_pos,
+            row + 1,
+        )
+    };
+
+    let natural_row_height = cell_height + 10.0;
+    let reserved_height = (natural_row_height * rows as f32).min(surface_height);
+    let row_height = reserved_height / rows as f32;
+    let top = surface_height - reserved_height;
+    let to_rect = |(col, row, width): (usize, usize, usize)| -> Rect4 {
+        let x = (col as f32 * cell_width).min(surface_width);
+        let max_width = (surface_width - x).max(0.0);
+        (
+            x,
+            top + row as f32 * row_height,
+            (width as f32 * cell_width).min(max_width),
+            row_height,
+        )
+    };
+
+    SearchBarGeometry {
+        rect: (0.0, top, surface_width, reserved_height),
+        rows,
+        reserved_height,
+        label: to_rect(label_pos),
+        editor: to_rect(editor_pos),
+        previous: to_rect(previous_pos),
+        next: to_rect(next_pos),
+        wrap: to_rect(wrap_pos),
+        case_mode: to_rect(case_pos),
+        invert: to_rect(invert_pos),
+        status: to_rect(status_pos),
+        close: to_rect(close_pos),
+    }
+}
+
+fn search_bar_text(search: &SearchOverlay, geometry: SearchBarGeometry, cell_width: f32) -> String {
+    let row_height = geometry.reserved_height / geometry.rows.max(1) as f32;
+    let mut rows = vec![Vec::<(usize, usize, String)>::new(); geometry.rows];
+    let mut add = |rect: Rect4, text: String| {
+        if rect.2 <= 0.0 || rect.3 <= 0.0 {
+            return;
+        }
+        let row = if row_height > 0.0 {
+            ((rect.1 - geometry.rect.1) / row_height).round().max(0.0) as usize
+        } else {
+            0
+        }
+        .min(rows.len().saturating_sub(1));
+        let col = (rect.0 / cell_width).round().max(0.0) as usize;
+        let width = (rect.2 / cell_width).floor().max(1.0) as usize;
+        rows[row].push((col, width, fit_single_line_label(&text, width)));
+    };
+
+    let label_cols = (geometry.label.2 / cell_width).floor() as usize;
+    add(
+        geometry.label,
+        if label_cols >= 6 { "Search" } else { "?" }.to_string(),
+    );
+    let editor_cols = (geometry.editor.2 / cell_width).floor().max(1.0) as usize;
+    add(geometry.editor, search_editor_label(search, editor_cols));
+    add(geometry.previous, "‹ Prev".to_string());
+    add(geometry.next, "Next ›".to_string());
+    add(
+        geometry.wrap,
+        format!("[{}] Wrap", if search.wrap { 'x' } else { ' ' }),
+    );
+    add(
+        geometry.case_mode,
+        format!("Case: {}", search.case_mode.label()),
+    );
+    add(
+        geometry.invert,
+        format!("[{}] Invert", if search.invert { 'x' } else { ' ' }),
+    );
+    add(geometry.status, search.status.label().to_string());
+    add(geometry.close, "× Close".to_string());
+
+    rows.iter_mut()
+        .map(|segments| {
+            segments.sort_by_key(|segment| segment.0);
+            let mut line = String::new();
+            let mut column = 0usize;
+            for (start, width, text) in segments {
+                if *start > column {
+                    line.extend(std::iter::repeat_n(' ', *start - column));
+                    column = *start;
+                }
+                if *start < column {
+                    continue;
+                }
+                let fitted = fit_single_line_label(text, *width);
+                column += display_width(&fitted);
+                line.push_str(&fitted);
+            }
+            line
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn search_editor_label(search: &SearchOverlay, max_cols: usize) -> String {
+    if max_cols == 0 {
+        return String::new();
+    }
+    if max_cols == 1 {
+        return "│".to_string();
+    }
+
+    // Do not let a pasted line break create extra chrome rows. The UI also
+    // normalizes paste, but paint is a trust boundary for callers of this crate.
+    let mut query = String::with_capacity(search.query.len().min(4096));
+    for ch in search.query.chars() {
+        if query.len() + ch.len_utf8() > 4096 {
+            break;
+        }
+        query.push(if ch.is_control() { ' ' } else { ch });
+    }
+    let mut cursor = search.cursor_byte.min(query.len());
+    while cursor > 0 && !query.is_char_boundary(cursor) {
+        cursor -= 1;
+    }
+    let caret = if search.focused == SearchControl::Editor {
+        "│"
+    } else {
+        ""
+    };
+    query.insert_str(cursor, caret);
+
+    let inner = max_cols.saturating_sub(2);
+    let mut body = drop_cols_front(&query, search.horizontal_scroll);
+    if display_width(&body) > inner {
+        body = fit_single_line_label(&body, inner);
+    }
+    let label = format!("[{body}]");
+    fit_single_line_label(&label, max_cols)
+}
+
+fn drop_cols_front(s: &str, cols: usize) -> String {
+    use unicode_segmentation::UnicodeSegmentation as _;
+    use unicode_width::UnicodeWidthStr as _;
+    let mut skipped = 0usize;
+    let mut byte = 0usize;
+    for (idx, grapheme) in s.grapheme_indices(true) {
+        let width = grapheme.width();
+        if skipped + width > cols {
+            byte = idx;
+            break;
+        }
+        skipped += width;
+        byte = idx + grapheme.len();
+        if skipped == cols {
+            break;
+        }
+    }
+    s[byte..].to_string()
+}
+
+fn search_query_column(query: &str, byte: usize) -> usize {
+    let mut byte = byte.min(query.len());
+    while byte > 0 && !query.is_char_boundary(byte) {
+        byte -= 1;
+    }
+    display_width(&query[..byte])
+}
+
 /// Maximum monospace columns available to a single-line overlay buffer.
 /// Reserve one column for glyph overhang and fractional cell metrics.
 fn overlay_label_cols(width: f32, cell_width: f32) -> usize {
@@ -6780,7 +7490,22 @@ pub fn update_banner_top(
     bottom_tabbar_h: f32,
     bottom_status_h: f32,
 ) -> f32 {
-    surface_h - banner_h - bottom_tabbar_h - bottom_status_h
+    update_banner_top_with_reserved(surface_h, banner_h, bottom_tabbar_h, bottom_status_h, 0.0)
+}
+
+/// Search-aware form of [`update_banner_top`]. `bottom_reserved_h` is the rich
+/// search lane's `SearchBarGeometry::reserved_height` (or zero while closed).
+/// Keeping the original four-argument helper as a wrapper preserves external
+/// callers while new draw/hit-test paths can keep Search as the bottommost
+/// strip and stack the passive update banner above it.
+pub fn update_banner_top_with_reserved(
+    surface_h: f32,
+    banner_h: f32,
+    bottom_tabbar_h: f32,
+    bottom_status_h: f32,
+    bottom_reserved_h: f32,
+) -> f32 {
+    surface_h - banner_h - bottom_tabbar_h - bottom_status_h - bottom_reserved_h
 }
 
 fn update_banner_chrome_colors(theme: &kettle_config::Theme) -> (Rgb, Rgb) {
@@ -9205,6 +9930,183 @@ mod pane_buffer_lifecycle_tests {
 }
 
 #[cfg(test)]
+mod search_bar_tests {
+    use super::{
+        HighlightRect, SearchBarGeometry, SearchCaseMode, SearchControl, SearchOverlay,
+        SearchStatus, drop_cols_front, search_bar_geometry, search_bar_text, search_editor_label,
+        search_highlight_at,
+    };
+
+    fn center(rect: (f32, f32, f32, f32)) -> (f32, f32) {
+        (rect.0 + rect.2 * 0.5, rect.1 + rect.3 * 0.5)
+    }
+
+    fn assert_inside(bar: SearchBarGeometry, rect: (f32, f32, f32, f32)) {
+        assert!(rect.2 > 0.0, "control must retain a width: {rect:?}");
+        assert!(rect.3 > 0.0, "control must retain a height: {rect:?}");
+        assert!(rect.0 >= bar.rect.0 && rect.1 >= bar.rect.1);
+        assert!(rect.0 + rect.2 <= bar.rect.0 + bar.rect.2 + f32::EPSILON);
+        assert!(rect.1 + rect.3 <= bar.rect.1 + bar.rect.3 + f32::EPSILON);
+    }
+
+    #[test]
+    fn signed_history_lines_project_into_the_viewport_without_casting() {
+        assert_eq!(
+            HighlightRect::from_grid_span(-40, 42, 24, 3, 0, true),
+            Some(HighlightRect {
+                row: 2,
+                col: 3,
+                width: 1,
+                active: true,
+            })
+        );
+        assert_eq!(
+            HighlightRect::from_grid_span(-43, 42, 24, 0, 1, false),
+            None
+        );
+        assert_eq!(HighlightRect::from_grid_span(0, 42, 24, 0, 1, false), None);
+    }
+
+    #[test]
+    fn highlight_lookup_streams_across_visible_cells() {
+        let spans = [
+            HighlightRect {
+                row: 1,
+                col: 2,
+                width: 3,
+                active: false,
+            },
+            HighlightRect {
+                row: 2,
+                col: 0,
+                width: 1,
+                active: true,
+            },
+        ];
+        let mut cursor = 0;
+        assert_eq!(search_highlight_at(&spans, &mut cursor, 1, 1), None);
+        assert_eq!(search_highlight_at(&spans, &mut cursor, 1, 2), Some(false));
+        assert_eq!(search_highlight_at(&spans, &mut cursor, 1, 4), Some(false));
+        assert_eq!(search_highlight_at(&spans, &mut cursor, 2, 0), Some(true));
+        assert_eq!(search_highlight_at(&spans, &mut cursor, 2, 1), None);
+        assert_eq!(cursor, spans.len());
+    }
+
+    #[test]
+    fn wide_geometry_is_one_row_and_hit_testing_reuses_paint_rects() {
+        let bar = search_bar_geometry(1200.0, 800.0, 10.0, 20.0);
+        assert_eq!(bar.rows, 1);
+        assert_eq!(bar.reserved_height, 30.0);
+        for control in SearchControl::ALL {
+            let rect = bar.control_rect(control);
+            assert_inside(bar, rect);
+            let (x, y) = center(rect);
+            assert_eq!(bar.hit_test(x, y), Some(control));
+        }
+        assert_eq!(bar.content_rect(1200.0, 800.0), (0.0, 0.0, 1200.0, 770.0));
+    }
+
+    #[test]
+    fn narrow_geometry_wraps_without_hiding_editor_or_close() {
+        let bar = search_bar_geometry(320.0, 800.0, 8.0, 18.0);
+        assert!(bar.rows >= 2);
+        for control in SearchControl::ALL {
+            assert_inside(bar, bar.control_rect(control));
+        }
+        // The invariant also holds at a deliberately pathological one-cell
+        // surface; Close moves to another row instead of covering the editor.
+        let tiny = search_bar_geometry(8.0, 800.0, 8.0, 18.0);
+        assert_inside(tiny, tiny.editor);
+        assert_inside(tiny, tiny.close);
+        assert_ne!(tiny.editor.1, tiny.close.1);
+    }
+
+    #[test]
+    fn rich_bar_is_status_only_and_never_emits_a_global_counter() {
+        let search = SearchOverlay {
+            query: "needle".into(),
+            cursor_byte: 6,
+            wrap: true,
+            case_mode: SearchCaseMode::Ignore,
+            invert: true,
+            status: SearchStatus::Wrapped,
+            focused: SearchControl::Editor,
+            ..SearchOverlay::default()
+        };
+        let bar = search_bar_geometry(1200.0, 800.0, 10.0, 20.0);
+        let text = search_bar_text(&search, bar, 10.0);
+        assert!(text.contains("needle"));
+        assert!(text.contains("Case: Ignore"));
+        assert!(text.contains("[x] Wrap"));
+        assert!(text.contains("[x] Invert"));
+        assert!(text.contains("Wrapped"));
+        assert!(text.contains("× Close"));
+        assert!(
+            !text.contains("/"),
+            "global match totals must stay out of chrome"
+        );
+    }
+
+    #[test]
+    fn editor_defensively_normalizes_controls_and_bounds_its_line() {
+        let search = SearchOverlay {
+            query: "a\nb\tc".into(),
+            cursor_byte: usize::MAX,
+            focused: SearchControl::Editor,
+            ..SearchOverlay::default()
+        };
+        let label = search_editor_label(&search, 8);
+        assert!(!label.contains('\n'));
+        assert!(!label.contains('\t'));
+        assert!(super::display_width(&label) <= 8);
+    }
+
+    #[test]
+    fn editor_horizontal_clip_never_splits_extended_graphemes() {
+        assert_eq!(drop_cols_front("a\u{301}b", 1), "b");
+        assert_eq!(drop_cols_front("👩‍💻x", 1), "👩‍💻x");
+        assert_eq!(drop_cols_front("👩‍💻x", 2), "x");
+    }
+
+    #[test]
+    fn status_vocabulary_is_bounded_and_semantic() {
+        assert_eq!(SearchStatus::Typing.label(), "Type to search");
+        assert_eq!(SearchStatus::Searching.label(), "Searching…");
+        assert_eq!(SearchStatus::Match.label(), "Match");
+        assert_eq!(SearchStatus::Wrapped.label(), "Wrapped");
+        assert_eq!(SearchStatus::Start.label(), "Start reached");
+        assert_eq!(SearchStatus::End.label(), "End reached");
+        assert_eq!(SearchStatus::NoMatch.label(), "No match");
+        assert_eq!(SearchStatus::Limited.label(), "Results limited");
+        assert_eq!(SearchStatus::Invalid.label(), "Invalid pattern");
+        assert_eq!(SearchStatus::TooComplex.label(), "Pattern too complex");
+        assert_eq!(SearchStatus::TooLong.label(), "Query too long");
+
+        let bar = search_bar_geometry(1200.0, 800.0, 10.0, 20.0);
+        let status_columns = (bar.status.2 / 10.0).floor() as usize;
+        for status in [
+            SearchStatus::Typing,
+            SearchStatus::Searching,
+            SearchStatus::Match,
+            SearchStatus::Wrapped,
+            SearchStatus::Start,
+            SearchStatus::End,
+            SearchStatus::NoMatch,
+            SearchStatus::Limited,
+            SearchStatus::Invalid,
+            SearchStatus::TooComplex,
+            SearchStatus::TooLong,
+        ] {
+            assert!(
+                super::display_width(status.label()) <= status_columns,
+                "wide status lane clipped {}",
+                status.label()
+            );
+        }
+    }
+}
+
+#[cfg(test)]
 mod title_fit_tests {
     use super::{
         display_width, fit_pane_titlebar_title, fit_single_line_label, fit_tab_path,
@@ -9553,7 +10455,9 @@ mod settings_hit_test_tests {
 
 #[cfg(test)]
 mod update_banner_top_tests {
-    use super::{color, update_banner_chrome_colors, update_banner_top};
+    use super::{
+        color, update_banner_chrome_colors, update_banner_top, update_banner_top_with_reserved,
+    };
 
     /// Drift guard (audit). The passive update banner must stack
     /// above any BOTTOM-anchored tab / status bar so it neither paints over
@@ -9569,6 +10473,12 @@ mod update_banner_top_tests {
         assert_eq!(update_banner_top(1000.0, 30.0, 0.0, 20.0), 950.0);
         // Both at the bottom → banner clears the stack of both.
         assert_eq!(update_banner_top(1000.0, 30.0, 28.0, 20.0), 922.0);
+        // Rich Search stays bottommost; the banner also clears its responsive
+        // reserved lane while preserving the legacy helper above.
+        assert_eq!(
+            update_banner_top_with_reserved(1000.0, 30.0, 28.0, 20.0, 60.0),
+            862.0
+        );
     }
 
     #[test]

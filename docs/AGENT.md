@@ -147,6 +147,7 @@ kettle ctl send_keys --keys "escape,:,w,q,enter"       # press keys/chords (v2.2
 kettle ctl send_mouse --json '{"event":"click","x":20,"y":10,"button":"left"}'
 kettle ctl resize_window --json '{"width":900,"height":560}'
 kettle ctl perform_action --text "start_search"        # dispatch app chrome actions
+kettle ctl dispatch_ui_key --keys "n,e,e,d,l,e,enter"  # drive the open Search bar; never PTY input
 kettle ctl wait_for --text "INSERT" --json '{"timeout_ms":5000}'   # block until on screen
 kettle ctl run_command --text "cargo build"            # run + wait for the result
 kettle ctl events                                       # stream the event feed (NDJSON)
@@ -165,13 +166,14 @@ so press Enter with `send_keys`, not a trailing `\n`.
 | `list_panes` | read-only | every window's panes: id, `window` (seq), tab, title, cwd, cols/rows, focused, argv, child_pid, agent_attached, read_only |
 | `read_screen` | read-only | visible viewport text + cursor + `cursor_visible` (DEC ?25) + history metadata + selection presence/range; `include_selection: true` adds selected text capped at 128 KiB plus `selection_truncated`; with `scrollback_lines`, returns requested history plus the active screen for command-output capture (params: `pane`, `scrollback_lines`, `include_selection`, and paging fields) |
 | `read_cells` | read-only | visible cell grid plus selected attributes (`any_underline`, underline variants, strikeout, underline-color presence) for renderer diagnostics without OCR |
-| `ui_geometry` | read-only | live window geometry: surface/content rects, renderer cell metrics, resize-overlay grid, tab-bar segment/new-tab rects, tab segment `path`/`fitted_title` diagnostics, pane titlebar rect/title/path/`fitted_title` diagnostics, open context-menu rect/rows, cursor, and tab drag armed/visible state |
+| `ui_geometry` | read-only | live window geometry: surface/content rects, renderer cell metrics, resize-overlay grid, tab-bar segment/new-tab rects, tab segment `path`/`fitted_title` diagnostics, pane titlebar rect/title/path/`fitted_title` diagnostics, open context-menu rect/rows, cursor, tab drag armed/visible state, and additive Search geometry/status/control metadata. The Search object deliberately omits its query and matched terminal text |
 | `screenshot` | full | save a live PNG (`pane`, `full_window`, `path`); filesystem writes are never allowed through read-only mode |
 | `subscribe` | read-only | switches the connection to the event stream |
 | `wait_for` | read-only | v2.20: block until the screen matches (`text` substring / `regex` / `quiet_ms` settle — AND when combined; `timeout_ms` default 30 000). Returns `{matched, elapsed_ms, polls}`; a timeout is `matched: false`, not an error. Runs on the connection thread, polling ≥50 ms — the UI is never blocked. The screen-text regex runs against per-line right-trimmed, newline-joined text — use `(?m)` end-of-line anchors rather than end-of-string |
 | `send_text` | full | type text into a pane (`pane`, `text`) |
 | `send_keys` | full | v2.20: press named keys / chords (`pane`, `keys: ["escape","ctrl+c","down","G",…]`). Tokens: key names (`escape`, `enter`, `tab`, `backspace`, `delete`, `insert`, `space`, arrows, `home`/`end`, `pageup`/`pagedown`, `f1`–`f12`), chords with `ctrl`/`alt`/`shift`/`super` (+ aliases), or single characters (case preserved). Encoded through the same path as GUI keystrokes against the pane's live modes (DECCKM-aware); all tokens parse before any byte is sent |
 | `dispatch_keybind` | full | diagnostic app-keybind dispatch (`logical`, `physical`, `mods`) using the same resolver as real window keyboard input. It does not write PTY bytes; it returns the candidate triggers, matched action, and whether a modal blocked dispatch |
+| `dispatch_ui_key` | full | press 1–64 pre-parsed key tokens (each at most 64 bytes) in the currently open supported Kettle modal. Search consumes them through its real Unicode editor/navigation path; no token is encoded or written to the PTY. All tokens validate before the first state change, and a closed modal is an error |
 | `send_mouse` | full | deterministic mouse input for diagnostics (`event`: `move`/`press`/`release`/`click`/`wheel`, window-relative `x`/`y`, `button`, `wheel_lines`, optional event-local `mods`) |
 | `resize_window` | full | request a live window client-area resize (`window`, `width`, `height`) and let the normal renderer/PTY resize path process it |
 | `perform_action` | full | dispatch a named Kettle app action (`action`, for example `start_search`, `command_palette`, `open_ssh`, `hint_mode`, `edit_tab_title`). Use this for app chrome that is not pane input; `send_keys` intentionally writes terminal keystrokes to the focused pane |
@@ -256,11 +258,26 @@ Or a project-scoped `.mcp.json`:
 Tools: `kettle_run` (headless one-shot — needs no running kettle),
 `kettle_list_panes`, `kettle_read_screen`, `kettle_read_cells`,
 `kettle_ui_geometry`, `kettle_screenshot`, `kettle_send_text`,
-`kettle_send_keys`, `kettle_send_mouse`, `kettle_resize_window`,
+`kettle_send_keys`, `kettle_dispatch_ui_key`, `kettle_send_mouse`, `kettle_resize_window`,
 `kettle_perform_action`, `kettle_wait_for`, `kettle_run_command` (these drive a
 running kettle, so start it with `kettle --agent-server full`). When no server
 is found, the control-backed tools return an actionable error pointing at
 `--agent-server`.
+
+For Search automation, call `kettle_perform_action` with `start_search`, then
+send individual character/chord tokens through `kettle_dispatch_ui_key` and
+observe `kettle_ui_geometry`. The diagnostic object reports the target pane,
+bar/reserved-row geometry, each control rectangle and focus state, status,
+match/truncation booleans, Wrap, Smart/Match/Ignore, and Invert. It intentionally
+does **not** return the query or matched terminal text; screenshots and
+`read_cells` are the evidence for highlight placement. A **Results limited**
+status or `visible_truncated = true` is not a definitive
+first/last/no-match verdict; an ordinary exact work-budget continuation remains
+**Searching** instead. **Pattern too complex** is a distinct compile status for
+a syntactically valid expression beyond the bounded engine budget. This
+separation also lets a probe run while tmux,
+AstroNvim, Codex CLI, or Claude Code CLI owns the pane without corrupting that
+program's input stream.
 
 The control surface also exposes `screenshot`, which saves a live PNG using the
 same renderer readback path as the UI screenshot action. It requires

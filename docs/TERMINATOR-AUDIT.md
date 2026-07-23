@@ -221,9 +221,32 @@ Row promoted to A from Bucket D during an audit cleanup pass.
 
 case_sensitive, invert_search.
 
-kettle ✅ search overlay (Ctrl+Shift+F). case_sensitive is a Terminator
-toggle; kettle does smart-case (lowercase pattern → case-insensitive,
-mixed case → case-sensitive). Different model. Note in audit; not a gap.
+kettle ✅ search overlay (`Ctrl+Shift+F`). The current bar follows
+Terminator's compact bottom-lane model and exposes Previous, Next, Wrap,
+Case, Invert, and Close beside a Unicode/grapheme-aware editor. Case cycles
+**Smart** (lowercase pattern → insensitive, uppercase present → sensitive),
+**Match** (always sensitive, Terminator's default), and **Ignore** (always
+insensitive); `invert-search` flips the default Enter direction. The settings
+persist through both the bar and Settings → Search.
+
+Kettle intentionally differs in bounded ways: patterns are strict Rust regexes
+compiled by `regex-automata`'s meta engine and capped at 4096 UTF-8 bytes; the
+status does not claim a global count; and history work is incremental
+(a nearby 1000-line range, then 500 ms idle traversal) with at most one bounded
+core work slice per event-loop turn and nearby projection capped at 65,536
+signed spans. Logical-line materialization is capped at 256 rows, 262,144
+inspected cells, and 64 KiB. Each bounded call also has 64 KiB
+aggregate text, 262,144-cell, and 256-logical-haystack work budgets; exact
+continuations resume, while an in-line capacity barrier reports **Results
+limited** instead of a possibly wrong ordering. Engine construction is capped
+at 512 KiB NFA, 256 KiB one-pass/hybrid, and 40 KiB DFA. Continuous output
+preserves chunk progress. Only non-navigation work gets a fresh verification
+after 500 ms quiet; output-interrupted explicit navigation waits for a user
+retry. These choices preserve responsive infinite/large scrollback while
+fixing the old failure to highlight negative-line history and ordinary
+soft-wrapped matches. See
+[AUDIT-2026-07-22-SEARCH.md](AUDIT-2026-07-22-SEARCH.md) for the frame evidence
+and baseline reproduction.
 
 ### `terminatorlib/terminal_popup_menu.py` — right-click menu
 
@@ -362,7 +385,7 @@ The full feature-by-feature ledger. Rows flip from B/C → ✅ A as cycles land.
 | zoom_in / zoom_out / zoom_normal | keybinds | ✅ `IncreaseFontSize` / `DecreaseFontSize` / `ResetFontSize` |
 | toggle_zoom (Ctrl+Shift+X) | keybinds | ✅ `ToggleZoom` |
 | full_screen (F11) | keybinds | ✅ `ToggleFullscreen` |
-| search (Ctrl+Shift+F) | keybinds | ✅ `StartSearch` |
+| search (Ctrl+Shift+F) | keybinds | ✅ `StartSearch`; Terminator-style bottom bar, strict regex, signed history highlights |
 | reset (Ctrl+Shift+R) | keybinds | ✅ `Reset` |
 | copy / paste | keybinds | ✅ same |
 | switch_to_tab_N | keybinds | ✅ `GotoTab(N)` |

@@ -12,9 +12,27 @@
       dividers, focus border, tab bar
 - [x] Geometry-based focus nav (`Alt+Arrows`), mouse-click focus, ratio
       resize (`Ctrl+Shift+Arrows`), broadcast/group input
-- [x] Regex search overlay (`Ctrl+Shift+F`) — true regex + smart-case
-      (insensitive until an uppercase char), literal fallback for an
-      invalid pattern (`search::build_regex`, +3 tests)
+- [x] Terminator-style scrollback search (`Ctrl+Shift+F`) — responsive bottom
+      bar with Previous/Next, Wrap, Smart/Match/Ignore, Invert, Close, and a
+      grapheme-aware editor. Patterns are strict Rust regexes capped at 4096
+      UTF-8 bytes; invalid syntax is surfaced instead of silently becoming a
+      literal. Per-window state remembers one query per pane.
+- [x] Bounded history search — signed spans retain negative scrollback rows and
+      soft-wrapped matches; typing targets an immediate 1000-line nearby range
+      followed by 500 ms idle traversal, while each event-loop turn runs at most
+      one bounded core slice and visible +/-100-line highlighting is capped at
+      65,536 spans. Each `regex-automata` meta-engine haystack is capped at
+      256 physical rows, 262,144 inspected cells, and 64 KiB. A bounded call
+      also yields exactly after 64 KiB aggregate text, 262,144 cells, or 256
+      complete logical haystacks; those exact continuations resume without a
+      warning, while an in-line capacity barrier reports **Results limited**.
+      Engine construction is capped at 512 KiB NFA, 256 KiB one-pass/hybrid,
+      and 40 KiB DFA. Chunk cursors progress under continuous output; only the
+      non-navigation pass gets a 500 ms quiet verification, while interrupted
+      explicit navigation waits for a user retry. Status replaces an eager
+      global match count. The control plane exposes modal-only
+      `dispatch_ui_key` and query-free Search geometry for deterministic
+      regression tests without sending bytes to the PTY.
 - [x] Clipboard (OSC 52 + copy/paste), keyboard input encoding, IME text
 
 - [x] Mouse drag text selection + wheel scrollback
