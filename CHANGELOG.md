@@ -6,6 +6,34 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+## [2.38.2] — 2026-07-23
+
+  ### Fixed
+  - **Split-pane titlebars no longer render a tofu box for emoji or symbol
+    glyphs on any platform.** The per-pane titlebar shaped its label with
+    cosmic-text's no-fallback Basic mode, so any codepoint outside the bundled
+    JetBrainsMono Nerd Font — the leading status glyph agents such as Claude
+    Code put in OSC 0/2 titles, an emoji `agent-badge`, or the `icon-bell`
+    `U+1F514` indicator — rasterized the font's `.notdef` box while the tab
+    bar rendered the identical string correctly. The titlebar, the resize
+    overlay chip, and quick-select hint labels now shape with Advanced mode
+    like every other chrome surface, walking the platform font-fallback
+    cascade (Segoe UI Emoji/Symbol on Windows, Noto/DejaVu via fontconfig on
+    Linux). Regression coverage: a cross-platform shaping-superset invariant,
+    a Windows-gated end-to-end glyph-resolution test, and a source guard that
+    keeps no-fallback shaping out of the render crate. Quick-select hint
+    labels also gained the same text-equality reshape gate the other chrome
+    buffers use, so an open overlay no longer re-shapes every label on each
+    blink-driven redraw.
+  - **Disabling ligatures no longer silently disables font fallback for
+    terminal text.** Turning the ligature flag off (any `liga`/`clig`/`calt`/
+    `dlig` toggle set to 0 via `font-feature`, with no other features active)
+    dropped the whole pane to the same no-fallback shaping mode, tofu-boxing
+    CJK/emoji/symbol fallback glyphs for those users. The ligature toggle was
+    already fully expressed as OpenType features (`liga/clig/calt/dlig = 0`),
+    so shaping now always uses the fallback-aware path; per-line shaping
+    caches keep the cost bounded to rows whose content changed.
+
 ## [2.38.1] — 2026-07-22
 
   ### Fixed

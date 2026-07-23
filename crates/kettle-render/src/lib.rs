@@ -1117,6 +1117,11 @@ pub struct Renderer {
     pane_titlebar_texts: Vec<String>,
     /// v2.20.0 P1b: last text shaped into each `tab_buffers` slot.
     tab_texts: Vec<String>,
+    /// v2.38.2: last text shaped into each `hint_buffers` slot. Quick-select
+    /// labels are byte-stable while the overlay is open, but the loop
+    /// re-shaped all of them (up to ~100) on every blink/keystroke redraw —
+    /// free-ish under no-fallback shaping, real work under Advanced.
+    hint_texts: Vec<String>,
     /// v2.20.0 P1b: last text shaped into `tab_close_buffer` / `tabbar_buffer`
     /// / `new_tab_arrow_buffer` / `status_bar_buffer`. The first three are
     /// constant glyphs, so after frame 1 these gates always hold.
@@ -1843,6 +1848,7 @@ impl Renderer {
             last_cursor_char: None,
             pane_titlebar_texts: Vec::new(),
             tab_texts: Vec::new(),
+            hint_texts: Vec::new(),
             tab_close_text: String::new(),
             tabbar_text: String::new(),
             new_tab_arrow_text: String::new(),
@@ -2377,10 +2383,17 @@ impl Renderer {
                 // v2.20.0 P1b: `Buffer::set_text` re-shapes unconditionally —
                 // gate it on text change so a steady title costs nothing.
                 if self.pane_titlebar_texts[i] != label {
+                    // Advanced shaping, like every other chrome buffer: the
+                    // title is shell-controlled OSC 0/2 text (agents such as
+                    // Claude Code lead with a status glyph) and the label can
+                    // carry the 🔔 bell — Basic skips cosmic-text's platform
+                    // font fallback (Segoe UI Emoji/Symbol, Noto), so any
+                    // glyph outside the bundled Nerd Font tofu-boxed here
+                    // while the tab bar rendered the same string fine.
                     buf.set_text(
                         &label,
                         &Attrs::new().family(Family::Name(&family)),
-                        Shaping::Basic,
+                        Shaping::Advanced,
                         None,
                     );
                     self.pane_titlebar_texts[i] = label;
@@ -3716,7 +3729,7 @@ impl Renderer {
                 self.resize_overlay_buffer.set_text(
                     &label,
                     &Attrs::new().family(Family::Name(&family)),
-                    Shaping::Basic,
+                    Shaping::Advanced,
                     None,
                 );
                 self.resize_overlay_text = label;
@@ -3824,22 +3837,33 @@ impl Renderer {
             while self.hint_buffers.len() < overlay.hint_labels.len() {
                 let b = TextBuffer::new(&mut self.font_system, metrics);
                 self.hint_buffers.push(b);
+                // A fresh buffer holds no shaped text; the empty sentinel
+                // keeps the equality gate below from skipping its first fill.
+                self.hint_texts.push(String::new());
             }
             // Quick-select labels every visible link, so
             // densities swing widely (50 → 5 → 100); shrink the pool to the
             // current label count instead of pinning it at the peak.
             self.hint_buffers.truncate(overlay.hint_labels.len());
+            self.hint_texts.truncate(overlay.hint_labels.len());
             for (i, hint) in overlay.hint_labels.iter().enumerate() {
                 let n = hint.label.chars().count().max(1) as f32;
                 let buf = &mut self.hint_buffers[i];
+                // Metrics/size stay outside the text gate (same DPI-change
+                // hazard as the resize chip above); both early-out when
+                // unchanged. The gate spares the ~100-label reshape the
+                // blink-driven redraw paid while the overlay sat open.
                 buf.set_metrics(metrics);
                 buf.set_size(Some(n * cw + 2.0), Some(ch));
-                buf.set_text(
-                    &hint.label,
-                    &Attrs::new().family(Family::Name(&family)),
-                    Shaping::Basic,
-                    None,
-                );
+                if self.hint_texts[i] != hint.label {
+                    buf.set_text(
+                        &hint.label,
+                        &Attrs::new().family(Family::Name(&family)),
+                        Shaping::Advanced,
+                        None,
+                    );
+                    self.hint_texts[i].clone_from(&hint.label);
+                }
                 buf.shape_until_scroll(&mut self.font_system, false);
             }
         }
@@ -5420,14 +5444,15 @@ impl Renderer {
         let default_attrs = Attrs::new()
             .family(Family::Name(family))
             .font_features(ff.clone());
-        // Advanced shaping applies OpenType features (ligatures, ss##,
-        // cv##, …). Drop to Basic only when ligatures are off *and* there
-        // are no explicit features to honor — the fast path with no shaping.
-        let shaping = if cfg.font_ligatures || !cfg.font_features.is_empty() {
-            Shaping::Advanced
-        } else {
-            Shaping::Basic
-        };
+        // Always Advanced: it is the only shaping mode that walks
+        // cosmic-text's platform font-fallback cascade (CJK, emoji, symbols).
+        // The ligature toggle is fully expressed as OpenType features
+        // (`font_features()` emits liga/clig/calt/dlig=0 when off), so the
+        // old ligatures-off drop to Basic shaping bought nothing but a
+        // narrower fast path — and silently tofu-boxed every fallback glyph
+        // for those users. Cost is bounded by the per-line shaping cache
+        // below: only rows whose content changed re-shape.
+        let shaping = Shaping::Advanced;
 
         // v2.20.0 P1 (perf): per-LINE keyed shaping cache. The old path fed
         // the whole viewport through `set_rich_text` every frame, which
@@ -5454,9 +5479,10 @@ impl Renderer {
         // recolors and the cursor-recolor cell all land in it via the
         // resolved run colors — each dirties exactly the rows it touches.
         // Inputs that change how a row SHAPES without changing its runs
-        // (font-family variants, ligature toggle, font-features, shaping
-        // mode) live in the per-pane style key; metrics / pane-size changes
-        // are handled inside the buffer (relayout keeps shaping).
+        // (font-family variants, ligature toggle, font-features) live in the
+        // per-pane style key; metrics / pane-size changes are handled inside
+        // the buffer (relayout keeps shaping). Shaping mode is a constant
+        // (always Advanced) so it no longer participates.
         use std::hash::{Hash, Hasher};
         let style_key = {
             let mut h = std::hash::DefaultHasher::new();
@@ -5468,13 +5494,12 @@ impl Renderer {
                 f.tag.hash(&mut h);
                 f.value.hash(&mut h);
             }
-            matches!(shaping, Shaping::Advanced).hash(&mut h);
             h.finish()
         };
         if self.pane_style_keys[idx] != style_key {
             self.pane_style_keys[idx] = style_key;
             // Wipe the row keys: every row below re-sets via `reset_new`,
-            // which is what propagates a changed shaping mode / font stack.
+            // which is what propagates a changed font stack / feature set.
             self.pane_line_keys[idx].clear();
         }
         let rows = screen_rows.max(0) as usize;
@@ -9363,6 +9388,115 @@ mod hidpi_scale_tests {
         assert!(
             (w3 / w1 - 3.0).abs() < 0.15,
             "cell width must scale ~3× without wrapping: {w1} → {w3}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod titlebar_glyph_fallback_tests {
+    use super::load_bundled_font;
+    use glyphon::{Attrs, Buffer as TextBuffer, Family, FontSystem, Metrics, Shaping};
+
+    /// Shape `text` once under `shaping` against a fresh `FontSystem` that
+    /// carries the bundled faces plus whatever `FontSystem::new()` loaded
+    /// from the host via `fontdb`'s system-font scan — the same stack the
+    /// chrome buffers shape with. Returns each resolved glyph id in source
+    /// order; `0` is TrueType's reserved `.notdef` — the tofu box.
+    fn shape_glyph_ids(text: &str, shaping: Shaping) -> Vec<u16> {
+        let mut fs = FontSystem::new();
+        for face in kettle_config::font::all() {
+            load_bundled_font(&mut fs, face);
+        }
+        let metrics = Metrics::new(16.0, 20.0);
+        let mut buf = TextBuffer::new(&mut fs, metrics);
+        buf.set_size(Some(2000.0), Some(200.0));
+        buf.set_text(
+            text,
+            &Attrs::new().family(Family::Name(kettle_config::font::FAMILY)),
+            shaping,
+            None,
+        );
+        buf.shape_until_scroll(&mut fs, false);
+        buf.layout_runs()
+            .flat_map(|run| run.glyphs.iter().map(|g| g.glyph_id))
+            .collect()
+    }
+
+    /// A pane-titlebar-shaped label: leading status glyph (Claude Code's
+    /// OSC 0/2 titles lead with one), title text, size text, and the
+    /// U+1F514 bell kettle appends itself when `icon-bell` fires. Neither
+    /// U+2733 nor U+1F514 exists in the bundled Nerd Font.
+    const LABEL: &str = "  \u{2733} kettle  120x40  \u{1F514}";
+
+    /// Cross-platform invariant: Advanced's fallback cascade is a strict
+    /// superset of Basic's single generic-family retry, so for the same
+    /// font db Advanced may only GAIN glyph coverage over Basic, never
+    /// lose it. Holds on any host regardless of which fonts are
+    /// installed, so it cannot flake on a font-poor CI image.
+    #[test]
+    fn advanced_shaping_never_loses_a_glyph_basic_resolves() {
+        let basic = shape_glyph_ids(LABEL, Shaping::Basic);
+        let advanced = shape_glyph_ids(LABEL, Shaping::Advanced);
+        // Cluster counts can differ between shapers; compare per-char by
+        // walking both in order only when lengths match, else just assert
+        // Advanced produced no MORE notdefs than Basic.
+        if basic.len() == advanced.len() {
+            for (i, (b, a)) in basic.iter().zip(&advanced).enumerate() {
+                assert!(
+                    *b == 0 || *a != 0,
+                    "glyph {i} resolved under Basic (id {b}) but not Advanced"
+                );
+            }
+        }
+        let basic_notdefs = basic.iter().filter(|&&id| id == 0).count();
+        let advanced_notdefs = advanced.iter().filter(|&&id| id == 0).count();
+        assert!(
+            advanced_notdefs <= basic_notdefs,
+            "Advanced produced more tofu than Basic: {advanced_notdefs} > {basic_notdefs}"
+        );
+    }
+
+    /// The concrete Windows regression this closes: Segoe UI Emoji /
+    /// Segoe UI Symbol are stock Windows fonts and cosmic-text's Windows
+    /// fallback list names both, so Advanced must resolve every glyph in
+    /// the label — this is exactly the split-pane titlebar tofu bug. The
+    /// second assert documents the defect Basic still carries; it pins
+    /// upstream cosmic-text behavior, so if it ever starts failing the
+    /// upstream no-fallback contract changed — harmless here since Basic
+    /// is no longer used, just drop that assert.
+    #[cfg(windows)]
+    #[test]
+    fn advanced_shaping_resolves_titlebar_emoji_on_windows() {
+        let advanced = shape_glyph_ids(LABEL, Shaping::Advanced);
+        assert!(
+            advanced.iter().all(|&id| id != 0),
+            "Advanced shaping still produced a .notdef on Windows: {advanced:?}"
+        );
+        let basic = shape_glyph_ids(LABEL, Shaping::Basic);
+        assert!(
+            basic.contains(&0),
+            "expected Basic shaping to tofu the bell/asterisk (no-fallback contract)"
+        );
+    }
+
+    /// Source guard (same shape as pane_buffer_lifecycle_tests): Basic
+    /// shaping skips the fallback cascade, which is how the titlebar
+    /// tofu-boxed emoji while the tab bar rendered them. It must never
+    /// reappear in production code. The only permitted uses are the two
+    /// comparison calls in this module's tests above, so pin the exact
+    /// count; the needle is assembled at runtime so this test's own
+    /// source cannot satisfy the match.
+    #[test]
+    fn no_call_site_uses_basic_shaping() {
+        let src = include_str!("lib.rs");
+        let needle = format!("Shaping::{}", "Basic");
+        let count = src.matches(&needle).count();
+        assert_eq!(
+            count, 2,
+            "expected exactly 2 uses of {needle} (both inside \
+             titlebar_glyph_fallback_tests) but found {count} — it skips \
+             cosmic-text's font-fallback cascade (no CJK/emoji/symbol \
+             fallback): the split-titlebar tofu-box bug"
         );
     }
 }
