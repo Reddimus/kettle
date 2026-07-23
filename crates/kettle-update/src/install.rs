@@ -3577,9 +3577,15 @@ mod tests {
             overwrite_attempt.is_err(),
             "a concurrent writer must not be able to modify a locked archive in place"
         );
-        assert_eq!(fs::read(archive.path()).unwrap(), b"original-bytes");
 
         fs4::FileExt::unlock(archive.as_file()).unwrap();
+        // Verify the blocked write left the original bytes intact only AFTER
+        // unlocking: the exclusive lock blocks reads through a fresh handle
+        // too (ERROR_LOCK_VIOLATION), so this check can't use `fs::read` while
+        // the lock is held. The write-blocked assertion above is what proves
+        // the protection; this confirms the file wasn't corrupted.
+        assert_eq!(fs::read(archive.path()).unwrap(), b"original-bytes");
+
         OpenOptions::new()
             .write(true)
             .open(archive.path())
