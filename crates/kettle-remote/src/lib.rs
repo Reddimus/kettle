@@ -413,9 +413,8 @@ impl LinuxProcessTree {
                         .join(pid.to_string())
                         .join("children"),
                 )
-                .map(|b| {
+                .inspect(|b| {
                     total_bytes += b.len() as u64;
-                    b
                 })
             } else {
                 None
