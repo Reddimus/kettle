@@ -257,7 +257,11 @@ jobs:
             Write-Error "--gpu-info output missing an 'Adapter:' line"
             exit 1
           }
-          if ($gpuInfo -notmatch '(?m)^Max texture:\s+\d+ px / side$') {
+          # `\s*$` (not a bare `$`): `| Out-String` joins with CRLF, and in
+          # .NET multiline mode `$` matches just before the `\n`, so a bare
+          # `side$` fails against the trailing `\r`. The Backend/Adapter checks
+          # above escape this only because they don't anchor the line end.
+          if ($gpuInfo -notmatch '(?m)^Max texture:\s+\d+ px / side\s*$') {
             Write-Error "--gpu-info output missing a 'Max texture:' line"
             exit 1
           }
