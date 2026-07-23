@@ -6,6 +6,8 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+## [2.38.1] — 2026-07-22
+
   ### Fixed
   - Linux stable self-updates now preserve the source installer's absolute
     256x256 PNG desktop icon instead of switching the launcher to the SVG.
