@@ -172,7 +172,7 @@ curl -fsSL https://raw.githubusercontent.com/Reddimus/kettle/main/scripts/instal
 Then search **"kettle"** in GNOME Activities / KDE Krunner / Ubuntu's
 Super-key, or run `kettle` from any shell on your `$PATH`.
 
-Pin a specific version: `KETTLE_VERSION=v2.38.1 sh` instead of `sh`.
+Pin a specific version: `KETTLE_VERSION=v2.38.2 sh` instead of `sh`.
 System-wide install: `KETTLE_PREFIX=/usr/local sh` (needs write access).
 Uninstall later: `~/.local/share/kettle/install.sh --uninstall`.
 
