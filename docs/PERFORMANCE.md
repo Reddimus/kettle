@@ -204,7 +204,8 @@ What the overhaul changed (each lands with a regression guard):
    visible viewport on every painted frame (`set_rich_text` resets all
    lines). Pane text now keeps one `BufferLine` per grid row keyed by its
    content; an idle blink frame re-shapes zero rows, a cursor move one.
-   Chrome labels (titlebar/tab/status) gained the same equality gates.
+   Chrome labels (titlebar/tab/status, and quick-select hints since
+   v2.38.2) gained the same equality gates.
 3. **SIMD extractor (P3)** — the image-protocol front stage walked the
    stream byte-by-byte; it now `memchr`-scans to the next ESC/ST/BEL and
    bulk-copies plain runs. `cargo bench -p kettle-vt` pins it (the first
