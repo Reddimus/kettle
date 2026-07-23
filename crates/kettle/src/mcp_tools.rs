@@ -184,6 +184,21 @@ pub fn tool_specs() -> Vec<Value> {
             }
         }),
         json!({
+            "name": "kettle_dispatch_ui_key",
+            "description": "Press bounded key tokens in the currently open Kettle UI modal. \
+                Unlike kettle_send_keys, this never writes bytes to the terminal PTY. Use it \
+                after kettle_perform_action start_search to test search editing/navigation safely. \
+                Requires the agent server in `full` mode.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "keys": {"type": "array", "minItems": 1, "maxItems": 64, "items": {"type": "string", "minLength": 1, "maxLength": 64}, "description": "UI key tokens, pressed in order"}
+                },
+                "required": ["keys"],
+                "additionalProperties": false
+            }
+        }),
+        json!({
             "name": "kettle_send_mouse",
             "description": "Send deterministic mouse input to a running kettle window for \
                 interactive UI/TUI diagnostics. Coordinates are physical pixels from the \
@@ -299,6 +314,7 @@ fn is_known_tool(name: &str) -> bool {
             | "kettle_send_text"
             | "kettle_run_command"
             | "kettle_send_keys"
+            | "kettle_dispatch_ui_key"
             | "kettle_send_mouse"
             | "kettle_resize_window"
             | "kettle_perform_action"
@@ -398,6 +414,15 @@ fn call_tool_inner(params: &Value, cancelled: Option<&std::sync::atomic::AtomicB
                 p.insert("pane".into(), pane.clone());
             }
             ctl_call("send_keys", Value::Object(p), cancelled)
+        }
+        "kettle_dispatch_ui_key" => {
+            let Some(keys) = args.get("keys").and_then(|k| k.as_array()) else {
+                return error_result("kettle_dispatch_ui_key requires a 'keys' string array");
+            };
+            if keys.is_empty() {
+                return error_result("kettle_dispatch_ui_key 'keys' must be non-empty");
+            }
+            ctl_call("dispatch_ui_key", json!({"keys": keys}), cancelled)
         }
         "kettle_send_mouse" => {
             let Some(event) = args.get("event").and_then(|e| e.as_str()) else {
@@ -624,6 +649,7 @@ fn validate_tool_arguments(name: &str, args: &Value) -> Result<(), String> {
             ("timeout_s", ArgKind::Number),
         ],
         "kettle_send_keys" => &[("pane", ArgKind::Unsigned), ("keys", ArgKind::Strings)],
+        "kettle_dispatch_ui_key" => &[("keys", ArgKind::Strings)],
         "kettle_send_mouse" => &[
             ("window", ArgKind::Unsigned),
             ("event", ArgKind::String),

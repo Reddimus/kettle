@@ -104,14 +104,6 @@ pub enum Dir {
     Vertical,
 }
 
-#[derive(Default)]
-pub struct SearchState {
-    pub open: bool,
-    pub query: String,
-    pub matches: Vec<kettle_core::Match>,
-    pub index: usize,
-}
-
 pub struct Pane {
     pub term: Terminal,
     pub rx: Receiver<TermEvent>,
@@ -760,7 +752,6 @@ pub struct Mux {
     pub tabs: Vec<Tab>,
     pub panes: HashMap<u64, Pane>,
     pub active: usize,
-    pub search: SearchState,
     /// Phase 3 of the named-groups design:
     /// migrated from `bool` to `BroadcastScope`. The
     /// per-tab broadcast = `BroadcastScope::Tab`; old "off" =
@@ -787,7 +778,6 @@ impl Mux {
             tabs: Vec::new(),
             panes: HashMap::new(),
             active: 0,
-            search: SearchState::default(),
             broadcast: BroadcastScope::Off,
             lua_output_subscribed: false,
             record_lossless: false,

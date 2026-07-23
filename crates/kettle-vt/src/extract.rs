@@ -144,6 +144,13 @@ impl Extractor {
         Self::with_budget(GraphicsBudget::default())
     }
 
+    #[cfg(test)]
+    pub(crate) fn isolated() -> Self {
+        let budget = GraphicsBudget::isolated(crate::GraphicsLimits::default())
+            .expect("default graphics limits are valid");
+        Self::with_budget(budget)
+    }
+
     fn with_budget(budget: GraphicsBudget) -> Self {
         Extractor {
             mode: Mode::Pass,

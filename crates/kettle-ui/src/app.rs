@@ -4,8 +4,8 @@
 use std::sync::Arc;
 
 use accesskit::{
-    ActionHandler, ActionRequest, ActivationHandler, DeactivationHandler, Node, NodeId, Role, Tree,
-    TreeId, TreeUpdate,
+    Action as AccessibilityAction, ActionData, ActionHandler, ActionRequest, ActivationHandler,
+    DeactivationHandler, Node, NodeId, Role, TextPosition, TextSelection, Tree, TreeId, TreeUpdate,
 };
 use anyhow::Result;
 use kettle_config::{
@@ -16,6 +16,7 @@ use kettle_render::{
     ContextMenu, ContextMenuRow, HighlightRect, HintLabel, ImePreedit, Overlay, PaneSnapshot,
     PaneView, Renderer, TabActivity as RenderTabActivity, TabBar, TabSeg,
 };
+use unicode_width::UnicodeWidthStr as _;
 use winit::application::ApplicationHandler;
 use winit::event::{ElementState, MouseButton, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
@@ -32,6 +33,10 @@ use crate::window_state::{WindowState, track_consumed_key_release};
 const ACCESSIBILITY_ROOT_ID: NodeId = NodeId(0);
 const ACCESSIBILITY_PANE_ID_MASK: u64 = 1 << 63;
 const ACCESSIBILITY_TEXT_ID_MASK: u64 = (1 << 63) | (1 << 62);
+const ACCESSIBILITY_SEARCH_ID_MASK: u64 = 1 << 61;
+const ACCESSIBILITY_SEARCH_CONTAINER_ID: NodeId = NodeId(ACCESSIBILITY_SEARCH_ID_MASK);
+const ACCESSIBILITY_SEARCH_TEXT_ID: NodeId = NodeId(ACCESSIBILITY_SEARCH_ID_MASK | 16);
+const ACCESSIBILITY_SEARCH_STATUS_ID: NodeId = NodeId(ACCESSIBILITY_SEARCH_ID_MASK | 17);
 const ACCESSIBILITY_UPDATE_INTERVAL: std::time::Duration = std::time::Duration::from_millis(100);
 
 fn accessibility_pane_id(pane_id: u64) -> NodeId {
@@ -40,6 +45,55 @@ fn accessibility_pane_id(pane_id: u64) -> NodeId {
 
 fn accessibility_text_id(pane_id: u64) -> NodeId {
     NodeId::from(ACCESSIBILITY_TEXT_ID_MASK | pane_id)
+}
+
+fn accessibility_search_control_id(control: kettle_render::SearchControl) -> NodeId {
+    let offset = match control {
+        kettle_render::SearchControl::Editor => 1,
+        kettle_render::SearchControl::Previous => 2,
+        kettle_render::SearchControl::Next => 3,
+        kettle_render::SearchControl::Wrap => 4,
+        kettle_render::SearchControl::Case => 5,
+        kettle_render::SearchControl::Invert => 6,
+        kettle_render::SearchControl::Close => 7,
+    };
+    NodeId(ACCESSIBILITY_SEARCH_ID_MASK | offset)
+}
+
+fn accessibility_search_control_from_id(id: NodeId) -> Option<kettle_render::SearchControl> {
+    match id.0 {
+        value
+            if value == accessibility_search_control_id(kettle_render::SearchControl::Editor).0 =>
+        {
+            Some(kettle_render::SearchControl::Editor)
+        }
+        value
+            if value
+                == accessibility_search_control_id(kettle_render::SearchControl::Previous).0 =>
+        {
+            Some(kettle_render::SearchControl::Previous)
+        }
+        value if value == accessibility_search_control_id(kettle_render::SearchControl::Next).0 => {
+            Some(kettle_render::SearchControl::Next)
+        }
+        value if value == accessibility_search_control_id(kettle_render::SearchControl::Wrap).0 => {
+            Some(kettle_render::SearchControl::Wrap)
+        }
+        value if value == accessibility_search_control_id(kettle_render::SearchControl::Case).0 => {
+            Some(kettle_render::SearchControl::Case)
+        }
+        value
+            if value == accessibility_search_control_id(kettle_render::SearchControl::Invert).0 =>
+        {
+            Some(kettle_render::SearchControl::Invert)
+        }
+        value
+            if value == accessibility_search_control_id(kettle_render::SearchControl::Close).0 =>
+        {
+            Some(kettle_render::SearchControl::Close)
+        }
+        _ => None,
+    }
 }
 
 #[derive(Clone)]
@@ -53,10 +107,18 @@ impl ActivationHandler for AccessibilityActivation {
     }
 }
 
-struct AccessibilityActions;
+struct AccessibilityActions {
+    proxy: EventLoopProxy<UserEvent>,
+    window_seq: u64,
+}
 
 impl ActionHandler for AccessibilityActions {
-    fn do_action(&mut self, _request: ActionRequest) {}
+    fn do_action(&mut self, request: ActionRequest) {
+        let _ = self.proxy.send_event(UserEvent::AccessibilityAction {
+            window_seq: self.window_seq,
+            request,
+        });
+    }
 }
 
 struct AccessibilityDeactivation;
@@ -292,6 +354,13 @@ fn ctl_page_values(
 pub enum UserEvent {
     Wakeup,
     ReloadConfig,
+    /// An assistive-technology action addressed to a specific OS window.
+    /// AccessKit can invoke this callback off the winit dispatch path, so it is
+    /// re-serialized through the event-loop proxy before touching UI state.
+    AccessibilityAction {
+        window_seq: u64,
+        request: ActionRequest,
+    },
     /// A compatible bare Kettle launch asked this primary process to open a
     /// fresh OS window. The bounded inbox carries the request and completion.
     Activation,
@@ -519,6 +588,295 @@ fn map_case_sensitivity(m: kettle_config::SearchCaseSensitivity) -> kettle_core:
         kettle_config::SearchCaseSensitivity::Smart => kettle_core::CaseSensitivity::Smart,
         kettle_config::SearchCaseSensitivity::Always => kettle_core::CaseSensitivity::Always,
         kettle_config::SearchCaseSensitivity::Never => kettle_core::CaseSensitivity::Never,
+    }
+}
+
+fn search_compile_error_status(
+    error: kettle_core::SearchCompileError,
+) -> kettle_render::SearchStatus {
+    match error {
+        kettle_core::SearchCompileError::QueryTooLong { .. } => {
+            kettle_render::SearchStatus::TooLong
+        }
+        kettle_core::SearchCompileError::InvalidRegex => kettle_render::SearchStatus::Invalid,
+        kettle_core::SearchCompileError::PatternTooComplex => {
+            kettle_render::SearchStatus::TooComplex
+        }
+    }
+}
+
+fn map_search_case_mode(
+    mode: kettle_config::SearchCaseSensitivity,
+) -> kettle_render::SearchCaseMode {
+    match mode {
+        kettle_config::SearchCaseSensitivity::Smart => kettle_render::SearchCaseMode::Smart,
+        kettle_config::SearchCaseSensitivity::Always => kettle_render::SearchCaseMode::Match,
+        kettle_config::SearchCaseSensitivity::Never => kettle_render::SearchCaseMode::Ignore,
+    }
+}
+
+fn effective_search_status(
+    search: &crate::search_input::SearchState,
+) -> kettle_render::SearchStatus {
+    if search.visible_truncated
+        && matches!(
+            search.status,
+            kettle_render::SearchStatus::Match | kettle_render::SearchStatus::Wrapped
+        )
+    {
+        kettle_render::SearchStatus::Limited
+    } else {
+        search.status
+    }
+}
+
+fn should_start_nearby_search(search: &crate::search_input::SearchState) -> bool {
+    search.typing_scanned_revision != Some(search.revision)
+        && !search.quiet_retry_pending
+        && search.background.is_none()
+}
+
+/// Synchronize a live Search surface after a global config reload.
+///
+/// Returns true when the scan direction changed and the caller must derive a fresh viewport
+/// anchor after resize. Closed windows consume these values the next time Search opens.
+fn sync_reloaded_search_preferences(
+    search: &mut crate::search_input::SearchState,
+    wrap: bool,
+    case_mode: kettle_config::SearchCaseSensitivity,
+    invert: bool,
+    now: std::time::Instant,
+) -> bool {
+    if !search.open {
+        return false;
+    }
+    let wrap_changed = search.wrap != wrap;
+    let case_changed = search.case_mode != case_mode;
+    let direction_changed = search.invert != invert;
+    search.wrap = wrap;
+    search.case_mode = case_mode;
+    search.invert = invert;
+
+    if case_changed {
+        search.note_edit(now);
+    } else if wrap_changed || direction_changed {
+        search.restart_navigation(now);
+    }
+    direction_changed
+}
+
+fn search_viewport_anchor(
+    display_offset: usize,
+    screen_lines: usize,
+    last_column: usize,
+    direction: kettle_core::SearchDirection,
+) -> kettle_core::SearchPoint {
+    let offset = i32::try_from(display_offset).unwrap_or(i32::MAX);
+    match direction {
+        kettle_core::SearchDirection::Forward => kettle_core::SearchPoint::new(-offset, 0),
+        kettle_core::SearchDirection::Reverse => kettle_core::SearchPoint::new(
+            i32::try_from(screen_lines.saturating_sub(1))
+                .unwrap_or(i32::MAX)
+                .saturating_sub(offset),
+            last_column,
+        ),
+    }
+}
+
+fn search_point_after(
+    point: kettle_core::SearchPoint,
+    direction: kettle_core::SearchDirection,
+    top_line: i32,
+    bottom_line: i32,
+    last_column: usize,
+) -> Option<kettle_core::SearchPoint> {
+    match direction {
+        kettle_core::SearchDirection::Forward if point.column < last_column => {
+            Some(kettle_core::SearchPoint::new(point.line, point.column + 1))
+        }
+        kettle_core::SearchDirection::Forward if point.line < bottom_line => {
+            Some(kettle_core::SearchPoint::new(point.line + 1, 0))
+        }
+        kettle_core::SearchDirection::Reverse if point.column > 0 => {
+            Some(kettle_core::SearchPoint::new(point.line, point.column - 1))
+        }
+        kettle_core::SearchDirection::Reverse if point.line > top_line => {
+            Some(kettle_core::SearchPoint::new(point.line - 1, last_column))
+        }
+        _ => None,
+    }
+}
+
+fn clamp_search_point(
+    point: kettle_core::SearchPoint,
+    top_line: i32,
+    bottom_line: i32,
+    last_column: usize,
+) -> kettle_core::SearchPoint {
+    kettle_core::SearchPoint::new(
+        point.line.clamp(top_line, bottom_line),
+        point.column.min(last_column),
+    )
+}
+
+fn continue_background_after_output(
+    job: &mut crate::search_input::BackgroundSearch,
+    token: kettle_core::SearchScanToken,
+    top_line: i32,
+    bottom_line: i32,
+    last_column: usize,
+) {
+    job.token = token;
+    job.output_drifted = true;
+    job.cursor = clamp_search_point(job.cursor, top_line, bottom_line, last_column);
+    job.wrap_anchor = clamp_search_point(job.wrap_anchor, top_line, bottom_line, last_column);
+    job.edge = if job.wrapped {
+        clamp_search_point(job.edge, top_line, bottom_line, last_column)
+    } else {
+        match job.direction {
+            kettle_core::SearchDirection::Forward => {
+                kettle_core::SearchPoint::new(bottom_line, last_column)
+            }
+            kettle_core::SearchDirection::Reverse => kettle_core::SearchPoint::new(top_line, 0),
+        }
+    };
+}
+
+fn bounded_search_edge(
+    origin: kettle_core::SearchPoint,
+    direction: kettle_core::SearchDirection,
+    top_line: i32,
+    bottom_line: i32,
+    last_column: usize,
+    max_lines: usize,
+) -> kettle_core::SearchPoint {
+    let lines = i32::try_from(max_lines).unwrap_or(i32::MAX);
+    match direction {
+        kettle_core::SearchDirection::Forward => kettle_core::SearchPoint::new(
+            origin.line.saturating_add(lines).min(bottom_line),
+            last_column,
+        ),
+        kettle_core::SearchDirection::Reverse => {
+            kettle_core::SearchPoint::new(origin.line.saturating_sub(lines).max(top_line), 0)
+        }
+    }
+}
+
+fn wrapped_background_search(
+    token: kettle_core::SearchScanToken,
+    direction: kettle_core::SearchDirection,
+    anchor: kettle_core::SearchPoint,
+    grid_bounds: (i32, i32, usize),
+    navigation: bool,
+    had_focus: bool,
+    output_drifted: bool,
+) -> Option<crate::search_input::BackgroundSearch> {
+    let (top_line, bottom_line, last_column) = grid_bounds;
+    let (cursor, edge) = match direction {
+        kettle_core::SearchDirection::Forward => (
+            kettle_core::SearchPoint::new(top_line, 0),
+            search_point_after(
+                anchor,
+                kettle_core::SearchDirection::Reverse,
+                top_line,
+                bottom_line,
+                last_column,
+            )?,
+        ),
+        kettle_core::SearchDirection::Reverse => (
+            kettle_core::SearchPoint::new(bottom_line, last_column),
+            search_point_after(
+                anchor,
+                kettle_core::SearchDirection::Forward,
+                top_line,
+                bottom_line,
+                last_column,
+            )?,
+        ),
+    };
+    let ordered = match direction {
+        kettle_core::SearchDirection::Forward => cursor <= edge,
+        kettle_core::SearchDirection::Reverse => cursor >= edge,
+    };
+    ordered.then_some(crate::search_input::BackgroundSearch {
+        token,
+        direction,
+        cursor,
+        edge,
+        wrap_anchor: anchor,
+        wrapped: true,
+        nearby: false,
+        navigation,
+        had_focus,
+        output_drifted,
+    })
+}
+
+fn exhausted_search_status(
+    job: &crate::search_input::BackgroundSearch,
+) -> kettle_render::SearchStatus {
+    if job.navigation && job.had_focus && !job.wrapped {
+        match job.direction {
+            kettle_core::SearchDirection::Forward => kettle_render::SearchStatus::End,
+            kettle_core::SearchDirection::Reverse => kettle_render::SearchStatus::Start,
+        }
+    } else {
+        kettle_render::SearchStatus::NoMatch
+    }
+}
+
+fn should_retry_output_drift(job: &crate::search_input::BackgroundSearch) -> bool {
+    job.output_drifted && !job.navigation
+}
+
+fn prepare_initial_search_retry_after_output(
+    search: &mut crate::search_input::SearchState,
+    job: &crate::search_input::BackgroundSearch,
+    anchor: kettle_core::SearchPoint,
+) -> bool {
+    if !should_retry_output_drift(job) {
+        return false;
+    }
+    search.anchor = Some(anchor);
+    search.quiet_retry_pending = true;
+    true
+}
+
+fn activate_quiet_search_retry(search: &mut crate::search_input::SearchState) -> bool {
+    if !search.quiet_retry_pending {
+        return false;
+    }
+    search.quiet_retry_pending = false;
+    search.typing_scanned_revision = None;
+    search.unlimited_retry_at = None;
+    search.status = kettle_render::SearchStatus::Searching;
+    true
+}
+
+fn cancel_deferred_search_retry(search: &mut crate::search_input::SearchState) {
+    search.quiet_retry_pending = false;
+    search.unlimited_retry_at = None;
+}
+
+fn finished_background_search(
+    job: &crate::search_input::BackgroundSearch,
+    now: std::time::Instant,
+) -> (kettle_render::SearchStatus, Option<std::time::Instant>) {
+    if job.output_drifted && !should_retry_output_drift(job) {
+        // Output destroyed the stable ordering required by an explicit Previous/Next request.
+        // Re-running the default-direction typing search would verify a different operation, so
+        // keep the honest bounded result and let the user's next navigation start a fresh job.
+        (kettle_render::SearchStatus::Limited, None)
+    } else if should_retry_output_drift(job) {
+        // The retained cursor guarantees progress under a continuously-writing PTY, but rows may
+        // have shifted between chunks. Never turn that best-effort pass into a definitive miss;
+        // once output is quiet, restart the initial search from a fresh viewport anchor.
+        (
+            kettle_render::SearchStatus::Searching,
+            Some(now + std::time::Duration::from_millis(500)),
+        )
+    } else {
+        (exhausted_search_status(job), None)
     }
 }
 
@@ -2923,8 +3281,6 @@ fn clamp_context_menu_anchor(
 
 /// `(active-tab-index, focused-leaf-id)` — the value `App::focus_key` returns.
 pub(crate) type FocusKey = (usize, Option<u64>);
-/// Cache key for the search re-scan: `(query, focus, tab last-output)`.
-pub(crate) type SearchScanKey = (String, FocusKey, Option<std::time::Instant>);
 /// Cache key for the viewport link re-scan: `(focus, tab last-output,
 /// scroll display_offset, focused cwd)`.
 /// v2.20.0 (review fix): the middle component is the focused pane's
@@ -3962,11 +4318,25 @@ impl App {
         } else {
             None
         };
+        let search_hover = self.search_geometry(ws).and_then(|geometry| {
+            let (x, y) = (ws.cursor.x as f32, ws.cursor.y as f32);
+            geometry
+                .hit_test(x, y)
+                .map(|control| {
+                    if control == kettle_render::SearchControl::Editor {
+                        CursorIcon::Text
+                    } else {
+                        CursorIcon::Pointer
+                    }
+                })
+                .or_else(|| rect_contains(geometry.rect, x, y).then_some(CursorIcon::Default))
+        });
         let chrome = chrome_cursor_icon(self.cursor_in_chrome_band(ws), self.any_modal_open(ws));
         // A split divider under the cursor shows the resize cursor
         // (after chrome/close-button, before the link-pointer / I-beam default).
         let want = close_hover
             .or(confirm_hover)
+            .or(search_hover)
             .or(chrome)
             .or_else(|| self.split_seam_hover_icon(ws))
             .unwrap_or_else(|| {
@@ -4044,7 +4414,7 @@ impl App {
             return;
         } else if let Some(state) = ws.editing_title.as_mut() {
             state.input.extend(text.chars().filter(|c| !c.is_control()));
-        } else if ws.mux.search.open {
+        } else if ws.search.open {
             self.search_key(ws, &key, Some(text));
         } else {
             self.write_terminal_input(ws, text.as_bytes());
@@ -4092,7 +4462,10 @@ impl App {
     /// uses the same `cell_h + 10px` formula, so the PTY grid, pixels, and
     /// hit-test agree instead of letting the banner cover the bottom row.
     fn update_banner_h(&self, ws: &WindowState) -> f32 {
-        if self.update_available.is_some() {
+        // Renderer chrome gives an active Search lane priority over this
+        // passive notice. Match that precedence in PTY sizing instead of
+        // reserving an invisible extra strip between content and Search.
+        if self.update_available.is_some() && !ws.search.open {
             ws.renderer
                 .as_ref()
                 .map(|r| r.cell_h + 10.0)
@@ -4102,10 +4475,33 @@ impl App {
         }
     }
 
+    /// Height reserved by the responsive search lane. The renderer owns the
+    /// layout formula; the app reuses it for PTY sizing and hit-testing so no
+    /// terminal row can be painted underneath the controls.
+    fn search_bar_h(&self, ws: &WindowState) -> f32 {
+        if !ws.search.open {
+            return 0.0;
+        }
+        let Some(renderer) = ws.renderer.as_ref() else {
+            return 26.0;
+        };
+        let (width, height) = renderer.surface_size();
+        kettle_render::search_bar_geometry(
+            width as f32,
+            height as f32,
+            renderer.cell_w,
+            renderer.cell_h,
+        )
+        .reserved_height
+    }
+
     fn update_banner_rect(&self, ws: &WindowState) -> Option<Rect> {
         self.update_available.as_ref()?;
         let (sw, sh) = ws.renderer.as_ref()?.surface_size();
         let banner_h = self.update_banner_h(ws);
+        if banner_h <= 0.0 {
+            return None;
+        }
         let bottom_tabbar_h = if matches!(self.cfg.tab_bar_pos, TabBarPos::Bottom) {
             self.tab_bar_h(ws)
         } else {
@@ -4154,7 +4550,7 @@ impl App {
         // Delegate to the pure helper, threading
         // `cfg.tab_bar_width` so a user-configured strip width
         // is honored.
-        content_rect_for_with_strip(
+        let mut area = content_rect_for_with_strip(
             surface,
             self.tab_bar_h(ws),
             self.status_bar_h(ws),
@@ -4162,7 +4558,9 @@ impl App {
             self.cfg.tab_bar_pos,
             self.cfg.status_bar,
             self.cfg.tab_bar_width,
-        )
+        );
+        area.3 = (area.3 - self.search_bar_h(ws)).max(0.0);
+        area
     }
 
     /// Tab-bar geometry — the single source of truth shared by the renderer
@@ -4184,11 +4582,16 @@ impl App {
         // Horizontal Top/Bottom keeps the
         // compute_tab_segment_widths flow.
         if is_vertical {
-            return self.tab_bar_vertical(ws, sw, sh, height);
+            return self.tab_bar_vertical(ws, sw, sh - self.search_bar_h(ws), height);
         }
         let y = match self.cfg.tab_bar_pos {
             TabBarPos::Top | TabBarPos::Left | TabBarPos::Right => 0.0,
-            TabBarPos::Bottom => sh - height,
+            TabBarPos::Bottom => {
+                let status = matches!(self.cfg.status_bar, kettle_config::StatusBarMode::Bottom)
+                    .then(|| self.status_bar_h(ws))
+                    .unwrap_or(0.0);
+                sh - self.search_bar_h(ws) - status - height
+            }
         };
         if ws.editing_title.is_some() {
             let strip_w = if is_vertical {
@@ -5766,74 +6169,729 @@ impl App {
     }
 
     fn update_search(&mut self, ws: &mut WindowState) {
-        if !ws.mux.search.open {
-            // Clear the scan cache so the next open re-scans from scratch.
-            ws.search_scan_key = None;
+        if !ws.search.open {
             return;
         }
-        let query = ws.mux.search.query.clone();
-        // Re-run the (potentially full-scrollback) regex scan only
-        // when something that affects the match set changed — the query, the
-        // focused pane, or that tab's last-output instant (new text could add
-        // or remove matches). Match *navigation* (n/N changes `index`) and the
-        // follow-to-match scroll below still run every call, so only the
-        // expensive scan is skipped on an idle frame.
-        let scan_key = (
-            query.clone(),
-            self.focus_key(ws),
-            ws.mux
-                .tabs
-                .get(ws.mux.active)
-                .and_then(|t| t.last_output_at),
-        );
-        if ws.search_scan_key.as_ref() != Some(&scan_key) {
-            let matches = if let Some(p) = ws.mux.focused() {
-                p.term
-                    .term
-                    .lock()
-                    .ok()
-                    .map(|t| {
-                        kettle_core::search_with(
-                            &t,
-                            &query,
-                            map_case_sensitivity(self.cfg.search_case_sensitive),
-                        )
-                    })
-                    .unwrap_or_default()
-            } else {
-                Vec::new()
-            };
-            let s = &mut ws.mux.search;
-            s.matches = matches;
-            if s.index >= s.matches.len() {
-                s.index = 0;
-            }
-            ws.search_scan_key = Some(scan_key);
-        }
-        // Follow the active match into scrollback when it (or the query)
-        // changed — once, so the user can still wheel-scroll freely.
-        let active = {
-            let s = &ws.mux.search;
-            s.matches
-                .get(s.index)
-                .copied()
-                .map(|m| ((s.query.clone(), s.index), m.line))
+        const TYPING_SEARCH_LINES: usize = 1_000;
+        const BACKGROUND_CHUNK_LINES: usize = 1_000;
+        const VISIBLE_CONTEXT_LINES: i32 = 100;
+        const MAX_LOGICAL_LINE_EXPANSION: usize = kettle_core::MAX_SEARCH_LOGICAL_LINE_CONTEXT;
+
+        let Some(pane_id) = ws.search.target_pane else {
+            self.close_search(ws);
+            return;
         };
-        if let Some((key, line)) = active
-            && ws.search_revealed.as_ref() != Some(&key)
-        {
-            if let Some(p) = ws.mux.focused()
-                && let Ok(mut t) = p.term.term.lock()
-            {
-                use kettle_core::Dimensions;
-                let g = t.grid();
-                let (hist, off, rows) = (g.history_size(), g.display_offset(), g.screen_lines());
-                let want = kettle_core::search::reveal_offset(line, off, hist, rows);
-                if want != off {
-                    t.scroll_display(kettle_core::Scroll::Delta(want as i32 - off as i32));
+        let Some(pane) = ws.mux.panes.get(&pane_id) else {
+            self.close_search(ws);
+            return;
+        };
+
+        // Compile untrusted input before taking the terminal-grid lock. Compilation has explicit
+        // engine limits, but it still does allocation and Unicode automata construction that must
+        // not delay the PTY reader.
+        if ws.search.compiled_revision != Some(ws.search.revision) {
+            let query = ws.search.query().to_string();
+            match kettle_core::CompiledSearch::compile(
+                &query,
+                map_case_sensitivity(ws.search.case_mode),
+            ) {
+                Ok(compiled) => {
+                    ws.search.compiled = compiled;
+                    ws.search.compiled_revision = Some(ws.search.revision);
+                    ws.search.status = if query.is_empty() {
+                        kettle_render::SearchStatus::Typing
+                    } else {
+                        kettle_render::SearchStatus::Searching
+                    };
+                }
+                Err(error) => {
+                    ws.search.compiled = None;
+                    ws.search.compiled_revision = Some(ws.search.revision);
+                    ws.search.status = search_compile_error_status(error);
                 }
             }
-            ws.search_revealed = Some(key);
+        }
+        if ws.search.compiled.is_none() {
+            ws.search.visible.clear();
+            ws.search.visible_scan = None;
+            ws.search.visible_turn_pending = false;
+            // Empty and rejected patterns have no deferred work. Leaving a due retry armed makes
+            // about_to_wait request a 1 ms redraw forever even though every frame exits here.
+            ws.search.background = None;
+            ws.search.unlimited_retry_at = None;
+            ws.search.quiet_retry_pending = false;
+            return;
+        }
+
+        let output_generation = pane.term.output_generation();
+        let Ok(mut term) = pane.term.term.lock() else {
+            ws.search.status = kettle_render::SearchStatus::Searching;
+            return;
+        };
+        use kettle_core::Dimensions as _;
+
+        let now = std::time::Instant::now();
+        let top_line = term.topmost_line().0;
+        let bottom_line = term.bottommost_line().0;
+        let last_column = term.last_column().0;
+        let screen_lines = term.screen_lines();
+        let display_offset = term.grid().display_offset();
+        let default_direction = if ws.search.invert {
+            kettle_core::SearchDirection::Reverse
+        } else {
+            kettle_core::SearchDirection::Forward
+        };
+        let current_token =
+            kettle_core::SearchScanToken::capture(&term, ws.search.revision, output_generation);
+
+        // Reflow invalidates grid coordinates and restarts from the viewport. Plain PTY output is
+        // different: retain a chunked job and advance its token so a process that prints every
+        // few milliseconds cannot keep a deep-history search behind the 500 ms typing debounce.
+        // An output-drifted exhausted pass is verified again after the stream becomes quiet before
+        // we claim No match/Start/End.
+        if let Some(previous_token) = ws.search.scan_token
+            && previous_token != current_token
+        {
+            ws.search.focused = None;
+            ws.search.revealed_focus = None;
+            ws.search.visible.clear();
+            ws.search.visible_scan = None;
+            ws.search.visible_key = None;
+            let reflowed = previous_token.query_revision != current_token.query_revision
+                || previous_token.layout.columns != current_token.layout.columns
+                || previous_token.layout.screen_lines != current_token.layout.screen_lines;
+            let rejected = matches!(
+                ws.search.status,
+                kettle_render::SearchStatus::Invalid
+                    | kettle_render::SearchStatus::TooComplex
+                    | kettle_render::SearchStatus::TooLong
+            );
+            if reflowed {
+                ws.search.typing_scanned_revision = None;
+                ws.search.background = None;
+                ws.search.anchor = Some(search_viewport_anchor(
+                    display_offset,
+                    screen_lines,
+                    last_column,
+                    default_direction,
+                ));
+                ws.search.unlimited_retry_at = (!rejected && !ws.search.query().is_empty())
+                    .then_some(if ws.search.quiet_retry_pending {
+                        now + std::time::Duration::from_millis(500)
+                    } else {
+                        now
+                    });
+            } else if let Some(job) = ws.search.background.as_mut() {
+                continue_background_after_output(
+                    job,
+                    current_token,
+                    top_line,
+                    bottom_line,
+                    last_column,
+                );
+                if !job.navigation {
+                    ws.search.typing_scanned_revision = None;
+                }
+            } else {
+                ws.search.typing_scanned_revision = None;
+                ws.search.anchor = Some(search_viewport_anchor(
+                    display_offset,
+                    screen_lines,
+                    last_column,
+                    default_direction,
+                ));
+                ws.search.unlimited_retry_at = (!rejected && !ws.search.query().is_empty())
+                    .then_some(if ws.search.quiet_retry_pending {
+                        now + std::time::Duration::from_millis(500)
+                    } else {
+                        now
+                    });
+            }
+            if !rejected && !ws.search.query().is_empty() {
+                ws.search.status = kettle_render::SearchStatus::Searching;
+            }
+        }
+        ws.search.scan_token = Some(current_token);
+        ws.search.anchor.get_or_insert_with(|| {
+            search_viewport_anchor(display_offset, screen_lines, last_column, default_direction)
+        });
+
+        let prioritize_visible = std::mem::take(&mut ws.search.visible_turn_pending);
+        let mut foreground_scan_ran = false;
+        let mut nearby_yielded_this_turn = false;
+
+        // Live typing stays bounded to nearby history. The endpoint is expanded
+        // to the logical line boundary so a regex can cross every soft wrap in
+        // that line without crossing a hard newline.
+        if !prioritize_visible && should_start_nearby_search(&ws.search) {
+            let anchor = ws.search.anchor.expect("search anchor initialized");
+            let edge = bounded_search_edge(
+                anchor,
+                default_direction,
+                top_line,
+                bottom_line,
+                last_column,
+                TYPING_SEARCH_LINES,
+            );
+            let edge = match default_direction {
+                kettle_core::SearchDirection::Forward => {
+                    kettle_core::search::bounded_line_search_right(
+                        &term,
+                        edge,
+                        MAX_LOGICAL_LINE_EXPANSION,
+                    )
+                    .0
+                }
+                kettle_core::SearchDirection::Reverse => {
+                    kettle_core::search::bounded_line_search_left(
+                        &term,
+                        edge,
+                        MAX_LOGICAL_LINE_EXPANSION,
+                    )
+                    .0
+                }
+            };
+            let result = ws
+                .search
+                .compiled
+                .as_mut()
+                .expect("compiled search checked")
+                .find_in_range(
+                    &term,
+                    kettle_core::SearchBounds::new(anchor, edge),
+                    default_direction,
+                    1,
+                );
+            foreground_scan_ran = true;
+            ws.search.focused = (!result.accuracy_limited)
+                .then(|| result.matches.first().copied())
+                .flatten();
+            ws.search.revealed_focus = None;
+            if result.accuracy_limited {
+                ws.search.typing_scanned_revision = Some(ws.search.revision);
+                if ws
+                    .search
+                    .background
+                    .as_ref()
+                    .is_some_and(|job| !job.navigation)
+                {
+                    ws.search.background = None;
+                }
+                ws.search.status = kettle_render::SearchStatus::Limited;
+                ws.search.unlimited_retry_at = None;
+            } else if ws.search.focused.is_some() {
+                ws.search.typing_scanned_revision = Some(ws.search.revision);
+                if ws
+                    .search
+                    .background
+                    .as_ref()
+                    .is_some_and(|job| !job.navigation)
+                {
+                    ws.search.background = None;
+                }
+                ws.search.status = kettle_render::SearchStatus::Match;
+                ws.search.unlimited_retry_at = None;
+            } else if let Some(cursor) = result.continuation {
+                ws.search.background = Some(crate::search_input::BackgroundSearch {
+                    token: current_token,
+                    direction: default_direction,
+                    cursor,
+                    edge,
+                    wrap_anchor: anchor,
+                    wrapped: false,
+                    nearby: true,
+                    navigation: false,
+                    had_focus: false,
+                    output_drifted: false,
+                });
+                nearby_yielded_this_turn = true;
+                ws.search.status = kettle_render::SearchStatus::Searching;
+                if let Some(window) = &ws.window {
+                    window.request_redraw();
+                }
+            } else {
+                ws.search.typing_scanned_revision = Some(ws.search.revision);
+                let at_edge = match default_direction {
+                    kettle_core::SearchDirection::Forward => edge.line >= bottom_line,
+                    kettle_core::SearchDirection::Reverse => edge.line <= top_line,
+                };
+                if at_edge {
+                    if ws.search.wrap {
+                        ws.search.status = kettle_render::SearchStatus::Searching;
+                    } else {
+                        ws.search.status = kettle_render::SearchStatus::NoMatch;
+                        ws.search.unlimited_retry_at = None;
+                    }
+                } else {
+                    ws.search.status = kettle_render::SearchStatus::Searching;
+                }
+            }
+        }
+
+        // After 500 ms idle, continue in logical-line-aligned chunks. Only one
+        // chunk runs per event-loop turn; the scan token cancels stale work
+        // after output/reflow/query changes.
+        let background_due = !prioritize_visible
+            && !foreground_scan_ran
+            && !nearby_yielded_this_turn
+            && (ws.search.background.is_some()
+                || ws
+                    .search
+                    .unlimited_retry_at
+                    .is_some_and(|deadline| now >= deadline));
+        let quiet_retry_due = background_due
+            && ws.search.background.is_none()
+            && ws.search.quiet_retry_pending
+            && ws
+                .search
+                .unlimited_retry_at
+                .is_some_and(|deadline| now >= deadline);
+        if quiet_retry_due {
+            activate_quiet_search_retry(&mut ws.search);
+            if let Some(window) = &ws.window {
+                window.request_redraw();
+            }
+        } else if background_due && (ws.search.background.is_some() || ws.search.focused.is_none())
+        {
+            if ws.search.background.is_none() {
+                let anchor = ws.search.anchor.expect("search anchor initialized");
+                let searched_edge = bounded_search_edge(
+                    anchor,
+                    default_direction,
+                    top_line,
+                    bottom_line,
+                    last_column,
+                    TYPING_SEARCH_LINES,
+                );
+                let searched_edge = match default_direction {
+                    kettle_core::SearchDirection::Forward => {
+                        kettle_core::search::bounded_line_search_right(
+                            &term,
+                            searched_edge,
+                            MAX_LOGICAL_LINE_EXPANSION,
+                        )
+                        .0
+                    }
+                    kettle_core::SearchDirection::Reverse => {
+                        kettle_core::search::bounded_line_search_left(
+                            &term,
+                            searched_edge,
+                            MAX_LOGICAL_LINE_EXPANSION,
+                        )
+                        .0
+                    }
+                };
+                let edge = match default_direction {
+                    kettle_core::SearchDirection::Forward => {
+                        kettle_core::SearchPoint::new(bottom_line, last_column)
+                    }
+                    kettle_core::SearchDirection::Reverse => {
+                        kettle_core::SearchPoint::new(top_line, 0)
+                    }
+                };
+                if let Some(cursor) = search_point_after(
+                    searched_edge,
+                    default_direction,
+                    top_line,
+                    bottom_line,
+                    last_column,
+                ) {
+                    ws.search.background = Some(crate::search_input::BackgroundSearch {
+                        token: current_token,
+                        direction: default_direction,
+                        cursor,
+                        edge,
+                        wrap_anchor: anchor,
+                        wrapped: false,
+                        nearby: false,
+                        navigation: false,
+                        had_focus: false,
+                        output_drifted: false,
+                    });
+                } else if ws.search.wrap {
+                    ws.search.background = wrapped_background_search(
+                        current_token,
+                        default_direction,
+                        anchor,
+                        (top_line, bottom_line, last_column),
+                        false,
+                        false,
+                        false,
+                    );
+                    if ws.search.background.is_some() {
+                        ws.search.status = kettle_render::SearchStatus::Searching;
+                    } else {
+                        ws.search.status = kettle_render::SearchStatus::NoMatch;
+                    }
+                } else {
+                    ws.search.status = kettle_render::SearchStatus::NoMatch;
+                }
+                ws.search.unlimited_retry_at = None;
+            }
+
+            if let Some(mut job) = ws.search.background.take()
+                && job.token == current_token
+            {
+                let chunk_edge = bounded_search_edge(
+                    job.cursor,
+                    job.direction,
+                    top_line,
+                    bottom_line,
+                    last_column,
+                    BACKGROUND_CHUNK_LINES,
+                );
+                let expanded_chunk_edge = match job.direction {
+                    kettle_core::SearchDirection::Forward => {
+                        kettle_core::search::bounded_line_search_right(
+                            &term,
+                            chunk_edge,
+                            MAX_LOGICAL_LINE_EXPANSION,
+                        )
+                        .0
+                    }
+                    kettle_core::SearchDirection::Reverse => {
+                        kettle_core::search::bounded_line_search_left(
+                            &term,
+                            chunk_edge,
+                            MAX_LOGICAL_LINE_EXPANSION,
+                        )
+                        .0
+                    }
+                };
+                let chunk_edge = match job.direction {
+                    kettle_core::SearchDirection::Forward => expanded_chunk_edge.min(job.edge),
+                    kettle_core::SearchDirection::Reverse => expanded_chunk_edge.max(job.edge),
+                };
+                let result = ws
+                    .search
+                    .compiled
+                    .as_mut()
+                    .expect("compiled search checked")
+                    .find_in_range(
+                        &term,
+                        kettle_core::SearchBounds::new(job.cursor, chunk_edge),
+                        job.direction,
+                        1,
+                    );
+                foreground_scan_ran = true;
+                if result.accuracy_limited {
+                    // Exact highlights inside bounded chunks are still safe, but an omitted
+                    // cross-boundary match could precede them. Do not advertise a wrong
+                    // first/next result or wrap past it.
+                    ws.search.status = kettle_render::SearchStatus::Limited;
+                } else if let Some(found) = result.matches.first().copied() {
+                    ws.search.focused = Some(found);
+                    ws.search.revealed_focus = None;
+                    ws.search.status = if job.output_drifted {
+                        // The span exists in the currently locked grid, but output between
+                        // earlier chunks can make its global first/next ordering uncertain.
+                        kettle_render::SearchStatus::Limited
+                    } else if job.wrapped {
+                        kettle_render::SearchStatus::Wrapped
+                    } else {
+                        kettle_render::SearchStatus::Match
+                    };
+                    if prepare_initial_search_retry_after_output(
+                        &mut ws.search,
+                        &job,
+                        search_viewport_anchor(
+                            display_offset,
+                            screen_lines,
+                            last_column,
+                            default_direction,
+                        ),
+                    ) {
+                        ws.search.unlimited_retry_at =
+                            Some(now + std::time::Duration::from_millis(500));
+                    }
+                } else if let Some(continuation) = result.continuation {
+                    job.cursor = continuation;
+                    ws.search.background = Some(job);
+                    ws.search.status = kettle_render::SearchStatus::Searching;
+                    if let Some(window) = &ws.window {
+                        window.request_redraw();
+                    }
+                } else if job.nearby {
+                    if job.output_drifted {
+                        let (status, retry_at) = finished_background_search(&job, now);
+                        ws.search.status = status;
+                        ws.search.unlimited_retry_at = retry_at;
+                        prepare_initial_search_retry_after_output(
+                            &mut ws.search,
+                            &job,
+                            search_viewport_anchor(
+                                display_offset,
+                                screen_lines,
+                                last_column,
+                                default_direction,
+                            ),
+                        );
+                    } else {
+                        ws.search.typing_scanned_revision = Some(ws.search.revision);
+                        let at_edge = match job.direction {
+                            kettle_core::SearchDirection::Forward => job.edge.line >= bottom_line,
+                            kettle_core::SearchDirection::Reverse => job.edge.line <= top_line,
+                        };
+                        if at_edge && !ws.search.wrap {
+                            ws.search.status = kettle_render::SearchStatus::NoMatch;
+                            ws.search.unlimited_retry_at = None;
+                        } else {
+                            ws.search.status = kettle_render::SearchStatus::Searching;
+                        }
+                    }
+                } else if chunk_edge == job.edge {
+                    if !job.wrapped && ws.search.wrap {
+                        ws.search.background = wrapped_background_search(
+                            current_token,
+                            job.direction,
+                            job.wrap_anchor,
+                            (top_line, bottom_line, last_column),
+                            job.navigation,
+                            job.had_focus,
+                            job.output_drifted,
+                        );
+                        if ws.search.background.is_some() {
+                            ws.search.status = kettle_render::SearchStatus::Searching;
+                        } else {
+                            let (status, retry_at) = finished_background_search(&job, now);
+                            ws.search.status = status;
+                            ws.search.unlimited_retry_at = retry_at;
+                            prepare_initial_search_retry_after_output(
+                                &mut ws.search,
+                                &job,
+                                search_viewport_anchor(
+                                    display_offset,
+                                    screen_lines,
+                                    last_column,
+                                    default_direction,
+                                ),
+                            );
+                        }
+                    } else {
+                        let (status, retry_at) = finished_background_search(&job, now);
+                        ws.search.status = status;
+                        ws.search.unlimited_retry_at = retry_at;
+                        prepare_initial_search_retry_after_output(
+                            &mut ws.search,
+                            &job,
+                            search_viewport_anchor(
+                                display_offset,
+                                screen_lines,
+                                last_column,
+                                default_direction,
+                            ),
+                        );
+                    }
+                } else if let Some(next) = search_point_after(
+                    chunk_edge,
+                    job.direction,
+                    top_line,
+                    bottom_line,
+                    last_column,
+                ) {
+                    job.cursor = next;
+                    ws.search.background = Some(job);
+                    ws.search.status = kettle_render::SearchStatus::Searching;
+                    if let Some(window) = &ws.window {
+                        window.request_redraw();
+                    }
+                } else {
+                    let (status, retry_at) = finished_background_search(&job, now);
+                    ws.search.status = status;
+                    ws.search.unlimited_retry_at = retry_at;
+                    prepare_initial_search_retry_after_output(
+                        &mut ws.search,
+                        &job,
+                        search_viewport_anchor(
+                            display_offset,
+                            screen_lines,
+                            last_column,
+                            default_direction,
+                        ),
+                    );
+                }
+            }
+        }
+
+        // Reveal only when focus changes. A user can still wheel away while
+        // search stays open without the next idle frame snapping them back.
+        if let Some(focused) = ws.search.focused
+            && ws.search.revealed_focus != Some(focused)
+        {
+            let history = term.grid().history_size();
+            let old_offset = term.grid().display_offset();
+            let wanted = kettle_core::search::reveal_offset(
+                focused.start.line,
+                old_offset,
+                history,
+                term.screen_lines(),
+            );
+            if wanted != old_offset {
+                term.scroll_display(kettle_core::Scroll::Delta(
+                    wanted as i32 - old_offset as i32,
+                ));
+            }
+            ws.search.revealed_focus = Some(focused);
+            ws.search.visible_key = None;
+        }
+
+        // Highlight only the viewport and a small logical-line context. This is
+        // bounded independently of scrollback size and invalidates on viewport
+        // movement without recompiling the regex.
+        let display_offset = term.grid().display_offset();
+        let layout = kettle_core::SearchLayout::capture(&term);
+        let visible_key = crate::search_input::VisibleSearchKey {
+            revision: ws.search.revision,
+            pane: pane_id,
+            output_generation,
+            columns: layout.columns,
+            screen_lines: layout.screen_lines,
+            history_size: layout.history_size,
+            display_offset,
+            focused: ws.search.focused,
+        };
+        if ws.search.visible_key != Some(visible_key) {
+            if foreground_scan_ran {
+                ws.search.visible_turn_pending = true;
+                if let Some(window) = &ws.window {
+                    window.request_redraw();
+                }
+                return;
+            }
+            let offset = i32::try_from(display_offset).unwrap_or(i32::MAX);
+            let viewport_top = (-offset).max(top_line);
+            let viewport_bottom = i32::try_from(term.screen_lines().saturating_sub(1))
+                .unwrap_or(i32::MAX)
+                .saturating_sub(offset)
+                .min(bottom_line);
+            let context_top = viewport_top
+                .saturating_sub(VISIBLE_CONTEXT_LINES)
+                .max(top_line);
+            let context_bottom = viewport_bottom
+                .saturating_add(VISIBLE_CONTEXT_LINES)
+                .min(bottom_line);
+            let viewport_start = kettle_core::SearchPoint::new(viewport_top, 0);
+            let viewport_end = kettle_core::SearchPoint::new(viewport_bottom, last_column);
+            let (context_start, left_truncated) = kettle_core::search::bounded_line_search_left(
+                &term,
+                kettle_core::SearchPoint::new(context_top, 0),
+                MAX_LOGICAL_LINE_EXPANSION,
+            );
+            let (context_end, right_truncated) = kettle_core::search::bounded_line_search_right(
+                &term,
+                kettle_core::SearchPoint::new(context_bottom, last_column),
+                MAX_LOGICAL_LINE_EXPANSION,
+            );
+            let (viewport_logical_start, viewport_left_truncated) =
+                kettle_core::search::bounded_line_search_left(
+                    &term,
+                    viewport_start,
+                    MAX_LOGICAL_LINE_EXPANSION,
+                );
+            let (viewport_logical_end, viewport_right_truncated) =
+                kettle_core::search::bounded_line_search_right(
+                    &term,
+                    viewport_end,
+                    MAX_LOGICAL_LINE_EXPANSION,
+                );
+
+            // Scan the viewport before surrounding context, one deterministic core work budget
+            // per frame. Dense pre-viewport matches can therefore never consume the cap before a
+            // visible/active match, and an exact work yield is resumed rather than mislabeled as
+            // Results limited or cached as complete.
+            let mut ranges = vec![kettle_core::SearchBounds::new(viewport_start, viewport_end)];
+            if viewport_logical_start < viewport_start || viewport_logical_end > viewport_end {
+                ranges.push(kettle_core::SearchBounds::new(
+                    viewport_logical_start,
+                    viewport_logical_end,
+                ));
+            }
+            if let Some(before_end) = search_point_after(
+                viewport_logical_start,
+                kettle_core::SearchDirection::Reverse,
+                top_line,
+                bottom_line,
+                last_column,
+            ) && context_start <= before_end
+            {
+                ranges.push(kettle_core::SearchBounds::new(context_start, before_end));
+            }
+            if let Some(after_start) = search_point_after(
+                viewport_logical_end,
+                kettle_core::SearchDirection::Forward,
+                top_line,
+                bottom_line,
+                last_column,
+            ) && after_start <= context_end
+            {
+                ranges.push(kettle_core::SearchBounds::new(after_start, context_end));
+            }
+
+            if ws
+                .search
+                .visible_scan
+                .as_ref()
+                .is_none_or(|scan| scan.key != visible_key)
+            {
+                ws.search.visible.clear();
+                ws.search.visible_truncated = false;
+                ws.search.visible_scan = Some(crate::search_input::VisibleSearchScan::new(
+                    visible_key,
+                    ranges,
+                    ws.search.focused,
+                    left_truncated
+                        || right_truncated
+                        || viewport_left_truncated
+                        || viewport_right_truncated,
+                ));
+            }
+
+            let (bounds, remaining) = {
+                let scan = ws
+                    .search
+                    .visible_scan
+                    .as_ref()
+                    .expect("visible scan initialized");
+                (
+                    scan.current_bounds().expect("visible scan has a range"),
+                    kettle_core::MAX_SEARCH_MATCHES.saturating_sub(scan.matches.len()),
+                )
+            };
+            let batch = ws
+                .search
+                .compiled
+                .as_mut()
+                .expect("compiled search checked")
+                .find_in_range(
+                    &term,
+                    bounds,
+                    kettle_core::SearchDirection::Forward,
+                    remaining,
+                );
+            let finished = if remaining == 0 {
+                true
+            } else {
+                let scan = ws
+                    .search
+                    .visible_scan
+                    .as_mut()
+                    .expect("visible scan initialized");
+                scan.apply_batch(batch)
+            };
+
+            if finished {
+                let mut scan = ws
+                    .search
+                    .visible_scan
+                    .take()
+                    .expect("visible scan initialized");
+                scan.matches.sort_by_key(|span| (span.start, span.end));
+                ws.search.visible = scan.matches;
+                ws.search.visible_truncated = scan.truncated;
+                ws.search.visible_key = Some(visible_key);
+            } else if let Some(window) = &ws.window {
+                window.request_redraw();
+            }
         }
     }
 
@@ -5854,11 +6912,12 @@ impl App {
             .as_ref()
             .map(|renderer| (renderer.cell_w, renderer.cell_h))
             .unwrap_or((8.0, 16.0));
-        let preedit = ws
+        let (preedit, preedit_focus) = ws
             .ime_preedit
             .as_ref()
-            .map(|(text, _)| text.as_str())
-            .unwrap_or_default();
+            .map(|(text, selection)| (text.as_str(), ime_preedit_focus(text, *selection)))
+            .unwrap_or(("", 0));
+        let preedit_before_focus = &preedit[..preedit_focus];
         let input = ws
             .palette_input
             .as_ref()
@@ -5868,18 +6927,38 @@ impl App {
                     .as_ref()
                     .map(|(query, _)| (12, query.as_str()))
             })
-            .or_else(|| ws.ssh_input.as_deref().map(|query| (8, query)))
-            .or_else(|| {
-                ws.mux
-                    .search
-                    .open
-                    .then_some((10, ws.mux.search.query.as_str()))
-            });
-        let (x, y) = if let Some((prefix_cols, input)) = input {
+            .or_else(|| ws.ssh_input.as_deref().map(|query| (8, query)));
+        let search_cursor = self.search_geometry(ws).map(|geometry| {
+            let mut projected = ws.search.query().to_string();
+            let replace = ws
+                .search
+                .editor
+                .selection()
+                .unwrap_or(ws.search.editor.cursor()..ws.search.editor.cursor());
+            projected.replace_range(replace.clone(), preedit);
+            let cursor_byte = replace.start.saturating_add(preedit_focus);
+            let columns = (geometry.editor.2 / cw).floor().max(1.0) as usize;
+            let scroll = crate::search_input::SearchEditor::visible_scroll_for(
+                &projected,
+                cursor_byte,
+                ws.search.editor.horizontal_scroll(),
+                columns.saturating_sub(2),
+            );
+            let cursor_column = projected[..cursor_byte].width().saturating_sub(scroll);
+            let left = geometry.editor.0 + cw;
+            let right = (geometry.editor.0 + geometry.editor.2 - cw).max(left);
+            (
+                (geometry.editor.0 + (cursor_column + 1) as f32 * cw).clamp(left, right),
+                geometry.editor.1 + ((geometry.editor.3 - ch) * 0.5).max(0.0),
+            )
+        });
+        let (x, y) = if let Some((x, y)) = search_cursor {
+            (x, y)
+        } else if let Some((prefix_cols, input)) = input {
             use unicode_width::UnicodeWidthStr as _;
 
             let size = window.inner_size();
-            let cols = prefix_cols + input.width() + preedit.width();
+            let cols = prefix_cols + input.width() + preedit_before_focus.width();
             (
                 (cols as f32 * cw).min(size.width.saturating_sub(1) as f32),
                 (size.height as f32 - ch - 5.0).max(0.0),
@@ -5895,7 +6974,8 @@ impl App {
                 TitleEditScope::Group => 19,
             };
             (
-                rect.0 + (label_cols + edit.input.width() + preedit.width()) as f32 * cw,
+                rect.0
+                    + (label_cols + edit.input.width() + preedit_before_focus.width()) as f32 * cw,
                 rect.1 + ((rect.3 - ch) * 0.5).max(0.0),
             )
         } else if ws.settings_text_edit.is_some() {
@@ -6073,11 +7153,8 @@ impl App {
     }
 
     fn overlay(&self, ws: &WindowState) -> Overlay {
-        let preedit = ws
-            .ime_preedit
-            .as_ref()
-            .map(|(text, _)| text.as_str())
-            .filter(|text| !text.is_empty());
+        let preedit_state = ws.ime_preedit.as_ref().filter(|(text, _)| !text.is_empty());
+        let preedit = preedit_state.map(|(text, _)| text.as_str());
         let with_preedit = |input: &str| match preedit {
             Some(preedit) => format!("{input}{preedit}"),
             None => input.to_string(),
@@ -6198,7 +7275,7 @@ impl App {
             && ws.ssh_input.is_none()
             && ws.confirm_dialog.is_none()
             && ws.editing_title.is_none()
-            && !ws.mux.search.open;
+            && !ws.search.open;
         let ime_preedit = preedit.filter(|_| terminal_surface).and_then(|text| {
             let (row, col) = self.terminal_cursor_cell(ws)?;
             Some(ImePreedit {
@@ -6234,7 +7311,7 @@ impl App {
             || ws.palette_input.is_some()
             || ws.layout_picker_input.is_some()
             || ws.hint_state.is_some()
-            || ws.mux.search.open
+            || ws.search.open
             // The title-edit and confirm-dialog input bars are also
             // active text surfaces — keep the cursor steady (not mid-blink-off)
             // while the user is typing/navigating them, like the other modals.
@@ -6316,7 +7393,7 @@ impl App {
         // unless the search bar happened to be open.
         let vi_cursor = ws.vi_mode.map(|v| (v.row, v.col));
         let vi_visual_anchor = ws.vi_mode.and_then(|v| v.visual_anchor);
-        let s = &ws.mux.search;
+        let s = &ws.search;
         if !s.open {
             return Overlay {
                 links,
@@ -6343,27 +7420,95 @@ impl App {
                 ..Overlay::default()
             };
         }
-        let highlights = s
-            .matches
-            .iter()
-            .enumerate()
-            .filter_map(|(i, m)| {
-                if m.line < 0 {
-                    return None;
+        let mut highlights = Vec::new();
+        if let Some(pane_id) = s.target_pane
+            && let Some(pane) = ws.mux.panes.get(&pane_id)
+            && let Ok(term) = pane.term.term.lock()
+        {
+            use kettle_core::Dimensions as _;
+            let display_offset = term.grid().display_offset();
+            let screen_lines = term.screen_lines();
+            let last_column = term.last_column().0;
+            let offset = i32::try_from(display_offset).unwrap_or(i32::MAX);
+            let visible_top = -offset;
+            let visible_bottom = i32::try_from(screen_lines.saturating_sub(1))
+                .unwrap_or(i32::MAX)
+                .saturating_sub(offset);
+            for span in &s.visible {
+                let first_line = span.start.line.max(visible_top);
+                let last_line = span.end.line.min(visible_bottom);
+                if first_line > last_line {
+                    continue;
                 }
-                Some(HighlightRect {
-                    col: m.start_col,
-                    row: m.line as usize,
-                    width: (m.end_col + 1).saturating_sub(m.start_col).max(1),
-                    active: i == s.index,
-                })
-            })
-            .collect();
+                let active = s.focused == Some(*span);
+                for line in first_line..=last_line {
+                    let start_col = if line == span.start.line {
+                        span.start.column
+                    } else {
+                        0
+                    };
+                    let end_col = if line == span.end.line {
+                        span.end.column.min(last_column)
+                    } else {
+                        last_column
+                    };
+                    if end_col < start_col {
+                        continue;
+                    }
+                    if let Some(rect) = HighlightRect::from_grid_span(
+                        line,
+                        display_offset,
+                        screen_lines,
+                        start_col,
+                        end_col.saturating_sub(start_col).saturating_add(1),
+                        active,
+                    ) {
+                        highlights.push(rect);
+                    }
+                }
+            }
+        }
         let confirm_dialog = confirm_dialog_early;
+        let mut search_query = s.query().to_string();
+        let mut search_cursor = s.editor.cursor();
+        let mut search_selection = s.editor.selection().map(|range| (range.start, range.end));
+        if let Some((preedit, selection)) = preedit_state {
+            let replace = s.editor.selection().unwrap_or(search_cursor..search_cursor);
+            search_query.replace_range(replace.clone(), preedit);
+            search_cursor = replace
+                .start
+                .saturating_add(ime_preedit_focus(preedit, *selection));
+            search_selection = None;
+        }
+        let search_horizontal_scroll = self
+            .search_geometry(ws)
+            .and_then(|geometry| {
+                let renderer = ws.renderer.as_ref()?;
+                let columns = (geometry.editor.2 / renderer.cell_w).floor().max(1.0) as usize;
+                Some(crate::search_input::SearchEditor::visible_scroll_for(
+                    &search_query,
+                    search_cursor,
+                    s.editor.horizontal_scroll(),
+                    columns.saturating_sub(2),
+                ))
+            })
+            .unwrap_or_else(|| s.editor.horizontal_scroll());
         Overlay {
-            search_query: Some(with_preedit(&s.query)),
-            search_count: s.matches.len(),
-            search_index: s.index,
+            search: Some(kettle_render::SearchOverlay {
+                target_pane: s.target_pane,
+                query: search_query,
+                cursor_byte: search_cursor,
+                selection: search_selection,
+                horizontal_scroll: search_horizontal_scroll,
+                wrap: s.wrap,
+                case_mode: map_search_case_mode(s.case_mode),
+                invert: s.invert,
+                status: effective_search_status(s),
+                focused: s.focused_control,
+            }),
+            search_query: None,
+            search_count: 0,
+            search_index: 0,
             highlights,
             links,
             ssh_query,
@@ -6437,25 +7582,6 @@ impl App {
         // Compare-only when nothing changed; independent of GPU health, so it
         // runs before the device-lost early-return below.
         self.maybe_sync_native_theme(ws);
-        let accessibility_key = self.accessibility_key(ws);
-        let accessibility_due = ws
-            .accessibility_updated_at
-            .is_none_or(|updated| updated.elapsed() >= ACCESSIBILITY_UPDATE_INTERVAL);
-        if ws.accessibility_key != Some(accessibility_key)
-            && accessibility_due
-            && let Some(mut adapter) = ws.accessibility.take()
-        {
-            let mut published = false;
-            adapter.update_if_active(|| {
-                published = true;
-                self.accessibility_tree(ws)
-            });
-            ws.accessibility = Some(adapter);
-            if published {
-                ws.accessibility_key = Some(accessibility_key);
-                ws.accessibility_updated_at = Some(std::time::Instant::now());
-            }
-        }
         // v2.31.0: if the GPU device was lost (a driver TDR/reset) or hit an
         // uncaptured error (VRAM exhaustion under memory pressure), rendering
         // against the dead device cannot succeed. The new wgpu error handlers
@@ -6563,6 +7689,8 @@ impl App {
         if ws.mux.reap() {
             return;
         }
+        ws.search_queries
+            .retain(|pane_id, _| ws.mux.panes.contains_key(pane_id));
         // scroll-on-output: if new output landed in any pane since the
         // previous frame, optionally yank that pane back to the bottom.
         // Tracking is per-pane (each one drifts independently when only
@@ -6628,6 +7756,10 @@ impl App {
             }
         }
         self.update_search(ws);
+        // Search status/focus are semantic accessibility state. Publish only
+        // after the scan has settled for this frame, and defer (rather than
+        // drop) an update that lands inside the terminal-content rate limit.
+        self.publish_accessibility_if_due(ws);
         self.update_links(ws);
         // Link set may have changed (scroll, output, mode flip) — re-sync
         // the cursor icon so a URL scrolling out from under a held Ctrl
@@ -6806,8 +7938,14 @@ impl App {
             .map(|r| r.surface_size().1 as f32)
             .unwrap_or(600.0);
         let y = match self.cfg.status_bar {
-            kettle_config::StatusBarMode::Top => 0.0,
-            kettle_config::StatusBarMode::Bottom => surface_h - h,
+            kettle_config::StatusBarMode::Top => {
+                if matches!(self.cfg.tab_bar_pos, TabBarPos::Top) {
+                    self.tab_bar_h(ws)
+                } else {
+                    0.0
+                }
+            }
+            kettle_config::StatusBarMode::Bottom => surface_h - self.search_bar_h(ws) - h,
             kettle_config::StatusBarMode::Off => 0.0,
         };
         // Compose text: HH:MM:SS · theme · focused pane title.
@@ -6873,7 +8011,11 @@ impl App {
     /// would render both, with palette capturing keys; visually
     /// confusing).
     fn close_all_modals(&mut self, ws: &mut WindowState) {
-        ws.mux.search.open = false;
+        let search_was_open = ws.search.open;
+        self.close_search(ws);
+        if !search_was_open {
+            ws.ime_focus_generation = ws.ime_focus_generation.wrapping_add(1);
+        }
         ws.palette_input = None;
         ws.settings_nav = None;
         // v2.24.0: also drop any open inline settings text prompt (the image-path
@@ -6894,6 +8036,147 @@ impl App {
         // first (then sets its own modal), so clearing the confirm dialog here
         // is safe: the confirm-open path clears-then-sets in that order.
         ws.confirm_dialog = None;
+    }
+
+    fn open_search(&mut self, ws: &mut WindowState) {
+        self.close_all_modals(ws);
+        // A modal takes exclusive pointer ownership. Cancel any terminal drag
+        // already in flight so its later motion/release cannot emit mouse
+        // protocol bytes behind Search.
+        ws.selecting = false;
+        ws.mouse_btn = None;
+        ws.last_mouse_cell = None;
+        ws.scrollbar_drag_offset = None;
+        ws.dragging_split = None;
+        ws.tab_drag_active = false;
+        ws.tab_drag_press = None;
+        ws.tab_pressed_idx = None;
+        ws.detach_drag = crate::detach::DragState::default();
+        ws.drag_press = None;
+        if self.torn_drag.as_ref().is_some_and(|drag| {
+            drag.seq == ws.seq
+                || drag.carrier == ws.seq
+                || drag.dock.is_some_and(|(seq, _)| seq == ws.seq)
+        }) {
+            self.abandon_torn_drag(Some(ws));
+        }
+        if ws.ime_preedit_owner.is_some() {
+            // The composition belongs to the previously focused surface. Keep
+            // its owner marker for the late Commit guard, but stop painting it
+            // in the newly opened search editor.
+            ws.ime_preedit = None;
+        }
+        let Some(pane_id) = ws.mux.active_focus() else {
+            return;
+        };
+        let direction = if self.cfg.invert_search {
+            kettle_core::SearchDirection::Reverse
+        } else {
+            kettle_core::SearchDirection::Forward
+        };
+        let display_offset = ws
+            .mux
+            .panes
+            .get(&pane_id)
+            .and_then(|pane| {
+                pane.term
+                    .term
+                    .lock()
+                    .ok()
+                    .map(|term| term.grid().display_offset())
+            })
+            .unwrap_or(0);
+        let remembered = ws.search_queries.get(&pane_id).cloned().unwrap_or_default();
+        let mut search = crate::search_input::SearchState {
+            open: true,
+            target_pane: Some(pane_id),
+            editor: crate::search_input::SearchEditor::from_text(
+                remembered,
+                kettle_core::MAX_SEARCH_QUERY_BYTES,
+            ),
+            wrap: self.cfg.search_wrap,
+            case_mode: self.cfg.search_case_sensitive,
+            invert: self.cfg.invert_search,
+            anchor: None,
+            pre_open_display_offset: Some(display_offset),
+            ..crate::search_input::SearchState::default()
+        };
+        if !search.query().is_empty() {
+            search.note_edit(std::time::Instant::now());
+        }
+        ws.search = search;
+        self.resize_all(ws);
+        // Reserving the responsive Search lane can shrink the terminal by several rows. In a
+        // scrolled-back grid Alacritty increases display_offset to preserve the viewed content,
+        // so derive the scan anchor only after that resize has settled.
+        ws.search.anchor = ws.mux.panes.get(&pane_id).and_then(|pane| {
+            let term = pane.term.term.lock().ok()?;
+            use kettle_core::Dimensions as _;
+            Some(search_viewport_anchor(
+                term.grid().display_offset(),
+                term.screen_lines(),
+                term.last_column().0,
+                direction,
+            ))
+        });
+    }
+
+    fn close_search(&mut self, ws: &mut WindowState) {
+        use kettle_core::Dimensions as _;
+
+        if !ws.search.open {
+            return;
+        }
+        ws.ime_focus_generation = ws.ime_focus_generation.wrapping_add(1);
+        let target = ws.search.target_pane;
+        let focused = ws.search.focused;
+        let fallback_offset = ws.search.pre_open_display_offset;
+        let query = ws.search.query().to_string();
+        if let Some(pane_id) = target
+            && ws.mux.panes.contains_key(&pane_id)
+        {
+            ws.search_queries.insert(pane_id, query);
+        }
+        if matches!(
+            ws.ime_preedit_owner.map(|session| session.owner),
+            Some(crate::window_state::ImePreeditOwner::Search)
+        ) {
+            // Keep the owner marker until Commit/Disabled so a late commit is
+            // recognized and discarded by the IME event path.
+            ws.ime_preedit = None;
+        }
+        ws.search.open = false;
+        ws.search.background = None;
+        ws.search.unlimited_retry_at = None;
+        ws.search.quiet_retry_pending = false;
+        ws.search.visible.clear();
+        ws.search.visible_scan = None;
+        ws.search.visible_turn_pending = false;
+        self.resize_all(ws);
+
+        if let Some(pane_id) = target
+            && let Some(pane) = ws.mux.panes.get(&pane_id)
+            && let Ok(mut term) = pane.term.term.lock()
+        {
+            // Grid growth already preserves the visible content. A focused result therefore
+            // needs no coordinate arithmetic here: its pre-grow SearchSpan is intentionally
+            // stale after history rows rotate back onto the screen. With no result, restore the
+            // viewport from before Search opened.
+            if focused.is_none() {
+                let current = term.grid().display_offset();
+                let wanted = fallback_offset
+                    .unwrap_or(current)
+                    .min(term.grid().history_size());
+                if wanted != current {
+                    term.scroll_display(kettle_core::Scroll::Delta(wanted as i32 - current as i32));
+                }
+            }
+        }
+        self.reset_blink_phase(ws);
+        // The remembered query now has a single pane-scoped owner. Drop the
+        // closed editor, compiled DFA, coordinates, and cache immediately so a
+        // dead pane cannot retain sensitive text for the process lifetime.
+        ws.search = crate::search_input::SearchState::default();
     }
 
     /// Apply the in-progress title edit + clear the
@@ -6963,7 +8246,7 @@ impl App {
     /// cursor-icon override (the OS arrow, not the I-beam, belongs over
     /// modal chrome) and later extended for the right-click menu.
     fn any_modal_open(&self, ws: &WindowState) -> bool {
-        ws.mux.search.open
+        ws.search.open
             || ws.palette_input.is_some()
             || ws.settings_nav.is_some()
             || ws.layout_picker_input.is_some()
@@ -8406,6 +9689,15 @@ impl App {
         }
     }
 
+    fn persist_search_pref(&self, key: &str, value: &str) {
+        if !self.persist_pref(key, value) {
+            fire_notify(
+                "kettle: search setting not saved",
+                "Applied for this session — couldn't write it to your config file.",
+            );
+        }
+    }
+
     /// Act on the update banner: dismiss it (recording the tag so it
     /// won't re-nag) and, when `open` is true, open the release page first.
     /// Returns `false` when no banner is showing (the caller decides whether
@@ -8804,18 +10096,7 @@ impl App {
                 ws.scaled_zoom_prev_font_size = None;
             }
             Action::StartSearch => {
-                // Close any other modal first so we don't
-                // stack two visible overlays. (Opening only sets one
-                // of the four state fields; the others would stay
-                // None already on the happy path, but defending in
-                // depth here lets a future "open X without closing"
-                // bug stay sane.)
-                self.close_all_modals(ws);
-                ws.mux.search.open = true;
-                ws.mux.search.query.clear();
-                ws.mux.search.matches.clear();
-                ws.mux.search.index = 0;
-                ws.search_revealed = None; // re-reveal on this new search
+                self.open_search(ws);
             }
             Action::ToggleBroadcastAll => {
                 // The "broadcast-all" action is actually
@@ -10448,6 +11729,31 @@ impl App {
             ws.scaled_zoom_prev_font_size = None;
         }
         self.resize_all(ws);
+        let direction_changed = sync_reloaded_search_preferences(
+            &mut ws.search,
+            self.cfg.search_wrap,
+            self.cfg.search_case_sensitive,
+            self.cfg.invert_search,
+            std::time::Instant::now(),
+        );
+        if direction_changed
+            && let Some(pane_id) = ws.search.target_pane
+            && let Some(pane) = ws.mux.panes.get(&pane_id)
+            && let Ok(term) = pane.term.term.lock()
+        {
+            use kettle_core::Dimensions as _;
+            let direction = if ws.search.invert {
+                kettle_core::SearchDirection::Reverse
+            } else {
+                kettle_core::SearchDirection::Forward
+            };
+            ws.search.anchor = Some(search_viewport_anchor(
+                term.grid().display_offset(),
+                term.screen_lines(),
+                term.last_column().0,
+                direction,
+            ));
+        }
         if let Some(w) = &ws.window {
             w.request_redraw();
         }
@@ -10648,6 +11954,7 @@ impl App {
             }
             Method::SendText => self.ctl_send_text(ws, conn_id, req),
             Method::SendKeys => self.ctl_send_keys(ws, conn_id, req),
+            Method::DispatchUiKey => self.ctl_dispatch_ui_key(ws, req),
             Method::DispatchKeybind => self.ctl_dispatch_keybind(ws, event_loop, req),
             Method::SendMouse => self.ctl_send_mouse(ws, event_loop, req),
             Method::ResizeWindow => self.ctl_resize_window(ws, req),
@@ -11149,6 +12456,46 @@ impl App {
                 "rect": rect_json(self.title_edit_rect(target)),
             })
         });
+        let search = target.search.open.then(|| {
+            let geometry = kettle_render::search_bar_geometry(
+                surface.0 as f32,
+                surface.1 as f32,
+                cell_w,
+                cell_h,
+            );
+            let controls = kettle_render::SearchControl::ALL.map(|control| {
+                serde_json::json!({
+                    "name": match control {
+                        kettle_render::SearchControl::Editor => "editor",
+                        kettle_render::SearchControl::Previous => "previous",
+                        kettle_render::SearchControl::Next => "next",
+                        kettle_render::SearchControl::Wrap => "wrap",
+                        kettle_render::SearchControl::Case => "case",
+                        kettle_render::SearchControl::Invert => "invert",
+                        kettle_render::SearchControl::Close => "close",
+                    },
+                    "label": control.accessible_label(),
+                    "rect": rect_json(geometry.control_rect(control)),
+                    "focused": control == target.search.focused_control,
+                })
+            });
+            serde_json::json!({
+                // The query is deliberately omitted: geometry diagnostics must
+                // not expose terminal-derived or user-entered search text.
+                "target_pane": target.search.target_pane,
+                "rect": rect_json(geometry.rect),
+                "reserved_height": geometry.reserved_height,
+                "rows": geometry.rows,
+                "status": effective_search_status(&target.search).label(),
+                "has_match": target.search.focused.is_some(),
+                "visible_truncated": target.search.visible_truncated,
+                "wrap": target.search.wrap,
+                "case": map_search_case_mode(target.search.case_mode).label(),
+                "invert": target.search.invert,
+                "status_rect": rect_json(geometry.status),
+                "controls": controls,
+            })
+        });
         Response::ok(
             req.id,
             serde_json::json!({
@@ -11158,7 +12505,7 @@ impl App {
                 "padding": {"x": self.cfg.padding_x, "y": self.cfg.padding_y},
                 "content": rect_json(self.area(target)),
                 "modals": {
-                    "search": target.mux.search.open,
+                    "search": target.search.open,
                     "palette": target.palette_input.is_some(),
                     "settings": target.settings_nav.is_some(),
                     "settings_text_edit": target.settings_text_edit.is_some(),
@@ -11171,6 +12518,7 @@ impl App {
                     "vi_mode": target.vi_mode.is_some(),
                 },
                 "context_menu": context_menu,
+                "search": search,
                 "title_edit": title_edit,
                 "resize_overlay": target.resize_overlay.map(|(cols, rows, _)| serde_json::json!({
                     "cols": cols,
@@ -11305,6 +12653,92 @@ impl App {
                 "font_size_before": font_size_before,
                 "font_size_after": font_size_after,
                 "candidates": candidate_labels,
+            }),
+        )
+    }
+
+    /// `dispatch_ui_key`: drive the currently open Kettle-owned modal without
+    /// ever encoding a byte for the PTY. This is intentionally separate from
+    /// `send_keys`: diagnostics can exercise Search even when the focused pane
+    /// is running an input-sensitive TUI, and a closed modal is a hard error.
+    /// The batch and token caps keep one control request bounded on the UI
+    /// thread. All tokens are parsed before state is changed.
+    fn ctl_dispatch_ui_key(
+        &mut self,
+        ws: &mut WindowState,
+        req: &kettle_ctl::protocol::Request,
+    ) -> kettle_ctl::protocol::Response {
+        use kettle_ctl::protocol::{Response, error_codes as ec};
+
+        const MAX_UI_KEYS: usize = 64;
+        const MAX_UI_KEY_BYTES: usize = 64;
+
+        if !ws.search.open {
+            return Response::err(req.id, ec::BAD_PARAMS, "no supported UI modal is open");
+        }
+        let Some(keys) = req.params.get("keys").and_then(|value| value.as_array()) else {
+            return Response::err(req.id, ec::BAD_PARAMS, "missing 'keys' array");
+        };
+        if keys.is_empty() || keys.len() > MAX_UI_KEYS {
+            return Response::err(
+                req.id,
+                ec::BAD_PARAMS,
+                format!("'keys' must contain 1..={MAX_UI_KEYS} entries"),
+            );
+        }
+
+        let mut parsed = Vec::with_capacity(keys.len());
+        for (index, value) in keys.iter().enumerate() {
+            let Some(token) = value.as_str() else {
+                return Response::err(req.id, ec::BAD_PARAMS, "non-string entry in 'keys'");
+            };
+            if token.is_empty() || token.len() > MAX_UI_KEY_BYTES {
+                return Response::err(
+                    req.id,
+                    ec::BAD_PARAMS,
+                    format!("UI key tokens must be 1..={MAX_UI_KEY_BYTES} bytes"),
+                );
+            }
+            let Some((mods, key)) = parse_ui_key(token) else {
+                return Response::err(
+                    req.id,
+                    ec::BAD_PARAMS,
+                    format!("unrecognized UI key token at index {index}"),
+                );
+            };
+            parsed.push((mods, key));
+        }
+
+        let previous_mods = ws.mods;
+        let mut applied = 0usize;
+        for (mods, key) in &parsed {
+            ws.mods = *mods;
+            let text = match key {
+                Key::Character(text)
+                    if !mods.control_key() && !mods.alt_key() && !mods.super_key() =>
+                {
+                    Some(text.as_str())
+                }
+                _ => None,
+            };
+            self.search_key(ws, key, text);
+            applied += 1;
+            if !ws.search.open {
+                break;
+            }
+        }
+        ws.mods = previous_mods;
+        if let Some(window) = &ws.window {
+            window.request_redraw();
+        }
+        Response::ok(
+            req.id,
+            serde_json::json!({
+                "window": ws.seq,
+                "modal": "search",
+                "keys": applied,
+                "requested_keys": parsed.len(),
+                "open": ws.search.open,
             }),
         )
     }
@@ -11523,6 +12957,9 @@ impl App {
     }
 
     fn ctl_mouse_move(&mut self, ws: &mut WindowState) {
+        if self.search_mouse_drag(ws) {
+            return;
+        }
         self.promote_tab_drag_if_needed(ws);
         if ws.tab_drag_active && ws.tab_drag_press.is_none() && !self.cfg.tab_bar_pos.is_vertical()
         {
@@ -11553,6 +12990,12 @@ impl App {
         }
         if ws.context_menu.is_some() && bcode != 2 {
             ws.context_menu = None;
+            return true;
+        }
+        if ws.search.open {
+            if bcode == 0 {
+                self.search_mouse_press(ws);
+            }
             return true;
         }
         if ws.settings_nav.is_some()
@@ -11647,6 +13090,12 @@ impl App {
     }
 
     fn ctl_mouse_release(&mut self, ws: &mut WindowState, bcode: u8) -> bool {
+        if ws.search.open {
+            if bcode == 0 {
+                ws.search.dragging_editor = false;
+            }
+            return true;
+        }
         let mut handled = false;
         if ws.mouse_btn == Some(bcode) {
             ws.mouse_btn = None;
@@ -11673,6 +13122,9 @@ impl App {
         if lines == 0 {
             return false;
         }
+        if ws.search.open {
+            return self.scroll_search_viewport(ws, lines);
+        }
         if self.cursor_in_tab_bar(ws) && ws.mux.tabs.len() > 1 {
             if lines > 0 {
                 ws.mux.prev_tab();
@@ -11698,6 +13150,22 @@ impl App {
             && let Ok(mut t) = pane.term.term.lock()
         {
             t.scroll_display(Scroll::Delta(lines));
+        }
+        true
+    }
+
+    fn scroll_search_viewport(&mut self, ws: &mut WindowState, lines: i32) -> bool {
+        let Some(pane_id) = ws.search.target_pane else {
+            return true;
+        };
+        if let Some(pane) = ws.mux.panes.get(&pane_id)
+            && let Ok(mut term) = pane.term.term.lock()
+        {
+            term.scroll_display(Scroll::Delta(lines));
+            ws.search.visible_key = None;
+        }
+        if let Some(window) = &ws.window {
+            window.request_redraw();
         }
         true
     }
@@ -12495,30 +13963,44 @@ impl App {
     }
 
     fn search_key(&mut self, ws: &mut WindowState, key: &Key, text: Option<&str>) {
+        let shortcut = if cfg!(target_os = "macos") {
+            ws.mods.super_key()
+        } else {
+            ws.mods.control_key()
+        };
+        let word_modifier = if cfg!(target_os = "macos") {
+            ws.mods.alt_key()
+        } else {
+            ws.mods.control_key()
+        };
+        let selecting = ws.mods.shift_key();
         match key {
             Key::Named(NamedKey::Escape) => {
-                // Closing the search overlay reveals the
-                // pane's cursor underneath. Reset blink so the
-                // cursor is visible immediately — same UX argument
-                // as the focus and Reset paths.
-                ws.mux.search.open = false;
-                self.reset_blink_phase(ws);
+                self.close_search(ws);
             }
             Key::Named(NamedKey::Enter) => {
-                // Terminator parity, terminatorlib/config.py:93
-                // `invert_search`: flip the default-direction.
-                // - Default: Enter → next match, Shift+Enter → previous.
-                // - With invert_search = true: Enter → previous match,
-                //   Shift+Enter → next. Matches Terminator's "search
-                //   reverse" toggle.
-                let go_back = ws.mods.shift_key() ^ self.cfg.invert_search;
-                self.search_step_match(ws, go_back);
+                if ws.search.focused_control == kettle_render::SearchControl::Editor {
+                    let go_back = ws.mods.shift_key() ^ ws.search.invert;
+                    self.search_step_match(ws, go_back);
+                } else {
+                    self.activate_search_control(ws, ws.search.focused_control);
+                }
             }
-            // v2.20.0 (`vim-menu-nav`): Ctrl+j/Ctrl+k (+ Ctrl+n/Ctrl+p) step
-            // to the next/previous match from the home row — search had no
-            // arrow-key nav at all before this. The direction is literal:
-            // `invert-search` only flips Enter's *default*, not an explicit
-            // directional key.
+            Key::Named(NamedKey::F3) => self.search_step_match(ws, ws.mods.shift_key()),
+            Key::Named(NamedKey::Tab) => {
+                let controls = kettle_render::SearchControl::ALL;
+                let current = controls
+                    .iter()
+                    .position(|control| *control == ws.search.focused_control)
+                    .unwrap_or(0);
+                let next = if ws.mods.shift_key() {
+                    (current + controls.len() - 1) % controls.len()
+                } else {
+                    (current + 1) % controls.len()
+                };
+                ws.search.focused_control = controls[next];
+                ws.search.editor.clear_selection();
+            }
             Key::Character(s)
                 if self.cfg.vim_menu_nav
                     && ws.mods.control_key()
@@ -12527,8 +14009,110 @@ impl App {
             {
                 self.search_step_match(ws, matches!(s.as_str(), "k" | "p"));
             }
+            Key::Character(s) if shortcut && s.eq_ignore_ascii_case("a") => {
+                ws.search.focused_control = kettle_render::SearchControl::Editor;
+                ws.search.editor.select_all();
+            }
+            Key::Character(s) if shortcut && s.eq_ignore_ascii_case("c") => {
+                if let Some(selected) = ws.search.editor.selected_text()
+                    && let Some(clipboard) = self.clipboard.as_mut()
+                    && let Err(error) = clipboard.set_text(selected.to_string())
+                {
+                    log::warn!("search copy: clipboard write failed: {error}");
+                }
+            }
+            Key::Character(s) if shortcut && s.eq_ignore_ascii_case("x") => {
+                ws.search.focused_control = kettle_render::SearchControl::Editor;
+                if let Some(selected) = ws.search.editor.selected_text().map(str::to_string) {
+                    if let Some(clipboard) = self.clipboard.as_mut()
+                        && let Err(error) = clipboard.set_text(selected)
+                    {
+                        log::warn!("search cut: clipboard write failed: {error}");
+                    }
+                    let outcome = ws
+                        .search
+                        .editor
+                        .insert("", kettle_core::MAX_SEARCH_QUERY_BYTES);
+                    if outcome.changed {
+                        ws.search.note_edit(std::time::Instant::now());
+                    }
+                }
+            }
+            Key::Character(s) if shortcut && s.eq_ignore_ascii_case("v") => {
+                ws.search.focused_control = kettle_render::SearchControl::Editor;
+                if let Some(clipboard) = self.clipboard.as_mut() {
+                    match clipboard.get_text() {
+                        Ok(paste) => {
+                            let outcome = ws
+                                .search
+                                .editor
+                                .insert(&paste, kettle_core::MAX_SEARCH_QUERY_BYTES);
+                            if outcome.changed {
+                                ws.search.note_edit(std::time::Instant::now());
+                            }
+                            if outcome.truncated {
+                                ws.search.status = kettle_render::SearchStatus::TooLong;
+                            }
+                        }
+                        Err(error) => log::warn!("search paste: clipboard read failed: {error}"),
+                    }
+                }
+            }
+            Key::Named(NamedKey::ArrowLeft)
+                if ws.search.focused_control == kettle_render::SearchControl::Editor =>
+            {
+                if cfg!(target_os = "macos") && shortcut {
+                    ws.search.editor.move_home(selecting);
+                } else {
+                    ws.search.editor.move_left(selecting, word_modifier);
+                }
+            }
+            Key::Named(NamedKey::ArrowRight)
+                if ws.search.focused_control == kettle_render::SearchControl::Editor =>
+            {
+                if cfg!(target_os = "macos") && shortcut {
+                    ws.search.editor.move_end(selecting);
+                } else {
+                    ws.search.editor.move_right(selecting, word_modifier);
+                }
+            }
+            Key::Named(NamedKey::Home)
+                if ws.search.focused_control == kettle_render::SearchControl::Editor =>
+            {
+                ws.search.editor.move_home(selecting);
+            }
+            Key::Named(NamedKey::End)
+                if ws.search.focused_control == kettle_render::SearchControl::Editor =>
+            {
+                ws.search.editor.move_end(selecting);
+            }
             Key::Named(NamedKey::Backspace) => {
-                ws.mux.search.query.pop();
+                ws.search.focused_control = kettle_render::SearchControl::Editor;
+                let changed = if word_modifier {
+                    ws.search.editor.delete_word_backward()
+                } else {
+                    ws.search.editor.backspace()
+                };
+                if changed {
+                    ws.search.note_edit(std::time::Instant::now());
+                }
+            }
+            Key::Named(NamedKey::Delete) => {
+                ws.search.focused_control = kettle_render::SearchControl::Editor;
+                let changed = if word_modifier {
+                    ws.search.editor.delete_word_forward()
+                } else {
+                    ws.search.editor.delete()
+                };
+                if changed {
+                    ws.search.note_edit(std::time::Instant::now());
+                }
+            }
+            Key::Character(s)
+                if s == " "
+                    && ws.search.focused_control != kettle_render::SearchControl::Editor =>
+            {
+                self.activate_search_control(ws, ws.search.focused_control);
             }
             _ => {
                 // Filter control chars like the sibling
@@ -12538,9 +14122,22 @@ impl App {
                 if let Some(t) = text
                     && !t.chars().any(|c| c.is_control())
                 {
-                    ws.mux.search.query.push_str(t);
+                    ws.search.focused_control = kettle_render::SearchControl::Editor;
+                    let outcome = ws
+                        .search
+                        .editor
+                        .insert(t, kettle_core::search::MAX_SEARCH_QUERY_BYTES);
+                    if outcome.changed {
+                        ws.search.note_edit(std::time::Instant::now());
+                    }
+                    if outcome.truncated {
+                        ws.search.status = kettle_render::SearchStatus::TooLong;
+                    }
                 }
             }
+        }
+        if ws.search.open {
+            self.sync_search_editor_scroll(ws);
         }
     }
 
@@ -12549,22 +14146,287 @@ impl App {
     /// instead of cycling). Extracted from `search_key`'s Enter arm in
     /// v2.20.0 so vim-menu-nav's Ctrl+j/Ctrl+k share the exact stepping.
     fn search_step_match(&mut self, ws: &mut WindowState, go_back: bool) {
-        let s = &mut ws.mux.search;
-        if s.matches.is_empty() {
+        let query = ws.search.query().to_string();
+        if query.is_empty() {
+            ws.search.status = kettle_render::SearchStatus::Typing;
             return;
         }
-        let n = s.matches.len();
-        s.index = if self.cfg.search_wrap {
-            if go_back {
-                (s.index + n - 1) % n
-            } else {
-                (s.index + 1) % n
+        if ws.search.compiled_revision != Some(ws.search.revision) {
+            match kettle_core::CompiledSearch::compile(
+                &query,
+                map_case_sensitivity(ws.search.case_mode),
+            ) {
+                Ok(compiled) => {
+                    ws.search.compiled = compiled;
+                    ws.search.compiled_revision = Some(ws.search.revision);
+                }
+                Err(error) => {
+                    ws.search.status = search_compile_error_status(error);
+                    return;
+                }
             }
-        } else if go_back {
-            s.index.saturating_sub(1)
-        } else {
-            (s.index + 1).min(n - 1)
+        }
+        if ws.search.compiled.is_none() {
+            return;
+        }
+        // Explicit Previous/Next supersedes an idle quiet-verification even if this request is
+        // already at a non-wrapping terminal edge and returns before constructing a job.
+        cancel_deferred_search_retry(&mut ws.search);
+        let Some(pane_id) = ws.search.target_pane else {
+            return;
         };
+        let Some(pane) = ws.mux.panes.get(&pane_id) else {
+            ws.search.status = kettle_render::SearchStatus::NoMatch;
+            return;
+        };
+        let output_generation = pane.term.output_generation();
+        let Ok(term) = pane.term.term.lock() else {
+            ws.search.status = kettle_render::SearchStatus::Searching;
+            return;
+        };
+        use kettle_core::Dimensions as _;
+        let direction = if go_back {
+            kettle_core::SearchDirection::Reverse
+        } else {
+            kettle_core::SearchDirection::Forward
+        };
+        let top_line = term.topmost_line().0;
+        let bottom_line = term.bottommost_line().0;
+        let last_column = term.last_column().0;
+        let had_focus = ws.search.focused.is_some();
+        let edge_origin = match (direction, ws.search.focused) {
+            (kettle_core::SearchDirection::Forward, Some(span)) => span.end,
+            (kettle_core::SearchDirection::Reverse, Some(span)) => span.start,
+            (_, None) => search_viewport_anchor(
+                term.grid().display_offset(),
+                term.screen_lines(),
+                last_column,
+                direction,
+            ),
+        };
+        let mut forced_wrap = false;
+        let origin = if ws.search.focused.is_some() {
+            match search_point_after(edge_origin, direction, top_line, bottom_line, last_column) {
+                Some(point) => point,
+                None if ws.search.wrap => {
+                    forced_wrap = true;
+                    match direction {
+                        kettle_core::SearchDirection::Forward => {
+                            kettle_core::SearchPoint::new(top_line, 0)
+                        }
+                        kettle_core::SearchDirection::Reverse => {
+                            kettle_core::SearchPoint::new(bottom_line, last_column)
+                        }
+                    }
+                }
+                None => {
+                    ws.search.status = if go_back {
+                        kettle_render::SearchStatus::Start
+                    } else {
+                        kettle_render::SearchStatus::End
+                    };
+                    return;
+                }
+            }
+        } else {
+            edge_origin
+        };
+        let edge = match direction {
+            kettle_core::SearchDirection::Forward => {
+                kettle_core::SearchPoint::new(bottom_line, last_column)
+            }
+            kettle_core::SearchDirection::Reverse => kettle_core::SearchPoint::new(top_line, 0),
+        };
+        let token =
+            kettle_core::SearchScanToken::capture(&term, ws.search.revision, output_generation);
+        drop(term);
+
+        // Enter/F3 navigation uses the same one-chunk-per-event-loop continuation as the idle
+        // deep scan. A miss in a multi-million-line history must never block winit while a full
+        // edge-to-edge RegexIter runs synchronously.
+        ws.search.scan_token = Some(token);
+        ws.search.typing_scanned_revision = Some(ws.search.revision);
+        ws.search.background = Some(crate::search_input::BackgroundSearch {
+            token,
+            direction,
+            cursor: origin,
+            edge,
+            wrap_anchor: origin,
+            wrapped: forced_wrap,
+            nearby: false,
+            navigation: true,
+            had_focus,
+            output_drifted: false,
+        });
+        ws.search.status = kettle_render::SearchStatus::Searching;
+        if let Some(window) = &ws.window {
+            window.request_redraw();
+        }
+    }
+
+    fn activate_search_control(
+        &mut self,
+        ws: &mut WindowState,
+        control: kettle_render::SearchControl,
+    ) {
+        match control {
+            kettle_render::SearchControl::Editor => {
+                ws.search.focused_control = kettle_render::SearchControl::Editor;
+            }
+            kettle_render::SearchControl::Previous => self.search_step_match(ws, true),
+            kettle_render::SearchControl::Next => self.search_step_match(ws, false),
+            kettle_render::SearchControl::Wrap => {
+                ws.search.wrap = !ws.search.wrap;
+                self.cfg.search_wrap = ws.search.wrap;
+                self.persist_search_pref(
+                    "search-wrap",
+                    if ws.search.wrap { "true" } else { "false" },
+                );
+                ws.search.restart_navigation(std::time::Instant::now());
+            }
+            kettle_render::SearchControl::Case => {
+                ws.search.case_mode = match ws.search.case_mode {
+                    kettle_config::SearchCaseSensitivity::Smart => {
+                        kettle_config::SearchCaseSensitivity::Always
+                    }
+                    kettle_config::SearchCaseSensitivity::Always => {
+                        kettle_config::SearchCaseSensitivity::Never
+                    }
+                    kettle_config::SearchCaseSensitivity::Never => {
+                        kettle_config::SearchCaseSensitivity::Smart
+                    }
+                };
+                self.cfg.search_case_sensitive = ws.search.case_mode;
+                let value = match ws.search.case_mode {
+                    kettle_config::SearchCaseSensitivity::Smart => "smart",
+                    kettle_config::SearchCaseSensitivity::Always => "always",
+                    kettle_config::SearchCaseSensitivity::Never => "never",
+                };
+                self.persist_search_pref("search-case-sensitive", value);
+                ws.search.note_edit(std::time::Instant::now());
+            }
+            kettle_render::SearchControl::Invert => {
+                ws.search.invert = !ws.search.invert;
+                self.cfg.invert_search = ws.search.invert;
+                self.persist_search_pref(
+                    "invert-search",
+                    if ws.search.invert { "true" } else { "false" },
+                );
+                let direction = if ws.search.invert {
+                    kettle_core::SearchDirection::Reverse
+                } else {
+                    kettle_core::SearchDirection::Forward
+                };
+                if let Some(pane_id) = ws.search.target_pane
+                    && let Some(pane) = ws.mux.panes.get(&pane_id)
+                    && let Ok(term) = pane.term.term.lock()
+                {
+                    use kettle_core::Dimensions as _;
+                    ws.search.anchor = Some(search_viewport_anchor(
+                        term.grid().display_offset(),
+                        term.screen_lines(),
+                        term.last_column().0,
+                        direction,
+                    ));
+                }
+                ws.search.note_edit(std::time::Instant::now());
+            }
+            kettle_render::SearchControl::Close => self.close_search(ws),
+        }
+    }
+
+    fn sync_search_editor_scroll(&self, ws: &mut WindowState) {
+        let Some(renderer) = ws.renderer.as_ref() else {
+            return;
+        };
+        let (width, height) = renderer.surface_size();
+        let geometry = kettle_render::search_bar_geometry(
+            width as f32,
+            height as f32,
+            renderer.cell_w,
+            renderer.cell_h,
+        );
+        let columns = (geometry.editor.2 / renderer.cell_w).floor().max(1.0) as usize;
+        ws.search
+            .editor
+            .ensure_cursor_visible(columns.saturating_sub(2));
+    }
+
+    fn search_geometry(&self, ws: &WindowState) -> Option<kettle_render::SearchBarGeometry> {
+        if !ws.search.open {
+            return None;
+        }
+        let renderer = ws.renderer.as_ref()?;
+        let (width, height) = renderer.surface_size();
+        Some(kettle_render::search_bar_geometry(
+            width as f32,
+            height as f32,
+            renderer.cell_w,
+            renderer.cell_h,
+        ))
+    }
+
+    fn search_mouse_press(&mut self, ws: &mut WindowState) -> bool {
+        let Some(geometry) = self.search_geometry(ws) else {
+            return false;
+        };
+        let (x, y) = (ws.cursor.x as f32, ws.cursor.y as f32);
+        let Some(control) = geometry.hit_test(x, y) else {
+            return false;
+        };
+        ws.search.focused_control = control;
+        if control != kettle_render::SearchControl::Editor {
+            ws.search.dragging_editor = false;
+            self.activate_search_control(ws, control);
+            return true;
+        }
+
+        let cell_width = ws.renderer.as_ref().map_or(8.0, |renderer| renderer.cell_w);
+        let relative = ((x - geometry.editor.0) / cell_width).floor() as isize;
+        let query_column = crate::search_input::pointer_query_column(
+            ws.search.editor.horizontal_scroll(),
+            relative,
+        );
+        let clicks = self.click_count(ws, usize::MAX, query_column);
+        match clicks {
+            2 => {
+                ws.search.editor.select_word_at_column(query_column);
+                ws.search.dragging_editor = false;
+            }
+            3 => {
+                ws.search.editor.select_all();
+                ws.search.dragging_editor = false;
+            }
+            _ => {
+                ws.search
+                    .editor
+                    .set_cursor_column(query_column, ws.mods.shift_key());
+                ws.search.dragging_editor = true;
+            }
+        }
+        self.sync_search_editor_scroll(ws);
+        true
+    }
+
+    fn search_mouse_drag(&mut self, ws: &mut WindowState) -> bool {
+        if !ws.search.open || !ws.search.dragging_editor {
+            return false;
+        }
+        let Some(geometry) = self.search_geometry(ws) else {
+            return true;
+        };
+        let cell_width = ws.renderer.as_ref().map_or(8.0, |renderer| renderer.cell_w);
+        let relative = ((ws.cursor.x as f32 - geometry.editor.0) / cell_width).floor() as isize;
+        let query_column = crate::search_input::pointer_query_column(
+            ws.search.editor.horizontal_scroll(),
+            relative,
+        );
+        ws.search.editor.set_cursor_column(query_column, true);
+        self.sync_search_editor_scroll(ws);
+        if let Some(window) = &ws.window {
+            window.request_redraw();
+        }
+        true
     }
 
     /// Command-palette key handling: fuzzy-filter as you type, `Tab`/`↑↓`
@@ -13576,6 +15438,39 @@ fn apply_bs_del_binding(cfg: &Config, key: &Key, mods: ModifiersState, bytes: Ve
 /// Shift). `None` on an unrecognized token, so the caller can name the bad
 /// token instead of sending wrong bytes. Pure (unit-tested).
 fn parse_send_key(token: &str) -> Option<(ModifiersState, Key)> {
+    parse_key_token(token, false)
+}
+
+/// Parse a Kettle-owned UI key. Unlike PTY `send_keys`, application chrome can
+/// consume Super/Command character chords directly (for example Command+A on
+/// macOS), so this preserves them instead of rejecting an unencodable PTY key.
+fn parse_ui_key(token: &str) -> Option<(ModifiersState, Key)> {
+    let (mods, key) = parse_key_token(token, true)?;
+    let key = if key == Key::Named(NamedKey::Space) {
+        Key::Character(" ".into())
+    } else if matches!(
+        &key,
+        Key::Named(
+            NamedKey::Escape
+                | NamedKey::Enter
+                | NamedKey::Tab
+                | NamedKey::Backspace
+                | NamedKey::Delete
+                | NamedKey::ArrowLeft
+                | NamedKey::ArrowRight
+                | NamedKey::Home
+                | NamedKey::End
+                | NamedKey::F3
+        ) | Key::Character(_)
+    ) {
+        key
+    } else {
+        return None;
+    };
+    Some((mods, key))
+}
+
+fn parse_key_token(token: &str, allow_super_character: bool) -> Option<(ModifiersState, Key)> {
     let parts: Vec<&str> = token.split('+').collect();
     let last = parts.len().checked_sub(1)?;
     let mut mods = ModifiersState::empty();
@@ -13665,7 +15560,7 @@ fn parse_send_key(token: &str) -> Option<(ModifiersState, Key)> {
                         // what a human's Shift press delivers; the encoder's
                         // Character arm ignores SHIFT, so `shift+g` would
                         // otherwise silently send lowercase `g`).
-                        if mods.contains(ModifiersState::SUPER) {
+                        if mods.contains(ModifiersState::SUPER) && !allow_super_character {
                             return None;
                         }
                         if mods.contains(ModifiersState::SHIFT) && c.is_ascii_alphabetic() {
@@ -13996,6 +15891,26 @@ fn normalized_ime_preedit(
     (!text.is_empty()).then_some((text, selection))
 }
 
+fn ime_preedit_focus(text: &str, selection: Option<(usize, usize)>) -> usize {
+    use unicode_segmentation::UnicodeSegmentation as _;
+
+    let requested = selection
+        .map_or(text.len(), |(_, focus)| focus)
+        .min(text.len());
+    let mut boundary = requested;
+    while boundary > 0 && !text.is_char_boundary(boundary) {
+        boundary -= 1;
+    }
+    if boundary == text.len() {
+        return boundary;
+    }
+    text.grapheme_indices(true)
+        .map(|(index, _)| index)
+        .take_while(|index| *index <= boundary)
+        .last()
+        .unwrap_or(0)
+}
+
 /// Watchdog body for the GPU-init guard. Polls `done` every `step`
 /// until `timeout` elapses. Returns `true` if the timeout was reached without
 /// `done` ever being observed set — i.e. the caller should treat the init as
@@ -14089,6 +16004,23 @@ impl ApplicationHandler<UserEvent> for App {
                     self.user_event_inner(&mut ws, el, ev.clone());
                     self.finish_window_dispatch(el, seq, ws);
                 }
+            }
+            UserEvent::AccessibilityAction {
+                window_seq,
+                request,
+            } => {
+                let Some(mut ws) = self.windows.remove(&window_seq) else {
+                    return;
+                };
+                self.user_event_inner(
+                    &mut ws,
+                    el,
+                    UserEvent::AccessibilityAction {
+                        window_seq,
+                        request,
+                    },
+                );
+                self.finish_window_dispatch(el, window_seq, ws);
             }
             UserEvent::RemoteCommand => {
                 // Re-arm before reading: a writer racing the drain can queue a
@@ -14566,6 +16498,8 @@ impl App {
     fn new_accessibility_adapter(
         event_loop: &ActiveEventLoop,
         window: &Window,
+        window_seq: u64,
+        proxy: EventLoopProxy<UserEvent>,
     ) -> accesskit_winit::Adapter {
         accesskit_winit::Adapter::with_direct_handlers(
             event_loop,
@@ -14573,7 +16507,7 @@ impl App {
             AccessibilityActivation {
                 initial: Self::initial_accessibility_tree(),
             },
-            AccessibilityActions,
+            AccessibilityActions { proxy, window_seq },
             AccessibilityDeactivation,
         )
     }
@@ -14629,6 +16563,97 @@ impl App {
             ));
             nodes.push((node_id, node));
         }
+        if ws.search.open
+            && let Some(geometry) = self.search_geometry(ws)
+        {
+            let bounds = |(x, y, width, height): kettle_render::Rect4| {
+                accesskit::Rect::new(
+                    f64::from(x),
+                    f64::from(y),
+                    f64::from(x + width),
+                    f64::from(y + height),
+                )
+            };
+            children.push(ACCESSIBILITY_SEARCH_CONTAINER_ID);
+            let mut search_children = Vec::with_capacity(8);
+            for control in kettle_render::SearchControl::ALL {
+                let id = accessibility_search_control_id(control);
+                search_children.push(id);
+                let mut node = Node::new(match control {
+                    kettle_render::SearchControl::Editor => Role::SearchInput,
+                    kettle_render::SearchControl::Wrap | kettle_render::SearchControl::Invert => {
+                        Role::CheckBox
+                    }
+                    _ => Role::Button,
+                });
+                node.set_label(control.accessible_label());
+                node.set_bounds(bounds(geometry.control_rect(control)));
+                node.add_action(AccessibilityAction::Focus);
+                node.add_action(AccessibilityAction::Click);
+                match control {
+                    kettle_render::SearchControl::Editor => {
+                        let query = ws.search.query();
+                        node.set_value(query);
+                        node.set_children([ACCESSIBILITY_SEARCH_TEXT_ID]);
+                        node.add_action(AccessibilityAction::SetValue);
+                        node.add_action(AccessibilityAction::ReplaceSelectedText);
+                        node.add_action(AccessibilityAction::SetTextSelection);
+
+                        let mut text_node = Node::new(Role::TextRun);
+                        text_node.set_value(query);
+                        text_node.set_character_lengths(
+                            query
+                                .chars()
+                                .map(|character| character.len_utf8() as u8)
+                                .collect::<Vec<_>>(),
+                        );
+                        let byte_character_index =
+                            |byte: usize| query[..byte.min(query.len())].chars().count();
+                        let (anchor, focus) = ws.search.editor.directed_selection().map_or_else(
+                            || {
+                                let cursor = byte_character_index(ws.search.editor.cursor());
+                                (cursor, cursor)
+                            },
+                            |(anchor, focus)| {
+                                (byte_character_index(anchor), byte_character_index(focus))
+                            },
+                        );
+                        node.set_text_selection(TextSelection {
+                            anchor: TextPosition {
+                                node: ACCESSIBILITY_SEARCH_TEXT_ID,
+                                character_index: anchor,
+                            },
+                            focus: TextPosition {
+                                node: ACCESSIBILITY_SEARCH_TEXT_ID,
+                                character_index: focus,
+                            },
+                        });
+                        nodes.push((ACCESSIBILITY_SEARCH_TEXT_ID, text_node));
+                    }
+                    kettle_render::SearchControl::Wrap => node.set_toggled(ws.search.wrap.into()),
+                    kettle_render::SearchControl::Case => {
+                        node.set_value(map_search_case_mode(ws.search.case_mode).label());
+                    }
+                    kettle_render::SearchControl::Invert => {
+                        node.set_toggled(ws.search.invert.into());
+                    }
+                    _ => {}
+                }
+                nodes.push((id, node));
+            }
+            search_children.push(ACCESSIBILITY_SEARCH_STATUS_ID);
+            let mut status = Node::new(Role::Status);
+            status.set_label(effective_search_status(&ws.search).label());
+            status.set_live(accesskit::Live::Polite);
+            status.set_bounds(bounds(geometry.status));
+            nodes.push((ACCESSIBILITY_SEARCH_STATUS_ID, status));
+
+            let mut search = Node::new(Role::Search);
+            search.set_label("Find in terminal history");
+            search.set_children(search_children);
+            search.set_bounds(bounds(geometry.rect));
+            nodes.push((ACCESSIBILITY_SEARCH_CONTAINER_ID, search));
+        }
         let mut root = Node::new(Role::Window);
         root.set_label("Kettle terminal");
         root.set_children(children);
@@ -14642,10 +16667,14 @@ impl App {
             ));
         }
         nodes.push((ACCESSIBILITY_ROOT_ID, root));
-        let focus = focused
-            .map(accessibility_pane_id)
-            .filter(|id| nodes.iter().any(|(candidate, _)| candidate == id))
-            .unwrap_or(ACCESSIBILITY_ROOT_ID);
+        let focus = if ws.search.open {
+            accessibility_search_control_id(ws.search.focused_control)
+        } else {
+            focused
+                .map(accessibility_pane_id)
+                .filter(|id| nodes.iter().any(|(candidate, _)| candidate == id))
+                .unwrap_or(ACCESSIBILITY_ROOT_ID)
+        };
         TreeUpdate {
             nodes,
             tree: None,
@@ -14664,6 +16693,21 @@ impl App {
             size.width.hash(&mut hasher);
             size.height.hash(&mut hasher);
         }
+        ws.search.open.hash(&mut hasher);
+        if ws.search.open {
+            ws.search.query().hash(&mut hasher);
+            ws.search.editor.cursor().hash(&mut hasher);
+            ws.search.editor.selection().hash(&mut hasher);
+            ws.search.wrap.hash(&mut hasher);
+            map_search_case_mode(ws.search.case_mode)
+                .label()
+                .hash(&mut hasher);
+            ws.search.invert.hash(&mut hasher);
+            effective_search_status(&ws.search)
+                .label()
+                .hash(&mut hasher);
+            ws.search.focused_control.hash(&mut hasher);
+        }
         let mut layout = ws.mux.layout(ws.mux.active, self.area(ws));
         layout.sort_by_key(|(pane_id, _)| *pane_id);
         for (pane_id, rect) in layout {
@@ -14678,6 +16722,36 @@ impl App {
             }
         }
         hasher.finish()
+    }
+
+    fn publish_accessibility_if_due(&self, ws: &mut WindowState) {
+        let key = self.accessibility_key(ws);
+        if ws.accessibility_key == Some(key) {
+            ws.accessibility_pending = false;
+            return;
+        }
+        let due = ws
+            .accessibility_updated_at
+            .is_none_or(|updated| updated.elapsed() >= ACCESSIBILITY_UPDATE_INTERVAL);
+        if !due {
+            ws.accessibility_pending = true;
+            return;
+        }
+        let Some(mut adapter) = ws.accessibility.take() else {
+            ws.accessibility_pending = false;
+            return;
+        };
+        let mut published = false;
+        adapter.update_if_active(|| {
+            published = true;
+            self.accessibility_tree(ws)
+        });
+        ws.accessibility = Some(adapter);
+        ws.accessibility_pending = false;
+        if published {
+            ws.accessibility_key = Some(key);
+            ws.accessibility_updated_at = Some(std::time::Instant::now());
+        }
     }
 
     /// C4: post-creation window setup shared by both window-creation paths.
@@ -14769,7 +16843,6 @@ impl App {
             }
         };
         self.apply_post_create(&window);
-        let accessibility = Self::new_accessibility_adapter(event_loop, &window);
         let size = window.inner_size();
         let scale = window.scale_factor() as f32;
         // Synchronous renderer init against the shared device — no block_on,
@@ -14790,6 +16863,8 @@ impl App {
         };
         let seq = self.next_window_seq;
         self.next_window_seq += 1;
+        let accessibility =
+            Self::new_accessibility_adapter(event_loop, &window, seq, self.proxy.clone());
         // Same Mux construction flags as run_with — process-global decisions.
         let mut mux = Mux::new();
         mux.lua_output_subscribed = self.lua_engine.is_some();
@@ -15603,7 +17678,8 @@ impl App {
             }
         };
         self.apply_post_create(&window);
-        let accessibility = Self::new_accessibility_adapter(event_loop, &window);
+        let accessibility =
+            Self::new_accessibility_adapter(event_loop, &window, ws.seq, self.proxy.clone());
         let size = window.inner_size();
         let scale = window.scale_factor() as f32;
         // Guard the synchronous GPU init against a hung
@@ -16027,11 +18103,86 @@ impl App {
         kettle_core::term::prewarm_shell_detection();
     }
 
+    fn handle_accessibility_action(&mut self, ws: &mut WindowState, request: ActionRequest) {
+        if !ws.search.open {
+            return;
+        }
+        let control = if request.target_node == ACCESSIBILITY_SEARCH_TEXT_ID {
+            Some(kettle_render::SearchControl::Editor)
+        } else {
+            accessibility_search_control_from_id(request.target_node)
+        };
+        let Some(control) = control else {
+            return;
+        };
+
+        match request.action {
+            AccessibilityAction::Focus => ws.search.focused_control = control,
+            AccessibilityAction::Click => {
+                ws.search.focused_control = control;
+                self.activate_search_control(ws, control);
+            }
+            AccessibilityAction::SetValue if control == kettle_render::SearchControl::Editor => {
+                if let Some(ActionData::Value(value)) = request.data {
+                    let outcome = ws
+                        .search
+                        .editor
+                        .replace_all(&value, kettle_core::MAX_SEARCH_QUERY_BYTES);
+                    if outcome.changed {
+                        ws.search.note_edit(std::time::Instant::now());
+                    }
+                    if outcome.truncated {
+                        ws.search.status = kettle_render::SearchStatus::TooLong;
+                    }
+                }
+            }
+            AccessibilityAction::ReplaceSelectedText
+                if control == kettle_render::SearchControl::Editor =>
+            {
+                if let Some(ActionData::Value(value)) = request.data {
+                    let outcome = ws
+                        .search
+                        .editor
+                        .insert(&value, kettle_core::MAX_SEARCH_QUERY_BYTES);
+                    if outcome.changed {
+                        ws.search.note_edit(std::time::Instant::now());
+                    }
+                    if outcome.truncated {
+                        ws.search.status = kettle_render::SearchStatus::TooLong;
+                    }
+                }
+            }
+            AccessibilityAction::SetTextSelection
+                if control == kettle_render::SearchControl::Editor =>
+            {
+                if let Some(ActionData::SetTextSelection(selection)) = request.data
+                    && selection.anchor.node == ACCESSIBILITY_SEARCH_TEXT_ID
+                    && selection.focus.node == ACCESSIBILITY_SEARCH_TEXT_ID
+                {
+                    ws.search.editor.set_character_selection(
+                        selection.anchor.character_index,
+                        selection.focus.character_index,
+                    );
+                }
+            }
+            _ => return,
+        }
+        if ws.search.open {
+            self.sync_search_editor_scroll(ws);
+        }
+        if let Some(window) = &ws.window {
+            window.request_redraw();
+        }
+    }
+
     fn user_event_inner(&mut self, ws: &mut WindowState, _el: &ActiveEventLoop, ev: UserEvent) {
         match ev {
             // Consumed by the outer window-less dispatch before a WindowState
             // is checked out.
             UserEvent::Activation => {}
+            UserEvent::AccessibilityAction { request, .. } => {
+                self.handle_accessibility_action(ws, request);
+            }
             UserEvent::Wakeup => {
                 // C4: wakeups fan out to every window; skip windows whose
                 // panes produced no output since their last paint (plain
@@ -16389,6 +18540,15 @@ impl App {
                     }
                     return;
                 }
+                // Search owns native pointer motion just as it owns synthetic ctl motion. Return
+                // even when no editor drag is armed so hover/motion cannot reach pane chrome or
+                // a mouse-tracking application behind the modal lane.
+                if ws.search.open {
+                    self.show_mouse_cursor(ws);
+                    self.sync_cursor_icon(ws);
+                    self.search_mouse_drag(ws);
+                    return;
+                }
                 // Dragging a split divider — recompute the
                 // addressed split's ratio from the cursor and apply. The split
                 // rect is re-fetched from the live seams so a mid-drag layout
@@ -16651,6 +18811,18 @@ impl App {
                     ws.context_menu = None;
                     if let Some(w) = &ws.window {
                         w.request_redraw();
+                    }
+                    return;
+                }
+                // Search controls are real click targets inside the reserved
+                // lane. Handle them before the generic modal swallow; clicks
+                // elsewhere remain consumed and can never reach the PTY.
+                if ws.search.open {
+                    if bcode == 0 {
+                        self.search_mouse_press(ws);
+                        if let Some(window) = &ws.window {
+                            window.request_redraw();
+                        }
                     }
                     return;
                 }
@@ -16995,6 +19167,12 @@ impl App {
                     MouseButton::Right => 2,
                     _ => return,
                 };
+                if ws.search.open {
+                    if bcode == 0 {
+                        ws.search.dragging_editor = false;
+                    }
+                    return;
+                }
                 // v2.19.0 (tear-off UX, D4): a left-release while a torn
                 // window is tracked is the DROP. Two shapes: (a) the
                 // synthesized release winit posts to the TORN window when
@@ -17037,6 +19215,7 @@ impl App {
                         self.copy_selection(ws);
                     }
                     ws.selecting = false;
+                    ws.search.dragging_editor = false;
                     ws.scrollbar_drag_offset = None;
                     // End any split-divider drag on left-button up.
                     ws.dragging_split = None;
@@ -17140,6 +19319,14 @@ impl App {
                 if ws.settings_nav.is_some()
                     && self.settings_mouse(ws, if lines > 0 { 1 } else { -1 }, false)
                 {
+                    return;
+                }
+                // Search owns the wheel, but uses it for local scrollback
+                // browsing so users can inspect nearby historical matches.
+                // Never encode tracking/alternate-scroll bytes into the TUI
+                // behind the lane.
+                if ws.search.open {
+                    self.scroll_search_viewport(ws, lines);
                     return;
                 }
                 // A non-context-menu modal swallows the
@@ -17320,6 +19507,8 @@ impl App {
                     // missing half of an old shortcut.
                     ws.suppressed_key_releases.clear();
                     ws.ime_preedit = None;
+                    ws.ime_focus_generation = ws.ime_focus_generation.wrapping_add(1);
+                    ws.search.dragging_editor = false;
                     if ws.selecting && self.cfg.copy_on_select {
                         self.copy_selection(ws);
                     }
@@ -17412,6 +19601,16 @@ impl App {
                         if ws.ime_preedit == next {
                             return;
                         }
+                        ws.ime_preedit_owner =
+                            next.as_ref()
+                                .map(|_| crate::window_state::ImePreeditSession {
+                                    owner: if ws.search.open {
+                                        crate::window_state::ImePreeditOwner::Search
+                                    } else {
+                                        crate::window_state::ImePreeditOwner::Other
+                                    },
+                                    generation: ws.ime_focus_generation,
+                                });
                         ws.ime_preedit = next;
                         self.update_ime_cursor_area(ws);
                         true
@@ -17419,10 +19618,25 @@ impl App {
                     winit::event::Ime::Commit(text) => {
                         let redraw = ws.ime_preedit.is_some() || !text.is_empty();
                         ws.ime_preedit = None;
-                        self.commit_ime_text(ws, &text, event_loop);
+                        let owner = ws.ime_preedit_owner.take();
+                        let current_owner = if ws.search.open {
+                            crate::window_state::ImePreeditOwner::Search
+                        } else {
+                            crate::window_state::ImePreeditOwner::Other
+                        };
+                        let owns_current_surface = owner.is_none_or(|session| {
+                            session.owner == current_owner
+                                && session.generation == ws.ime_focus_generation
+                        });
+                        if owns_current_surface {
+                            self.commit_ime_text(ws, &text, event_loop);
+                        }
                         redraw
                     }
-                    winit::event::Ime::Disabled => ws.ime_preedit.take().is_some(),
+                    winit::event::Ime::Disabled => {
+                        ws.ime_preedit_owner = None;
+                        ws.ime_preedit.take().is_some()
+                    }
                 };
                 if redraw && let Some(window) = &ws.window {
                     window.request_redraw();
@@ -17439,7 +19653,7 @@ impl App {
                     || ws.ssh_input.is_some()
                     || ws.confirm_dialog.is_some()
                     || ws.editing_title.is_some()
-                    || ws.mux.search.open
+                    || ws.search.open
                     || ws.ime_preedit.is_some();
                 if track_consumed_key_release(
                     &mut ws.suppressed_key_releases,
@@ -17699,7 +19913,7 @@ impl App {
                     return;
                 }
 
-                if ws.mux.search.open {
+                if ws.search.open {
                     self.search_key(ws, &event.logical_key, text);
                     if let Some(w) = &ws.window {
                         w.request_redraw();
@@ -17769,6 +19983,8 @@ impl App {
             self.pending_window_close = true;
             return None;
         }
+        ws.search_queries
+            .retain(|pane_id, _| ws.mux.panes.contains_key(pane_id));
         // Once the GPU device is lost we no longer paint (see the redraw guard).
         // Drive renderer recovery from here instead of scheduling animation
         // wakes that would only re-enter the dead-device redraw path.
@@ -17968,6 +20184,48 @@ impl App {
             let ms = (remaining.as_millis() as u64).max(1);
             wait_ms = Some(wait_ms.map_or(ms, |w| w.min(ms)));
         }
+        // Search's deferred unlimited pass is deadline-driven and chunked.
+        // Wake exactly when the 500 ms typing debounce expires; while a chunk
+        // job remains, schedule the next event-loop turn without polling at a
+        // frame-rate forever (the job clears at a match or terminal edge).
+        if ws.search.open {
+            if let Some(deadline) = ws.search.unlimited_retry_at {
+                let due = now >= deadline;
+                let ms = if due {
+                    1
+                } else {
+                    (deadline.saturating_duration_since(now).as_millis() as u64).max(1)
+                };
+                wait_ms = Some(wait_ms.map_or(ms, |wait| wait.min(ms)));
+                if due && let Some(window) = &ws.window {
+                    window.request_redraw();
+                }
+            }
+            if ws.search.background.is_some() {
+                wait_ms = Some(wait_ms.map_or(1, |wait| wait.min(1)));
+                if let Some(window) = &ws.window {
+                    window.request_redraw();
+                }
+            }
+        }
+        if ws.accessibility_pending {
+            let remaining =
+                ws.accessibility_updated_at
+                    .map_or(std::time::Duration::ZERO, |updated| {
+                        ACCESSIBILITY_UPDATE_INTERVAL
+                            .saturating_sub(now.saturating_duration_since(updated))
+                    });
+            let due = remaining.is_zero();
+            let ms = if due {
+                1
+            } else {
+                (remaining.as_millis() as u64).max(1)
+            };
+            wait_ms = Some(wait_ms.map_or(ms, |wait| wait.min(ms)));
+            if due && let Some(window) = &ws.window {
+                window.request_redraw();
+            }
+        }
         // Reply `timed_out` to any pending
         // run_command whose deadline has passed, and—while runs are pending—
         // schedule a wake at the soonest deadline so a fully-silent command
@@ -18164,6 +20422,169 @@ mod tests {
             super::CONFIG_RELOAD_DEBOUNCE,
             std::time::Duration::from_millis(75)
         );
+    }
+
+    #[test]
+    fn config_reload_synchronizes_open_search_preferences() {
+        let now = std::time::Instant::now();
+        let mut search = crate::search_input::SearchState {
+            open: true,
+            editor: crate::search_input::SearchEditor::from_text("(".into(), 4096),
+            compiled_revision: Some(0),
+            status: kettle_render::SearchStatus::Invalid,
+            ..crate::search_input::SearchState::default()
+        };
+
+        assert!(super::sync_reloaded_search_preferences(
+            &mut search,
+            false,
+            kettle_config::SearchCaseSensitivity::Smart,
+            true,
+            now,
+        ));
+        assert!(!search.wrap);
+        assert!(search.invert);
+        assert_eq!(search.status, kettle_render::SearchStatus::Invalid);
+        assert!(search.unlimited_retry_at.is_none());
+
+        assert!(!super::sync_reloaded_search_preferences(
+            &mut search,
+            false,
+            kettle_config::SearchCaseSensitivity::Always,
+            true,
+            now,
+        ));
+        assert_eq!(
+            search.case_mode,
+            kettle_config::SearchCaseSensitivity::Always
+        );
+        assert_eq!(search.status, kettle_render::SearchStatus::Searching);
+        assert_eq!(search.revision, 1);
+    }
+
+    #[test]
+    fn visible_projection_limit_is_derived_and_clears_with_the_viewport() {
+        let mut search = crate::search_input::SearchState {
+            status: kettle_render::SearchStatus::Match,
+            visible_truncated: true,
+            ..crate::search_input::SearchState::default()
+        };
+        assert_eq!(
+            super::effective_search_status(&search),
+            kettle_render::SearchStatus::Limited
+        );
+        search.visible_truncated = false;
+        assert_eq!(
+            super::effective_search_status(&search),
+            kettle_render::SearchStatus::Match
+        );
+        search.status = kettle_render::SearchStatus::Limited;
+        assert_eq!(
+            super::effective_search_status(&search),
+            kettle_render::SearchStatus::Limited
+        );
+    }
+
+    #[test]
+    fn output_continuation_keeps_progress_and_defers_a_definitive_miss() {
+        let token = kettle_core::SearchScanToken {
+            query_revision: 3,
+            output_generation: 9,
+            layout: kettle_core::SearchLayout {
+                columns: 80,
+                screen_lines: 24,
+                history_size: 10_000,
+            },
+        };
+        let mut job = crate::search_input::BackgroundSearch {
+            token: kettle_core::SearchScanToken {
+                output_generation: 8,
+                ..token
+            },
+            direction: kettle_core::SearchDirection::Forward,
+            cursor: kettle_core::SearchPoint::new(-4_000, 0),
+            edge: kettle_core::SearchPoint::new(23, 79),
+            wrap_anchor: kettle_core::SearchPoint::new(0, 0),
+            wrapped: false,
+            nearby: false,
+            navigation: false,
+            had_focus: false,
+            output_drifted: false,
+        };
+        super::continue_background_after_output(&mut job, token, -10_000, 23, 79);
+        assert_eq!(job.cursor, kettle_core::SearchPoint::new(-4_000, 0));
+        assert_eq!(job.edge, kettle_core::SearchPoint::new(23, 79));
+        assert_eq!(job.token, token);
+        assert!(job.output_drifted);
+
+        let mut nearby_job = job;
+        nearby_job.nearby = true;
+        let mut nearby_search = crate::search_input::SearchState {
+            revision: 3,
+            background: Some(nearby_job),
+            ..crate::search_input::SearchState::default()
+        };
+        assert!(!super::should_start_nearby_search(&nearby_search));
+        nearby_search.background.as_mut().unwrap().nearby = false;
+        assert!(!super::should_start_nearby_search(&nearby_search));
+        nearby_search.background = None;
+        assert!(super::should_start_nearby_search(&nearby_search));
+        nearby_search.typing_scanned_revision = Some(3);
+        assert!(!super::should_start_nearby_search(&nearby_search));
+
+        let (status, retry_at) = super::finished_background_search(&job, std::time::Instant::now());
+        assert_eq!(status, kettle_render::SearchStatus::Searching);
+        assert!(retry_at.is_some());
+
+        job.navigation = true;
+        job.direction = kettle_core::SearchDirection::Reverse;
+        job.had_focus = true;
+        assert!(!super::should_retry_output_drift(&job));
+        let original_anchor = kettle_core::SearchPoint::new(-99, 7);
+        let mut search = crate::search_input::SearchState {
+            anchor: Some(original_anchor),
+            typing_scanned_revision: Some(3),
+            ..crate::search_input::SearchState::default()
+        };
+        assert!(!super::prepare_initial_search_retry_after_output(
+            &mut search,
+            &job,
+            kettle_core::SearchPoint::new(0, 0),
+        ));
+        assert_eq!(search.anchor, Some(original_anchor));
+        assert_eq!(search.typing_scanned_revision, Some(3));
+        let (status, retry_at) = super::finished_background_search(&job, std::time::Instant::now());
+        assert_eq!(status, kettle_render::SearchStatus::Limited);
+        assert!(retry_at.is_none());
+
+        job.navigation = false;
+        let retry_anchor = kettle_core::SearchPoint::new(-20, 0);
+        assert!(super::prepare_initial_search_retry_after_output(
+            &mut search,
+            &job,
+            retry_anchor,
+        ));
+        assert_eq!(search.anchor, Some(retry_anchor));
+        assert_eq!(search.typing_scanned_revision, Some(3));
+        assert!(search.quiet_retry_pending);
+        search.unlimited_retry_at = Some(std::time::Instant::now());
+        assert!(super::activate_quiet_search_retry(&mut search));
+        assert!(!search.quiet_retry_pending);
+        assert!(search.typing_scanned_revision.is_none());
+        assert!(search.unlimited_retry_at.is_none());
+        assert!(super::should_start_nearby_search(&search));
+
+        search.quiet_retry_pending = true;
+        search.unlimited_retry_at = Some(std::time::Instant::now());
+        super::cancel_deferred_search_retry(&mut search);
+        assert!(!search.quiet_retry_pending);
+        assert!(search.unlimited_retry_at.is_none());
+
+        job.navigation = true;
+        job.output_drifted = false;
+        let (status, retry_at) = super::finished_background_search(&job, std::time::Instant::now());
+        assert_eq!(status, kettle_render::SearchStatus::Start);
+        assert!(retry_at.is_none());
     }
 
     #[test]
@@ -18412,6 +20833,12 @@ mod tests {
             super::normalized_ime_preedit("compose".into(), Some((1, 4))),
             Some(("compose".into(), Some((1, 4))))
         );
+        assert_eq!(super::ime_preedit_focus("compose", Some((1, 4))), 4);
+        assert_eq!(super::ime_preedit_focus("界x", Some((0, 3))), 3);
+        // An invalid byte offset and a caret inside an extended grapheme both snap backward to a
+        // safe visible boundary.
+        assert_eq!(super::ime_preedit_focus("界x", Some((0, 2))), 0);
+        assert_eq!(super::ime_preedit_focus("a\u{301}x", Some((0, 1))), 0);
     }
 
     #[test]
@@ -18758,10 +21185,16 @@ mod tests {
         // 2. Focus-loss drag-flag reset (the block also clears dragging_split,
         //    so check the individual resets, not a contiguous
         //    block).
+        let focused_arm = src
+            .split("WindowEvent::Focused(f) => {")
+            .nth(1)
+            .and_then(|body| body.split("WindowEvent::").next())
+            .expect("Focused event arm");
         assert!(
-            src.contains("if ws.selecting && self.cfg.copy_on_select {")
-                && src.contains("ws.selecting = false;")
-                && src.contains("ws.tab_drag_active = false;\n                    ws.tab_drag_press = None;\n                    ws.tab_pressed_idx = None;\n                    // A focus loss also ends any split-divider drag.\n                    ws.dragging_split = None;\n                    ws.mouse_btn = None;"),
+            focused_arm.contains("if ws.selecting && self.cfg.copy_on_select {")
+                && focused_arm.contains("ws.selecting = false;")
+                && focused_arm.contains("ws.search.dragging_editor = false;")
+                && focused_arm.contains("ws.tab_drag_active = false;\n                    ws.tab_drag_press = None;\n                    ws.tab_pressed_idx = None;\n                    // A focus loss also ends any split-divider drag.\n                    ws.dragging_split = None;\n                    ws.mouse_btn = None;"),
             "the Focused `!f` arm must disarm the latched drag flags"
         );
         // 3. Side-button dismisses a lone context menu instead of leaking SGR.
@@ -18832,7 +21265,7 @@ mod tests {
             .expect("search_key present");
         assert!(
             arm.contains("!t.chars().any(|c| c.is_control())")
-                && arm.contains("ws.mux.search.query.push_str(t)"),
+                && arm.contains(".insert(t, kettle_core::search::MAX_SEARCH_QUERY_BYTES)"),
             "search_key must filter control chars before appending to the query"
         );
     }
@@ -18933,6 +21366,28 @@ mod tests {
         assert_eq!(parse_send_key("ctrl+"), None, "missing key");
         assert_eq!(parse_send_key("f13"), None, "no such F-key");
         assert_eq!(parse_send_key("escape+x"), None, "named key as modifier");
+    }
+
+    #[test]
+    fn parse_ui_key_allows_app_shortcuts_and_rejects_inert_tokens() {
+        use super::parse_ui_key;
+        use winit::keyboard::{Key, ModifiersState, NamedKey};
+
+        assert_eq!(
+            parse_ui_key("cmd+a"),
+            Some((ModifiersState::SUPER, Key::Character("a".into())))
+        );
+        assert_eq!(
+            parse_ui_key("space"),
+            Some((ModifiersState::empty(), Key::Character(" ".into())))
+        );
+        assert_eq!(
+            parse_ui_key("shift+f3"),
+            Some((ModifiersState::SHIFT, Key::Named(NamedKey::F3)))
+        );
+        assert_eq!(parse_ui_key("up"), None);
+        assert_eq!(parse_ui_key("page_down"), None);
+        assert_eq!(parse_ui_key("insert"), None);
     }
 
     /// v2.20.0 (agent plane): the encoded bytes must match what a human

@@ -301,6 +301,95 @@ tables. It writes the full per-file SHA-256 ledger to
 `target/diagnostics/tracked-files-audit.json`. Add `--require-clean-index` when
 auditing a staged release tree.
 
+**Search regressions.** Search changes need focused tests at all three owning
+boundaries:
+
+- `kettle-core`: `regex-automata` meta-engine behavior; distinct invalid,
+  too-complex, and 4096-byte query errors; 512 KiB NFA, 256 KiB one-pass,
+  256 KiB hybrid-cache, and 40 KiB DFA ceilings; implicit whole-match-only
+  captures; Smart/Match/Ignore; Unicode word boundaries; forward/reverse and
+  wrapped outcomes; signed history coordinates; one-pass zero-width suppression
+  and nullable-alternative priority; soft wraps, wide characters, combining
+  marks, variation selectors, and ZWJ graphemes; scan cancellation; and the
+  65,536-span cap;
+- `kettle-core` work limits: each engine invocation and aggregate bounded call
+  is <=64 KiB UTF-8; an aggregate call is also <=262,144 inspected cells and
+  <=256 complete logical haystacks; a single haystack is <=256 physical rows
+  and <=262,144 inspected cells. Tests must distinguish an exact continuation
+  between complete hard logical lines from an immediate Results-limited barrier
+  inside an over-capacity logical line, and prove neither direction skips;
+- `kettle-ui`: grapheme-aware edit/selection/delete/copy/cut/paste, per-window
+  state, per-pane remembered queries, the nominal 1000-line nearby/idle ranges
+  with one core slice per turn, continuous-output progress, the
+  non-navigation-only quiet retry, output-interrupted explicit-navigation
+  Results-limited state, output/layout/query invalidation, direction shortcuts,
+  result anchoring, and the invariant that UI-dispatched keys never reach the
+  PTY;
+- `kettle-render`: one row on wide surfaces and as many additional rows as
+  needed on narrow surfaces, all control hit targets, reserved content rows,
+  signed multi-line projection, active/inactive colors, every bounded status
+  including Pattern too complex, and linear visible-cell/span traversal.
+
+For a deterministic live check, start a disposable full control server, emit
+repeated history markers into its focused pane, then use Kettle-owned input:
+
+```sh
+kettle ctl perform_action --text start_search
+kettle ctl dispatch_ui_key --keys "n,e,e,d,l,e"
+kettle ctl ui_geometry --raw
+kettle ctl dispatch_ui_key --keys "enter,shift+enter,f3,shift+f3,escape"
+```
+
+`ui_geometry.search` must report the bar/control rectangles, target pane,
+status, `has_match`, truncation, Wrap, Case, and Invert states. The Search
+object must not contain the raw query or matched terminal text. Use `kettle ctl screenshot --json
+'{"full_window":true,"path":"/tmp/kettle-search.png"}'` plus `read_cells` to
+verify historical and soft-wrapped highlight pixels. Do not substitute
+`send_keys` in this test:
+`send_keys` intentionally targets the PTY; `dispatch_ui_key` is the bounded
+modal-only path and must fail when no supported modal is open.
+
+**Search engine-budget performance probe.** This is a local diagnostic, not a
+CI pass/fail benchmark. On the 2026-07-22 audit machine (i7-1165G7, Rust 1.96.0,
+`regex-automata` 0.4.14, optimized `rustc -O`, pinned to CPU 3), the worst
+accepted adversarial family `(?:\w?){8}\P{Letter}\b` took a three-sample median
+17.8 ms for a no-match 64 KiB haystack. That is the production single-call
+ceiling. Larger diagnostic inputs scaled to 35.8/71.3/143.6/288.5 ms at
+128 KiB/256 KiB/512 KiB/1 MiB respectively, but production never passes those
+sizes to one invocation. N=10 needs 543,244 NFA bytes and must compile as
+Pattern too complex; N=200 needs 10,050,980 bytes and demonstrates the prior
+unbounded risk (1.56 s per 256 KiB no-match and about 11.3 MiB static memory).
+
+The ignored probe lives at `target/diagnostics/regex_limits.rs`; build and run
+it against the checkout's `regex-automata` target rlib:
+
+```sh
+rustc -O --edition=2024 target/diagnostics/regex_limits.rs \
+  -L dependency=target/debug/deps \
+  --extern regex_automata=target/debug/deps/libregex_automata-c458cab110e7d576.rlib \
+  -o target/diagnostics/regex_limits
+taskset -c 3 target/diagnostics/regex_limits extra
+taskset -c 3 target/diagnostics/regex_limits engines
+taskset -c 3 target/diagnostics/regex_limits cachefamilies
+```
+
+The rlib fingerprint is specific to that recorded checkout and changes after a
+dependency rebuild. Preserve raw results with the release audit; do not promote
+this host-specific median to a cross-platform CI threshold. Full details and
+the evidence boundary are in
+[AUDIT-2026-07-22-SEARCH.md](AUDIT-2026-07-22-SEARCH.md).
+
+The settled local checkpoint also passed the core search tests (27/27), full
+core library tests (179/179), UI library tests (320/320), the renderer bounded
+status test (1/1), warnings-denied all-target clippy for all three owning
+crates, `cargo fmt --all --check`, `git diff --check`, and
+`just live-ui-helper-selftest`. The post-hardening Xvfb history E2E is retained
+at
+`target/diagnostics/search-history-e2e-settled/search-history-20260722-164503/`;
+its navigation statuses were Wrapped/Match/Match/Match. These are local Linux
+artifacts, not substitutes for the still-pending workspace/strict gates,
+GitHub CI, or native Windows/macOS checks.
+
 ## Manual / interactive checks
 
 These need a real display and are run by hand (or on real hardware):
@@ -363,7 +452,15 @@ These need a real display and are run by hand (or on real hardware):
     right-click context-menu opening, Settings modal open/close from that menu,
     context-menu `Split Right` dispatch, split-window resize, and Command
     palette opening from the new-tab dropdown through `kettle ctl`, plus Search
-    opening through `perform_action start_search`. It also drives the SSH
+    opening through `perform_action start_search`, editing/stepping through
+    `dispatch_ui_key`, and control/status assertions through `ui_geometry`.
+    The Search probe must include a negative-line history result, a soft-wrapped
+    result, invalid/too-complex/too-long patterns, an exact resumable work yield,
+    an in-line capacity Results-limited barrier, no-wrap boundaries,
+    continuous-output progress, non-navigation quiet verification, an
+    output-interrupted explicit navigation that remains Results limited until
+    retry, close anchoring, and a PTY sentinel proving modal input was not
+    forwarded. It also drives the SSH
     launcher, layout picker, quick-select hint mode, and window/tab/pane
     title-edit overlays through `perform_action`, with a visible URL fixture for
     hint mode. It emits OSC 777 from inside the live pane and asserts the
@@ -423,6 +520,13 @@ These need a real display and are run by hand (or on real hardware):
     `scripts/check-live-ui-smoke.py`; WSL uses the Unix shell scripts. Run those
     platform-local recipes before changing renderer defaults or tab/underline
     interaction code.
+
+Search release evidence is platform-scoped. Run the live interaction/search
+probe on an Ubuntu Wayland or X11 desktop and on native Windows 11; exercise the
+same pane under tmux, clean Neovim, configured AstroNvim, Codex CLI, and Claude
+Code CLI where installed. macOS and Windows/WSL results remain separate checks:
+never infer them from a Linux unit test or an offscreen renderer pass. Record
+missing tools and unrun platforms as explicit skips in the release audit.
 
 ## Pattern: audit-driven hardening
 

@@ -115,6 +115,7 @@ fn mcp_stdio_initialize_list_and_kettle_run() {
         .collect();
     assert!(names.contains(&"kettle_run"));
     assert!(names.contains(&"kettle_send_keys"));
+    assert!(names.contains(&"kettle_dispatch_ui_key"));
     assert!(names.contains(&"kettle_wait_for"));
 
     let call = responses

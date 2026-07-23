@@ -1925,6 +1925,7 @@ dependencies = [
  "log",
  "portable-pty",
  "regex",
+ "regex-automata",
  "serde_json",
  "tempfile",
  "windows-sys 0.61.2",
@@ -1967,6 +1968,7 @@ dependencies = [
  "raw-window-handle",
  "serde_json",
  "tempfile",
+ "unicode-segmentation",
  "unicode-width",
  "wgpu",
 ]
@@ -2012,6 +2014,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tempfile",
+ "unicode-segmentation",
  "unicode-width",
  "windows 0.62.2",
  "winit",

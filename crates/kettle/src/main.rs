@@ -560,7 +560,7 @@ struct McpArgs {
 struct CtlArgs {
     /// The method to call (`get_state`, `list_tabs`, `list_panes`,
     /// `read_screen`, `read_cells`, `ui_geometry`, `screenshot`, `send_text`,
-    /// `send_keys`, `dispatch_keybind`, `send_mouse`, `resize_window`,
+    /// `send_keys`, `dispatch_ui_key`, `dispatch_keybind`, `send_mouse`, `resize_window`,
     /// `perform_action`, `wait_for`, `run_command`), or `events` to stream the event feed.
     method: String,
     /// Target a specific pane id (else the focused pane).
@@ -574,7 +574,7 @@ struct CtlArgs {
     /// legitimate text (`--text "-- INSERT --"` waits for vim's mode line).
     #[arg(long, allow_hyphen_values = true)]
     text: Option<String>,
-    /// Comma-separated key tokens for `send_keys`, e.g.
+    /// Comma-separated key tokens for `send_keys` or `dispatch_ui_key`, e.g.
     /// `--keys "escape,i,h,i,escape,ctrl+c"` (each segment is ONE key:
     /// a name like `escape`/`enter`/`f5`, a chord like `ctrl+c`, or a
     /// single character; a literal comma key is spelled `comma`, and

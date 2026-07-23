@@ -148,8 +148,8 @@ crates/
   kettle-update/   Signed update feeds · bounded extraction · transactions
   kettle-config/   Config parsing · 500+ themes · keybinds · ssh-host · fuzzy
   kettle-vt/       Image-protocol extractor (Sixel · kitty · iTerm2 · OSC 7/133)
-  kettle-core/     PTY reader · alacritty_terminal+vte · search · hints · links
-  kettle-render/   wgpu pipelines · glyphon text · screenshots · GPU self-test
+  kettle-core/     PTY reader · alacritty_terminal+vte · bounded grid search · hints · links
+  kettle-render/   wgpu pipelines · glyphon text · search/chrome geometry · screenshots · GPU self-test
   kettle-remote/   SSH/container detection · process-tree inspection
   kettle-ctl/      Local control protocol · IPC transport · discovery · client
   kettle-ui/       winit app · tab/split mux · session · input · all the chrome
@@ -158,6 +158,26 @@ crates/
 
 Each crate has its own tests. Anything pure (logic with no `&self` / I/O)
 should live in the crate it most belongs to and have unit tests there.
+
+Search changes intentionally keep responsibilities split: grid matching and
+signed spans belong in `kettle-core`, which adapts bounded terminal-grid
+materialization to `regex-automata`'s meta engine. Editor, scheduling, and
+per-window state belong in `kettle-ui`; responsive geometry and highlight
+projection belong in `kettle-render`. Preserve the 4096-byte query cap, 65,536
+match-projection cap, 512 KiB NFA / 256 KiB one-pass / 256 KiB hybrid-cache /
+40 KiB DFA engine ceilings, and implicit whole-match-only capture policy.
+Runtime work is capped at 64 KiB for both one engine call and one aggregate
+bounded call; the latter also permits at most 262,144 inspected cells and 256
+complete logical-line haystacks. One haystack permits at most 256 physical rows
+and 262,144 inspected cells, with the same 64 KiB text ceiling. Preserve the
+distinction between an exact continuation (yield only between complete hard
+logical lines) and an in-line capacity barrier (**Results limited**, with no
+continuation past uninspected cells). Preserve scan invalidation and
+modal-input/PTY separation. Add portable tests for engine-size rejection,
+work-budget resumption, soft wraps, Unicode graphemes, zero-width suppression,
+nullable-expression priority, and pathological logical lines;
+platform-specific keyboard or live-window claims still need the native CI
+runner or an explicitly recorded interactive check.
 
 ## What makes a good change
 

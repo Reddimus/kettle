@@ -22,10 +22,11 @@ use winit::window::{CursorIcon, Window};
 use kettle_render::Renderer;
 
 use crate::app::{
-    ConfirmDialogState, ContextMenuState, HintTarget, LinksScanKey, SearchScanKey, SplitDrag,
-    TitleEditState, ViState,
+    ConfirmDialogState, ContextMenuState, HintTarget, LinksScanKey, SplitDrag, TitleEditState,
+    ViState,
 };
 use crate::mux::Mux;
+use crate::search_input::SearchState;
 
 /// Track key presses consumed by Kettle UI and swallow only their matching
 /// release. Kitty's event-type reporting makes releases observable by the
@@ -62,6 +63,18 @@ pub(crate) struct WindowAccent {
     pub(crate) presence: Option<kettle_ctl::presence::PresenceGuard>,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ImePreeditOwner {
+    Search,
+    Other,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct ImePreeditSession {
+    pub(crate) owner: ImePreeditOwner,
+    pub(crate) generation: u64,
+}
+
 pub(crate) struct WindowState {
     /// Stable per-window sequence number (1-based, process-lifetime unique).
     /// Exposed to agents via the ctl API (C8) and used as the map key — never
@@ -80,6 +93,7 @@ pub(crate) struct WindowState {
     /// native accessibility traffic on the UI thread.
     pub(crate) accessibility_key: Option<u64>,
     pub(crate) accessibility_updated_at: Option<std::time::Instant>,
+    pub(crate) accessibility_pending: bool,
     /// OS taskbar progress, driven by the focused pane's OSC 9;4
     /// state each frame (pwsh 7 / Windows Terminal parity). No-op off Windows.
     pub(crate) taskbar: crate::taskbar::Taskbar,
@@ -92,6 +106,13 @@ pub(crate) struct WindowState {
     /// reader thread + channels), so a tab can move between windows (C5) by
     /// moving its panes between Muxes — the PTYs never notice.
     pub(crate) mux: Mux,
+    /// Scrollback search is OS-window chrome, not terminal/mux state. Keeping
+    /// it here prevents one window's modal and editor focus from leaking into
+    /// another and lets a tab move without carrying transient UI state.
+    pub(crate) search: SearchState,
+    /// Last query per pane, memory-only. Reopening search restores the pane's
+    /// local query without persisting terminal contents to disk.
+    pub(crate) search_queries: std::collections::HashMap<u64, String>,
     pub(crate) mods: ModifiersState,
     /// Physical keys whose press was consumed by Kettle UI/keybindings. Their
     /// matching release must not leak to a Kitty-protocol client after the UI
@@ -100,6 +121,13 @@ pub(crate) struct WindowState {
     /// Active input-method composition and its byte-indexed selection range.
     /// Committed text is written to the PTY and this preedit is cleared.
     pub(crate) ime_preedit: Option<(String, Option<(usize, usize)>)>,
+    /// Surface that owned the active composition. If ownership changes before
+    /// Commit, the old composition is discarded instead of escaping across a
+    /// modal boundary into Search or the terminal PTY.
+    pub(crate) ime_preedit_owner: Option<ImePreeditSession>,
+    /// Incremented whenever keyboard focus moves between Kettle-owned input surfaces. A delayed
+    /// IME Commit is accepted only by the exact generation that received its Preedit.
+    pub(crate) ime_focus_generation: u64,
     pub(crate) fullscreen: bool,
     pub(crate) cursor: PhysicalPosition<f64>,
     pub(crate) selecting: bool,
@@ -115,12 +143,6 @@ pub(crate) struct WindowState {
     /// while the left button is held after a press landed on a divider seam;
     /// each CursorMoved recomputes the addressed split's ratio from the cursor.
     pub(crate) dragging_split: Option<SplitDrag>,
-    /// `(query, index)` last scrolled-to, so the viewport follows search
-    /// matches into scrollback without re-scrolling every frame.
-    pub(crate) search_revealed: Option<(String, usize)>,
-    /// Cache key for the last completed search scan — see app.rs
-    /// (`update_search` re-scans only when query/focus/output changed).
-    pub(crate) search_scan_key: Option<SearchScanKey>,
     /// Cache key for the last viewport link-autodetect scan — see
     /// app.rs (`update_links` re-scans only on output, scroll, or focus).
     pub(crate) links_scan_key: Option<LinksScanKey>,
@@ -309,20 +331,23 @@ impl WindowState {
             accessibility: None,
             accessibility_key: None,
             accessibility_updated_at: None,
+            accessibility_pending: false,
             taskbar: crate::taskbar::Taskbar::new(),
             attention_active: false,
             mux,
+            search: SearchState::default(),
+            search_queries: std::collections::HashMap::new(),
             mods: ModifiersState::empty(),
             suppressed_key_releases: std::collections::HashSet::new(),
             ime_preedit: None,
+            ime_preedit_owner: None,
+            ime_focus_generation: 0,
             fullscreen,
             cursor: PhysicalPosition::new(0.0, 0.0),
             selecting: false,
             scrollbar_drag_offset: None,
             scrollbar_hover: false,
             dragging_split: None,
-            search_revealed: None,
-            search_scan_key: None,
             links_scan_key: None,
             mouse_btn: None,
             last_mouse_cell: None,

@@ -36,9 +36,10 @@ panel. Use the keyboard:
 - **↑ / ↓** — move between options
 - **← / →** — change the highlighted option (font size, theme opacity,
   scrollbar, bell, cursor, …)
-- **Tab** — cycle category (Appearance → Behavior → Keybinds). The **Keybinds**
-  category is an interactive rebinder: pick an action, press a chord (with a
-  modifier) to bind it live, and it's written to your config.
+- **Tab** — cycle category (Appearance → Background → Behavior → Search → Tabs
+  → Graphics → Keybinds). The **Keybinds** category is an interactive rebinder:
+  pick an action, press a chord (with a modifier) to bind it live, and it's
+  written to your config.
 - **Esc** — close
 
 Changes apply **instantly** and are saved automatically — no restart, no file
@@ -59,13 +60,40 @@ kettle uses **Terminator-style** keys:
 | Move focus between panes | `Alt + Arrow` |
 | Resize the split | `Shift + Arrow` |
 | Next / previous tab | `Ctrl+PageUp` / `Ctrl+PageDown` |
+| Search screen + scrollback | `Ctrl+Shift+F` |
 | Settings | `Ctrl+,` |
 | Command palette (search every action) | `Ctrl+Shift+K` |
 
 See the full list any time with `kettle --list-keybinds`, or press
 `Ctrl+Shift+K` and type what you want.
 
-## 5. If something looks wrong
+## 5. Search screen and scrollback
+
+Press **`Ctrl+Shift+F`** to open the bottom search bar. Enter a Rust regular
+expression (up to 4096 UTF-8 bytes); an incomplete or invalid expression is
+shown as **Invalid pattern** instead of being changed into a literal search. A
+valid expression that exceeds the bounded engine budget shows **Pattern too
+complex**.
+
+- `Enter` / `Shift+Enter` finds in the default / opposite direction.
+- `F3` / `Shift+F3` always finds next / previous.
+- **Wrap** controls whether stepping crosses the history boundary.
+- **Smart** ignores case until the pattern contains an uppercase character;
+  **Match** always matches case; **Ignore** never matches case.
+- **Invert** flips the default direction. `Escape` closes the bar while keeping
+  the selected result anchored on screen.
+
+The query editor follows Unicode grapheme boundaries for caret movement and
+deletion, so combining marks and emoji sequences are not split. Kettle
+remembers the last query for each pane within its current window. The status
+shows searching, match/boundary, invalid, too-complex, no-match, or **Results
+limited** rather than a global count. Results limited means a pathological
+soft-wrapped line, an output-interrupted navigation, or the nearby-highlight
+cap made ordering uncertain; Kettle will not claim a possibly wrong first,
+last, or miss. Ordinary work-budget pauses resume automatically. This keeps
+large or infinite scrollback responsive.
+
+## 6. If something looks wrong
 
 - **Text too big/small?** Open Settings (`Ctrl+,`) → Appearance → Font size,
   or use `Ctrl + +` / `Ctrl + -`.

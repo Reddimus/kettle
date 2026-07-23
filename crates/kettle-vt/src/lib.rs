@@ -528,7 +528,9 @@ mod tests {
         let png = base64_png();
         let seq = format!("\x1b]1337;File=inline=1:{png}\x07");
         let bytes = seq.as_bytes();
-        let mut e = Extractor::new();
+        // This test owns an isolated account because it verifies streaming
+        // state, not contention in the process-wide graphics budget.
+        let mut e = Extractor::isolated();
         let mut images = 0;
         for b in bytes {
             for c in e.feed(&[*b]) {

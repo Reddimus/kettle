@@ -103,7 +103,7 @@ keys). The file is **watched and reloaded live**.
 | `allow-bold` | bool | `true` | When `false`, the SGR bold attribute is suppressed — useful on fonts without a bold companion (Terminator `allow_bold`) |
 | `bold-is-bright` | bool | `false` | When `true`, bold text using a palette 0–7 color is remapped to the bright 8–15 variant (xterm convention) |
 | `clear-select-on-copy` | bool | `false` | When `true`, the selection highlight is cleared right after a copy (some users prefer the selection to disappear once captured) |
-| `invert-search` | bool | `false` | When `true`, the in-pane search overlay opens at the bottom instead of the top |
+| `invert-search` | bool | `false` | Terminator parity. Flip the search bar's default step direction: `Enter` searches backward and `Shift+Enter` forward. The explicit Previous / Next controls and `Shift+F3` / `F3` keep their literal directions |
 | `search-wrap` | bool | `true` | Terminator parity. When `true` (default), scrollback search wraps around (past the last match → the first). When `false`, Next stops at the last match and Previous at the first |
 | `vim-menu-nav` | bool | `true` | Vim-style navigation in kettle's menus/overlays. List overlays (context menu, new-tab dropdown, settings) take `j`/`k` (wrapping), `g`/`G`, `Ctrl+d`/`Ctrl+u` (half page); in the context menu / new-tab dropdown `h` = back/close and `l` = drill in/activate, while in the settings panel `h`/`l` step the highlighted row's value (same as `←`/`→`); confirm dialogs take `y`/`n`; text-input overlays with a selection (palette, search, layout picker) use `Ctrl+j`/`Ctrl+k` (or `Ctrl+n`/`Ctrl+p`) so letters keep typing. Menu mnemonics skip the nav letters while enabled; type-to-search keeps working. `false` restores plain arrow-key navigation |
 | `backspace-binding` | `ascii-del`\|`control-h`\|`escape-sequence`\|`auto` | `ascii-del` | Byte(s) the Backspace key sends. `ascii-del` = `0x7f` (the modern default); `control-h` = `0x08` for hosts expecting the old binding |
@@ -113,6 +113,71 @@ keys). The file is **watched and reloaded live**.
 | `term` | string | `xterm-256color` | The `TERM` value exported to the PTY |
 | `colorterm` | string | `truecolor` | The `COLORTERM` value exported to the PTY (advertises 24-bit color) |
 | `env` | `KEY=VALUE` | — | Repeatable; exports user environment variables to every spawned pane. Names must use portable env syntax (`[A-Za-z_][A-Za-z0-9_]*`), empty values are allowed, and later duplicates win. Kettle still owns terminal identity vars through `term`, `colorterm`, `TERM_PROGRAM`, and `TERM_PROGRAM_VERSION`; user vars are also appended to `WSLENV` for Windows → WSL launches |
+
+### Scrollback search
+
+`Ctrl+Shift+F` opens a responsive Terminator-style bar at the bottom of the
+window. Its controls are Editor, Previous, Next, Wrap, Case, Invert, and Close;
+`search-wrap`, `search-case-sensitive`, and `invert-search` are also available
+in **Settings → Search**. Changes made from either surface persist to the config.
+
+Patterns use strict Rust regex syntax through `regex-automata`'s meta engine and
+are limited to **4096 UTF-8 bytes**. An invalid pattern remains invalid: Kettle
+does not reinterpret it as a literal. Engine construction is bounded to a
+**512 KiB NFA**, **256 KiB one-pass state**, **256 KiB hybrid cache**, and
+**40 KiB DFA**. A syntactically valid expression that exceeds an applicable
+ceiling shows **Pattern too complex**. Kettle asks the engine for its implicit
+whole-match capture only (`WhichCaptures::Implicit`); parentheses still group
+normally, but subgroup capture values are neither built nor exposed because
+search only needs the whole grid span.
+
+Highlights require a consuming match, so zero-width results such as bare `^`,
+`$`, or `\b` are suppressed in the engine's single leftmost-first pass. Rust
+alternative priority still applies: a nullable alternative that wins with an
+empty match can shadow a later consuming alternative at the same position. The
+editor supports grapheme-aware selection, caret movement, deletion, Home/End,
+platform copy/cut/paste shortcuts, and horizontal scrolling. Control characters
+in inserted text are rejected; pasted tabs and newlines normalize to spaces.
+
+Typing scans up to 1000 physical lines around the viewport immediately. If that
+bounded pass has no match, a 500 ms idle retry walks the remaining history in
+1000-line chunks without blocking the event loop. The 1000-line range is a
+navigation bound, not permission for one long synchronous call: one exact core
+work slice runs per event-loop turn and yields only between complete hard
+logical lines. Its continuation resumes on a later turn without showing
+Results limited.
+
+Existing chunk progress is preserved while a PTY keeps producing output;
+because rows can shift during that pass, a non-navigation scan is verified
+again from a fresh viewport anchor after output has been quiet for 500 ms
+before Kettle reports a definitive boundary or miss. If output interrupts an
+explicit Previous/Next operation, that operation stays **Results limited**
+until the user retries it; silently starting a default-direction quiet retry
+would verify a different navigation request.
+
+Visible highlighting scans the viewport plus 100 physical lines on each side.
+One regex-engine invocation receives at most **64 KiB of UTF-8**. One aggregate
+bounded call has the same **64 KiB** text ceiling and may inspect at most
+**262,144 terminal cells** across at most **256 complete logical-line
+haystacks**. Reaching an aggregate work ceiling produces the exact resumable
+yield described above.
+
+A single soft-wrapped logical haystack is separately bounded to **256 physical
+rows**, **64 KiB of UTF-8**, and **262,144 inspected cells**. If that capacity
+ends inside the logical line, it is an immediate accuracy barrier: Kettle does
+not skip the uninspected cells, returns no continuation beyond them, and reports
+**Results limited** instead of claiming a definitive first, last, wrap, or
+no-match state. One nearby projection retains at most **65,536 match spans**.
+Signed grid coordinates keep negative scrollback rows valid. Only the active
+and nearby matches are retained; the bar deliberately reports status rather
+than an eager global match count. Search state belongs to the OS window, while
+the last query is remembered per pane within that window.
+
+`Enter` follows the configured default direction and `Shift+Enter` reverses it;
+`F3` / `Shift+F3` are always Next / Previous. `Escape` closes the bar without
+snapping the viewport away from the selected result. Search input is Kettle UI
+chrome and is not sent to tmux, AstroNvim, Codex CLI, Claude Code CLI, or any
+other program in the PTY.
 
 ### Auto light/dark theme switching
 
@@ -216,7 +281,7 @@ software fallback before launching a normal session.
 | `visible-bell` / `urgent-bell` | bool / bool | `—` | Terminator compat aliases for the unified `bell` key. Terminator splits the bell into two orthogonal bools; kettle's `bell = both` is `visible_bell + urgent_bell`, `bell = visual` is `visible_bell` alone, `bell = attention` is `urgent_bell` alone. The two arms compose at end-of-parse so file order doesn't matter. **Precedence:** if you set the canonical `bell = …` key explicitly, the Terminator aliases are ignored — canonical wins over alias on hybrid configs |
 | `log-strip-ansi` | bool | `false` | Strip ANSI escape sequences from the per-pane session log (`Action::ToggleSessionLog`) before writing. `true` → log is plain-text (CSI / OSC / single-char ESC all stripped); `false` → raw stream is preserved (`cat`-replayable in a terminal) |
 | `light-theme` / `dark-theme` | theme name | `""` (falls back to `theme`) | See the `light-theme` / `dark-theme` row in the **Keys** table above — same fields. Terminator `auto_theme` parity: `Action::ToggleLightDark` swaps between the two (case-insensitive bundled-name lookup; an empty value no-ops that side of the swap and falls back to `theme`) |
-| `search-case-sensitive` | enum | `smart` | Terminator `case_sensitive` parity. Scrollback-search case-sensitivity. `smart` (default; ripgrep/vim: case-insensitive until any uppercase), `always` / `sensitive` (force sensitive even for lowercase patterns — matches Terminator's default), `never` / `insensitive` (force insensitive even for mixed-case). The Terminator-spelled `case-sensitive = true/false` is also accepted (`true` ⇒ always, `false` ⇒ never) |
+| `search-case-sensitive` | enum | `smart` | Terminator `case_sensitive` parity. Scrollback-search case-sensitivity. `smart` (bar label **Smart**; case-insensitive until any uppercase), `always` / `sensitive` (bar label **Match**; force sensitive even for lowercase patterns — matches Terminator's default), `never` / `insensitive` (bar label **Ignore**; force insensitive even for mixed-case). The Terminator-spelled `case-sensitive = true/false` is also accepted (`true` ⇒ always, `false` ⇒ never) |
 | `link-single-click` | bool | `false` | Single-click opens URLs (default needs `Ctrl`/`Cmd`+click) |
 
 When a fatal GPU error occurs, Kettle writes fault-only recovery records under

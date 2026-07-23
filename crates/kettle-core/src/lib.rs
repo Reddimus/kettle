@@ -11,9 +11,9 @@
 //!   registries. `Terminal::new` opens the PTY, spawns the reader, wires
 //!   the extractor in front, and exposes thread-safe `Arc<Mutex<Term>>`
 //!   for the renderer.
-//! - [`search`](mod@search) — regex + smart-case scrollback search
-//!   (`Ctrl+Shift+F`), `build_regex` literal fallback, `reveal_offset`
-//!   for jump-to-match.
+//! - [`search`](mod@search) — bounded signed-grid [`CompiledSearch`]
+//!   (`Ctrl+Shift+F`) with strict regex compilation, plus viewport reveal
+//!   geometry and legacy compatibility helpers.
 //! - [`links`](mod@links) — explicit OSC 8 hyperlinks + autodetected
 //!   URLs and local file paths in the visible grid; `is_safe_url`
 //!   allowlist for safe `open::that_detached` dispatch.
@@ -54,7 +54,13 @@ pub use alacritty_terminal::vte::ansi::{Color as AnsiColor, CursorShape, NamedCo
 pub use event::{EventProxy, TermEvent, Waker};
 pub use images::{ImageData, ImageSourceRect, Images, Placement};
 pub use links::{Link, links, links_with_cwd};
-pub use search::{CaseSensitivity, Match, search, search_with};
+pub use search::{
+    CaseSensitivity, CompiledSearch, MAX_SEARCH_LOGICAL_LINE_CONTEXT, MAX_SEARCH_MATCHES,
+    MAX_SEARCH_MATERIALIZED_BYTES, MAX_SEARCH_MATERIALIZED_CELLS, MAX_SEARCH_OPERATION_BYTES,
+    MAX_SEARCH_OPERATION_CELLS, MAX_SEARCH_OPERATION_HAYSTACKS, MAX_SEARCH_QUERY_BYTES, Match,
+    SearchBatch, SearchBounds, SearchCompileError, SearchDirection, SearchLayout, SearchOutcome,
+    SearchPoint, SearchScanToken, SearchSpan, search, search_with,
+};
 pub use term::{
     CommandFinished, ProtocolNotification, PtyOutputSender, PtyWriter, ScreenText, SharedTerm,
     Terminal,
