@@ -270,10 +270,17 @@ jobs:
           # --screenshot-menu: the v1.3.0/v1.3.1 blank-menu regression guard,
           # same 40 KB floor rationale as the Linux/macOS step, now exercised
           # against the DX12/WARP offscreen adapter.
+          # kettle.exe is a GUI-subsystem binary, so PowerShell's `&` does NOT
+          # wait for it — it returns immediately and the file check would race
+          # the still-running render (the --gpu-info call above only waited
+          # because the `| Out-String` pipe blocks until the process closes its
+          # stdout at exit). Use `Start-Process -Wait -PassThru` so the write
+          # is complete before Test-PngMagic and the real exit code is read.
           $menuPng = Join-Path $env:RUNNER_TEMP "kettle-menu.png"
-          & ".\target\release\kettle.exe" --screenshot-menu $menuPng
-          if ($LASTEXITCODE -ne 0) {
-            Write-Error "--screenshot-menu exited $LASTEXITCODE"
+          $proc = Start-Process -FilePath ".\target\release\kettle.exe" `
+            -ArgumentList "--screenshot-menu", $menuPng -Wait -PassThru -NoNewWindow
+          if ($proc.ExitCode -ne 0) {
+            Write-Error "--screenshot-menu exited $($proc.ExitCode)"
             exit 1
           }
           Test-PngMagic $menuPng
@@ -288,9 +295,10 @@ jobs:
           # Nerd Font, glyphon shaping, wgpu offscreen device + texture,
           # image::save PNG encode) through the DX12/WARP adapter.
           $shotPng = Join-Path $env:RUNNER_TEMP "kettle-ci.png"
-          & ".\target\release\kettle.exe" --screenshot $shotPng
-          if ($LASTEXITCODE -ne 0) {
-            Write-Error "--screenshot exited $LASTEXITCODE"
+          $proc = Start-Process -FilePath ".\target\release\kettle.exe" `
+            -ArgumentList "--screenshot", $shotPng -Wait -PassThru -NoNewWindow
+          if ($proc.ExitCode -ne 0) {
+            Write-Error "--screenshot exited $($proc.ExitCode)"
             exit 1
           }
           Test-PngMagic $shotPng
