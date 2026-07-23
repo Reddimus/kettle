@@ -21541,12 +21541,20 @@ mod tests {
             .nth(1)
             .and_then(|s| s.split("\n    fn apply_window_resize").next())
             .expect("toggle_zoom_with_scale body present");
+        // Strip line comments before the checks: the rationale prose in the
+        // helper necessarily NAMES the `cfg.font_size` anti-pattern it warns
+        // against, which would otherwise trip the negative assertion below.
+        let code: String = helper
+            .lines()
+            .map(|line| line.split("//").next().unwrap_or(line))
+            .collect::<Vec<_>>()
+            .join("\n");
         assert!(
-            helper.contains("let cur = r.font_size();") && helper.contains("cur * factor"),
+            code.contains("let cur = r.font_size();") && code.contains("cur * factor"),
             "ScaledZoom must scale from the live renderer size"
         );
         assert!(
-            !helper.contains("self.cfg.font_size"),
+            !code.contains("cfg.font_size"),
             "ScaledZoom must not scale from the (stale) config font size"
         );
     }
