@@ -136,6 +136,19 @@ or cross-crate plumbing that should not be rushed into one release:
   them into the responsive, multi-row layout the search bar gained in v2.38.0
   (also makes room for per-row keybind hints). Extends the vertical-list-pickers
   entry above.
+- **Clone-safe non-blocking ctl write (`kettle-ctl` transport).** The audit
+  finding that `write_all_until` toggles `O_NONBLOCK` on the shared open file
+  description (so a concurrently-used `try_clone`d sibling could observe
+  `WouldBlock` during a write) is real, but the attempted fix — dropping the
+  fd flag and relying on per-`send` `MSG_DONTWAIT` — hangs on macOS, which does
+  not reliably honor `MSG_DONTWAIT` on AF_UNIX stream sockets (a full send
+  buffer blocks forever instead of returning `WouldBlock`). The fd-level
+  `O_NONBLOCK` guard is therefore retained. A clone-safe rewrite must keep the
+  fd blocking and achieve per-write non-blocking another way — e.g. `poll`ing
+  `POLLOUT` before each `send` on a still-blocking fd, or writing through a
+  dup'd fd whose flags are private — verified on real macOS. The client's
+  request/response is exclusive today, so the shared-flag window is not
+  currently reachable.
 - **Update-archive extract residual on Linux (post-fix hardening).** v2.39.0
   closed the verify/extract TOCTOU on Windows outright (a mandatory
   `LockFileEx` range lock) and closed the delete-and-recreate variant on Linux

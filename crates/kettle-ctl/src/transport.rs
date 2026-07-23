@@ -98,64 +98,82 @@ impl CtlStream {
     /// Write an entire protocol frame without allowing a blocked local peer to
     /// outlive the request's deadline. On Windows, client pipe handles use
     /// overlapped I/O so cancellation can target the exact pending operation.
-    /// On Unix, every `send()` passes `MSG_DONTWAIT`, which makes that one
-    /// call non-blocking regardless of the fd's blocking mode — so, unlike an
-    /// earlier revision, this never toggles `O_NONBLOCK` on the underlying
-    /// file descriptor. That flag lives on the shared open file description,
-    /// not the fd, so flipping it here would also affect any sibling handle
-    /// produced by [`try_clone`](CtlStream::try_clone) (the very split
-    /// read/write pattern this transport's callers use): a concurrent
-    /// blocking `Read` on that sibling could spuriously observe `WouldBlock`
-    /// for the duration of this write.
+    /// On Unix, this scopes `O_NONBLOCK` to the fd for the duration of the
+    /// write (restored before returning). `MSG_DONTWAIT` alone is NOT enough:
+    /// macOS does not reliably honor it on AF_UNIX stream sockets, so without
+    /// the fd-level flag a `send()` into a full buffer with a stalled peer
+    /// blocks forever and never observes the deadline (a real macOS hang).
+    /// The known cost — `O_NONBLOCK` lives on the shared open file
+    /// description, so a sibling from [`try_clone`](CtlStream::try_clone) used
+    /// concurrently during this window could observe `WouldBlock` — is
+    /// tolerated because the client's request/response is exclusive; a
+    /// clone-safe rewrite is tracked in docs/AUDIT-DEFERRED.md.
     pub(crate) fn write_all_until(
         &mut self,
         mut buf: &[u8],
         deadline: Instant,
         cancelled: Option<&AtomicBool>,
     ) -> io::Result<()> {
-        while !buf.is_empty() {
-            check_write_state(deadline, cancelled)?;
-            let written = match self {
-                #[cfg(unix)]
-                CtlStream::Unix(stream) => {
-                    use std::os::fd::AsRawFd as _;
+        #[cfg(unix)]
+        let nonblocking = {
+            let CtlStream::Unix(stream) = &*self;
+            UnixNonblockingGuard::new(stream)?
+        };
 
-                    loop {
-                        let flags = libc::MSG_DONTWAIT | libc::MSG_NOSIGNAL;
-                        // SAFETY: the stream owns this fd and `buf` is readable
-                        // for its full length during the call.
-                        let result = unsafe {
-                            libc::send(stream.as_raw_fd(), buf.as_ptr().cast(), buf.len(), flags)
-                        };
-                        if result >= 0 {
-                            break result as usize;
-                        }
-                        let error = io::Error::last_os_error();
-                        match error.kind() {
-                            io::ErrorKind::Interrupted => continue,
-                            io::ErrorKind::WouldBlock => {
-                                wait_unix_writable(stream, deadline, cancelled)?;
+        let result = (|| {
+            while !buf.is_empty() {
+                check_write_state(deadline, cancelled)?;
+                let written = match self {
+                    #[cfg(unix)]
+                    CtlStream::Unix(stream) => {
+                        use std::os::fd::AsRawFd as _;
+
+                        loop {
+                            let flags = libc::MSG_DONTWAIT | libc::MSG_NOSIGNAL;
+                            // SAFETY: the stream owns this fd and `buf` is readable
+                            // for its full length during the call.
+                            let result = unsafe {
+                                libc::send(
+                                    stream.as_raw_fd(),
+                                    buf.as_ptr().cast(),
+                                    buf.len(),
+                                    flags,
+                                )
+                            };
+                            if result >= 0 {
+                                break result as usize;
                             }
-                            _ => return Err(error),
+                            let error = io::Error::last_os_error();
+                            match error.kind() {
+                                io::ErrorKind::Interrupted => continue,
+                                io::ErrorKind::WouldBlock => {
+                                    wait_unix_writable(stream, deadline, cancelled)?;
+                                }
+                                _ => return Err(error),
+                            }
                         }
                     }
+                    #[cfg(windows)]
+                    CtlStream::Windows(stream) if stream.overlapped => {
+                        windows_io::write(&stream.file, buf, Some(deadline), cancelled)?
+                    }
+                    #[cfg(windows)]
+                    CtlStream::Windows(stream) => stream.file.write(buf)?,
+                };
+                if written == 0 {
+                    return Err(io::Error::new(
+                        io::ErrorKind::WriteZero,
+                        "failed to write the control frame",
+                    ));
                 }
-                #[cfg(windows)]
-                CtlStream::Windows(stream) if stream.overlapped => {
-                    windows_io::write(&stream.file, buf, Some(deadline), cancelled)?
-                }
-                #[cfg(windows)]
-                CtlStream::Windows(stream) => stream.file.write(buf)?,
-            };
-            if written == 0 {
-                return Err(io::Error::new(
-                    io::ErrorKind::WriteZero,
-                    "failed to write the control frame",
-                ));
+                buf = &buf[written..];
             }
-            buf = &buf[written..];
-        }
-        Ok(())
+            Ok(())
+        })();
+
+        #[cfg(unix)]
+        nonblocking.restore()?;
+        result
     }
 
     /// Wait until at least one byte can be read, the peer closes, or `timeout`
@@ -395,6 +413,60 @@ fn check_write_state(deadline: Instant, cancelled: Option<&AtomicBool>) -> io::R
         ));
     }
     Ok(())
+}
+
+/// Scopes `O_NONBLOCK` onto a Unix stream's fd for the lifetime of a bounded
+/// write, restoring the descriptor's original status flags afterward. See
+/// [`CtlStream::write_all_until`] for why the fd flag — not just per-`send`
+/// `MSG_DONTWAIT` — is required for correct non-blocking behavior on macOS.
+#[cfg(unix)]
+struct UnixNonblockingGuard {
+    fd: std::os::fd::RawFd,
+    original_flags: libc::c_int,
+    restored: bool,
+}
+
+#[cfg(unix)]
+impl UnixNonblockingGuard {
+    fn new(stream: &std::os::unix::net::UnixStream) -> io::Result<Self> {
+        use std::os::fd::AsRawFd as _;
+
+        let fd = stream.as_raw_fd();
+        // SAFETY: the stream owns this valid fd for the guard's lifetime.
+        let original_flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+        if original_flags < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        // SAFETY: F_SETFL accepts the retrieved status flags plus O_NONBLOCK.
+        if unsafe { libc::fcntl(fd, libc::F_SETFL, original_flags | libc::O_NONBLOCK) } < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(Self {
+            fd,
+            original_flags,
+            restored: false,
+        })
+    }
+
+    fn restore(mut self) -> io::Result<()> {
+        // SAFETY: the stream still owns the fd and these are its original flags.
+        if unsafe { libc::fcntl(self.fd, libc::F_SETFL, self.original_flags) } < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        self.restored = true;
+        Ok(())
+    }
+}
+
+#[cfg(unix)]
+impl Drop for UnixNonblockingGuard {
+    fn drop(&mut self) {
+        if !self.restored {
+            // Best-effort fallback during unwinding or an early return from
+            // `restore`; normal paths surface restoration errors explicitly.
+            unsafe { libc::fcntl(self.fd, libc::F_SETFL, self.original_flags) };
+        }
+    }
 }
 
 #[cfg(unix)]
@@ -1054,16 +1126,15 @@ mod tests {
         assert_eq!(duration_millis_ceil(Duration::from_millis(1_500)), 1_500);
     }
 
-    /// Audit fix: `write_all_until`'s Unix path used to toggle `O_NONBLOCK`
-    /// on the stream's fd for the call's duration via a now-removed guard —
-    /// entirely redundant with `MSG_DONTWAIT` on every `send()`, and a hazard
-    /// because `O_NONBLOCK` lives on the shared open file description, not
-    /// the fd, so it would also affect any `try_clone`d sibling handle (the
-    /// split reader/writer pattern this transport's real callers use). Pin
-    /// that a successful write leaves the fd's blocking-mode flag untouched.
+    /// `write_all_until` scopes `O_NONBLOCK` onto the fd for the duration of
+    /// the write (required on macOS, where `MSG_DONTWAIT` alone doesn't make
+    /// AF_UNIX sends non-blocking) and must RESTORE the descriptor's original
+    /// status flags before returning — leaving it set would leak the flag onto
+    /// any `try_clone`d sibling that shares the open file description. Pin that
+    /// a successful write ends with the fd's blocking-mode flag as it started.
     #[cfg(unix)]
     #[test]
-    fn write_all_until_does_not_toggle_fd_blocking_mode() {
+    fn write_all_until_restores_fd_blocking_mode() {
         use std::os::fd::AsRawFd as _;
 
         fn status_flags(stream: &std::os::unix::net::UnixStream) -> libc::c_int {
