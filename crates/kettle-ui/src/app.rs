@@ -1114,6 +1114,44 @@ fn session_screenshot_path(
     dir.join(format!("kettle-{unix_secs}-{pid}.png"))
 }
 
+/// Validate a caller-supplied `screenshot` destination (I1, audit
+/// v2.38.2). `path` reaches here verbatim from the ctl `screenshot` method
+/// / the `kettle_screenshot` MCP tool built on it — both reachable by an
+/// agent whose instructions can be steered by prompt-injected terminal
+/// content — and used to go straight to the renderer's plain
+/// `ImageBuffer::save` with NO containment: no canonicalization, no
+/// symlink rejection, no restriction to a safe directory. Pointing `path`
+/// at an existing sensitive file (`~/.bashrc`, `~/.ssh/authorized_keys`, a
+/// Windows Startup-folder item) — or a symlink planted ahead of time —
+/// made this a silent arbitrary-file-overwrite primitive.
+///
+/// `std::fs::symlink_metadata` (NOT `Path::exists`, which follows
+/// symlinks and would miss a dangling one) detects ANY existing entry at
+/// the destination — file, directory, or symlink — without following it,
+/// so a pre-planted symlink is caught even when its target doesn't exist
+/// yet. Requiring the destination to be brand-new closes the overwrite /
+/// symlink-follow primitive entirely — the same never-follow-an-existing-
+/// path discipline used elsewhere in this codebase
+/// (`kettle_state::atomic_replace`, the recorder) — at the cost of a
+/// second capture to the same `path` now failing instead of clobbering
+/// the first.
+///
+/// Pure (no filesystem writes, only a metadata probe) — unit-testable
+/// against a real temp directory.
+fn validate_screenshot_path(s: &str) -> Result<std::path::PathBuf, &'static str> {
+    if s.trim().is_empty() {
+        return Err("'path' is empty");
+    }
+    let path = std::path::PathBuf::from(s);
+    if std::fs::symlink_metadata(&path).is_ok() {
+        return Err(
+            "'path' already exists — refusing to overwrite an existing file or follow an \
+             existing symlink; choose a new destination",
+        );
+    }
+    Ok(path)
+}
+
 /// Terminator parity (`plugins/logger.py`): build the
 /// per-pane session-log path. Lives under `<cache>/kettle/logs/`
 /// (XDG-respecting via env probe; falls back to `./kettle-logs/`
@@ -2131,6 +2169,34 @@ pub(crate) struct ViState {
     visual_anchor: Option<(usize, usize)>,
 }
 
+/// Read a pane's live grid dimensions `(cols, rows)`. Used by `resize_all`
+/// to detect whether a given resize pass actually changed the focused
+/// pane's grid — the signal that stale vi-mode state (`ViState`) can no
+/// longer be trusted (audit v2.38.2). `None` if the pane is gone or its
+/// terminal lock can't be acquired (treated as "can't prove it's
+/// unchanged", which the caller folds into "changed").
+fn pane_grid_dims(mux: &Mux, id: u64) -> Option<(usize, usize)> {
+    use kettle_core::Dimensions;
+    let pane = mux.panes.get(&id)?;
+    let t = pane.term.term.lock().ok()?;
+    Some((t.columns(), t.screen_lines()))
+}
+
+/// Pure decision backing the `resize_all` vi-mode guard above: has a
+/// resize pass invalidated the vi-mode cursor/visual-selection anchor
+/// (raw grid indices with no built-in notion of "the grid under me just
+/// reflowed")? `None` on either side (pane gone / terminal lock
+/// contention) can't be proven unchanged, so it folds into "yes, exit
+/// vi-mode" via `!=` — fail toward dropping the risky derived state
+/// rather than trusting it, the same direction used elsewhere in this
+/// file (e.g. `native_theme_hint`, `motion_should_report`).
+fn vi_mode_invalidated_by_resize(
+    dims_before: Option<(usize, usize)>,
+    dims_after: Option<(usize, usize)>,
+) -> bool {
+    dims_before != dims_after
+}
+
 /// Pure-helper char-boundary truncation for status-bar
 /// titles. Caps at `max` chars; appends `…` when truncated so the
 /// elision is visible. Uses char count (not bytes) so UTF-8
@@ -2723,6 +2789,15 @@ pub enum ConfirmAction {
     /// Send a clipboard/PRIMARY paste after the user accepted the multi-line
     /// paste protection prompt.
     PasteText(Box<str>),
+    /// Finish a Settings keybind rebind that would otherwise silently steal
+    /// a chord already bound to a different action (audit v2.38.2). Applies
+    /// via `App::apply_keybind_rebind` — identical to the direct
+    /// (no-conflict) rebind path — once the user confirms the reassignment.
+    RebindKeybind {
+        trig: Trigger,
+        act: Action,
+        action_name: &'static str,
+    },
 }
 
 /// Which buttons a confirm modal shows. v1 is just
@@ -5549,9 +5624,75 @@ impl App {
                 plan.push((id, cols, rows));
             }
         }
+        // Vi-mode's cursor + visual-selection anchor (`ViState`) are raw grid
+        // indices captured at movement/`v`-press time; NOTHING revisits them
+        // after a resize/reflow (audit v2.38.2 — before this fix, resizing the
+        // window mid-selection left a stale (row, col) that `y` would happily
+        // yank text from, silently copying whatever now occupies that cell in
+        // the reflowed grid instead of what the user actually highlighted).
+        // Snapshot the focused pane's pre-resize grid dims so we can tell
+        // whether THIS call actually changed them — a resize_all triggered by
+        // an unrelated split's ratio drag, for instance, shouldn't needlessly
+        // kick the user out of vi-mode.
+        let focused_id = ws.mux.active_focus();
+        let focused_dims_before = focused_id.and_then(|id| pane_grid_dims(&ws.mux, id));
         for (id, cols, rows) in plan {
             if let Some(p) = ws.mux.panes.get_mut(&id) {
                 p.term.resize(cols, rows, cw, ch);
+            }
+        }
+        if ws.vi_mode.is_some() {
+            let focused_dims_after = focused_id.and_then(|id| pane_grid_dims(&ws.mux, id));
+            if vi_mode_invalidated_by_resize(focused_dims_before, focused_dims_after) {
+                // Same "transient overlay drops out from under a state
+                // change it can't safely reconcile" pattern used elsewhere
+                // (e.g. focus loss disarming latched drag flags) — exiting
+                // is simpler and strictly safer than reclamping row/col/
+                // anchor to the new bounds, which would keep the indices
+                // in-range but still pointing at unrelated post-reflow text.
+                ws.vi_mode = None;
+            }
+        }
+    }
+
+    /// Shared zoom transition for `Action::ToggleZoom` and
+    /// `Action::ScaledZoom` (audit v2.38.2 fix — the two actions flip the
+    /// SAME `ws.mux` zoom flag but used to maintain
+    /// `ws.scaled_zoom_prev_font_size` independently, so a plain
+    /// `ToggleZoom` could un-zoom a pane that `ScaledZoom` had enlarged
+    /// without ever restoring the font or clearing the stale baseline —
+    /// leaving the pane visually un-zoomed but oversized, and corrupting
+    /// any *later* `ScaledZoom` call's save/restore pairing).
+    ///
+    /// `scale` is `Some(factor)` for `ScaledZoom` (bump the live font by
+    /// `factor` on zoom-in, saving the pre-bump size the first time) and
+    /// `None` for plain `ToggleZoom` (never bumps the font on zoom-in —
+    /// unchanged historical behavior). Either action, on zoom-*out*,
+    /// restores the font from `scaled_zoom_prev_font_size` and clears it
+    /// if a scaled-zoom baseline is pending — so the pairing can never be
+    /// left desynced no matter which action toggled the flag.
+    fn toggle_zoom_with_scale(&mut self, ws: &mut WindowState, scale: Option<f32>) {
+        ws.mux.toggle_zoom();
+        self.resize_all(ws);
+        let now_zoomed = ws.mux.is_zoomed();
+        if let Some(r) = ws.renderer.as_mut() {
+            if now_zoomed {
+                if let Some(factor) = scale {
+                    // Baseline off the LIVE renderer size, not
+                    // `self.cfg.font_size`. Increase/DecreaseFontSize only
+                    // call `r.set_font_size` (they never write
+                    // `cfg.font_size`), so a prior manual zoom left the
+                    // config value stale — scaling from it would otherwise
+                    // discard the user's manual zoom on restore.
+                    let cur = r.font_size();
+                    if ws.scaled_zoom_prev_font_size.is_none() {
+                        ws.scaled_zoom_prev_font_size = Some(cur);
+                    }
+                    let new_size = (cur * factor).clamp(6.0, 96.0);
+                    r.set_font_size(new_size);
+                }
+            } else if let Some(prev) = ws.scaled_zoom_prev_font_size.take() {
+                r.set_font_size(prev);
             }
         }
     }
@@ -5690,7 +5831,15 @@ impl App {
                         } else {
                             String::new()
                         };
-                        pane.term.write(fmt(&text).as_bytes());
+                        // Bound the reply symmetrically with the write path
+                        // above: the OS clipboard is outside kettle's control
+                        // (a big log/diff/webpage copy is plausible with no
+                        // attacker involved, and a malicious remote program
+                        // querying via OSC 52 `?` shouldn't be able to force an
+                        // unbounded base64 encode + single PTY write either
+                        // way).
+                        let text = clamp_osc52(&text, OSC52_MAX);
+                        pane.term.write(fmt(text).as_bytes());
                     }
                     TermEvent::TextAreaSizeRequest(fmt) => {
                         // CSI 14 t — text-area size in pixels. Sixel / kitty
@@ -10140,8 +10289,12 @@ impl App {
                 };
             }
             Action::ToggleZoom => {
-                ws.mux.toggle_zoom();
-                self.resize_all(ws);
+                // v2.38.2 audit fix: route through the shared helper (also
+                // used by ScaledZoom) so un-zooming via the plain toggle
+                // still restores/clears a pending scaled-zoom font
+                // baseline instead of leaving it stale — see
+                // `toggle_zoom_with_scale`'s doc comment.
+                self.toggle_zoom_with_scale(ws, None);
             }
             // v2.20.0 (Ghostty `equalize_splits` parity): rebalance the
             // active tab's split tree to equal pane areas, then push the new
@@ -10282,30 +10435,12 @@ impl App {
             // some other way and then hits ScaledZoom, the second
             // call still flips state correctly because we look at
             // the post-toggle zoom flag and pair save/restore via
-            // a single `Option<f32>`.
+            // a single `Option<f32>` — and (v2.38.2 audit fix) `ToggleZoom`
+            // now shares this exact save/restore logic via
+            // `toggle_zoom_with_scale` instead of maintaining its own copy,
+            // so the pairing can't drift between the two actions.
             Action::ScaledZoom => {
-                ws.mux.toggle_zoom();
-                self.resize_all(ws);
-                let now_zoomed = ws.mux.is_zoomed();
-                if let Some(r) = ws.renderer.as_mut() {
-                    if now_zoomed {
-                        // Baseline off the LIVE renderer size,
-                        // not `self.cfg.font_size`. Increase/DecreaseFontSize
-                        // only call `r.set_font_size` (they never write
-                        // `cfg.font_size`), so a prior manual zoom left the
-                        // config value stale — ScaledZoom would otherwise scale
-                        // from the original config size and, on exit, *discard*
-                        // the user's manual zoom by restoring it.
-                        let cur = r.font_size();
-                        if ws.scaled_zoom_prev_font_size.is_none() {
-                            ws.scaled_zoom_prev_font_size = Some(cur);
-                        }
-                        let new_size = (cur * 1.5).clamp(6.0, 96.0);
-                        r.set_font_size(new_size);
-                    } else if let Some(prev) = ws.scaled_zoom_prev_font_size.take() {
-                        r.set_font_size(prev);
-                    }
-                }
+                self.toggle_zoom_with_scale(ws, Some(1.5));
             }
             Action::ToggleFullscreen => {
                 ws.fullscreen = !ws.fullscreen;
@@ -11580,6 +11715,13 @@ impl App {
             ConfirmAction::PasteText(text) => {
                 self.paste_text_confirmed(ws, &text);
             }
+            ConfirmAction::RebindKeybind {
+                trig,
+                act,
+                action_name,
+            } => {
+                self.apply_keybind_rebind(trig, act, action_name);
+            }
         }
     }
 
@@ -11636,7 +11778,16 @@ impl App {
                 pane.term.set_native_cwd(native_cwd);
                 if detected != pane.remote_context {
                     if let Some(ctx) = &detected {
-                        pane.title = kettle_remote::format_remote_title(ctx);
+                        // I1 parity (audit v2.38.2): `format_remote_title` just
+                        // interpolates host/user/container strings scanned out of
+                        // a local process's argv — untrusted the same way an OSC 2
+                        // title is untrusted. Route it through the same
+                        // `sanitize_title()` the OSC-2 path uses (see the `Title`
+                        // arm in `drain_events`) so a maliciously-named remote
+                        // host/container can't smuggle control characters or
+                        // Unicode bidi overrides into the OS titlebar / Alt-Tab /
+                        // tab label / accessibility-tree label.
+                        pane.title = sanitize_title(&kettle_remote::format_remote_title(ctx));
                         pane.title_is_placeholder = false;
                     }
                     pane.remote_context = detected;
@@ -13257,11 +13408,17 @@ impl App {
             })
         };
         let path = match req.params.get("path").and_then(|v| v.as_str()) {
-            Some(s) if !s.trim().is_empty() => std::path::PathBuf::from(s),
-            Some(_) => {
-                let _ = reply.send(Response::err(req.id, ec::BAD_PARAMS, "'path' is empty"));
-                return;
-            }
+            // I1 (audit v2.38.2): validate before this path is handed to the
+            // renderer's plain `ImageBuffer::save` — see
+            // `validate_screenshot_path`'s doc comment for the full threat
+            // model (an MCP-reachable arbitrary-file-overwrite primitive).
+            Some(s) => match validate_screenshot_path(s) {
+                Ok(p) => p,
+                Err(message) => {
+                    let _ = reply.send(Response::err(req.id, ec::BAD_PARAMS, message));
+                    return;
+                }
+            },
             None => {
                 let secs = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
@@ -14669,6 +14826,54 @@ impl App {
         }
     }
 
+    /// Apply a Settings-captured keybind rebind live and persist it.
+    /// `action_name` is the config token (`Action::from_name`'s input,
+    /// e.g. `"copy"`) for the action `act` already decodes to.
+    ///
+    /// v2.28.0 (audit): a rebind REPLACES the action's binding, so this
+    /// first drops every OTHER chord currently mapped to `act` (else the
+    /// Keybinds row could show a stale chord — the display scans the
+    /// `keybinds` HashMap non-deterministically) and persists an `unbind`
+    /// for each dropped chord before the new `bind`, so a reload doesn't
+    /// resurrect the old chord alongside the new one.
+    ///
+    /// Shared by the direct (no-conflict) rebind path and
+    /// `ConfirmAction::RebindKeybind` (audit v2.38.2 — a chord already
+    /// bound to a DIFFERENT action routes through a confirm dialog first
+    /// instead of stealing it silently, but applies via this exact same
+    /// method once the user confirms) so the two paths can never diverge.
+    fn apply_keybind_rebind(&mut self, trig: Trigger, act: Action, action_name: &str) {
+        let label = trig.label();
+        let stale: Vec<String> = self
+            .cfg
+            .keybinds
+            .iter()
+            .filter(|(t, v)| **v == act && **t != trig)
+            .map(|(t, _)| t.label())
+            .collect();
+        self.cfg.keybinds.retain(|_, v| *v != act);
+        self.cfg.keybinds.insert(trig, act);
+        // Persist: unbind the old chord(s), then bind the new one. This
+        // also naturally covers stealing a chord from another action —
+        // appending `trig=action_name` after any earlier `trig=<other>`
+        // line means the last-one-wins reload resolves `trig` to the new
+        // action, matching the live HashMap `insert` above.
+        if let Some(path) = self
+            .config_path
+            .clone()
+            .or_else(kettle_config::Config::default_path)
+        {
+            for old in &stale {
+                if let Err(e) = kettle_config::append_keybind(&path, old, "unbind") {
+                    log::warn!("append_keybind({old}=unbind) failed: {e}");
+                }
+            }
+            if let Err(e) = kettle_config::append_keybind(&path, &label, action_name) {
+                log::warn!("append_keybind({label}={action_name}) failed: {e}");
+            }
+        }
+    }
+
     /// Keyboard routing while the settings overlay is open.
     /// ↑/↓ move between fields, Tab/Shift+Tab switch category, ←/→ change the
     /// focused field's value, Space/Enter activate (toggle / cycle forward),
@@ -14722,37 +14927,40 @@ impl App {
                     && let Some(act) = Action::from_name(action)
                 {
                     let trig = Trigger::new(mods, kk);
-                    let label = trig.label();
-                    // v2.28.0 (audit): a rebind REPLACES the action's binding.
-                    // Capture the chord(s) already mapped to this action (other
-                    // than the new one) and drop them live — so the old chord
-                    // stops firing and the Keybinds row can't show a stale chord
-                    // (the display scans the keybinds HashMap non-deterministically)
-                    // — then persist an `unbind` for each so a reload doesn't
-                    // re-add the default chord alongside the new one.
-                    let stale: Vec<String> = self
-                        .cfg
-                        .keybinds
-                        .iter()
-                        .filter(|(t, v)| **v == act && **t != trig)
-                        .map(|(t, _)| t.label())
-                        .collect();
-                    self.cfg.keybinds.retain(|_, v| *v != act);
-                    self.cfg.keybinds.insert(trig, act);
-                    // Persist: unbind the old chord(s), then bind the new one.
-                    if let Some(path) = self
-                        .config_path
-                        .clone()
-                        .or_else(kettle_config::Config::default_path)
+                    // Audit v2.38.2: a chord already bound to a DIFFERENT
+                    // action must not be silently stolen — the old
+                    // action's ONLY binding could vanish with no warning
+                    // and no undo path. Mirror the modifier-safety check
+                    // just above (which also refuses to apply silently)
+                    // by routing through a confirm dialog instead of
+                    // applying immediately; Cancel is the safe default.
+                    if let Some(stolen_from) =
+                        self.cfg.keybinds.get(&trig).filter(|v| **v != act).cloned()
                     {
-                        for old in &stale {
-                            if let Err(e) = kettle_config::append_keybind(&path, old, "unbind") {
-                                log::warn!("append_keybind({old}=unbind) failed: {e}");
-                            }
-                        }
-                        if let Err(e) = kettle_config::append_keybind(&path, &label, action) {
-                            log::warn!("append_keybind({label}={action}) failed: {e}");
-                        }
+                        let chord_label = trig.label();
+                        let stolen_name = kettle_config::keybinds::action_label(&stolen_from);
+                        let new_name = kettle_config::keybinds::action_label(&act);
+                        ws.confirm_dialog = Some(ConfirmDialogState {
+                            prompt: format!(
+                                "{chord_label} is already bound to \"{stolen_name}\". \
+                                 Reassign it to \"{new_name}\"?"
+                            ),
+                            buttons: vec![
+                                ConfirmButton::Cancel,
+                                ConfirmButton::Confirm {
+                                    label: "Reassign".to_string(),
+                                    destructive: false,
+                                },
+                            ],
+                            focus_idx: 0,
+                            on_confirm: ConfirmAction::RebindKeybind {
+                                trig,
+                                act,
+                                action_name: action,
+                            },
+                        });
+                    } else {
+                        self.apply_keybind_rebind(trig, act, action);
                     }
                 }
                 if let Some(n) = ws.settings_nav.as_mut() {
@@ -14899,18 +15107,36 @@ impl App {
         // graph can't hot-swap and every window shares one adapter), so we flag
         // a restart affordance instead of rebuilding the renderer live.
         if key_str == "gpu" {
-            if new_val == "auto" {
-                self.persist_pref("gpu-vendor-id", "0");
-                self.persist_pref("gpu-device-id", "0");
-                self.persist_pref("gpu-name", "");
+            // Audit v2.38.2: fold all three (or zero, on an unexpected
+            // `new_val` shape) `persist_pref` results together instead of
+            // discarding them — a partial/total write failure (read-only
+            // config, momentarily locked file, no write permission) must
+            // not silently claim "restart to apply" when the pin didn't
+            // actually land on disk, only to revert to auto on the next
+            // launch with no error ever shown.
+            let saved = if new_val == "auto" {
+                let a = self.persist_pref("gpu-vendor-id", "0");
+                let b = self.persist_pref("gpu-device-id", "0");
+                let c = self.persist_pref("gpu-name", "");
+                a && b && c
             } else if let Some((v, rest)) = new_val.split_once(':')
                 && let Some((d, name)) = rest.split_once(':')
             {
-                self.persist_pref("gpu-vendor-id", &format!("0x{v}"));
-                self.persist_pref("gpu-device-id", &format!("0x{d}"));
-                self.persist_pref("gpu-name", name);
+                let a = self.persist_pref("gpu-vendor-id", &format!("0x{v}"));
+                let b = self.persist_pref("gpu-device-id", &format!("0x{d}"));
+                let c = self.persist_pref("gpu-name", name);
+                a && b && c
+            } else {
+                false
+            };
+            if saved {
+                ws.settings_restart_pending = true;
+            } else {
+                fire_notify(
+                    "kettle: setting not saved",
+                    "Applied for this session — couldn't write it to your config file.",
+                );
             }
-            ws.settings_restart_pending = true;
             self.reload_config(ws);
             return;
         }
@@ -14926,8 +15152,18 @@ impl App {
         // meant to set *uniform* padding, but persisted only the X
         // axis — leaving `window-padding-y` at its default produced
         // visibly lopsided padding. Mirror the value to the Y axis.
-        if key_str == "window-padding-x" {
-            self.persist_pref("window-padding-y", &new_val);
+        //
+        // Audit v2.38.2: surface a failed mirror write the same way the
+        // general path above does — the X write can succeed while this one
+        // fails (e.g. the config file becomes read-only or briefly locked
+        // between the two calls), silently leaving lopsided padding after
+        // restart with no error ever shown.
+        if key_str == "window-padding-x" && !self.persist_pref("window-padding-y", &new_val) {
+            fire_notify(
+                "kettle: setting not saved",
+                "Window padding applied for this session, but the vertical axis \
+                 couldn't be written — padding may end up lopsided after restart.",
+            );
         }
         // v2.23.0: the remaining GPU policy keys (power preference / backend /
         // force-software) also only take effect on restart.
@@ -20327,7 +20563,7 @@ mod tests {
         App, ContextMenuItem, assign_mnemonics, count_rows_fitting, filter_disabled,
         find_menu_row_y, modal_swallows_pointer, rank_layouts, sanitize_native_window_title,
         sanitize_title, selection_kind, should_restore_session, should_reveal_after_renderer_init,
-        startup_inner_size_px, typeahead_match,
+        startup_inner_size_px, typeahead_match, vi_mode_invalidated_by_resize,
     };
     use kettle_config::Action;
     use kettle_core::SelectionType;
@@ -20658,6 +20894,66 @@ mod tests {
         // Length is capped at 512 chars.
         let long = "x".repeat(5000);
         assert_eq!(sanitize_title(&long).chars().count(), 512);
+    }
+
+    /// Audit v2.38.2 fix: `poll_remote_contexts` must sanitize
+    /// `kettle_remote::format_remote_title`'s output exactly like the OSC-2
+    /// `Title` path does — the host/user/container strings it interpolates
+    /// come verbatim from a scanned process's argv (untrusted, same class as
+    /// an OSC-set title), so without this a maliciously-named SSH host or
+    /// container could smuggle bidi overrides / control characters into the
+    /// OS titlebar, Alt-Tab, the tab label, and the accessibility tree.
+    #[test]
+    fn remote_title_is_sanitized_like_osc_titles() {
+        let evil_host = kettle_remote::RemoteContext::Ssh {
+            host: "safe\u{202e}evil".to_string(),
+            user: None,
+        };
+        let raw = kettle_remote::format_remote_title(&evil_host);
+        assert!(
+            raw.contains('\u{202e}'),
+            "sanity: format_remote_title itself does no filtering"
+        );
+        let sanitized = sanitize_title(&raw);
+        assert!(
+            !sanitized.contains('\u{202e}') && !sanitized.chars().any(|c| c.is_control()),
+            "sanitize_title(format_remote_title(..)) must neutralize bidi/control chars: {sanitized:?}"
+        );
+
+        let evil_container = kettle_remote::RemoteContext::Container {
+            runtime: kettle_remote::ContainerRuntime::Docker,
+            container: "evil\x1b]0;pwned\x07".to_string(),
+        };
+        let sanitized = sanitize_title(&kettle_remote::format_remote_title(&evil_container));
+        assert!(
+            !sanitized.chars().any(|c| c.is_control()),
+            "container-name control chars must be neutralized: {sanitized:?}"
+        );
+    }
+
+    /// Audit v2.38.2 fix: a resize/reflow that actually changes the focused
+    /// pane's grid dims must be detected so `resize_all` can exit vi-mode
+    /// (its cursor/visual-anchor are raw indices into the OLD grid shape and
+    /// would otherwise silently yank the wrong rows). `None` on either side
+    /// (pane gone / lock contention) can't be proven safe, so it must also
+    /// count as "invalidated" rather than "unchanged".
+    #[test]
+    fn vi_mode_invalidated_by_resize_detects_dim_changes() {
+        assert!(!vi_mode_invalidated_by_resize(
+            Some((80, 24)),
+            Some((80, 24))
+        ));
+        assert!(vi_mode_invalidated_by_resize(
+            Some((80, 24)),
+            Some((100, 24))
+        ));
+        assert!(vi_mode_invalidated_by_resize(
+            Some((80, 24)),
+            Some((80, 30))
+        ));
+        assert!(vi_mode_invalidated_by_resize(Some((80, 24)), None));
+        assert!(vi_mode_invalidated_by_resize(None, Some((80, 24))));
+        assert!(!vi_mode_invalidated_by_resize(None, None));
     }
 
     /// Native OS titlebars do not reliably use kettle's terminal font fallback,
@@ -21232,21 +21528,59 @@ mod tests {
     /// is stale after any manual Increase/DecreaseFontSize (which only touch the
     /// renderer), so scaling from it discards the user's manual zoom on exit.
     /// A behavioral test needs a live renderer + mux; pin it at the source.
+    ///
+    /// The scaling logic now lives in the shared `toggle_zoom_with_scale`
+    /// helper (both `ToggleZoom` and `ScaledZoom` call it — see the next
+    /// test), so the guard checks the helper body rather than the
+    /// `Action::ScaledZoom` arm itself.
     #[test]
     fn scaled_zoom_baselines_off_live_font_size() {
         let src = include_str!("app.rs");
-        let arm = src
+        let helper = src
+            .split("fn toggle_zoom_with_scale(")
+            .nth(1)
+            .and_then(|s| s.split("\n    fn apply_window_resize").next())
+            .expect("toggle_zoom_with_scale body present");
+        assert!(
+            helper.contains("let cur = r.font_size();") && helper.contains("cur * factor"),
+            "ScaledZoom must scale from the live renderer size"
+        );
+        assert!(
+            !helper.contains("self.cfg.font_size"),
+            "ScaledZoom must not scale from the (stale) config font size"
+        );
+    }
+
+    /// Drift guard (audit v2.38.2 fix). `ToggleZoom` and `ScaledZoom` must
+    /// route through the SAME `toggle_zoom_with_scale` transition helper,
+    /// which owns `scaled_zoom_prev_font_size` — previously `ToggleZoom`
+    /// toggled the zoom flag directly and never touched that field, so a
+    /// plain zoom-out after a `ScaledZoom` zoom-in left the font enlarged
+    /// and the saved baseline stale (the pane read as un-zoomed but
+    /// oversized, and a later `ScaledZoom` compounded from the wrong size).
+    /// A behavioral test needs a live renderer + mux; pin the shared call
+    /// at the source.
+    #[test]
+    fn toggle_zoom_and_scaled_zoom_share_the_transition_helper() {
+        let src = include_str!("app.rs");
+        let toggle_arm = src
+            .split("Action::ToggleZoom => {")
+            .nth(1)
+            .and_then(|s| s.split("Action::EqualizeSplits").next())
+            .expect("ToggleZoom arm present");
+        assert!(
+            toggle_arm.contains("self.toggle_zoom_with_scale(ws, None);"),
+            "plain ToggleZoom must route through toggle_zoom_with_scale so \
+             zoom-out restores/clears any pending scaled-zoom font baseline"
+        );
+        let scaled_arm = src
             .split("Action::ScaledZoom => {")
             .nth(1)
             .and_then(|s| s.split("Action::ToggleFullscreen").next())
             .expect("ScaledZoom arm present");
         assert!(
-            arm.contains("let cur = r.font_size();") && arm.contains("cur * 1.5"),
-            "ScaledZoom must scale from the live renderer size"
-        );
-        assert!(
-            !arm.contains("self.cfg.font_size * 1.5"),
-            "ScaledZoom must not scale from the (stale) config font size"
+            scaled_arm.contains("self.toggle_zoom_with_scale(ws, Some(1.5));"),
+            "ScaledZoom must route through the same shared helper as ToggleZoom"
         );
     }
 
@@ -21528,13 +21862,54 @@ mod tests {
     /// symmetric — persisting only X leaves Y at its default (lopsided). A
     /// behavioral test needs the live overlay + persist path; pin the
     /// dual-write at the source.
+    ///
+    /// Audit v2.38.2 fix: the Y mirror write's `persist_pref` result must
+    /// also be checked (not discarded) and surfaced via `fire_notify` on
+    /// failure, the same as the general Settings write path just above it —
+    /// otherwise a failed mirror write after a successful X write leaves
+    /// lopsided padding after restart with no error shown.
     #[test]
     fn window_padding_setting_writes_both_axes() {
         let src = include_str!("app.rs");
         assert!(
-            src.contains("if key_str == \"window-padding-x\" {")
-                && src.contains("self.persist_pref(\"window-padding-y\", &new_val);"),
-            "the Window-padding control must mirror its value to window-padding-y"
+            src.contains(
+                "if key_str == \"window-padding-x\" && !self.persist_pref(\"window-padding-y\", &new_val) {"
+            ),
+            "the Window-padding control must mirror its value to window-padding-y AND \
+             check the mirror write's result"
+        );
+    }
+
+    /// Drift guard (audit v2.38.2 fix). The GPU device-picker branch writes
+    /// THREE keys (vendor/device/name) and used to discard every
+    /// `persist_pref` result, unconditionally setting
+    /// `settings_restart_pending = true` even when none of the three writes
+    /// landed on disk — telling the user a restart will apply a pin that
+    /// silently reverts to auto instead. A behavioral test needs a live
+    /// Settings overlay + a failing config write; pin the checked-result
+    /// shape at the source.
+    #[test]
+    fn gpu_picker_checks_persist_results_before_flagging_restart() {
+        let src = include_str!("app.rs");
+        let arm = src
+            .split("if key_str == \"gpu\" {")
+            .nth(1)
+            .and_then(|s| {
+                s.split("\n        // Notify if the Settings change can't")
+                    .next()
+            })
+            .expect("gpu picker branch present");
+        assert!(
+            arm.contains("let a = self.persist_pref(\"gpu-vendor-id\", \"0\");")
+                && arm.contains("a && b && c"),
+            "the auto branch must fold all three persist_pref results together"
+        );
+        assert!(
+            arm.contains("if saved {")
+                && arm.contains("ws.settings_restart_pending = true;")
+                && arm.contains("fire_notify("),
+            "settings_restart_pending must only be set when the writes actually succeeded, \
+             and a failure must be surfaced via fire_notify"
         );
     }
 
@@ -22793,6 +23168,49 @@ mod tests {
         assert!(keybind_chord_is_safe(Mods::CTRL, KKey::Char('a')));
         assert!(keybind_chord_is_safe(Mods::ALT, KKey::Enter));
         assert!(keybind_chord_is_safe(Mods::SHIFT, KKey::Char('z')));
+    }
+
+    /// Drift guard (audit v2.38.2 fix). Rebinding a Settings keybind row to
+    /// a chord already bound to a DIFFERENT action must not silently steal
+    /// it — the modifier-safety check a few lines above already refuses to
+    /// apply silently (it fires a notify and stays in capture mode), and
+    /// the conflict check must follow that same precedent instead of
+    /// falling straight into `keybinds.insert`. A behavioral test needs a
+    /// live App + WindowState + Settings overlay; pin the shape at the
+    /// source level.
+    #[test]
+    fn keybind_rebind_conflict_is_gated_behind_confirmation() {
+        let src = include_str!("app.rs");
+        let capture_arm = src
+            .split("if !keybind_chord_is_safe(mods, kk) {")
+            .nth(1)
+            .and_then(|s| s.split("\n        match key {").next())
+            .expect("chord-capture body present");
+        assert!(
+            capture_arm.contains("self.cfg.keybinds.get(&trig).filter(|v| **v != act).cloned()"),
+            "a conflicting existing binding must be looked up before applying the rebind"
+        );
+        assert!(
+            capture_arm.contains("ws.confirm_dialog = Some(ConfirmDialogState {")
+                && capture_arm.contains("ConfirmAction::RebindKeybind {"),
+            "a conflicting rebind must route through a confirm dialog, not apply immediately"
+        );
+        assert!(
+            capture_arm.contains("self.apply_keybind_rebind(trig, act, action);"),
+            "a non-conflicting rebind must still apply immediately via the shared helper"
+        );
+        // The confirm dialog's dispatch must finish the SAME way the
+        // direct path does — no separate, divergent apply logic.
+        let dispatch = src
+            .split("fn dispatch_confirm_action(")
+            .nth(1)
+            .and_then(|s| s.split("\n    fn ").next())
+            .expect("dispatch_confirm_action body present");
+        assert!(
+            dispatch.contains("ConfirmAction::RebindKeybind {")
+                && dispatch.contains("self.apply_keybind_rebind(trig, act, action_name);"),
+            "confirming a rebind must apply via apply_keybind_rebind, matching the direct path"
+        );
     }
 
     #[test]
@@ -24215,6 +24633,59 @@ mod tests {
         );
         // .png extension is fixed (vs the `session_log_path` .log shape).
         assert_eq!(p.extension().and_then(|s| s.to_str()), Some("png"));
+    }
+
+    /// Audit v2.38.2 fix. `validate_screenshot_path` must refuse an empty
+    /// path AND — the actual security fix — any destination that already
+    /// exists in any form, so the ctl `screenshot` method / the
+    /// `kettle_screenshot` MCP tool can never be pointed at an existing
+    /// sensitive file to silently overwrite it.
+    #[test]
+    fn validate_screenshot_path_rejects_empty_and_existing_destinations() {
+        use super::validate_screenshot_path;
+
+        assert!(validate_screenshot_path("").is_err());
+        assert!(validate_screenshot_path("   ").is_err());
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        // A brand-new path inside a real (existing) directory is fine.
+        let fresh = dir.path().join("new-shot.png");
+        assert_eq!(
+            validate_screenshot_path(fresh.to_str().unwrap()).unwrap(),
+            fresh
+        );
+
+        // An EXISTING regular file must be refused — this is the
+        // "~/.bashrc" / "~/.ssh/authorized_keys" overwrite scenario.
+        let existing_file = dir.path().join("already-here.png");
+        std::fs::write(&existing_file, b"not a screenshot").expect("write fixture file");
+        assert!(validate_screenshot_path(existing_file.to_str().unwrap()).is_err());
+
+        // An EXISTING directory must also be refused.
+        assert!(validate_screenshot_path(dir.path().to_str().unwrap()).is_err());
+    }
+
+    /// Audit v2.38.2 fix. A pre-planted symlink must be refused even when
+    /// its target doesn't exist (a dangling symlink) — `Path::exists`
+    /// follows symlinks and would report `false` for a dangling one,
+    /// wrongly treating the destination as free; `symlink_metadata` must
+    /// be used instead so the attacker can't race a "the target doesn't
+    /// exist yet" window. Unix-only: creating a symlink on Windows needs
+    /// Developer Mode / admin, which isn't guaranteed in CI.
+    #[cfg(unix)]
+    #[test]
+    fn validate_screenshot_path_rejects_dangling_symlink() {
+        use super::validate_screenshot_path;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let link = dir.path().join("evil-link.png");
+        let target = dir.path().join("does-not-exist-yet");
+        std::os::unix::fs::symlink(&target, &link).expect("create symlink");
+        assert!(!target.exists(), "sanity: the symlink target is dangling");
+        assert!(
+            validate_screenshot_path(link.to_str().unwrap()).is_err(),
+            "a dangling symlink must still be refused, not silently followed/created through"
+        );
     }
 
     /// Drift guard. `session_log_path` is the pure helper

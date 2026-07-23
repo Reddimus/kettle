@@ -1,9 +1,15 @@
 # Terminator `tab-position = left / right` (vertical tabs) — design
 
-> Status: design only. The parser already accepts the
-> values, and the runtime already logs a warn-fallback to top for
-> them; the render-layout change is a real chunk of work. This doc
-> lays out the architecture + phased roadmap.
+> Status: **Shipped in v1.46.0.** All 8 phases landed:
+> `TabBarPos::Left`/`Right` store the real orientation (no more
+> warn-and-fallback-to-top), `content_rect_for`/`tab_bar_vertical`
+> stack segments top-to-bottom on the strip side, and `tab-bar-width`
+> is configurable. See `TabBarPos::is_vertical` and the vertical
+> branches in `crates/kettle-render/src/lib.rs` (tab-bar layout, hit
+> testing, and paint) and `crates/kettle-config/src/lib.rs`
+> (`tab-position = left/right` parsing). This doc is kept as the
+> historical design record; the phase roadmap below describes what
+> was built.
 
 ## What it is
 

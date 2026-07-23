@@ -159,6 +159,25 @@ fn capped_instance_count(requested: usize, max_instances: usize) -> usize {
     requested.min(max_instances)
 }
 
+/// Decide whether an "N image placements dropped" warning should fire this
+/// frame, given how many placements are being dropped and what was last
+/// warned about. Returns `(should_warn, next_last_warned)`.
+///
+/// Only warns on a *transition* to a new drop count (including 0 -> N and any
+/// change in N), never every frame of a steady-state overflow — a REPL or TUI
+/// pinned above the placement budget would otherwise spam one `log::warn!`
+/// per frame forever. Dropping back to 0 clears the memory, so the next
+/// overflow (even at the same count) is reported again as a fresh event.
+fn dropped_warn_transition(dropped: usize, last_warned: Option<usize>) -> (bool, Option<usize>) {
+    if dropped == 0 {
+        (false, None)
+    } else if last_warned == Some(dropped) {
+        (false, last_warned)
+    } else {
+        (true, Some(dropped))
+    }
+}
+
 fn record_draw(draws: &mut Vec<(usize, u32, u32)>, key: usize, index: u32) {
     if let Some((last_key, start, count)) = draws.last_mut()
         && *last_key == key
@@ -185,6 +204,11 @@ pub struct ImagePipeline {
     budget: GraphicsBudget,
     max_instances: usize,
     epoch: u64,
+    /// Drop count from the last frame a "skipping N image placements"
+    /// warning fired, so `upload` logs once per exceedance transition
+    /// instead of every frame of a steady-state overflow. `None` once the
+    /// backlog clears (or on startup).
+    last_dropped_warn: Option<usize>,
 }
 
 impl ImagePipeline {
@@ -336,6 +360,7 @@ impl ImagePipeline {
             budget,
             max_instances,
             epoch: 0,
+            last_dropped_warn: None,
         })
     }
 
@@ -470,9 +495,24 @@ impl ImagePipeline {
         self.draws.clear();
         self.epoch = self.epoch.saturating_add(1);
         if items.is_empty() {
+            // No placements this frame, so nothing is being dropped; clear the
+            // transition memory so a later overflow (even at the same count)
+            // is reported as a fresh event rather than staying suppressed.
+            self.last_dropped_warn = None;
             return;
         }
         let item_count = capped_instance_count(items.len(), self.max_instances);
+        let dropped = items.len() - item_count;
+        let (should_warn, next_warn_state) =
+            dropped_warn_transition(dropped, self.last_dropped_warn);
+        self.last_dropped_warn = next_warn_state;
+        if should_warn {
+            log::warn!(
+                "skipping {dropped} image placement(s): per-frame budget of {} exceeded ({} requested this frame)",
+                self.max_instances,
+                items.len()
+            );
+        }
         if item_count > self.cap {
             let Some(next_cap) = item_count.checked_next_power_of_two() else {
                 log::warn!("image instance count overflow; skipping frame images");
@@ -644,6 +684,21 @@ mod aba_guard_tests {
         let inline = kettle_core::GraphicsLimits::default().placements;
         assert_eq!(super::capped_instance_count(4096, inline), inline);
         assert_eq!(super::capped_instance_count(4096, 4096), 4096);
+    }
+
+    #[test]
+    fn dropped_warn_fires_once_per_exceedance_transition() {
+        // First overflow: no prior warning recorded -> warn, remember 5.
+        assert_eq!(super::dropped_warn_transition(5, None), (true, Some(5)));
+        // Same drop count next frame (steady-state overflow) -> stay silent.
+        assert_eq!(super::dropped_warn_transition(5, Some(5)), (false, Some(5)));
+        // Drop count changes (worse overflow) -> warn again, remember 9.
+        assert_eq!(super::dropped_warn_transition(9, Some(5)), (true, Some(9)));
+        // Backlog clears -> reset memory, no warning for zero drops.
+        assert_eq!(super::dropped_warn_transition(0, Some(9)), (false, None));
+        // A fresh overflow at the *same* count as before the clear is
+        // reported again rather than staying suppressed.
+        assert_eq!(super::dropped_warn_transition(9, None), (true, Some(9)));
     }
 
     #[test]

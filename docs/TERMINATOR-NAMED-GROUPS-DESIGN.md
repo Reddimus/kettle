@@ -1,10 +1,20 @@
 # Terminator named broadcast groups — design
 
-> Status: design only. Named broadcast groups (Terminator
-> `create_group` / `group_tab` / `group_win` / `ungroup_*`) require
-> per-pane group-name state + a group-scoped broadcast policy. This
-> doc lays out the architecture + phase roadmap. Same shape as
-> the existing Bucket D design docs.
+> Status: **Shipped in v1.46.0** — broader than this doc originally
+> scoped. `Action::CreateGroup`/`EditPaneGroup` (assign one pane),
+> `GroupTab`/`GroupWindow` (bulk-assign a name to every pane in the
+> tab/window), and `UngroupTab`/`UngroupWindow` (bulk-clear) all
+> exist and are wired end to end in `crates/kettle-ui/src/app.rs`,
+> backed by `BroadcastScope::Group(name)` + `Action::ToggleBroadcastGroup`
+> and a per-pane `group_name` shown as a titlebar `[group]` tag.
+> `ungroup_all` is currently an alias for `ToggleBroadcastOff`
+> (disables broadcast) rather than a dedicated "clear every group,
+> keep broadcast state" action — the one behavioral gap from the
+> Terminator semantics above. Separately, three related config keys
+> (`split_to_group`, `autoclean_groups`, `always_split_with_profile`)
+> are parsed in `crates/kettle-config/src/lib.rs` but are not read
+> anywhere in `kettle-ui` — dead config, not yet wired into the split
+> path. This doc is kept as the historical design record.
 
 ## What it is
 

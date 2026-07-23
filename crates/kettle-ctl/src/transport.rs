@@ -98,74 +98,64 @@ impl CtlStream {
     /// Write an entire protocol frame without allowing a blocked local peer to
     /// outlive the request's deadline. On Windows, client pipe handles use
     /// overlapped I/O so cancellation can target the exact pending operation.
-    /// Unix scopes `O_NONBLOCK` to this exclusively borrowed client write and
-    /// restores the original descriptor flags before any response read.
+    /// On Unix, every `send()` passes `MSG_DONTWAIT`, which makes that one
+    /// call non-blocking regardless of the fd's blocking mode — so, unlike an
+    /// earlier revision, this never toggles `O_NONBLOCK` on the underlying
+    /// file descriptor. That flag lives on the shared open file description,
+    /// not the fd, so flipping it here would also affect any sibling handle
+    /// produced by [`try_clone`](CtlStream::try_clone) (the very split
+    /// read/write pattern this transport's callers use): a concurrent
+    /// blocking `Read` on that sibling could spuriously observe `WouldBlock`
+    /// for the duration of this write.
     pub(crate) fn write_all_until(
         &mut self,
         mut buf: &[u8],
         deadline: Instant,
         cancelled: Option<&AtomicBool>,
     ) -> io::Result<()> {
-        #[cfg(unix)]
-        let nonblocking = {
-            let CtlStream::Unix(stream) = &*self;
-            UnixNonblockingGuard::new(stream)?
-        };
+        while !buf.is_empty() {
+            check_write_state(deadline, cancelled)?;
+            let written = match self {
+                #[cfg(unix)]
+                CtlStream::Unix(stream) => {
+                    use std::os::fd::AsRawFd as _;
 
-        let result = (|| {
-            while !buf.is_empty() {
-                check_write_state(deadline, cancelled)?;
-                let written = match self {
-                    #[cfg(unix)]
-                    CtlStream::Unix(stream) => {
-                        use std::os::fd::AsRawFd as _;
-
-                        loop {
-                            let flags = libc::MSG_DONTWAIT | libc::MSG_NOSIGNAL;
-                            // SAFETY: the stream owns this fd and `buf` is readable
-                            // for its full length during the call.
-                            let result = unsafe {
-                                libc::send(
-                                    stream.as_raw_fd(),
-                                    buf.as_ptr().cast(),
-                                    buf.len(),
-                                    flags,
-                                )
-                            };
-                            if result >= 0 {
-                                break result as usize;
+                    loop {
+                        let flags = libc::MSG_DONTWAIT | libc::MSG_NOSIGNAL;
+                        // SAFETY: the stream owns this fd and `buf` is readable
+                        // for its full length during the call.
+                        let result = unsafe {
+                            libc::send(stream.as_raw_fd(), buf.as_ptr().cast(), buf.len(), flags)
+                        };
+                        if result >= 0 {
+                            break result as usize;
+                        }
+                        let error = io::Error::last_os_error();
+                        match error.kind() {
+                            io::ErrorKind::Interrupted => continue,
+                            io::ErrorKind::WouldBlock => {
+                                wait_unix_writable(stream, deadline, cancelled)?;
                             }
-                            let error = io::Error::last_os_error();
-                            match error.kind() {
-                                io::ErrorKind::Interrupted => continue,
-                                io::ErrorKind::WouldBlock => {
-                                    wait_unix_writable(stream, deadline, cancelled)?;
-                                }
-                                _ => return Err(error),
-                            }
+                            _ => return Err(error),
                         }
                     }
-                    #[cfg(windows)]
-                    CtlStream::Windows(stream) if stream.overlapped => {
-                        windows_io::write(&stream.file, buf, Some(deadline), cancelled)?
-                    }
-                    #[cfg(windows)]
-                    CtlStream::Windows(stream) => stream.file.write(buf)?,
-                };
-                if written == 0 {
-                    return Err(io::Error::new(
-                        io::ErrorKind::WriteZero,
-                        "failed to write the control frame",
-                    ));
                 }
-                buf = &buf[written..];
+                #[cfg(windows)]
+                CtlStream::Windows(stream) if stream.overlapped => {
+                    windows_io::write(&stream.file, buf, Some(deadline), cancelled)?
+                }
+                #[cfg(windows)]
+                CtlStream::Windows(stream) => stream.file.write(buf)?,
+            };
+            if written == 0 {
+                return Err(io::Error::new(
+                    io::ErrorKind::WriteZero,
+                    "failed to write the control frame",
+                ));
             }
-            Ok(())
-        })();
-
-        #[cfg(unix)]
-        nonblocking.restore()?;
-        result
+            buf = &buf[written..];
+        }
+        Ok(())
     }
 
     /// Wait until at least one byte can be read, the peer closes, or `timeout`
@@ -248,10 +238,17 @@ impl CtlStream {
     }
 
     /// Verify that an accepted local transport peer has the same effective user
-    /// as this process. Filesystem permissions remain the first boundary; peer
-    /// credentials close the race where a socket path is inherited or passed to
-    /// another local account. Platforms without a peer-credential API retain
-    /// the private endpoint/DACL boundary.
+    /// as this process. Filesystem permissions (Unix mode bits) / the pipe DACL
+    /// remain the first boundary; peer credentials close the race where a
+    /// socket path is inherited or passed to another local account, AND — on
+    /// Windows — the fact that the pipe's default DACL admits the whole
+    /// Builtin-Administrators group, not only the process owner. Windows'
+    /// check resolves the connected client's PID at the kernel level via
+    /// `GetNamedPipeClientProcessId` (unspoofable — this is not a PID the peer
+    /// claims over the wire) and compares that process's primary-token user
+    /// SID against this process's own. Platforms without any peer-credential
+    /// API at all would retain only the private endpoint/DACL boundary, but
+    /// every OS this crate targets has one.
     pub fn peer_is_same_user(&self) -> io::Result<bool> {
         match self {
             #[cfg(any(target_os = "linux", target_os = "android"))]
@@ -308,7 +305,7 @@ impl CtlStream {
             ))]
             CtlStream::Unix(_) => Ok(true),
             #[cfg(windows)]
-            CtlStream::Windows(_) => Ok(true),
+            CtlStream::Windows(stream) => windows_io::peer_is_same_user(&stream.file),
         }
     }
 
@@ -398,56 +395,6 @@ fn check_write_state(deadline: Instant, cancelled: Option<&AtomicBool>) -> io::R
         ));
     }
     Ok(())
-}
-
-#[cfg(unix)]
-struct UnixNonblockingGuard {
-    fd: std::os::fd::RawFd,
-    original_flags: libc::c_int,
-    restored: bool,
-}
-
-#[cfg(unix)]
-impl UnixNonblockingGuard {
-    fn new(stream: &std::os::unix::net::UnixStream) -> io::Result<Self> {
-        use std::os::fd::AsRawFd as _;
-
-        let fd = stream.as_raw_fd();
-        // SAFETY: the stream owns this valid fd for the guard's lifetime.
-        let original_flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
-        if original_flags < 0 {
-            return Err(io::Error::last_os_error());
-        }
-        // SAFETY: F_SETFL accepts the retrieved status flags plus O_NONBLOCK.
-        if unsafe { libc::fcntl(fd, libc::F_SETFL, original_flags | libc::O_NONBLOCK) } < 0 {
-            return Err(io::Error::last_os_error());
-        }
-        Ok(Self {
-            fd,
-            original_flags,
-            restored: false,
-        })
-    }
-
-    fn restore(mut self) -> io::Result<()> {
-        // SAFETY: the stream still owns the fd and these are its original flags.
-        if unsafe { libc::fcntl(self.fd, libc::F_SETFL, self.original_flags) } < 0 {
-            return Err(io::Error::last_os_error());
-        }
-        self.restored = true;
-        Ok(())
-    }
-}
-
-#[cfg(unix)]
-impl Drop for UnixNonblockingGuard {
-    fn drop(&mut self) {
-        if !self.restored {
-            // Best-effort fallback during unwinding or an early return from
-            // `restore`; normal paths surface restoration errors explicitly.
-            unsafe { libc::fcntl(self.fd, libc::F_SETFL, self.original_flags) };
-        }
-    }
 }
 
 #[cfg(unix)]
@@ -691,6 +638,124 @@ mod windows_io {
 
     fn duration_millis(duration: Duration) -> u32 {
         duration_millis_ceil(duration).clamp(1, u32::MAX as u128) as u32
+    }
+
+    /// Compare the user of the process on the other end of a connected
+    /// named-pipe instance against this process's own effective user. This is
+    /// the real enforcement [`super::CtlStream::peer_is_same_user`]'s
+    /// contract promises: the pipe's DACL alone admits SYSTEM and the whole
+    /// Builtin-Administrators group, not only the creating user, so a second
+    /// local admin account must be turned away HERE, at connection time.
+    pub(super) fn peer_is_same_user(file: &std::fs::File) -> io::Result<bool> {
+        use windows_sys::Win32::Security::{
+            EqualSid, GetTokenInformation, PSID, TOKEN_QUERY, TOKEN_USER, TokenUser,
+        };
+        use windows_sys::Win32::System::Pipes::GetNamedPipeClientProcessId;
+        use windows_sys::Win32::System::Threading::{
+            GetCurrentProcess, OpenProcess, OpenProcessToken, PROCESS_QUERY_LIMITED_INFORMATION,
+        };
+
+        /// An owned kernel handle (a process or a token), closed on drop.
+        struct OwnedHandle(HANDLE);
+
+        impl Drop for OwnedHandle {
+            fn drop(&mut self) {
+                // SAFETY: this struct exclusively owns a valid handle for its
+                // lifetime and never hands out a duplicate.
+                unsafe {
+                    CloseHandle(self.0);
+                }
+            }
+        }
+
+        /// The user SID from a process's primary token. `GetTokenInformation`
+        /// writes a `TOKEN_USER` header into `_buffer` whose `Sid` pointer
+        /// points elsewhere inside that SAME buffer, so the buffer must
+        /// outlive every use of `sid` — kept alongside it here rather than
+        /// dropped after extraction.
+        struct TokenUserSid {
+            _buffer: Vec<u64>,
+            sid: PSID,
+        }
+
+        fn token_user_sid(process: HANDLE) -> io::Result<TokenUserSid> {
+            let mut token: HANDLE = std::ptr::null_mut();
+            // SAFETY: `process` is a valid open process handle (or the
+            // GetCurrentProcess pseudo-handle) and `token` is a valid output
+            // pointer for the call's duration.
+            if unsafe { OpenProcessToken(process, TOKEN_QUERY, &mut token) } == 0 {
+                return Err(io::Error::last_os_error());
+            }
+            let token = OwnedHandle(token);
+
+            // Discover the required buffer size first: this call is EXPECTED
+            // to fail (ERROR_INSUFFICIENT_BUFFER) and only `len` matters.
+            let mut len = 0u32;
+            // SAFETY: a null pointer with a zero length is the documented
+            // size-query form of GetTokenInformation.
+            unsafe { GetTokenInformation(token.0, TokenUser, std::ptr::null_mut(), 0, &mut len) };
+            if len == 0 {
+                return Err(io::Error::last_os_error());
+            }
+            // `Vec<u8>` only guarantees 1-byte alignment, but TOKEN_USER
+            // contains pointer-sized fields; back the buffer with `u64`s so
+            // its address is always suitably aligned for the cast below.
+            let words = (len as usize).div_ceil(std::mem::size_of::<u64>());
+            let mut buffer = vec![0u64; words];
+            let capacity = len;
+            // SAFETY: `buffer` is at least `len` bytes (rounded up) and
+            // correctly aligned to receive the TOKEN_USER header.
+            if unsafe {
+                GetTokenInformation(
+                    token.0,
+                    TokenUser,
+                    buffer.as_mut_ptr().cast(),
+                    capacity,
+                    &mut len,
+                )
+            } == 0
+            {
+                return Err(io::Error::last_os_error());
+            }
+            // SAFETY: the call above succeeded, so `buffer` now starts with a
+            // populated TOKEN_USER whose `User.Sid` is a valid PSID pointing
+            // at SID bytes elsewhere inside this same buffer.
+            let sid = unsafe { (*buffer.as_ptr().cast::<TOKEN_USER>()).User.Sid };
+            Ok(TokenUserSid {
+                _buffer: buffer,
+                sid,
+            })
+        }
+
+        // Resolve the connected client's PID at the kernel level — NOT a
+        // value the peer supplies, so it cannot be spoofed over the pipe.
+        let mut client_pid = 0u32;
+        // SAFETY: `file` owns a valid, connected named-pipe server handle.
+        if unsafe { GetNamedPipeClientProcessId(file.as_raw_handle() as HANDLE, &mut client_pid) }
+            == 0
+        {
+            return Err(io::Error::last_os_error());
+        }
+
+        // PROCESS_QUERY_LIMITED_INFORMATION is the minimal access right that
+        // still permits OpenProcessToken; no code-injection-capable access
+        // (e.g. PROCESS_VM_*, PROCESS_TERMINATE) is requested against the peer.
+        // SAFETY: `client_pid` came from the kernel call above.
+        let client_process =
+            unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, client_pid) };
+        if client_process.is_null() {
+            return Err(io::Error::last_os_error());
+        }
+        let client_process = OwnedHandle(client_process);
+
+        let client_sid = token_user_sid(client_process.0)?;
+        // SAFETY: GetCurrentProcess returns a pseudo-handle valid for this
+        // process's lifetime; it requires no OpenProcess call or CloseHandle.
+        let self_sid = token_user_sid(unsafe { GetCurrentProcess() })?;
+
+        // SAFETY: both `TokenUserSid`s (and their backing buffers) are still
+        // alive here, so both `sid` pointers remain valid for this call.
+        Ok(unsafe { EqualSid(client_sid.sid, self_sid.sid) } != 0)
     }
 }
 
@@ -989,9 +1054,16 @@ mod tests {
         assert_eq!(duration_millis_ceil(Duration::from_millis(1_500)), 1_500);
     }
 
+    /// Audit fix: `write_all_until`'s Unix path used to toggle `O_NONBLOCK`
+    /// on the stream's fd for the call's duration via a now-removed guard —
+    /// entirely redundant with `MSG_DONTWAIT` on every `send()`, and a hazard
+    /// because `O_NONBLOCK` lives on the shared open file description, not
+    /// the fd, so it would also affect any `try_clone`d sibling handle (the
+    /// split reader/writer pattern this transport's real callers use). Pin
+    /// that a successful write leaves the fd's blocking-mode flag untouched.
     #[cfg(unix)]
     #[test]
-    fn unix_nonblocking_guard_restores_original_status_flags() {
+    fn write_all_until_does_not_toggle_fd_blocking_mode() {
         use std::os::fd::AsRawFd as _;
 
         fn status_flags(stream: &std::os::unix::net::UnixStream) -> libc::c_int {
@@ -1001,12 +1073,21 @@ mod tests {
             flags
         }
 
-        let (stream, _peer) = std::os::unix::net::UnixStream::pair().expect("socket pair");
+        let (stream, peer) = std::os::unix::net::UnixStream::pair().expect("socket pair");
         let original = status_flags(&stream);
-        let guard = UnixNonblockingGuard::new(&stream).expect("enable nonblocking mode");
-        assert_ne!(status_flags(&stream) & libc::O_NONBLOCK, 0);
-        guard.restore().expect("restore blocking mode");
-        assert_eq!(status_flags(&stream), original);
+        assert_eq!(original & libc::O_NONBLOCK, 0, "fixture starts blocking");
+
+        let mut ctl = CtlStream::Unix(stream);
+        ctl.write_all_until(b"probe", Instant::now() + Duration::from_secs(1), None)
+            .expect("write should succeed on a fresh, empty-buffer socket pair");
+
+        let CtlStream::Unix(stream) = &ctl;
+        assert_eq!(
+            status_flags(stream),
+            original,
+            "write_all_until must never leave O_NONBLOCK set on the fd"
+        );
+        drop(peer);
     }
 
     fn test_endpoint(tag: &str) -> String {
@@ -1162,6 +1243,35 @@ mod tests {
         reader.read_line(&mut resp).expect("client read");
         assert_eq!(resp.trim_end(), "resp:req-1", "got: {resp:?}");
         server.join().expect("server thread");
+    }
+
+    /// Audit fix: on Windows `peer_is_same_user()` used to unconditionally
+    /// return `Ok(true)` — a no-op that never actually checked anything.
+    /// Exercise the real kernel path (PID resolution + token SID compare on
+    /// Windows, `SO_PEERCRED`/`getpeereid` on Unix) end to end: a peer
+    /// connecting from THIS SAME PROCESS is, on every supported OS, the same
+    /// user, so both the server-accepted stream and the connecting client
+    /// stream must report `true`. This would not by itself have caught the
+    /// audited stub (an always-`Ok(true)` stub also passes this assertion),
+    /// but it does pin that the real implementation's kernel calls succeed
+    /// and resolve to the expected answer rather than erroring or panicking.
+    #[test]
+    fn peer_is_same_user_reports_true_for_local_loopback() {
+        let endpoint = test_endpoint("peer-same-user");
+        let listener = CtlListener::bind(&endpoint).expect("bind");
+        let server = std::thread::spawn(move || {
+            let conn = listener.accept().expect("accept");
+            conn.peer_is_same_user().expect("check server-side peer")
+        });
+        let client = connect(&endpoint).expect("connect");
+        assert!(
+            client.peer_is_same_user().expect("check client-side peer"),
+            "connecting from this same process must report the same user"
+        );
+        assert!(
+            server.join().expect("server thread"),
+            "accepting from this same process must report the same user"
+        );
     }
 
     #[test]

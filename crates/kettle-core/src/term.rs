@@ -1457,6 +1457,12 @@ impl Terminal {
                 .spawn(move || {
                     let mut processor: Processor = Processor::new();
                     let mut extractor = Extractor::new();
+                    // Persistent across every PTY-read chunk for this pane's
+                    // lifetime (see `AnsiStripper` docs): a CSI/OSC sequence
+                    // whose terminator lands in the next 64 KiB read is still
+                    // recognized, instead of leaking its continuation bytes
+                    // into the log as literal text.
+                    let mut ansi_stripper = AnsiStripper::new();
                     // A blocking PTY read must remain on a pump thread so the
                     // parser's DEC 2026 timeout can wake independently. Bound
                     // the handoff and recycle buffers: under output flood this
@@ -1528,7 +1534,7 @@ impl Terminal {
                                     use std::io::Write as _;
                                     let strip = log_strip_ansi.lock().map(|g| *g).unwrap_or(false);
                                     if strip {
-                                        let cleaned = strip_ansi_bytes(&buffer);
+                                        let cleaned = ansi_stripper.strip(&buffer);
                                         let _ = f.write_all(&cleaned);
                                     } else {
                                         let _ = f.write_all(&buffer);
@@ -2492,69 +2498,120 @@ impl PtyWriter {
     }
 }
 
-/// Terminator parity (`plugins/logger.py` extension):
-/// strip ANSI escape sequences from a byte slice. Handles:
+/// Parser state for [`AnsiStripper`], carried across calls so a CSI/OSC
+/// sequence split across two PTY-read chunks (each capped at
+/// `PTY_READ_BUFFER_BYTES`) is still recognized as a single sequence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum StripState {
+    /// Not inside any escape sequence; plain bytes pass through.
+    #[default]
+    Plain,
+    /// Just saw a bare ESC; the next byte decides CSI (`[`), OSC (`]`), or a
+    /// single-char escape (anything else).
+    EscSeen,
+    /// Inside `ESC [ params...`, scanning for the CSI final byte
+    /// (`0x40..=0x7e`).
+    Csi,
+    /// Inside `ESC ] ...`, scanning for BEL (`0x07`) or ST (`ESC \\`).
+    /// `esc_seen` is true right after an ESC byte was seen inside the OSC
+    /// body, so the very next byte can complete (`\\`) or invalidate it (any
+    /// other byte, including another ESC, which restarts the same check).
+    Osc { esc_seen: bool },
+}
+
+/// Terminator parity (`plugins/logger.py` extension): a persistent-state
+/// stripper for ANSI/OSC escape sequences, used by the per-pane session-log
+/// path (`log_strip_ansi`). Recognizes:
 ///   - CSI (Control Sequence Introducer): `ESC [ params final`
 ///     where final is in `0x40..=0x7e`.
 ///   - OSC (Operating System Command): `ESC ] ... terminator`
 ///     where terminator is BEL (0x07) or ST (`ESC \\`).
 ///   - Single-char ESC: `ESC X` for any other X.
-///   - Bare ESC at end of buffer: dropped (assumes split-across-
-///     reads is fine; the next chunk's continuation would be
-///     dropped too, but the reader does line-buffered logging
-///     so a stray ESC is an acceptable corner case).
 ///
-/// Plain printable bytes + newlines pass through. Pure — no
-/// state across calls (good enough for byte-block stripping;
-/// callers needing perfect stripping across read boundaries
-/// can buffer first).
-pub fn strip_ansi_bytes(input: &[u8]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(input.len());
-    let mut i = 0;
-    while i < input.len() {
-        let b = input[i];
-        if b != 0x1b {
-            out.push(b);
-            i += 1;
-            continue;
-        }
-        // ESC at end of buffer → drop.
-        if i + 1 >= input.len() {
-            break;
-        }
-        match input[i + 1] {
-            b'[' => {
-                // CSI: scan until terminator in 0x40..=0x7e.
-                i += 2;
-                while i < input.len() && !(0x40..=0x7e).contains(&input[i]) {
-                    i += 1;
-                }
-                if i < input.len() {
-                    i += 1; // consume terminator
-                }
-            }
-            b']' => {
-                // OSC: scan until BEL or ESC\.
-                i += 2;
-                while i < input.len() {
-                    if input[i] == 0x07 {
-                        i += 1;
-                        break;
-                    }
-                    if input[i] == 0x1b && i + 1 < input.len() && input[i + 1] == b'\\' {
-                        i += 2;
-                        break;
-                    }
-                    i += 1;
-                }
-            }
-            _ => {
-                // Single-char ESC (like ESC c reset).
-                i += 2;
-            }
-        }
+/// Unlike a stateless scan, `AnsiStripper` carries its FSM state across
+/// `strip` calls: a CSI/OSC sequence whose terminator lands in the *next*
+/// 64 KiB PTY read is still tracked as "mid-sequence" and its continuation
+/// bytes (raw SGR parameters, the tail of an OSC 8 URI, a window title) are
+/// dropped rather than leaking into the log as literal text. Plain
+/// printable bytes + newlines pass through unchanged.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct AnsiStripper {
+    state: StripState,
+}
+
+impl AnsiStripper {
+    /// A fresh stripper, starting outside any escape sequence.
+    pub fn new() -> Self {
+        Self::default()
     }
-    out
+
+    /// Strip ANSI escape sequences from `input`, resuming any sequence left
+    /// in progress by a previous call on `self`. See the type docs for the
+    /// sequence forms recognized.
+    pub fn strip(&mut self, input: &[u8]) -> Vec<u8> {
+        let mut out = Vec::with_capacity(input.len());
+        for &b in input {
+            match self.state {
+                StripState::Plain => {
+                    if b == 0x1b {
+                        self.state = StripState::EscSeen;
+                    } else {
+                        out.push(b);
+                    }
+                }
+                StripState::EscSeen => {
+                    self.state = match b {
+                        b'[' => StripState::Csi,
+                        b']' => StripState::Osc { esc_seen: false },
+                        // Single-char ESC (like ESC c reset): this one byte
+                        // completes it, back to plain.
+                        _ => StripState::Plain,
+                    };
+                }
+                StripState::Csi => {
+                    if (0x40..=0x7e).contains(&b) {
+                        self.state = StripState::Plain;
+                    }
+                    // Else still inside CSI params — keep scanning.
+                }
+                StripState::Osc { esc_seen } => {
+                    if esc_seen {
+                        // A prior byte in this OSC body was ESC. `\` now
+                        // completes the ST terminator; anything else means
+                        // that ESC wasn't a terminator after all — resume
+                        // scanning, re-arming `esc_seen` if THIS byte is
+                        // itself another ESC.
+                        self.state = if b == b'\\' {
+                            StripState::Plain
+                        } else {
+                            StripState::Osc {
+                                esc_seen: b == 0x1b,
+                            }
+                        };
+                    } else if b == 0x07 {
+                        self.state = StripState::Plain; // BEL terminator
+                    } else if b == 0x1b {
+                        self.state = StripState::Osc { esc_seen: true };
+                    }
+                    // Else still inside the OSC payload — keep scanning.
+                }
+            }
+        }
+        out
+    }
+}
+
+/// Stateless one-shot ANSI strip: equivalent to `AnsiStripper::default()`
+/// fed `input` once. Correct as long as every CSI/OSC sequence in `input`
+/// is fully contained in this one call — a bare ESC or a sequence whose
+/// terminator hasn't arrived yet is simply dropped, with no memory carried
+/// to a subsequent call. Callers that strip a stream in chunks (e.g. the
+/// per-pane session log, fed one PTY read at a time) MUST use
+/// [`AnsiStripper`] directly and reuse the same instance across chunks, or a
+/// sequence split across a chunk boundary leaks its continuation bytes into
+/// the output as literal text.
+pub fn strip_ansi_bytes(input: &[u8]) -> Vec<u8> {
+    AnsiStripper::default().strip(input)
 }
 
 /// The kitty image-id bits a placeholder cell's foreground color carries:
@@ -3085,6 +3142,56 @@ mod home_dir_tests {
         // Plain ASCII passes through unchanged.
         let s = b"no escapes here";
         assert_eq!(strip_ansi_bytes(s), b"no escapes here");
+    }
+
+    /// Regression test for the split-mid-sequence log-corruption bug: a
+    /// CSI/OSC sequence whose terminator lands in the *next* PTY-read chunk
+    /// must still be recognized (and fully removed) when the same
+    /// `AnsiStripper` instance is reused across calls — exactly how the
+    /// reader thread's per-pane log path uses it. Each case below splits a
+    /// sequence at a different, deliberately awkward byte boundary; with the
+    /// old per-call-stateless `strip_ansi_bytes` the second chunk would have
+    /// leaked raw escape-sequence bytes into the log as literal text.
+    #[test]
+    fn ansi_stripper_persists_state_across_split_sequences() {
+        use super::AnsiStripper;
+
+        // CSI params split before the final byte: "\x1b[31mhello" split as
+        // "\x1b[3" | "1mhello".
+        let mut s = AnsiStripper::new();
+        let mut out = s.strip(b"\x1b[3");
+        out.extend(s.strip(b"1mhello"));
+        assert_eq!(out, b"hello");
+
+        // OSC body (title) split before the BEL terminator: split as
+        // "\x1b]0;tit" | "le\x07after".
+        let mut s = AnsiStripper::new();
+        let mut out = s.strip(b"\x1b]0;tit");
+        out.extend(s.strip(b"le\x07after"));
+        assert_eq!(out, b"after");
+
+        // OSC 8 hyperlink split exactly at the ST (`ESC \`) boundary — the
+        // most awkward split, since the terminator itself straddles the
+        // chunk boundary: "...\x1b" | "\\link".
+        let mut s = AnsiStripper::new();
+        let mut out = s.strip(b"\x1b]8;;http://example/\x1b");
+        out.extend(s.strip(b"\\link"));
+        assert_eq!(out, b"link");
+
+        // Bare ESC at the very end of one chunk, CSI continues in the next:
+        // "\x1b" | "[1mA".
+        let mut s = AnsiStripper::new();
+        let mut out = s.strip(b"\x1b");
+        out.extend(s.strip(b"[1mA"));
+        assert_eq!(out, b"A");
+
+        // Sanity: a single instance also strips a sequence spread over
+        // three chunks, and keeps passing plain bytes through between them.
+        let mut s = AnsiStripper::new();
+        let mut out = s.strip(b"before\x1b[");
+        out.extend(s.strip(b"38;5;"));
+        out.extend(s.strip(b"196mred"));
+        assert_eq!(out, b"beforered");
     }
 }
 

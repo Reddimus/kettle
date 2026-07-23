@@ -78,6 +78,19 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
 }
 "#;
 
+/// Compute the instance-buffer capacity (rounded up to a power of two) and
+/// its byte size needed to hold `len` quad instances. Returns `None` if
+/// either the capacity or the resulting byte size would overflow `usize`,
+/// so callers can degrade (skip the upload) rather than panic —
+/// `usize::next_power_of_two()` panics on overflow, and a plain
+/// `capacity * size_of::<QuadInstance>()` multiplication can overflow even
+/// when the capacity itself is representable.
+fn grow_capacity(len: usize) -> Option<(usize, usize)> {
+    let capacity = len.checked_next_power_of_two()?;
+    let bytes = capacity.checked_mul(std::mem::size_of::<QuadInstance>())?;
+    Some((capacity, bytes))
+}
+
 pub struct QuadPipeline {
     pipeline: wgpu::RenderPipeline,
     bind_group: wgpu::BindGroup,
@@ -190,10 +203,26 @@ impl QuadPipeline {
             }),
         );
         if data.len() > self.capacity {
-            self.capacity = data.len().next_power_of_two();
+            // Checked growth: `next_power_of_two()` panics (and this
+            // workspace runs with `panic = "abort"`, so that would be a hard
+            // process abort) if the grown capacity overflows `usize`, and a
+            // naive `* size_of::<QuadInstance>()` could overflow separately
+            // even when the capacity itself fits. Mirror the checked-growth
+            // contract used by `ImagePipeline::upload` (imgpipe.rs) and
+            // `GlyphPipeline::upload` (glyphpipe.rs): degrade by skipping
+            // this frame's quad upload instead of panicking.
+            let Some((capacity, bytes)) = grow_capacity(data.len()) else {
+                log::warn!(
+                    "quad instance buffer growth for {} instances overflows usize; skipping quad upload",
+                    data.len()
+                );
+                self.count = 0;
+                return;
+            };
+            self.capacity = capacity;
             self.instances = device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("kettle-quad-instances"),
-                size: (self.capacity * std::mem::size_of::<QuadInstance>()) as u64,
+                size: bytes as u64,
                 usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
                 mapped_at_creation: false,
             });
@@ -212,5 +241,44 @@ impl QuadPipeline {
         pass.set_bind_group(0, &self.bind_group, &[]);
         pass.set_vertex_buffer(0, self.instances.slice(..));
         pass.draw(0..4, 0..self.count);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn grow_capacity_rounds_up_to_next_power_of_two() {
+        assert_eq!(
+            grow_capacity(5),
+            Some((8, 8 * std::mem::size_of::<QuadInstance>()))
+        );
+        assert_eq!(
+            grow_capacity(4096 + 1),
+            Some((8192, 8192 * std::mem::size_of::<QuadInstance>()))
+        );
+        // Already a power of two: capacity is unchanged.
+        assert_eq!(
+            grow_capacity(64),
+            Some((64, 64 * std::mem::size_of::<QuadInstance>()))
+        );
+    }
+
+    #[test]
+    fn grow_capacity_degrades_instead_of_panicking_on_next_power_of_two_overflow() {
+        // No power of two large enough to hold `usize::MAX` instances is
+        // representable in a `usize`, so the checked call must return
+        // `None` rather than panicking the way `next_power_of_two()` would.
+        assert_eq!(grow_capacity(usize::MAX), None);
+    }
+
+    #[test]
+    fn grow_capacity_degrades_instead_of_overflowing_on_byte_size() {
+        // `huge` is itself a representable power of two, but multiplying it
+        // by `size_of::<QuadInstance>()` (32 bytes) overflows `usize` — this
+        // exercises the second checked step, independent of the first.
+        let huge = 1usize << (usize::BITS - 1);
+        assert_eq!(grow_capacity(huge), None);
     }
 }

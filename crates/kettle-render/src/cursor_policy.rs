@@ -23,6 +23,32 @@ struct CodexFooter {
     model_row: i32,
 }
 
+/// Substrings pinned to Codex CLI's transient native-Windows ConPTY footer
+/// (see `docs/TERMINAL-CLIENT-COMPATIBILITY.md`, "Focus and cursor state").
+/// Centralized here — rather than left as inline literals scattered across
+/// the matcher functions below — so a Codex footer wording change shows up
+/// as a single obvious diff instead of several silent ones. If Codex ever
+/// reworks this footer, update these constants AND the fixtures in this
+/// file's test module together: letting them drift apart doesn't fail
+/// loudly, it just quietly stops suppressing and re-introduces the ConPTY
+/// cursor glitch this module exists to hide.
+const CODEX_HEADER_MARKER: &str = "OpenAI Codex";
+const CODEX_COMPOSER_PREFIX: &str = "›";
+/// Codex's own escape-key hint. Deliberately more specific than the generic
+/// "to interrupt" phrasing many unrelated long-running CLIs print alongside
+/// a `Ctrl+C` hint — keying off the full phrase keeps an ordinary program's
+/// "(Ctrl+C to interrupt)" footer from corroborating a Codex match.
+const CODEX_ACTIVE_STATUS_MARKER: &str = "esc to interrupt";
+const CODEX_MODEL_PREFIX: &str = "gpt-";
+const CODEX_MODEL_SEPARATOR: &str = " · ";
+/// How many leading viewport rows [`has_codex_header`] scans. Codex always
+/// draws this header via an absolute cursor-home at the very top of its
+/// full-screen UI, so the degraded-layout corroboration only needs the top
+/// of the screen — scanning the whole viewport risked corroborating on
+/// stale or incidental "OpenAI Codex" text scrolled into view far from the
+/// actual footer (e.g. a file mentioning the product name).
+const CODEX_HEADER_SCAN_ROWS: i32 = 3;
+
 fn suppress_windows_codex_footer_cursor(
     snap: &PaneSnapshot,
     cursor_viewport_row: i32,
@@ -101,13 +127,31 @@ fn viewport_row_cells(snap: &PaneSnapshot, viewport_row: i32) -> Option<&[SnapCe
         .then_some(row)
 }
 
-fn row_starts_with_trimmed(row: &[SnapCell], prefix: &str) -> bool {
-    let start = row
-        .iter()
+fn leading_non_whitespace(row: &[SnapCell]) -> usize {
+    row.iter()
         .position(|cell| !cell.c.is_whitespace())
-        .unwrap_or(row.len());
+        .unwrap_or(row.len())
+}
+
+fn row_starts_with_trimmed(row: &[SnapCell], prefix: &str) -> bool {
+    let start = leading_non_whitespace(row);
     let mut cells = row[start..].iter().map(|cell| cell.c);
     prefix.chars().all(|want| cells.next() == Some(want))
+}
+
+/// Like [`row_starts_with_trimmed`] for [`CODEX_MODEL_PREFIX`], but also
+/// requires the prefix be immediately followed by a digit (a real Codex
+/// model name is always `gpt-<version>`, e.g. `gpt-5.5` or `gpt-4o`). This
+/// rules out ordinary text that merely starts with the literal word `gpt-`
+/// — a changelog line, a directory named `gpt-notes`, a sentence like
+/// "gpt-style completions" — without excluding any real Codex model row.
+fn row_starts_with_codex_model_name(row: &[SnapCell]) -> bool {
+    let start = leading_non_whitespace(row);
+    let mut cells = row[start..].iter().map(|cell| cell.c);
+    CODEX_MODEL_PREFIX
+        .chars()
+        .all(|want| cells.next() == Some(want))
+        && cells.next().is_some_and(|c| c.is_ascii_digit())
 }
 
 fn row_contains(row: &[SnapCell], needle: &str) -> bool {
@@ -126,16 +170,16 @@ fn row_ends_with_trimmed(row: &[SnapCell], want: char) -> bool {
 }
 
 fn is_codex_model_status_row(row: &[SnapCell]) -> bool {
-    row_starts_with_trimmed(row, "gpt-")
-        && (row_contains(row, " · ") || row_ends_with_trimmed(row, '~'))
+    row_starts_with_codex_model_name(row)
+        && (row_contains(row, CODEX_MODEL_SEPARATOR) || row_ends_with_trimmed(row, '~'))
 }
 
 fn is_codex_composer_row(row: &[SnapCell]) -> bool {
-    row_starts_with_trimmed(row, "›")
+    row_starts_with_trimmed(row, CODEX_COMPOSER_PREFIX)
 }
 
 fn is_codex_active_status_row(row: &[SnapCell]) -> bool {
-    row_contains(row, "to interrupt")
+    row_contains(row, CODEX_ACTIVE_STATUS_MARKER)
 }
 
 fn cursor_cell_has_flag(snap: &PaneSnapshot, cursor_viewport_row: i32, flag: Flags) -> bool {
@@ -153,8 +197,9 @@ fn has_nearby_codex_composer(snap: &PaneSnapshot, cursor_viewport_row: i32) -> b
 }
 
 fn has_codex_header(snap: &PaneSnapshot) -> bool {
-    (0..snap.screen_lines as i32).any(|row| {
-        viewport_row_cells(snap, row).is_some_and(|cells| row_contains(cells, "OpenAI Codex"))
+    let last_row = CODEX_HEADER_SCAN_ROWS.min(snap.screen_lines as i32);
+    (0..last_row).any(|row| {
+        viewport_row_cells(snap, row).is_some_and(|cells| row_contains(cells, CODEX_HEADER_MARKER))
     })
 }
 
@@ -341,6 +386,47 @@ mod tests {
         let row = snap.cursor.point.line.0 + snap.display_offset as i32;
 
         assert!(!cursor_draw_allowed(&snap, row, false, true));
+    }
+
+    #[test]
+    fn generic_interrupt_wording_without_esc_prefix_is_not_suppressed() {
+        // Same shape as a Codex footer (a "›"-prefixed composer row with a
+        // `gpt-<version>` status row below it and a "to interrupt" status
+        // line above it) but the status line uses the generic phrasing many
+        // unrelated long-running CLIs print ("Ctrl+C to interrupt") instead
+        // of Codex's specific "esc to interrupt". Before requiring the full
+        // phrase, this combination corroborated a full Codex footer match
+        // and suppressed the cursor over the status row.
+        let snap = captured_snap(
+            "\x1b[HCtrl+C to interrupt\r\n\
+             \x1b[1m\u{203a}\x1b[22m task\r\n\
+             gpt-5.5 high \u{b7} ~\x1b[1;1H\x1b[?25h",
+            80,
+            6,
+        );
+        let row = snap.cursor.point.line.0 + snap.display_offset as i32;
+
+        assert_eq!(row, 0);
+        assert!(cursor_draw_allowed(&snap, row, true, true));
+    }
+
+    #[test]
+    fn coincidental_gpt_dash_word_without_version_digit_is_not_suppressed() {
+        // "gpt-tools" starts with the literal `gpt-` prefix and separates
+        // its trailing word with a middot, just like a real Codex model row
+        // ("gpt-5.5 · ..."), and it sits directly under a "›"-prefixed line.
+        // Before requiring a digit immediately after `gpt-`, this coincidence
+        // was enough for the degraded-layout fallback to suppress the cursor.
+        let snap = captured_snap(
+            "\x1b[H\x1b[1m\u{203a}\x1b[22m ready\r\n\
+             gpt-tools \u{b7} notes\x1b[2;1H\x1b[?25h",
+            80,
+            6,
+        );
+        let row = snap.cursor.point.line.0 + snap.display_offset as i32;
+
+        assert_eq!(row, 1);
+        assert!(cursor_draw_allowed(&snap, row, true, true));
     }
 
     #[test]

@@ -33,8 +33,9 @@ Each change has the same shape:
 4. **Pin the contract with a test — and add a drift guard if the
    bug class can recur.** Hand-rolled scenarios that would have
    failed pre-fix. Most changes add 1–3 assertions; the workspace
-   test suite grows by roughly one test per change (currently 319+,
-   see `cargo test --workspace`).
+   test suite grows by roughly one test per change — see
+   [docs/TESTING.md](docs/TESTING.md) for the current per-crate
+   breakdown, or run `cargo test --workspace` for today's number.
 
    A **drift guard** is a separate test that catches *the next
    time someone reintroduces the same shape of bug* — not just
@@ -86,11 +87,12 @@ Each change has the same shape:
    ```
    The Justfile at the repo root mirrors every CI step so a
    green `just gauntlet` locally is the same gate every PR
-   runs on every OS. `just --list` shows every recipe
-   (`fmt` / `clippy` / `test` / `doc` / `deny` / `machete` /
-   `build` / `release` / `gauntlet` / `gauntlet-strict` /
-   `screenshot` / `menu` / `bench` / `install` / `uninstall` /
-   `run` / `clean`). `just deny` (`cargo deny check`) and
+   runs on every OS. Run `just --list` for the full,
+   always-current set of recipes (build/release/install helpers,
+   the `gauntlet`/`gauntlet-strict`/`gauntlet-full` CI mirrors, and
+   the live-UI smoke recipes like `interaction-smoke` /
+   `tabbar-click-smoke` used for manual renderer/tab-bar checks —
+   see [docs/TESTING.md](docs/TESTING.md)). `just deny` (`cargo deny check`) and
    `just machete` (`cargo machete`) mirror the supply-chain CI
    workflows so a stale dependency-ignore entry is caught
    at the local pre-flight. `just gauntlet-strict` chains

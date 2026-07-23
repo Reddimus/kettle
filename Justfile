@@ -6,8 +6,17 @@
 #                              # `winget install Casey.Just` on Windows
 #
 # Run `just` (no args) to see the recipe list; `just <recipe>` to run.
-# Recipes intentionally mirror the CI gate so a green `just gauntlet`
-# locally is the same gate `.github/workflows/ci.yml` runs on every PR.
+# `just gauntlet` mirrors the CI matrix job's *core Rust gate*
+# (fmt/clippy/build/test/doc) on every OS — the fast loop to run before
+# every commit. It deliberately does NOT cover the packaging/installer/
+# update-manifest/GPU-render checks `.github/workflows/ci.yml` also runs
+# (those need a release build, platform-specific tooling, or a GPU
+# adapter that isn't always available locally). `just gauntlet-full`
+# adds every one of those CI-only checks so a green `gauntlet-full` is
+# the closest local match to "every ci.yml step passed" — run it before
+# a release cut or before touching packaging/*, scripts/install*,
+# scripts/*manifest*.{py,ps1}, or the renderer, not just before a
+# routine commit.
 #
 # Cross-platform: every recipe runs on Windows PowerShell, Linux/macOS
 # bash/zsh, and Git Bash on Windows. Two patterns:
@@ -16,9 +25,10 @@
 #     var visible to all recipes without a shell-prefix (`FOO=bar
 #     cmd` is bash-only; just's `export` is shell-agnostic).
 #   - `[unix]` / `[windows]` recipe attributes platform-gate
-#     install/uninstall/bench/menu-shot/clean so Windows users
-#     get a graceful message + the Linux scripts stay shipped
-#     as-is.
+#     install/uninstall/bench/menu-shot/clean/every CI-parity smoke
+#     added below, so Windows users get a graceful message on a
+#     Linux/macOS-only check (and vice versa) instead of a confusing
+#     failure.
 
 # Use Windows PowerShell (preinstalled on every Windows 10+
 # machine) as the recipe shell on Windows. Just's default is `sh` which
@@ -116,6 +126,105 @@ tracked-audit:
 ttf-parser-scope:
     ./scripts/check-ttf-parser-scope.sh
 
+# === Packaging & release metadata ==================================
+# These four wrap CI checks that used to have NO `just` entry point at
+# all — a contributor could only discover them by reading ci.yml, run
+# `just gauntlet` clean, and still get an unrelated CI failure on a
+# packaging-only change. Folded into `gauntlet-full` above.
+
+# Validate the Homebrew/AUR package templates and their renderer
+# (scripts/render-package-templates.py). Default `--auto` mode also
+# checks the current tag's *published* release assets once they exist
+# — a harmless no-op before a tag is cut, so this is safe to run any
+# time. Mirrors CI's Linux-only "Package template lockstep" step; the
+# script is portable bash + python3 so it also runs unmodified on macOS.
+[unix]
+package-templates:
+    ./scripts/check-package-templates.sh
+
+[windows]
+package-templates:
+    @echo "package-templates needs bash (scripts/check-package-templates.sh)."
+    @echo "Run it under Git Bash/WSL, or trust CI's Linux leg."
+
+# Hermetic unit tests for scripts/make-update-manifest.py (the signed
+# update-manifest generator). Mirrors CI's Linux-only "Signed update
+# manifest generator" step.
+[unix]
+update-manifest-test:
+    python3 scripts/test-update-manifest.py
+
+[windows]
+update-manifest-test:
+    python scripts/test-update-manifest.py
+
+# Hermetic unit tests for scripts/package-manifest.py (the inner
+# release-tarball manifest generator/verifier). Mirrors CI's
+# Linux-only "Inner package manifest generator and verifier" step.
+[unix]
+package-manifest-test:
+    python3 scripts/test-package-manifest.py
+
+[windows]
+package-manifest-test:
+    python scripts/test-package-manifest.py
+
+# Rebuild packaging/macos/kettle.iconset into a .icns via the same
+# `iconutil` CI uses, and sanity-check the result isn't a malformed or
+# empty container (the same regression class the release.yml iconutil
+# step could otherwise only catch at tag-cut time). `iconutil` ships
+# with macOS only — there's no Linux/Windows equivalent — so this is
+# [unix]-gated and self-skips with a clear message on non-macOS Unix
+# rather than failing on missing tooling. Mirrors CI's macOS-only
+# "Packaging smoke — macOS .icns" step. Output lands under
+# `{{TMPDIR}}` like the `screenshot`/`menu` recipes.
+[unix]
+icns-smoke:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if ! command -v iconutil >/dev/null 2>&1; then
+      echo "icns-smoke needs iconutil (macOS-only); skipping on this OS."
+      echo "This check only runs for real on macOS — trust CI's macOS leg elsewhere."
+      exit 0
+    fi
+    out="{{TMPDIR}}/kettle-icns-smoke.icns"
+    iconutil -c icns packaging/macos/kettle.iconset -o "$out"
+    file "$out" | grep -q "Mac OS X icon" \
+      || { echo "iconutil produced a non-icns file"; file "$out"; exit 1; }
+    # Real one is ~300 KB; floor at 100 KB catches an empty container.
+    size=$(stat -f%z "$out")
+    test "$size" -gt 100000 \
+      || { echo "icns too small ($size bytes) — iconutil likely produced an empty container"; exit 1; }
+    echo "iconutil OK ($size bytes)"
+
+[windows]
+icns-smoke:
+    @echo "icns-smoke needs iconutil (macOS-only); not applicable on Windows."
+    @echo "See 'just ico-smoke' for the Windows .ico equivalent."
+
+# Verify packaging/windows/kettle.ico parses as a well-formed,
+# multi-resolution Windows icon. Implemented as native ICONDIR-header
+# parsing (no `file`/`xxd` dependency, unlike ci.yml's bash version) so
+# it needs nothing beyond PowerShell 5.1+: bytes 0-3 must be the ICO
+# magic (00 00 01 00) and the 2-byte little-endian image count at
+# offset 4 must be >= 4 (the release recipe bakes in 6 sizes; same
+# floor CI's `file`-based check uses). Mirrors CI's Windows-only
+# "Packaging smoke — Windows .ico" step.
+[windows]
+ico-smoke:
+    $path = "packaging/windows/kettle.ico"
+    if (-not (Test-Path $path)) { Write-Error "$path is missing"; exit 1 }
+    $bytes = [System.IO.File]::ReadAllBytes($path)
+    if ($bytes.Length -lt 6 -or $bytes[0] -ne 0 -or $bytes[1] -ne 0 -or $bytes[2] -ne 1 -or $bytes[3] -ne 0) { Write-Error "$path is not a well-formed .ico (bad ICONDIR magic)"; exit 1 }
+    $count = $bytes[4] -bor ($bytes[5] -shl 8)
+    if ($count -lt 4) { Write-Error "$path has only $count resolution(s) (expected >= 4)"; exit 1 }
+    Write-Output "kettle.ico OK ($count resolutions)"
+
+[unix]
+ico-smoke:
+    @echo "ico-smoke checks packaging/windows/kettle.ico; not applicable off Windows."
+    @echo "See 'just icns-smoke' for the macOS .icns equivalent."
+
 # === Builds ========================================================
 
 # Dev build (fast incremental) — what `cargo build` would do anyway,
@@ -130,10 +239,11 @@ release:
 
 # === Verification gauntlet =========================================
 
-# The full CI-equivalent gate. Run this before every PR — a green
-# `just gauntlet` is what the GitHub Actions matrix runs on every
-# OS. Use this if you're about to push a feature; trust this if
-# it's green.
+# The CI matrix job's core Rust gate (fmt/clippy/build/test/doc) plus
+# the live-UI-helper self-test. This is the fast pre-commit loop; run
+# it before every commit. It does NOT cover the packaging/installer/
+# update-manifest/GPU-render checks ci.yml also runs — see
+# `gauntlet-full` below for those.
 gauntlet: live-ui-helper-selftest
     cargo fmt --all --check
     cargo clippy --workspace --all-targets -- -D warnings
@@ -141,7 +251,7 @@ gauntlet: live-ui-helper-selftest
     cargo test --workspace
     cargo doc --workspace --no-deps
     @echo ""
-    @echo "GAUNTLET PASSED — same gate CI runs on every PR. Safe to push."
+    @echo "GAUNTLET PASSED — core Rust gate green. Run 'just gauntlet-full' for full CI parity."
 
 # Strict gate: gauntlet + supply-chain hygiene (adds the
 # `cargo-deny` stale-ignore catch and the `cargo-machete`
@@ -151,7 +261,23 @@ gauntlet: live-ui-helper-selftest
 # cargo-machete` (one-time).
 gauntlet-strict: gauntlet deny machete tracked-audit
     @echo ""
-    @echo "STRICT GAUNTLET PASSED — every CI workflow green locally."
+    @echo "STRICT GAUNTLET PASSED — fmt/clippy/build/test/doc + supply-chain green."
+
+# The FULL CI-equivalent gate: gauntlet-strict plus every packaging,
+# installer, update-manifest, and GPU-render check ci.yml runs that
+# `gauntlet`/`gauntlet-strict` don't touch. Every dependency below is
+# [unix]/[windows]-gated (see each recipe's own comment for exactly
+# what it covers and on which OS it's a real check vs. an informational
+# stub), so this either exercises the full ci.yml surface reachable on
+# the current OS, or tells you plainly what it couldn't run here. Needs
+# a release build (several dependencies exercise target/release/kettle);
+# `release` runs once and is shared across every recipe that needs it.
+# Run this before a release cut, or before any change to packaging/*,
+# scripts/install*, scripts/*manifest*.{py,ps1}, or the renderer —
+# `gauntlet`/`gauntlet-strict` alone won't catch a regression there.
+gauntlet-full: gauntlet-strict package-templates update-manifest-test package-manifest-test icns-smoke ico-smoke linux-installer-smoke windows-installer-smoke headless-gpu-smoke gpu-render-smoke cli-smoke
+    @echo ""
+    @echo "FULL GAUNTLET PASSED — every ci.yml check this OS can run locally is green."
 
 # === End-to-end smoke ==============================================
 
@@ -187,6 +313,197 @@ screenshot OUT=(TMPDIR / "kettle.png"):
 menu OUT=(TMPDIR / "kettle-menu.png"):
     cargo run --release -p kettle -- --screenshot-menu {{OUT}}
     @echo "wrote {{OUT}}"
+
+# Run a real windowed kettle under Xvfb for a few seconds and assert it
+# neither panics nor exits with an unexpected code. `xvfb-run` is
+# Linux/X11-only (no macOS/Windows equivalent), so this self-skips with
+# a clear message elsewhere rather than failing on missing tooling.
+# Mirrors CI's Linux-only "Headless GPU smoke" step. Needs a release
+# binary.
+[unix]
+headless-gpu-smoke: release
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if ! command -v xvfb-run >/dev/null 2>&1; then
+      echo "headless-gpu-smoke needs xvfb-run (Linux/Xvfb); not available on this OS — skipping."
+      echo "See 'just gpu-render-smoke' for the offscreen render checks that also run on macOS."
+      exit 0
+    fi
+    export LIBGL_ALWAYS_SOFTWARE=1
+    log="{{TMPDIR}}/kettle-headless-smoke.log"
+    # The `bash -c '…$rc…'` invocation is single-quoted on purpose so
+    # the inner `$rc` expands inside the *nested* bash, not this one.
+    xvfb-run -a bash -c 'timeout 10 ./target/release/kettle >'"$log"' 2>&1; rc=$?; \
+      grep -qiE "panic|thread .* panicked" '"$log"' && { echo "panic in run"; cat '"$log"'; exit 1; }; \
+      test $rc -eq 124 -o $rc -eq 0 || { echo "bad exit $rc"; cat '"$log"'; exit 1; }; \
+      echo "headless run OK (exit $rc)"'
+
+[windows]
+headless-gpu-smoke:
+    @echo "headless-gpu-smoke needs Xvfb (Linux-only). Windows coverage comes from"
+    @echo "CI's windows-latest build/test/CLI smoke; see 'just cli-smoke' locally."
+
+# Bundle of ci.yml's Linux/macOS-only offscreen render smokes:
+# `--gpu-info` (adapter resolution + key:value output shape),
+# `--screenshot-menu` (the v1.3.0/v1.3.1 blank-menu regression class),
+# and `--screenshot` (the full text+quad+image render + PNG encode
+# path). Needs a release binary; LIBGL_ALWAYS_SOFTWARE is a harmless
+# no-op outside Linux's software-Vulkan path. Mirrors CI's
+# "--gpu-info diagnostic smoke", "--screenshot-menu visual regression",
+# and "--screenshot end-to-end" steps (all `runner.os != 'Windows'`).
+[unix]
+gpu-render-smoke: release
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export LIBGL_ALWAYS_SOFTWARE=1
+    out_dir="{{TMPDIR}}/kettle-gpu-render-smoke"
+    mkdir -p "$out_dir"
+    ./target/release/kettle --gpu-info | tee "$out_dir/gpu-info.txt"
+    grep -qE '^Backend:[[:space:]]+' "$out_dir/gpu-info.txt"
+    grep -qE '^Adapter:[[:space:]]+' "$out_dir/gpu-info.txt"
+    grep -qE '^Max texture:[[:space:]]+[0-9]+ px / side$' "$out_dir/gpu-info.txt"
+    ./target/release/kettle --screenshot-menu "$out_dir/kettle-menu.png"
+    head -c 4 "$out_dir/kettle-menu.png" | xxd | grep -q "8950 4e47"
+    # Floor at 40 KB — well above the byte-identical blank-menu
+    # regression, well below the typical 55+ KB the real render outputs.
+    size=$(wc -c < "$out_dir/kettle-menu.png")
+    test "$size" -gt 40000 \
+      || { echo "kettle-menu.png is too small ($size bytes) — likely the blank-menu regression"; exit 1; }
+    echo "screenshot-menu OK ($size bytes)"
+    ./target/release/kettle --screenshot "$out_dir/kettle-ci.png"
+    head -c 4 "$out_dir/kettle-ci.png" | xxd | grep -q "8950 4e47"
+    size=$(wc -c < "$out_dir/kettle-ci.png")
+    test "$size" -gt 10000 \
+      || { echo "kettle-ci.png is too small ($size bytes)"; exit 1; }
+    echo "screenshot OK ($size bytes)"
+    echo "gpu-render-smoke PASSED (gpu-info + screenshot-menu + screenshot)"
+
+[windows]
+gpu-render-smoke:
+    @echo "gpu-render-smoke (gpu-info + screenshot-menu + screenshot) needs bash + xxd,"
+    @echo "matching ci.yml's Linux/macOS-only legs. On Windows, build a release binary"
+    @echo "and run 'kettle --gpu-info' / '--screenshot' / '--screenshot-menu' by hand,"
+    @echo "or trust CI's windows-latest leg."
+
+# Faithful local mirror of ci.yml's "CLI smoke (all OSes)" step: drives
+# every introspection flag (--version, --help, --check-config,
+# --list-themes/--actions/--keybinds/--ssh-hosts, --print-default-config,
+# --profile, --shell-integration, --print-completions, --config-path)
+# and asserts both the happy-path output shape and the error-path exit
+# codes. Self-builds the debug binary if missing, exactly like CI.
+# Artifacts land under {{TMPDIR}}/kettle-cli-smoke instead of a CI
+# runner's throwaway workspace. The CI script's `$RUNNER_OS` branch
+# collapses to the non-Windows binary path — Git Bash on Windows
+# resolves the extensionless name to `kettle.exe` on its own, so this
+# also works if invoked under Git Bash, hence [unix] rather than a hard
+# OS check.
+[unix]
+cli-smoke:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    out_dir="{{TMPDIR}}/kettle-cli-smoke"
+    mkdir -p "$out_dir"
+    KETTLE_CI_BIN="./target/debug/kettle"
+    if [ ! -x "$KETTLE_CI_BIN" ]; then
+      cargo build -q -p kettle
+    fi
+    # --version exercises the build.rs git-SHA capture.
+    "$KETTLE_CI_BIN" --version | tee "$out_dir/kettle-version.txt"
+    grep -E '^kettle [0-9]+\.[0-9]+\.[0-9]+ \([0-9a-f]+(\+dirty)?\)' "$out_dir/kettle-version.txt"
+    # --help: pin clap's usage prelude plus the load-bearing flags.
+    "$KETTLE_CI_BIN" --help > "$out_dir/kettle-help.txt"
+    grep -qE '^Usage: kettle' "$out_dir/kettle-help.txt"
+    grep -q -- '--config' "$out_dir/kettle-help.txt"
+    grep -q -- '--screenshot' "$out_dir/kettle-help.txt"
+    grep -q -- '--gpu-info' "$out_dir/kettle-help.txt"
+    grep -q -- '--shell-integration' "$out_dir/kettle-help.txt"
+    grep -q -- '--print-completions' "$out_dir/kettle-help.txt"
+    grep -q -- '--print-default-config' "$out_dir/kettle-help.txt"
+    # --check-config falls back to defaults + "status: OK" with no config.
+    "$KETTLE_CI_BIN" --check-config | grep -E '^kettle:  [0-9]'
+    "$KETTLE_CI_BIN" --check-config \
+      | grep -E '^hint: +kettle --print-default-config > '
+    "$KETTLE_CI_BIN" --config-path
+    # --list-themes should always be 500+ entries (bundled iTerm2-Color-Schemes).
+    "$KETTLE_CI_BIN" --list-themes > "$out_dir/themes.txt"
+    test "$(wc -l < "$out_dir/themes.txt")" -gt 400
+    # --list-actions: every action name + aliases.
+    "$KETTLE_CI_BIN" --list-actions > "$out_dir/actions.txt"
+    test "$(wc -l < "$out_dir/actions.txt")" -gt 50
+    # --list-keybinds: the default Terminator-compatible chord set.
+    "$KETTLE_CI_BIN" --list-keybinds > "$out_dir/keybinds.txt"
+    test "$(wc -l < "$out_dir/keybinds.txt")" -gt 40
+    # --list-ssh-hosts with none configured emits an explicit fallback line.
+    "$KETTLE_CI_BIN" --list-ssh-hosts \
+      | grep -E '^\(no ssh-host entries configured\)$'
+    # --print-default-config emits the embedded example config; round-trip
+    # it through --check-config.
+    "$KETTLE_CI_BIN" --print-default-config > "$out_dir/k.cfg"
+    test "$(wc -l < "$out_dir/k.cfg")" -gt 50
+    "$KETTLE_CI_BIN" --config "$out_dir/k.cfg" --check-config \
+      | grep -E '^status: +OK'
+    # --profile NAME must be honored by every introspection flag, not
+    # silently ignored in favor of the default path. Write a profile with
+    # a deliberately malformed value under a scratch XDG_CONFIG_HOME
+    # (never the user's real config dir) and assert --check-config's
+    # exit code goes non-zero.
+    export XDG_CONFIG_HOME="$out_dir/xdg-config"
+    mkdir -p "$XDG_CONFIG_HOME/kettle/profiles"
+    echo 'font-size = not_a_number' > "$XDG_CONFIG_HOME/kettle/profiles/cibad.config"
+    out=$("$KETTLE_CI_BIN" --profile cibad --check-config 2>&1) && \
+        { echo "--profile cibad --check-config exited 0 (should be non-zero on malformed font-size)"; \
+          echo "$out"; \
+          exit 1; }
+    if echo "$out" | grep -q 'font-size'; then
+        echo "--profile cibad --check-config surfaces malformed font-size"
+    else
+        echo "--profile cibad output missing 'font-size' diagnostic"
+        echo "$out"
+        exit 1
+    fi
+    # --shell-integration <shell>: every known shell emits a non-trivial
+    # snippet containing the OSC 133 marker; an unknown shell errors.
+    for sh in bash zsh fish powershell; do
+      "$KETTLE_CI_BIN" --shell-integration "$sh" > "$out_dir/k.${sh}"
+      grep -q "OSC 133" "$out_dir/k.${sh}"
+      test "$(wc -l < "$out_dir/k.${sh}")" -gt 8
+    done
+    if "$KETTLE_CI_BIN" --shell-integration tcsh 2>/dev/null; then
+      echo "expected --shell-integration tcsh to error"; exit 1
+    fi
+    # --print-completions <shell>: every known shell mentions `kettle`;
+    # an unknown shell errors.
+    for sh in bash zsh fish powershell; do
+      "$KETTLE_CI_BIN" --print-completions "$sh" > "$out_dir/k.completions.${sh}"
+      test "$(wc -c < "$out_dir/k.completions.${sh}")" -gt 200
+      grep -q "kettle" "$out_dir/k.completions.${sh}"
+    done
+    if "$KETTLE_CI_BIN" --print-completions tcsh 2>/dev/null; then
+      echo "expected --print-completions tcsh to error"; exit 1
+    fi
+    # A missing --config / --working-directory path must exit non-zero,
+    # not silently fall back to defaults.
+    typo="$out_dir/kettle-ci-definitely-no-such-path-$RANDOM"
+    rm -rf "$typo"
+    if "$KETTLE_CI_BIN" --config "$typo" --config-path 2>/dev/null; then
+      echo "expected --config $typo to exit nonzero"; exit 1
+    fi
+    if "$KETTLE_CI_BIN" --working-directory "$typo" --config-path 2>/dev/null; then
+      echo "expected --working-directory $typo to exit nonzero"; exit 1
+    fi
+    # Happy path: the bootstrap config round-trips through --config-path
+    # (basename-only match, since path-separator style varies by OS).
+    "$KETTLE_CI_BIN" --config "$out_dir/k.cfg" --config-path \
+      | grep -qE 'k\.cfg$'
+    rm -rf "$XDG_CONFIG_HOME"
+    echo "cli-smoke PASSED"
+
+[windows]
+cli-smoke:
+    @echo "cli-smoke's implementation is bash-based (matches ci.yml's CLI smoke,"
+    @echo "which itself runs via Git Bash on windows-latest). Not wired up as a"
+    @echo "native PowerShell recipe here — trust CI's windows-latest leg, or run"
+    @echo "'cargo build -q -p kettle' and exercise target\\debug\\kettle.exe by hand."
 
 # Reproduce the docs/PERFORMANCE.md baseline. Runs each measurement
 # 5× via `/usr/bin/time` (Linux/macOS) or `Measure-Command` (Win11).
@@ -283,6 +600,36 @@ install-recording RECORD_DIR=(env_var("HOME") / ".cache/kettle/records"):
 [windows]
 install-recording:
     @echo "install-recording is a Linux helper; on Windows set 'record = on' in the config."
+
+# Exercise scripts/install.sh's real install/uninstall paths (default
+# per-user prefix, custom --prefix, the release-tarball layout,
+# --record-dir validation, and — once the current tag is published —
+# the curl|sh online installer) inside an isolated temp prefix that
+# never touches the real ~/.local. Needs a release binary (copies and
+# restores target/release/kettle around the run). Mirrors CI's
+# Linux-only "Linux installer smoke" step.
+[unix]
+linux-installer-smoke: release
+    ./scripts/check-linux-installers.sh
+
+[windows]
+linux-installer-smoke:
+    @echo "linux-installer-smoke exercises scripts/install.sh (Linux/XDG paths)."
+    @echo "Not applicable on Windows; see 'just windows-installer-smoke' instead."
+
+# Exercise scripts/install.ps1's portable/custom-prefix mode and its
+# isolated default-install integration mode — including upgrading a
+# stale pre-existing shortcut — on real Windows. Needs a release build
+# (kettle.exe + kettle-console.exe). Mirrors CI's Windows-only
+# "Windows installer smoke" step.
+[windows]
+windows-installer-smoke: release
+    powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/check-windows-installer.ps1
+
+[unix]
+windows-installer-smoke:
+    @echo "windows-installer-smoke exercises scripts/install.ps1 (Windows-only paths)."
+    @echo "Not applicable here; see 'just linux-installer-smoke' instead."
 
 # === Misc ==========================================================
 

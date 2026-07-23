@@ -81,11 +81,39 @@ function Invoke-Bench {
         # StandardOutput / StandardError pipes are drained
         # asynchronously after exit (small kettle outputs fit in
         # the OS pipe buffer; no risk of blocking the child).
+        #
+        # Take one snapshot immediately after Start(), before entering
+        # the poll loop: a very fast invocation (e.g. `--version` on a
+        # quick machine) can exit before the first 5ms tick ever lands,
+        # which would otherwise leave $maxWs at its initial 0 and print
+        # a bogus "0.0 MB peak working set" row. The immediate snapshot
+        # guarantees at least one real sample regardless of how long
+        # the child lives.
         $maxWs = 0L
+        try {
+            $p.Refresh()
+            $maxWs = $p.WorkingSet64
+        } catch {
+            # Process raced ahead of us even before the first Refresh();
+            # fall through to the post-loop fallback below.
+        }
         while (-not $p.HasExited) {
             $p.Refresh()
             if ($p.WorkingSet64 -gt $maxWs) { $maxWs = $p.WorkingSet64 }
             Start-Sleep -Milliseconds 5
+        }
+        if ($maxWs -eq 0) {
+            # Last-resort fallback: PeakWorkingSet64 is documented above
+            # to often return 0 once the process has exited, but it's
+            # strictly better than a guaranteed zero for the rare case
+            # where both the initial snapshot and every poll tick missed
+            # the process's entire (sub-5ms) lifetime.
+            try {
+                $p.Refresh()
+                $maxWs = $p.PeakWorkingSet64
+            } catch {
+                # Genuinely unmeasurable for this run; leave $maxWs at 0.
+            }
         }
         $null = $p.StandardOutput.ReadToEnd()
         $null = $p.StandardError.ReadToEnd()

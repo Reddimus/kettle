@@ -1087,6 +1087,13 @@ pub fn search(term: &Term<EventProxy>, pattern: &str) -> Vec<Match> {
 }
 
 /// Search with an explicit case-sensitivity override.
+///
+/// Bounded by [`MAX_SEARCH_MATCHES`] — the same hard ceiling the chunked [`CompiledSearch`]
+/// scanner enforces on every bounded call. Without it a pattern that matches pathologically often
+/// across a large scrollback (a single common character, or repetitive hostile program output)
+/// would allocate one [`Match`] per hit into an unbounded `Vec`, synchronously blocking the
+/// calling thread while it grows without limit; this legacy whole-buffer entry point is exactly
+/// as exposed to that failure mode as the bounded API and must honor the same ceiling.
 pub fn search_with(term: &Term<EventProxy>, pattern: &str, mode: CaseSensitivity) -> Vec<Match> {
     let Some(re) = build_regex_with(pattern, mode) else {
         return Vec::new();
@@ -1104,7 +1111,7 @@ pub fn search_with(term: &Term<EventProxy>, pattern: &str, mode: CaseSensitivity
     // keeps the capacity.
     let mut text = String::with_capacity(cols);
     let mut col_of_byte: Vec<usize> = Vec::with_capacity(cols * 2);
-    for line in top..=bottom {
+    'lines: for line in top..=bottom {
         // Reconstruct the line text (spacer-aware) + byte→column map via the
         // shared helper, so the wide-char-spacer fix can't drift (v2.26.0).
         crate::grid_text::row_text_into(grid, line, cols, &mut text, &mut col_of_byte);
@@ -1126,6 +1133,11 @@ pub fn search_with(term: &Term<EventProxy>, pattern: &str, mode: CaseSensitivity
                 start_col,
                 end_col,
             });
+            // Ceiling reached: stop materializing more matches rather than continuing to grow an
+            // unbounded result vector. `usize::MAX`-style pathological inputs cannot outlast this.
+            if matches.len() >= MAX_SEARCH_MATCHES {
+                break 'lines;
+            }
         }
     }
     matches
@@ -2082,5 +2094,51 @@ mod tests {
         ] {
             assert!(build_regex_with("", mode).is_none());
         }
+    }
+
+    #[test]
+    fn search_with_finds_matches_across_scrollback_and_viewport() {
+        let mut term = empty_term(8, 2);
+        write_ascii(&mut term, 0, 0, "needle");
+        term.grid_mut().scroll_up::<Color>(&(Line(0)..Line(2)), 1);
+        write_ascii(&mut term, 1, 1, "needle");
+
+        let matches = search_with(&term, "needle", CaseSensitivity::Always);
+        assert_eq!(
+            matches,
+            vec![
+                Match {
+                    line: -1,
+                    start_col: 0,
+                    end_col: 5,
+                },
+                Match {
+                    line: 1,
+                    start_col: 1,
+                    end_col: 6,
+                },
+            ]
+        );
+    }
+
+    /// Regression guard for the audit finding that `search`/`search_with` had no ceiling of any
+    /// kind: a pattern matching pathologically often across the buffer must stop accumulating
+    /// results at [`MAX_SEARCH_MATCHES`] instead of growing an unbounded `Vec<Match>`.
+    #[test]
+    fn search_with_stops_at_the_hard_match_ceiling() {
+        // Pick dimensions whose cell count comfortably exceeds `MAX_SEARCH_MATCHES` so a
+        // pattern matching every single cell would, without a cap, produce far more matches
+        // than the ceiling allows.
+        let columns = 300;
+        let lines = MAX_SEARCH_MATCHES / columns + 2;
+        let mut term = empty_term(columns, lines);
+        let row = "a".repeat(columns);
+        for line in 0..lines as i32 {
+            write_ascii(&mut term, line, 0, &row);
+        }
+        assert!(columns * lines > MAX_SEARCH_MATCHES);
+
+        let matches = search_with(&term, "a", CaseSensitivity::Always);
+        assert_eq!(matches.len(), MAX_SEARCH_MATCHES);
     }
 }

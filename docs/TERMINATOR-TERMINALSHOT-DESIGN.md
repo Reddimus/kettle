@@ -1,12 +1,14 @@
 # Terminator `terminalshot.py` port — design
 
-> Status: design only. The runtime live-window surface
-> readback machinery spans more than one phase of work, so this doc
-> lays out the architecture + phase roadmap. Same shape as
-> [`TERMINATOR-REMOTE-DESIGN.md`](TERMINATOR-REMOTE-DESIGN.md),
-> [`TERMINATOR-DETACHABLE-TABS-DESIGN.md`](TERMINATOR-DETACHABLE-TABS-DESIGN.md),
-> [`TERMINATOR-PANE-TITLEBAR-DESIGN.md`](TERMINATOR-PANE-TITLEBAR-DESIGN.md),
-> [`TERMINATOR-BG-IMAGE-DESIGN.md`](TERMINATOR-BG-IMAGE-DESIGN.md).
+> Status: **Shipped in v1.46.0.** The live wgpu surface-readback path
+> landed end to end: `Renderer::capture_live_surface`, the
+> `ScreenshotWorker`/`ScreenshotJob` pipeline (`crates/kettle-render/src/lib.rs`),
+> a `kettle-ctl` `Method::Screenshot`, an MCP `kettle_screenshot` tool
+> (`crates/kettle/src/mcp_tools.rs`), and the focused-pane crop path.
+> This is in addition to (not a replacement for) the pre-existing
+> offscreen `kettle --screenshot=PATH` synthetic-scene renderer used
+> for visual regression testing. This doc is kept as the historical
+> design record; the phase roadmap below describes what was built.
 
 ## What it is
 

@@ -295,7 +295,7 @@ commands, environment values, or user paths. `RUST_LOG` controls both `log` and
 | Directional focus | `Alt+Arrows` | Scroll to top/bottom | `Ctrl+Home` / `End` |
 | Select to top/bottom | `Shift+Home` / `End` | Select all | command palette (`select_all`) |
 | Scroll line / page | `Ctrl+Shift+Up/Down` / `Shift+PgUp/PgDn` | Reset font size | `Ctrl+0` |
-| Font bigger / smaller | `Ctrl+` `+` / `-` | Broadcast on/off | `Super+G` / `Shift+Super+G` |
+| Font bigger / smaller | `Ctrl+` `+` / `-` | Broadcast on/off | `Super+G` / `Shift+Super+G` (`Ctrl+Shift+G` on Windows, where `Win+G` opens Game Bar) |
 | Reload config | `Ctrl+Shift+M` | Reset terminal | `Ctrl+Shift+R` |
 | New tab: Nth dropdown shell | `Ctrl+Shift+1..9` | Settings panel | `Ctrl+,` |
 

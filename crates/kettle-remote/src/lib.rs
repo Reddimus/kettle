@@ -319,6 +319,19 @@ impl RemoteScanner {
 const MAX_PROC_FILE_BYTES: u64 = 1 << 20;
 #[cfg(target_os = "linux")]
 const MAX_PROC_TREE_NODES: usize = 4096;
+/// Audit (robustness): aggregate ceiling, in bytes, on ALL `cmdline` +
+/// `children` file content read across a single [`LinuxProcessTree::refresh_from`]
+/// walk. `MAX_PROC_FILE_BYTES` only bounds a SINGLE file's size; without an
+/// aggregate cap, up to `MAX_PROC_TREE_NODES` (4096) descendants each near
+/// that 1 MiB per-file ceiling could retain multiple GiB in `self.entries`
+/// and cost multiple GiB of synchronous file I/O on one `refresh_roots` tick
+/// (called directly on kettle-ui's poll loop — see the doc on
+/// `LinuxProcessTree::refresh_from`). 32 MiB is generous next to any
+/// legitimate shell-argv/child-list total (a few hundred KiB in practice
+/// even for a wide process tree) while keeping the worst case bounded to
+/// tens of MiB instead of GiB.
+#[cfg(target_os = "linux")]
+const MAX_PROC_TREE_TOTAL_BYTES: u64 = 32 * MAX_PROC_FILE_BYTES;
 
 #[cfg(any(target_os = "linux", test))]
 fn parse_proc_children(bytes: &[u8]) -> impl Iterator<Item = u32> + '_ {
@@ -356,28 +369,57 @@ impl LinuxProcessTree {
         self.refresh_from(std::path::Path::new("/proc"), roots);
     }
 
+    /// Audit (robustness): synchronous procfs walk backing `refresh_roots`,
+    /// which kettle-ui's `poll_remote_contexts` calls directly on the UI
+    /// thread every ~200ms (no worker thread) — so both the memory this
+    /// retains and the wall-clock time this takes bound how long the whole
+    /// window can stall. `MAX_PROC_TREE_NODES` bounds node COUNT and
+    /// `MAX_PROC_FILE_BYTES` bounds a single file's size, but neither bounds
+    /// the SUM of every node's argv/children bytes — see
+    /// `MAX_PROC_TREE_TOTAL_BYTES`, which this walk now also enforces:
+    /// once the running total reaches that ceiling, further `cmdline`/
+    /// `children` reads are skipped for the rest of the walk (the node
+    /// itself, and its already-known parent/cwd, are still recorded — only
+    /// the potentially-large file payloads are dropped), so a pathological
+    /// or hostile descendant subtree can no longer balloon this to
+    /// multiple GiB of retained memory or synchronous I/O.
     fn refresh_from(&mut self, proc_root: &std::path::Path, roots: &[u32]) {
         use std::collections::{HashSet, VecDeque};
 
         self.entries.clear();
         let mut queue: VecDeque<_> = roots.iter().copied().map(|pid| (pid, None)).collect();
         let mut visited = HashSet::with_capacity(roots.len());
+        let mut total_bytes: u64 = 0;
         while let Some((pid, parent)) = queue.pop_front() {
             if self.entries.len() >= MAX_PROC_TREE_NODES || !visited.insert(pid) {
                 continue;
             }
             let process_dir = proc_root.join(pid.to_string());
-            let argv =
-                read_proc_file_bounded(&process_dir.join("cmdline")).map(|b| parse_proc_argv(&b));
+            let argv = if total_bytes < MAX_PROC_TREE_TOTAL_BYTES {
+                read_proc_file_bounded(&process_dir.join("cmdline")).map(|b| {
+                    total_bytes += b.len() as u64;
+                    parse_proc_argv(&b)
+                })
+            } else {
+                None
+            };
             let cwd = std::fs::read_link(process_dir.join("cwd"))
                 .ok()
                 .map(|path| path.to_string_lossy().into_owned());
-            let children = read_proc_file_bounded(
-                &process_dir
-                    .join("task")
-                    .join(pid.to_string())
-                    .join("children"),
-            );
+            let children = if total_bytes < MAX_PROC_TREE_TOTAL_BYTES {
+                read_proc_file_bounded(
+                    &process_dir
+                        .join("task")
+                        .join(pid.to_string())
+                        .join("children"),
+                )
+                .map(|b| {
+                    total_bytes += b.len() as u64;
+                    b
+                })
+            } else {
+                None
+            };
             if argv.is_none() && cwd.is_none() && children.is_none() {
                 continue;
             }
@@ -888,8 +930,41 @@ pub fn detect_ssh(argv: &[String]) -> Option<RemoteContext> {
         return None;
     }
     // sshpass wraps ssh — find the `ssh` inside its argv.
+    //
+    // Audit (correctness): this used to be a bare
+    // `argv.iter().position(|a| argv0_basename(a) == "ssh")` — an unanchored
+    // scan of the WHOLE argv, including sshpass's own flag VALUES. If any
+    // earlier token (e.g. the `-p`/`-f` value) happened to basename to
+    // "ssh" (a password or password-file path literally named "ssh"), that
+    // token was mistaken for the real ssh invocation and everything after
+    // it (the actual target) was silently discarded. Instead, walk
+    // sshpass's OWN known flags from argv[1] (mirroring the disciplined
+    // flag-skipping loop ssh's own options get below) and take the first
+    // remaining non-flag token as the wrapped command's argv[0].
+    //
+    // sshpass(1) short options: `-p password` / `-f filename` / `-d fd` /
+    // `-P prompt` each consume exactly one separate value; `-e` (password
+    // from the `SSHPASS` env var), `-v`, `-h`, `-V` are boolean.
     let inner_start = if exe == "sshpass" {
-        argv.iter().position(|a| argv0_basename(a) == "ssh")? + 1
+        let mut j = 1;
+        let inner = loop {
+            let a = argv.get(j)?;
+            if let Some(stripped) = a.strip_prefix('-')
+                && !stripped.is_empty()
+            {
+                let needs_value = matches!(stripped, "p" | "f" | "d" | "P") && j + 1 < argv.len();
+                j += if needs_value { 2 } else { 1 };
+                continue;
+            }
+            break j;
+        };
+        // The wrapped command must actually be ssh — sshpass can wrap any
+        // password-prompting program, but this detector only recognizes the
+        // ssh case (the pre-existing contract of this function).
+        if argv0_basename(&argv[inner]) != "ssh" {
+            return None;
+        }
+        inner + 1
     } else {
         1
     };
@@ -1013,10 +1088,78 @@ pub fn detect_container(argv: &[String]) -> Option<RemoteContext> {
         // Find the `exec` subcommand, allowing GLOBAL options
         // before it (`kubectl -n ns exec …`, `docker --context foo exec …`)
         // rather than pinning it at argv[1] (which silently returned None for
-        // those). Scan for the first literal `exec` token; a container/namespace
-        // named "exec" is contrived enough to ignore.
-        let pos = argv.iter().skip(1).position(|a| a == "exec")?;
-        i = 1 + pos + 1;
+        // those).
+        //
+        // Audit (correctness): this used to be
+        // `argv.iter().skip(1).position(|a| a == "exec")` — an UNANCHORED
+        // scan of the ENTIRE argv. Any later positional argument that
+        // happened to literally be "exec" (a build tag, an npm/script arg, a
+        // k8s object literally named `exec`, …) was mistaken for the
+        // subcommand boundary, and the argv element right after IT got
+        // parsed as the container name — even for commands that aren't an
+        // `exec` invocation at all (e.g. `docker build -t exec .`).
+        // Anchor instead: walk only recognized GLOBAL option flags (and
+        // their values) from argv[1], and require the FIRST non-flag
+        // token to be exactly "exec" — any other subcommand there
+        // (`build`, `ps`, `run`, `inspect`, …) correctly yields `None`
+        // instead of being scanned past.
+        const GLOBAL_LONG_NEEDS_VALUE: &[&str] = &[
+            "host",
+            "context",
+            "config",
+            "log-level",
+            "namespace",
+            "kubeconfig",
+            "cluster",
+            "user",
+            "server",
+            "token",
+            "as",
+            "as-group",
+            "request-timeout",
+            "tlscacert",
+            "tlscert",
+            "tlskey",
+        ];
+        loop {
+            let a = argv.get(i)?;
+            if let Some(stripped) = a.strip_prefix("--") {
+                if stripped.is_empty() {
+                    // Bare "--" before the subcommand isn't meaningful for
+                    // any of these CLIs; skip rather than treat as positional.
+                    i += 1;
+                    continue;
+                }
+                // Once we know `stripped` has no `=`, it IS the flag name
+                // (a `--flag=value` token never reaches this check — the
+                // `!stripped.contains('=')` short-circuits first).
+                let needs_value = !stripped.contains('=')
+                    && i + 1 < argv.len()
+                    && GLOBAL_LONG_NEEDS_VALUE.contains(&stripped);
+                i += if needs_value { 2 } else { 1 };
+                continue;
+            }
+            if let Some(stripped) = a.strip_prefix('-')
+                && !stripped.is_empty()
+            {
+                // Single-char global flags that take a value: docker/podman
+                // `-H`/`-c`, kubectl `-n`/`-s`. Bundled/boolean shorts (`-D`,
+                // `-v`) just skip one token — same conservative default the
+                // post-`exec` flag loop below uses.
+                let needs_value = stripped.len() == 1
+                    && matches!(stripped, "H" | "c" | "n" | "l" | "s")
+                    && i + 1 < argv.len();
+                i += if needs_value { 2 } else { 1 };
+                continue;
+            }
+            // First non-flag token: it MUST be the `exec` subcommand — no
+            // scanning past it for a later, coincidental match.
+            if a != "exec" {
+                return None;
+            }
+            i += 1;
+            break;
+        }
     }
     // Skip flags + their values. Container CLIs share the same
     // shape — `-it` is a stacked short-flag bundle (no value),
@@ -1272,6 +1415,87 @@ mod tests {
                 host: "box.example".into(),
                 user: Some("alice".into()),
             })
+        );
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// Audit (robustness): `refresh_from` used to bound only a SINGLE
+    /// file's size (`MAX_PROC_FILE_BYTES`), not the sum across the whole
+    /// walk — a wide subtree of large-argv descendants could retain
+    /// multiple GiB in `entries`. Build ~40 descendants each with a
+    /// near-1-MiB `cmdline` (comfortably over `MAX_PROC_TREE_TOTAL_BYTES`
+    /// in aggregate, even though each individually passes the per-file
+    /// cap) and assert the walk stops accumulating argv bytes well before
+    /// the naive `N * per-file-cap` total, while still recording every
+    /// descendant's parent/cwd (structure survives the budget; only the
+    /// large payloads are dropped).
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_proc_scanner_caps_aggregate_argv_bytes_across_the_whole_walk() {
+        use std::os::unix::fs::symlink;
+
+        let root = std::env::temp_dir().join(format!(
+            "kettle-proc-tree-budget-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        // Just under MAX_PROC_FILE_BYTES (1 MiB) so the per-file cap alone
+        // would happily accept every one of these.
+        const BLOB_LEN: usize = 1_048_000;
+        const N: u32 = 40;
+        let scan_root = 1000u32;
+        let mut root_children = String::new();
+        for pid in 1..=N {
+            let dir = root.join(pid.to_string());
+            std::fs::create_dir_all(dir.join("task").join(pid.to_string())).unwrap();
+            let mut argv = vec![b'x'; BLOB_LEN];
+            *argv.last_mut().unwrap() = 0; // NUL-terminate: one argv token.
+            std::fs::write(dir.join("cmdline"), &argv).unwrap();
+            std::fs::write(dir.join("task").join(pid.to_string()).join("children"), b"").unwrap();
+            symlink("/tmp", dir.join("cwd")).unwrap();
+            root_children.push_str(&pid.to_string());
+            root_children.push('\n');
+        }
+        let root_dir = root.join(scan_root.to_string());
+        std::fs::create_dir_all(root_dir.join("task").join(scan_root.to_string())).unwrap();
+        std::fs::write(root_dir.join("cmdline"), b"bash\0").unwrap();
+        std::fs::write(
+            root_dir
+                .join("task")
+                .join(scan_root.to_string())
+                .join("children"),
+            root_children.as_bytes(),
+        )
+        .unwrap();
+        symlink("/tmp", root_dir.join("cwd")).unwrap();
+
+        let mut tree = LinuxProcessTree::default();
+        tree.refresh_from(&root, &[scan_root]);
+
+        // Structure (parent + cwd) survives for every descendant regardless
+        // of the aggregate budget.
+        for pid in 1..=N {
+            assert_eq!(tree.parent_of(pid), Some(scan_root));
+            assert_eq!(tree.cwd_of(pid).as_deref(), Some("/tmp"));
+        }
+        // But the total retained argv payload is capped well below the
+        // naive N * BLOB_LEN worst case, and at least one descendant's argv
+        // was skipped once the aggregate budget was spent.
+        let total_argv_bytes: usize = (1..=N)
+            .filter_map(|pid| tree.argv_of(pid))
+            .map(|argv| argv.iter().map(|s| s.len()).sum::<usize>())
+            .sum();
+        assert!(
+            total_argv_bytes < (N as usize) * BLOB_LEN,
+            "aggregate byte budget did not cap total retained argv bytes: {total_argv_bytes}"
+        );
+        assert!(
+            (1..=N).any(|pid| tree.argv_of(pid).is_none()),
+            "expected at least one descendant's argv to be skipped past the aggregate budget"
         );
 
         std::fs::remove_dir_all(root).unwrap();
@@ -1855,6 +2079,76 @@ mod tests {
                 runtime: ContainerRuntime::Docker,
                 container: "web".into(),
             })
+        );
+    }
+
+    /// Audit (correctness): `detect_container` used to locate the `exec`
+    /// subcommand with an unanchored `.position()` scan of the WHOLE argv,
+    /// so a later positional value that happened to literally be "exec"
+    /// (a build tag, a k8s object name, …) was mistaken for the subcommand
+    /// boundary and the argv element right after it became a phantom
+    /// container. The subcommand must now be exactly the first non-flag
+    /// token (after skipping only recognized global option flags).
+    #[test]
+    fn detect_container_does_not_scan_past_the_subcommand_for_a_coincidental_exec() {
+        let argv = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        // `docker build -t exec .` — "exec" is the IMAGE TAG, not a
+        // subcommand. Must NOT become a phantom `Container` context.
+        assert_eq!(
+            detect_container(&argv(&["docker", "build", "-t", "exec", "."])),
+            None
+        );
+        // Same shape for podman / kubectl (any non-"exec" first positional
+        // must reject, regardless of a later "exec"-shaped token).
+        assert_eq!(
+            detect_container(&argv(&["podman", "run", "--name", "exec", "alpine"])),
+            None
+        );
+        assert_eq!(
+            detect_container(&argv(&["kubectl", "get", "pods", "exec"])),
+            None
+        );
+        // A container/pod genuinely named "exec" still works when it's the
+        // ACTUAL argument to a real `exec` subcommand.
+        assert_eq!(
+            detect_container(&argv(&["docker", "exec", "exec", "sh"])),
+            Some(RemoteContext::Container {
+                runtime: ContainerRuntime::Docker,
+                container: "exec".into(),
+            })
+        );
+    }
+
+    /// Audit (correctness): for `sshpass`, the inner `ssh` used to be found
+    /// via `argv.iter().position(|a| argv0_basename(a) == "ssh")`, an
+    /// unanchored scan of the WHOLE argv — including sshpass's own flag
+    /// VALUES. A `-p`/`-f` value that happened to basename to "ssh" (a
+    /// password or password-file path literally named "ssh") was mistaken
+    /// for the real ssh invocation, silently discarding the real target.
+    #[test]
+    fn detect_ssh_sshpass_does_not_match_a_flag_value_named_ssh() {
+        let argv = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        // Password literally "ssh": the -p VALUE must not be mistaken for
+        // the wrapped ssh binary — the real ssh + target come after it.
+        assert_eq!(
+            detect_ssh(&argv(&["sshpass", "-p", "ssh", "ssh", "user@host"])),
+            Some(RemoteContext::Ssh {
+                host: "host".into(),
+                user: Some("user".into()),
+            })
+        );
+        // Same for a `-f` password-file path literally named "ssh".
+        assert_eq!(
+            detect_ssh(&argv(&["sshpass", "-f", "ssh", "ssh", "user@host"])),
+            Some(RemoteContext::Ssh {
+                host: "host".into(),
+                user: Some("user".into()),
+            })
+        );
+        // sshpass wrapping a non-ssh command is not an ssh session.
+        assert_eq!(
+            detect_ssh(&argv(&["sshpass", "-p", "secret", "scp", "f", "host:/f"])),
+            None
         );
     }
 

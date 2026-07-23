@@ -90,6 +90,21 @@ where
     false
 }
 
+// `is_console_operation`, `takes_one_value`, and `is_gui_flag` below are a
+// hand-maintained mirror of the `Cli` struct in `crates/kettle/src/main.rs`.
+// There is deliberately no automated cross-check here: `kettle-console` and
+// `kettle` are two `[[bin]]` targets in the same `Cargo.toml` with no shared
+// `[lib]` crate, so this file cannot `use` the real `Cli` type or call
+// `Cli::command().get_arguments()` to walk clap's own flag list. A future
+// flag that lands in `main.rs` without a matching update here will silently
+// fall through to the final `return true` in `should_wait` (wait — the safe
+// default for an unrecognized token, but wrong for a new no-op-value GUI
+// flag). If this drifts again, the durable fix is to expose `Cli` from a
+// shared `kettle` lib target so a `#[test]` here (or in `main.rs`) can walk
+// `get_arguments()` and assert every flag is classified by exactly one of
+// these three functions. Until then: when you add a flag to `Cli`, add it
+// here too, and extend `waits_for_cli_but_not_window_launches` /
+// `recording_directory_is_classified_as_a_gui_value_option` below.
 fn is_console_operation(argument: &str) -> bool {
     matches!(
         argument,
@@ -153,6 +168,7 @@ fn is_gui_flag(argument: &str) -> bool {
             | "-b"
             | "--hidden"
             | "-H"
+            | "--new-process"
     ) || argument == "--record-raw-input"
         || (argument.starts_with('-')
             && !argument.starts_with("--")
@@ -183,6 +199,18 @@ mod tests {
         assert!(!should_wait(["--config", "update"]));
         assert!(!should_wait(["-e", "pwsh"]));
         assert!(!should_wait(["-e", "update"]));
+    }
+
+    /// `--new-process` (`crates/kettle/src/main.rs`'s explicit
+    /// bare-launch-isolation escape hatch) is a no-value GUI flag like
+    /// `--restore`: it must return immediately instead of blocking the
+    /// calling shell for the lifetime of the new window. Regression test
+    /// for the flag falling through to the unknown-argument `wait` branch.
+    #[test]
+    fn new_process_flag_does_not_wait() {
+        assert!(!should_wait(["--new-process"]));
+        assert!(!should_wait(["--new-process", "--restore"]));
+        assert!(!should_wait(["--layout", "dev", "--new-process"]));
     }
 
     #[test]

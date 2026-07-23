@@ -6,6 +6,81 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+## [2.39.0] — 2026-07-23
+
+A whole-repository audit (multi-agent: per-crate plus cross-cutting security,
+performance, terminal-semantics, UX, compatibility, architecture, and docs
+lanes; every finding adversarially re-verified, and the security-critical
+fixes verified a second time against their diffs). 59 findings confirmed, 52
+shipped here; the remainder — two god-file splits and five cross-crate
+follow-ups — are tracked in
+[docs/AUDIT-DEFERRED.md](docs/AUDIT-DEFERRED.md). Full write-up in
+[docs/AUDIT-2026-07-23-FULL.md](docs/AUDIT-2026-07-23-FULL.md).
+
+  ### Fixed
+  - **Windows control-plane peer authentication was a no-op.**
+    `CtlStream::peer_is_same_user()` returned `Ok(true)` unconditionally on
+    Windows, contradicting its own contract and the "verifies same-user peers"
+    guarantee. It now checks the named-pipe client via
+    `GetNamedPipeClientProcessId` → open process → `GetTokenInformation` →
+    `EqualSid` against this process's token, with RAII handle ownership and
+    fail-closed error handling.
+  - **Remote-context pane titles bypassed the bidi/control-char sanitizer.**
+    SSH/container titles built from scanned process argv reached the pane
+    title, OS window title, and accessibility tree unfiltered; they now route
+    through `sanitize_title()` like every other title path.
+  - **`ctl screenshot` could be steered into an arbitrary-file overwrite.** The
+    live screenshot now opens its output with `create_new` (`O_EXCL` /
+    `CREATE_NEW`), so a symlink or file planted at the destination during the
+    capture window makes the write fail atomically instead of being followed;
+    screenshots and the remote-command file are also created owner-only.
+  - **A malformed MCP line could crash the server** via unbounded JSON nesting;
+    an explicit, string/escape-aware depth guard (limit 64) now rejects
+    over-nested input before the parser runs.
+  - **The `curl | sh` bootstrap installer could be silently downgraded.**
+    Verification against the Ed25519-signed release manifest no longer falls
+    back to the forgeable same-origin checksum when a capable openssl simply
+    can't fetch the manifest for a ≥ v2.35.0 release — that now fails closed;
+    only a genuinely older release or an openssl without Ed25519 takes the
+    weaker path. The update-archive verify/extract TOCTOU is closed outright on
+    Windows and narrowed on Linux (verify and extract share one handle).
+  - **Windows piped stdin was silently discarded.**
+    `attach_parent_console_if_needed` unconditionally replaced
+    `STD_INPUT_HANDLE` with `CONIN$`, defeating `is_terminal()` and hanging
+    `echo y | kettle update`; stdin is now guarded exactly as stdout/stderr
+    already were. The `kettle.com` launcher also learned `--new-process`, so it
+    no longer blocks the shell for that flag.
+  - `atomic_create_new` could leak its staged temp file and report success as
+    failure; state/lock acquisition gained bounded/timeout variants so a stuck
+    holder no longer wedges every caller. The ctl discovery registry and
+    AF_UNIX path length gained the ownership / length guards their Unix
+    siblings already had; config load, the legacy scrollback `search` API, and
+    the OSC 52 clipboard-read reply gained the bounds their symmetric paths
+    enforce. Cross-chunk ANSI-strip state, zoom/font-size desync, and vi-mode
+    selection reclamping after reflow were corrected.
+  - **A symlinked config file is read on startup again** (regression caught in
+    review before release): the hardened `O_NOFOLLOW` config reader is now
+    reached through the same symlink resolution the editor uses, so a
+    `~/.config/kettle/config` managed by GNU Stow / chezmoi / a manual `ln -s`
+    loads instead of silently falling back to defaults.
+
+  ### Changed
+  - **Context-menu, settings, and search-family overlay text buffers stopped
+    reshaping every frame.** They now carry the same text-equality reshape gate
+    the tab bar and quick-select hints use, so an open overlay no longer
+    re-shapes every label on each blink-driven redraw. The glyph-atlas slot
+    cache and quad-buffer growth gained eviction / checked-arithmetic bounds.
+  - **Ten config knobs that were parsed but never read** were removed (unknown
+    keys still warn-and-ignore, so existing configs never error) or wired up to
+    the behaviour they name.
+  - `just gauntlet` now actually mirrors the CI gate; CI gained the Windows
+    CLI-rendering smokes and the split-titlebar live smoke runs on Windows; the
+    `bench.ps1` zero-sample race was fixed. Six `TERMINATOR-*-DESIGN.md` "design
+    only" headers now state the version each feature shipped in, and the
+    PowerShell shell-integration snippet that reproduced an already-fixed
+    infinite-prompt loop, the broadcast keybind, the animated-background limits,
+    and the workspace test counts were corrected against the code.
+
 ## [2.38.2] — 2026-07-23
 
   ### Fixed

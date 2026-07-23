@@ -1,8 +1,13 @@
 # Background image render — design
 
-> Status: design only. The implementation touches the wgpu
-> render pipeline + image decode + a blur shader; this doc lays out the
-> architecture so the work lands in bounded phases.
+> Status: **Shipped.** Static wallpaper rendering (decode, texture
+> upload, `background_image_mode`/`_align_horiz`/`_align_vert`/
+> `_blur`/`_darkness`) landed in v1.20.0; animated GIF/APNG/animated-WebP
+> playback followed in v2.22.0, with the opaque-chrome-over-wallpaper
+> layering fix, the GPU picker, and ongoing perf/self-heal polish in
+> v2.23.0 and later. See `crates/kettle-config/src/lib.rs`
+> (`background_image*` fields) and `crates/kettle-render/src/bg_image.rs`
+> + `imgpipe.rs`. This doc is kept as the historical design record.
 
 ## What it is
 

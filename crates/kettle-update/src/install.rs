@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 #[cfg(any(windows, target_os = "linux"))]
 use std::fs::OpenOptions;
 #[cfg(any(windows, target_os = "linux"))]
-use std::io::Read;
+use std::io::{Read, Seek};
 #[cfg(any(windows, target_os = "linux"))]
 use std::path::Component;
 #[cfg(any(windows, target_os = "linux"))]
@@ -601,15 +601,33 @@ fn install_update_into(
     let mut archive = tempfile::Builder::new()
         .prefix("kettle-update-download-")
         .tempfile()?;
+    // Hold an exclusive lock on the archive for its entire lifetime, from
+    // before any bytes are written until after extraction has read them.
+    // `NamedTempFile` does not request exclusive sharing (Windows keeps the
+    // default FILE_SHARE_READ|FILE_SHARE_WRITE; Unix leaves it a normal 0600
+    // file), so a same-user process that already has the path open could
+    // otherwise overwrite bytes in place while we still hold our handle. On
+    // Windows this lock is a mandatory, kernel-enforced byte-range lock that
+    // fails any other process's read/write touching it, lock-aware or not;
+    // on Unix it is advisory only, so it does not stop a hostile writer, but
+    // the same-handle discipline below still closes the delete-and-recreate
+    // variant of this race there.
+    fs4::FileExt::lock(archive.as_file())?;
     client.download_to(update, archive.as_file_mut())?;
     archive.as_file_mut().flush()?;
     archive.as_file().sync_all()?;
-    verify_sha256(archive.path(), &asset.sha256)?;
+    // Verify and extract from the very same open handle rather than
+    // re-resolving `archive.path()` a second time for each step. Re-opening
+    // by path here would let another same-user process substitute a
+    // different file (or a delete-and-recreate at the same name) in the gap
+    // between the two opens, defeating the SHA-256/signature verification
+    // that is this crate's entire security model.
+    verify_sha256(archive.as_file_mut(), &asset.sha256)?;
 
     let staging = tempfile::Builder::new()
         .prefix(".kettle-update-stage-")
         .tempdir_in(&install.prefix)?;
-    extract_archive(archive.path(), staging.path())?;
+    extract_archive(archive.as_file_mut(), staging.path())?;
 
     #[cfg(windows)]
     let package_root = staging.path().to_path_buf();
@@ -877,14 +895,68 @@ fn spawn_pending_helper(prefix: &Path) -> Result<(), UpdateError> {
         .map_err(UpdateError::from)
 }
 
+/// Bounds how long the helper waits for the update-transaction and
+/// running-instances locks before giving up. A holder that is merely stuck
+/// (not crashed) rather than exited normally — the GPU device-loss/TDR hangs
+/// this project has seen recur — would otherwise leave the helper blocked on
+/// an unbounded `ExclusiveFileLock::acquire` forever, with the staged,
+/// already-signature-and-hash-verified update never applied and no
+/// diagnostic left for the user.
+#[cfg(windows)]
+const PENDING_HELPER_LOCK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
+
 #[cfg(windows)]
 fn run_pending_update_helper_inner(prefix: &Path, helper: &Path) -> Result<(), UpdateError> {
+    run_pending_update_helper_inner_with_timeout(prefix, helper, PENDING_HELPER_LOCK_TIMEOUT)
+}
+
+/// Core of [`run_pending_update_helper_inner`], parameterized on the lock
+/// timeout so tests can exercise the timed-out path in milliseconds instead
+/// of waiting out the real [`PENDING_HELPER_LOCK_TIMEOUT`].
+#[cfg(windows)]
+fn run_pending_update_helper_inner_with_timeout(
+    prefix: &Path,
+    helper: &Path,
+    lock_timeout: std::time::Duration,
+) -> Result<(), UpdateError> {
     // Match quarantine's lock order: update transaction first, running images
     // second. This keeps staging cleanup and a newly requested update from
     // racing the helper after it has begun validating pending state.
-    let _update_lock =
-        kettle_state::ExclusiveFileLock::acquire(&prefix.join(".kettle-update.lock"))?;
-    let running_lock = kettle_state::ExclusiveFileLock::acquire(&prefix.join(RUNNING_LOCK_FILE))?;
+    let update_lock_path = prefix.join(".kettle-update.lock");
+    let update_lock =
+        match kettle_state::ExclusiveFileLock::acquire_timeout(&update_lock_path, lock_timeout) {
+            Ok(lock) => lock,
+            Err(error) if error.kind() == std::io::ErrorKind::TimedOut => {
+                // Nothing is held here, so there is nowhere safe to persist a
+                // last_error (every pending-file writer in this module serializes
+                // on this same lock); surface the failure and leave the pending
+                // record for the next launch to retry untouched.
+                return Err(UpdateError::Transaction(format!(
+                    "timed out after {:?} waiting for the update lock at {}: {error}",
+                    lock_timeout,
+                    update_lock_path.display()
+                )));
+            }
+            Err(error) => return Err(error.into()),
+        };
+    let running_lock_path = prefix.join(RUNNING_LOCK_FILE);
+    let running_lock = match kettle_state::ExclusiveFileLock::acquire_timeout(
+        &running_lock_path,
+        lock_timeout,
+    ) {
+        Ok(lock) => lock,
+        Err(error) if error.kind() == std::io::ErrorKind::TimedOut => {
+            let timeout_error = UpdateError::Transaction(format!(
+                "timed out after {lock_timeout:?} waiting for another Kettle process to release {RUNNING_LOCK_FILE}; it may be stuck"
+            ));
+            // We still hold the update lock, which every pending-file writer
+            // in this module acquires first, so it is safe to record the
+            // failure here even without the running lock.
+            record_pending_failure_before_running_lock(&update_lock, prefix, &timeout_error);
+            return Err(timeout_error);
+        }
+        Err(error) => return Err(error.into()),
+    };
     // A second helper may have waited behind the one that completed the update.
     if !prefix.join(PENDING_FILE).is_file() {
         return Ok(());
@@ -998,6 +1070,28 @@ fn record_pending_failure(
     prefix: &Path,
     error: &UpdateError,
 ) {
+    record_pending_failure_locked(prefix, error);
+}
+
+/// Same write as [`record_pending_failure`], for the call site that times out
+/// acquiring the running lock itself and so can only prove it holds the
+/// update lock. Every pending-file writer in this module (`begin_pending_attempt`,
+/// `try_quarantine_pending`, this function's sibling) takes the update lock
+/// first, so holding it alone is sufficient to serialize this write against
+/// all of them; the running lock only additionally orders this against the
+/// live binary swap in `apply_staged_update`, which does not touch the
+/// pending record.
+#[cfg(windows)]
+fn record_pending_failure_before_running_lock(
+    _update_lock: &kettle_state::ExclusiveFileLock,
+    prefix: &Path,
+    error: &UpdateError,
+) {
+    record_pending_failure_locked(prefix, error);
+}
+
+#[cfg(windows)]
+fn record_pending_failure_locked(prefix: &Path, error: &UpdateError) {
     let Ok(mut pending) = load_pending(prefix) else {
         return;
     };
@@ -1064,9 +1158,15 @@ fn sha256_file(path: &Path) -> Result<String, UpdateError> {
     Ok(hex::encode(hash.finalize()))
 }
 
+/// Hashes the already-open `file` handle from its start, rather than
+/// re-opening its path. Re-opening by path between this check and extraction
+/// would let another same-user process substitute the bytes in between (the
+/// downloaded archive's `NamedTempFile` is not opened with exclusive
+/// sharing), so every caller must pass the exact handle it later extracts
+/// from instead of resolving the path again.
 #[cfg(any(windows, target_os = "linux"))]
-fn verify_sha256(path: &Path, expected: &str) -> Result<(), UpdateError> {
-    let mut file = File::open(path)?;
+fn verify_sha256(file: &mut File, expected: &str) -> Result<(), UpdateError> {
+    file.rewind()?;
     let mut hash = Sha256::new();
     let mut buffer = [0_u8; 64 * 1024];
     loop {
@@ -1193,10 +1293,14 @@ fn zip_unix_mode_is_safe(mode: Option<u32>, is_dir: bool) -> bool {
     }
 }
 
+/// Extracts from the already-open `archive` handle (the same one
+/// [`verify_sha256`] hashed) instead of re-opening its path, so nothing can
+/// substitute the archive's bytes between verification and extraction. See
+/// [`verify_sha256`] for the TOCTOU this closes.
 #[cfg(windows)]
-fn extract_archive(archive: &Path, destination: &Path) -> Result<(), UpdateError> {
-    let file = File::open(archive)?;
-    let mut zip = zip::ZipArchive::new(file)?;
+fn extract_archive(archive: &mut File, destination: &Path) -> Result<(), UpdateError> {
+    archive.rewind()?;
+    let mut zip = zip::ZipArchive::new(&mut *archive)?;
     if zip.len() > MAX_ARCHIVE_ENTRIES {
         return Err(UpdateError::UnsafeArchive("too many entries".into()));
     }
@@ -1270,10 +1374,14 @@ fn extract_archive(archive: &Path, destination: &Path) -> Result<(), UpdateError
     Ok(())
 }
 
+/// Extracts from the already-open `archive` handle (the same one
+/// [`verify_sha256`] hashed) instead of re-opening its path, so nothing can
+/// substitute the archive's bytes between verification and extraction. See
+/// [`verify_sha256`] for the TOCTOU this closes.
 #[cfg(target_os = "linux")]
-fn extract_archive(archive: &Path, destination: &Path) -> Result<(), UpdateError> {
-    let file = File::open(archive)?;
-    let decoder = flate2::read::GzDecoder::new(file);
+fn extract_archive(archive: &mut File, destination: &Path) -> Result<(), UpdateError> {
+    archive.rewind()?;
+    let decoder = flate2::read::GzDecoder::new(&mut *archive);
     let mut tar = tar::Archive::new(decoder);
     let mut count = 0_usize;
     let mut total = 0_u64;
@@ -2584,7 +2692,13 @@ fn refresh_platform_integration(install: &ManagedInstall) {
     use std::os::windows::process::CommandExt as _;
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
     let script = install.prefix.join("install.ps1");
-    let _ = std::process::Command::new("powershell.exe")
+    let Some(powershell) = system_powershell_path() else {
+        log::warn!(
+            "could not resolve a fully-qualified PowerShell path; skipping the post-update integration refresh"
+        );
+        return;
+    };
+    let _ = std::process::Command::new(powershell)
         .args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-File"])
         .arg(script)
         .arg("-RefreshIntegration")
@@ -2592,18 +2706,78 @@ fn refresh_platform_integration(install: &ManagedInstall) {
         .status();
 }
 
+/// Resolves `powershell.exe` by a fixed, fully-qualified system path instead
+/// of letting `Command::new` search for a bare name. `CreateProcess`'s
+/// default search order tries the spawning process's own application
+/// directory and its current working directory before PATH, so a same-user
+/// attacker able to write into either (a much weaker position than
+/// compromising this process's environment) could otherwise have this
+/// authenticated self-update step execute an arbitrary planted binary.
+/// `%SystemRoot%`/`%windir%` are set by Windows for every process and are
+/// the standard way to name the system directory without new API bindings;
+/// resolving through them and confirming the target file actually exists is
+/// still strictly safer than an unqualified `Command::new("powershell.exe")`.
+#[cfg(windows)]
+fn system_powershell_path() -> Option<PathBuf> {
+    for variable in ["SystemRoot", "windir"] {
+        if let Some(root) = std::env::var_os(variable) {
+            let root = PathBuf::from(root);
+            if root.is_absolute() {
+                let candidate = root.join(r"System32\WindowsPowerShell\v1.0\powershell.exe");
+                if candidate.is_file() {
+                    return Some(candidate);
+                }
+            }
+        }
+    }
+    let fallback = PathBuf::from(r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe");
+    fallback.is_file().then_some(fallback)
+}
+
 #[cfg(target_os = "linux")]
 fn refresh_platform_integration(install: &ManagedInstall) {
-    let _ = std::process::Command::new("update-desktop-database")
-        .arg(install.prefix.join("share/applications"))
-        .status();
+    if let Some(tool) = system_tool_path("update-desktop-database") {
+        let _ = std::process::Command::new(tool)
+            .arg(install.prefix.join("share/applications"))
+            .status();
+    }
     let icon_root = install.prefix.join("share/icons/hicolor");
-    if icon_root.join("index.theme").is_file() {
-        let _ = std::process::Command::new("gtk-update-icon-cache")
+    if icon_root.join("index.theme").is_file()
+        && let Some(tool) = system_tool_path("gtk-update-icon-cache")
+    {
+        let _ = std::process::Command::new(tool)
             .args(["-f", "-t"])
             .arg(icon_root)
             .status();
     }
+}
+
+/// The absolute directories desktop-integration tools are installed to on
+/// mainstream Linux distributions, in lookup order.
+#[cfg(target_os = "linux")]
+const SYSTEM_TOOL_DIRS: &[&str] = &["/usr/bin", "/usr/local/bin", "/bin"];
+
+/// Resolves a desktop-integration tool by a fixed absolute path instead of
+/// letting `Command::new` search PATH for a bare name, so a same-user
+/// attacker who can write into an earlier PATH entry cannot have this
+/// authenticated self-update step run a planted binary that merely shares
+/// one of these well-known tool names. Silently skipping when none of the
+/// allowlisted directories has the tool matches this call site's existing
+/// best-effort behavior (its own status codes are already ignored).
+#[cfg(target_os = "linux")]
+fn system_tool_path(name: &str) -> Option<PathBuf> {
+    system_tool_path_in(SYSTEM_TOOL_DIRS, name)
+}
+
+/// Core of [`system_tool_path`], parameterized on the candidate directories
+/// so tests can exercise the allowlist/ordering behavior against a synthetic
+/// directory set instead of depending on which desktop-integration tools
+/// happen to be installed on the machine running the test.
+#[cfg(target_os = "linux")]
+fn system_tool_path_in(dirs: &[&str], name: &str) -> Option<PathBuf> {
+    dirs.iter()
+        .map(|dir| Path::new(dir).join(name))
+        .find(|candidate| candidate.is_file())
 }
 
 #[cfg(test)]
@@ -3172,6 +3346,61 @@ mod tests {
         }
     }
 
+    /// Regression test for resolving desktop-integration tools by a fixed
+    /// allowlist rather than an unqualified `Command::new(name)` PATH
+    /// search: a same-named binary planted outside every allowlisted
+    /// directory (standing in for a writable, earlier PATH entry) must never
+    /// be picked up, and among allowlisted directories the earliest match
+    /// wins.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn system_tool_path_in_only_resolves_allowlisted_directories_in_order() {
+        let root = tempfile::tempdir().unwrap();
+        let off_list = root.path().join("off-list");
+        let first = root.path().join("first");
+        let second = root.path().join("second");
+        fs::create_dir_all(&off_list).unwrap();
+        fs::create_dir_all(&first).unwrap();
+        fs::create_dir_all(&second).unwrap();
+        fs::write(off_list.join("tool"), b"attacker").unwrap();
+
+        let dirs = [first.to_str().unwrap(), second.to_str().unwrap()];
+        assert!(
+            system_tool_path_in(&dirs, "tool").is_none(),
+            "a same-named binary outside every allowlisted directory must not be resolved"
+        );
+
+        fs::write(second.join("tool"), b"real").unwrap();
+        assert_eq!(
+            system_tool_path_in(&dirs, "tool").unwrap(),
+            second.join("tool")
+        );
+
+        fs::write(first.join("tool"), b"real-preferred").unwrap();
+        assert_eq!(
+            system_tool_path_in(&dirs, "tool").unwrap(),
+            first.join("tool"),
+            "earlier allowlisted directories must take priority"
+        );
+    }
+
+    /// Regression test for resolving `powershell.exe` by a fixed,
+    /// fully-qualified path rather than an unqualified
+    /// `Command::new("powershell.exe")` PATH/CWD search.
+    #[cfg(windows)]
+    #[test]
+    fn system_powershell_path_resolves_a_fully_qualified_existing_binary() {
+        let path =
+            system_powershell_path().expect("a Windows test runner must have PowerShell installed");
+        assert!(path.is_absolute());
+        assert!(path.is_file());
+        assert!(
+            path.file_name().and_then(|name| name.to_str()) == Some("powershell.exe"),
+            "resolved path was {}",
+            path.display()
+        );
+    }
+
     #[test]
     fn zip_unix_modes_reject_links_devices_fifos_and_type_mismatches() {
         assert!(zip_unix_mode_is_safe(None, false));
@@ -3214,7 +3443,8 @@ mod tests {
         let destination = root.path().join("stage");
         fs::create_dir(&destination).unwrap();
         write_archive(&archive, 0o755);
-        extract_archive(&archive, &destination).unwrap();
+        let mut archive_file = fs::File::open(&archive).unwrap();
+        extract_archive(&mut archive_file, &destination).unwrap();
         assert_eq!(
             fs::metadata(destination.join("kettle/install.sh"))
                 .unwrap()
@@ -3228,7 +3458,8 @@ mod tests {
         let special_destination = root.path().join("special-stage");
         fs::create_dir(&special_destination).unwrap();
         write_archive(&special_archive, 0o4755);
-        let error = extract_archive(&special_archive, &special_destination).unwrap_err();
+        let mut special_archive_file = fs::File::open(&special_archive).unwrap();
+        let error = extract_archive(&mut special_archive_file, &special_destination).unwrap_err();
         assert!(error.to_string().contains("special permission bits"));
         assert!(!special_destination.join("kettle/install.sh").exists());
     }
@@ -3259,10 +3490,103 @@ mod tests {
         let destination = root.path().join("stage");
         fs::create_dir(&destination).unwrap();
 
-        let error = extract_archive(&archive_path, &destination).unwrap_err();
+        let mut archive_file = fs::File::open(&archive_path).unwrap();
+        let error = extract_archive(&mut archive_file, &destination).unwrap_err();
 
         assert!(error.to_string().contains("sparse files are forbidden"));
         assert!(!destination.join("kettle/sparse").exists());
+    }
+
+    #[cfg(target_os = "linux")]
+    fn write_test_tar_gz(path: &Path, payload: &[u8]) {
+        let encoder = flate2::write::GzEncoder::new(
+            fs::File::create(path).unwrap(),
+            flate2::Compression::default(),
+        );
+        let mut archive = tar::Builder::new(encoder);
+        let mut header = tar::Header::new_gnu();
+        header.set_entry_type(tar::EntryType::Regular);
+        header.set_mode(0o644);
+        header.set_size(payload.len() as u64);
+        header.set_cksum();
+        archive
+            .append_data(&mut header, "kettle/payload", payload.as_slice())
+            .unwrap();
+        archive.into_inner().unwrap().finish().unwrap();
+    }
+
+    /// Regression test for the archive TOCTOU: `verify_sha256` and
+    /// `extract_archive` must operate on the exact handle the caller passes
+    /// in rather than re-resolving the caller's path, so a same-user process
+    /// that swaps the file at that path between the hash check and
+    /// extraction cannot smuggle unverified bytes into the staging
+    /// directory.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_extract_archive_reads_the_verified_handle_not_a_reopened_path() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("release.tar.gz");
+        write_test_tar_gz(&path, b"original-bytes");
+        let expected_hash = sha256_file(&path).unwrap();
+
+        let mut file = fs::File::open(&path).unwrap();
+        verify_sha256(&mut file, &expected_hash).unwrap();
+
+        // Simulate an attacker replacing the archive at the same path after
+        // the hash check succeeds but before extraction runs. On Linux this
+        // delete-and-recreate is possible even while our handle stays open;
+        // that open handle keeps referencing the original, already-verified
+        // inode regardless.
+        let malicious = root.path().join("malicious.tar.gz");
+        write_test_tar_gz(&malicious, b"attacker-bytes");
+        fs::rename(&malicious, &path).unwrap();
+        assert_ne!(sha256_file(&path).unwrap(), expected_hash);
+
+        let destination = root.path().join("stage");
+        fs::create_dir(&destination).unwrap();
+        extract_archive(&mut file, &destination).unwrap();
+
+        assert_eq!(
+            fs::read(destination.join("kettle/payload")).unwrap(),
+            b"original-bytes",
+            "extraction must read the handle verify_sha256 hashed, not whatever now lives at the archive's path"
+        );
+    }
+
+    /// Regression test for the Windows half of the same archive TOCTOU: the
+    /// exclusive lock `install_update_into` takes on the downloaded archive
+    /// must be a mandatory, kernel-enforced lock that blocks a concurrent
+    /// same-user writer from overwriting the file's bytes in place, not
+    /// merely an advisory courtesy that a hostile writer can ignore.
+    #[cfg(windows)]
+    #[test]
+    fn windows_archive_lock_blocks_a_concurrent_in_place_overwrite() {
+        let root = tempfile::tempdir().unwrap();
+        let archive = tempfile::Builder::new()
+            .prefix("kettle-update-download-")
+            .tempfile_in(root.path())
+            .unwrap();
+        fs::write(archive.path(), b"original-bytes").unwrap();
+        fs4::FileExt::lock(archive.as_file()).unwrap();
+
+        let overwrite_attempt = OpenOptions::new()
+            .write(true)
+            .open(archive.path())
+            .and_then(|mut contender| contender.write_all(b"attacker-bytes"));
+        assert!(
+            overwrite_attempt.is_err(),
+            "a concurrent writer must not be able to modify a locked archive in place"
+        );
+        assert_eq!(fs::read(archive.path()).unwrap(), b"original-bytes");
+
+        fs4::FileExt::unlock(archive.as_file()).unwrap();
+        OpenOptions::new()
+            .write(true)
+            .open(archive.path())
+            .unwrap()
+            .write_all(b"ok-after-unlock")
+            .unwrap();
+        assert_eq!(fs::read(archive.path()).unwrap(), b"ok-after-unlock");
     }
 
     #[test]
@@ -3465,6 +3789,47 @@ mod tests {
         let persisted = load_pending(root.path()).unwrap();
         assert_eq!(persisted.attempts, 2);
         assert!(persisted.last_error.is_none());
+    }
+
+    /// Regression test: a stuck (not crashed) holder of the running-instances
+    /// lock must not wedge the pending-update helper forever. The helper
+    /// should give up once its bounded timeout elapses and leave an
+    /// actionable `last_error` behind for the next launch's
+    /// `inspect_pending_start` to surface, instead of blocking indefinitely
+    /// with no diagnostic and no escape hatch.
+    #[cfg(windows)]
+    #[test]
+    fn pending_helper_gives_up_on_a_stuck_running_lock_instead_of_hanging_forever() {
+        let root = tempfile::tempdir().unwrap();
+        let pending = seed_windows_pending(root.path(), 0);
+        let helper = root.path().join(&pending.helper).canonicalize().unwrap();
+
+        // Simulate a wedged Kettle process (e.g. a GPU device-loss/TDR hang)
+        // that holds the shared run lock without ever releasing it.
+        let running_lock_path = root.path().join(RUNNING_LOCK_FILE);
+        let stuck_holder = kettle_state::ExclusiveFileLock::acquire(&running_lock_path).unwrap();
+
+        let error = run_pending_update_helper_inner_with_timeout(
+            root.path(),
+            &helper,
+            std::time::Duration::from_millis(200),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("may be stuck"));
+
+        let recorded = load_pending(root.path()).unwrap();
+        assert!(
+            recorded
+                .last_error
+                .as_deref()
+                .is_some_and(|message| message.contains("may be stuck")),
+            "a timed-out helper must leave an actionable last_error for the next launch"
+        );
+        // The attempt counter must be untouched: the helper never got far
+        // enough to call `begin_pending_attempt`.
+        assert_eq!(recorded.attempts, 0);
+
+        drop(stuck_holder);
     }
 
     #[cfg(windows)]

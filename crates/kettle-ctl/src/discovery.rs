@@ -20,6 +20,8 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde::{Deserialize, Serialize};
+#[cfg(windows)]
+use windows_sys::Win32::Security::{PSECURITY_DESCRIPTOR, PSID};
 
 /// Registry records are tiny (normally a few hundred bytes). Bound reads so a
 /// corrupt same-user file cannot turn discovery into an unbounded allocation.
@@ -81,18 +83,63 @@ pub fn registry_dir() -> PathBuf {
 }
 
 /// The default transport endpoint for `pid` (matches the server's `bind`).
+///
+/// On Unix, `sockaddr_un.sun_path` is 108 bytes on Linux (104 on BSD/macOS); a
+/// direct `<dir>/ctl-<pid>.sock` path can exceed that under a long
+/// `XDG_STATE_HOME`/`HOME` (an LDAP/AD-joined `/home/example.com/first.last`
+/// style path, or a long macOS username). When the direct path would
+/// overflow, fall back to a short, deterministic path under a private
+/// uid-namespaced temp dir — the same class of fallback `activation.rs`'s
+/// `activation_paths()` already applies to its own AF_UNIX endpoint, so both
+/// sockets in this crate share one length-safe construction.
 pub fn default_endpoint(dir: &std::path::Path, pid: u32) -> String {
     #[cfg(windows)]
     {
         let _ = dir;
         format!(r"\\.\pipe\kettle-ctl-{pid}")
     }
-    #[cfg(not(windows))]
+    #[cfg(unix)]
     {
-        dir.join(format!("ctl-{pid}.sock"))
+        use std::os::unix::ffi::OsStrExt as _;
+
+        let direct = dir.join(format!("ctl-{pid}.sock"));
+        // Leave headroom below the tightest known sun_path capacity (104 on
+        // BSD/macOS) for the NUL terminator, matching activation.rs's margin.
+        if direct.as_os_str().as_bytes().len() <= 100 {
+            return direct.to_string_lossy().into_owned();
+        }
+        let hash = stable_hash(
+            dir.as_os_str()
+                .as_bytes()
+                .iter()
+                .copied()
+                .chain(pid.to_le_bytes()),
+        );
+        private_temp_ctl_dir()
+            .join(format!("ctl-{hash:016x}.sock"))
             .to_string_lossy()
             .into_owned()
     }
+}
+
+/// The private, uid-namespaced temp dir used for the length-fallback socket
+/// path above. Sibling of `private_temp_state_dir` (which fronts a missing
+/// `XDG_RUNTIME_DIR`/`XDG_STATE_HOME`/`HOME`), but this one is used
+/// unconditionally once the direct path is too long, regardless of which
+/// registry dir triggered the overflow.
+#[cfg(unix)]
+fn private_temp_ctl_dir() -> PathBuf {
+    std::env::temp_dir().join(format!("kettle-{}", unsafe { libc::geteuid() }))
+}
+
+/// FNV-1a, matching `activation.rs`'s `stable_hash` exactly so both endpoint
+/// fallbacks in this crate use the same construction. Kept as a separate copy
+/// (rather than a shared helper) to respect this file's ownership boundary.
+#[cfg(unix)]
+fn stable_hash(bytes: impl IntoIterator<Item = u8>) -> u64 {
+    bytes.into_iter().fold(0xcbf29ce484222325, |hash, byte| {
+        (hash ^ u64::from(byte)).wrapping_mul(0x100000001b3)
+    })
 }
 
 /// Path of the `<pid>.json` entry file.
@@ -123,9 +170,13 @@ fn registry_dir_is_private(dir: &std::path::Path) -> bool {
         use std::os::unix::fs::MetadataExt as _;
         metadata.uid() == unsafe { libc::geteuid() } && metadata.mode() & 0o077 == 0
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
     {
-        true
+        // Verify actual ownership instead of trusting whatever ACL
+        // %LOCALAPPDATA% happened to inherit (a redirected/shared profile, a
+        // Terminal-Services-style multi-user box, or an injected env var
+        // could all point this at a non-private directory otherwise).
+        owned_by_current_user(dir)
     }
 }
 
@@ -157,6 +208,16 @@ fn read_registry_entry(path: &std::path::Path) -> Option<String> {
     {
         use std::os::unix::fs::MetadataExt as _;
         if metadata.uid() != unsafe { libc::geteuid() } || metadata.mode() & 0o077 != 0 {
+            return None;
+        }
+    }
+    #[cfg(windows)]
+    {
+        // Mirror the Unix uid check above: don't trust that a `<pid>.json`
+        // found in the registry dir is actually ours, only that its owning
+        // SID matches this process's — closing the same spoofing gap the
+        // Unix arm already closes via `uid()`.
+        if !owned_by_current_user(path) {
             return None;
         }
     }
@@ -335,6 +396,161 @@ pub fn prune(dir: &std::path::Path, pid: u32) {
     unregister(dir, pid);
 }
 
+/// Owns a `PSID` produced by one of two Win32 APIs, freed the way each API
+/// documents: `LocalFree` for the security-descriptor buffer
+/// `GetNamedSecurityInfoW` allocates, or nothing beyond the `Vec`'s own
+/// deallocation for the `TOKEN_USER` buffer `GetTokenInformation` fills (the
+/// SID it returns points inside that same buffer). Either way, `sid()` is
+/// only valid for as long as this value is alive.
+#[cfg(windows)]
+enum OwnedSid {
+    Descriptor(PSECURITY_DESCRIPTOR, PSID),
+    // `u64`-backed (rather than `Vec<u8>`) so the buffer is pointer-aligned:
+    // `TOKEN_USER` embeds a `PSID` field and Windows requires the buffer
+    // passed to `GetTokenInformation` to be suitably aligned for it. The
+    // `Vec` is never read directly — it is a lifetime anchor keeping the
+    // buffer the sibling `PSID` points into alive until this value drops.
+    TokenBuffer(#[allow(dead_code)] Vec<u64>, PSID),
+}
+
+#[cfg(windows)]
+impl OwnedSid {
+    fn sid(&self) -> PSID {
+        match self {
+            OwnedSid::Descriptor(_, sid) | OwnedSid::TokenBuffer(_, sid) => *sid,
+        }
+    }
+}
+
+#[cfg(windows)]
+impl Drop for OwnedSid {
+    fn drop(&mut self) {
+        if let OwnedSid::Descriptor(descriptor, _) = self {
+            // SAFETY: `descriptor` was allocated by `GetNamedSecurityInfoW`,
+            // which documents `LocalFree` as its release function.
+            unsafe {
+                windows_sys::Win32::Foundation::LocalFree(*descriptor);
+            }
+        }
+    }
+}
+
+/// True if `path`'s Win32 security-descriptor owner SID matches the current
+/// process token's user SID. This is the Windows equivalent of the Unix
+/// `metadata.uid() == geteuid()` checks used throughout this file — without
+/// it, `registry_dir_is_private`/`read_registry_entry` on Windows previously
+/// trusted whatever ACL the directory or file happened to have, rather than
+/// verifying ownership.
+#[cfg(windows)]
+fn owned_by_current_user(path: &std::path::Path) -> bool {
+    let Some(current) = current_user_sid() else {
+        return false;
+    };
+    let Some(owner) = path_owner_sid(path) else {
+        return false;
+    };
+    // SAFETY: both SIDs were produced by a successful query above and their
+    // owning buffers (held alive by `current`/`owner`) are still in scope.
+    unsafe { windows_sys::Win32::Security::EqualSid(current.sid(), owner.sid()) != 0 }
+}
+
+/// The current process token's user SID, via `OpenProcessToken` +
+/// `GetTokenInformation(TokenUser)` (the standard two-call size-then-fill
+/// pattern: the first call fails but reports the required buffer size).
+#[cfg(windows)]
+fn current_user_sid() -> Option<OwnedSid> {
+    use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
+    use windows_sys::Win32::Security::{GetTokenInformation, TOKEN_QUERY, TOKEN_USER, TokenUser};
+    use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+
+    let mut token: HANDLE = std::ptr::null_mut();
+    // SAFETY: `GetCurrentProcess` returns a pseudo-handle that needs no
+    // closing; `token` is a valid output pointer for this call.
+    if unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) } == 0 {
+        return None;
+    }
+    let mut needed: u32 = 0;
+    // SAFETY: a null, zero-length buffer is the documented way to query the
+    // required size; `needed` is a valid output pointer. This call is
+    // expected to fail (ERROR_INSUFFICIENT_BUFFER) — only `needed` matters.
+    unsafe {
+        GetTokenInformation(token, TokenUser, std::ptr::null_mut(), 0, &mut needed);
+    }
+    if needed == 0 {
+        // SAFETY: `token` is the valid handle opened above.
+        unsafe { CloseHandle(token) };
+        return None;
+    }
+    // Round up to whole `u64` words so the buffer is at least `needed` bytes
+    // and pointer-aligned (see `OwnedSid::TokenBuffer`'s doc comment).
+    let mut buffer: Vec<u64> = vec![0u64; (needed as usize).div_ceil(std::mem::size_of::<u64>())];
+    let mut written = 0u32;
+    // SAFETY: `buffer` holds at least `needed` bytes, matching the size probe.
+    let ok = unsafe {
+        GetTokenInformation(
+            token,
+            TokenUser,
+            buffer.as_mut_ptr().cast(),
+            needed,
+            &mut written,
+        )
+    };
+    // SAFETY: `token` remains the valid handle opened above until closed here.
+    unsafe { CloseHandle(token) };
+    if ok == 0 {
+        return None;
+    }
+    // SAFETY: `buffer` was just filled by a successful `GetTokenInformation`
+    // call for `TokenUser`, which the API documents as writing a `TOKEN_USER`
+    // at the start of the buffer.
+    let sid = unsafe { (*buffer.as_ptr().cast::<TOKEN_USER>()).User.Sid };
+    if sid.is_null() {
+        return None;
+    }
+    Some(OwnedSid::TokenBuffer(buffer, sid))
+}
+
+/// `path`'s owning SID, via `GetNamedSecurityInfoW(OWNER_SECURITY_INFORMATION)`.
+#[cfg(windows)]
+fn path_owner_sid(path: &std::path::Path) -> Option<OwnedSid> {
+    use std::os::windows::ffi::OsStrExt as _;
+    use windows_sys::Win32::Foundation::ERROR_SUCCESS;
+    use windows_sys::Win32::Security::Authorization::{GetNamedSecurityInfoW, SE_FILE_OBJECT};
+    use windows_sys::Win32::Security::OWNER_SECURITY_INFORMATION;
+
+    let wide: Vec<u16> = path
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    let mut owner: PSID = std::ptr::null_mut();
+    let mut descriptor: PSECURITY_DESCRIPTOR = std::ptr::null_mut();
+    // SAFETY: `wide` is NUL-terminated and remains alive for the call; the
+    // remaining arguments are valid output pointers. On success `descriptor`
+    // owns `owner`'s backing storage and is freed via `LocalFree` in
+    // `OwnedSid`'s `Drop`.
+    let status = unsafe {
+        GetNamedSecurityInfoW(
+            wide.as_ptr(),
+            SE_FILE_OBJECT,
+            OWNER_SECURITY_INFORMATION,
+            &mut owner,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            &mut descriptor,
+        )
+    };
+    if status != ERROR_SUCCESS || owner.is_null() {
+        if !descriptor.is_null() {
+            // SAFETY: `descriptor` was allocated by the call above.
+            unsafe { windows_sys::Win32::Foundation::LocalFree(descriptor) };
+        }
+        return None;
+    }
+    Some(OwnedSid::Descriptor(descriptor, owner))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -510,5 +726,76 @@ mod tests {
         symlink(&target, &path).unwrap();
         assert!(list(&dir).is_empty(), "symlink records are ignored");
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn default_endpoint_falls_back_when_the_direct_path_would_overflow_sun_path() {
+        // A short dir stays direct: exactly the historical `<dir>/ctl-<pid>.sock`.
+        let short = std::path::PathBuf::from("/run/u/kettle/ctl");
+        assert_eq!(
+            default_endpoint(&short, 123),
+            short.join("ctl-123.sock").to_string_lossy().into_owned()
+        );
+
+        // An LDAP/AD-style long HOME (mirrors the failure scenario: a long
+        // XDG_STATE_HOME/HOME under which the direct path exceeds sun_path).
+        let long = std::path::PathBuf::from(
+            "/home/example.com/first.last/.local/state/kettle/ctl-with-a-very-long-directory-name-that-pushes-past-the-sun-path-limit",
+        );
+        let direct_len = long
+            .join("ctl-123456.sock")
+            .to_string_lossy()
+            .into_owned()
+            .len();
+        assert!(direct_len > 100, "test fixture must exceed the threshold");
+        let endpoint = default_endpoint(&long, 123456);
+        assert!(
+            endpoint.len() <= 100,
+            "fallback endpoint must fit sun_path: {endpoint:?} ({} bytes)",
+            endpoint.len()
+        );
+        assert!(
+            !endpoint.starts_with(long.to_string_lossy().as_ref()),
+            "fallback must not reuse the overlong dir: {endpoint:?}"
+        );
+        assert!(
+            endpoint.starts_with(private_temp_ctl_dir().to_string_lossy().as_ref()),
+            "fallback must live under the private uid-namespaced temp dir: {endpoint:?}"
+        );
+
+        // Deterministic: same (dir, pid) always resolves to the same fallback
+        // path, so a server's `bind` and a client's registry validity check
+        // (`entry.endpoint == default_endpoint(dir, entry.pid)`) agree.
+        assert_eq!(endpoint, default_endpoint(&long, 123456));
+        // Distinct dirs must not collide on the same fallback socket path.
+        let other_long = long.join("nested-but-still-way-too-long-for-a-unix-socket-path");
+        assert_ne!(endpoint, default_endpoint(&other_long, 123456));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn current_process_owns_directories_and_files_it_creates() {
+        let dir = std::env::temp_dir().join(format!("kettle-ctl-owner-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        assert!(
+            owned_by_current_user(&dir),
+            "a directory this process just created must be recognized as self-owned"
+        );
+
+        let file = dir.join("owned.txt");
+        std::fs::write(&file, b"x").unwrap();
+        assert!(
+            owned_by_current_user(&file),
+            "a file this process just created must be recognized as self-owned"
+        );
+
+        assert!(
+            !owned_by_current_user(&dir.join("does-not-exist.txt")),
+            "a nonexistent path must not be treated as owned"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
