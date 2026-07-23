@@ -1600,7 +1600,10 @@ fn apply_staged_update(
 fn render_linux_desktop(source: &Path, prefix: &Path) -> Result<String, UpdateError> {
     let text = fs::read_to_string(source)?;
     let executable = prefix.join("bin/kettle");
-    let icon = prefix.join("share/icons/hicolor/scalable/apps/kettle.svg");
+    // Match scripts/install.sh's known-good absolute PNG contract. Keeping one
+    // user-local icon format avoids SVG loader/theme variance when GNOME Shell
+    // refreshes the launcher after an authenticated update.
+    let icon = prefix.join("share/icons/hicolor/256x256/apps/kettle.png");
     let exec_value = desktop_exec_argument(&executable)?;
     let executable_value = desktop_string_path(&executable)?;
     let icon_value = desktop_string_path(&icon)?;
@@ -3121,6 +3124,10 @@ mod tests {
             "TryExec={}",
             desktop_string_path(&executable).unwrap()
         )));
+        let icon = prefix.join("share/icons/hicolor/256x256/apps/kettle.png");
+        let expected_icon = format!("Icon={}", desktop_string_path(&icon).unwrap());
+        assert!(desktop.lines().any(|line| line == expected_icon));
+        assert!(!desktop.contains("scalable/apps/kettle.svg"));
         assert!(
             desktop.contains("%%"),
             "Exec field code was not escaped: {desktop}"

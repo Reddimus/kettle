@@ -114,7 +114,10 @@ Either way, after install:
 - Binary at `~/.local/bin/kettle`
 - Launcher at `~/.local/share/applications/kettle.desktop`
 - Icon at `~/.local/share/icons/hicolor/scalable/apps/kettle.svg`
-  (plus 8-bit PNG fallbacks at 16/24/32/48/64/128/256)
+  (plus 8-bit PNG fallbacks at 16/24/32/48/64/128/256). User-local source,
+  release-tarball, and stable self-update installs all point the launcher at
+  the absolute 256x256 PNG so GNOME Super-key search does not depend on a
+  user-local icon cache.
 
 Make sure `~/.local/bin` is on your `PATH`. Hit the **Super key** and
 type **"kettle"** to launch. To remove everything later:
