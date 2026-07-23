@@ -318,3 +318,23 @@ Before closing the regression, record:
 This division keeps the result reviewable: source contracts and bounded
 algorithms can be proven portably, while compositor, GPU, IME, accessibility,
 desktop launcher, and real TUI behavior remain native evidence obligations.
+
+## Linux stable-deployment follow-up
+
+The first authenticated v2.38.0 deployment installed the exact verified Linux
+archive and preserved the stable ownership marker and recording configuration.
+It also exposed an installer consistency bug outside the search engine: the
+source/release-tarball installer pinned `Icon=` to the absolute 256x256 PNG for
+GNOME, while the Rust self-updater rewrote it to the absolute SVG. The existing
+`kettle.desktop` favorite was absent after that refresh and was restored without
+launching Kettle. The observation does not prove that the icon value removed
+the GSettings favorite: GNOME keys favorites by desktop-file ID, which remained
+`kettle.desktop`.
+
+The follow-up makes the self-updater render the same PNG path as
+`scripts/install.sh` and adds a regression assertion to the staged-Linux-update
+test. Future authenticated updates therefore keep one launcher icon format and
+one documented Super-key rendering contract; this does not claim to alter
+GNOME's desktop-file identity rules. This static integration check does not
+replace the still-pending user-approved Wayland launch, input, IME, or
+accessibility checks.

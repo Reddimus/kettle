@@ -54,7 +54,7 @@ Pin a specific version (recommended for reproducible installs):
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/Reddimus/kettle/main/scripts/install-online.sh \
-  | KETTLE_VERSION=v2.38.0 sh
+  | KETTLE_VERSION=v2.38.1 sh
 ```
 
 System-wide install (writes to a custom prefix; needs the
@@ -114,7 +114,10 @@ Either way, after install:
 - Binary at `~/.local/bin/kettle`
 - Launcher at `~/.local/share/applications/kettle.desktop`
 - Icon at `~/.local/share/icons/hicolor/scalable/apps/kettle.svg`
-  (plus 8-bit PNG fallbacks at 16/24/32/48/64/128/256)
+  (plus 8-bit PNG fallbacks at 16/24/32/48/64/128/256). User-local source,
+  release-tarball, and stable self-update installs all point the launcher at
+  the absolute 256x256 PNG so GNOME Super-key search does not depend on a
+  user-local icon cache.
 
 Make sure `~/.local/bin` is on your `PATH`. Hit the **Super key** and
 type **"kettle"** to launch. To remove everything later:
@@ -273,14 +276,14 @@ one-shot, the `kettle ctl` control client, `kettle mcp`) and its threat model.
 
 ### Verifying a download (SHA-256)
 
-Every release from **v1.3.4** onward ships a `.sha256` sidecar (current latest: v2.38.0)
+Every release from **v1.3.4** onward ships a `.sha256` sidecar (current latest: v2.38.1)
 generated on the same CI runner as the artifact. Verify a tarball
 before extracting it:
 
 ```sh
 # Linux / WSL
-curl -fLO https://github.com/Reddimus/kettle/releases/download/v2.38.0/kettle-linux-x86_64.tar.gz
-curl -fLO https://github.com/Reddimus/kettle/releases/download/v2.38.0/kettle-linux-x86_64.tar.gz.sha256
+curl -fLO https://github.com/Reddimus/kettle/releases/download/v2.38.1/kettle-linux-x86_64.tar.gz
+curl -fLO https://github.com/Reddimus/kettle/releases/download/v2.38.1/kettle-linux-x86_64.tar.gz.sha256
 sha256sum -c kettle-linux-x86_64.tar.gz.sha256
 # → kettle-linux-x86_64.tar.gz: OK
 ```
