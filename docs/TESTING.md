@@ -500,9 +500,21 @@ These need a real display and are run by hand (or on real hardware):
     kettle_run to echo a marker"` — Claude Code drives the MCP tools end-to-end.
   - **Live renderer/UI diagnostics**: on a Linux desktop run
     `just live-render-smoke`, `just interaction-smoke`, `just tabbar-click-smoke`,
-    `just tab-title-smoke`, `just split-titlebar-smoke`,
+    `just tearoff-smoke`, `just tab-title-smoke`, `just split-titlebar-smoke`,
     `just zoom-keybind-smoke`, and `just underline-scroll-smoke`. Artifacts land under `target/diagnostics/*`
-    for frame-by-frame review. Tabbar runs write `analysis.json` with the
+    for frame-by-frame review. The tearoff recipe is two-tier: a portable
+    ctl tier proves the mouseless `move_tab_to_new_window` tear +
+    `tab_moved` broadcast (plus the `tear_lift`/`dock_highlighted`/`band`
+    diagnostics in `ui_geometry`), and an X11-desktop tier
+    (`scripts/check-tearoff-live-smoke.sh`) drives xdotool REAL pointer
+    input through the full gesture — tear, freeze-guarded follow, re-dock
+    merge, Esc cancel — once per carry path (native `_NET_WM_MOVERESIZE`,
+    then `KETTLE_TEAR_MANUAL_FOLLOW=1` forcing the manual-follow/rescue-
+    tick fallback). Real input is load-bearing: `maybe_tear_off` and
+    re-dock respond only to native winit pointer events, so ctl
+    `send_mouse` cannot reach them by design; the dock-highlight visuals
+    are verified by recorded-frame analysis rather than this smoke (the
+    ctl geometry endpoint only addresses the focused window mid-drag). Tabbar runs write `analysis.json` with the
     old/new active tab rects and outside-rect pixel-change counts; tab-title
     and split-titlebar runs assert cwd-derived labels use the available title
     budget before ellipsizing. Underline runs write

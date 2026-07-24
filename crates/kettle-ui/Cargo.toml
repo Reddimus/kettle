@@ -108,6 +108,16 @@ winit = { version = "0.30.13", default-features = false, features = [
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
+# v2.40.0 (tear-off UX): live screen-pointer queries during torn-tab drags —
+# the X11 counterpart of the Windows GetCursorPos drift correction. The WM's
+# move-grab anchor drifts from the tear-time grab offset (measured 55-86px
+# under Mutter), so dock hit-testing and the frozen-drag rescue tick need the
+# REAL cursor. Already in-tree transitively via winit's x11 backend; queried
+# only while torn-drag tracking is active, never on Wayland (connect fails or
+# the call sites are gated off there).
+[target.'cfg(all(unix, not(target_os = "macos")))'.dependencies]
+x11rb = "0.13"
+
 # ITaskbarList3 for OSC 9;4 taskbar progress (PowerShell 7 /
 # Windows Terminal parity — `Write-Progress` + `winget` drive the taskbar
 # button). The `windows` crate gives safe COM wrappers; 0.62 is already in

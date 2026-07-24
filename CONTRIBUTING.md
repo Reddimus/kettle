@@ -273,35 +273,46 @@ needed there.
 
 ## Releasing
 
-Releases go through `scripts/release.sh`, which does the four ops
-atomically (working-tree clean check, CHANGELOG section check,
-Cargo.toml bump, Cargo.lock refresh, single commit, annotated
-tag). Doing them by hand has tripped past releases: the CHANGELOG
-section got committed AFTER the tag, the release-pipeline CI guard
-correctly rejected the Linux job at pre-flight, and the macOS +
-Windows jobs uploaded a partial release. Always use the script.
+Releases go through `scripts/release.sh` (version bump + single
+signed commit) and `scripts/tag-release.sh` (signed annotated tag,
+pushed from synchronized `main`), with a PR and required CI between
+them. Doing the steps by hand has tripped past releases: the
+CHANGELOG section got committed AFTER the tag, the release-pipeline
+CI guard correctly rejected the Linux job at pre-flight, and the
+macOS + Windows jobs uploaded a partial release. Always use the
+scripts — `release.sh` intentionally never pushes or tags `main`
+itself.
 
 Flow:
 
-1. Land your changes on `main`.
-2. Add a `## [X.Y.Z] — YYYY-MM-DD` section to `CHANGELOG.md`
-   describing what changed since the previous version. Commit it.
-3. Run `just gauntlet-strict` to verify every CI workflow's
+1. Land your changes on `main` (via PR), including a
+   `## [X.Y.Z] — YYYY-MM-DD` section in `CHANGELOG.md`
+   describing what changed since the previous version.
+2. Run `just gauntlet-strict` to verify every CI workflow's
    check (fmt / clippy / build / test / doc / cargo-deny /
    cargo-machete) passes locally first. The plain `just
    gauntlet` mirrors every-PR CI; the `-strict` variant adds
    the supply-chain CI workflows that run on Cargo.lock
    changes, so a release-cut catches stale-ignore / unused-dep
-   issues before tagging.
-4. Run `scripts/release.sh X.Y.Z`. It refuses to proceed if the
-   working tree is dirty, if the CHANGELOG section is missing,
-   if the tag already exists, or if VERSION isn't strict semver.
-   On success: commits the bump + creates the annotated tag.
-5. Sanity-check the commit + tag, then push:
-       git push origin main && git push origin vX.Y.Z
-6. The release workflow builds + uploads the three platform
-   tarballs + their `.sha256` sidecars. Watch it with:
-       gh run watch $(gh run list --workflow=release.yml --limit 1 --json databaseId --jq '.[0].databaseId')
+   issues before tagging. `just gauntlet-full` is the closest
+   local match to every ci.yml step for a release cut.
+3. From fresh `main`, create a release branch and run
+   `scripts/release.sh X.Y.Z` on it. The script refuses to run on
+   `main` or a dirty tree, and rejects a missing CHANGELOG section,
+   an existing tag, or a non-semver VERSION. On success it leaves a
+   single signed `release: vX.Y.Z` commit bumping
+   Cargo.toml/Cargo.lock/flake.nix/README/docs.
+4. Push the branch, open a PR titled `release: vX.Y.Z`, wait for
+   the required checks, and merge (merge commit, matching the
+   repo's history).
+5. On synchronized `main`, run `scripts/tag-release.sh X.Y.Z` — it
+   re-validates the version/CHANGELOG pairing, creates the signed
+   annotated tag `vX.Y.Z`, verifies it, and pushes it.
+6. The release workflow (pretest → per-OS package matrix →
+   finalize) builds the platform archives + `.sha256` sidecars,
+   Ed25519-signs the update manifest, and publishes the GitHub
+   release from a verified draft. Poll it with:
+       gh run list --workflow=release.yml --limit 1
 7. Verify the install path resolves:
        KETTLE_VERSION=vX.Y.Z sh scripts/install-online.sh
 

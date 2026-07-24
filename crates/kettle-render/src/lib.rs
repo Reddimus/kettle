@@ -182,6 +182,50 @@ pub mod menu {
     pub const PANEL_BREATHING: f32 = 80.0;
 }
 
+// v2.40.0 (tear-off UX): tab-drag rendering constants, single home — same
+// rationale as `menu` above (the ghost/marker/highlight numbers were inline
+// literals scattered across two crates before this). Gesture *thresholds*
+// (arm distance, tear hysteresis) stay in kettle-ui with the drag FSM; only
+// paint geometry/opacity lives here. Re-exported for kettle-ui via
+// `kettle_render::tab_drag`.
+pub mod tab_drag {
+    /// Drag-ghost drop-shadow offset at rest (no tear pending).
+    pub const GHOST_SHADOW_OFFSET_PX: f32 = 3.0;
+    /// Drag-ghost drop-shadow opacity at rest.
+    pub const GHOST_SHADOW_ALPHA: f32 = 0.30;
+    /// Drag-ghost body opacity at rest (`theme.background` copy).
+    pub const GHOST_BG_ALPHA: f32 = 0.85;
+    /// Accent strip width on the ghost's leading edge — matches the live
+    /// active segment's strip.
+    pub const GHOST_ACCENT_W_PX: f32 = 2.0;
+
+    /// Extra shadow offset at full tear-lift (`TabBar::tear_lift = 1.0`,
+    /// cursor at the tear threshold): the ghost visibly "lifts off" the
+    /// bar as a release becomes a tear.
+    pub const GHOST_SHADOW_OFFSET_LIFT_PX: f32 = 5.0;
+    /// Extra shadow opacity at full tear-lift.
+    pub const GHOST_SHADOW_ALPHA_LIFT: f32 = 0.25;
+    /// Body opacity *reduction* at full tear-lift — the ghost fades as it
+    /// leaves the strip, signalling "this is coming out".
+    pub const GHOST_BG_ALPHA_LIFT: f32 = 0.30;
+
+    /// Re-dock insertion-marker line thickness (was a 2.0 inline literal;
+    /// 3px survives dark-on-dark themes at a glance).
+    pub const INSERT_MARKER_PX: f32 = 3.0;
+    /// Square end-caps on the insertion marker — the "bullet" idiom the
+    /// per-tab activity dot already uses (this renderer has no curves).
+    pub const INSERT_MARKER_CAP_PX: f32 = 5.0;
+
+    /// Dock-target band wash opacity while a torn window hovers a strip.
+    /// The only latch signal every platform shares — the Windows-only
+    /// torn-window translucency is additive on top of this.
+    pub const DOCK_HIGHLIGHT_WASH_ALPHA: f32 = 0.14;
+    /// Accent border thickness on the band's pane-facing edge.
+    pub const DOCK_HIGHLIGHT_BORDER_PX: f32 = 2.0;
+    /// Accent border opacity.
+    pub const DOCK_HIGHLIGHT_BORDER_ALPHA: f32 = 0.55;
+}
+
 /// One quick-select hint label drawn over the focused pane at a grid cell.
 #[derive(Clone)]
 pub struct HintLabel {
@@ -721,13 +765,28 @@ pub struct TabBar {
     /// moved while the underlying segments snap into place via
     /// `Mux::move_active_tab`. `None` while no drag is active.
     pub drag_cursor_x: Option<f32>,
+    /// v2.40.0 (tear-off UX): 0.0..=1.0 — how far the drag has moved from
+    /// the tab band toward the tear threshold. 0.0 at/inside the band,
+    /// 1.0 at (or past) the distance `tear_threshold_crossed` fires at.
+    /// Escalates the ghost's shadow/opacity (`tab_drag::*_LIFT*`) so a
+    /// release visibly reads as "this will tear off". Only non-zero while
+    /// `drag_cursor_x` is live and the drag FSM is in a Dragging state;
+    /// on non-Wayland the tear consumes the gesture at 1.0, so the full
+    /// range is mostly visible on Wayland's at-release path.
+    pub tear_lift: f32,
     /// v2.19.0 (tear-off UX, re-dock): `Some(rect)` while a torn-off
     /// window hovers this window's tab band — the accent-colored
     /// insertion marker showing where the dropped tab will land. The
-    /// UI computes the rect (a 2-px line between segments, oriented
-    /// per `tab-bar-pos`) so the renderer stays geometry-free, same
-    /// contract as `hovered_close_idx`.
+    /// UI computes the rect (a `tab_drag::INSERT_MARKER_PX` line between
+    /// segments, oriented per `tab-bar-pos`) so the renderer stays
+    /// geometry-free, same contract as `hovered_close_idx`.
     pub insert_marker: Option<Rect4>,
+    /// v2.40.0 (tear-off UX): the strip's full band rect in surface
+    /// coords, both orientations — the canvas for the dock-target
+    /// highlight (`tab_drag::DOCK_HIGHLIGHT_*`) drawn while
+    /// `insert_marker` is latched. UI-computed, same geometry-free
+    /// contract as `insert_marker`.
+    pub band: Rect4,
     /// v2.26.0: `‹` scroll-left button rect, present (non-zero) only when the
     /// horizontal tab bar overflows (more tabs than fit at `tab_min_width`).
     /// Clicking it reveals tabs scrolled off the left. `(0,0,0,0)` when the bar
@@ -748,7 +807,9 @@ impl TabBar {
             broadcast: false,
             hovered_close_idx: None,
             drag_cursor_x: None,
+            tear_lift: 0.0,
             insert_marker: None,
+            band: (0.0, 0.0, 0.0, 0.0),
             scroll_left: (0.0, 0.0, 0.0, 0.0),
             scroll_right: (0.0, 0.0, 0.0, 0.0),
         }
@@ -3279,20 +3340,31 @@ impl Renderer {
                 let half = seg_w * 0.5;
                 let max_x = (sw - seg_w).max(0.0);
                 let ghost_x = (cx - half).clamp(0.0, max_x);
+                // v2.40.0 (tear-off UX): pre-tear escalation — the ghost
+                // "lifts off" as the cursor approaches the tear threshold
+                // (bigger/darker shadow, fading body), so a release reads
+                // as "this will tear" instead of surprising the user with
+                // a new window. `tear_lift` is 0 for a plain reorder.
+                let lift = tabbar.tear_lift.clamp(0.0, 1.0);
+                let shadow_off =
+                    tab_drag::GHOST_SHADOW_OFFSET_PX + tab_drag::GHOST_SHADOW_OFFSET_LIFT_PX * lift;
+                let shadow_alpha =
+                    tab_drag::GHOST_SHADOW_ALPHA + tab_drag::GHOST_SHADOW_ALPHA_LIFT * lift;
+                let bg_alpha = tab_drag::GHOST_BG_ALPHA - tab_drag::GHOST_BG_ALPHA_LIFT * lift;
                 // Soft drop shadow under the ghost (same trick as
                 // `menu_chrome_quads`'s context menu).
                 over.push(rect(
-                    ghost_x + 3.0,
-                    by + 3.0,
+                    ghost_x + shadow_off,
+                    by + shadow_off,
                     seg_w,
                     seg_h,
                     Rgb::new(0, 0, 0),
-                    0.30,
+                    shadow_alpha,
                 ));
-                // Ghost background — theme.background at 0.85 opacity
-                // so the bar shows through enough that it reads as a
-                // floating preview rather than a real new tab.
-                over.push(rect(ghost_x, by, seg_w, seg_h, theme.background, 0.85));
+                // Ghost background — theme.background, translucent enough
+                // that the bar shows through and it reads as a floating
+                // preview rather than a real new tab.
+                over.push(rect(ghost_x, by, seg_w, seg_h, theme.background, bg_alpha));
                 // Accent strip on the left edge, same color the live
                 // active segment uses (palette[3] yellow under
                 // broadcast, accent-color → palette[4]
@@ -3303,17 +3375,76 @@ impl Renderer {
                 } else {
                     self.ui_accent(cfg, theme)
                 };
-                over.push(rect(ghost_x, by, 2.0, seg_h, accent, 1.0));
+                over.push(rect(
+                    ghost_x,
+                    by,
+                    tab_drag::GHOST_ACCENT_W_PX,
+                    seg_h,
+                    accent,
+                    1.0,
+                ));
             }
             // v2.19.0 (tear-off UX, re-dock): the insertion marker — an
             // accent line between segments showing where a torn-off
             // window's tab will dock. Pushed to `over` so it sits above
-            // segment backgrounds AND text (a 2-px line under text would
+            // segment backgrounds AND text (a thin line under text would
             // vanish behind a long title). Rect comes oriented from the
             // UI (vertical line for horizontal bars, horizontal line for
             // vertical bars).
             if let Some((ix, iy, iw, ih)) = tabbar.insert_marker {
-                over.push(rect(ix, iy, iw, ih, self.ui_accent(cfg, theme), 1.0));
+                let accent = self.ui_accent(cfg, theme);
+                // v2.40.0 (tear-off UX): dock-target highlight — wash the
+                // whole latched band in translucent accent plus a border on
+                // the pane-facing edge. Before this, the marker line was the
+                // ONLY latch signal off-Windows (the torn-window alpha trick
+                // is Windows-only) and a session recording showed it reads
+                // as "nothing happened" on Linux. Presence is derived from
+                // `insert_marker` so the two signals cannot drift apart.
+                let (bx0, by0, bw0, bh0) = tabbar.band;
+                if bw0 > 0.0 && bh0 > 0.0 {
+                    over.push(rect(
+                        bx0,
+                        by0,
+                        bw0,
+                        bh0,
+                        accent,
+                        tab_drag::DOCK_HIGHLIGHT_WASH_ALPHA,
+                    ));
+                    // Border on the pane-facing edge: bottom for a top bar,
+                    // top for a bottom bar, right for a left bar, left for
+                    // a right bar — taken from `tab-bar-position` directly
+                    // (shape inference misreads a tall `tab-bar-width` next
+                    // to a short window).
+                    let bp = tab_drag::DOCK_HIGHLIGHT_BORDER_PX;
+                    let (ex, ey, ew, eh) = match cfg.tab_bar_pos {
+                        kettle_config::TabBarPos::Top => (bx0, by0 + bh0 - bp, bw0, bp),
+                        kettle_config::TabBarPos::Bottom => (bx0, by0, bw0, bp),
+                        kettle_config::TabBarPos::Left => (bx0 + bw0 - bp, by0, bp, bh0),
+                        kettle_config::TabBarPos::Right => (bx0, by0, bp, bh0),
+                    };
+                    over.push(rect(
+                        ex,
+                        ey,
+                        ew,
+                        eh,
+                        accent,
+                        tab_drag::DOCK_HIGHLIGHT_BORDER_ALPHA,
+                    ));
+                }
+                over.push(rect(ix, iy, iw, ih, accent, 1.0));
+                // Square end-caps (the activity-dot "bullet" idiom — this
+                // renderer has no curves) so the marker reads as a placed
+                // pin rather than a stray hairline.
+                let cap = tab_drag::INSERT_MARKER_CAP_PX;
+                if iw < ih {
+                    let cx0 = ix + iw * 0.5 - cap * 0.5;
+                    over.push(rect(cx0, iy - cap * 0.5, cap, cap, accent, 1.0));
+                    over.push(rect(cx0, iy + ih - cap * 0.5, cap, cap, accent, 1.0));
+                } else {
+                    let cy0 = iy + ih * 0.5 - cap * 0.5;
+                    over.push(rect(ix - cap * 0.5, cy0, cap, cap, accent, 1.0));
+                    over.push(rect(ix + iw - cap * 0.5, cy0, cap, cap, accent, 1.0));
+                }
             }
         }
 
