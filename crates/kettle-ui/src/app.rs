@@ -1483,6 +1483,25 @@ fn tab_close_hover_icon(over_close: bool) -> Option<CursorIcon> {
     }
 }
 
+/// v2.40.0 (tear-off UX): pure — while a tab-drag gesture is armed or in
+/// progress, override every other cursor decision with the "holding
+/// something" hand: `Grab` the moment a press arms the FSM (the gesture
+/// could still resolve to a plain click), `Grabbing` once movement promotes
+/// it to a real drag. In-window reorder and cross-window tear share
+/// `detach::DragState`, so one helper covers both. `None` from `Idle`
+/// defers to every other rule. No `detachable-tabs` re-check needed: the
+/// press handler only arms the FSM when the config gate is on, so a
+/// non-`Idle` state already implies it (see
+/// `detachable_tabs_config_gates_all_detach_paths`).
+fn tab_drag_cursor_icon(state: &crate::detach::DragState) -> Option<CursorIcon> {
+    match state {
+        crate::detach::DragState::Idle => None,
+        crate::detach::DragState::ArmedInside { .. } => Some(CursorIcon::Grab),
+        crate::detach::DragState::DraggingInside { .. }
+        | crate::detach::DragState::DraggingOutside { .. } => Some(CursorIcon::Grabbing),
+    }
+}
+
 fn confirm_button_label(button: &ConfirmButton) -> &str {
     match button {
         ConfirmButton::Cancel => "Cancel",
@@ -2918,6 +2937,19 @@ fn tear_threshold_crossed(cx: f32, cy: f32, band: (f32, f32, f32, f32), threshol
     threshold > 0.0 && dist_to_rect(cx, cy, band) >= threshold
 }
 
+/// v2.40.0 (tear-off UX): 0.0..=1.0 — how far the cursor has travelled from
+/// the tab band toward the tear threshold. 0.0 at/inside the band, 1.0 at
+/// (or past) the exact distance `tear_threshold_crossed` fires at, so the
+/// ghost's visual lift saturates precisely where the tear happens. A
+/// non-positive threshold can never tear, so it also never lifts. Pure for
+/// the same unit-testability reason as `tear_threshold_crossed`.
+fn tear_lift_ratio(cx: f32, cy: f32, band: (f32, f32, f32, f32), threshold: f32) -> f32 {
+    if threshold <= 0.0 {
+        return 0.0;
+    }
+    (dist_to_rect(cx, cy, band) / threshold).clamp(0.0, 1.0)
+}
+
 /// v2.19.0 (tear-off UX, re-dock): insertion index for a tab dropped at
 /// `cursor` (main-axis coordinate) given the existing segments' main-axis
 /// midpoints, in order. First segment whose midpoint exceeds the cursor
@@ -3527,6 +3559,36 @@ pub struct App {
 }
 
 /// v2.19.0 (tear-off UX): tracking for the one in-flight torn-window drag.
+/// v2.40.0 (tear-off UX): rescue-tick cadence while it is carrying a torn
+/// drag (or watching a silent native handoff) — one frame at 60Hz.
+const TORN_TICK_MS: u64 = 16;
+
+/// v2.40.0 (tear-off UX): diagnostics/test override — `KETTLE_TEAR_MANUAL_FOLLOW=1`
+/// skips the native `drag_window()` handoff so a tear always takes the
+/// manual-follow/rescue-tick path. The demotion is otherwise a nondeterministic
+/// race (the WM silently dropping `_NET_WM_MOVERESIZE` for a just-mapped
+/// window), which made the fallback untestable on demand — the live tear-off
+/// smoke pins BOTH paths by launching one instance per mode. Read per tear,
+/// not cached: trivially cheap, and it keeps the override in one place.
+fn tear_native_handoff_disabled() -> bool {
+    std::env::var_os("KETTLE_TEAR_MANUAL_FOLLOW").is_some_and(|v| v == "1")
+}
+
+/// v2.40.0 (tear-off UX): real pointer travel (px) required — alongside the
+/// 400ms grace — before a silent native handoff is demoted to manual
+/// follow. A WM that took the grab moves the frame with the pointer, so
+/// travel-without-`Moved` is proof it never did; the floor keeps a
+/// stationary hover from demoting a healthy-but-quiet grab.
+const DEMOTION_TRAVEL_PX: f64 = 24.0;
+
+/// v2.40.0 (tear-off UX): how far the torn window's resting frame may sit
+/// from `cursor − anchor_est` before the commit-time revalidation calls it
+/// a WM snap-back (Esc-cancel) instead of a drop. Generous enough for the
+/// pointer drift between the physical release and the first client event
+/// that observes it; an Esc restore jumps the frame by the whole drag
+/// distance, far past this.
+const DOCK_COMMIT_SLACK_PX: f64 = 96.0;
+
 struct TornDrag {
     /// Seq of the torn-off window being dragged.
     seq: u64,
@@ -3565,8 +3627,10 @@ struct TornDrag {
     /// actually starting) and against an X11 tear the user never moved.
     saw_move: bool,
     /// Last signal (tear or `Moved`) — the stale-tracking failsafe: a
-    /// torn drag with no movement for 30s is abandoned by `about_to_wait`
-    /// (covers an X11 tear whose release we never observe).
+    /// torn drag with no movement for 120s is abandoned by `about_to_wait`
+    /// (covers an X11 tear whose release we never observe). The rescue
+    /// tick also arbitrates on it (a fresh CursorMoved-driven follow
+    /// suppresses the tick for 30ms).
     last_signal: std::time::Instant,
     /// The torn window's HWND (Windows; `None` elsewhere) — the dock-hover
     /// translucency and the z-order walk both key off it, and tracking
@@ -3575,6 +3639,25 @@ struct TornDrag {
     /// struct shape stays identical across platforms.
     #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
     hwnd: Option<isize>,
+    /// v2.40.0 (tear-off UX, X11): live estimate of the WM move-grab's
+    /// pointer→frame anchor, learned on every `Moved` that pairs with a
+    /// real cursor query (`anchor = cursor − frame`). The WM anchors its
+    /// grab at the BUTTON-PRESS position while `grab` was computed at
+    /// TEAR time — a session recording measured them 55-86px apart under
+    /// Mutter, so `frame + grab` cannot be trusted for the dock hit-test.
+    /// The commit-time revalidation uses this instead: a real drop leaves
+    /// `frame + anchor_est ≈ cursor`; an Esc-cancelled move snapped the
+    /// frame elsewhere, so the mismatch turns the commit into an abandon.
+    anchor_est: Option<(f64, f64)>,
+    /// v2.40.0 (tear-off UX, X11): the real cursor position when the
+    /// rescue tick first looked at this drag, while no `Moved` had arrived
+    /// yet. Demotion evidence: if the pointer has since travelled but the
+    /// WM still hasn't produced a `Moved`, the WM never actually took the
+    /// drag (an accepted-but-ignored `_NET_WM_MOVERESIZE`, or a race with
+    /// an unmapped window) and the tick takes over. Purely time-based
+    /// demotion would fight a WM that DID take the grab over a pointer
+    /// the user is simply holding still.
+    tick_ref: Option<(f64, f64)>,
 }
 
 /// Fire a desktop notification with the given title + optional body,
@@ -4407,9 +4490,18 @@ impl App {
                 .or_else(|| rect_contains(geometry.rect, x, y).then_some(CursorIcon::Default))
         });
         let chrome = chrome_cursor_icon(self.cursor_in_chrome_band(ws), self.any_modal_open(ws));
+        // v2.40.0 (tear-off UX): a live tab-drag owns the cursor, FIRST in
+        // the chain — mid-drag the pointer can transiently cross another
+        // tab's ✕ hit-zone or a split seam, and without the priority the
+        // icon would flicker Pointer/resize while the user is holding a
+        // tab. Restore is automatic: `want` is recomputed from live state
+        // on every cursor move, so the next event after the FSM returns to
+        // `Idle` falls through to the rules below.
+        let drag_icon = tab_drag_cursor_icon(&ws.detach_drag);
         // A split divider under the cursor shows the resize cursor
         // (after chrome/close-button, before the link-pointer / I-beam default).
-        let want = close_hover
+        let want = drag_icon
+            .or(close_hover)
             .or(confirm_hover)
             .or(search_hover)
             .or(chrome)
@@ -4640,6 +4732,31 @@ impl App {
 
     /// Tab-bar geometry — the single source of truth shared by the renderer
     /// (drawing) and the click hit-testing below.
+    /// v2.40.0 (tear-off UX): this window's live tear-lift — non-zero only
+    /// while its own drag FSM is in a Dragging state. Same `dock_band` +
+    /// `1.5 × tab_bar_h` pair `maybe_tear_off` uses, so the ghost's lift
+    /// saturates exactly where the tear fires and the two can't drift.
+    fn tear_lift_for(&self, ws: &WindowState) -> f32 {
+        if !self.cfg.detachable_tabs {
+            return 0.0;
+        }
+        match ws.detach_drag {
+            crate::detach::DragState::DraggingInside { .. }
+            | crate::detach::DragState::DraggingOutside { .. } => self
+                .dock_band(ws)
+                .map(|band| {
+                    tear_lift_ratio(
+                        ws.cursor.x as f32,
+                        ws.cursor.y as f32,
+                        band,
+                        1.5 * self.tab_bar_h(ws),
+                    )
+                })
+                .unwrap_or(0.0),
+            _ => 0.0,
+        }
+    }
+
     fn tab_bar(&self, ws: &WindowState) -> TabBar {
         let height = self.tab_bar_h(ws);
         if height <= 0.0 {
@@ -4687,7 +4804,10 @@ impl App {
                 broadcast: ws.mux.is_broadcast_on(),
                 hovered_close_idx: None,
                 drag_cursor_x: None,
+                // The title-edit modal owns the bar — no drag can be live.
+                tear_lift: 0.0,
                 insert_marker: None,
+                band: (0.0, y, sw, height),
                 scroll_left: (0.0, 0.0, 0.0, 0.0),
                 scroll_right: (0.0, 0.0, 0.0, 0.0),
             };
@@ -4804,7 +4924,9 @@ impl App {
             } else {
                 None
             },
-            // v2.19.0 (re-dock): vertical 2-px insertion line at the docked tab's
+            // v2.40.0 (tear-off UX): pre-tear ghost escalation.
+            tear_lift: self.tear_lift_for(ws),
+            // v2.19.0 (re-dock): vertical insertion line at the docked tab's
             // landing slot. v2.26.0: anchor to the target tab's on-screen x when
             // visible (overflow scrolling), else the leftmost visible edge.
             insert_marker: ws.dock_preview.map(|idx| {
@@ -4815,9 +4937,11 @@ impl App {
                     .flatten()
                     .or_else(|| layout.xs.iter().copied().flatten().next())
                     .unwrap_or(0.0)
-                    .clamp(0.0, strip - 2.0);
-                (x, y, 2.0, height)
+                    .clamp(0.0, strip - kettle_render::tab_drag::INSERT_MARKER_PX);
+                (x, y, kettle_render::tab_drag::INSERT_MARKER_PX, height)
             }),
+            // v2.40.0 (tear-off UX): the dock-highlight canvas.
+            band: (0.0, y, sw, height),
             scroll_left: to_btn(layout.arrow_left),
             scroll_right: to_btn(layout.arrow_right),
         }
@@ -4922,14 +5046,26 @@ impl App {
             } else {
                 None
             },
-            // v2.19.0 (re-dock): horizontal 2-px insertion line across
+            // v2.40.0 (tear-off UX): populated for struct symmetry; the
+            // ghost paint path is x-only/horizontal-only (see
+            // `drag_cursor_x` above), so this is inert on vertical bars.
+            tear_lift: self.tear_lift_for(ws),
+            // v2.19.0 (re-dock): horizontal insertion line across
             // the strip at the docked tab's landing slot.
             insert_marker: ws.dock_preview.map(|idx| {
                 let iy = (idx.min(labels.len()) as f32 * height)
-                    .min(sh - 2.0)
+                    .min(sh - kettle_render::tab_drag::INSERT_MARKER_PX)
                     .max(0.0);
-                (strip_x, iy, strip_w, 2.0)
+                (
+                    strip_x,
+                    iy,
+                    strip_w,
+                    kettle_render::tab_drag::INSERT_MARKER_PX,
+                )
             }),
+            // v2.40.0 (tear-off UX): the dock-highlight canvas — the whole
+            // vertical strip.
+            band: (strip_x, 0.0, strip_w, sh),
             // v2.26.0: vertical bars don't overflow-scroll (yet) — no arrows.
             scroll_left: (0.0, 0.0, 0.0, 0.0),
             scroll_right: (0.0, 0.0, 0.0, 0.0),
@@ -12685,7 +12821,12 @@ impl App {
                     "new_tab": rect_json(bar.new_tab),
                     "new_tab_menu": rect_json(bar.new_tab_menu),
                     "drag_cursor_x": bar.drag_cursor_x,
+                    // v2.40.0 (tear-off UX): pre-tear ghost escalation +
+                    // dock-highlight state, for live-UI smokes.
+                    "tear_lift": bar.tear_lift,
                     "insert_marker": bar.insert_marker,
+                    "dock_highlighted": bar.insert_marker.is_some(),
+                    "band": rect_json(bar.band),
                     "segments": segments,
                 },
                 "pane_titlebars": pane_titlebars,
@@ -16329,6 +16470,10 @@ impl ApplicationHandler<UserEvent> for App {
         {
             self.abandon_torn_drag(None);
         }
+        // v2.40.0 (tear-off UX, X11): frozen-drag rescue — reposition/dock
+        // from the live pointer when the WM or the carrier's event stream
+        // stops delivering; returns a wait budget that keeps it ticking.
+        let torn_tick_wait = self.torn_drag_pointer_tick();
         let now = std::time::Instant::now();
         if self
             .config_reload_deadline
@@ -16361,6 +16506,9 @@ impl ApplicationHandler<UserEvent> for App {
                 .saturating_duration_since(std::time::Instant::now())
                 .as_millis() as u64)
                 .max(1);
+            min_wait = Some(min_wait.map_or(ms, |wait| wait.min(ms)));
+        }
+        if let Some(ms) = torn_tick_wait {
             min_wait = Some(min_wait.map_or(ms, |wait| wait.min(ms)));
         }
         if self.windows.is_empty() {
@@ -16443,6 +16591,41 @@ fn cursor_screen_pos() -> Option<(f64, f64)> {
     unsafe { GetCursorPos(&mut p) }
         .ok()
         .map(|()| (f64::from(p.x), f64::from(p.y)))
+}
+
+/// v2.40.0 (tear-off UX, X11): the LIVE screen cursor — X11 counterpart of
+/// the Windows `GetCursorPos` path above, backed by a lazy side connection
+/// (x11rb `QueryPointer` on the root window; root coords ARE screen
+/// coords). Needed because the WM's move-grab anchor drifts from the
+/// tear-time `grab` offset (measured 55-86px under Mutter — enough to miss
+/// the whole dock band), and because pointer motion stops reaching the
+/// client entirely once the WM holds the move grab. A Wayland session (no
+/// X server, or only XWayland for foreign clients) fails the one-time
+/// connect and yields `None` forever — callers keep their approximation.
+/// The connection is only ever exercised while torn-drag tracking is live.
+#[cfg(all(unix, not(target_os = "macos")))]
+fn cursor_screen_pos() -> Option<(f64, f64)> {
+    use x11rb::connection::Connection as _;
+    use x11rb::protocol::xproto::ConnectionExt as _;
+    use x11rb::rust_connection::RustConnection;
+    static X11: std::sync::OnceLock<Option<(RustConnection, u32)>> = std::sync::OnceLock::new();
+    let (conn, root) = X11
+        .get_or_init(|| {
+            x11rb::connect(None).ok().map(|(conn, screen)| {
+                let root = conn.setup().roots[screen].root;
+                (conn, root)
+            })
+        })
+        .as_ref()?;
+    let reply = conn.query_pointer(*root).ok()?.reply().ok()?;
+    Some((f64::from(reply.root_x), f64::from(reply.root_y)))
+}
+
+/// macOS: no live-cursor query wired up — manual-follow there rides the
+/// source window's own CursorMoved stream, which is exact already.
+#[cfg(not(any(target_os = "windows", all(unix, not(target_os = "macos")))))]
+fn cursor_screen_pos() -> Option<(f64, f64)> {
+    None
 }
 
 /// v2.19.0 (re-dock, Windows): per-window alpha for the dock-hover
@@ -17238,13 +17421,17 @@ impl App {
             // Sound on macOS too: this window IS receiving the drag, so
             // NSApp.currentEvent is its own mouseDragged (unlike the torn-
             // window handoff below, where the event belongs to the source).
-            let native = match src.drag_window() {
-                Ok(()) => true,
-                Err(e) => {
-                    log::info!(
-                        "tab-drag window move: native drag unavailable ({e}); manual follow"
-                    );
-                    false
+            let native = if tear_native_handoff_disabled() {
+                false
+            } else {
+                match src.drag_window() {
+                    Ok(()) => true,
+                    Err(e) => {
+                        log::info!(
+                            "tab-drag window move: native drag unavailable ({e}); manual follow"
+                        );
+                        false
+                    }
                 }
             };
             self.torn_drag = Some(TornDrag {
@@ -17257,6 +17444,8 @@ impl App {
                 saw_move: false,
                 last_signal: std::time::Instant::now(),
                 hwnd: window_hwnd(&src),
+                anchor_est: None,
+                tick_ref: None,
             });
             return true;
         }
@@ -17381,7 +17570,7 @@ impl App {
                 // unsound for a window that never saw the press; the
                 // lone-tab branch above keeps the native path
                 // there since it drags the window that owns the event.
-                let native = if cfg!(target_os = "macos") {
+                let native = if cfg!(target_os = "macos") || tear_native_handoff_disabled() {
                     false
                 } else {
                     self.windows
@@ -17412,6 +17601,8 @@ impl App {
                         .get(&torn_seq)
                         .and_then(|t| t.window.as_deref())
                         .and_then(window_hwnd),
+                    anchor_est: None,
+                    tick_ref: None,
                 });
             }
             Err(WindowOpen::AdoptTab(dt)) => {
@@ -17462,6 +17653,15 @@ impl App {
             (cursor.1 - f64::from(ip.y)) as f32,
         );
         let band = self.dock_band(w)?;
+        log::debug!(
+            "dock_index_at: seq={} cursor=({:.0},{:.0}) ip=({},{}) rel=({cx:.0},{cy:.0}) band={band:?} dist={:.0}",
+            w.seq,
+            cursor.0,
+            cursor.1,
+            ip.x,
+            ip.y,
+            dist_to_rect(cx, cy, band),
+        );
         if dist_to_rect(cx, cy, band) > 0.0 {
             return None;
         }
@@ -17596,12 +17796,18 @@ impl App {
 
     /// v2.19.0 (re-dock): does the latched dock target still hold for the
     /// torn window's FINAL resting position? A real drop leaves the frame
-    /// tracking the pointer, so frame + grab lies on the latched band; a
-    /// WM-cancelled move (X11 Esc) snapped the frame back to its origin,
-    /// where frame + grab points nowhere near the band — the commit then
-    /// becomes an abandon. Bias-safe on X11: the latch was set from the
-    /// same frame+grab approximation, so a constant anchor slide cancels
-    /// out. `ws` = the torn window (checked out of the map).
+    /// tracking the pointer; a WM-cancelled move (X11 Esc) snapped the
+    /// frame back to its origin — the commit then becomes an abandon.
+    ///
+    /// v2.40.0: with the live-cursor latch, the old "frame + grab, same
+    /// bias as the latch" self-consistency no longer holds (the latch is
+    /// now exact while grab still carries the WM-anchor drift). The
+    /// snap-back tell is `anchor_est`: a real drop leaves the resting
+    /// frame within `DOCK_COMMIT_SLACK_PX` of `cursor − anchor_est`; an
+    /// Esc-restored frame lands wherever the drag STARTED, far from the
+    /// pointer still hovering the band. Falls back to the legacy
+    /// frame+grab check when either live signal is unavailable.
+    /// `ws` = the torn window (checked out of the map).
     fn revalidate_dock_latch(&self, ws: &WindowState) -> bool {
         let Some(td) = self.torn_drag.as_ref() else {
             return false;
@@ -17613,9 +17819,80 @@ impl App {
         let Some(op) = ws.window.as_ref().and_then(|w| w.outer_position().ok()) else {
             return true; // can't tell — trust the latch
         };
+        if let (Some(cur), Some(anchor)) = (cursor_screen_pos(), td.anchor_est) {
+            let expect = (f64::from(op.x) + anchor.0, f64::from(op.y) + anchor.1);
+            let miss = ((expect.0 - cur.0).powi(2) + (expect.1 - cur.1).powi(2)).sqrt();
+            if miss > DOCK_COMMIT_SLACK_PX {
+                return false; // frame is not where the pointer put it — snap-back
+            }
+            return self
+                .dock_hit_test(cur, td.seq, td.hwnd, None)
+                .is_some_and(|(seq, _)| seq == latched);
+        }
         let cursor = (f64::from(op.x) + td.grab.0, f64::from(op.y) + td.grab.1);
         self.dock_hit_test(cursor, td.seq, td.hwnd, None)
             .is_some_and(|(seq, _)| seq == latched)
+    }
+
+    /// v2.40.0 (tear-off UX, X11): the frozen-drag rescue tick, run from
+    /// `about_to_wait` while torn-drag tracking is live. Covers the two
+    /// holes in event-driven tracking a session recording exposed on
+    /// GNOME/Mutter: (a) a native handoff the WM accepted but never acted
+    /// on — no `Moved` ever arrives (e.g. `_NET_WM_MOVERESIZE` racing a
+    /// just-created, not-yet-mapped window) — demote to manual-follow once
+    /// the REAL pointer demonstrably travelled while the frame did not;
+    /// (b) manual-follow starving because the pointer left the
+    /// capture-holding source window's bounds (its CursorMoved stream
+    /// stops at the border) — carry the torn window straight from the live
+    /// pointer. Healthy native tracking is left strictly alone. Returns
+    /// the wait budget (ms) that keeps the tick alive; `None` when idle
+    /// (no drag, healthy native, or no live-cursor source — macOS/Wayland).
+    fn torn_drag_pointer_tick(&mut self) -> Option<u64> {
+        let td = self.torn_drag.as_ref()?;
+        if td.native && td.saw_move {
+            return None;
+        }
+        let cursor = cursor_screen_pos()?;
+        if td.native {
+            // No `Moved` yet — gather demotion evidence.
+            let Some(reference) = td.tick_ref else {
+                if let Some(td) = self.torn_drag.as_mut() {
+                    td.tick_ref = Some(cursor);
+                }
+                return Some(TORN_TICK_MS);
+            };
+            let travelled =
+                ((cursor.0 - reference.0).powi(2) + (cursor.1 - reference.1).powi(2)).sqrt();
+            let waited = td.started.elapsed() >= std::time::Duration::from_millis(400);
+            if !waited || travelled < DEMOTION_TRAVEL_PX {
+                return Some(TORN_TICK_MS);
+            }
+            log::info!(
+                "tear-off: pointer moved {travelled:.0}px with no WM move; demoting to manual follow"
+            );
+            if let Some(td) = self.torn_drag.as_mut() {
+                td.native = false;
+            }
+        }
+        let td = self.torn_drag.as_ref()?;
+        // A CursorMoved-driven follow ran a moment ago — let the higher-
+        // rate event stream win while it flows; the tick fills the gaps.
+        if td.saw_move && td.last_signal.elapsed() < std::time::Duration::from_millis(30) {
+            return Some(TORN_TICK_MS);
+        }
+        let (grab, torn_seq) = (td.grab, td.seq);
+        let torn_win = self.windows.get(&torn_seq).and_then(|t| t.window.clone())?;
+        torn_win.set_outer_position(winit::dpi::PhysicalPosition::new(
+            (cursor.0 - grab.0) as i32,
+            (cursor.1 - grab.1) as i32,
+        ));
+        let torn_hwnd = window_hwnd(&torn_win);
+        if let Some(td) = self.torn_drag.as_mut() {
+            td.saw_move = true;
+            td.last_signal = std::time::Instant::now();
+        }
+        self.update_dock_target(cursor, torn_hwnd, None);
+        Some(TORN_TICK_MS)
     }
 
     /// v2.19.0 (re-dock): set/clear a mapped window's dock preview (the
@@ -17638,6 +17915,7 @@ impl App {
         if w.dock_preview == idx {
             return;
         }
+        log::debug!("dock preview: window {} -> {idx:?}", w.seq);
         w.dock_preview = idx;
         if let Some(win) = &w.window {
             win.request_redraw();
@@ -18658,19 +18936,21 @@ impl App {
                 td.last_signal = std::time::Instant::now();
                 let grab = td.grab;
                 // Frame + grab approximates the pointer, but the move
-                // loop's anchor can drift from `grab` by however far the
-                // pointer slid between window creation and loop start
-                // (measured ~10-35px) — enough to miss a band edge. On
-                // Windows the LIVE cursor is one call away; on X11 the
-                // approximation (with whatever constant slide the WM's
-                // anchor baked in) is all we have — the latch and the
-                // commit-time revalidation use the SAME approximation, so
-                // the bias is at least self-consistent.
+                // loop's anchor drifts from `grab` by however far the
+                // pointer slid between press/tear and loop start — a
+                // session recording measured 55-86px under Mutter, enough
+                // to miss the whole band. The LIVE cursor is one call away
+                // on Windows (GetCursorPos) AND on X11 (QueryPointer via
+                // the side connection); the approximation remains the
+                // fallback for a failed query. Each real-cursor + frame
+                // pair also refreshes `anchor_est`, the snap-back tell the
+                // commit-time revalidation keys off.
                 let approx = (f64::from(pos.x) + grab.0, f64::from(pos.y) + grab.1);
-                #[cfg(target_os = "windows")]
-                let cursor = cursor_screen_pos().unwrap_or(approx);
-                #[cfg(not(target_os = "windows"))]
-                let cursor = approx;
+                let real = cursor_screen_pos();
+                if let Some(cur) = real {
+                    td.anchor_est = Some((cur.0 - f64::from(pos.x), cur.1 - f64::from(pos.y)));
+                }
+                let cursor = real.unwrap_or(approx);
                 let torn_hwnd = ws.window.as_deref().and_then(window_hwnd);
                 self.update_dock_target(cursor, torn_hwnd, None);
             }
@@ -23557,6 +23837,29 @@ mod tests {
         assert_eq!(dist_to_rect(803.0, 28.0, top), 5.0); // 3-4-5 corner
     }
 
+    /// v2.40.0 (tear-off UX): the ghost's tear-lift is a clamped linear
+    /// ramp over the SAME distance/threshold pair the tear decision uses,
+    /// so 1.0 lands exactly where `tear_threshold_crossed` fires.
+    #[test]
+    fn tear_lift_ratio_scales_with_distance() {
+        use super::{tear_lift_ratio, tear_threshold_crossed};
+        let top = (0.0, 0.0, 800.0, 24.0);
+        // Inside the band: no lift, anywhere along the strip.
+        assert_eq!(tear_lift_ratio(5.0, 12.0, top, 36.0), 0.0);
+        assert_eq!(tear_lift_ratio(790.0, 12.0, top, 36.0), 0.0);
+        // Halfway to the threshold below the band: half lift.
+        assert_eq!(tear_lift_ratio(400.0, 42.0, top, 36.0), 0.5);
+        // Exactly at the threshold: full lift — and the tear fires here.
+        assert_eq!(tear_lift_ratio(400.0, 60.0, top, 36.0), 1.0);
+        assert!(tear_threshold_crossed(400.0, 60.0, top, 36.0));
+        // Far past the threshold (Wayland's at-release hover): clamped.
+        assert_eq!(tear_lift_ratio(400.0, 500.0, top, 36.0), 1.0);
+        // Above the window: same uniform hysteresis as the tear decision.
+        assert_eq!(tear_lift_ratio(400.0, -18.0, top, 36.0), 0.5);
+        // A zero threshold can never tear, so it never lifts either.
+        assert_eq!(tear_lift_ratio(400.0, 500.0, top, 0.0), 0.0);
+    }
+
     /// v2.19.0 (re-dock): docking inserts BETWEEN segments — n tabs have
     /// n+1 slots, decided by segment midpoints.
     #[test]
@@ -23632,6 +23935,29 @@ mod tests {
         assert!(
             src.contains(".is_some_and(|t| t.seq == seq || t.carrier == seq)"),
             "finish_window_dispatch must abandon tracking for a dying torn/carrier window"
+        );
+        // 9. v2.40.0: the dock hit-test runs from the LIVE cursor when a
+        //    query source exists (GetCursorPos / X11 QueryPointer) — the
+        //    frame+grab approximation alone misses the band by the WM's
+        //    anchor drift (measured 55-86px under Mutter).
+        assert!(
+            src.contains("let cursor = real.unwrap_or(approx);"),
+            "the Moved-driven hit-test must prefer the live cursor"
+        );
+        // 10. v2.40.0: the frozen-drag rescue tick is wired into
+        //     about_to_wait — without it, a silent native handoff (or a
+        //     pointer past the carrier's bounds) leaves the torn window
+        //     frozen mid-air with no path to carry or dock it.
+        assert!(
+            src.contains("let torn_tick_wait = self.torn_drag_pointer_tick();"),
+            "about_to_wait must run the frozen-drag rescue tick"
+        );
+        // 11. v2.40.0: with an exact latch, the commit-time revalidation
+        //     detects an Esc snap-back via the learned move-grab anchor,
+        //     not the biased grab offset.
+        assert!(
+            src.contains("if let (Some(cur), Some(anchor)) = (cursor_screen_pos(), td.anchor_est)"),
+            "revalidate_dock_latch must key snap-back detection off anchor_est"
         );
     }
 
@@ -23928,6 +24254,41 @@ mod tests {
         // hand, not the arrow.
         assert_eq!(
             tab_close_hover_icon(true).or(chrome),
+            Some(CursorIcon::Pointer)
+        );
+    }
+
+    /// v2.40.0 (tear-off UX): the tab-drag cursor tracks the detach FSM —
+    /// Grab while armed, Grabbing while dragging — and outranks every
+    /// other icon rule so it can't flicker mid-drag.
+    #[test]
+    fn tab_drag_cursor_icon_by_drag_state() {
+        use super::tab_drag_cursor_icon;
+        use crate::detach::DragState;
+        use winit::window::CursorIcon;
+        assert_eq!(tab_drag_cursor_icon(&DragState::Idle), None);
+        assert_eq!(
+            tab_drag_cursor_icon(&DragState::ArmedInside { tab_idx: 0 }),
+            Some(CursorIcon::Grab)
+        );
+        assert_eq!(
+            tab_drag_cursor_icon(&DragState::DraggingInside { tab_idx: 1 }),
+            Some(CursorIcon::Grabbing)
+        );
+        assert_eq!(
+            tab_drag_cursor_icon(&DragState::DraggingOutside { tab_idx: 2 }),
+            Some(CursorIcon::Grabbing)
+        );
+        // Compose: a live drag outranks the close-✕ Pointer (the pointer
+        // can transiently cross another tab's close zone mid-drag).
+        assert_eq!(
+            tab_drag_cursor_icon(&DragState::DraggingInside { tab_idx: 0 })
+                .or(super::tab_close_hover_icon(true)),
+            Some(CursorIcon::Grabbing)
+        );
+        // Idle defers — the close-hover rule gets its turn.
+        assert_eq!(
+            tab_drag_cursor_icon(&DragState::Idle).or(super::tab_close_hover_icon(true)),
             Some(CursorIcon::Pointer)
         );
     }

@@ -705,6 +705,22 @@ tabbar-click-smoke:
 tabbar-click-smoke:
     python scripts/check-live-ui-smoke.py tabbar
 
+# v2.40.0 (tear-off UX): tear-off regression guards, two tiers. The ctl tier
+# proves the mouseless move_tab_to_new_window tear + tab_moved broadcast; the
+# live tier drives xdotool REAL pointer input through the full gesture
+# (tear -> follow -> re-dock merge -> Esc cancel), because `maybe_tear_off`
+# and re-dock only respond to native winit pointer events — synthetic
+# `ctl send_mouse` cannot reach them by design. Live tier is X11-desktop-only
+# (skips cleanly elsewhere); artifacts under target/diagnostics/tearoff-*.
+[unix]
+tearoff-smoke: release
+    python3 scripts/check-live-ui-smoke.py --kettle ./target/release/kettle tearoff
+    KETTLE_BIN=./target/release/kettle ./scripts/check-tearoff-live-smoke.sh
+
+[windows]
+tearoff-smoke:
+    python scripts/check-live-ui-smoke.py tearoff
+
 # Reproduce cwd-derived title recovery for shell-truncated tab titles.
 # Captures list_panes/list_tabs/ui_geometry under target/diagnostics/tab-title-*.
 [unix]

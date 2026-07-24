@@ -743,15 +743,37 @@ source and live):
   window when the Windows modal loop exits (`WM_EXITSIZEMOVE`); on
   X11/macOS the first client pointer event after the WM's grab ends
   serves the same role (clients receive no pointer events during the
-  move). A 30s `about_to_wait` failsafe abandons orphaned tracking.
+  move). A 120s `about_to_wait` failsafe abandons orphaned tracking.
 - **Re-dock hit-testing** runs on the torn window's `Moved` stream
   (`WM_WINDOWPOSCHANGED` keeps firing inside the modal loop), preferring
-  the live cursor over the frame+grab approximation on Windows. The
-  dragged window goes translucent (`WS_EX_LAYERED` + `LWA_ALPHA`,
-  verified compatible with the wgpu flip-model swapchain) so the target
-  strip and its accent insertion marker stay readable beneath it; a
-  hidden single-tab `auto` bar **materializes** while hovered so the
-  drop target is visible.
+  the live cursor over the frame+grab approximation everywhere a query
+  source exists — `GetCursorPos` on Windows and, since v2.40.0, x11rb
+  `QueryPointer` on X11. The approximation alone misses: the WM anchors
+  its move grab at the *press* position while `grab` is computed at
+  *tear* time, a drift a session recording measured at 55-86px under
+  Mutter — more than the whole band. The latched target's strip paints a
+  cross-platform accent **wash + pane-edge border + capped insertion
+  marker** (`kettle_render::tab_drag`); on Windows the dragged window
+  additionally goes translucent (`WS_EX_LAYERED` + `LWA_ALPHA`, verified
+  compatible with the wgpu flip-model swapchain); a hidden single-tab
+  `auto` bar **materializes** while hovered so the drop target is
+  visible.
+- **Frozen-drag rescue (v2.40.0, X11)**: a native handoff the WM accepts
+  but never acts on (e.g. `_NET_WM_MOVERESIZE` racing a just-created,
+  unmapped window) used to leave the torn window frozen mid-air once the
+  pointer left the capture-holding source window's bounds. An
+  `about_to_wait` tick (`torn_drag_pointer_tick`, 16ms while active) now
+  polls the real pointer, demotes the silent handoff on
+  travel-without-`Moved` evidence, carries the torn window itself, and
+  keeps the dock hit-test live. Commit-time revalidation keys Esc
+  snap-back detection off a learned move-grab anchor (`anchor_est`)
+  instead of the drifted grab offset.
+- **Cursor + pre-tear affordance (v2.40.0)**: the OS cursor shows
+  `Grab`/`Grabbing` for the whole armed/dragging gesture (first in the
+  `sync_cursor_icon` priority chain so it cannot flicker mid-drag), and
+  the reorder ghost's shadow/opacity escalate with `TabBar::tear_lift`
+  (0→1 over the band-to-threshold distance) so the tear point is
+  telegraphed instead of springing a new window unannounced.
 - A **lone-tab** window's tab drags the whole window (`drag_window()`
   with dock tracking, no detach) — Chromium semantics, and the way a
   torn-off window merges back.

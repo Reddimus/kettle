@@ -6,6 +6,63 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+## [2.40.0] — 2026-07-23
+
+Tab tear-off UX overhaul, driven by a recorded frame-by-frame session of the
+real gesture on Ubuntu X11/GNOME (xdotool-driven drags, ffmpeg capture, every
+attempt analyzed). The session caught two functional breaks on X11 and a set
+of missing affordances; all are fixed here, with the gesture now covered by a
+deterministic two-tier live smoke.
+
+  ### Fixed
+  - **X11: torn windows could freeze mid-air.** When the WM silently ignored
+    the `_NET_WM_MOVERESIZE` handoff (a race against the just-created,
+    not-yet-mapped window), the manual-follow fallback only tracked while the
+    pointer stayed inside the capture-holding source window — leaving the
+    torn window stranded the moment the pointer crossed its border. A new
+    `about_to_wait` rescue tick polls the real pointer (x11rb
+    `QueryPointer`, the X11 counterpart of the Windows `GetCursorPos` drift
+    correction), demotes a silent handoff on travel-without-`Moved` evidence,
+    and carries the torn window itself.
+  - **X11: re-docking a torn window rarely latched.** The dock hit-test
+    approximated the pointer as `frame + grab`, but the WM anchors its move
+    grab at the button-press position while `grab` is computed at tear time —
+    measured 55-86px apart under Mutter, more than the whole tab band. The
+    hit-test now runs from the live cursor wherever a query source exists
+    (Windows/X11), and commit-time revalidation detects an Esc snap-back via
+    a learned move-grab anchor (`anchor_est`) instead of the drifted offset.
+  - `KETTLE_TEAR_MANUAL_FOLLOW=1` (diagnostics) forces the manual-follow
+    path, making the otherwise race-dependent fallback testable on demand.
+
+  ### Changed
+  - **Cross-platform dock-target highlight.** The latched target strip now
+    paints an accent wash plus a pane-edge border (with the insertion marker
+    widened to 3px and given square end-caps), so a Linux/macOS drop target
+    is no longer signalled by a bare 2px line — previously the only
+    non-Windows cue, and invisible in the recorded session. The Windows
+    torn-window translucency remains, additively.
+  - **Pre-tear ghost escalation.** The drag ghost's shadow grows and its body
+    fades as the cursor approaches the tear threshold (`TabBar::tear_lift`,
+    0→1 over the band-to-threshold distance), telegraphing "release will
+    tear" instead of springing a new window unannounced.
+  - **Grab/Grabbing cursor** through the whole tab-drag gesture, first in the
+    cursor-priority chain so transiting another tab's close-✕ or a split seam
+    can't flicker the icon mid-drag.
+  - Tab-drag paint constants consolidated into `kettle_render::tab_drag`
+    (ghost opacities/offsets, marker width/caps, highlight alphas), the same
+    single-home pattern as `kettle_render::menu`; `ui_geometry` now reports
+    `tear_lift`, `dock_highlighted`, and the band rect for smoke assertions.
+
+  ### Added
+  - `just tearoff-smoke`: a ctl tier (mouseless `move_tab_to_new_window`
+    tear + `tab_moved` event + diagnostics keys) plus an X11 live tier
+    driving real xdotool input through tear → follow → re-dock merge → Esc
+    cancel, once per carry path (native handoff, forced manual-follow).
+  - `docs/ARCHITECTURE.md` detachable-tabs section updated for the live-
+    pointer tracking, rescue tick, and highlight; `CONTRIBUTING.md`'s
+    "Releasing" section rewritten to match the actual two-script,
+    PR-mediated flow (`release.sh` on a branch → PR → `tag-release.sh`).
+
 ## [2.39.0] — 2026-07-23
 
 A whole-repository audit (multi-agent: per-crate plus cross-cutting security,

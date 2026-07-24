@@ -60,11 +60,14 @@ and **WezTerm** into one tool.
   pointer** in the OS's native move loop — Snap Layouts and FancyZones
   work mid-drag, and PTYs, scrollback and running programs move
   untouched. **Drop it onto another kettle window's tab bar to merge it
-  back**: the dragged window turns translucent over the target strip, an
-  accent line marks the insertion slot, and a lone-tab window can be
-  re-docked the same way by dragging its tab. (`Esc` before the tear
-  cancels; this is the live-window model Chrome uses — Windows Terminal
-  only shows a ghost header and creates the window at drop.) Each window
+  back**: the target strip glows in its accent color with a capped
+  insertion marker at the landing slot (on Windows the dragged window
+  additionally turns translucent over it), and a lone-tab window can be
+  re-docked the same way by dragging its tab. The cursor shows a
+  grab/grabbing hand through the whole gesture, and the drag ghost
+  visibly lifts off the bar as the tear point approaches. (`Esc` before
+  the tear cancels; this is the live-window model Chrome uses — Windows
+  Terminal only shows a ghost header and creates the window at drop.) Each window
   claims its own Peacock accent hue from the theme (on by default; pin
   one with `accent-color`/`--accent`, opt out with `accent-color =
   theme`) so windows are tellable apart at a glance.

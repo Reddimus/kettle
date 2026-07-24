@@ -12,6 +12,12 @@
 > here. The user-visible end state (drag a tab into another window,
 > or empty space to spawn one, PTYs keep running) matches this doc;
 > the plumbing does not. Kept as the historical design record.
+> The *visual* layer (drag ghost, pre-tear lift, dock-target
+> highlight, insertion marker) lives in `kettle_render::tab_drag` +
+> the tab-bar assembly in `crates/kettle-ui/src/app.rs`
+> (`tab_bar`/`sync_cursor_icon`); the X11 live-pointer tracking and
+> frozen-drag rescue added in v2.40.0 are described in
+> `docs/ARCHITECTURE.md` § Detachable tabs.
 
 ## What it is
 

@@ -2318,6 +2318,86 @@ def run_interaction(kettle: str, root: Path) -> Path:
     return out
 
 
+def run_tearoff(kettle: str, root: Path) -> Path:
+    """Tier-1 deterministic tear-off: the mouseless `move_tab_to_new_window`
+    action must detach the active tab into a second live window (PTYs
+    intact) and broadcast `tab_moved`. The mouse-driven tear/re-dock
+    gesture needs REAL pointer input (the ctl `send_mouse` path cannot
+    reach `maybe_tear_off` by design) — that lives in
+    scripts/check-tearoff-live-smoke.sh, not here."""
+    out = root / f"tearoff-{time.strftime('%Y%m%d-%H%M%S')}"
+    out.mkdir(parents=True, exist_ok=True)
+    cfg = out / "config"
+    cfg.write_text(
+        "\n".join(
+            [
+                "agent-server = full",
+                "tab-bar = always",
+                "tab-bar-position = top",
+                "detachable-tabs = true",
+                "status-bar = off",
+                "restore-session = false",
+                "update-check = false",
+                "background = #101010",
+                "foreground = #f4f4f4",
+                "window-width = 120",
+                "window-height = 30",
+            ]
+        )
+        + "\n"
+    )
+    with LiveKettle(kettle, cfg, out / "kettle.log") as live:
+        events = EventStream(live, out / "events.ndjson")
+        try:
+            live.ctl("perform_action", params={"action": "new_tab"})
+            tabs = live.json_ctl("list_tabs")
+            rows = [t for t in tabs.get("tabs", []) if isinstance(t, dict)]
+            if len(rows) != 2 or {t.get("window") for t in rows} != {1}:
+                raise SystemExit(f"tearoff smoke: expected 2 tabs in window 1, got {tabs}")
+            live.screenshot(out / "before-tear.png")
+
+            # v2.40.0: the new diagnostic surface the gesture smokes key off.
+            bar = live.json_ctl("ui_geometry").get("tab_bar", {})
+            for key in ("tear_lift", "dock_highlighted", "band"):
+                if key not in bar:
+                    raise SystemExit(f"tearoff smoke: ui_geometry tab_bar missing {key!r}: {bar}")
+            if bar.get("tear_lift") != 0.0 or bar.get("dock_highlighted") is not False:
+                raise SystemExit(f"tearoff smoke: idle drag diagnostics not at rest: {bar}")
+
+            live.ctl("perform_action", params={"action": "move_tab_to_new_window"})
+            moved = events.wait_for("tab_moved", {"from_window": 1})
+            to_window = moved.get("data", {}).get("to_window")
+            for _ in range(50):
+                tabs = live.json_ctl("list_tabs")
+                rows = [t for t in tabs.get("tabs", []) if isinstance(t, dict)]
+                windows = {t.get("window") for t in rows}
+                if len(rows) == 2 and len(windows) == 2:
+                    break
+                time.sleep(0.1)
+            else:
+                raise SystemExit(f"tearoff smoke: tab did not land in a second window: {tabs}")
+            if to_window not in windows:
+                raise SystemExit(
+                    f"tearoff smoke: tab_moved reported to_window={to_window}, windows={windows}"
+                )
+            live.screenshot(out / "after-tear.png")
+            (out / "tabs.json").write_text(json.dumps(tabs, indent=2) + "\n")
+            (out / "analysis.json").write_text(
+                json.dumps(
+                    {
+                        "tab_moved": moved,
+                        "windows": sorted(str(w) for w in windows),
+                        "diagnostic_keys": sorted(bar.keys()),
+                    },
+                    indent=2,
+                )
+                + "\n"
+            )
+        finally:
+            events.close()
+    return out
+
+
 def run_tab_title(kettle: str, root: Path) -> Path:
     out = root / f"tab-title-{time.strftime('%Y%m%d-%H%M%S')}"
     out.mkdir(parents=True, exist_ok=True)
@@ -2628,6 +2708,7 @@ def main() -> int:
         choices=[
             "tabbar",
             "tab-title",
+            "tearoff",
             "split-titlebar",
             "zoom-keybind",
             "underline",
@@ -2659,6 +2740,9 @@ def main() -> int:
     if args.case in ("tab-title", "all"):
         out = run_tab_title(args.kettle, root)
         print(f"tab-title smoke: OK artifacts={out}")
+    if args.case in ("tearoff", "all"):
+        out = run_tearoff(args.kettle, root)
+        print(f"tearoff smoke: OK artifacts={out}")
     if args.case in ("split-titlebar", "all"):
         out = run_split_titlebar(args.kettle, root)
         print(f"split-titlebar smoke: OK artifacts={out}")
