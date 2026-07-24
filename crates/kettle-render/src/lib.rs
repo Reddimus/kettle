@@ -3412,19 +3412,15 @@ impl Renderer {
                     ));
                     // Border on the pane-facing edge: bottom for a top bar,
                     // top for a bottom bar, right for a left bar, left for
-                    // a right bar — inferred from the band's shape and
-                    // which surface edge it hugs (no cfg reach-back).
+                    // a right bar — taken from `tab-bar-position` directly
+                    // (shape inference misreads a tall `tab-bar-width` next
+                    // to a short window).
                     let bp = tab_drag::DOCK_HIGHLIGHT_BORDER_PX;
-                    let (ex, ey, ew, eh) = if bw0 >= bh0 {
-                        if by0 <= 0.5 {
-                            (bx0, by0 + bh0 - bp, bw0, bp)
-                        } else {
-                            (bx0, by0, bw0, bp)
-                        }
-                    } else if bx0 <= 0.5 {
-                        (bx0 + bw0 - bp, by0, bp, bh0)
-                    } else {
-                        (bx0, by0, bp, bh0)
+                    let (ex, ey, ew, eh) = match cfg.tab_bar_pos {
+                        kettle_config::TabBarPos::Top => (bx0, by0 + bh0 - bp, bw0, bp),
+                        kettle_config::TabBarPos::Bottom => (bx0, by0, bw0, bp),
+                        kettle_config::TabBarPos::Left => (bx0 + bw0 - bp, by0, bp, bh0),
+                        kettle_config::TabBarPos::Right => (bx0, by0, bp, bh0),
                     };
                     over.push(rect(
                         ex,

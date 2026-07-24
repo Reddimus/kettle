@@ -185,7 +185,46 @@ print(int(r["x"] + r["width"] / 2))
     exit 1
   fi
 
-  # --- Re-dock: carry onto window 1's band, release, expect a merge. ---
+  # --- Esc mid-drag over a latched band must ABANDON, not merge (the
+  # Esc-cancel regression an adversarial review caught: Esc moves the
+  # frame, never the pointer, so only physical button state can tell a
+  # cancel from a drop). The button stays held through Esc; the later
+  # release with tracking already cleared must also not merge. ---
+  read -r wx wy <<<"$(client_xy "$wid")"
+  band_cx=$((wx + seg2_cx))
+  band_cy=$((wy + ${bar_h%.*} / 2))
+  xdotool mousemove --sync $((band_cx + 150)) $((band_cy + 200))
+  sleep 0.2
+  xdotool mousemove --sync "$band_cx" "$band_cy"
+  sleep 0.9
+  xdotool key Escape
+  sleep 0.4
+  xdotool mousemove --sync $((band_cx + 4)) $((band_cy + 3))
+  sleep 0.4
+  read -r ntabs nwins <<<"$(tab_windows)"
+  if [ "$ntabs" != "2" ] || [ "$nwins" != "2" ]; then
+    xdotool mouseup 1
+    echo "tearoff live smoke [$label]: Esc during a dock hover merged anyway ($ntabs tabs, $nwins windows)" >&2
+    exit 1
+  fi
+  xdotool mouseup 1
+  sleep 0.4
+  read -r ntabs nwins <<<"$(tab_windows)"
+  if [ "$ntabs" != "2" ] || [ "$nwins" != "2" ]; then
+    echo "tearoff live smoke [$label]: post-Esc release merged despite the cancel ($ntabs tabs, $nwins windows)" >&2
+    exit 1
+  fi
+
+  # --- Re-dock: re-grab the torn window's lone tab (whole-window drag),
+  # carry onto window 1's band, release, expect a merge. ---
+  read -r tx ty <<<"$(client_xy "$torn")"
+  xdotool mousemove --sync $((tx + 150)) $((ty + ${bar_h%.*} / 2))
+  xdotool mousedown 1
+  sleep 0.15
+  xdotool mousemove --sync $((tx + 158)) $((ty + ${bar_h%.*} / 2))
+  sleep 0.1
+  xdotool mousemove --sync $((tx + 160)) $((ty + tear_px + 40))
+  sleep 0.6
   read -r wx wy <<<"$(client_xy "$wid")"
   band_cx=$((wx + seg2_cx))
   band_cy=$((wy + ${bar_h%.*} / 2))

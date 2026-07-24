@@ -29,8 +29,10 @@ deterministic two-tier live smoke.
     grab at the button-press position while `grab` is computed at tear time —
     measured 55-86px apart under Mutter, more than the whole tab band. The
     hit-test now runs from the live cursor wherever a query source exists
-    (Windows/X11), and commit-time revalidation detects an Esc snap-back via
-    a learned move-grab anchor (`anchor_est`) instead of the drifted offset.
+    (Windows/X11), and commit-time revalidation distinguishes an Esc-cancel
+    from a real drop by physical button state (the X11 `QueryPointer` button
+    mask — the same tell the Windows release path reads), since Esc moves
+    the frame but never the pointer.
   - `KETTLE_TEAR_MANUAL_FOLLOW=1` (diagnostics) forces the manual-follow
     path, making the otherwise race-dependent fallback testable on demand.
 

@@ -3581,14 +3581,6 @@ fn tear_native_handoff_disabled() -> bool {
 /// stationary hover from demoting a healthy-but-quiet grab.
 const DEMOTION_TRAVEL_PX: f64 = 24.0;
 
-/// v2.40.0 (tear-off UX): how far the torn window's resting frame may sit
-/// from `cursor − anchor_est` before the commit-time revalidation calls it
-/// a WM snap-back (Esc-cancel) instead of a drop. Generous enough for the
-/// pointer drift between the physical release and the first client event
-/// that observes it; an Esc restore jumps the frame by the whole drag
-/// distance, far past this.
-const DOCK_COMMIT_SLACK_PX: f64 = 96.0;
-
 struct TornDrag {
     /// Seq of the torn-off window being dragged.
     seq: u64,
@@ -3639,25 +3631,16 @@ struct TornDrag {
     /// struct shape stays identical across platforms.
     #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
     hwnd: Option<isize>,
-    /// v2.40.0 (tear-off UX, X11): live estimate of the WM move-grab's
-    /// pointer→frame anchor, learned on every `Moved` that pairs with a
-    /// real cursor query (`anchor = cursor − frame`). The WM anchors its
-    /// grab at the BUTTON-PRESS position while `grab` was computed at
-    /// TEAR time — a session recording measured them 55-86px apart under
-    /// Mutter, so `frame + grab` cannot be trusted for the dock hit-test.
-    /// The commit-time revalidation uses this instead: a real drop leaves
-    /// `frame + anchor_est ≈ cursor`; an Esc-cancelled move snapped the
-    /// frame elsewhere, so the mismatch turns the commit into an abandon.
-    anchor_est: Option<(f64, f64)>,
-    /// v2.40.0 (tear-off UX, X11): the real cursor position when the
-    /// rescue tick first looked at this drag, while no `Moved` had arrived
-    /// yet. Demotion evidence: if the pointer has since travelled but the
-    /// WM still hasn't produced a `Moved`, the WM never actually took the
-    /// drag (an accepted-but-ignored `_NET_WM_MOVERESIZE`, or a race with
-    /// an unmapped window) and the tick takes over. Purely time-based
-    /// demotion would fight a WM that DID take the grab over a pointer
-    /// the user is simply holding still.
-    tick_ref: Option<(f64, f64)>,
+    /// v2.40.0 (tear-off UX, X11): the real cursor position at the last
+    /// tracking signal — refreshed by every `Moved` that pairs with a
+    /// live-cursor query, or by the rescue tick's first look. Demotion
+    /// evidence: if the pointer has since travelled while no further
+    /// `Moved` arrived, the WM is not actually moving the window (an
+    /// accepted-but-ignored `_NET_WM_MOVERESIZE`, an unmapped-window
+    /// race, or a grab dropped after one incidental placement `Moved`)
+    /// and the tick takes over. Purely time-based demotion would fight a
+    /// WM that DID take the grab over a pointer simply holding still.
+    signal_cursor: Option<(f64, f64)>,
 }
 
 /// Fire a desktop notification with the given title + optional body,
@@ -16593,20 +16576,21 @@ fn cursor_screen_pos() -> Option<(f64, f64)> {
         .map(|()| (f64::from(p.x), f64::from(p.y)))
 }
 
-/// v2.40.0 (tear-off UX, X11): the LIVE screen cursor — X11 counterpart of
-/// the Windows `GetCursorPos` path above, backed by a lazy side connection
-/// (x11rb `QueryPointer` on the root window; root coords ARE screen
-/// coords). Needed because the WM's move-grab anchor drifts from the
+/// v2.40.0 (tear-off UX, X11): one `QueryPointer` round-trip on a lazy
+/// side connection — the LIVE screen cursor (root coords ARE screen
+/// coords) plus the primary button's held state from the same reply's
+/// button mask. Needed because the WM's move-grab anchor drifts from the
 /// tear-time `grab` offset (measured 55-86px under Mutter — enough to miss
-/// the whole dock band), and because pointer motion stops reaching the
-/// client entirely once the WM holds the move grab. A Wayland session (no
-/// X server, or only XWayland for foreign clients) fails the one-time
-/// connect and yields `None` forever — callers keep their approximation.
-/// The connection is only ever exercised while torn-drag tracking is live.
+/// the whole dock band), pointer motion stops reaching the client entirely
+/// while the WM holds the move grab, and the Esc-cancel tell needs the
+/// physical button state (see `primary_button_physically_held`). A Wayland
+/// session (no X server for this client) fails the one-time connect and
+/// yields `None` forever — callers keep their approximations. Only ever
+/// exercised while torn-drag tracking is live.
 #[cfg(all(unix, not(target_os = "macos")))]
-fn cursor_screen_pos() -> Option<(f64, f64)> {
+fn x11_pointer_state() -> Option<((f64, f64), bool)> {
     use x11rb::connection::Connection as _;
-    use x11rb::protocol::xproto::ConnectionExt as _;
+    use x11rb::protocol::xproto::{ConnectionExt as _, KeyButMask};
     use x11rb::rust_connection::RustConnection;
     static X11: std::sync::OnceLock<Option<(RustConnection, u32)>> = std::sync::OnceLock::new();
     let (conn, root) = X11
@@ -16618,7 +16602,18 @@ fn cursor_screen_pos() -> Option<(f64, f64)> {
         })
         .as_ref()?;
     let reply = conn.query_pointer(*root).ok()?.reply().ok()?;
-    Some((f64::from(reply.root_x), f64::from(reply.root_y)))
+    // The server applies the pointer-button mapping before reporting the
+    // state mask, so BUTTON1 here is the LOGICAL primary — a left-handed
+    // mapping is already accounted for.
+    let held = reply.mask.contains(KeyButMask::BUTTON1);
+    Some(((f64::from(reply.root_x), f64::from(reply.root_y)), held))
+}
+
+/// v2.40.0 (tear-off UX, X11): the LIVE screen cursor — X11 counterpart of
+/// the Windows `GetCursorPos` path above. See `x11_pointer_state`.
+#[cfg(all(unix, not(target_os = "macos")))]
+fn cursor_screen_pos() -> Option<(f64, f64)> {
+    x11_pointer_state().map(|(pos, _)| pos)
 }
 
 /// macOS: no live-cursor query wired up — manual-follow there rides the
@@ -16666,14 +16661,23 @@ const WS_EX_LAYERED_BIT: isize = 0x0008_0000;
 #[cfg(target_os = "windows")]
 const DOCK_HOVER_ALPHA: u8 = 150;
 
-/// v2.19.0 (tear-off UX, Windows): is the primary mouse button PHYSICALLY
-/// held right now? Distinguishes an Esc-CANCELLED modal move loop (button
-/// still down at WM_EXITSIZEMOVE) from a real drop (button up) — winit's
-/// synthesized release looks identical for both. Honors a swapped-button
-/// mouse (`SM_SWAPBUTTON`: GetAsyncKeyState reports PHYSICAL buttons, so
-/// the primary button of a left-handed mouse is VK_RBUTTON). Always false
-/// off-Windows: only the Windows modal loop produces a release-while-held.
+/// v2.19.0 (tear-off UX, Windows) / v2.40.0 (X11): is the primary mouse
+/// button PHYSICALLY held right now? Distinguishes an Esc-CANCELLED move
+/// loop (button still down when the WM ends its grab) from a real drop
+/// (button up) — the client-visible events look identical for both.
+/// Windows honors a swapped-button mouse (`SM_SWAPBUTTON`:
+/// GetAsyncKeyState reports PHYSICAL buttons, so the primary button of a
+/// left-handed mouse is VK_RBUTTON); X11 reads the button mask from the
+/// same `QueryPointer` the live-cursor path uses (the server pre-applies
+/// the pointer mapping there). False elsewhere (macOS manual-follow and
+/// Wayland never produce a release-while-held; an X11 query failure also
+/// degrades to false, which errs toward committing a real drop rather
+/// than dropping user data on a cancel we cannot prove).
 fn primary_button_physically_held() -> bool {
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        x11_pointer_state().is_some_and(|(_, held)| held)
+    }
     #[cfg(target_os = "windows")]
     {
         use windows::Win32::UI::Input::KeyboardAndMouse::{
@@ -16687,7 +16691,7 @@ fn primary_button_physically_held() -> bool {
         };
         (unsafe { GetAsyncKeyState(i32::from(vk.0)) } as u16) & 0x8000 != 0
     }
-    #[cfg(not(target_os = "windows"))]
+    #[cfg(not(any(target_os = "windows", all(unix, not(target_os = "macos")))))]
     false
 }
 
@@ -17444,8 +17448,7 @@ impl App {
                 saw_move: false,
                 last_signal: std::time::Instant::now(),
                 hwnd: window_hwnd(&src),
-                anchor_est: None,
-                tick_ref: None,
+                signal_cursor: None,
             });
             return true;
         }
@@ -17601,8 +17604,7 @@ impl App {
                         .get(&torn_seq)
                         .and_then(|t| t.window.as_deref())
                         .and_then(window_hwnd),
-                    anchor_est: None,
-                    tick_ref: None,
+                    signal_cursor: None,
                 });
             }
             Err(WindowOpen::AdoptTab(dt)) => {
@@ -17794,20 +17796,17 @@ impl App {
         }
     }
 
-    /// v2.19.0 (re-dock): does the latched dock target still hold for the
-    /// torn window's FINAL resting position? A real drop leaves the frame
-    /// tracking the pointer; a WM-cancelled move (X11 Esc) snapped the
-    /// frame back to its origin — the commit then becomes an abandon.
-    ///
-    /// v2.40.0: with the live-cursor latch, the old "frame + grab, same
-    /// bias as the latch" self-consistency no longer holds (the latch is
-    /// now exact while grab still carries the WM-anchor drift). The
-    /// snap-back tell is `anchor_est`: a real drop leaves the resting
-    /// frame within `DOCK_COMMIT_SLACK_PX` of `cursor − anchor_est`; an
-    /// Esc-restored frame lands wherever the drag STARTED, far from the
-    /// pointer still hovering the band. Falls back to the legacy
-    /// frame+grab check when either live signal is unavailable.
-    /// `ws` = the torn window (checked out of the map).
+    /// v2.19.0 (re-dock): does the latched dock target still hold at the
+    /// moment a heuristic pointer-event commit fires? A real drop ended
+    /// with the button UP; a WM-cancelled move (X11 Esc) ends its grab
+    /// with the button still physically HELD — the same tell the Windows
+    /// release path uses (`primary_button_physically_held`), read here
+    /// from the X11 `QueryPointer` button mask. Position heuristics can't
+    /// make this call: Esc doesn't move the pointer (a live-cursor
+    /// hit-test still sees the band) and the WM's restore `Moved` re-syncs
+    /// any frame-anchor estimate before the commit event arrives, so only
+    /// the button state separates the two. `ws` = the torn window
+    /// (checked out of the map).
     fn revalidate_dock_latch(&self, ws: &WindowState) -> bool {
         let Some(td) = self.torn_drag.as_ref() else {
             return false;
@@ -17816,54 +17815,62 @@ impl App {
             // Nothing latched — commit and abandon are equivalent.
             return false;
         };
-        let Some(op) = ws.window.as_ref().and_then(|w| w.outer_position().ok()) else {
+        // Esc-cancel: the WM ended its grab while the user still holds
+        // the button. Abandon — the user's release hasn't happened, so
+        // nothing was dropped.
+        if primary_button_physically_held() {
+            return false;
+        }
+        // Real drop: re-run the hit-test from the best cursor estimate —
+        // live when available, else the legacy frame+grab approximation
+        // (macOS manual-follow keeps its original self-consistent bias).
+        let cursor = cursor_screen_pos().or_else(|| {
+            ws.window
+                .as_ref()
+                .and_then(|w| w.outer_position().ok())
+                .map(|op| (f64::from(op.x) + td.grab.0, f64::from(op.y) + td.grab.1))
+        });
+        let Some(cursor) = cursor else {
             return true; // can't tell — trust the latch
         };
-        if let (Some(cur), Some(anchor)) = (cursor_screen_pos(), td.anchor_est) {
-            let expect = (f64::from(op.x) + anchor.0, f64::from(op.y) + anchor.1);
-            let miss = ((expect.0 - cur.0).powi(2) + (expect.1 - cur.1).powi(2)).sqrt();
-            if miss > DOCK_COMMIT_SLACK_PX {
-                return false; // frame is not where the pointer put it — snap-back
-            }
-            return self
-                .dock_hit_test(cur, td.seq, td.hwnd, None)
-                .is_some_and(|(seq, _)| seq == latched);
-        }
-        let cursor = (f64::from(op.x) + td.grab.0, f64::from(op.y) + td.grab.1);
         self.dock_hit_test(cursor, td.seq, td.hwnd, None)
             .is_some_and(|(seq, _)| seq == latched)
     }
 
     /// v2.40.0 (tear-off UX, X11): the frozen-drag rescue tick, run from
-    /// `about_to_wait` while torn-drag tracking is live. Covers the two
-    /// holes in event-driven tracking a session recording exposed on
-    /// GNOME/Mutter: (a) a native handoff the WM accepted but never acted
-    /// on — no `Moved` ever arrives (e.g. `_NET_WM_MOVERESIZE` racing a
-    /// just-created, not-yet-mapped window) — demote to manual-follow once
-    /// the REAL pointer demonstrably travelled while the frame did not;
-    /// (b) manual-follow starving because the pointer left the
-    /// capture-holding source window's bounds (its CursorMoved stream
-    /// stops at the border) — carry the torn window straight from the live
-    /// pointer. Healthy native tracking is left strictly alone. Returns
-    /// the wait budget (ms) that keeps the tick alive; `None` when idle
-    /// (no drag, healthy native, or no live-cursor source — macOS/Wayland).
+    /// `about_to_wait` while torn-drag tracking is live. Covers the holes
+    /// in event-driven tracking a session recording exposed on
+    /// GNOME/Mutter: (a) a native handoff the WM accepted but never (or no
+    /// longer) acts on — `Moved` events stop while the REAL pointer keeps
+    /// travelling (e.g. `_NET_WM_MOVERESIZE` racing a just-created,
+    /// not-yet-mapped window, or a WM that dropped the grab after a single
+    /// incidental placement `Moved`) — demote to manual-follow on that
+    /// travel-without-`Moved` evidence; (b) manual-follow starving because
+    /// the pointer left the capture-holding source window's bounds (its
+    /// CursorMoved stream stops at the border) — carry the torn window
+    /// straight from the live pointer. Healthy native tracking (fresh
+    /// `Moved` signals) is left strictly alone. Returns the wait budget
+    /// (ms) that keeps the tick alive; `None` only when there is no drag
+    /// or no live-cursor source (macOS/Wayland).
     fn torn_drag_pointer_tick(&mut self) -> Option<u64> {
         let td = self.torn_drag.as_ref()?;
-        if td.native && td.saw_move {
-            return None;
-        }
         let cursor = cursor_screen_pos()?;
         if td.native {
-            // No `Moved` yet — gather demotion evidence.
-            let Some(reference) = td.tick_ref else {
+            // Demotion evidence: the pointer travelled while the WM sent
+            // no `Moved`. `signal_cursor` is the pointer at the last
+            // tracking signal (or this tick's first look); `saw_move`
+            // alone is NOT proof of health — a single incidental
+            // placement `Moved` must not disable the rescue forever.
+            let Some(reference) = td.signal_cursor else {
                 if let Some(td) = self.torn_drag.as_mut() {
-                    td.tick_ref = Some(cursor);
+                    td.signal_cursor = Some(cursor);
                 }
                 return Some(TORN_TICK_MS);
             };
             let travelled =
                 ((cursor.0 - reference.0).powi(2) + (cursor.1 - reference.1).powi(2)).sqrt();
-            let waited = td.started.elapsed() >= std::time::Duration::from_millis(400);
+            let waited = td.last_signal.elapsed() >= std::time::Duration::from_millis(400)
+                && td.started.elapsed() >= std::time::Duration::from_millis(400);
             if !waited || travelled < DEMOTION_TRAVEL_PX {
                 return Some(TORN_TICK_MS);
             }
@@ -18942,13 +18949,13 @@ impl App {
                 // to miss the whole band. The LIVE cursor is one call away
                 // on Windows (GetCursorPos) AND on X11 (QueryPointer via
                 // the side connection); the approximation remains the
-                // fallback for a failed query. Each real-cursor + frame
-                // pair also refreshes `anchor_est`, the snap-back tell the
-                // commit-time revalidation keys off.
+                // fallback for a failed query. Each real-cursor + `Moved`
+                // pair also refreshes `signal_cursor`, the rescue tick's
+                // travel-without-`Moved` demotion reference.
                 let approx = (f64::from(pos.x) + grab.0, f64::from(pos.y) + grab.1);
                 let real = cursor_screen_pos();
                 if let Some(cur) = real {
-                    td.anchor_est = Some((cur.0 - f64::from(pos.x), cur.1 - f64::from(pos.y)));
+                    td.signal_cursor = Some(cur);
                 }
                 let cursor = real.unwrap_or(approx);
                 let torn_hwnd = ws.window.as_deref().and_then(window_hwnd);
@@ -20242,6 +20249,20 @@ impl App {
                     if let Some(w) = &ws.window {
                         w.request_redraw();
                     }
+                    return;
+                }
+                // v2.40.0 (tear-off UX): Esc also cancels a MANUAL-FOLLOW
+                // torn drag (native cancels belong to the WM's own move
+                // loop, whose grab-end the button-state revalidation
+                // sorts out). Without this, manual mode had no cancel at
+                // all: the eventual release would commit whatever dock
+                // target happened to be latched. Consumed, like the
+                // pre-tear cancel above; the torn window simply stays
+                // where the drag left it.
+                if self.torn_drag.as_ref().is_some_and(|t| !t.native)
+                    && matches!(&event.logical_key, Key::Named(NamedKey::Escape))
+                {
+                    self.abandon_torn_drag(Some(ws));
                     return;
                 }
                 // Keep the cursor solid while actively typing.
@@ -23952,12 +23973,17 @@ mod tests {
             src.contains("let torn_tick_wait = self.torn_drag_pointer_tick();"),
             "about_to_wait must run the frozen-drag rescue tick"
         );
-        // 11. v2.40.0: with an exact latch, the commit-time revalidation
-        //     detects an Esc snap-back via the learned move-grab anchor,
-        //     not the biased grab offset.
+        // 11. v2.40.0: the heuristic pointer-event commits distinguish an
+        //     Esc-cancel from a real drop by PHYSICAL button state (the
+        //     X11 QueryPointer mask / Windows GetAsyncKeyState) — position
+        //     heuristics cannot: Esc moves the frame, never the pointer,
+        //     and the WM's restore `Moved` re-syncs any frame-anchor
+        //     estimate before the commit event arrives.
         assert!(
-            src.contains("if let (Some(cur), Some(anchor)) = (cursor_screen_pos(), td.anchor_est)"),
-            "revalidate_dock_latch must key snap-back detection off anchor_est"
+            src.contains(
+                "if primary_button_physically_held() {\n            return false;\n        }"
+            ),
+            "revalidate_dock_latch must key Esc-cancel detection off physical button state"
         );
     }
 

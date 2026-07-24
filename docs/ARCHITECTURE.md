@@ -763,11 +763,15 @@ source and live):
   unmapped window) used to leave the torn window frozen mid-air once the
   pointer left the capture-holding source window's bounds. An
   `about_to_wait` tick (`torn_drag_pointer_tick`, 16ms while active) now
-  polls the real pointer, demotes the silent handoff on
-  travel-without-`Moved` evidence, carries the torn window itself, and
-  keeps the dock hit-test live. Commit-time revalidation keys Esc
-  snap-back detection off a learned move-grab anchor (`anchor_est`)
-  instead of the drifted grab offset.
+  polls the real pointer, demotes a stalled handoff on
+  travel-without-`Moved` evidence (a single incidental placement `Moved`
+  is not proof of health), carries the torn window itself, and keeps the
+  dock hit-test live. Commit-time revalidation distinguishes an
+  Esc-cancel from a real drop by PHYSICAL button state — the X11
+  `QueryPointer` button mask, the same tell the Windows release path
+  reads via `GetAsyncKeyState` — because position heuristics cannot: Esc
+  moves the frame, never the pointer, and the WM's restore `Moved`
+  re-syncs any frame-anchor estimate before the commit event arrives.
 - **Cursor + pre-tear affordance (v2.40.0)**: the OS cursor shows
   `Grab`/`Grabbing` for the whole armed/dragging gesture (first in the
   `sync_cursor_icon` priority chain so it cannot flicker mid-drag), and
