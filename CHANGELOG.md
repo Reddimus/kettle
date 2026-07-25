@@ -6,6 +6,8 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+## [2.42.0] — 2026-07-24
+
   ### Added
   - **Paste a screenshot into a pane.** Copying a *file* populates `CF_HDROP` /
     `text/uri-list`, which v2.38.0's `paste-files` already turns into a
