@@ -454,18 +454,6 @@ fn set_visible_on_all_spaces(window: &winit::window::Window) {
     }
 }
 
-/// Translate a winit `MouseScrollDelta` into terminal lines, scaled by the
-/// configured `scroll-multiplier`. `LineDelta` ticks are ~3 lines × mult;
-/// `PixelDelta` is `y/20` × mult (~3 lines per typical notch). Pure.
-fn wheel_lines(delta: &winit::event::MouseScrollDelta, multiplier: f32) -> i32 {
-    let m = multiplier.max(0.0);
-    let raw = match delta {
-        winit::event::MouseScrollDelta::LineDelta(_, y) => y.round() * 3.0,
-        winit::event::MouseScrollDelta::PixelDelta(p) => (p.y as f32) / 20.0,
-    };
-    (raw * m).round() as i32
-}
-
 fn rect_contains(rect: kettle_render::Rect4, x: f32, y: f32) -> bool {
     x >= rect.0 && x < rect.0 + rect.2 && y >= rect.1 && y < rect.1 + rect.3
 }
@@ -548,8 +536,11 @@ fn putty_paste_source(source_clipboard: bool) -> PasteSource {
 ///
 ///   * `ctrl` — Ctrl modifier held (the canonical zoom modifier across
 ///     gnome-terminal, Terminator, xterm-via-ctrl-shift-plus, etc.).
-///   * `lines` — already-scaled `wheel_lines` result; sign drives the
-///     zoom direction, zero short-circuits.
+///   * `notches` — whole detents drained from `WheelAccum`; sign drives
+///     the zoom direction, zero short-circuits. Deliberately detents and
+///     not scaled lines: one physical notch must be one font step
+///     regardless of `scroll-multiplier`, and a sub-detent touchpad event
+///     must not zoom at all.
 ///   * `disabled` — `cfg.disable_mousewheel_zoom`. Opt-out for users
 ///     who scroll-zoom by accident (laptop touchpads + a Ctrl-meta
 ///     remap is a common collision).
@@ -557,10 +548,10 @@ fn putty_paste_source(source_clipboard: bool) -> PasteSource {
 /// Returns `Some(+1)` to grow, `Some(-1)` to shrink, `None` for no-op.
 /// Extracted as a pure helper so the policy is unit-testable without
 /// constructing a full App + winit event loop.
-fn should_zoom_font(ctrl: bool, lines: i32, disabled: bool) -> Option<i32> {
-    if !ctrl || disabled || lines == 0 {
+fn should_zoom_font(ctrl: bool, notches: i32, disabled: bool) -> Option<i32> {
+    if !ctrl || disabled || notches == 0 {
         None
-    } else if lines > 0 {
+    } else if notches > 0 {
         Some(1)
     } else {
         Some(-1)
@@ -13160,14 +13151,48 @@ impl App {
         } else {
             None
         };
-        let wheel_lines = if event == "wheel" {
-            let Some(lines) = req.params.get("wheel_lines").and_then(|v| v.as_i64()) else {
-                return Response::err(req.id, ec::BAD_PARAMS, "missing 'wheel_lines' integer");
-            };
-            Some(lines.clamp(i32::MIN as i64, i32::MAX as i64) as i32)
-        } else {
-            None
-        };
+        // A wheel event takes EITHER a pre-quantized whole-line count
+        // (`wheel_lines`, the historical form) or a raw, possibly fractional
+        // detent count (`wheel_delta`, the units winit actually reports).
+        // `wheel_delta` is the only synthetic path that runs the real
+        // sub-detent accumulator, so it is what lets a test reproduce a
+        // precision-touchpad gesture.
+        let mut wheel_lines = None;
+        let mut wheel_delta = None;
+        if event == "wheel" {
+            match (
+                req.params.get("wheel_delta").and_then(|v| v.as_f64()),
+                req.params.get("wheel_lines").and_then(|v| v.as_i64()),
+            ) {
+                (Some(_), Some(_)) => {
+                    return Response::err(
+                        req.id,
+                        ec::BAD_PARAMS,
+                        "pass either 'wheel_delta' or 'wheel_lines', not both",
+                    );
+                }
+                (Some(delta), None) => {
+                    if !delta.is_finite() {
+                        return Response::err(
+                            req.id,
+                            ec::BAD_PARAMS,
+                            "'wheel_delta' must be finite",
+                        );
+                    }
+                    wheel_delta = Some(delta);
+                }
+                (None, Some(lines)) => {
+                    wheel_lines = Some(lines.clamp(i32::MIN as i64, i32::MAX as i64) as i32);
+                }
+                (None, None) => {
+                    return Response::err(
+                        req.id,
+                        ec::BAD_PARAMS,
+                        "missing 'wheel_lines' integer or 'wheel_delta' number",
+                    );
+                }
+            }
+        }
         let event_mods = if req.params.get("mods").is_some() {
             match parse_ctl_mods(req.params.get("mods")) {
                 Ok(mods) => mods,
@@ -13212,7 +13237,11 @@ impl App {
                 handled = pressed || released;
             }
             "wheel" => {
-                handled = self.ctl_mouse_wheel(ws, wheel_lines.expect("validated wheel delta"));
+                handled = match (wheel_delta, wheel_lines) {
+                    (Some(delta), _) => self.ctl_mouse_wheel_delta(ws, delta),
+                    (None, Some(lines)) => self.ctl_mouse_wheel(ws, lines),
+                    (None, None) => unreachable!("wheel params validated above"),
+                };
             }
             _ => unreachable!("event validated above"),
         }
@@ -13393,38 +13422,224 @@ impl App {
         handled
     }
 
+    /// ctl/MCP `send_mouse {event:"wheel"}` with a pre-quantized whole-line
+    /// count. The caller has already decided how many lines to move, so this
+    /// skips the accumulator and derives detents from the historical
+    /// 3-lines-per-notch ratio.
     fn ctl_mouse_wheel(&mut self, ws: &mut WindowState, lines: i32) -> bool {
         if lines == 0 {
             return false;
         }
-        if ws.search.open {
-            return self.scroll_search_viewport(ws, lines);
+        // At least one detent in the same direction, so callers that inject a
+        // single line still cycle exactly one tab / one font step.
+        let notches = match lines / 3 {
+            0 => lines.signum(),
+            n => n,
+        };
+        self.dispatch_wheel(
+            ws,
+            input::WheelSteps {
+                notches,
+                lines,
+                cols: 0,
+            },
+        )
+    }
+
+    /// ctl/MCP `send_mouse {event:"wheel", wheel_delta:<f64>}` with a RAW,
+    /// possibly fractional detent count — the same units winit reports.
+    ///
+    /// This is the only synthetic path that exercises the real accumulator, so
+    /// it is what lets an automated test reproduce a precision-touchpad gesture
+    /// (a stream of ~0.08-detent events). The integer `wheel_lines` form cannot:
+    /// it enters downstream of quantization, which is precisely why the
+    /// sub-detent bug fixed in v2.41.0 had no coverage before.
+    fn ctl_mouse_wheel_delta(&mut self, ws: &mut WindowState, notches: f64) -> bool {
+        let steps = ws.wheel.feed(
+            &winit::event::MouseScrollDelta::LineDelta(0.0, notches as f32),
+            self.cfg.scroll_multiplier,
+        );
+        if steps.is_zero() {
+            // Banked as residue — a real gesture needs several of these before
+            // the first whole step comes out.
+            return false;
         }
-        if self.cursor_in_tab_bar(ws) && ws.mux.tabs.len() > 1 {
-            if lines > 0 {
-                ws.mux.prev_tab();
-            } else {
-                ws.mux.next_tab();
+        self.dispatch_wheel(ws, steps)
+    }
+
+    /// The shared wheel ladder, downstream of quantization.
+    ///
+    /// Both the real winit `MouseWheel` event and the ctl/MCP `send_mouse`
+    /// injections land here so the two cannot drift apart — before v2.41.0 the
+    /// ctl copy had silently lost the context-menu, settings, modal-swallow and
+    /// Ctrl+zoom stages, meaning automation exercised a different terminal than
+    /// the user did.
+    ///
+    /// `steps.notches` drives discrete consumers (one action per physical
+    /// detent, independent of `scroll-multiplier`); `steps.lines` drives
+    /// continuous ones. Returns whether the wheel was consumed.
+    fn dispatch_wheel(&mut self, ws: &mut WindowState, steps: input::WheelSteps) -> bool {
+        // Terminator menu UX (C5): wheel over an
+        // open context menu scrolls its rows (one row per
+        // wheel notch). Pre-empts every other wheel dispatch
+        // so a 512-entry Theme submenu scrolls cleanly
+        // instead of leaking through to the underlying pane
+        // / tab bar / font-zoom. Swallowed even mid-detent, so a slow touchpad
+        // gesture can't leak past the menu while its residue builds.
+        if ws.context_menu.is_some() {
+            if steps.notches != 0 {
+                // Wheel up = notches > 0 = scroll up = decrement
+                // offset; wheel down = notches < 0 = scroll down.
+                self.scroll_context_menu(ws, -(steps.notches as isize));
             }
             return true;
         }
+        // v2.24.0: wheel over a settings field adjusts it (up = forward,
+        // down = backward). A wheel outside the panel is NOT a dismiss —
+        // it just falls through to the modal swallow below. One field step per
+        // detent, so a touchpad can't blow through a 512-entry Theme list.
+        if ws.settings_nav.is_some()
+            && steps.notches != 0
+            && self.settings_mouse(ws, steps.notches.signum(), false)
+        {
+            return true;
+        }
+        // Search owns the wheel, but uses it for local scrollback
+        // browsing so users can inspect nearby historical matches.
+        // Never encode tracking/alternate-scroll bytes into the TUI
+        // behind the lane.
+        if ws.search.open {
+            if steps.lines != 0 {
+                self.scroll_search_viewport(ws, steps.lines);
+            }
+            return true;
+        }
+        // A non-context-menu modal swallows the
+        // wheel too — without this, Ctrl+wheel still zoomed the font
+        // and Shift/plain wheel still scrolled the pane / cycled tabs
+        // behind an open search / palette / settings / etc. The context
+        // menu already consumed its wheel above, so it is `None` here
+        // and `modal_swallows_pointer` reduces to "any modal open".
+        if modal_swallows_pointer(self.any_modal_open(ws), ws.context_menu.is_some()) {
+            return true;
+        }
+        // Wheel over the tab bar cycles tabs (kitty / iTerm2 /
+        // Ghostty parity). Each detent moves one
+        // tab regardless of `scroll-multiplier` so the gesture
+        // stays predictable — multiple lines from a fast scroll
+        // collapse to a single tab change, like the real apps.
+        //
+        // A horizontal swipe over the bar cycles too: the strip has no
+        // independent scroll offset (`tab_strip_layout` derives its window from
+        // the ACTIVE tab), so moving the selection IS how the bar scrolls.
+        // Positive = "backwards" on both axes, matching winit's documented
+        // convention that +Y scrolls up and +X scrolls left.
+        if self.cursor_in_tab_bar(ws) && ws.mux.tabs.len() > 1 {
+            let step = if steps.notches != 0 {
+                steps.notches
+            } else {
+                steps.cols
+            };
+            if step != 0 {
+                if step > 0 {
+                    ws.mux.prev_tab();
+                } else {
+                    ws.mux.next_tab();
+                }
+                if let Some(w) = &ws.window {
+                    w.request_redraw();
+                }
+            }
+            return true;
+        }
+        // Terminator parity: Ctrl+wheel resizes the
+        // font. Fires BEFORE the mouse-tracking pass-through so
+        // it works even when a TUI like tmux/htop has mouse
+        // tracking on — matches gnome-terminal / Terminator /
+        // xterm UX. `cfg.disable_mousewheel_zoom = true`
+        // (previously a no-op, before this feature existed)
+        // opts out for users who scroll-zoom by accident on a
+        // touchpad. Step size matches the existing keyboard
+        // IncreaseFontSize / DecreaseFontSize actions for a
+        // single source of truth.
+        let zoom_owns_wheel = ws.mods.control_key() && !self.cfg.disable_mousewheel_zoom;
+        if let Some(sign) = should_zoom_font(
+            ws.mods.control_key(),
+            steps.notches,
+            self.cfg.disable_mousewheel_zoom,
+        ) && let Some(r) = ws.renderer.as_mut()
+        {
+            // Step logical size, not the now-physical
+            // cell_h (which would double-apply the DPI scale).
+            let new = if sign > 0 {
+                r.font_size() + 1.0
+            } else {
+                (r.font_size() - 1.0).max(6.0)
+            };
+            r.set_font_size(new);
+            self.resize_all(ws);
+            if let Some(w) = &ws.window {
+                w.request_redraw();
+            }
+            return true;
+        }
+        if zoom_owns_wheel {
+            // Ctrl is held and zoom is enabled, but this event was only a
+            // fraction of a detent. Swallow it rather than letting a
+            // mid-gesture Ctrl+wheel scroll the pane instead of zooming it.
+            return true;
+        }
+        // Shift+wheel always scrolls the kettle scrollback even
+        // when a TUI has mouse-tracking on (xterm convention).
+        // Without this bypass, you can't scroll back through
+        // your tmux/htop session — the TUI swallows every wheel
+        // notch.
         let mode = self.focused_mode(ws);
         let (track, _) = input::mouse_tracking(mode);
-        if track != input::MouseTracking::Off && !ws.mods.shift_key() {
-            let btn = if lines > 0 { 64 } else { 65 };
-            for _ in 0..lines.unsigned_abs().min(8) {
-                self.send_mouse(ws, btn, true, false);
+        let track_active = track != input::MouseTracking::Off && !ws.mods.shift_key();
+        if track_active {
+            // Horizontal wheel reports as xterm buttons 6/7 (encoded 66/67)
+            // alongside the vertical 64/65. `mouse_encode` passes any
+            // `btn >= 64` through unchanged, so no encoder change is needed.
+            let mut reported = false;
+            if steps.lines != 0 {
+                let btn = if steps.lines > 0 { 64 } else { 65 };
+                for _ in 0..steps.lines.unsigned_abs().min(8) {
+                    reported |= self.send_mouse(ws, btn, true, false);
+                }
             }
+            if steps.cols != 0 {
+                let btn = if steps.cols > 0 { 66 } else { 67 };
+                for _ in 0..steps.cols.unsigned_abs().min(8) {
+                    reported |= self.send_mouse(ws, btn, true, false);
+                }
+            }
+            if reported {
+                return true;
+            }
+            // `send_mouse` declined every report — the pane is read-only (or
+            // Shift re-entered mid-gesture). Falling through to local scrollback
+            // is what keeps the wheel alive: before v2.41.0 this branch consumed
+            // the event, reported nothing, and left read-only panes running a
+            // mouse-tracking TUI completely unscrollable.
         } else if !ws.mods.shift_key()
-            && let Some(bytes) = input::alternate_scroll_key(lines, mode)
+            && steps.lines != 0
+            && let Some(bytes) = input::alternate_scroll_key(steps.lines, mode)
         {
             if let Some(pane) = ws.mux.focused() {
                 pane.feed_input(&bytes);
             }
-        } else if let Some(pane) = ws.mux.focused()
-            && let Ok(mut t) = pane.term.term.lock()
-        {
-            t.scroll_display(Scroll::Delta(lines));
+            return true;
+        }
+        if steps.lines != 0 {
+            if let Some(pane) = ws.mux.focused()
+                && let Ok(mut t) = pane.term.term.lock()
+            {
+                t.scroll_display(Scroll::Delta(steps.lines));
+            }
+            if let Some(w) = &ws.window {
+                w.request_redraw();
+            }
         }
         true
     }
@@ -19819,123 +20034,32 @@ impl App {
                     }
                 }
             }
-            WindowEvent::MouseWheel { delta, .. } => {
-                let lines = wheel_lines(&delta, self.cfg.scroll_multiplier);
-                if lines == 0 {
+            WindowEvent::MouseWheel { delta, phase, .. } => {
+                // A gesture ending (macOS momentum scroll, and any backend that
+                // reports phases) drops leftover sub-detent residue so a partial
+                // step can't leak into the next, unrelated gesture.
+                if matches!(
+                    phase,
+                    winit::event::TouchPhase::Ended | winit::event::TouchPhase::Cancelled
+                ) {
+                    ws.wheel.reset();
+                }
+                let steps = ws.wheel.feed(&delta, self.cfg.scroll_multiplier);
+                // Numbers only — never terminal content. Makes the
+                // precision-touchpad class of bug diagnosable from a user's
+                // `RUST_LOG=debug` run instead of requiring a custom build.
+                log::debug!(
+                    "wheel: delta={delta:?} phase={phase:?} -> notches={} lines={} cols={}",
+                    steps.notches,
+                    steps.lines,
+                    steps.cols
+                );
+                if steps.is_zero() {
+                    // Motion too small to move anything yet — it is banked in
+                    // `ws.wheel`, not discarded.
                     return;
                 }
-                // Terminator menu UX (C5): wheel over an
-                // open context menu scrolls its rows (one row per
-                // wheel notch). Pre-empts every other wheel dispatch
-                // so a 512-entry Theme submenu scrolls cleanly
-                // instead of leaking through to the underlying pane
-                // / tab bar / font-zoom.
-                if ws.context_menu.is_some() {
-                    // Wheel up = lines > 0 = scroll up = decrement
-                    // offset; wheel down = lines < 0 = scroll down.
-                    self.scroll_context_menu(ws, -(lines as isize));
-                    return;
-                }
-                // v2.24.0: wheel over a settings field adjusts it (up = forward,
-                // down = backward). A wheel outside the panel is NOT a dismiss —
-                // it just falls through to the modal swallow below.
-                if ws.settings_nav.is_some()
-                    && self.settings_mouse(ws, if lines > 0 { 1 } else { -1 }, false)
-                {
-                    return;
-                }
-                // Search owns the wheel, but uses it for local scrollback
-                // browsing so users can inspect nearby historical matches.
-                // Never encode tracking/alternate-scroll bytes into the TUI
-                // behind the lane.
-                if ws.search.open {
-                    self.scroll_search_viewport(ws, lines);
-                    return;
-                }
-                // A non-context-menu modal swallows the
-                // wheel too — without this, Ctrl+wheel still zoomed the font
-                // and Shift/plain wheel still scrolled the pane / cycled tabs
-                // behind an open search / palette / settings / etc. The context
-                // menu already consumed its wheel above, so it is `None` here
-                // and `modal_swallows_pointer` reduces to "any modal open".
-                if modal_swallows_pointer(self.any_modal_open(ws), ws.context_menu.is_some()) {
-                    return;
-                }
-                // Wheel over the tab bar cycles tabs (kitty / iTerm2 /
-                // Ghostty parity). Each "click" of the wheel moves one
-                // tab regardless of `scroll-multiplier` so the gesture
-                // stays predictable — multiple lines from a fast scroll
-                // collapse to a single tab change, like the real apps.
-                if self.cursor_in_tab_bar(ws) && ws.mux.tabs.len() > 1 {
-                    if lines > 0 {
-                        ws.mux.prev_tab();
-                    } else {
-                        ws.mux.next_tab();
-                    }
-                    if let Some(w) = &ws.window {
-                        w.request_redraw();
-                    }
-                    return;
-                }
-                // Terminator parity: Ctrl+wheel resizes the
-                // font. Fires BEFORE the mouse-tracking pass-through so
-                // it works even when a TUI like tmux/htop has mouse
-                // tracking on — matches gnome-terminal / Terminator /
-                // xterm UX. `cfg.disable_mousewheel_zoom = true`
-                // (previously a no-op, before this feature existed)
-                // opts out for users who scroll-zoom by accident on a
-                // touchpad. Step size matches the existing keyboard
-                // IncreaseFontSize / DecreaseFontSize actions for a
-                // single source of truth.
-                if let Some(sign) = should_zoom_font(
-                    ws.mods.control_key(),
-                    lines,
-                    self.cfg.disable_mousewheel_zoom,
-                ) && let Some(r) = ws.renderer.as_mut()
-                {
-                    // Step logical size, not the now-physical
-                    // cell_h (which would double-apply the DPI scale).
-                    let new = if sign > 0 {
-                        r.font_size() + 1.0
-                    } else {
-                        (r.font_size() - 1.0).max(6.0)
-                    };
-                    r.set_font_size(new);
-                    self.resize_all(ws);
-                    if let Some(w) = &ws.window {
-                        w.request_redraw();
-                    }
-                    return;
-                }
-                // Shift+wheel always scrolls the kettle scrollback even
-                // when a TUI has mouse-tracking on (xterm convention).
-                // Without this bypass, you can't scroll back through
-                // your tmux/htop session — the TUI swallows every wheel
-                // notch.
-                let mode = self.focused_mode(ws);
-                let (track, _) = input::mouse_tracking(mode);
-                let track_active = track != input::MouseTracking::Off && !ws.mods.shift_key();
-                if track_active {
-                    let btn = if lines > 0 { 64 } else { 65 };
-                    for _ in 0..lines.unsigned_abs().min(8) {
-                        self.send_mouse(ws, btn, true, false);
-                    }
-                } else if !ws.mods.shift_key()
-                    && let Some(bytes) = input::alternate_scroll_key(lines, mode)
-                {
-                    if let Some(pane) = ws.mux.focused() {
-                        pane.feed_input(&bytes);
-                    }
-                } else {
-                    if let Some(pane) = ws.mux.focused()
-                        && let Ok(mut t) = pane.term.term.lock()
-                    {
-                        t.scroll_display(Scroll::Delta(lines));
-                    }
-                    if let Some(w) = &ws.window {
-                        w.request_redraw();
-                    }
-                }
+                self.dispatch_wheel(ws, steps);
             }
             WindowEvent::DroppedFile(path) => {
                 // A file dropped while a modal (search /
@@ -23064,24 +23188,22 @@ mod tests {
         assert!(!should_notify_malformed(&none, &b));
     }
 
+    /// A non-positive `scroll-multiplier` must never scroll BACKWARDS. The
+    /// config clamps to `[0.1, 50.0]` so this is unreachable in practice, but
+    /// the accumulator clamps too — and unlike the pre-v2.41.0 `wheel_lines`,
+    /// which zeroed everything, detents survive so tab cycling and font zoom
+    /// (which are deliberately multiplier-independent) keep working.
     #[test]
-    fn wheel_lines_scales_by_multiplier() {
-        use super::wheel_lines;
-        use winit::dpi::PhysicalPosition;
+    fn wheel_accum_ignores_negative_multiplier_for_lines_only() {
+        use crate::input::WheelAccum;
         use winit::event::MouseScrollDelta;
 
-        // One LineDelta notch at default mult (1.0) = 3 lines; doubles at 2x.
-        let one = MouseScrollDelta::LineDelta(0.0, 1.0);
-        assert_eq!(wheel_lines(&one, 1.0), 3);
-        assert_eq!(wheel_lines(&one, 2.0), 6);
-        // Negative notch → negative lines (scroll the other way).
-        let down = MouseScrollDelta::LineDelta(0.0, -2.0);
-        assert_eq!(wheel_lines(&down, 1.0), -6);
-        // PixelDelta: ~3 lines per ~60 px notch (60/20=3) at default mult.
-        let pix = MouseScrollDelta::PixelDelta(PhysicalPosition::new(0.0, 60.0));
-        assert_eq!(wheel_lines(&pix, 1.0), 3);
-        // Multiplier clamps at 0 to avoid backwards-scroll on bad config.
-        assert_eq!(wheel_lines(&one, -5.0), 0);
+        let steps = WheelAccum::default().feed(&MouseScrollDelta::LineDelta(0.0, 1.0), -5.0);
+        assert_eq!(steps.lines, 0, "a bad multiplier must not invert scrolling");
+        assert_eq!(
+            steps.notches, 1,
+            "detent-driven actions are multiplier-independent by design"
+        );
     }
 
     /// Drift guard: pin the `copy_clipboard_decision`
