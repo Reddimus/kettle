@@ -6,6 +6,38 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+  ### Added
+  - **Paste a screenshot into a pane.** Copying a *file* populates `CF_HDROP` /
+    `text/uri-list`, which v2.38.0's `paste-files` already turns into a
+    shell-quoted path. Capturing a *screenshot* (Win+Shift+S, Snipping Tool,
+    macOS Cmd+Shift+4, GNOME Screenshot) does something different: it puts a raw
+    bitmap on the clipboard with no file and no text behind it, so neither the
+    file branch nor the text fallback could see it and the paste did nothing at
+    all. Kettle now materializes the bitmap as a PNG and pastes its path through
+    the same `format_paths_for_paste` pipeline — shell-aware quoting and WSL
+    `C:\` → `/mnt/c` translation included. Handing a CLI agent a path also avoids
+    depending on the agent's own clipboard-bitmap decoding, which is unreliable
+    on native Windows. New `paste-images` key (on by default, `paste-image`
+    alias); a copied file still wins when both are present.
+
+    Temp files live in an owner-only per-process directory under the OS temp
+    dir, are bounded in count and total bytes so a paste loop cannot fill the
+    disk, reject malformed clipboard geometry before allocating, and are deleted
+    when kettle exits — a directory orphaned by a crash is reclaimed on the next
+    launch. Because they are session-scoped, a path captured in an old
+    transcript will not resolve after kettle closes.
+
+  ### Changed
+  - `arboard` is now built with its `image-data` feature. The comment that
+    disabled it claimed the feature "transitively pulls `image` with default
+    features (= every format incl. avif/rav1e)" — that was wrong: arboard pins
+    `default-features = false` on `image` for every target and requests only
+    `png`+`bmp` on Windows, `png` on Linux, `tiff` on macOS. Since kettle-render
+    already builds `image` with png/jpeg/webp/bmp/gif, the Windows and Linux
+    dependency graphs gain **no new crate**; macOS adds `tiff` + `fax`. Verified
+    with `cargo tree --target x86_64-pc-windows-msvc`. Kettle still never writes
+    an image *to* the clipboard.
+
 ## [2.41.0] — 2026-07-24
 
 Touchpad scrolling fix. Reported from a Windows 11 Surface Book 3: two-finger

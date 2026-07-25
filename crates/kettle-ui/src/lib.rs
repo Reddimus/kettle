@@ -34,6 +34,7 @@ mod gpu_diagnostics;
 mod input;
 mod lua;
 mod mux;
+mod paste_image;
 mod runtime_diagnostics;
 mod search_input;
 mod session;

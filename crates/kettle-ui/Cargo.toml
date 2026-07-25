@@ -18,13 +18,17 @@ workspace = true
 accesskit = "0.24.1"
 accesskit_winit = "0.33.2"
 anyhow.workspace = true
-# default-features off drops the `image_data` feature,
-# which transitively pulls `image` with default features (= every
-# format incl. avif/rav1e). kettle's clipboard surface is text-
-# only (selection copy / paste / OSC 52); no image-to-clipboard
-# path exists. Saves another ~MB on the binary alongside the
-# kettle-vt feature narrowing.
-arboard = { version = "3.6.1", default-features = false }
+# `image-data` is enabled for clipboard-bitmap PASTE (a screenshot puts a raw
+# bitmap on the clipboard with no file and no text behind it — see
+# src/paste_image.rs). An earlier comment here claimed the feature "pulls
+# `image` with default features (= every format incl. avif/rav1e)"; that was
+# wrong. arboard pins `default-features = false` on `image` for every target and
+# asks only for `png`+`bmp` on Windows, `png` on Linux, `tiff` on macOS — and
+# kettle-render already builds `image` with png/jpeg/webp/bmp/gif, so the
+# Windows and Linux graphs gain NO new crate. macOS adds `tiff` + `fax`.
+# Verified with `cargo tree --target x86_64-pc-windows-msvc`.
+# kettle still never WRITES an image to the clipboard; only reads one.
+arboard = { version = "3.6.1", default-features = false, features = ["image-data"] }
 crossbeam-channel = "0.5.15"
 fs4 = "1.1"
 # Decode the embedded PNG app icon into a winit window icon so

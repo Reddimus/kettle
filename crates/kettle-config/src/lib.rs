@@ -282,6 +282,33 @@ impl PasteFiles {
     }
 }
 
+/// Policy for pasting a clipboard BITMAP — a screenshot from Win+Shift+S, the
+/// Snipping Tool, macOS Cmd+Shift+4, GNOME Screenshot — into the focused pane.
+/// Unlike a copied file, a captured screenshot puts raw pixels on the clipboard
+/// with no file and no text behind it, so there is no path to quote until one is
+/// materialized. `On` (default) writes the bitmap to a temporary PNG and pastes
+/// that path; `Off` disables the branch, leaving a bitmap clipboard to fall
+/// through to the (usually empty) text paste.
+///
+/// Distinct from [`PasteFiles`] because the privacy profile differs: pasting a
+/// file only references bytes the user already stored, whereas this WRITES
+/// captured screen content to disk. The files are owner-only, bounded, and
+/// deleted when kettle exits.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PasteImages {
+    /// Ignore a clipboard bitmap.
+    Off,
+    /// Write it to a temporary PNG and paste that path (default).
+    On,
+}
+
+impl PasteImages {
+    /// Should a clipboard bitmap be materialized and pasted as a path?
+    pub fn enabled(self) -> bool {
+        matches!(self, PasteImages::On)
+    }
+}
+
 /// Whether the GUI session recorder is armed at launch (`record = on`). `Off`
 /// (the default) records nothing; `On` starts an asciicast recording for the
 /// window session, written into the configured `record-dir`. Recording captures
@@ -1056,6 +1083,8 @@ pub struct Config {
     /// Paste a clipboard file list (e.g. a file copied in Explorer) as a
     /// shell-quoted path (default: on). See [`PasteFiles`].
     pub paste_files: PasteFiles,
+    /// Paste a clipboard BITMAP (screenshot) as a temporary-PNG path.
+    pub paste_images: PasteImages,
     /// Arm the GUI session recorder at launch (`record = on`). Off by default.
     /// Recording captures on-screen output verbatim; typed keystrokes are
     /// redacted to tokens unless [`Config::record_raw_input`] is on. The window
@@ -2307,6 +2336,7 @@ impl Default for Config {
             bell: BellMode::Both,
             osc52: Osc52::Copy,
             paste_files: PasteFiles::On,
+            paste_images: PasteImages::On,
             record: RecordMode::Off,
             record_dir: None,
             record_raw_input: false,
@@ -3814,6 +3844,12 @@ impl Config {
                     cfg.paste_files = match e.value.to_ascii_lowercase().as_str() {
                         "off" | "none" | "disabled" | "false" | "0" => PasteFiles::Off,
                         _ => PasteFiles::On,
+                    }
+                }
+                "paste-images" | "paste-image" => {
+                    cfg.paste_images = match e.value.to_ascii_lowercase().as_str() {
+                        "off" | "none" | "disabled" | "false" | "0" => PasteImages::Off,
+                        _ => PasteImages::On,
                     }
                 }
                 "record" => {
@@ -6328,6 +6364,42 @@ cell-height = 1.2\n";
             Config::parse_text("paste-files = bogus").paste_files,
             PasteFiles::On
         );
+    }
+
+    #[test]
+    fn paste_images_policy_parsing_and_default() {
+        // On by default, so a screenshot pastes without configuration.
+        assert_eq!(Config::default().paste_images, PasteImages::On);
+        assert!(Config::default().paste_images.enabled());
+
+        for off in [
+            "paste-images = off",
+            "paste-images = none",
+            "paste-images = disabled",
+            "paste-images = false",
+            "paste-images = 0",
+            // Singular alias, since the key names one pasted image at a time.
+            "paste-image = off",
+        ] {
+            assert_eq!(
+                Config::parse_text(off).paste_images,
+                PasteImages::Off,
+                "{off} must disable clipboard-bitmap paste"
+            );
+        }
+        assert_eq!(
+            Config::parse_text("paste-images = on").paste_images,
+            PasteImages::On
+        );
+        // Unknown value falls back to the (on) default, matching `paste-files`.
+        assert_eq!(
+            Config::parse_text("paste-images = bogus").paste_images,
+            PasteImages::On
+        );
+        // Independent of `paste-files` — the two have different privacy
+        // profiles (this one writes captured screen content to disk).
+        let cfg = Config::parse_text("paste-files = off\npaste-images = on");
+        assert!(!cfg.paste_files.enabled() && cfg.paste_images.enabled());
     }
 
     #[test]

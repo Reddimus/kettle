@@ -3490,6 +3490,9 @@ pub struct App {
     /// here, and the next OSC-133 `CommandFinished` for that pane resolves it.
     pending_runs: std::collections::HashMap<u64, PendingRun>,
     clipboard: Option<arboard::Clipboard>,
+    /// Temporary PNGs materialized from clipboard bitmaps. Owner-only, bounded,
+    /// and removed on exit — see [`crate::paste_image`].
+    pasted_images: crate::paste_image::PastedImages,
     /// Triggers: compiled regex set built from `cfg.triggers` at App
     /// construction (and after live reload). Invalid patterns are logged via
     /// `log::warn!` and dropped.
@@ -3746,6 +3749,9 @@ impl App {
     }
 
     pub fn run_with(mut startup: crate::Options) -> Result<()> {
+        // Reclaim pasted-image directories from a run that died before its own
+        // cleanup. Age-gated, so a sibling instance mid-session is untouched.
+        crate::paste_image::sweep_stale();
         let event_loop = EventLoop::<UserEvent>::with_user_event().build()?;
         event_loop.set_control_flow(ControlFlow::Wait);
         let proxy = event_loop.create_proxy();
@@ -4062,6 +4068,7 @@ impl App {
                     }
                 }
             },
+            pasted_images: crate::paste_image::PastedImages::new(),
             compiled_triggers: initial_triggers,
             last_trigger_fire: None,
             remote_scanner: kettle_remote::RemoteScanner::new(),
@@ -4083,6 +4090,10 @@ impl App {
         app.runtime_tracker.set_window_count(app.windows.len());
         let result = event_loop.run_app(&mut app);
         app.runtime_tracker.set_phase("exiting");
+        // Pasted screenshots are captured screen content, so they do not outlive
+        // the session that produced them. Runs on the error path too — an exit
+        // caused by a failure is exactly when leftovers would go unnoticed.
+        app.pasted_images.cleanup();
         if let Err(error) = &result {
             app.runtime_tracker.record_exit(&error.to_string());
         }
@@ -5464,12 +5475,48 @@ impl App {
             self.paste_text(ws, text);
             return;
         }
+        // Bitmap paste: a screenshot puts raw pixels on the clipboard with no
+        // file and no text behind it, so neither branch above can see it and the
+        // paste used to do nothing at all. Materialize it as a PNG and paste the
+        // path, reusing the same shell-quoting / WSL-translation pipeline.
+        // Ordered after the file branch so a genuine copied file always wins.
+        if self.cfg.paste_images.enabled()
+            && let Some(text) = self.clipboard_image_paste_text(ws)
+        {
+            self.paste_text(ws, text);
+            return;
+        }
         let text = self
             .clipboard
             .as_mut()
             .and_then(|c| c.get_text().ok())
             .unwrap_or_default();
         self.paste_text(ws, text);
+    }
+
+    /// Write a clipboard bitmap to a temporary PNG and format its path for the
+    /// focused pane, or `None` when the clipboard holds no image.
+    ///
+    /// A failure to encode or write is logged and degrades to `None` so the
+    /// paste falls through to text rather than silently doing nothing — the
+    /// failure mode this whole path exists to remove.
+    fn clipboard_image_paste_text(&mut self, ws: &WindowState) -> Option<String> {
+        let image = self.clipboard.as_mut()?.get_image().ok()?;
+        let path = match self
+            .pasted_images
+            .save_rgba(image.width, image.height, &image.bytes)
+        {
+            Ok(path) => path,
+            Err(error) => {
+                log::warn!("clipboard image paste failed: {error}");
+                return None;
+            }
+        };
+        let argv = ws.mux.focused_argv();
+        Some(crate::mux::format_paths_for_paste(
+            &argv,
+            std::slice::from_ref(&path),
+        ))
     }
 
     /// Read a file list from the clipboard (CF_HDROP on Windows, `text/uri-list`

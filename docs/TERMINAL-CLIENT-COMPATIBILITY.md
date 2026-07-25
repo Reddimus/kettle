@@ -31,12 +31,23 @@ arbitrary binary — the portable channel both Claude Code and Codex accept is a
 `ffprobe` via a shell for a video) rather than receiving bytes over an escape
 sequence.
 
-Kettle supports this two ways, both of which paste a shell-quoted path (never
+Kettle supports this three ways, all of which paste a shell-quoted path (never
 raw bytes):
 
 - **Copy a file** in Explorer/Finder, then paste (`Ctrl+Shift+V`). When the
   clipboard holds a file list instead of text, Kettle pastes the path(s).
   Controlled by `paste-files` (on by default; `paste-files = off` disables it).
+- **Copy a screenshot** (Win+Shift+S, Snipping Tool, macOS Cmd+Shift+4, GNOME
+  Screenshot), then paste. A capture puts a raw *bitmap* on the clipboard with
+  no file and no text behind it, so Kettle writes it to a temporary PNG and
+  pastes that path. Controlled by `paste-images` (on by default). The temp files
+  are owner-only, bounded, and deleted when Kettle exits — fine for handing an
+  image to a running agent, not a durable store. This also avoids depending on
+  the client's own clipboard-bitmap support, which varies by platform: Claude
+  Code's documented image-paste chord is `Alt+V` on Windows/WSL and `Ctrl+V`
+  elsewhere, and native-Windows bitmap paste is unreliable. Kettle leaves those
+  chords unbound (its own paste is `Ctrl+Shift+V`) so they still reach the
+  client for anyone who prefers that route.
 - **Drag and drop** a file onto the window — always pastes the path.
 
 Multiple selected files paste as space-separated quoted paths. Paths are quoted
