@@ -211,7 +211,8 @@ pub fn tool_specs() -> Vec<Value> {
                     "x": {"type": "number", "description": "x coordinate for move/press/release/click, or optional wheel cursor position"},
                     "y": {"type": "number", "description": "y coordinate for move/press/release/click, or optional wheel cursor position"},
                     "button": {"type": "string", "enum": ["left", "middle", "right", "back", "forward"], "description": "default left"},
-                    "wheel_lines": {"type": "integer", "description": "signed terminal-scroll lines for wheel events"}
+                    "wheel_lines": {"type": "integer", "description": "signed terminal-scroll lines for wheel events (pre-quantized; skips the sub-detent accumulator)"},
+                    "wheel_delta": {"type": "number", "description": "signed RAW wheel detents for wheel events, fractions allowed (e.g. 0.08 per event to emulate a precision touchpad). Mutually exclusive with wheel_lines; runs the real sub-detent accumulator"}
                 },
                 "required": ["event"],
                 "additionalProperties": false
@@ -430,7 +431,7 @@ fn call_tool_inner(params: &Value, cancelled: Option<&std::sync::atomic::AtomicB
             };
             let mut p = serde_json::Map::new();
             p.insert("event".into(), json!(event));
-            for k in ["window", "x", "y", "button", "wheel_lines"] {
+            for k in ["window", "x", "y", "button", "wheel_lines", "wheel_delta"] {
                 if let Some(v) = args.get(k) {
                     p.insert(k.into(), v.clone());
                 }
@@ -657,6 +658,7 @@ fn validate_tool_arguments(name: &str, args: &Value) -> Result<(), String> {
             ("y", ArgKind::Number),
             ("button", ArgKind::String),
             ("wheel_lines", ArgKind::Integer),
+            ("wheel_delta", ArgKind::Number),
         ],
         "kettle_resize_window" => &[
             ("window", ArgKind::Unsigned),

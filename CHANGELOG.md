@@ -6,6 +6,77 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+## [2.41.0] — 2026-07-24
+
+Touchpad scrolling fix. Reported from a Windows 11 Surface Book 3: two-finger
+scroll gestures did nothing at all in kettle. The cause was in kettle, not the
+driver — and the wheel path around it turned out to have several more defects,
+all fixed here and now covered by unit and live end-to-end guards.
+
+  ### Fixed
+  - **Precision-touchpad and high-resolution-wheel scrolling did nothing.**
+    Windows delivers touchpad scrolling as `WM_MOUSEWHEEL` with deltas far
+    smaller than `WHEEL_DELTA` (120); MSDN requires applications to accumulate
+    them. winit divides by 120 and on Windows always reports `LineDelta` (never
+    `PixelDelta`), so one gesture arrives as a stream of ~0.07–0.3 notch
+    events. `wheel_lines` did `y.round() * 3.0` per event and the handler
+    returned early on zero, so **every event rounded to nothing and the residue
+    was discarded** — touchpad scrolling was not slow, it was completely dead.
+    Only a violent flick packing ≥ 60/120 into a single message survived.
+    Replaced with `WheelAccum`, which carries the fraction across events.
+    Whole-notch feel is unchanged (3 lines per notch, scaled by
+    `scroll-multiplier`); sub-notch motion now accumulates instead of vanishing.
+  - **`scroll-multiplier = 0.1` disabled the mouse wheel outright.** A legal,
+    documented, clamp-passing value: one notch became `1.0 × 3.0 × 0.1 = 0.3`,
+    which rounded to zero. Fixed by the same accumulator.
+  - **Slow macOS/Wayland trackpad scrolling was dropped.** Those backends emit
+    small `PixelDelta`s; anything under `10/multiplier` px rounded away.
+  - **Horizontal scrolling was discarded entirely.** The handler matched
+    `LineDelta(_, y)` and ignored `PixelDelta.x`, so two-finger sideways swipes
+    and tilt-wheels did nothing. Horizontal motion now reports as xterm buttons
+    6/7 (encoded 66/67) to mouse-tracking applications, and cycles tabs when the
+    pointer is over the tab bar.
+  - **A read-only pane running a mouse-tracking TUI could not be scrolled.**
+    `send_mouse` returns `false` for a read-only pane specifically so callers
+    fall through to local handling, but the wheel handler discarded that return
+    — consuming the event, reporting nothing, and leaving the pane frozen. It
+    now falls through to local scrollback, matching the documented contract that
+    selection and scrollback keep working when input is disabled.
+  - **Alternate scroll ignored DEC private mode 1007.** `alternate_scroll_key`
+    gated on `ALT_SCREEN` alone, so an application that turned alternate scroll
+    off with `CSI ?1007 l` still received synthesized arrow keys. Now gated on
+    `ALTERNATE_SCROLL` as well, matching xterm and upstream Alacritty. The flag
+    is set by default, so default behavior is unchanged.
+  - **The ctl/agent wheel path had drifted from the real one.** `ctl_mouse_wheel`
+    was a partial copy of the dispatch ladder, missing the context-menu,
+    settings, modal-swallow and Ctrl+zoom stages — automation exercised a
+    different terminal than a human did. Both paths now share one
+    `dispatch_wheel`.
+
+  ### Added
+  - `send_mouse` accepts `wheel_delta`: a signed **raw** wheel-detent count with
+    fractions allowed (e.g. `0.08` per event), alongside the existing
+    pre-quantized integer `wheel_lines`. This is the only synthetic path that
+    runs the real accumulator, which is why the touchpad defect had no coverage
+    before — `wheel_lines` enters downstream of the conversion that was broken.
+  - `just touchpad-scroll-smoke`: a live end-to-end scenario driving 60
+    sub-detent events through ctl and asserting the viewport actually moves,
+    returns to the bottom on the mirrored gesture, and still scrolls exactly 3
+    lines for one whole detent. Wired into `gauntlet-full`.
+  - `KETTLE_SMOKE_EXTRA_CONFIG`: extra config appended to every generated live
+    smoke config. Each scenario writes a minimal config and so inherits none of
+    the developer's real settings — including a pinned GPU. On a dual-GPU laptop
+    that silently drops the harness onto the integrated GPU, where a driver
+    fault can abort startup before the control server comes up. Unset in CI.
+
+  ### Changed
+  - Discrete wheel actions (tab cycling, Ctrl+wheel font zoom, context-menu and
+    settings rows) now advance once per **physical detent** rather than per
+    scaled line. Previously they were driven by the multiplier-scaled line
+    count; with sub-detent accumulation that would have moved three tabs per
+    detent. Ctrl+wheel with zoom enabled also swallows mid-gesture events, so a
+    partial detent can no longer scroll the pane instead of zooming it.
+
 ## [2.40.0] — 2026-07-23
 
 Tab tear-off UX overhaul, driven by a recorded frame-by-frame session of the

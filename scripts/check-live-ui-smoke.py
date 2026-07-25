@@ -167,6 +167,18 @@ class LiveKettle:
         self.proc: Optional[subprocess.Popen] = None
 
     def __enter__(self) -> "LiveKettle":
+        # Machine-local escape hatch. Every scenario writes its own minimal
+        # config, which means it inherits none of the developer's real settings
+        # — including a pinned `gpu-device-id`/`gpu-vendor-id`. On a dual-GPU
+        # laptop that silently drops the harness onto the integrated GPU, where
+        # a driver fault can abort the process before the control server ever
+        # comes up (an 0xC0000005 with an empty log). Appending extra config
+        # here lets such a machine run the live smokes without hardcoding one
+        # developer's hardware into the repo. Unset in CI, so it is a no-op.
+        extra_cfg = os.environ.get("KETTLE_SMOKE_EXTRA_CONFIG", "").strip()
+        if extra_cfg:
+            with self.cfg.open("a", encoding="utf-8") as fh:
+                fh.write("\n" + extra_cfg.replace("\\n", "\n").strip() + "\n")
         log_f = self.log.open("wb")
         self.proc = subprocess.Popen(
             [self.kettle, "--config", str(self.cfg), "--agent-server", "full", *self.extra_args],
@@ -2701,6 +2713,132 @@ def run_zoom_keybind(kettle: str, root: Path) -> Path:
     return out
 
 
+def run_touchpad_scroll(kettle: str, root: Path) -> Path:
+    """Reproduce a Windows Precision Touchpad scroll gesture end to end.
+
+    Precision touchpads emit a stream of WM_MOUSEWHEEL messages carrying far
+    less than WHEEL_DELTA(120) each, which winit reports as fractional
+    `LineDelta` notches. Before v2.41.0 kettle quantized every event on its own
+    and each one rounded to zero, so touchpad scrolling was completely dead —
+    and no test caught it, because the only synthetic wheel path
+    (`wheel_lines`) injected pre-quantized whole lines and therefore skipped the
+    broken conversion entirely.
+
+    This drives the raw `wheel_delta` form, which runs the real sub-detent
+    accumulator end to end: ctl -> WheelAccum -> dispatch -> scroll_display.
+
+    Note it cannot be run against a pre-fix binary as a bisect probe, because
+    `wheel_delta` shipped WITH the fix and an older build rejects the parameter
+    outright. The numeric defect itself is pinned by the unit test
+    `wheel_accum_carries_sub_notch_residue` in crates/kettle-ui/src/input.rs,
+    which fails the moment the per-event rounding is reintroduced. This
+    scenario's job is to prove the whole live path is wired up.
+    """
+    out = root / f"touchpad-scroll-{time.strftime('%Y%m%d-%H%M%S')}"
+    out.mkdir(parents=True, exist_ok=True)
+    cfg = out / "config"
+    cfg.write_text(
+        "\n".join(
+            [
+                "agent-server = full",
+                "tab-bar = always",
+                "status-bar = off",
+                "restore-session = false",
+                "update-check = false",
+                "font-size = 13",
+                "background = #101010",
+                "foreground = #f4f4f4",
+                "window-width = 100",
+                "window-height = 28",
+            ]
+        )
+        + "\n"
+    )
+
+    # One real gesture's worth of motion: ~0.08 of a detent per event, which is
+    # what a slow two-finger drag actually produces.
+    step = 0.08
+    events = 60
+
+    analysis: Dict[str, object] = {"delta_per_event": step, "events": events}
+    with LiveKettle(kettle, cfg, out / "kettle.log") as live:
+        marker = "KETTLE_TOUCHPAD_SCROLL_DONE"
+        if platform.system() == "Windows":
+            fill_cmd = (
+                "$esc=[char]27; [Console]::Write($esc + '[2J' + $esc + '[3J' + $esc + '[H'); "
+                "1..140 | ForEach-Object { 'KETTLE_TOUCHPAD_SCROLL_{0:D3}' -f $_ }; "
+                f"Write-Output {marker}"
+            )
+        else:
+            fill_cmd = (
+                "printf '\\033[2J\\033[3J\\033[H'; "
+                "for i in $(seq 1 140); do printf 'KETTLE_TOUCHPAD_SCROLL_%03d\\n' \"$i\"; done; "
+                f"printf '{marker}\\n'"
+            )
+        live_shell_command(live, fill_cmd, marker, timeout_ms=12000)
+        bottom = live.json_ctl("read_screen")
+        (out / "bottom.screen.json").write_text(json.dumps(bottom, indent=2) + "\n")
+        if int(bottom.get("display_offset", 0)) != 0:
+            raise SystemExit(
+                f"touchpad smoke: expected bottom display_offset 0, got {bottom.get('display_offset')}"
+            )
+        live.screenshot(out / "bottom.png")
+
+        # Scroll back with sub-detent events only. No single one of these can
+        # move the viewport on its own; only the accumulated residue can.
+        for _ in range(events):
+            live.ctl("send_mouse", params={"event": "wheel", "wheel_delta": step})
+        time.sleep(0.2)
+        scrolled = live.json_ctl("read_screen")
+        (out / "scrolled.screen.json").write_text(json.dumps(scrolled, indent=2) + "\n")
+        live.screenshot(out / "scrolled.png")
+        offset = int(scrolled.get("display_offset", 0))
+        analysis["display_offset_after_gesture"] = offset
+        if offset <= 0:
+            raise SystemExit(
+                "touchpad smoke: sub-detent wheel deltas did not scroll at all "
+                f"(display_offset={offset}). This is the precision-touchpad "
+                "regression: every event quantized to zero and the residue was "
+                "discarded."
+            )
+        # 60 x 0.08 detents = 4.8 detents = ~14 lines at the default multiplier.
+        # Bound it loosely so the guard survives float slack, but tightly enough
+        # to catch an accumulator that over- or under-drains by a wide margin.
+        if not (8 <= offset <= 20):
+            raise SystemExit(
+                f"touchpad smoke: gesture scrolled {offset} lines, expected ~14 "
+                "(60 events x 0.08 detents x 3 lines/detent)"
+            )
+
+        # The mirror gesture must land back exactly at the live bottom, proving
+        # the residue is symmetric and nothing is silently dropped.
+        for _ in range(events):
+            live.ctl("send_mouse", params={"event": "wheel", "wheel_delta": -step})
+        time.sleep(0.2)
+        returned = live.json_ctl("read_screen")
+        (out / "returned.screen.json").write_text(json.dumps(returned, indent=2) + "\n")
+        analysis["display_offset_after_return"] = int(returned.get("display_offset", 0))
+        if int(returned.get("display_offset", 0)) != 0:
+            raise SystemExit(
+                "touchpad smoke: mirrored gesture did not return to the live bottom "
+                f"(display_offset={returned.get('display_offset')})"
+            )
+
+        # A whole detent still behaves exactly as it always did: 3 lines.
+        live.ctl("send_mouse", params={"event": "wheel", "wheel_delta": 1.0})
+        time.sleep(0.15)
+        one = live.json_ctl("read_screen")
+        (out / "one-detent.screen.json").write_text(json.dumps(one, indent=2) + "\n")
+        analysis["display_offset_one_detent"] = int(one.get("display_offset", 0))
+        if int(one.get("display_offset", 0)) != 3:
+            raise SystemExit(
+                "touchpad smoke: one whole detent must still scroll exactly 3 lines, got "
+                f"{one.get('display_offset')}"
+            )
+    (out / "analysis.json").write_text(json.dumps(analysis, indent=2) + "\n")
+    return out
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument(
@@ -2715,6 +2853,7 @@ def main() -> int:
             "agent-tui",
             "search-history",
             "interaction",
+            "touchpad-scroll",
             "self-test",
             "all",
         ],
@@ -2768,6 +2907,9 @@ def main() -> int:
     if args.case in ("interaction", "all"):
         out = run_interaction(args.kettle, root)
         print(f"interaction smoke: OK artifacts={out}")
+    if args.case in ("touchpad-scroll", "all"):
+        out = run_touchpad_scroll(args.kettle, root)
+        print(f"touchpad-scroll smoke: OK artifacts={out}")
     return 0
 
 

@@ -275,7 +275,7 @@ gauntlet-strict: gauntlet deny machete tracked-audit
 # Run this before a release cut, or before any change to packaging/*,
 # scripts/install*, scripts/*manifest*.{py,ps1}, or the renderer —
 # `gauntlet`/`gauntlet-strict` alone won't catch a regression there.
-gauntlet-full: gauntlet-strict package-templates update-manifest-test package-manifest-test icns-smoke ico-smoke linux-installer-smoke windows-installer-smoke headless-gpu-smoke gpu-render-smoke cli-smoke
+gauntlet-full: gauntlet-strict package-templates update-manifest-test package-manifest-test icns-smoke ico-smoke linux-installer-smoke windows-installer-smoke headless-gpu-smoke gpu-render-smoke cli-smoke touchpad-scroll-smoke
     @echo ""
     @echo "FULL GAUNTLET PASSED — every ci.yml check this OS can run locally is green."
 
@@ -694,6 +694,21 @@ interaction-smoke:
 [windows]
 interaction-smoke:
     python scripts/check-live-ui-smoke.py interaction
+
+# Reproduce a Windows Precision Touchpad gesture: a stream of sub-detent wheel
+# deltas (the units winit actually reports) instead of pre-quantized whole
+# lines. Guards the v2.41.0 fix where every such event rounded to zero on its
+# own and touchpad scrolling was completely dead. Drives `wheel_delta`, the
+# only synthetic path that runs the real accumulator — the older integer
+# `wheel_lines` form enters downstream of the conversion and cannot reproduce
+# it. Artifacts under target/diagnostics/touchpad-scroll-*.
+[unix]
+touchpad-scroll-smoke: release
+    python3 scripts/check-live-ui-smoke.py --kettle ./target/release/kettle touchpad-scroll
+
+[windows]
+touchpad-scroll-smoke: release
+    python scripts/check-live-ui-smoke.py touchpad-scroll
 
 # Reproduce and guard the multi-tab mouse-click visual state. Captures full
 # window PNGs and tab geometry JSON under target/diagnostics/tabbar-click-*.

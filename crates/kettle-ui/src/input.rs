@@ -33,14 +33,142 @@ pub fn mouse_tracking(mode: TermMode) -> (MouseTracking, bool) {
     (t, sgr)
 }
 
+/// Scrollback lines per physical wheel detent at `scroll-multiplier = 1.0`.
+const LINES_PER_NOTCH: f32 = 3.0;
+
+/// Physical pixels per detent for backends that report `PixelDelta` (macOS
+/// trackpads, Wayland/libinput). 60 px ÷ 3 lines reproduces the historical
+/// `p.y / 20.0` lines-per-pixel ratio exactly, so scroll feel is unchanged.
+const PIXELS_PER_NOTCH: f32 = 60.0;
+
+/// Ceiling on retained residue. A device streaming deltas faster than they are
+/// drained — or a hostile synthetic feed over the ctl socket — cannot grow the
+/// accumulator without bound. 10k notches is orders of magnitude more motion
+/// than any real gesture.
+const MAX_WHEEL_RESIDUAL: f32 = 10_000.0;
+
+/// Whole steps drained out of a [`WheelAccum`] by one wheel event.
+///
+/// Two quantities, because the wheel drives two different kinds of consumer:
+/// *discrete* ones that must move exactly one step per physical detent (tab
+/// cycling, Ctrl+wheel font zoom, context-menu rows) and *continuous* ones that
+/// scale with `scroll-multiplier` (scrollback, search viewport, mouse reports).
+/// Deriving both from a single number would cycle three tabs per detent.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct WheelSteps {
+    /// Whole detents, ignoring `scroll-multiplier`. Positive = wheel up.
+    pub notches: i32,
+    /// Scrollback lines, scaled by `scroll-multiplier`. Positive = scroll back
+    /// toward older output (matches `Scroll::Delta`'s sign convention).
+    pub lines: i32,
+    /// Whole horizontal detents. Positive = wheel/swipe right.
+    pub cols: i32,
+}
+
+impl WheelSteps {
+    pub fn is_zero(self) -> bool {
+        self.notches == 0 && self.lines == 0 && self.cols == 0
+    }
+}
+
+/// Sub-detent wheel residue.
+///
+/// Windows Precision Touchpads and high-resolution wheels deliver
+/// `WM_MOUSEWHEEL` deltas far smaller than `WHEEL_DELTA` (120) — MSDN requires
+/// that applications "accumulate the delta values until `WHEEL_DELTA` is
+/// reached". winit divides by 120 and, on Windows, *always* reports
+/// `LineDelta` (never `PixelDelta`), so one touchpad gesture arrives as a
+/// stream of ~0.07–0.3 notch events.
+///
+/// Rounding each event in isolation — the pre-v2.41.0 behavior — rounded every
+/// one of them to zero, so touchpad scrolling did not merely feel slow, it was
+/// *completely dead*. The same dead-zone killed the mouse wheel outright at
+/// `scroll-multiplier = 0.1` and swallowed slow macOS/Wayland trackpad motion.
+/// Carrying the fraction forward is what makes sub-detent input work at all.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct WheelAccum {
+    notches: f32,
+    lines: f32,
+    cols: f32,
+}
+
+impl WheelAccum {
+    /// Drop all residue. Called on `TouchPhase::Ended`/`Cancelled` so momentum
+    /// scrolling on macOS doesn't leak a partial step into the next gesture.
+    pub fn reset(&mut self) {
+        *self = Self::default();
+    }
+
+    /// Fold one winit delta into the residue and return whatever whole steps
+    /// that made available.
+    pub fn feed(&mut self, delta: &winit::event::MouseScrollDelta, multiplier: f32) -> WheelSteps {
+        use winit::event::MouseScrollDelta;
+        let (dx, dy) = match delta {
+            MouseScrollDelta::LineDelta(x, y) => (*x, *y),
+            MouseScrollDelta::PixelDelta(p) => {
+                (p.x as f32 / PIXELS_PER_NOTCH, p.y as f32 / PIXELS_PER_NOTCH)
+            }
+        };
+        // A NaN or infinite delta would poison the residue permanently: every
+        // later `trunc()` would yield NaN and the wheel would stay dead for the
+        // life of the window. Drop the event instead of persisting the damage.
+        if !dx.is_finite() || !dy.is_finite() {
+            return WheelSteps::default();
+        }
+        // Reversing direction abandons the residue rather than spending it
+        // against the new direction, so an up-then-down flick doesn't lose its
+        // first step to leftovers from the previous one. The axes are
+        // independent — a diagonal gesture reversing horizontally must not
+        // discard vertical progress.
+        if wheel_reverses(dy, self.notches) {
+            self.notches = 0.0;
+            self.lines = 0.0;
+        }
+        if wheel_reverses(dx, self.cols) {
+            self.cols = 0.0;
+        }
+        self.notches = clamp_residual(self.notches + dy);
+        self.lines = clamp_residual(self.lines + dy * LINES_PER_NOTCH * multiplier.max(0.0));
+        self.cols = clamp_residual(self.cols + dx);
+        WheelSteps {
+            notches: drain_residual(&mut self.notches),
+            lines: drain_residual(&mut self.lines),
+            cols: drain_residual(&mut self.cols),
+        }
+    }
+}
+
+/// True when `delta` pushes against non-zero residue of the opposite sign.
+fn wheel_reverses(delta: f32, residual: f32) -> bool {
+    delta != 0.0 && residual != 0.0 && (delta < 0.0) != (residual < 0.0)
+}
+
+fn clamp_residual(v: f32) -> f32 {
+    v.clamp(-MAX_WHEEL_RESIDUAL, MAX_WHEEL_RESIDUAL)
+}
+
+/// Take the whole part, leave the fraction behind for the next event.
+fn drain_residual(residual: &mut f32) -> i32 {
+    let whole = residual.trunc();
+    *residual -= whole;
+    whole as i32
+}
+
 /// xterm alternate-scroll behavior (DEC private mode 1007): when the focused
 /// app is on the alternate screen and has NOT enabled mouse tracking, wheel
 /// notches are delivered as Up/Down cursor keys instead of scrolling terminal
 /// history. This is what makes `less`, `man`, and vim scroll with a wheel before
 /// they opt into mouse reports.
+///
+/// Gated on `ALTERNATE_SCROLL` as well as `ALT_SCREEN`, matching upstream
+/// Alacritty and xterm. The flag is *set by default*, so the common case is
+/// unchanged — but an app that opts out with `CSI ?1007 l` (because it wants
+/// the wheel to reach kettle's own scrollback, or handles scrolling some other
+/// way) is now honored instead of being force-fed synthetic arrow keys.
 pub fn alternate_scroll_key(lines: i32, mode: TermMode) -> Option<Vec<u8>> {
     if lines == 0
         || !mode.contains(TermMode::ALT_SCREEN)
+        || !mode.contains(TermMode::ALTERNATE_SCROLL)
         || mouse_tracking(mode).0 != MouseTracking::Off
     {
         return None;
@@ -1489,7 +1617,9 @@ mod tests {
 
     #[test]
     fn alternate_scroll_emits_cursor_keys_only_without_mouse_tracking() {
-        let alt = TermMode::ALT_SCREEN;
+        // `ALTERNATE_SCROLL` (DEC 1007) is in the terminal's default mode set,
+        // so the realistic alt-screen state carries both flags.
+        let alt = TermMode::ALT_SCREEN | TermMode::ALTERNATE_SCROLL;
         assert_eq!(
             alternate_scroll_key(3, alt),
             Some(b"\x1b[A\x1b[A\x1b[A".to_vec())
@@ -1499,7 +1629,7 @@ mod tests {
             Some(b"\x1b[B\x1b[B\x1b[B".to_vec())
         );
 
-        let app_cursor = TermMode::ALT_SCREEN | TermMode::APP_CURSOR;
+        let app_cursor = alt | TermMode::APP_CURSOR;
         assert_eq!(
             alternate_scroll_key(3, app_cursor),
             Some(b"\x1bOA\x1bOA\x1bOA".to_vec())
@@ -1516,10 +1646,158 @@ mod tests {
         assert_eq!(alternate_scroll_key(0, alt), None);
         assert_eq!(alternate_scroll_key(3, TermMode::empty()), None);
         assert_eq!(
-            alternate_scroll_key(3, TermMode::ALT_SCREEN | TermMode::MOUSE_REPORT_CLICK),
+            alternate_scroll_key(3, alt | TermMode::MOUSE_REPORT_CLICK),
             None,
             "mouse-tracking apps must receive wheel reports, not synthesized arrows"
         );
+        // An app that turns 1007 off wants the wheel to reach kettle's own
+        // scrollback instead of being fed synthetic arrow keys.
+        assert_eq!(
+            alternate_scroll_key(3, TermMode::ALT_SCREEN),
+            None,
+            "CSI ?1007 l must opt out of alternate scroll"
+        );
+    }
+
+    #[test]
+    fn wheel_accum_carries_sub_notch_residue() {
+        use winit::dpi::PhysicalPosition;
+        use winit::event::MouseScrollDelta;
+
+        // A Windows Precision Touchpad gesture: WM_MOUSEWHEEL deltas well under
+        // WHEEL_DELTA(120), which winit hands us as fractional LineDelta. Before
+        // v2.41.0 each of these rounded to zero independently and the terminal
+        // never scrolled at all.
+        let mut accum = WheelAccum::default();
+        let mut lines = 0;
+        let mut notches = 0;
+        for _ in 0..20 {
+            let steps = accum.feed(&MouseScrollDelta::LineDelta(0.0, 0.1), 1.0);
+            lines += steps.lines;
+            notches += steps.notches;
+        }
+        // 20 x 0.1 notches = 2 notches = 6 lines. Allow one step of float slack.
+        assert!(
+            (5..=6).contains(&lines),
+            "sub-notch deltas must accumulate into real scroll, got {lines}"
+        );
+        assert!(
+            (1..=2).contains(&notches),
+            "sub-notch deltas must accumulate into whole detents, got {notches}"
+        );
+
+        // Pin the defect itself: the pre-fix formula (`y.round() * 3.0 * mult`,
+        // rounded) yields exactly nothing for this identical input, which is why
+        // touchpad scrolling was dead rather than merely slow.
+        let old_formula_total: i32 = (0..20).map(|_| (0.1f32.round() * 3.0) as i32).sum();
+        assert_eq!(
+            old_formula_total, 0,
+            "regression guard: the old per-event rounding dropped the whole gesture"
+        );
+
+        // Whole detents keep their historical feel exactly: 3 lines per notch,
+        // scaled by the multiplier.
+        let one = MouseScrollDelta::LineDelta(0.0, 1.0);
+        assert_eq!(
+            WheelAccum::default().feed(&one, 1.0),
+            WheelSteps {
+                notches: 1,
+                lines: 3,
+                cols: 0
+            }
+        );
+        assert_eq!(WheelAccum::default().feed(&one, 2.0).lines, 6);
+        assert_eq!(
+            WheelAccum::default()
+                .feed(&MouseScrollDelta::LineDelta(0.0, -2.0), 1.0)
+                .lines,
+            -6
+        );
+        // PixelDelta parity with the historical `p.y / 20.0`: 60 px = 3 lines.
+        assert_eq!(
+            WheelAccum::default()
+                .feed(
+                    &MouseScrollDelta::PixelDelta(PhysicalPosition::new(0.0, 60.0)),
+                    1.0
+                )
+                .lines,
+            3
+        );
+        // A sub-threshold PixelDelta (macOS/Wayland trackpad) also accumulates
+        // instead of vanishing.
+        let mut pixel = WheelAccum::default();
+        let small = MouseScrollDelta::PixelDelta(PhysicalPosition::new(0.0, 5.0));
+        let total: i32 = (0..8).map(|_| pixel.feed(&small, 1.0).lines).sum();
+        assert!(
+            total >= 1,
+            "small pixel deltas must accumulate, got {total}"
+        );
+    }
+
+    #[test]
+    fn wheel_accum_reversal_reset_and_hostile_input() {
+        use winit::event::MouseScrollDelta;
+
+        // Reversing direction abandons leftover residue instead of spending it
+        // against the new direction.
+        let mut accum = WheelAccum::default();
+        accum.feed(&MouseScrollDelta::LineDelta(0.0, 0.9), 1.0);
+        let back = accum.feed(&MouseScrollDelta::LineDelta(0.0, -0.9), 1.0);
+        assert_eq!(
+            back.notches, 0,
+            "a reversal must not immediately fire a notch off stale residue"
+        );
+
+        // `reset` clears everything (TouchPhase::Ended / momentum end).
+        let mut accum = WheelAccum::default();
+        accum.feed(&MouseScrollDelta::LineDelta(0.0, 0.9), 1.0);
+        accum.reset();
+        assert_eq!(
+            accum
+                .feed(&MouseScrollDelta::LineDelta(0.0, 0.2), 1.0)
+                .lines,
+            0
+        );
+
+        // NaN/infinite deltas are dropped, not folded in — otherwise the residue
+        // becomes NaN and the wheel is dead for the life of the window.
+        let mut accum = WheelAccum::default();
+        assert!(
+            accum
+                .feed(&MouseScrollDelta::LineDelta(0.0, f32::NAN), 1.0)
+                .is_zero()
+        );
+        assert!(
+            accum
+                .feed(&MouseScrollDelta::LineDelta(0.0, f32::INFINITY), 1.0)
+                .is_zero()
+        );
+        assert_eq!(
+            accum
+                .feed(&MouseScrollDelta::LineDelta(0.0, 1.0), 1.0)
+                .lines,
+            3,
+            "a poisoned residue would make every later event yield nothing"
+        );
+
+        // Residue stays bounded under a flood, so a runaway device or a hostile
+        // ctl feed can't accumulate an unbounded scroll.
+        let mut accum = WheelAccum::default();
+        for _ in 0..64 {
+            accum.feed(&MouseScrollDelta::LineDelta(0.0, f32::MAX), 1.0);
+        }
+        let after = accum.feed(&MouseScrollDelta::LineDelta(0.0, 1.0), 1.0);
+        assert!(
+            after.lines.abs() <= 30_001,
+            "residue must stay clamped, got {}",
+            after.lines
+        );
+
+        // Horizontal motion accumulates on its own axis and does not disturb
+        // vertical progress.
+        let mut accum = WheelAccum::default();
+        let diag = accum.feed(&MouseScrollDelta::LineDelta(1.0, 1.0), 1.0);
+        assert_eq!((diag.cols, diag.notches, diag.lines), (1, 1, 3));
     }
 
     #[test]

@@ -130,6 +130,12 @@ pub(crate) struct WindowState {
     pub(crate) ime_focus_generation: u64,
     pub(crate) fullscreen: bool,
     pub(crate) cursor: PhysicalPosition<f64>,
+    /// Sub-detent wheel residue for this window. Precision touchpads and
+    /// high-resolution wheels report a fraction of a detent per event; without
+    /// carrying the remainder across events every one of them quantizes to zero
+    /// and the wheel does nothing at all. Per-window because each OS window has
+    /// its own independent pointer-event stream.
+    pub(crate) wheel: crate::input::WheelAccum,
     pub(crate) selecting: bool,
     /// Distance from the pointer to the dragged thumb's top edge. Keeping the
     /// grab offset prevents the thumb from jumping when a drag starts.
@@ -344,6 +350,7 @@ impl WindowState {
             ime_focus_generation: 0,
             fullscreen,
             cursor: PhysicalPosition::new(0.0, 0.0),
+            wheel: crate::input::WheelAccum::default(),
             selecting: false,
             scrollbar_drag_offset: None,
             scrollbar_hover: false,
