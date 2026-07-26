@@ -525,14 +525,13 @@ pub enum GpuPowerPreference {
 }
 
 /// `gpu-backend` (v2.23.0): which wgpu graphics backend to request. `Auto`
-/// lets wgpu choose per platform (DX12 on Windows, Metal on macOS, Vulkan on
-/// Linux). The explicit variants exist mainly so the in-app GPU picker can pin
-/// a specific adapter — on Windows the same physical GPU is enumerated once per
-/// backend (DX12 *and* Vulkan), so the backend disambiguates which entry the
-/// user chose. A backend the platform can't provide falls back to `Auto`.
+/// uses Kettle's deterministic native order (DX12 on Windows, Metal on macOS,
+/// Vulkan elsewhere). An explicit backend applies independently of a physical
+/// GPU pin. If it is unavailable, Kettle logs the fallback and uses native
+/// order so a stale cross-platform config cannot prevent startup.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum GpuBackend {
-    /// Let wgpu pick the platform-default backend — kettle default.
+    /// Use Kettle's deterministic native-first backend order.
     #[default]
     Auto,
     /// Direct3D 12 (Windows).
@@ -1355,8 +1354,9 @@ pub struct Config {
     /// Defaults to `Auto`: let wgpu / the platform choose unless the user pins
     /// a specific GPU below or explicitly asks for low/high power preference.
     pub gpu_power_preference: GpuPowerPreference,
-    /// `gpu-backend` (v2.23.0): pin the wgpu backend (DX12/Vulkan/Metal/GL), or
-    /// `Auto` (default). See [`GpuBackend`].
+    /// `gpu-backend` (v2.23.0): pin the wgpu backend (DX12/Vulkan/Metal/GL)
+    /// independently of the physical GPU pin, or use deterministic native
+    /// `Auto` order (default). See [`GpuBackend`].
     pub gpu_backend: GpuBackend,
     /// `gpu-vendor-id` (v2.23.0): PCI vendor id of the pinned GPU (0 = unset →
     /// use `gpu-power-preference`). Set by the in-app GPU picker. Hex in the
@@ -5125,6 +5125,35 @@ cell-height = 1.2\n";
         assert!(
             duplicates.is_empty(),
             "main CONFIG.md Keys table has duplicate primary rows: {duplicates:?}"
+        );
+
+        // Keep the Terminator-parity reference as one Markdown table. Prose
+        // inserted between rows silently closes a CommonMark table, leaving
+        // every later `| key | ... |` line rendered as plain text.
+        let parity = config_md
+            .split("### Terminator-parity keys")
+            .nth(1)
+            .and_then(|s| {
+                s.split("### Terminator-parity config keys by disposition")
+                    .next()
+            })
+            .expect("Terminator-parity keys section");
+        let mut table_started = false;
+        let mut table_closed = false;
+        for line in parity.lines() {
+            if line.starts_with('|') {
+                assert!(
+                    !table_closed,
+                    "CONFIG.md Terminator-parity table resumes after prose: {line}"
+                );
+                table_started = true;
+            } else if table_started {
+                table_closed = true;
+            }
+        }
+        assert!(
+            table_started,
+            "CONFIG.md Terminator-parity table is missing"
         );
     }
 

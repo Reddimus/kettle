@@ -167,19 +167,28 @@ putting a user path on the wire.
 - **One GPU context** — the wgpu `GpuContext { instance, adapter,
   device, queue }` is created with window 1 and shared; each subsequent
   window gets its own surface via `Renderer::new_with_gpu` (synchronous —
-  no adapter request, no watchdog needed). The adapter is chosen by
-  `resolve_adapter` (v2.23.0): a config-pinned GPU (`gpu-vendor-id` /
-  `-device-id` / `-name`, set via Settings → Graphics) wins, matched among the
-  *surface-capable* adapters by `(vendor,device,backend) → (vendor,device) →
-  name`; otherwise the `gpu-power-preference` policy applies — defaulting to
-  `auto` so wgpu / the platform chooses, with a software fallback last.
-  An absent pin (eGPU unplugged, driver swap) silently falls through to the
-  policy, so a stale pin never fails startup. Because the device/surface graph
+  no adapter request, no watchdog needed). Live windows, `--gpu-info`,
+  screenshots, offscreen tests, detection, and recovery share one adapter
+  policy. A config-pinned GPU (`gpu-vendor-id` /
+  `-device-id` / `-name`, set via Settings → Graphics) wins; `gpu-backend`
+  applies with or without that physical pin. Auto backend order is deterministic
+  (DX12 first on Windows, Metal on macOS, Vulkan elsewhere), and unavailable
+  explicit backends log an observable fallback to native order. The common
+  unpinned Auto path enables and probes one backend at a time, so successful
+  Windows DX12 startup does not initialize the Vulkan ICD. Pins and explicit
+  low/high preference use one cross-backend enumeration; low/high ranks the
+  physical GPU before backend and preserves the platform-preferred adapter for
+  equal-class ties. Live instances retain winit's event-loop-owned
+  `OwnedDisplayHandle` so the GLES fallback can present under Wayland without
+  keeping window 1 alive. An absent pin
+  (eGPU unplugged, driver swap) falls through to the power policy, so a stale
+  portable config never prevents startup. Because the device/surface graph
   can't hot-swap and every window shares the one adapter, GPU changes apply on
   the next launch (the settings panel shows a "restart to apply" hint).
   A fatal wgpu error latches one bounded in-memory `GpuFault`; the event loop
   then rebuilds every renderer on a pure settle/backoff state machine
-  (configured adapter → other hardware → software) without dropping PTYs.
+  (same physical GPU through an alternate backend → surface-preferred GPU →
+  another physical hardware GPU → software) without dropping PTYs.
   Driver callbacks never perform filesystem I/O. The event-loop thread writes
   capped, rotated, terminal-content-free JSONL incident records under the
   per-user cache. Surface acquisition treats both `Success` and `Suboptimal`

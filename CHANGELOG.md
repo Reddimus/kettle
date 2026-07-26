@@ -7,6 +7,11 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 ## [Unreleased]
 
   ### Fixed
+  - `gpu-backend` now applies without requiring a physical GPU pin, explicit
+    low/high power preference wins across backend ranks, detected software
+    adapters remain valid device pins, and unavailable portable backend
+    settings fall back observably instead of preventing startup. Stale pins
+    preserve the platform-preferred physical adapter when falling back to Auto.
   - Surface timeouts, occlusion, and swapchain reconfiguration no longer count
     as painted frames. On the normal render path, Kettle now consumes PTY output
     generations, advances paint timestamps, and updates flood pacing only after
@@ -68,6 +73,12 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
     changes to readers.
 
   ### Changed
+  - GPU backend selection is deterministic and shared by live rendering,
+    screenshots, `--gpu-info`, tests, and recovery. Default unpinned Windows
+    startup probes DX12 once and does not initialize Vulkan unless DX12 is
+    unavailable; macOS prefers Metal and Linux prefers Vulkan. Live instances
+    retain winit's event-loop-owned display handle required for the Linux
+    Wayland GLES fallback without retaining a closed window.
   - `just agent-tui-smoke` and Windows `just agent-tui-wsl-smoke` now build and
     run the exact current-checkout release executable reported by Cargo,
     honoring `CARGO_TARGET_DIR`, configured target triples, and the platform

@@ -6578,13 +6578,14 @@ impl App {
     fn try_recover_gpu(
         &mut self,
         ws: &mut WindowState,
+        event_loop: &ActiveEventLoop,
         escalation: kettle_render::AdapterEscalation,
         attempt: u32,
     ) -> Result<GpuRecoveryOutcome, String> {
         let Some(window) = ws.window.clone() else {
             return Err("primary window is unavailable".to_string());
         };
-        let avoid = self.gpu.as_ref().map(|gpu| gpu.adapter_ids());
+        let avoid = self.gpu.as_ref().map(|gpu| gpu.adapter_key());
         log::warn!("GPU recovery attempt {attempt} ({escalation:?})");
 
         ws.renderer = None;
@@ -6595,15 +6596,17 @@ impl App {
         let cfg = self.cfg.clone();
         let size = window.inner_size();
         let scale = window.scale_factor() as f32;
-        let new_renderer = match pollster::block_on(kettle_render::Renderer::new_with_escalation(
-            window.clone(),
-            size.width.max(1),
-            size.height.max(1),
-            scale,
-            &cfg,
-            escalation,
-            avoid,
-        )) {
+        let new_renderer = match pollster::block_on(
+            kettle_render::Renderer::new_with_escalation_and_display_handle(
+                window.clone(),
+                event_loop.owned_display_handle(),
+                size.width.max(1),
+                size.height.max(1),
+                scale,
+                &cfg,
+                kettle_render::AdapterSelection::new(escalation, avoid),
+            ),
+        ) {
             Ok(renderer) => renderer,
             Err(err) => {
                 log::error!("GPU recovery: renderer rebuild failed: {err}");
@@ -16834,6 +16837,8 @@ const GPU_RECOVERY_SETTLE: std::time::Duration = std::time::Duration::from_milli
 fn gpu_escalation_label(escalation: kettle_render::AdapterEscalation) -> &'static str {
     match escalation {
         kettle_render::AdapterEscalation::Preferred => "preferred",
+        kettle_render::AdapterEscalation::AlternateBackend => "alternate_backend",
+        kettle_render::AdapterEscalation::SurfacePreferred => "surface_preferred",
         kettle_render::AdapterEscalation::AnyHardware => "any_hardware",
         kettle_render::AdapterEscalation::ForceSoftware => "force_software",
     }
@@ -18871,8 +18876,9 @@ impl App {
         let init_result = {
             let runtime_tracker = self.runtime_tracker.clone();
             let _phase = runtime_tracker.enter("gpu_init");
-            pollster::block_on(Renderer::new(
+            pollster::block_on(Renderer::new_with_display_handle(
                 window.clone(),
+                event_loop.owned_display_handle(),
                 size.width.max(1),
                 size.height.max(1),
                 scale,
@@ -21074,7 +21080,7 @@ impl App {
     fn about_to_wait_inner(
         &mut self,
         ws: &mut WindowState,
-        _event_loop: &ActiveEventLoop,
+        event_loop: &ActiveEventLoop,
     ) -> Option<u64> {
         // Drain trailing recorder output before reap removes a
         // just-exited pane (covers the shell-exit → process-exit close path,
@@ -21106,7 +21112,7 @@ impl App {
                     {
                         log::warn!("GPU fault diagnostic write failed: {error}");
                     }
-                    match self.try_recover_gpu(ws, escalation, attempt) {
+                    match self.try_recover_gpu(ws, event_loop, escalation, attempt) {
                         Ok(outcome) => {
                             if let Some(log) = self.gpu_incident.as_mut()
                                 && let Err(error) = log.record_recovered(
@@ -22117,6 +22123,30 @@ mod tests {
             wait_body[..end].contains("self.try_recover_gpu(ws,")
                 && wait_body[..end].contains("gpu_recovery_backoff("),
             "about_to_wait_inner must drive GPU recovery while the device is lost"
+        );
+    }
+
+    #[test]
+    fn live_gpu_context_uses_event_loop_owned_display_handle() {
+        let src = include_str!("app.rs");
+        let resumed = src
+            .find("fn resumed_inner(")
+            .expect("resumed_inner present");
+        let resumed_body = &src[resumed..resumed + 9000];
+        assert!(
+            resumed_body.contains("Renderer::new_with_display_handle(")
+                && resumed_body.contains("event_loop.owned_display_handle()"),
+            "initial GPU creation must retain the event-loop display connection, not window 1"
+        );
+
+        let recovery = src
+            .find("fn try_recover_gpu(")
+            .expect("try_recover_gpu present");
+        let recovery_body = &src[recovery..recovery + 5000];
+        assert!(
+            recovery_body.contains("Renderer::new_with_escalation_and_display_handle(")
+                && recovery_body.contains("event_loop.owned_display_handle()"),
+            "GPU recovery must rebuild with the event-loop display connection"
         );
     }
 

@@ -249,15 +249,11 @@ per-key audit against Terminator's source.
 | `window-state` | enum | `normal` | Launch state: `normal` \| `maximise` (`maximize`) \| `fullscreen` \| `hidden`. Honored by winit's `with_maximized` / `with_fullscreen` / `set_visible(false)` |
 | `window-width` / `window-height` | int cells | unset | Fresh-window startup grid size. Width is clamped `[20, 400]`, height `[8, 200]`; if one side is omitted, the other uses Kettle's startup baseline (`100x36`). Session restore and explicit new-window geometry override this seed |
 | `window-position-x` / `window-position-y` | int px | unset | Fresh-window startup position in physical pixels. Negative values support multi-monitor layouts. Session restore and explicit new-window placement override this seed |
-| `gpu-power-preference` | enum | `auto` | Which GPU policy wgpu uses at startup: `auto` (platform/wgpu chooses — **default**) \| `low` (low-power / usually integrated) \| `high` (high-performance / often discrete). Used as the policy/fallback when no specific GPU is pinned (`gpu-device-id` below). On a dual-GPU laptop `high` may wake the discrete GPU from its low-power state; use it only when you want that render headroom. Single-GPU machines usually resolve all three policies to the same adapter. Also surfaced in Settings → Graphics |
-| `gpu-device-id` / `gpu-vendor-id` | hex u32 | `0` / `0` | Pin a *specific* GPU by its PCI device + vendor id (e.g. `0x2191` / `0x10de`). `0`/unset = use `gpu-power-preference`. Easiest set via Settings → Graphics → GPU device; the resolver falls back to the power-preference policy if the pinned GPU is absent (eGPU unplugged, driver swap) so a stale pin never fails startup. **Applies on next launch** |
+| `gpu-power-preference` | enum | `auto` | GPU preference at startup: `auto` (surface/platform preference — **default**) \| `low` (low-power / usually integrated) \| `high` (high-performance / often discrete). Used when no specific GPU is pinned (`gpu-device-id` below). Auto uses deterministic native backend order: DX12 first on Windows, Metal on macOS, Vulkan elsewhere. Explicit `low`/`high` ranks the requested physical GPU class before backend, so a lower-ranked backend cannot make the opposite GPU class win; equal-class ties preserve the platform-preferred adapter. On a dual-GPU laptop `high` may wake the discrete GPU; use it only when you want that render headroom. Also surfaced in Settings → Graphics |
+| `gpu-device-id` / `gpu-vendor-id` | hex u32 | `0` / `0` | Pin a *specific* adapter by its PCI device + vendor id (e.g. `0x2191` / `0x10de`). Both ids at `0` plus an empty `gpu-name` means use `gpu-power-preference`. Easiest set via Settings → Graphics → GPU device; detected software adapters with zero PCI ids remain pinnable by `gpu-name`. The resolver falls back to the power-preference policy if the pin is absent (eGPU unplugged, driver swap) so a stale pin never fails startup. **Applies on next launch** |
 | `gpu-name` | string | — | Display name of the pinned GPU; also a fallback match if the `(vendor,device)` pair no longer enumerates. Written by the settings picker |
-| `gpu-backend` | enum | `auto` | Pin the graphics backend: `auto` \| `dx12` \| `vulkan` \| `metal` \| `gl`. Mainly disambiguates the same GPU exposed under multiple backends on Windows. **Applies on next launch** |
-| `gpu-force-software` | bool | `false` | Force wgpu's software/fallback adapter (slow; for debugging GPU-driver issues). **Applies on next launch.** Kettle also auto-recovers from a lost GPU device by rebuilding the renderer on a backoff: configured GPU, then another hardware adapter, then software rendering while panes keep running |
-
-`kettle --gpu-info` honors these settings, including `--config` and
-`--profile`, without opening a window. Use it to verify an explicit pin or the
-software fallback before launching a normal session.
+| `gpu-backend` | enum | `auto` | Select the graphics backend independently of a GPU pin: `auto` \| `dx12` \| `vulkan` \| `metal` \| `gl`. `auto` uses DX12 → Vulkan → GL on Windows, Metal first on macOS, and Vulkan → GL elsewhere. An unavailable explicit backend emits a warning and falls back to native order so a portable config still starts. **Applies on next launch** |
+| `gpu-force-software` | bool | `false` | Force wgpu's software/fallback adapter (slow; for debugging GPU-driver issues). **Applies on next launch.** After device loss, recovery tries another backend on the same GPU, the surface-preferred GPU, another physical hardware GPU, then software rendering while panes keep running |
 | `borderless` | bool | `false` | Hide OS chrome (`winit::WindowAttributes::with_decorations(false)`). Useful for tiling WMs |
 | `always-on-top` | bool | `false` | Keep window above others (`winit::Window::set_window_level(AlwaysOnTop)`) |
 | `hide-on-lose-focus` | bool | `false` | Quake-style auto-hide. Wayland defers to compositor; Linux X11 + macOS + Windows hide directly |
@@ -284,14 +280,6 @@ software fallback before launching a normal session.
 | `light-theme` / `dark-theme` | theme name | `""` (falls back to `theme`) | See the `light-theme` / `dark-theme` row in the **Keys** table above — same fields. Terminator `auto_theme` parity: `Action::ToggleLightDark` swaps between the two (case-insensitive bundled-name lookup; an empty value no-ops that side of the swap and falls back to `theme`) |
 | `search-case-sensitive` | enum | `smart` | Terminator `case_sensitive` parity. Scrollback-search case-sensitivity. `smart` (bar label **Smart**; case-insensitive until any uppercase), `always` / `sensitive` (bar label **Match**; force sensitive even for lowercase patterns — matches Terminator's default), `never` / `insensitive` (bar label **Ignore**; force insensitive even for mixed-case). The Terminator-spelled `case-sensitive = true/false` is also accepted (`true` ⇒ always, `false` ⇒ never) |
 | `link-single-click` | bool | `false` | Single-click opens URLs (default needs `Ctrl`/`Cmd`+click) |
-
-When a fatal GPU error occurs, Kettle writes fault-only recovery records under
-`%LOCALAPPDATA%\kettle\diagnostics\` on Windows or
-`$XDG_CACHE_HOME/kettle/diagnostics/` (normally
-`~/.cache/kettle/diagnostics/`) on Unix. The JSONL schema records Kettle and
-adapter versions, fault type, recovery escalation, and outcome. It never records
-terminal text, commands, environment variables, or working directories. Each
-incident is capped at 256 KiB and the newest ten are retained.
 | `disable-mouse-paste` | bool | `false` | Block middle-click paste |
 | `clipboard-paste-protection` | bool | `true` | Confirm multi-line pastes when any writable target would receive raw, non-bracketed paste. Single-line pastes and panes that enabled bracketed paste (editors/agent CLIs) paste immediately |
 | `putty-paste-style` | bool | `false` | Right-click pastes instead of opening the context menu. By default it uses the same PRIMARY-first source as middle-click paste on Linux and falls back to the regular clipboard on platforms without PRIMARY |
@@ -301,6 +289,21 @@ incident is capped at 256 KiB and the newest ten are retained.
 | `detachable-tabs` | bool | `true` | Allow cross-window tab tear-off / re-dock and the `move_tab_to_new_window` action. `false` keeps in-window tab switching and reordering but disables detach |
 | `ask-before-closing` | enum | `multiple-terminals` | Close-confirmation policy: `always`, `multiple-terminals`, or `never`. Applies to close-window, close-tab, and close-pane actions; panes sitting idle at an integrated-shell prompt do not count as work to lose |
 | `lua-sandbox` | enum | `safe` | Lua plugin trust mode: `safe` (default) nils `os.execute` / `os.exit` / `io.open` / `io.popen` etc; `trusted` enables full stdlib. See [`docs/examples/init.lua`](examples/init.lua) for the `kettle.*` Lua API surface (URL handlers, event hooks, menu items) with Launchpad / APT URL handlers ported from Terminator's `url_handlers.py` |
+
+`kettle --gpu-info` honors the GPU settings above, including `--config` and
+`--profile`, without opening a window. It reports the requested backend policy,
+the active backend, and whether an explicit backend fallback occurred.
+Screenshots honor the loaded configuration through the same policy. The CI
+offscreen GPU self-test deliberately uses `Config::default()` so a developer's
+machine configuration cannot make the repository gate nondeterministic.
+
+When a fatal GPU error occurs, Kettle writes fault-only recovery records under
+`%LOCALAPPDATA%\kettle\diagnostics\` on Windows or
+`$XDG_CACHE_HOME/kettle/diagnostics/` (normally
+`~/.cache/kettle/diagnostics/`) on Unix. The JSONL schema records Kettle and
+adapter versions, fault type, recovery escalation, and outcome. It never records
+terminal text, commands, environment variables, or working directories. Each
+incident is capped at 256 KiB and the newest ten are retained.
 
 ### Terminator-parity config keys by disposition
 

@@ -165,10 +165,9 @@ struct Cli {
     #[arg(long)]
     config_path: bool,
 
-    /// Print the wgpu adapter / backend / driver / texture-limit
-    /// details kettle would use on this machine, then exit. Useful
-    /// for filing a "blank window" / "no GPU adapter" bug report
-    /// without a windowed run.
+    /// Print the configured backend policy, resolved adapter, driver, and
+    /// texture limits Kettle would use, then exit. Useful for filing a
+    /// "blank window" / "no GPU adapter" bug report without a windowed run.
     #[arg(long)]
     gpu_info: bool,
 
