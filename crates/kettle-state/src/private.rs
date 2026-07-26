@@ -325,6 +325,11 @@ pub(super) fn dacl_signature(path: &Path) -> io::Result<(Option<Vec<u8>>, bool)>
     windows::dacl_signature(path)
 }
 
+#[cfg(all(test, windows))]
+fn make_private_file_inheritable(file: &File) -> io::Result<()> {
+    windows::make_private_file_inheritable(file)
+}
+
 #[cfg(unix)]
 pub(super) use unix::PrivateParentGuard;
 
@@ -2896,6 +2901,63 @@ mod windows {
     }
 
     #[cfg(test)]
+    pub(super) fn make_private_file_inheritable(file: &File) -> io::Result<()> {
+        let current_user = current_user_sid()?;
+        let handle = reopen_for_acl(file)?;
+        if !owned_by_user_raw(handle.as_raw_handle() as HANDLE, current_user.sid)? {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "test fixture must remain owned by the effective user",
+            ));
+        }
+        let mut dacl = std::ptr::null_mut();
+        let mut descriptor = std::ptr::null_mut();
+        // SAFETY: output pointers are valid and the reopened handle has
+        // READ_CONTROL.
+        let status = unsafe {
+            GetSecurityInfo(
+                handle.as_raw_handle() as HANDLE,
+                SE_FILE_OBJECT,
+                DACL_SECURITY_INFORMATION,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                &mut dacl,
+                std::ptr::null_mut(),
+                &mut descriptor,
+            )
+        };
+        if status != 0 {
+            return Err(io::Error::from_raw_os_error(status as i32));
+        }
+        let descriptor = SecurityDescriptor(descriptor);
+        // Make a deterministic legacy fixture without relying on the process
+        // token's default owner. Elevated runners otherwise create ordinary
+        // files with Administrators ownership, which production must reject.
+        let status = unsafe {
+            SetSecurityInfo(
+                handle.as_raw_handle() as HANDLE,
+                SE_FILE_OBJECT,
+                DACL_SECURITY_INFORMATION | UNPROTECTED_DACL_SECURITY_INFORMATION,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                dacl,
+                std::ptr::null(),
+            )
+        };
+        drop(descriptor);
+        if status != 0 {
+            return Err(io::Error::from_raw_os_error(status as i32));
+        }
+        if has_current_user_only_dacl_raw(handle.as_raw_handle() as HANDLE, current_user.sid)? {
+            Err(io::Error::other(
+                "test fixture DACL unexpectedly remained protected",
+            ))
+        } else {
+            Ok(())
+        }
+    }
+
+    #[cfg(test)]
     mod tests {
         use super::*;
         use windows_sys::Win32::Security::{
@@ -3000,7 +3062,8 @@ mod tests {
     fn existing_user_owned_file_is_hardened() {
         let dir = crate::test_tempdir();
         let path = dir.path().join("legacy");
-        let file = File::create(&path).unwrap();
+        let file = create_private_file_new(&path).unwrap();
+        make_private_file_inheritable(&file).unwrap();
         restrict_private_file(&file).unwrap();
         assert!(has_current_user_only_dacl(&file).unwrap());
     }
@@ -3042,7 +3105,10 @@ mod tests {
     fn legacy_windows_hardening_requires_exclusive_access() {
         let dir = crate::test_tempdir();
         let path = dir.path().join("legacy");
-        std::fs::write(&path, b"private").unwrap();
+        let mut file = create_private_file_new(&path).unwrap();
+        file.write_all(b"private").unwrap();
+        make_private_file_inheritable(&file).unwrap();
+        drop(file);
         let preexisting_reader = File::open(&path).unwrap();
 
         assert!(open_private_file(&path).is_err());
