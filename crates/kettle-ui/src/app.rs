@@ -1916,6 +1916,20 @@ fn typed_recently(
     last_typed.is_some_and(|t| now.saturating_duration_since(t) < window)
 }
 
+fn pane_snapshot_keys_match(
+    cached: &[(u64, u64, usize, usize)],
+    current: impl IntoIterator<Item = (u64, u64, usize, usize)>,
+) -> bool {
+    let mut current = current.into_iter();
+    for cached_key in cached {
+        match current.next() {
+            Some(current_key) if *cached_key == current_key => {}
+            _ => return false,
+        }
+    }
+    current.next().is_none()
+}
+
 /// Pure cols/rows-that-fit math for a pane rect, shared by `grid_of`. A multi-pane
 /// tab's per-pane titlebar steals `titlebar_h` of height,
 /// so the PTY must be sized for the rows that actually fit *below* it — without
@@ -5113,6 +5127,21 @@ impl App {
         )
     }
 
+    fn pane_snapshots_match_current_layout(&self, ws: &WindowState) -> bool {
+        if ws.renderer.is_none() || ws.pane_snapshots.len() != ws.pane_snapshot_keys.len() {
+            return false;
+        }
+        let area = self.area(ws);
+        let layout = ws.mux.layout(ws.mux.active, area);
+        let titlebar_h = self.pane_titlebar_inset(ws, layout.len());
+        let current = layout.iter().filter_map(|(id, rect)| {
+            let pane = ws.mux.panes.get(id)?;
+            let (columns, screen_lines) = self.grid_of_inset(ws, *rect, titlebar_h);
+            Some((*id, pane.term.output_generation(), columns, screen_lines))
+        });
+        pane_snapshot_keys_match(&ws.pane_snapshot_keys, current)
+    }
+
     fn focused_rect(&self, ws: &WindowState, area: Rect) -> Option<Rect> {
         let f = ws.mux.active_focus()?;
         ws.mux
@@ -7542,7 +7571,7 @@ impl App {
         true
     }
 
-    fn overlay(&self, ws: &WindowState) -> Overlay {
+    fn overlay(&self, ws: &WindowState, reuse_pane_snapshots: bool) -> Overlay {
         let preedit_state = ws.ime_preedit.as_ref().filter(|(text, _)| !text.is_empty());
         let preedit = preedit_state.map(|(text, _)| text.as_str());
         let with_preedit = |input: &str| match preedit {
@@ -7691,8 +7720,23 @@ impl App {
         let pane_blink = ws
             .mux
             .active_focus()
-            .and_then(|id| ws.mux.panes.get(&id))
-            .map(|p| p.term.cursor_blinking())
+            .and_then(|id| {
+                reuse_pane_snapshots
+                    .then(|| {
+                        ws.pane_snapshot_keys
+                            .iter()
+                            .position(|(pane_id, ..)| *pane_id == id)
+                            .and_then(|index| ws.pane_snapshots.get(index))
+                            .map(|snapshot| snapshot.cursor_blinking)
+                    })
+                    .flatten()
+                    .or_else(|| {
+                        ws.mux
+                            .panes
+                            .get(&id)
+                            .map(|pane| pane.term.cursor_blinking())
+                    })
+            })
             .unwrap_or(true);
         let blink_enabled = self.cfg.cursor_blink && pane_blink;
         let cursor_visible = if !blink_enabled
@@ -8010,146 +8054,158 @@ impl App {
         // B (Peacock): resolve/refresh this window's accent claim (cheap in
         // the steady state; full pool walk only on first frame/theme switch).
         self.sync_window_accent(ws);
-        self.drain_events(ws);
-        self.poll_remote_contexts(ws);
-        self.poll_theme_schedule(ws);
-        self.poll_focus_event(ws);
-        self.poll_title_event(ws);
-        if ws.ime_preedit.is_some() {
-            self.update_ime_cursor_area(ws);
-        }
-        // Reflect the focused pane's OSC 9;4 progress onto the OS
-        // taskbar button (pwsh 7 / Windows Terminal parity). No-op off Windows.
-        self.poll_taskbar_progress(ws);
-        // Process any pane-restart requests queued during
-        // drain_events. Done HERE (after drain) so we don't hold a
-        // &mut iter into ws.mux.panes when spawning a new tab.
-        // event_loop arg is unused for now (the spawn doesn't need it);
-        // kept in the signature for symmetry with other dispatchers.
-        if !ws.pending_pane_restarts.is_empty() {
-            let pane_ids: Vec<u64> = std::mem::take(&mut ws.pending_pane_restarts);
-            let (cw, ch) = self.cell_px(ws);
-            let waker = self.waker();
-            // Use the live grid (matches the existing surface)
-            // for the new tab. An earlier version hardcoded 80×24 which mismatched
-            // any non-default kettle window size — the new shell would
-            // start with a tiny grid then grow on next resize. Pulling
-            // from the current area means the restart shell starts at
-            // the size the user is actually using.
-            let (cols, rows) = self.grid_of(ws, self.area(ws));
-            for pane_id in pane_ids {
-                let restart_info: Option<(Vec<String>, Option<String>)> = ws
-                    .mux
-                    .panes
-                    .get(&pane_id)
-                    .map(|p| (p.argv.clone(), p.term.current_dir()));
-                if let Some((argv, cwd)) = restart_info {
-                    if let Err(e) = ws.mux.new_tab_with(
-                        &self.cfg,
-                        cols,
-                        rows,
-                        cw,
-                        ch,
-                        waker.clone(),
-                        &argv,
-                        cwd.as_deref(),
-                    ) {
-                        log::warn!("exit-action = restart: spawn failed for pane {pane_id}: {e}");
-                    } else {
-                        // A respawned tab is a fresh tab
-                        // from the plugin's POV; fire TabAdd.
-                        self.fire_tab_add_event(ws);
+        // A context-menu hover changes only one highlight quad. When no output,
+        // pane order, or grid dimensions changed, keep the prior render
+        // snapshots and bypass every terminal-locking maintenance pass below.
+        // The one-shot hint is invalidated by any intervening input/user event.
+        let reuse_pane_snapshots = std::mem::take(&mut ws.reuse_pane_snapshots_once)
+            && ws.context_menu.is_some()
+            && self.pane_snapshots_match_current_layout(ws);
+        if !reuse_pane_snapshots {
+            self.drain_events(ws);
+            self.poll_remote_contexts(ws);
+            self.poll_theme_schedule(ws);
+            self.poll_focus_event(ws);
+            self.poll_title_event(ws);
+            if ws.ime_preedit.is_some() {
+                self.update_ime_cursor_area(ws);
+            }
+            // Reflect the focused pane's OSC 9;4 progress onto the OS
+            // taskbar button (pwsh 7 / Windows Terminal parity). No-op off Windows.
+            self.poll_taskbar_progress(ws);
+            // Process any pane-restart requests queued during
+            // drain_events. Done HERE (after drain) so we don't hold a
+            // &mut iter into ws.mux.panes when spawning a new tab.
+            // event_loop arg is unused for now (the spawn doesn't need it);
+            // kept in the signature for symmetry with other dispatchers.
+            if !ws.pending_pane_restarts.is_empty() {
+                let pane_ids: Vec<u64> = std::mem::take(&mut ws.pending_pane_restarts);
+                let (cw, ch) = self.cell_px(ws);
+                let waker = self.waker();
+                // Use the live grid (matches the existing surface)
+                // for the new tab. An earlier version hardcoded 80×24 which mismatched
+                // any non-default kettle window size — the new shell would
+                // start with a tiny grid then grow on next resize. Pulling
+                // from the current area means the restart shell starts at
+                // the size the user is actually using.
+                let (cols, rows) = self.grid_of(ws, self.area(ws));
+                for pane_id in pane_ids {
+                    let restart_info: Option<(Vec<String>, Option<String>)> = ws
+                        .mux
+                        .panes
+                        .get(&pane_id)
+                        .map(|p| (p.argv.clone(), p.term.current_dir()));
+                    if let Some((argv, cwd)) = restart_info {
+                        if let Err(e) = ws.mux.new_tab_with(
+                            &self.cfg,
+                            cols,
+                            rows,
+                            cw,
+                            ch,
+                            waker.clone(),
+                            &argv,
+                            cwd.as_deref(),
+                        ) {
+                            log::warn!(
+                                "exit-action = restart: spawn failed for pane {pane_id}: {e}"
+                            );
+                        } else {
+                            // A respawned tab is a fresh tab
+                            // from the plugin's POV; fire TabAdd.
+                            self.fire_tab_add_event(ws);
+                        }
                     }
                 }
             }
-        }
-        // Reflect the active pane (incl. after tab/focus switches).
-        self.sync_window_title(ws);
-        // Capture a just-exited pane's final output before reap drops
-        // its sidechannel — otherwise the shell's last line is lost from the trace.
-        self.flush_recorder_output(ws);
-        if ws.mux.reap() {
-            return;
-        }
-        ws.search_queries
-            .retain(|pane_id, _| ws.mux.panes.contains_key(pane_id));
-        // scroll-on-output: if new output landed in any pane since the
-        // previous frame, optionally yank that pane back to the bottom.
-        // Tracking is per-pane (each one drifts independently when only
-        // its background process emits) and uses the pure
-        // `should_scroll_on_output` rule so the "what counts as new
-        // output" decision lives outside the render path.
-        let want_sob = self.cfg.scroll_on_output;
-        // Track which panes produced output this frame so
-        // we can latch their tab's `last_output_at`. Collected here
-        // and dispatched after the borrow ends — same shape as the
-        // `bell_panes` collection in `drain_events`.
-        let mut output_panes: Vec<u64> = Vec::new();
-        for (&pane_id, pane) in ws.mux.panes.iter_mut() {
-            let now = pane
-                .term
-                .term
-                .lock()
-                .ok()
-                .map(|t| {
-                    use kettle_core::Dimensions;
-                    t.grid().history_size()
-                })
-                .unwrap_or(0);
-            let advanced = match pane.last_history {
-                Some(prev) => now > prev,
-                None => false,
-            };
-            if advanced {
-                output_panes.push(pane_id);
+            // Reflect the active pane (incl. after tab/focus switches).
+            self.sync_window_title(ws);
+            // Capture a just-exited pane's final output before reap drops
+            // its sidechannel — otherwise the shell's last line is lost from the trace.
+            self.flush_recorder_output(ws);
+            if ws.mux.reap() {
+                return;
             }
-            if kettle_core::scrollbar::should_scroll_on_output(want_sob, pane.last_history, now)
-                && let Ok(mut t) = pane.term.term.lock()
-            {
-                t.scroll_display(Scroll::Bottom);
-            }
-            pane.last_history = Some(now);
-        }
-        for id in output_panes {
-            ws.mux.touch_tab_output(id);
-        }
-        // Auto-scroll while dragging a selection past the focused pane's
-        // top/bottom edge — every modern terminal does this so the user
-        // doesn't have to release / scroll-back / shift-click to extend.
-        // Pure `selection_autoscroll_lines` chooses the per-frame rate;
-        // scrolling the viewport here naturally re-fires `update_selection`
-        // below to anchor the selection's end to the new visible line.
-        if ws.selecting {
-            let area = self.area(ws);
-            if let Some(rect) = self.focused_rect(ws, area) {
-                let lines = selection_autoscroll_lines(ws.cursor.y as f32, rect.1, rect.1 + rect.3);
-                if lines != 0
-                    && let Some(p) = ws.mux.focused()
-                    && let Ok(mut t) = p.term.term.lock()
+            ws.search_queries
+                .retain(|pane_id, _| ws.mux.panes.contains_key(pane_id));
+            // scroll-on-output: if new output landed in any pane since the
+            // previous frame, optionally yank that pane back to the bottom.
+            // Tracking is per-pane (each one drifts independently when only
+            // its background process emits) and uses the pure
+            // `should_scroll_on_output` rule so the "what counts as new
+            // output" decision lives outside the render path.
+            let want_sob = self.cfg.scroll_on_output;
+            // Track which panes produced output this frame so
+            // we can latch their tab's `last_output_at`. Collected here
+            // and dispatched after the borrow ends — same shape as the
+            // `bell_panes` collection in `drain_events`.
+            let mut output_panes: Vec<u64> = Vec::new();
+            for (&pane_id, pane) in ws.mux.panes.iter_mut() {
+                let now = pane
+                    .term
+                    .term
+                    .lock()
+                    .ok()
+                    .map(|t| {
+                        use kettle_core::Dimensions;
+                        t.grid().history_size()
+                    })
+                    .unwrap_or(0);
+                let advanced = match pane.last_history {
+                    Some(prev) => now > prev,
+                    None => false,
+                };
+                if advanced {
+                    output_panes.push(pane_id);
+                }
+                if kettle_core::scrollbar::should_scroll_on_output(want_sob, pane.last_history, now)
+                    && let Ok(mut t) = pane.term.term.lock()
                 {
-                    t.scroll_display(Scroll::Delta(lines));
+                    t.scroll_display(Scroll::Bottom);
                 }
-                if lines != 0 {
-                    // Re-anchor the selection's end at the (now-moved)
-                    // cursor row so the highlight grows in step with the
-                    // scroll, not stuck on the original click-time row.
-                    self.update_selection(ws, area);
+                pane.last_history = Some(now);
+            }
+            for id in output_panes {
+                ws.mux.touch_tab_output(id);
+            }
+            // Auto-scroll while dragging a selection past the focused pane's
+            // top/bottom edge — every modern terminal does this so the user
+            // doesn't have to release / scroll-back / shift-click to extend.
+            // Pure `selection_autoscroll_lines` chooses the per-frame rate;
+            // scrolling the viewport here naturally re-fires `update_selection`
+            // below to anchor the selection's end to the new visible line.
+            if ws.selecting {
+                let area = self.area(ws);
+                if let Some(rect) = self.focused_rect(ws, area) {
+                    let lines =
+                        selection_autoscroll_lines(ws.cursor.y as f32, rect.1, rect.1 + rect.3);
+                    if lines != 0
+                        && let Some(p) = ws.mux.focused()
+                        && let Ok(mut t) = p.term.term.lock()
+                    {
+                        t.scroll_display(Scroll::Delta(lines));
+                    }
+                    if lines != 0 {
+                        // Re-anchor the selection's end at the (now-moved)
+                        // cursor row so the highlight grows in step with the
+                        // scroll, not stuck on the original click-time row.
+                        self.update_selection(ws, area);
+                    }
                 }
             }
+            self.update_search(ws);
+            // Search status/focus are semantic accessibility state. Publish only
+            // after the scan has settled for this frame, and defer (rather than
+            // drop) an update that lands inside the terminal-content rate limit.
+            self.publish_accessibility_if_due(ws);
+            self.update_links(ws);
+            // Link set may have changed (scroll, output, mode flip) — re-sync
+            // the cursor icon so a URL scrolling out from under a held Ctrl
+            // doesn't leave the pointer-hand icon stuck on a now-empty cell.
+            // Deduped via `last_cursor_icon` so this is a cheap per-frame
+            // recheck when nothing changed.
+            self.sync_cursor_icon(ws);
         }
-        self.update_search(ws);
-        // Search status/focus are semantic accessibility state. Publish only
-        // after the scan has settled for this frame, and defer (rather than
-        // drop) an update that lands inside the terminal-content rate limit.
-        self.publish_accessibility_if_due(ws);
-        self.update_links(ws);
-        // Link set may have changed (scroll, output, mode flip) — re-sync
-        // the cursor icon so a URL scrolling out from under a held Ctrl
-        // doesn't leave the pointer-hand icon stuck on a now-empty cell.
-        // Deduped via `last_cursor_icon` so this is a cheap per-frame
-        // recheck when nothing changed.
-        self.sync_cursor_icon(ws);
-        let overlay = self.overlay(ws);
+        let overlay = self.overlay(ws, reuse_pane_snapshots);
         let area = self.area(ws);
         let tabbar = self.tab_bar(ws);
         // Build status bar BEFORE the &mut renderer borrow
@@ -8170,19 +8226,27 @@ impl App {
             return;
         }
 
-        // Capture the output generations represented by this candidate frame
-        // before taking any pane snapshots. Output that races the snapshot can
-        // therefore cause one harmless extra repaint, never a missed repaint.
-        // The recycled map is committed only after the surface is presented.
-        ws.pending_output_gen.clear();
-        for (id, p) in &ws.mux.panes {
-            ws.pending_output_gen
-                .insert(*id, p.term.output_generation());
+        if ws.renderer.is_none() {
+            return;
         }
 
-        let Some(renderer) = ws.renderer.as_mut() else {
-            return;
-        };
+        // Capture the output generations represented by this candidate frame
+        // before taking any new pane snapshots. A hover-only frame reuses the
+        // exact cached generations rather than sampling live generations after
+        // the reuse check; output racing either path therefore causes one
+        // harmless extra repaint, never a missed repaint. The recycled map is
+        // committed only after the surface is presented.
+        ws.pending_output_gen.clear();
+        if reuse_pane_snapshots {
+            for (id, output_generation, _, _) in &ws.pane_snapshot_keys {
+                ws.pending_output_gen.insert(*id, *output_generation);
+            }
+        } else {
+            for (id, p) in &ws.mux.panes {
+                ws.pending_output_gen
+                    .insert(*id, p.term.output_generation());
+            }
+        }
 
         // v2.20.0 P2 (perf): capture each visible pane's renderable state into
         // a pooled snapshot UNDER the Term lock, then drop the guard
@@ -8197,6 +8261,10 @@ impl App {
         // Also pass the pane's title so the per-pane
         // titlebar can render the text.
         let mut snaps = std::mem::take(&mut ws.pane_snapshots);
+        let mut snapshot_keys = std::mem::take(&mut ws.pane_snapshot_keys);
+        if !reuse_pane_snapshots {
+            snapshot_keys.clear();
+        }
         let mut metas = Vec::with_capacity(layout.len());
         let home = crate::mux::home_dir_string();
         for (id, r) in &layout {
@@ -8214,13 +8282,28 @@ impl App {
                     ],
                     per_class_limit.saturating_mul(3),
                 );
-                if let Ok(g) = p.term.term.lock() {
-                    let si = metas.len();
+                let si = metas.len();
+                let snapshot_ready = if reuse_pane_snapshots {
+                    snaps.get(si).is_some()
+                } else {
+                    let output_generation = p.term.output_generation();
+                    let Ok(g) = p.term.term.lock() else {
+                        continue;
+                    };
                     if snaps.len() <= si {
                         snaps.push(PaneSnapshot::default());
                     }
                     snaps[si].capture(&g);
                     drop(g); // lock released — the render below is lock-free
+                    snapshot_keys.push((
+                        *id,
+                        output_generation,
+                        snaps[si].columns,
+                        snaps[si].screen_lines,
+                    ));
+                    true
+                };
+                if snapshot_ready {
                     let cwd = p.term.current_dir_or_native();
                     let title_parts = pane_title_parts(
                         &self.cfg.agent_badge,
@@ -8248,6 +8331,7 @@ impl App {
             }
         }
         snaps.truncate(metas.len());
+        snapshot_keys.truncate(metas.len());
         // Hand the renderer borrows into `metas` (which lives
         // for the whole frame) instead of a second per-pane clone of the images
         // Vec / title String / group_name. `snap` borrows the pooled snapshot
@@ -8277,6 +8361,12 @@ impl App {
             .collect();
         // Status bar built BEFORE the &mut renderer borrow
         // (the helper reads `ws.mux` immutably). Cheap when off.
+        let Some(renderer) = ws.renderer.as_mut() else {
+            drop(panes);
+            ws.pane_snapshots = snaps;
+            ws.pane_snapshot_keys = snapshot_keys;
+            return;
+        };
         let frame_result = renderer.render_frame_with_status_and_pre_present(
             &panes,
             &tabbar,
@@ -8292,6 +8382,7 @@ impl App {
         // Return the snapshot pool (cell-Vec capacity recycles next frame).
         drop(panes);
         ws.pane_snapshots = snaps;
+        ws.pane_snapshot_keys = snapshot_keys;
         match frame_result {
             Ok(outcome) => {
                 let presented = apply_output_generation_outcome(
@@ -9640,6 +9731,7 @@ impl App {
             }
             menu.scroll_offset = off;
         }
+        ws.reuse_pane_snapshots_once = true;
         if let Some(w) = &ws.window {
             w.request_redraw();
         }
@@ -9674,6 +9766,7 @@ impl App {
         let clamped = new_off.min(max_off);
         if clamped != menu.scroll_offset {
             menu.scroll_offset = clamped;
+            ws.reuse_pane_snapshots_once = true;
             if let Some(w) = &ws.window {
                 w.request_redraw();
             }
@@ -9731,6 +9824,7 @@ impl App {
             return;
         }
         menu.highlight = idx;
+        ws.reuse_pane_snapshots_once = true;
         if let Some(w) = &ws.window {
             w.request_redraw();
         }
@@ -19112,6 +19206,7 @@ impl App {
     }
 
     fn user_event_inner(&mut self, ws: &mut WindowState, _el: &ActiveEventLoop, ev: UserEvent) {
+        ws.reuse_pane_snapshots_once = false;
         match ev {
             // Consumed by the outer window-less dispatch before a WindowState
             // is checked out.
@@ -19247,6 +19342,13 @@ impl App {
         event_loop: &ActiveEventLoop,
         event: WindowEvent,
     ) {
+        let preserves_menu_redraw_hint = matches!(
+            &event,
+            WindowEvent::RedrawRequested | WindowEvent::CursorMoved { .. }
+        ) && ws.context_menu.is_some();
+        if !preserves_menu_redraw_hint {
+            ws.reuse_pane_snapshots_once = false;
+        }
         if let (Some(adapter), Some(window)) = (&mut ws.accessibility, &ws.window) {
             adapter.process_event(window, &event);
         }
@@ -21254,10 +21356,10 @@ mod modal_discipline_guard {
 mod tests {
     use super::{
         App, ContextMenuItem, apply_output_generation_outcome, assign_mnemonics,
-        count_rows_fitting, filter_disabled, find_menu_row_y, modal_swallows_pointer, rank_layouts,
-        sanitize_native_window_title, sanitize_title, selection_kind, should_restore_session,
-        should_reveal_after_renderer_init, startup_inner_size_px, typeahead_match,
-        vi_mode_invalidated_by_resize,
+        count_rows_fitting, filter_disabled, find_menu_row_y, modal_swallows_pointer,
+        pane_snapshot_keys_match, rank_layouts, sanitize_native_window_title, sanitize_title,
+        selection_kind, should_restore_session, should_reveal_after_renderer_init,
+        startup_inner_size_px, typeahead_match, vi_mode_invalidated_by_resize,
     };
     use kettle_config::Action;
     use kettle_core::SelectionType;
@@ -21301,6 +21403,25 @@ mod tests {
             candidate,
             std::collections::HashMap::from([(1, 10), (2, 20)])
         );
+    }
+
+    #[test]
+    fn pane_snapshot_reuse_fails_closed_on_output_layout_or_order_changes() {
+        let cached = [(1, 10, 120, 40), (2, 20, 80, 24)];
+        assert!(pane_snapshot_keys_match(&cached, cached));
+        assert!(!pane_snapshot_keys_match(
+            &cached,
+            [(1, 11, 120, 40), (2, 20, 80, 24)]
+        ));
+        assert!(!pane_snapshot_keys_match(
+            &cached,
+            [(1, 10, 121, 40), (2, 20, 80, 24)]
+        ));
+        assert!(!pane_snapshot_keys_match(
+            &cached,
+            [(2, 20, 80, 24), (1, 10, 120, 40)]
+        ));
+        assert!(!pane_snapshot_keys_match(&cached, [(1, 10, 120, 40)]));
     }
 
     #[test]

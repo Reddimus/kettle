@@ -527,6 +527,15 @@ text, so its bitmap is already resident).
   extractor caps in-flight sequences (16 MiB) so a hostile stream can't hang
   or OOM — the cap is security-relevant: an SSH session into a constrained
   container can otherwise OOM-kill kettle by emitting unbounded image data.
+- **Context-menu redraws are terminal-lock-free when safe.** Pointer/keyboard
+  highlight changes arm a one-shot snapshot-reuse hint. Before taking the fast
+  path, the UI compares every visible pane's stable id, atomic output
+  generation, columns, rows, and order with the pooled snapshot keys. Any
+  intervening input/user event clears the hint, and any key mismatch falls back
+  to the full drain/snapshot path. A reused snapshot also carries the captured
+  cursor-blink bit, so building the overlay does not reacquire the focused
+  `Term`. Renderer text damage excludes the highlighted menu row (a quad-only
+  change) but includes labels, enabled colors, anchor, and scroll window.
 - **Lua VM** is parked on the App struct (single-threaded
   `LuaEngine`) — `mlua`'s `send` feature makes the handle `Send + Sync`
   but kettle never clones it across threads. Event hooks

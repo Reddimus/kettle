@@ -269,6 +269,32 @@ pub fn menu_row_chars(row: &ContextMenuRow) -> usize {
         }
 }
 
+/// Text/layout damage key for the context-menu renderer.
+///
+/// The highlighted row is deliberately excluded: moving the pointer changes
+/// only a cheap quad. Text must be prepared again when its content, color,
+/// position, or visible scroll window changes.
+fn context_menu_text_damage_key(menu: Option<&ContextMenu>) -> u64 {
+    use std::hash::{Hash, Hasher};
+
+    let mut hash = std::hash::DefaultHasher::new();
+    menu.is_some().hash(&mut hash);
+    if let Some(menu) = menu {
+        menu.anchor.0.to_bits().hash(&mut hash);
+        menu.anchor.1.to_bits().hash(&mut hash);
+        menu.scroll_offset.hash(&mut hash);
+        menu.panel_h_clamped.to_bits().hash(&mut hash);
+        menu.rows.len().hash(&mut hash);
+        for row in &menu.rows {
+            row.label.hash(&mut hash);
+            row.separator.hash(&mut hash);
+            row.enabled.hash(&mut hash);
+            row.hint.hash(&mut hash);
+        }
+    }
+    hash.finish()
+}
+
 /// Disabled / secondary menu text: blend the foreground toward the panel
 /// background (~55% mute) without alpha-blending through to whatever lives
 /// under the panel.
@@ -1066,6 +1092,31 @@ struct PendingCursorGlyph {
     clip: (f32, f32, f32, f32),
 }
 
+fn cursor_glyph_damage_key(
+    cursor: Option<&PendingCursorGlyph>,
+    metrics: Metrics,
+    family: &str,
+) -> Option<u64> {
+    use std::hash::{Hash, Hasher};
+
+    let cursor = cursor?;
+    let mut hash = std::hash::DefaultHasher::new();
+    cursor.x.to_bits().hash(&mut hash);
+    cursor.y.to_bits().hash(&mut hash);
+    cursor.ch.hash(&mut hash);
+    cursor.color.r.hash(&mut hash);
+    cursor.color.g.hash(&mut hash);
+    cursor.color.b.hash(&mut hash);
+    cursor.clip.0.to_bits().hash(&mut hash);
+    cursor.clip.1.to_bits().hash(&mut hash);
+    cursor.clip.2.to_bits().hash(&mut hash);
+    cursor.clip.3.to_bits().hash(&mut hash);
+    metrics.font_size.to_bits().hash(&mut hash);
+    metrics.line_height.to_bits().hash(&mut hash);
+    family.hash(&mut hash);
+    Some(hash.finish())
+}
+
 /// v2.21.x: the decoded background-image, animated. A still image is one frame;
 /// an animated GIF / APNG / animated WebP is many. `frames.is_empty()` encodes a
 /// FAILED decode (drives the retry throttle, like the old inner `Option::None`).
@@ -1189,6 +1240,11 @@ pub struct Renderer {
     /// Set during the focused pane's `build_pane` when a solid block cursor is
     /// visible; consumed (and reset) each frame in `render_frame_with_status`.
     pending_cursor_glyph: Option<PendingCursorGlyph>,
+    /// Vertex/layout key last prepared into `cursor_glyph_renderer`. Stable
+    /// cursor frames (including menu hover) can render its retained vertices;
+    /// any main text prepare still forces a refresh in case the shared atlas
+    /// repacked.
+    last_cursor_glyph_key: Option<u64>,
     /// The cursor-cell glyph shaped last frame. A change forces a `prepare` so
     /// the new glyph is guaranteed resident in the atlas before the cursor pass
     /// reuses its bitmap (the only way the 1-glyph cursor prepare could grow
@@ -2263,6 +2319,7 @@ impl Renderer {
             cursor_glyph_renderer,
             cursor_glyph_buffer,
             pending_cursor_glyph: None,
+            last_cursor_glyph_key: None,
             last_cursor_char: None,
             pane_titlebar_texts: Vec::new(),
             tab_texts: Vec::new(),
@@ -5108,7 +5165,7 @@ impl Renderer {
         // without a following prepare would clear the in-use set and let a
         // later prepare evict still-displayed glyphs out from under the cached
         // vertices.
-        let overlay_open = overlay.search.is_some()
+        let non_context_text_overlay_open = overlay.search.is_some()
             || overlay.search_query.is_some()
             || !overlay.hint_labels.is_empty()
             || overlay.ime_preedit.is_some()
@@ -5116,11 +5173,11 @@ impl Renderer {
             || overlay.palette_query.is_some()
             || overlay.layout_picker_query.is_some()
             || overlay.edit_title.is_some()
-            || overlay.context_menu.is_some()
             || overlay.confirm_dialog.is_some()
             || overlay.settings.is_some()
             || overlay.resize_overlay.is_some()
             || overlay.update_available.is_some();
+        let overlay_open = non_context_text_overlay_open || overlay.context_menu.is_some();
         let chrome_hash = {
             use std::hash::{Hash, Hasher};
             let mut h = std::hash::DefaultHasher::new();
@@ -5132,6 +5189,7 @@ impl Renderer {
             self.new_tab_arrow_text.hash(&mut h);
             self.resize_overlay_text.hash(&mut h);
             self.ime_text.hash(&mut h);
+            context_menu_text_damage_key(overlay.context_menu.as_ref()).hash(&mut h);
             h.finish()
         };
         let chrome_changed = chrome_hash != self.last_chrome_hash;
@@ -5159,9 +5217,15 @@ impl Renderer {
         let need_prepare = any_pane_text_changed
             || chrome_changed
             || text_layout_changed
-            || overlay_open
+            || non_context_text_overlay_open
             || cursor_char_changed
             || overlay_changed;
+        let cursor_glyph_key =
+            cursor_glyph_damage_key(self.pending_cursor_glyph.as_ref(), metrics, &family);
+        let cursor_glyph_changed = cursor_glyph_key != self.last_cursor_glyph_key;
+        if cursor_glyph_key.is_none() {
+            self.last_cursor_glyph_key = None;
+        }
         if need_prepare {
             self.text_renderer.prepare(
                 &self.gpu.device,
@@ -5207,15 +5271,15 @@ impl Renderer {
             self.glyph_clips = gc;
             self.grid_glyphs_dirty = false;
         }
-        // v2.21.0 (idle perf): prepare the focused solid-block cursor's inverted
-        // glyph in its own renderer. Runs EVERY frame a block cursor is visible
-        // (cheap: 1 glyph, bitmap already in the atlas), so a blink toggles this
-        // 1-glyph prepare + the block quad while the pane buffers — and their
-        // whole-viewport prepare — stay untouched.
+        // Prepare the focused solid-block cursor's inverted glyph only when its
+        // text/position/style changed. A main text prepare also forces this tiny
+        // prepare because both renderers share an atlas that may have repacked.
+        // Menu-highlight and other quad-only frames reuse retained vertices.
         if let Some((gx, gy, gch, gcolor, gclip)) = self
             .pending_cursor_glyph
             .as_ref()
             .map(|c| (c.x, c.y, c.ch, c.color, c.clip))
+            .filter(|_| need_prepare || cursor_glyph_changed)
         {
             let mut enc = [0u8; 4];
             self.cursor_glyph_buffer.set_metrics(metrics);
@@ -5250,6 +5314,10 @@ impl Renderer {
                 [area],
                 &mut self.swash,
             )?;
+            // Commit the retained-vertex key only after prepare succeeds. A
+            // transient atlas/device error must retry rather than treating
+            // stale vertices as current on the next frame.
+            self.last_cursor_glyph_key = cursor_glyph_key;
         }
         self.quads
             .upload(&self.gpu.device, &self.gpu.queue, [sw, sh], &quads);
@@ -10448,6 +10516,91 @@ mod titlebar_glyph_fallback_tests {
 
 #[cfg(test)]
 mod pane_buffer_lifecycle_tests {
+    #[test]
+    fn context_menu_hover_changes_only_quad_damage() {
+        let mut menu = super::ContextMenu {
+            anchor: (20.0, 30.0),
+            rows: vec![
+                super::ContextMenuRow {
+                    label: "Copy".to_string(),
+                    separator: false,
+                    enabled: true,
+                    hint: "Ctrl+Shift+C".to_string(),
+                },
+                super::ContextMenuRow {
+                    label: "Paste".to_string(),
+                    separator: false,
+                    enabled: true,
+                    hint: "Ctrl+Shift+V".to_string(),
+                },
+            ],
+            highlight: 0,
+            scroll_offset: 0,
+            panel_h_clamped: 120.0,
+        };
+        let initial = super::context_menu_text_damage_key(Some(&menu));
+
+        menu.highlight = 1;
+        assert_eq!(
+            super::context_menu_text_damage_key(Some(&menu)),
+            initial,
+            "highlight motion changes quads, not shaped menu text"
+        );
+
+        menu.scroll_offset = 1;
+        assert_ne!(super::context_menu_text_damage_key(Some(&menu)), initial);
+        menu.scroll_offset = 0;
+        menu.rows[0].enabled = false;
+        assert_ne!(super::context_menu_text_damage_key(Some(&menu)), initial);
+    }
+
+    #[test]
+    fn cursor_glyph_damage_key_reuses_only_identical_vertices() {
+        let mut cursor = super::PendingCursorGlyph {
+            x: 10.0,
+            y: 20.0,
+            ch: 'x',
+            color: kettle_config::Rgb::new(1, 2, 3),
+            clip: (0.0, 0.0, 100.0, 80.0),
+        };
+        let initial = super::cursor_glyph_damage_key(
+            Some(&cursor),
+            glyphon::Metrics::new(14.0, 18.0),
+            "Kettle Mono",
+        );
+        assert_eq!(
+            super::cursor_glyph_damage_key(
+                Some(&cursor),
+                glyphon::Metrics::new(14.0, 18.0),
+                "Kettle Mono",
+            ),
+            initial
+        );
+
+        cursor.x = 11.0;
+        assert_ne!(
+            super::cursor_glyph_damage_key(
+                Some(&cursor),
+                glyphon::Metrics::new(14.0, 18.0),
+                "Kettle Mono",
+            ),
+            initial
+        );
+        cursor.x = 10.0;
+        assert_ne!(
+            super::cursor_glyph_damage_key(
+                Some(&cursor),
+                glyphon::Metrics::new(15.0, 19.0),
+                "Kettle Mono",
+            ),
+            initial
+        );
+        assert_eq!(
+            super::cursor_glyph_damage_key(None, glyphon::Metrics::new(14.0, 18.0), "Kettle Mono",),
+            None
+        );
+    }
+
     /// Drift guard. The per-pane text-buffer vecs are grown with
     /// `while len < panes.len()` and must be truncated back down when panes
     /// close, or they sit at the session's high-water pane count holding idle

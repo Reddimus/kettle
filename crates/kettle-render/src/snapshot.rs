@@ -92,6 +92,9 @@ pub struct PaneSnapshot {
     /// Viewport cells in `display_iter` order (row-major, all columns).
     pub cells: Vec<SnapCell>,
     pub cursor: RenderableCursor,
+    /// DEC cursor blink state captured with the cursor so UI-only redraws do
+    /// not need to reacquire the terminal lock just to build the overlay.
+    pub cursor_blinking: bool,
     /// Grid-absolute selection range (`contains` does the point math).
     pub selection: Option<SelectionRange>,
     /// Full 269-slot color table (OSC 4/10/11/12 overrides + dims) — `Copy`
@@ -111,6 +114,7 @@ impl Default for PaneSnapshot {
                 shape: CursorShape::Hidden,
                 point: Point::new(Line(0), Column(0)),
             },
+            cursor_blinking: false,
             selection: None,
             colors: TermColors::default(),
             display_offset: 0,
@@ -136,6 +140,7 @@ impl PaneSnapshot {
         let content = term.renderable_content();
         self.display_offset = content.display_offset;
         self.cursor = content.cursor;
+        self.cursor_blinking = term.cursor_style().blinking;
         self.selection = content.selection;
         self.colors = *content.colors;
 
@@ -240,5 +245,19 @@ mod tests {
         let mut snap = PaneSnapshot::default();
         snap.capture(&term);
         assert!(snap.cells.iter().all(|c| c.zerowidth().is_empty()));
+    }
+
+    #[test]
+    fn capture_carries_cursor_blink_state_for_lock_free_ui_redraws() {
+        let (mut term, mut proc) = test_term(8, 2);
+        let mut snap = PaneSnapshot::default();
+
+        proc.advance(&mut term, b"\x1b[?12h");
+        snap.capture(&term);
+        assert!(snap.cursor_blinking);
+
+        proc.advance(&mut term, b"\x1b[?12l");
+        snap.capture(&term);
+        assert!(!snap.cursor_blinking);
     }
 }

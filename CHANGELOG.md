@@ -21,6 +21,16 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
     healthy shared device, and non-device render errors rebuild that renderer's
     retained resources on a separate capped backoff.
 
+  ### Performance
+  - Context-menu highlight redraws now reuse the last validated pane snapshots
+    and skip terminal event maintenance, terminal mutex acquisition, viewport
+    copies, and glyphon text preparation. Reuse is one-shot and fails closed
+    when pane order, output generation, columns, or rows differ; menu text is
+    re-prepared when content, enabled color, anchor, or scroll window changes,
+    while a highlighted-row change uploads only menu quads. Stable block-cursor
+    glyph vertices are retained too and are refreshed on glyph, geometry,
+    style, font, or shared-atlas damage.
+
 ## [2.42.0] — 2026-07-24
 
   ### Added

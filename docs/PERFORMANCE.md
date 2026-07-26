@@ -1,5 +1,24 @@
 # Performance
 
+## Unreleased — context-menu interaction latency
+
+Context-menu row hover used to take the full frame path: every pointer crossing
+locked and copied all visible terminal grids, ran terminal maintenance, and
+forced both glyphon text renderers to prepare because any open overlay marked
+the whole text frame dirty. On a high-DPI 5120x2160 desktop that work sits
+directly on the input-to-present critical path.
+
+Menu-only redraws now validate and reuse the pooled pane snapshots by pane id,
+output generation, grid dimensions, and order. The fast path performs no
+terminal mutex acquisition or viewport copy; a cursor-blink bit captured in the
+snapshot avoids a hidden overlay-builder lock. The renderer hashes menu text
+and layout separately from its highlighted row, so hover changes only rebuild
+and upload menu quads; the unchanged block-cursor glyph renderer also reuses
+its retained vertices unless cursor/font/atlas damage requires a refresh.
+Output, resize, reorder, scroll, enabled-state, anchor, or label changes fail
+closed to the normal path. Cross-terminal frame-latency numbers belong to the
+machine-local benchmark artifact and are not claimed by portable unit tests.
+
 ## v2.25.1 — grid cursor-blink regression fix
 
 The grid renderer fix keeps cell-locked pane glyph uploads on their own damage

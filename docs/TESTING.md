@@ -276,6 +276,18 @@ UI compilation keeps the public `FrameOutcome` contract exhaustive; native
 live-render smoke remains responsible for actual window-system presentation
 and wgpu surface recreation.
 
+**Context-menu frame fast path.**
+`pane_snapshot_reuse_fails_closed_on_output_layout_or_order_changes`
+exercises the snapshot identity/generation/dimension gate, and
+`context_menu_hover_changes_only_quad_damage` proves the menu text-damage key
+ignores highlight motion but changes for scrolling and enabled text color.
+`capture_carries_cursor_blink_state_for_lock_free_ui_redraws` keeps the cached
+blink bit wired through `PaneSnapshot::capture`, while
+`cursor_glyph_damage_key_reuses_only_identical_vertices` covers the retained
+cursor-glyph vertices. These structural tests prove the no-lock/no-reshape
+route; native interaction capture remains the evidence for input-to-present
+latency and frame pacing.
+
 **`.cast` replay.** `replays_asciicast_v2_output_into_grid` parses an asciicast
 v2 trace — the exact format [`docs/RECORDING.md`](RECORDING.md)'s recorder
 writes — and feeds its `o` (output) events through the harness, asserting grid
