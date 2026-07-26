@@ -16524,19 +16524,18 @@ fn parse_key_token(token: &str, allow_super_character: bool) -> Option<(Modifier
                         if ch.next().is_some() {
                             return None;
                         }
-                        // Review fixes: `super+<char>` has NO PTY encoding —
-                        // fail loudly rather than silently dropping the
-                        // modifier. `shift+<letter>` normalizes to the
-                        // uppercase character with SHIFT cleared (exactly
-                        // what a human's Shift press delivers; the encoder's
-                        // Character arm ignores SHIFT, so `shift+g` would
-                        // otherwise silently send lowercase `g`).
+                        // `super+<char>` has no portable legacy PTY encoding,
+                        // so fail loudly rather than silently dropping the
+                        // modifier. Keep SHIFT on alphabetic chords while
+                        // normalizing their logical character to uppercase:
+                        // the legacy encoder still emits the expected byte,
+                        // while Kitty CSI-u needs the live modifier bit to
+                        // distinguish Ctrl+C from Ctrl+Shift+C.
                         if mods.contains(ModifiersState::SUPER) && !allow_super_character {
                             return None;
                         }
                         if mods.contains(ModifiersState::SHIFT) && c.is_ascii_alphabetic() {
                             c = c.to_ascii_uppercase();
-                            mods.remove(ModifiersState::SHIFT);
                         }
                         Key::Character(c.to_string().into())
                     }
@@ -22749,14 +22748,14 @@ mod tests {
             parse_send_key(":"),
             Some((none, Key::Character(":".into())))
         );
-        // Review fixes: shift+letter normalizes to the uppercase char with
-        // SHIFT cleared (what a human's Shift press delivers — the encoder's
-        // Character arm ignores SHIFT); super+char has no PTY encoding and
-        // fails loudly; the chord/CLI separator characters are reachable
-        // via their names.
+        // Shift+letter normalizes to the uppercase logical character while
+        // retaining SHIFT. Legacy encoding still produces the uppercase byte,
+        // while negotiated CSI-u preserves the actual chord. Super+char has no
+        // portable legacy PTY encoding and fails loudly; the chord/CLI
+        // separator characters are reachable via their names.
         assert_eq!(
             parse_send_key("shift+g"),
-            Some((none, Key::Character("G".into())))
+            Some((ModifiersState::SHIFT, Key::Character("G".into())))
         );
         assert_eq!(parse_send_key("super+x"), None, "super+char unencodable");
         assert_eq!(
@@ -22828,6 +22827,26 @@ mod tests {
         assert_eq!(
             enc("ctrl+c", TermMode::DISAMBIGUATE_ESC_CODES),
             Some(b"\x1b[99;5u".to_vec())
+        );
+        assert_eq!(
+            enc("ctrl+shift+c", TermMode::DISAMBIGUATE_ESC_CODES),
+            Some(b"\x1b[99;6u".to_vec()),
+            "synthetic chords must retain the same modifiers as GUI input"
+        );
+        assert_eq!(
+            enc(
+                "shift+g",
+                TermMode::REPORT_ALL_KEYS_AS_ESC | TermMode::REPORT_ALTERNATE_KEYS
+            ),
+            Some(b"\x1b[103:71;2u".to_vec())
+        );
+        assert_eq!(
+            enc(
+                "ctrl+space",
+                TermMode::REPORT_ALL_KEYS_AS_ESC | TermMode::REPORT_ASSOCIATED_TEXT
+            ),
+            Some(b"\x1b[32;5u".to_vec()),
+            "synthetic Control chords must not invent associated text"
         );
     }
 

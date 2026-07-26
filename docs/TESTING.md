@@ -476,8 +476,10 @@ These need a real display and are run by hand (or on real hardware):
     optional tools are reported as skips, so this is a real-machine smoke rather
     than a portable CI gate.
   - **Live agent/TUI window**: `just agent-tui-smoke` opens a real
-    grid-renderer Kettle window in explicit native-shell mode, drives a shell
-    marker, a prompt-shaped `➜  ~`
+    grid-renderer Kettle window in explicit native-shell mode: PowerShell on
+    Windows and deterministic non-rc Bash on Unix/macOS. The recipe builds and
+    selects the current checkout's release binary, then drives a shell marker,
+    a prompt-shaped `➜  ~`
     marker, deterministic Windows Codex active-placeholder and queued-input
     cursor fixtures with cell-level pixel assertions, optional
     Codex/Claude CLI version probes plus `codex exec --help` /
@@ -501,16 +503,21 @@ These need a real display and are run by hand (or on real hardware):
     a failed-command/stale-exit-code transcript. External auth failures are
     captured as `auth_failed`; set `KETTLE_AGENT_AUTH_SMOKE=strict` when missing
     credentials should fail the run.
-    On Windows, `just agent-tui-wsl-smoke` instead keeps the Windows
-    `kettle.exe`/ConPTY/render path and launches a non-rc bash through
+    On Windows, `just agent-tui-wsl-smoke` builds and selects the current
+    checkout's `kettle.exe`, keeps its ConPTY/render path, and launches non-rc
+    Bash through
     `wsl.exe`; `KETTLE_SMOKE_WSL_DISTRO` selects a distro. Tool detection,
     tmux control, Neovim/AstroNvim, and agent commands then run inside that
     distro rather than against the Windows host `PATH`.
     `KETTLE_SMOKE_ASTRO_CONFIG` can select the target-shell config directory.
     `KETTLE_SMOKE_NVIM_DATA` can select its installed plugin data. The helper
-    copies the config and existing `lazy`/`site` runtime, redirects every
-    Neovim XDG config/data/state/cache path to disposable storage, then removes
-    it, so a compatibility smoke cannot edit the user's live configuration.
+    creates an unpredictable owner-private directory inside the target distro,
+    copies the config and existing `lazy`/`site` runtime while dereferencing
+    symlinks, and redirects `HOME` plus every Neovim XDG
+    config/data/state/cache/runtime path to that snapshot before removing it.
+    Ordinary writes that honor those paths cannot edit live configuration.
+    This is not an OS security sandbox; config code that deliberately uses a
+    hard-coded absolute path can still reach that path.
   - **Live interaction window**: `just interaction-smoke` opens a real
     grid-renderer Kettle window and drives multiline text entry, scrollback
     mouse wheel movement, local selection drag, the exact keyboard/Shift-click

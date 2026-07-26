@@ -20,6 +20,22 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
     without GPU wakeups, `Lost` recreates only the affected wgpu surface on the
     healthy shared device, and non-device render errors rebuild that renderer's
     retained resources on a separate capped backoff.
+  - **Agent `send_keys` now matches negotiated Kitty keyboard input.**
+    Synthetic `Shift` chords retain their modifier in CSI-u (so
+    `ctrl+shift+c` is no longer reported as `ctrl+c`), and synthetic
+    Control chords no longer invent associated text for values such as
+    `ctrl+space`.
+  - **Agent/TUI compatibility smoke isolation and shell parity.** Unix native
+    runs now use deterministic non-rc Bash instead of feeding POSIX commands to
+    an arbitrary default shell. Native and WSL tool probes use the same
+    augmented `PATH`; Neovim snapshots use unpredictable private directories,
+    dereference config links, and redirect `HOME` plus all XDG state away from
+    live configuration.
+
+  ### Changed
+  - `just agent-tui-smoke` and Windows `just agent-tui-wsl-smoke` now build and
+    explicitly run the current checkout's release binary instead of potentially
+    exercising a stale `kettle` from `PATH`.
 
   ### Performance
   - Context-menu highlight redraws now reuse the last validated pane snapshots

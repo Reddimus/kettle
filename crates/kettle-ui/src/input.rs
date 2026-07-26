@@ -627,22 +627,16 @@ fn synthetic_key_event(key: &Key, mods: ModifiersState) -> KittyKeyEvent {
         Key::Named(NamedKey::Escape) => Some("\u{1b}".to_owned()),
         _ => None,
     };
-    let text_with_all_modifiers = match key {
-        Key::Character(_) if mods.control_key() => {
-            let mut encoded = encode(key, text.as_deref(), mods, TermMode::empty())
-                .and_then(|bytes| String::from_utf8(bytes).ok())
-                .unwrap_or_default();
-            // Alt prefixes the PTY encoding with Escape, but is not itself
-            // associated text in the Kitty protocol.
-            if mods.alt_key() {
-                encoded = encoded
-                    .strip_prefix('\u{1b}')
-                    .unwrap_or(&encoded)
-                    .to_owned();
-            }
-            encoded
-        }
-        _ => text.clone().unwrap_or_default(),
+    // A synthetic token has no platform text event. Control-modified key text
+    // is either a forbidden C0 code (Ctrl+C, Ctrl+Space, Ctrl+Enter) or
+    // layout-dependent AltGr text. Omitting associated text is the only honest
+    // portable representation; the CSI-u key code + modifier field still
+    // carries the complete chord. Unmodified/Shift/Alt tokens have the literal
+    // text supplied by the token itself.
+    let text_with_all_modifiers = if mods.control_key() {
+        String::new()
+    } else {
+        text.clone().unwrap_or_default()
     };
 
     KittyKeyEvent {
@@ -1235,6 +1229,44 @@ mod tests {
         assert_eq!(
             encode_kitty_key_event(&grapheme, ModifiersState::empty(), associated),
             Some(b"\x1b[0;1;128105:8205:128187u".to_vec())
+        );
+    }
+
+    #[test]
+    fn synthetic_control_chords_match_gui_protocol_events() {
+        let mode = TermMode::REPORT_ALL_KEYS_AS_ESC
+            | TermMode::REPORT_ALTERNATE_KEYS
+            | TermMode::REPORT_ASSOCIATED_TEXT;
+
+        let shifted_mods = ModifiersState::CONTROL | ModifiersState::SHIFT;
+        let gui_shifted = protocol_event(
+            Key::Character("C".into()),
+            Key::Character("c".into()),
+            Some("\u{3}"),
+            "\u{3}",
+            KeyLocation::Standard,
+            ElementState::Pressed,
+            false,
+        );
+        assert_eq!(
+            encode_key_press(&Key::Character("C".into()), shifted_mods, mode),
+            encode_kitty_key_event(&gui_shifted, shifted_mods, mode),
+            "Ctrl+Shift+C must preserve Shift and its alternate key"
+        );
+
+        let gui_control_space = protocol_event(
+            Key::Named(NamedKey::Space),
+            Key::Named(NamedKey::Space),
+            Some("\0"),
+            "\0",
+            KeyLocation::Standard,
+            ElementState::Pressed,
+            false,
+        );
+        assert_eq!(
+            encode_key_press(&Key::Named(NamedKey::Space), ModifiersState::CONTROL, mode),
+            encode_kitty_key_event(&gui_control_space, ModifiersState::CONTROL, mode),
+            "Ctrl+Space must omit C0 associated text in both paths"
         );
     }
 

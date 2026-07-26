@@ -171,7 +171,7 @@ so press Enter with `send_keys`, not a trailing `\n`.
 | `subscribe` | read-only | switches the connection to the event stream |
 | `wait_for` | read-only | v2.20: block until the screen matches (`text` substring / `regex` / `quiet_ms` settle — AND when combined; `timeout_ms` default 30 000). Returns `{matched, elapsed_ms, polls}`; a timeout is `matched: false`, not an error. Runs on the connection thread, polling ≥50 ms — the UI is never blocked. The screen-text regex runs against per-line right-trimmed, newline-joined text — use `(?m)` end-of-line anchors rather than end-of-string |
 | `send_text` | full | type text into a pane (`pane`, `text`) |
-| `send_keys` | full | v2.20: press named keys / chords (`pane`, `keys: ["escape","ctrl+c","down","G",…]`). Tokens: key names (`escape`, `enter`, `tab`, `backspace`, `delete`, `insert`, `space`, arrows, `home`/`end`, `pageup`/`pagedown`, `f1`–`f12`), chords with `ctrl`/`alt`/`shift`/`super` (+ aliases), or single characters (case preserved). Encoded through the same path as GUI keystrokes against the pane's live modes (DECCKM-aware); all tokens parse before any byte is sent |
+| `send_keys` | full | v2.20: press named keys / chords (`pane`, `keys: ["escape","ctrl+c","down","G",…]`). Tokens: key names (`escape`, `enter`, `tab`, `backspace`, `delete`, `insert`, `space`, arrows, `home`/`end`, `pageup`/`pagedown`, `f1`–`f12`), chords with `ctrl`/`alt`/`shift`/`super` (+ aliases), or single characters (case preserved). Encoded through the same path as GUI keystrokes against the pane's live modes (DECCKM- and negotiated Kitty CSI-u-aware); all tokens parse before any byte is sent |
 | `dispatch_keybind` | full | diagnostic app-keybind dispatch (`logical`, `physical`, `mods`) using the same resolver as real window keyboard input. It does not write PTY bytes; it returns the candidate triggers, matched action, and whether a modal blocked dispatch |
 | `dispatch_ui_key` | full | press 1–64 pre-parsed key tokens (each at most 64 bytes) in the currently open supported Kettle modal. Search consumes them through its real Unicode editor/navigation path; no token is encoded or written to the PTY. All tokens validate before the first state change, and a closed modal is an error |
 | `send_mouse` | full | deterministic mouse input for diagnostics (`event`: `move`/`press`/`release`/`click`/`wheel`, window-relative `x`/`y`, `button`, `wheel_lines` **or** `wheel_delta`, optional event-local `mods`). A wheel event takes exactly one of `wheel_lines` (signed whole scroll lines, entering downstream of quantization) or `wheel_delta` (signed raw wheel detents, fractions allowed — runs the real sub-detent accumulator, so it can emulate a precision touchpad) |
@@ -335,6 +335,8 @@ just agent-tui-smoke
 ```
 
 Starts a real grid-renderer Kettle window in explicit `native` shell mode,
+using PowerShell on Windows and deterministic non-rc Bash on Unix/macOS. The
+recipe first builds and selects the current checkout's release binary, then
 drives a shell marker, optional Codex
 CLI and Claude Code CLI `--version` probes plus `codex exec --help` /
 `claude --print --help` output captures, a prompt-shaped `➜  ~` marker, a
@@ -368,13 +370,19 @@ $env:KETTLE_SMOKE_NVIM_DATA = "/home/me/.local/share/nvim"
 just agent-tui-wsl-smoke
 ```
 
-This launches `wsl.exe` with a deterministic non-rc bash, probes the WSL
-`PATH`, and addresses tmux through that distro. Before configured Neovim or
-AstroNvim runs, the helper copies its config plus the existing `lazy`/`site`
-plugin runtime and redirects
+This builds the current checkout's Windows release binary, launches `wsl.exe`
+with deterministic non-rc Bash, probes the augmented WSL `PATH`, and addresses
+tmux through that same environment. Before configured Neovim or AstroNvim
+runs, the helper creates an unpredictable, owner-private directory inside the
+target distro. It copies the config plus the existing `lazy`/`site` plugin
+runtime while dereferencing symlinks, then redirects `HOME`,
 `XDG_CONFIG_HOME`, `XDG_DATA_HOME`, `XDG_STATE_HOME`, and `XDG_CACHE_HOME` to
-one disposable directory. The original config and state are never written.
-Clean Neovim uses the same isolation; the directory is removed at the end.
+that snapshot; `XDG_RUNTIME_DIR` is isolated there as well. Clean Neovim uses
+the same isolation; the directory is removed at the end.
+
+This protects ordinary configuration and plugin writes that honor `HOME` or
+Neovim's XDG paths. It is state isolation, not an OS security sandbox: code
+that deliberately writes a hard-coded absolute path can still reach that path.
 Authenticated agent probes remain opt-in and use the target shell's existing
 credentials.
 
