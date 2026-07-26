@@ -3671,7 +3671,8 @@ mod conformance {
     fn recorder_output_round_trips_through_replay() {
         use crate::record::Recorder;
         use std::io::Read;
-        let path = std::env::temp_dir().join(format!("kettle-rr-{}.cast", std::process::id()));
+        let temp = crate::record::test_tempdir();
+        let path = temp.path().join("round-trip.cast");
         {
             let mut rec = Recorder::start(&path, 20, 4, false).expect("start recorder");
             rec.record_output(b"hello ");

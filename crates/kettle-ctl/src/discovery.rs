@@ -15,9 +15,8 @@
 //! The `kind` field is reserved so the future `kettle-muxd` daemon can register
 //! as `"muxd"` alongside `"gui"` without a format change.
 
-use std::io::{Read as _, Write as _};
+use std::io::Read as _;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde::{Deserialize, Serialize};
 #[cfg(windows)]
@@ -147,8 +146,6 @@ fn entry_path(dir: &std::path::Path, pid: u32) -> PathBuf {
     dir.join(format!("{pid}.json"))
 }
 
-static NEXT_TEMP: AtomicU64 = AtomicU64::new(1);
-
 fn registry_entry_is_valid(dir: &std::path::Path, file_pid: u32, entry: &RegistryEntry) -> bool {
     entry.v == 1
         && entry.pid == file_pid
@@ -275,58 +272,11 @@ pub fn register(dir: &std::path::Path, entry: &RegistryEntry) -> std::io::Result
     }
     let path = entry_path(dir, entry.pid);
     let json = serde_json::to_string(entry).map_err(std::io::Error::other)?;
-    let suffix = NEXT_TEMP.fetch_add(1, Ordering::Relaxed);
-    let tmp = dir.join(format!(
-        ".{}.json.tmp-{}-{suffix}",
-        entry.pid,
-        std::process::id()
-    ));
-    let mut options = std::fs::OpenOptions::new();
-    options.write(true).create_new(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt as _;
-        options.mode(0o600);
-    }
-    let write_result = (|| {
-        let mut file = options.open(&tmp)?;
-        file.write_all(json.as_bytes())?;
-        file.sync_all()?;
-        #[cfg(unix)]
-        std::fs::rename(&tmp, &path)?;
-        #[cfg(windows)]
-        {
-            use std::os::windows::ffi::OsStrExt as _;
-            use windows_sys::Win32::Storage::FileSystem::{
-                MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW,
-            };
-
-            let from: Vec<u16> = tmp.as_os_str().encode_wide().chain(Some(0)).collect();
-            let to: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
-            // SAFETY: both path buffers are NUL-terminated and remain alive for
-            // the call. The files share a directory, so replacement stays on
-            // one volume and is atomic from readers' perspective.
-            if unsafe {
-                MoveFileExW(
-                    from.as_ptr(),
-                    to.as_ptr(),
-                    MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
-                )
-            } == 0
-            {
-                return Err(std::io::Error::last_os_error());
-            }
-        }
-        #[cfg(unix)]
-        if let Ok(directory) = std::fs::File::open(dir) {
-            let _ = directory.sync_all();
-        }
-        Ok::<(), std::io::Error>(())
-    })();
-    if write_result.is_err() {
-        let _ = std::fs::remove_file(&tmp);
-    }
-    write_result?;
+    kettle_state::atomic_replace(
+        &path,
+        json.as_bytes(),
+        kettle_state::AtomicWriteOptions::PRIVATE,
+    )?;
     Ok(path)
 }
 
@@ -618,7 +568,7 @@ mod tests {
 
     #[test]
     fn register_list_unregister_round_trip() {
-        let dir = std::env::temp_dir().join(format!("kettle-ctl-reg-{}", std::process::id()));
+        let dir = crate::test_scratch_root().join(format!("kettle-ctl-reg-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let e1 = RegistryEntry {
             v: 1,
@@ -648,7 +598,8 @@ mod tests {
 
     #[test]
     fn list_live_excludes_dead_pids_and_prunes_them() {
-        let dir = std::env::temp_dir().join(format!("kettle-ctl-live-{}", std::process::id()));
+        let dir =
+            crate::test_scratch_root().join(format!("kettle-ctl-live-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         // A live entry (our own pid) and a dead one (u32::MAX-1 is far past any
         // real pid table on Windows and Linux alike — same convention as the
@@ -688,7 +639,8 @@ mod tests {
 
     #[test]
     fn list_skips_garbage_files() {
-        let dir = std::env::temp_dir().join(format!("kettle-ctl-garbage-{}", std::process::id()));
+        let dir =
+            crate::test_scratch_root().join(format!("kettle-ctl-garbage-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("bad.json"), "not json").unwrap();
@@ -702,7 +654,8 @@ mod tests {
     fn registry_entry_is_private_regular_and_exact_version() {
         use std::os::unix::fs::PermissionsExt as _;
 
-        let dir = std::env::temp_dir().join(format!("kettle-ctl-private-{}", std::process::id()));
+        let dir =
+            crate::test_scratch_root().join(format!("kettle-ctl-private-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let entry = RegistryEntry {
             v: 1,
@@ -732,8 +685,8 @@ mod tests {
     fn registry_rejects_symlink_leaf_and_untrusted_records() {
         use std::os::unix::fs::{PermissionsExt as _, symlink};
 
-        let root =
-            std::env::temp_dir().join(format!("kettle-ctl-registry-guards-{}", std::process::id()));
+        let root = crate::test_scratch_root()
+            .join(format!("kettle-ctl-registry-guards-{}", std::process::id()));
         let dir = root.join("ctl");
         let redirected = root.join("redirected");
         let _ = std::fs::remove_dir_all(&root);
@@ -817,7 +770,8 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn current_process_owns_directories_and_files_it_creates() {
-        let dir = std::env::temp_dir().join(format!("kettle-ctl-owner-{}", std::process::id()));
+        let dir =
+            crate::test_scratch_root().join(format!("kettle-ctl-owner-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         assert!(

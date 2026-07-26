@@ -1154,12 +1154,12 @@ fn session_screenshot_path(
 /// v2.38.2). `path` reaches here verbatim from the ctl `screenshot` method
 /// / the `kettle_screenshot` MCP tool built on it — both reachable by an
 /// agent whose instructions can be steered by prompt-injected terminal
-/// content — and used to go straight to the renderer's plain
-/// `ImageBuffer::save` with NO containment: no canonicalization, no
-/// symlink rejection, no restriction to a safe directory. Pointing `path`
-/// at an existing sensitive file (`~/.bashrc`, `~/.ssh/authorized_keys`, a
-/// Windows Startup-folder item) — or a symlink planted ahead of time —
-/// made this a silent arbitrary-file-overwrite primitive.
+/// content. Before the create-new renderer boundary existed, the destination
+/// went straight to `ImageBuffer::save` with no symlink rejection. Pointing
+/// `path` at an existing sensitive file (`~/.bashrc`,
+/// `~/.ssh/authorized_keys`, a Windows Startup-folder item) — or a symlink
+/// planted ahead of time — made this a silent arbitrary-file-overwrite
+/// primitive.
 ///
 /// `std::fs::symlink_metadata` (NOT `Path::exists`, which follows
 /// symlinks and would miss a dangling one) detects ANY existing entry at
@@ -3933,17 +3933,22 @@ impl App {
                     }
                 })
             {
-                let _ = std::fs::create_dir_all(&dir);
-                // Truncate any leftover content on
-                // startup so commands that arrived after a previous
-                // kettle crashed mid-process don't replay as bytes
-                // typed into the NEW kettle's focused pane. Subtle
-                // bug surfaced by audit. Failing to truncate is
-                // fine (file may not exist yet) — the watcher will
-                // still fire on next write.
-                let _ = std::fs::write(&path, "");
-                let _ = w.watch(&dir, notify::RecursiveMode::NonRecursive);
-                remote_watcher = Some(w);
+                // Create or harden the control file before registering its
+                // watcher, and truncate through that verified handle so a
+                // reparse/path swap cannot redirect startup cleanup. Commands
+                // left after a previous crash must not replay into this run.
+                match kettle_state::open_private_file(&path)
+                    .and_then(|file| file.set_len(0))
+                    .and_then(|()| {
+                        w.watch(&dir, notify::RecursiveMode::NonRecursive)
+                            .map_err(std::io::Error::other)
+                    }) {
+                    Ok(()) => remote_watcher = Some(w),
+                    Err(error) => log::warn!(
+                        "remote-command watcher disabled for {}: {error}",
+                        path.display()
+                    ),
+                }
             }
         }
 
@@ -11305,14 +11310,7 @@ impl App {
                             .unwrap_or(0);
                         let cache = cache_dir_from_env(|k| std::env::var(k).ok());
                         let path = session_log_path(secs, std::process::id(), cache.as_deref());
-                        if let Some(parent) = path.parent() {
-                            let _ = std::fs::create_dir_all(parent);
-                        }
-                        match std::fs::OpenOptions::new()
-                            .create(true)
-                            .append(true)
-                            .open(&path)
-                        {
+                        match kettle_state::open_private_file_append(&path) {
                             Ok(f) => {
                                 log::info!("toggle-session-log: writing to {}", path.display());
                                 // Propagate the config's
@@ -11357,9 +11355,6 @@ impl App {
                         .unwrap_or(0);
                     let cache = cache_dir_from_env(|k| std::env::var(k).ok());
                     let path = session_screenshot_path(secs, std::process::id(), cache.as_deref());
-                    if let Some(parent) = path.parent() {
-                        let _ = std::fs::create_dir_all(parent);
-                    }
                     let path_str = path.display().to_string();
                     let request = kettle_render::ScreenshotRequest {
                         out_path: path,
@@ -14139,10 +14134,10 @@ impl App {
             })
         };
         let path = match req.params.get("path").and_then(|v| v.as_str()) {
-            // I1 (audit v2.38.2): validate before this path is handed to the
-            // renderer's plain `ImageBuffer::save` — see
-            // `validate_screenshot_path`'s doc comment for the full threat
-            // model (an MCP-reachable arbitrary-file-overwrite primitive).
+            // I1 (audit v2.38.2): reject an existing destination up front for
+            // a prompt response; the renderer independently enforces
+            // create-new, owner-only publication after this metadata probe.
+            // See `validate_screenshot_path` for the full threat model.
             Some(s) => match validate_screenshot_path(s) {
                 Ok(p) => p,
                 Err(message) => {
@@ -14159,17 +14154,6 @@ impl App {
                 session_screenshot_path(secs, std::process::id(), cache.as_deref())
             }
         };
-        if let Some(parent) = path.parent()
-            && !parent.as_os_str().is_empty()
-            && let Err(e) = std::fs::create_dir_all(parent)
-        {
-            let _ = reply.send(Response::err(
-                req.id,
-                ec::INTERNAL,
-                format!("could not create screenshot directory: {e}"),
-            ));
-            return;
-        }
         let (done_tx, done_rx) = std::sync::mpsc::channel();
         let renderer = if target_seq == ws.seq {
             ws.renderer.as_mut()
@@ -14681,6 +14665,8 @@ impl App {
     }
 
     fn drain_remote_commands(&mut self, ws: &mut WindowState) {
+        use std::io::{Read as _, Seek as _};
+
         let Some(path) = self.startup.remote_file.clone() else {
             return;
         };
@@ -14692,21 +14678,47 @@ impl App {
         // `kettle --remote-send "$(some-cmd)"`); silently truncate
         // + warn rather than allocate the whole thing.
         const MAX_REMOTE_BYTES: u64 = 1 << 20; // 1 MB
-        let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+        let mut file = match kettle_state::open_existing_private_file(&path) {
+            Ok(file) => file,
+            Err(error) => {
+                log::warn!(
+                    "remote-command file at {} failed private verification: {error}",
+                    path.display()
+                );
+                return;
+            }
+        };
+        let size = file.metadata().map(|m| m.len()).unwrap_or(0);
         if size > MAX_REMOTE_BYTES {
             log::warn!(
                 "remote-command file at {} is {size} bytes (cap {MAX_REMOTE_BYTES}); \
                  truncating without processing",
                 path.display()
             );
-            let _ = std::fs::write(&path, "");
+            let _ = file.set_len(0);
             return;
         }
-        let text = match std::fs::read_to_string(&path) {
-            Ok(s) if !s.is_empty() => s,
-            _ => return,
-        };
-        let _ = std::fs::write(&path, "");
+        let mut text = String::with_capacity(usize::try_from(size).unwrap_or(0));
+        if file.seek(std::io::SeekFrom::Start(0)).is_err()
+            || file
+                .by_ref()
+                .take(MAX_REMOTE_BYTES + 1)
+                .read_to_string(&mut text)
+                .is_err()
+            || text.is_empty()
+        {
+            return;
+        }
+        if text.len() as u64 > MAX_REMOTE_BYTES {
+            log::warn!(
+                "remote-command file at {} grew past {MAX_REMOTE_BYTES} bytes while reading; \
+                 truncating without processing",
+                path.display()
+            );
+            let _ = file.set_len(0);
+            return;
+        }
+        let _ = file.set_len(0);
         for line in text.lines() {
             let line = line.trim_end_matches('\r');
             if line.is_empty() || line.starts_with('#') {

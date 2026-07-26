@@ -19,6 +19,35 @@ use std::io::{self, Read, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
+#[cfg(unix)]
+#[doc(hidden)]
+pub struct UnixStream {
+    stream: std::os::unix::net::UnixStream,
+    write_gate: std::sync::Arc<std::sync::Mutex<()>>,
+}
+
+#[cfg(unix)]
+impl UnixStream {
+    fn new(stream: std::os::unix::net::UnixStream) -> io::Result<Self> {
+        // Keep the shared open-file description nonblocking for its entire
+        // lifetime. Read/Write below restore blocking semantics in userspace;
+        // unlike a temporary fcntl toggle, a clone can never observe a
+        // transient mode change.
+        stream.set_nonblocking(true)?;
+        Ok(Self {
+            stream,
+            write_gate: std::sync::Arc::new(std::sync::Mutex::new(())),
+        })
+    }
+
+    fn try_clone(&self) -> io::Result<Self> {
+        Ok(Self {
+            stream: self.stream.try_clone()?,
+            write_gate: self.write_gate.clone(),
+        })
+    }
+}
+
 #[cfg(windows)]
 #[doc(hidden)]
 pub struct WindowsStream {
@@ -40,7 +69,7 @@ const CONNECT_BACKOFF: std::time::Duration = std::time::Duration::from_millis(20
 /// per-connection reader + writer threads.
 pub enum CtlStream {
     #[cfg(unix)]
-    Unix(std::os::unix::net::UnixStream),
+    Unix(UnixStream),
     #[cfg(windows)]
     Windows(WindowsStream),
 }
@@ -49,7 +78,7 @@ impl Read for CtlStream {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         match self {
             #[cfg(unix)]
-            CtlStream::Unix(s) => s.read(buf),
+            CtlStream::Unix(stream) => unix_blocking_read(&stream.stream, buf),
             #[cfg(windows)]
             CtlStream::Windows(stream) if stream.overlapped => windows_io::read(&stream.file, buf),
             #[cfg(windows)]
@@ -62,7 +91,13 @@ impl Write for CtlStream {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
         match self {
             #[cfg(unix)]
-            CtlStream::Unix(s) => s.write(buf),
+            CtlStream::Unix(stream) => {
+                let _gate = stream
+                    .write_gate
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                unix_blocking_write(&stream.stream, buf)
+            }
             #[cfg(windows)]
             CtlStream::Windows(stream) if stream.overlapped => {
                 windows_io::write(&stream.file, buf, None, None)
@@ -74,7 +109,10 @@ impl Write for CtlStream {
     fn flush(&mut self) -> io::Result<()> {
         match self {
             #[cfg(unix)]
-            CtlStream::Unix(s) => s.flush(),
+            CtlStream::Unix(stream) => {
+                let mut socket = &stream.stream;
+                socket.flush()
+            }
             #[cfg(windows)]
             CtlStream::Windows(stream) => stream.file.flush(),
         }
@@ -98,16 +136,12 @@ impl CtlStream {
     /// Write an entire protocol frame without allowing a blocked local peer to
     /// outlive the request's deadline. On Windows, client pipe handles use
     /// overlapped I/O so cancellation can target the exact pending operation.
-    /// On Unix, this scopes `O_NONBLOCK` to the fd for the duration of the
-    /// write (restored before returning). `MSG_DONTWAIT` alone is NOT enough:
-    /// macOS does not reliably honor it on AF_UNIX stream sockets, so without
-    /// the fd-level flag a `send()` into a full buffer with a stalled peer
-    /// blocks forever and never observes the deadline (a real macOS hang).
-    /// The known cost — `O_NONBLOCK` lives on the shared open file
-    /// description, so a sibling from [`try_clone`](CtlStream::try_clone) used
-    /// concurrently during this window could observe `WouldBlock` — is
-    /// tolerated because the client's request/response is exclusive; a
-    /// clone-safe rewrite is tracked in docs/AUDIT-DEFERRED.md.
+    /// Unix connections are nonblocking for their entire lifetime, with
+    /// blocking-compatible `Read`/`Write` wrappers for ordinary callers. A
+    /// connection-wide gate keeps complete bounded writes serialized across
+    /// [`try_clone`](CtlStream::try_clone) siblings without toggling flags on
+    /// their shared open-file description. This retains the fd-level
+    /// nonblocking behavior macOS AF_UNIX requires.
     pub(crate) fn write_all_until(
         &mut self,
         mut buf: &[u8],
@@ -115,10 +149,12 @@ impl CtlStream {
         cancelled: Option<&AtomicBool>,
     ) -> io::Result<()> {
         #[cfg(unix)]
-        let nonblocking = {
+        let write_gate = {
             let CtlStream::Unix(stream) = &*self;
-            UnixNonblockingGuard::new(stream)?
+            stream.write_gate.clone()
         };
+        #[cfg(unix)]
+        let write_guard = lock_write_gate_until(&write_gate, deadline, cancelled)?;
 
         let result = (|| {
             while !buf.is_empty() {
@@ -134,7 +170,7 @@ impl CtlStream {
                             // for its full length during the call.
                             let result = unsafe {
                                 libc::send(
-                                    stream.as_raw_fd(),
+                                    stream.stream.as_raw_fd(),
                                     buf.as_ptr().cast(),
                                     buf.len(),
                                     flags,
@@ -147,7 +183,7 @@ impl CtlStream {
                             match error.kind() {
                                 io::ErrorKind::Interrupted => continue,
                                 io::ErrorKind::WouldBlock => {
-                                    wait_unix_writable(stream, deadline, cancelled)?;
+                                    wait_unix_writable(&stream.stream, deadline, cancelled)?;
                                 }
                                 _ => return Err(error),
                             }
@@ -172,7 +208,7 @@ impl CtlStream {
         })();
 
         #[cfg(unix)]
-        nonblocking.restore()?;
+        drop(write_guard);
         result
     }
 
@@ -194,7 +230,7 @@ impl CtlStream {
                         .saturating_add(u128::from(remaining.subsec_nanos() > 0))
                         .min(i32::MAX as u128) as i32;
                     let mut poll_fd = libc::pollfd {
-                        fd: stream.as_raw_fd(),
+                        fd: stream.stream.as_raw_fd(),
                         events: libc::POLLIN,
                         revents: 0,
                     };
@@ -278,7 +314,7 @@ impl CtlStream {
                 // the stream fd remains alive for the duration of the call.
                 let rc = unsafe {
                     libc::getsockopt(
-                        stream.as_raw_fd(),
+                        stream.stream.as_raw_fd(),
                         libc::SOL_SOCKET,
                         libc::SO_PEERCRED,
                         std::ptr::addr_of_mut!(credentials).cast(),
@@ -303,7 +339,7 @@ impl CtlStream {
                 let mut gid: libc::gid_t = 0;
                 // SAFETY: uid/gid are valid output pointers and the stream fd
                 // remains alive for the call.
-                let rc = unsafe { libc::getpeereid(stream.as_raw_fd(), &mut uid, &mut gid) };
+                let rc = unsafe { libc::getpeereid(stream.stream.as_raw_fd(), &mut uid, &mut gid) };
                 if rc != 0 {
                     return Err(io::Error::last_os_error());
                 }
@@ -349,7 +385,7 @@ impl CtlStream {
                 // buffer outlives the call.
                 let n = unsafe {
                     libc::recv(
-                        s.as_raw_fd(),
+                        s.stream.as_raw_fd(),
                         probe.as_mut_ptr() as *mut libc::c_void,
                         1,
                         libc::MSG_PEEK | libc::MSG_DONTWAIT,
@@ -415,56 +451,95 @@ fn check_write_state(deadline: Instant, cancelled: Option<&AtomicBool>) -> io::R
     Ok(())
 }
 
-/// Scopes `O_NONBLOCK` onto a Unix stream's fd for the lifetime of a bounded
-/// write, restoring the descriptor's original status flags afterward. See
-/// [`CtlStream::write_all_until`] for why the fd flag — not just per-`send`
-/// `MSG_DONTWAIT` — is required for correct non-blocking behavior on macOS.
 #[cfg(unix)]
-struct UnixNonblockingGuard {
-    fd: std::os::fd::RawFd,
-    original_flags: libc::c_int,
-    restored: bool,
-}
+fn lock_write_gate_until<'a>(
+    gate: &'a std::sync::Mutex<()>,
+    deadline: Instant,
+    cancelled: Option<&AtomicBool>,
+) -> io::Result<std::sync::MutexGuard<'a, ()>> {
+    use std::sync::TryLockError;
 
-#[cfg(unix)]
-impl UnixNonblockingGuard {
-    fn new(stream: &std::os::unix::net::UnixStream) -> io::Result<Self> {
-        use std::os::fd::AsRawFd as _;
-
-        let fd = stream.as_raw_fd();
-        // SAFETY: the stream owns this valid fd for the guard's lifetime.
-        let original_flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
-        if original_flags < 0 {
-            return Err(io::Error::last_os_error());
+    loop {
+        check_write_state(deadline, cancelled)?;
+        match gate.try_lock() {
+            Ok(guard) => return Ok(guard),
+            Err(TryLockError::Poisoned(error)) => return Ok(error.into_inner()),
+            Err(TryLockError::WouldBlock) => {
+                // Concurrent complete-frame writes are rare. A short bounded
+                // sleep avoids a hot spin while preserving the caller's
+                // deadline and prompt cancellation semantics.
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                std::thread::sleep(remaining.min(Duration::from_millis(1)));
+            }
         }
-        // SAFETY: F_SETFL accepts the retrieved status flags plus O_NONBLOCK.
-        if unsafe { libc::fcntl(fd, libc::F_SETFL, original_flags | libc::O_NONBLOCK) } < 0 {
-            return Err(io::Error::last_os_error());
-        }
-        Ok(Self {
-            fd,
-            original_flags,
-            restored: false,
-        })
-    }
-
-    fn restore(mut self) -> io::Result<()> {
-        // SAFETY: the stream still owns the fd and these are its original flags.
-        if unsafe { libc::fcntl(self.fd, libc::F_SETFL, self.original_flags) } < 0 {
-            return Err(io::Error::last_os_error());
-        }
-        self.restored = true;
-        Ok(())
     }
 }
 
 #[cfg(unix)]
-impl Drop for UnixNonblockingGuard {
-    fn drop(&mut self) {
-        if !self.restored {
-            // Best-effort fallback during unwinding or an early return from
-            // `restore`; normal paths surface restoration errors explicitly.
-            unsafe { libc::fcntl(self.fd, libc::F_SETFL, self.original_flags) };
+fn unix_blocking_read(
+    stream: &std::os::unix::net::UnixStream,
+    buf: &mut [u8],
+) -> io::Result<usize> {
+    if buf.is_empty() {
+        return Ok(0);
+    }
+    loop {
+        let mut socket = stream;
+        match socket.read(buf) {
+            Ok(read) => return Ok(read),
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                wait_unix_event(stream, libc::POLLIN)?;
+            }
+            Err(error) => return Err(error),
+        }
+    }
+}
+
+#[cfg(unix)]
+fn unix_blocking_write(stream: &std::os::unix::net::UnixStream, buf: &[u8]) -> io::Result<usize> {
+    if buf.is_empty() {
+        return Ok(0);
+    }
+    loop {
+        let mut socket = stream;
+        match socket.write(buf) {
+            Ok(written) => return Ok(written),
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                wait_unix_event(stream, libc::POLLOUT)?;
+            }
+            Err(error) => return Err(error),
+        }
+    }
+}
+
+#[cfg(unix)]
+fn wait_unix_event(
+    stream: &std::os::unix::net::UnixStream,
+    events: libc::c_short,
+) -> io::Result<()> {
+    use std::os::fd::AsRawFd as _;
+
+    loop {
+        let mut poll_fd = libc::pollfd {
+            fd: stream.as_raw_fd(),
+            events,
+            revents: 0,
+        };
+        // SAFETY: `poll_fd` is a valid one-element array and the stream owns
+        // its fd for the duration of the call. A negative timeout blocks like
+        // the public std::io Read/Write contract these wrappers preserve.
+        let result = unsafe { libc::poll(&mut poll_fd, 1, -1) };
+        if result > 0 {
+            return Ok(());
+        }
+        if result == 0 {
+            continue;
+        }
+        let error = io::Error::last_os_error();
+        if error.kind() != io::ErrorKind::Interrupted {
+            return Err(error);
         }
     }
 }
@@ -864,7 +939,7 @@ mod imp {
 
         pub fn accept(&self) -> io::Result<CtlStream> {
             let (stream, _addr) = self.inner.accept()?;
-            Ok(CtlStream::Unix(stream))
+            Ok(CtlStream::Unix(UnixStream::new(stream)?))
         }
     }
 
@@ -886,7 +961,7 @@ mod imp {
         let mut last = None;
         for _ in 0..super::CONNECT_RETRIES {
             match UnixStream::connect(endpoint) {
-                Ok(s) => return Ok(CtlStream::Unix(s)),
+                Ok(s) => return Ok(CtlStream::Unix(super::UnixStream::new(s)?)),
                 Err(e) if e.kind() == io::ErrorKind::NotFound => return Err(e),
                 Err(e) => {
                     last = Some(e);
@@ -1126,39 +1201,164 @@ mod tests {
         assert_eq!(duration_millis_ceil(Duration::from_millis(1_500)), 1_500);
     }
 
-    /// `write_all_until` scopes `O_NONBLOCK` onto the fd for the duration of
-    /// the write (required on macOS, where `MSG_DONTWAIT` alone doesn't make
-    /// AF_UNIX sends non-blocking) and must RESTORE the descriptor's original
-    /// status flags before returning — leaving it set would leak the flag onto
-    /// any `try_clone`d sibling that shares the open file description. Pin that
-    /// a successful write ends with the fd's blocking-mode flag as it started.
+    /// The shared open-file description stays nonblocking for its full
+    /// lifetime, while the public Read API still blocks until data arrives.
+    /// This is the clone-safe macOS contract: no bounded write ever toggles a
+    /// flag underneath a sibling reader.
     #[cfg(unix)]
     #[test]
-    fn write_all_until_restores_fd_blocking_mode() {
+    fn unix_stream_mode_is_stable_while_clone_read_remains_blocking() {
         use std::os::fd::AsRawFd as _;
 
-        fn status_flags(stream: &std::os::unix::net::UnixStream) -> libc::c_int {
+        fn status_flags(stream: &UnixStream) -> libc::c_int {
             // SAFETY: the stream owns this valid fd for the duration of the call.
-            let flags = unsafe { libc::fcntl(stream.as_raw_fd(), libc::F_GETFL) };
+            let flags = unsafe { libc::fcntl(stream.stream.as_raw_fd(), libc::F_GETFL) };
             assert!(flags >= 0, "read socket status flags");
             flags
         }
 
-        let (stream, peer) = std::os::unix::net::UnixStream::pair().expect("socket pair");
-        let original = status_flags(&stream);
-        assert_eq!(original & libc::O_NONBLOCK, 0, "fixture starts blocking");
+        let (stream, mut peer) = std::os::unix::net::UnixStream::pair().expect("socket pair");
+        let stream = UnixStream::new(stream).expect("wrap stream");
+        assert_ne!(
+            status_flags(&stream) & libc::O_NONBLOCK,
+            0,
+            "wrapped connection remains nonblocking at the fd level"
+        );
 
         let mut ctl = CtlStream::Unix(stream);
+        let mut reader = ctl.try_clone().expect("clone");
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let reader_thread = std::thread::spawn(move || {
+            let mut reply = [0_u8; 5];
+            done_tx.send(reader.read_exact(&mut reply).map(|()| reply))
+        });
+        assert!(
+            done_rx.recv_timeout(Duration::from_millis(30)).is_err(),
+            "blocking-compatible reader returned before data was available"
+        );
+        peer.write_all(b"reply").expect("write response");
+        assert_eq!(
+            done_rx
+                .recv_timeout(Duration::from_secs(1))
+                .expect("reader result")
+                .expect("reader success"),
+            *b"reply"
+        );
+        reader_thread
+            .join()
+            .expect("reader thread")
+            .expect("send result");
+
         ctl.write_all_until(b"probe", Instant::now() + Duration::from_secs(1), None)
             .expect("write should succeed on a fresh, empty-buffer socket pair");
-
         let CtlStream::Unix(stream) = &ctl;
-        assert_eq!(
-            status_flags(stream),
-            original,
-            "write_all_until must never leave O_NONBLOCK set on the fd"
+        assert_ne!(
+            status_flags(stream) & libc::O_NONBLOCK,
+            0,
+            "bounded writes must not change the connection's stable mode"
         );
-        drop(peer);
+        let mut probe = [0_u8; 5];
+        peer.read_exact(&mut probe).expect("read probe");
+        assert_eq!(&probe, b"probe");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn bounded_writes_from_clones_are_serialized_as_complete_frames() {
+        use std::os::fd::AsRawFd as _;
+
+        let (stream, mut peer) = std::os::unix::net::UnixStream::pair().expect("socket pair");
+        let stream = UnixStream::new(stream).expect("wrap stream");
+        let bytes: libc::c_int = 4 * 1024;
+        // SAFETY: the stream owns this valid fd and `bytes` is a correctly
+        // sized SO_SNDBUF value. A small buffer forces each frame through
+        // multiple send/poll iterations, exposing interleaving without a gate.
+        assert_eq!(
+            unsafe {
+                libc::setsockopt(
+                    stream.stream.as_raw_fd(),
+                    libc::SOL_SOCKET,
+                    libc::SO_SNDBUF,
+                    std::ptr::addr_of!(bytes).cast(),
+                    std::mem::size_of_val(&bytes) as libc::socklen_t,
+                )
+            },
+            0
+        );
+        let first = CtlStream::Unix(stream);
+        let second = first.try_clone().expect("clone");
+        let frame_len = 256 * 1024;
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(3));
+        let run_writer =
+            move |mut stream: CtlStream, byte: u8, barrier: std::sync::Arc<std::sync::Barrier>| {
+                std::thread::spawn(move || {
+                    let frame = vec![byte; frame_len];
+                    barrier.wait();
+                    stream
+                        .write_all_until(&frame, Instant::now() + Duration::from_secs(5), None)
+                        .expect("write complete frame");
+                })
+            };
+        let writer_a = run_writer(first, b'a', barrier.clone());
+        let writer_b = run_writer(second, b'b', barrier.clone());
+        barrier.wait();
+        let mut received = vec![0_u8; frame_len * 2];
+        peer.read_exact(&mut received).expect("read both frames");
+        writer_a.join().expect("writer a");
+        writer_b.join().expect("writer b");
+
+        let split = received
+            .windows(2)
+            .position(|pair| pair[0] != pair[1])
+            .map_or(received.len(), |index| index + 1);
+        assert_eq!(split, frame_len, "exactly one complete frame comes first");
+        let a_then_b = received[..split].iter().all(|&byte| byte == b'a')
+            && received[split..].iter().all(|&byte| byte == b'b');
+        let b_then_a = received[..split].iter().all(|&byte| byte == b'b')
+            && received[split..].iter().all(|&byte| byte == b'a');
+        assert!(
+            a_then_b || b_then_a,
+            "clone writers must not interleave frame bytes"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn bounded_write_waiting_for_clone_gate_observes_deadline_and_cancellation() {
+        let (stream, _peer) = std::os::unix::net::UnixStream::pair().expect("socket pair");
+        let stream = UnixStream::new(stream).expect("wrap stream");
+        let gate = stream.write_gate.clone();
+        let _held = gate.lock().expect("hold clone writer gate");
+        let mut ctl = CtlStream::Unix(stream);
+
+        let started = Instant::now();
+        let error = ctl
+            .write_all_until(b"frame", started + Duration::from_millis(30), None)
+            .expect_err("gate wait must observe deadline");
+        assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+        assert!(
+            started.elapsed() < Duration::from_millis(500),
+            "gate wait outlived its deadline: {:?}",
+            started.elapsed()
+        );
+
+        let cancelled = std::sync::Arc::new(AtomicBool::new(false));
+        let setter = cancelled.clone();
+        let canceller = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(30));
+            setter.store(true, Ordering::Release);
+        });
+        let started = Instant::now();
+        let error = ctl
+            .write_all_until(b"frame", started + Duration::from_secs(5), Some(&cancelled))
+            .expect_err("gate wait must observe cancellation");
+        assert_eq!(error.kind(), io::ErrorKind::Interrupted);
+        assert!(
+            started.elapsed() < Duration::from_millis(500),
+            "gate wait ignored cancellation: {:?}",
+            started.elapsed()
+        );
+        canceller.join().expect("canceller thread");
     }
 
     fn test_endpoint(tag: &str) -> String {
@@ -1373,7 +1573,7 @@ mod tests {
                 // correctly sized, readable SO_SNDBUF value.
                 let result = unsafe {
                     libc::setsockopt(
-                        socket.as_raw_fd(),
+                        socket.stream.as_raw_fd(),
                         libc::SOL_SOCKET,
                         libc::SO_SNDBUF,
                         std::ptr::addr_of!(bytes).cast(),

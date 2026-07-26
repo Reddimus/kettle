@@ -433,7 +433,7 @@ mod tests {
     }
 
     fn test_paths(label: &str) -> (PathBuf, ActivationPaths) {
-        let dir = std::env::temp_dir().join(format!(
+        let dir = crate::test_scratch_root().join(format!(
             "kettle-activation-test-{}-{label}",
             std::process::id()
         ));

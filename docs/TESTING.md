@@ -92,8 +92,38 @@ discipline here.
 - **kettle-state**: creates and replaces private state without leaving staging
   files, preserves an existing destination's permissions, rejects symlink
   destinations, and proves exclusive advisory locks block competing handles
-  and release on drop. Configuration, session, and updater tests separately pin
-  each caller's validation and recovery policy on top of these primitives.
+  and release on drop. Native Unix tests assert mode `0600`; native Windows
+  tests require an effective-user owner and exactly one zero-flag full-access
+  ACE for that user under `SE_DACL_PROTECTED`. Policy tests reject a
+  group-valued or different owner as provenance even when a DACL looks exact.
+  Reparse leaf/parent tests use symbolic links when
+  permitted and an unprivileged directory-junction fallback otherwise. Private
+  replacement publishes the secured staged file itself, leaving no ACL
+  hardening step after private publication. Native tests also prove
+  failed-create cleanup deletes the created object through its handle and that
+  Win32 trailing-dot aliases and NTFS alternate-data-stream leaf names are
+  rejected without changing the intended file.
+  Windows test scratch files live under the current profile rather than the
+  process temp directory because a machine policy may intentionally grant
+  sandbox principals delete-child access there; the production policy rejects
+  such an ancestor instead of weakening its trust requirements.
+  Configuration, session, diagnostics, screenshots, pasted images, recording,
+  remote-command, and updater callers fail closed when the shared primitive
+  fails.
+
+- **kettle-ctl transport**: the split-handle loopback runs on every native CI
+  OS. Unix additionally asserts the shared open-file description remains
+  stably nonblocking while a cloned reader retains blocking semantics; stalled
+  peers prove deadline and cancellation exits. These regressions must run on a
+  real macOS runner because AF_UNIX full-buffer behavior cannot be claimed from
+  Linux alone.
+
+- **kettle-update archive boundary**: Linux tests hash and extract one bounded
+  in-memory archive buffer, overwrite the former download path between those
+  operations, and prove only verified bytes reach staging. Hash mismatch,
+  entry count, unpacked bytes, path, link/special/sparse-file, mode, and
+  package-manifest failures remain fail-closed. Windows separately exercises
+  its mandatory archive range lock.
 
 - **kettle-core VT conformance** (150+ tests): drives the *real*
   vte + alacritty_terminal path used by the PTY reader and asserts

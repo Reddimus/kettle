@@ -2,14 +2,16 @@
 use std::fs;
 #[cfg(any(windows, target_os = "linux"))]
 use std::fs::File;
-#[cfg(any(windows, target_os = "linux"))]
+#[cfg(windows)]
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
 #[cfg(any(windows, target_os = "linux"))]
 use std::fs::OpenOptions;
 #[cfg(any(windows, target_os = "linux"))]
-use std::io::{Read, Seek};
+use std::io::Read;
+#[cfg(windows)]
+use std::io::Seek;
 #[cfg(any(windows, target_os = "linux"))]
 use std::path::Component;
 #[cfg(any(windows, target_os = "linux"))]
@@ -598,36 +600,38 @@ fn install_update_into(
         .ok_or(UpdateError::UpdateLocked)?;
     recover_transaction(&install.prefix)?;
 
+    #[cfg(windows)]
     let mut archive = tempfile::Builder::new()
         .prefix("kettle-update-download-")
         .tempfile()?;
-    // Hold an exclusive lock on the archive for its entire lifetime, from
-    // before any bytes are written until after extraction has read them.
-    // `NamedTempFile` does not request exclusive sharing (Windows keeps the
-    // default FILE_SHARE_READ|FILE_SHARE_WRITE; Unix leaves it a normal 0600
-    // file), so a same-user process that already has the path open could
-    // otherwise overwrite bytes in place while we still hold our handle. On
-    // Windows this lock is a mandatory, kernel-enforced byte-range lock that
-    // fails any other process's read/write touching it, lock-aware or not;
-    // on Unix it is advisory only, so it does not stop a hostile writer, but
-    // the same-handle discipline below still closes the delete-and-recreate
-    // variant of this race there.
-    fs4::FileExt::lock(archive.as_file())?;
-    client.download_to(update, archive.as_file_mut())?;
-    archive.as_file_mut().flush()?;
-    archive.as_file().sync_all()?;
-    // Verify and extract from the very same open handle rather than
-    // re-resolving `archive.path()` a second time for each step. Re-opening
-    // by path here would let another same-user process substitute a
-    // different file (or a delete-and-recreate at the same name) in the gap
-    // between the two opens, defeating the SHA-256/signature verification
-    // that is this crate's entire security model.
+    // Windows keeps one mandatory, kernel-enforced byte-range lock from before
+    // download until extraction completes. Linux does not create a writable
+    // archive inode at all; its single bounded buffer is constructed below.
+    #[cfg(windows)]
+    {
+        fs4::FileExt::lock(archive.as_file())?;
+        client.download_to(update, archive.as_file_mut())?;
+        archive.as_file_mut().flush()?;
+        archive.as_file().sync_all()?;
+    }
+    // Verify and extract the exact same bytes: a mandatory locked handle on
+    // Windows, or one signed-size-bounded in-memory buffer on Linux.
+    #[cfg(windows)]
     verify_sha256(archive.as_file_mut(), &asset.sha256)?;
+    #[cfg(target_os = "linux")]
+    let archive = {
+        let bytes = client.download_bytes(update)?;
+        verify_sha256_bytes(&bytes, &asset.sha256)?;
+        bytes
+    };
 
     let staging = tempfile::Builder::new()
         .prefix(".kettle-update-stage-")
         .tempdir_in(&install.prefix)?;
+    #[cfg(windows)]
     extract_archive(archive.as_file_mut(), staging.path())?;
+    #[cfg(target_os = "linux")]
+    extract_archive(&archive, staging.path())?;
 
     #[cfg(windows)]
     let package_root = staging.path().to_path_buf();
@@ -1158,13 +1162,9 @@ fn sha256_file(path: &Path) -> Result<String, UpdateError> {
     Ok(hex::encode(hash.finalize()))
 }
 
-/// Hashes the already-open `file` handle from its start, rather than
-/// re-opening its path. Re-opening by path between this check and extraction
-/// would let another same-user process substitute the bytes in between (the
-/// downloaded archive's `NamedTempFile` is not opened with exclusive
-/// sharing), so every caller must pass the exact handle it later extracts
-/// from instead of resolving the path again.
-#[cfg(any(windows, target_os = "linux"))]
+/// Hashes the mandatory-locked Windows archive handle from its start. The
+/// caller extracts from this same still-locked handle.
+#[cfg(windows)]
 fn verify_sha256(file: &mut File, expected: &str) -> Result<(), UpdateError> {
     file.rewind()?;
     let mut hash = Sha256::new();
@@ -1177,6 +1177,14 @@ fn verify_sha256(file: &mut File, expected: &str) -> Result<(), UpdateError> {
         hash.update(&buffer[..count]);
     }
     if hex::encode(hash.finalize()) != expected {
+        return Err(UpdateError::HashMismatch);
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn verify_sha256_bytes(bytes: &[u8], expected: &str) -> Result<(), UpdateError> {
+    if hex::encode(Sha256::digest(bytes)) != expected {
         return Err(UpdateError::HashMismatch);
     }
     Ok(())
@@ -1374,14 +1382,12 @@ fn extract_archive(archive: &mut File, destination: &Path) -> Result<(), UpdateE
     Ok(())
 }
 
-/// Extracts from the already-open `archive` handle (the same one
-/// [`verify_sha256`] hashed) instead of re-opening its path, so nothing can
-/// substitute the archive's bytes between verification and extraction. See
-/// [`verify_sha256`] for the TOCTOU this closes.
+/// Extracts from the same bounded in-memory bytes hashed by
+/// [`verify_sha256_bytes`]. No writable archive inode exists between
+/// verification and extraction.
 #[cfg(target_os = "linux")]
-fn extract_archive(archive: &mut File, destination: &Path) -> Result<(), UpdateError> {
-    archive.rewind()?;
-    let decoder = flate2::read::GzDecoder::new(&mut *archive);
+fn extract_archive(archive: &[u8], destination: &Path) -> Result<(), UpdateError> {
+    let decoder = flate2::read::GzDecoder::new(std::io::Cursor::new(archive));
     let mut tar = tar::Archive::new(decoder);
     let mut count = 0_usize;
     let mut total = 0_u64;
@@ -2784,6 +2790,22 @@ fn system_tool_path_in(dirs: &[&str], name: &str) -> Option<PathBuf> {
 mod tests {
     use super::*;
 
+    #[cfg(windows)]
+    fn test_tempdir() -> tempfile::TempDir {
+        let base = std::env::var_os("LOCALAPPDATA")
+            .or_else(|| std::env::var_os("USERPROFILE"))
+            .expect("Windows tests require LOCALAPPDATA or USERPROFILE");
+        tempfile::Builder::new()
+            .prefix("kettle-update-test-")
+            .tempdir_in(base)
+            .expect("create test directory in the user-private profile")
+    }
+
+    #[cfg(not(windows))]
+    fn test_tempdir() -> tempfile::TempDir {
+        tempfile::tempdir().expect("create test directory")
+    }
+
     #[cfg(any(windows, target_os = "linux"))]
     fn fake_update() -> AvailableUpdate {
         AvailableUpdate {
@@ -2819,7 +2841,7 @@ mod tests {
     #[cfg(any(windows, target_os = "linux"))]
     #[test]
     fn managed_install_accepts_stable_and_explains_local_development_channels() {
-        let root = tempfile::tempdir().unwrap();
+        let root = test_tempdir();
         #[cfg(windows)]
         let (prefix, executable, marker_path) = {
             let prefix = root.path().join("kettle");
@@ -2948,7 +2970,7 @@ mod tests {
     #[cfg(any(windows, target_os = "linux"))]
     #[test]
     fn package_manifest_requires_exact_hash_size_mode_and_file_set() {
-        let root = tempfile::tempdir().unwrap();
+        let root = test_tempdir();
         fs::create_dir(root.path().join("shell-integration")).unwrap();
         fs::write(root.path().join("kettle.exe"), b"binary").unwrap();
         fs::write(root.path().join("shell-integration/kettle.ps1"), b"prompt").unwrap();
@@ -2974,7 +2996,7 @@ mod tests {
     #[cfg(any(windows, target_os = "linux"))]
     #[test]
     fn transaction_rolls_back_replaced_and_created_files() {
-        let root = tempfile::tempdir().unwrap();
+        let root = test_tempdir();
         fs::write(root.path().join("existing"), b"old").unwrap();
         let mut tx = Transaction::begin(root.path(), "99.0.0").unwrap();
         #[cfg(unix)]
@@ -2998,7 +3020,7 @@ mod tests {
     #[cfg(any(windows, target_os = "linux"))]
     #[test]
     fn interrupted_transaction_recovers_from_journal() {
-        let root = tempfile::tempdir().unwrap();
+        let root = test_tempdir();
         fs::write(root.path().join("value"), b"before").unwrap();
         {
             let mut tx = Transaction::begin(root.path(), "99.0.0").unwrap();
@@ -3013,7 +3035,7 @@ mod tests {
     #[cfg(any(windows, target_os = "linux"))]
     #[test]
     fn committed_transaction_recovery_keeps_new_files_and_only_cleans_state() {
-        let root = tempfile::tempdir().unwrap();
+        let root = test_tempdir();
         fs::write(root.path().join("value"), b"before").unwrap();
         {
             let mut tx = Transaction::begin(root.path(), "99.0.0").unwrap();
@@ -3038,7 +3060,7 @@ mod tests {
     #[cfg(any(windows, target_os = "linux"))]
     #[test]
     fn recovery_resumes_partially_completed_rollback_idempotently() {
-        let root = tempfile::tempdir().unwrap();
+        let root = test_tempdir();
         fs::write(root.path().join("one"), b"old-one").unwrap();
         fs::write(root.path().join("two"), b"old-two").unwrap();
         {
@@ -3062,7 +3084,7 @@ mod tests {
     #[cfg(any(windows, target_os = "linux"))]
     #[test]
     fn corrupted_backup_stops_recovery_without_deleting_evidence() {
-        let root = tempfile::tempdir().unwrap();
+        let root = test_tempdir();
         fs::write(root.path().join("value"), b"before").unwrap();
         let backup;
         {
@@ -3083,7 +3105,7 @@ mod tests {
     #[cfg(any(windows, target_os = "linux"))]
     #[test]
     fn transaction_rejects_duplicate_destinations() {
-        let root = tempfile::tempdir().unwrap();
+        let root = test_tempdir();
         let mut tx = Transaction::begin(root.path(), "99.0.0").unwrap();
         tx.install_bytes(Path::new("README.md"), b"first", None)
             .unwrap();
@@ -3098,7 +3120,7 @@ mod tests {
     #[test]
     fn transaction_refuses_symbolic_link_destinations() {
         use std::os::unix::fs::symlink;
-        let root = tempfile::tempdir().unwrap();
+        let root = test_tempdir();
         let outside = root.path().join("outside");
         fs::write(&outside, b"outside").unwrap();
         symlink(&outside, root.path().join("value")).unwrap();
@@ -3116,8 +3138,8 @@ mod tests {
     fn transaction_refuses_symbolic_link_ancestors() {
         use std::os::unix::fs::symlink;
 
-        let root = tempfile::tempdir().unwrap();
-        let outside = tempfile::tempdir().unwrap();
+        let root = test_tempdir();
+        let outside = test_tempdir();
         symlink(outside.path(), root.path().join("share")).unwrap();
         let mut tx = Transaction::begin(root.path(), "99.0.0").unwrap();
 
@@ -3140,8 +3162,8 @@ mod tests {
     fn recovery_refuses_a_replaced_symbolic_link_ancestor() {
         use std::os::unix::fs::symlink;
 
-        let root = tempfile::tempdir().unwrap();
-        let outside = tempfile::tempdir().unwrap();
+        let root = test_tempdir();
+        let outside = test_tempdir();
         fs::create_dir_all(root.path().join("share/kettle")).unwrap();
         fs::write(root.path().join("share/kettle/value"), b"before").unwrap();
         {
@@ -3168,7 +3190,7 @@ mod tests {
     #[cfg(any(windows, target_os = "linux"))]
     #[test]
     fn legacy_journal_recovery_removes_journal_before_backup_cleanup() {
-        let root = tempfile::tempdir().unwrap();
+        let root = test_tempdir();
         let backup_name = ".kettle-update-backup-legacy";
         let backup = root.path().join(backup_name);
         fs::create_dir(&backup).unwrap();
@@ -3198,7 +3220,7 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn staged_windows_release_replaces_binary_and_support_files_atomically() {
-        let root = tempfile::tempdir().unwrap();
+        let root = test_tempdir();
         let prefix = root.path().join("install");
         let stage = root.path().join("stage");
         fs::create_dir_all(stage.join("shell-integration")).unwrap();
@@ -3237,7 +3259,7 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn staged_linux_release_populates_installer_layout() {
-        let root = tempfile::tempdir().unwrap();
+        let root = test_tempdir();
         let prefix = root.path().join("install with \\ % $ quote\" and ` value");
         let stage = root.path().join("stage/kettle");
         fs::create_dir_all(stage.join("packaging/linux")).unwrap();
@@ -3332,7 +3354,7 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn desktop_template_rewrite_requires_each_owned_key_exactly_once() {
-        let root = tempfile::tempdir().unwrap();
+        let root = test_tempdir();
         let template = root.path().join("kettle.desktop");
         let prefix = root.path().join("prefix");
         for body in [
@@ -3355,7 +3377,7 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn system_tool_path_in_only_resolves_allowlisted_directories_in_order() {
-        let root = tempfile::tempdir().unwrap();
+        let root = test_tempdir();
         let off_list = root.path().join("off-list");
         let first = root.path().join("first");
         let second = root.path().join("second");
@@ -3438,13 +3460,13 @@ mod tests {
             encoder.finish().unwrap();
         }
 
-        let root = tempfile::tempdir().unwrap();
+        let root = test_tempdir();
         let archive = root.path().join("release.tar.gz");
         let destination = root.path().join("stage");
         fs::create_dir(&destination).unwrap();
         write_archive(&archive, 0o755);
-        let mut archive_file = fs::File::open(&archive).unwrap();
-        extract_archive(&mut archive_file, &destination).unwrap();
+        let archive_bytes = fs::read(&archive).unwrap();
+        extract_archive(&archive_bytes, &destination).unwrap();
         assert_eq!(
             fs::metadata(destination.join("kettle/install.sh"))
                 .unwrap()
@@ -3458,8 +3480,8 @@ mod tests {
         let special_destination = root.path().join("special-stage");
         fs::create_dir(&special_destination).unwrap();
         write_archive(&special_archive, 0o4755);
-        let mut special_archive_file = fs::File::open(&special_archive).unwrap();
-        let error = extract_archive(&mut special_archive_file, &special_destination).unwrap_err();
+        let special_archive_bytes = fs::read(&special_archive).unwrap();
+        let error = extract_archive(&special_archive_bytes, &special_destination).unwrap_err();
         assert!(error.to_string().contains("special permission bits"));
         assert!(!special_destination.join("kettle/install.sh").exists());
     }
@@ -3467,7 +3489,7 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn linux_archive_extraction_rejects_pax_sparse_metadata() {
-        let root = tempfile::tempdir().unwrap();
+        let root = test_tempdir();
         let archive_path = root.path().join("sparse.tar.gz");
         let encoder = flate2::write::GzEncoder::new(
             fs::File::create(&archive_path).unwrap(),
@@ -3490,8 +3512,8 @@ mod tests {
         let destination = root.path().join("stage");
         fs::create_dir(&destination).unwrap();
 
-        let mut archive_file = fs::File::open(&archive_path).unwrap();
-        let error = extract_archive(&mut archive_file, &destination).unwrap_err();
+        let archive_bytes = fs::read(&archive_path).unwrap();
+        let error = extract_archive(&archive_bytes, &destination).unwrap_err();
 
         assert!(error.to_string().contains("sparse files are forbidden"));
         assert!(!destination.join("kettle/sparse").exists());
@@ -3515,28 +3537,22 @@ mod tests {
         archive.into_inner().unwrap().finish().unwrap();
     }
 
-    /// Regression test for the archive TOCTOU: `verify_sha256` and
-    /// `extract_archive` must operate on the exact handle the caller passes
-    /// in rather than re-resolving the caller's path, so a same-user process
-    /// that swaps the file at that path between the hash check and
-    /// extraction cannot smuggle unverified bytes into the staging
-    /// directory.
+    /// Regression test for the archive TOCTOU: verification and extraction
+    /// consume one immutable-in-practice in-memory buffer, so even an in-place
+    /// overwrite of the downloaded archive path cannot change staged bytes.
     #[cfg(target_os = "linux")]
     #[test]
-    fn linux_extract_archive_reads_the_verified_handle_not_a_reopened_path() {
-        let root = tempfile::tempdir().unwrap();
+    fn linux_extract_archive_reads_the_verified_memory_buffer() {
+        let root = test_tempdir();
         let path = root.path().join("release.tar.gz");
         write_test_tar_gz(&path, b"original-bytes");
         let expected_hash = sha256_file(&path).unwrap();
 
-        let mut file = fs::File::open(&path).unwrap();
-        verify_sha256(&mut file, &expected_hash).unwrap();
+        let archive = fs::read(&path).unwrap();
+        verify_sha256_bytes(&archive, &expected_hash).unwrap();
 
-        // Simulate an attacker replacing the archive at the same path after
-        // the hash check succeeds but before extraction runs. On Linux this
-        // delete-and-recreate is possible even while our handle stays open;
-        // that open handle keeps referencing the original, already-verified
-        // inode regardless.
+        // Simulate a same-user writer replacing the path after verification.
+        // Extraction has no file handle to race: it only sees `archive`.
         let malicious = root.path().join("malicious.tar.gz");
         write_test_tar_gz(&malicious, b"attacker-bytes");
         fs::rename(&malicious, &path).unwrap();
@@ -3544,13 +3560,20 @@ mod tests {
 
         let destination = root.path().join("stage");
         fs::create_dir(&destination).unwrap();
-        extract_archive(&mut file, &destination).unwrap();
+        extract_archive(&archive, &destination).unwrap();
 
         assert_eq!(
             fs::read(destination.join("kettle/payload")).unwrap(),
             b"original-bytes",
-            "extraction must read the handle verify_sha256 hashed, not whatever now lives at the archive's path"
+            "extraction must read the bytes verify_sha256_bytes hashed"
         );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_memory_buffer_hash_mismatch_fails_closed() {
+        let error = verify_sha256_bytes(b"downloaded", &"00".repeat(32)).unwrap_err();
+        assert!(matches!(error, UpdateError::HashMismatch));
     }
 
     /// Regression test for the Windows half of the same archive TOCTOU: the
@@ -3561,7 +3584,7 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn windows_archive_lock_blocks_a_concurrent_in_place_overwrite() {
-        let root = tempfile::tempdir().unwrap();
+        let root = test_tempdir();
         let archive = tempfile::Builder::new()
             .prefix("kettle-update-download-")
             .tempfile_in(root.path())
@@ -3597,7 +3620,7 @@ mod tests {
 
     #[test]
     fn atomic_state_write_replaces_existing_file() {
-        let temp = tempfile::tempdir().unwrap();
+        let temp = test_tempdir();
         let path = temp.path().join("state.json");
         fs::write(&path, b"old").unwrap();
 
@@ -3609,7 +3632,7 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn windows_run_lock_and_target_handle_gate_replacement() {
-        let root = tempfile::tempdir().unwrap();
+        let root = test_tempdir();
         let child_executable = root.path().join("kettle.exe");
         fs::copy(std::env::current_exe().unwrap(), &child_executable).unwrap();
         let blocked_target_path = root.path().join("kettle.com");
@@ -3691,21 +3714,16 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn windows_stale_cleanup_does_not_race_active_update_preparation() {
-        let root = tempfile::tempdir().unwrap();
+        let root = test_tempdir();
         let stage = root.path().join(".kettle-update-stage-in-progress");
         let helper = root.path().join(".kettle-update-helper-in-progress.exe");
         fs::create_dir(&stage).unwrap();
         fs::write(stage.join("payload"), b"still preparing").unwrap();
         fs::write(&helper, b"helper").unwrap();
 
-        let update_lock = OpenOptions::new()
-            .create(true)
-            .truncate(false)
-            .read(true)
-            .write(true)
-            .open(root.path().join(".kettle-update.lock"))
-            .unwrap();
-        fs4::FileExt::lock(&update_lock).unwrap();
+        let update_lock =
+            kettle_state::ExclusiveFileLock::acquire(&root.path().join(".kettle-update.lock"))
+                .unwrap();
         assert!(!cleanup_stale_windows_update_files_if_idle(root.path()).unwrap());
         assert!(stage.is_dir());
         assert!(helper.is_file());
@@ -3747,7 +3765,7 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn windows_invalid_and_exhausted_pending_updates_are_quarantined() {
-        let invalid = tempfile::tempdir().unwrap();
+        let invalid = test_tempdir();
         fs::write(invalid.path().join(PENDING_FILE), b"not json").unwrap();
         let PendingStartInspection::Failed {
             fingerprint,
@@ -3767,7 +3785,7 @@ mod tests {
                 .starts_with(FAILED_PENDING_PREFIX)
         }));
 
-        let exhausted = tempfile::tempdir().unwrap();
+        let exhausted = test_tempdir();
         seed_windows_pending(exhausted.path(), MAX_PENDING_ATTEMPTS);
         let PendingStartInspection::Failed {
             fingerprint,
@@ -3784,7 +3802,7 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn windows_pending_attempt_is_checkpointed_before_fallible_work() {
-        let root = tempfile::tempdir().unwrap();
+        let root = test_tempdir();
         let pending = seed_windows_pending(root.path(), 1);
         let helper = root.path().join(&pending.helper).canonicalize().unwrap();
 
@@ -3806,7 +3824,7 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn pending_helper_gives_up_on_a_stuck_running_lock_instead_of_hanging_forever() {
-        let root = tempfile::tempdir().unwrap();
+        let root = test_tempdir();
         let pending = seed_windows_pending(root.path(), 0);
         let helper = root.path().join(&pending.helper).canonicalize().unwrap();
 
@@ -3841,7 +3859,7 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn windows_quarantine_failure_never_blocks_startup_recovery() {
-        let root = tempfile::tempdir().unwrap();
+        let root = test_tempdir();
         fs::write(root.path().join(PENDING_FILE), b"not json").unwrap();
         fs::create_dir(root.path().join(".kettle-update.lock")).unwrap();
         let fingerprint = pending_file_fingerprint(&root.path().join(PENDING_FILE)).unwrap();
@@ -3859,7 +3877,7 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn windows_failure_checkpoint_precedes_a_later_helper_success() {
-        let root = tempfile::tempdir().unwrap();
+        let root = test_tempdir();
         seed_windows_pending(root.path(), 1);
         let running_path = root.path().join(RUNNING_LOCK_FILE);
         let failure_actor = kettle_state::ExclusiveFileLock::acquire(&running_path).unwrap();

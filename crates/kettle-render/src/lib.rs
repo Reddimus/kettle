@@ -1789,13 +1789,11 @@ fn finish_live_screenshot(job: ScreenshotJob) -> Result<std::path::PathBuf, Stri
     Ok(prepared.request.out_path)
 }
 
-/// Opens `path` for writing with owner-only permissions where the platform
-/// supports it (Unix `0o600`), creating it if absent and truncating any
-/// existing content. Used for screenshot PNGs, which — like recordings —
-/// may capture private on-screen content; see the call site in
-/// `finish_live_screenshot`.
+/// Creates `path` with owner-only permissions (`0600` on Unix, a protected
+/// current-user DACL on Windows), refusing any existing path or reparse-point
+/// parent. Used for screenshot PNGs, which — like recordings — may capture
+/// private on-screen content; see the call site in `finish_live_screenshot`.
 fn create_private_screenshot_file(path: &std::path::Path) -> std::io::Result<std::fs::File> {
-    let mut options = std::fs::OpenOptions::new();
     // `create_new` (O_CREAT | O_EXCL, CREATE_NEW on Windows) is the security
     // boundary here, not the earlier `validate_screenshot_path` pre-check in
     // the ctl handler. That pre-check runs synchronously when the request
@@ -1805,15 +1803,9 @@ fn create_private_screenshot_file(path: &std::path::Path) -> std::io::Result<std
     // regular file, or a symlink planted into the window to redirect the write
     // at, say, `~/.ssh/authorized_keys`) already exists at `path`, the open
     // fails with `AlreadyExists` rather than following it and truncating the
-    // target. A brand-new inode also means the `mode(0o600)` below is the
-    // file's exact permission with no pre-existing bits to re-harden.
-    options.write(true).create_new(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt as _;
-        options.mode(0o600);
-    }
-    options.open(path)
+    // target. The shared helper also applies the private descriptor in that
+    // same create operation, before any screenshot bytes can be written.
+    kettle_state::create_private_file_new(path)
 }
 
 fn crop_screenshot(
@@ -1867,6 +1859,22 @@ fn crop_screenshot(
 mod live_screenshot_tests {
     use super::{create_private_screenshot_file, crop_screenshot};
 
+    #[cfg(windows)]
+    fn test_tempdir() -> tempfile::TempDir {
+        let base = std::env::var_os("LOCALAPPDATA")
+            .or_else(|| std::env::var_os("USERPROFILE"))
+            .expect("Windows tests require LOCALAPPDATA or USERPROFILE");
+        tempfile::Builder::new()
+            .prefix("kettle-render-test-")
+            .tempdir_in(base)
+            .expect("create test directory in the user-private profile")
+    }
+
+    #[cfg(not(windows))]
+    fn test_tempdir() -> tempfile::TempDir {
+        tempfile::tempdir().expect("tempdir")
+    }
+
     fn pixels(width: u32, height: u32) -> Vec<u8> {
         (0..width * height)
             .flat_map(|pixel| [pixel as u8, 0, 0, 255])
@@ -1915,7 +1923,7 @@ mod live_screenshot_tests {
     #[test]
     fn private_screenshot_file_is_created_owner_only() {
         use std::os::unix::fs::PermissionsExt as _;
-        let dir = tempfile::tempdir().expect("tempdir");
+        let dir = test_tempdir();
         let path = dir.path().join("shot.png");
         let file = create_private_screenshot_file(&path).expect("open");
         let mode = file.metadata().expect("metadata").permissions().mode() & 0o777;
@@ -1930,7 +1938,7 @@ mod live_screenshot_tests {
     /// (the ctl-side `validate_screenshot_path` pre-check is only a fast-fail).
     #[test]
     fn private_screenshot_file_refuses_a_pre_existing_path() {
-        let dir = tempfile::tempdir().expect("tempdir");
+        let dir = test_tempdir();
         let path = dir.path().join("shot.png");
         std::fs::write(&path, b"stale").expect("seed file");
         let err = create_private_screenshot_file(&path).expect_err("must refuse an existing path");
@@ -1947,7 +1955,7 @@ mod live_screenshot_tests {
     #[cfg(unix)]
     #[test]
     fn private_screenshot_file_refuses_to_follow_a_symlink() {
-        let dir = tempfile::tempdir().expect("tempdir");
+        let dir = test_tempdir();
         let sensitive = dir.path().join("sensitive");
         std::fs::write(&sensitive, b"secret").expect("seed target");
         let link = dir.path().join("shot.png");

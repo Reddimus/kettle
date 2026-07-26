@@ -1,6 +1,6 @@
 //! Privacy-safe event-loop stall and exit diagnostics.
 
-use std::fs::{File, OpenOptions};
+use std::fs::File;
 use std::io::{self, Write as _};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -165,7 +165,6 @@ fn write_incident(
     error: Option<&str>,
 ) -> io::Result<PathBuf> {
     let dir = diagnostic_dir(shared.cache_dir.as_deref());
-    create_private_dir(&dir)?;
     let timestamp = unix_millis();
     let (path, mut file) = create_private_file(&dir, timestamp, std::process::id())?;
     let incident = Incident {
@@ -194,21 +193,6 @@ fn diagnostic_dir(cache_dir: Option<&Path>) -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("kettle-diagnostics"))
 }
 
-fn create_private_dir(dir: &Path) -> io::Result<()> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::{DirBuilderExt as _, PermissionsExt as _};
-        std::fs::DirBuilder::new()
-            .recursive(true)
-            .mode(0o700)
-            .create(dir)?;
-        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?;
-    }
-    #[cfg(not(unix))]
-    std::fs::create_dir_all(dir)?;
-    Ok(())
-}
-
 fn create_private_file(dir: &Path, unix_ms: u128, pid: u32) -> io::Result<(PathBuf, File)> {
     for suffix in 0..100u8 {
         let suffix = if suffix == 0 {
@@ -217,14 +201,7 @@ fn create_private_file(dir: &Path, unix_ms: u128, pid: u32) -> io::Result<(PathB
             format!("-{suffix}")
         };
         let path = dir.join(format!("runtime-{unix_ms}-{pid}{suffix}.json"));
-        let mut options = OpenOptions::new();
-        options.write(true).create_new(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt as _;
-            options.mode(0o600);
-        }
-        match options.open(&path) {
+        match kettle_state::create_private_file_new(&path) {
             Ok(file) => return Ok((path, file)),
             Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
             Err(error) => return Err(error),

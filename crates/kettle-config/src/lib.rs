@@ -9781,7 +9781,14 @@ cell-height = 1.2\n";
     // Drift guards for `persist_config_toggle`.
 
     fn tempdir_for(test_name: &str) -> std::path::PathBuf {
-        let p = std::env::temp_dir().join(format!(
+        #[cfg(windows)]
+        let scratch = std::env::var_os("LOCALAPPDATA")
+            .or_else(|| std::env::var_os("USERPROFILE"))
+            .map(std::path::PathBuf::from)
+            .expect("Windows tests require LOCALAPPDATA or USERPROFILE");
+        #[cfg(not(windows))]
+        let scratch = std::env::temp_dir();
+        let p = scratch.join(format!(
             "kettle-cfg-{}-{}-{}",
             test_name,
             std::process::id(),

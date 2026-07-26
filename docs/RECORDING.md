@@ -58,10 +58,13 @@ file and survives updates, the same effect).
 
 Managed recording directories are created with mode `0700` on Unix. Each cast
 uses a collision-safe `kettle-session-<time>-<pid>-<counter>.cast` name,
-`create_new`, an exclusive active-file lock, and mode `0600`. Two launches in
-the same second therefore cannot truncate or interleave one another. An
-explicit file retains the established overwrite behavior, but Kettle obtains
-its exclusive lock before truncating it; a second active writer is refused.
+`create_new`, an exclusive active-file lock, and owner-only permissions:
+`0600` on Unix or a protected current-user DACL on Windows. Two launches in the
+same second therefore cannot truncate or interleave one another. An explicit
+file retains the established overwrite behavior, but Kettle secures and locks
+it before truncating it; a second active writer is refused. Unix symbolic links
+and Windows reparse-point files or parent directories are refused before an
+explicit or managed recording file is opened.
 
 Each session stops at a complete NDJSON event boundary before 512 MiB. When
 space permits, its last event is a `kettle:record_limit` marker. The native
@@ -135,8 +138,9 @@ the child's `ECHO` flag), so the recorder is conservative by default:
   retains the limit/I/O stop states described above. Borderless and fullscreen
   modes can hide OS title decorations, so recording errors also emit a desktop
   notification when the platform notification service is available.
-- The trace file is local-only (`0600` on Unix); kettle never uploads it. Writes
-  are best-effort — a full disk disables the recorder, it never crashes kettle.
+- The trace file is local-only (`0600` on Unix; protected current-user DACL on
+  Windows); kettle never uploads it. Writes are best-effort — a full disk
+  disables the recorder, it never crashes kettle.
 
 ## Data flow
 
