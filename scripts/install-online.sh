@@ -528,6 +528,7 @@ if [ "$OPENSSL_ED25519" -eq 1 ] \
   fi
   # MANIFEST_FIELDS contains only a validated lowercase hex digest and decimal
   # size, so normal POSIX field splitting is safe and deterministic.
+  # shellcheck disable=SC2086
   set -- $MANIFEST_FIELDS
   if [ "$#" -ne 2 ]; then
     echo "kettle install-online.sh: signed manifest field extraction was ambiguous." >&2
@@ -750,6 +751,8 @@ if ! ARCHIVE_PREFLIGHT=$(
   echo "kettle install-online.sh: authenticated archive failed the bounded structural preflight." >&2
   exit 1
 fi
+# ARCHIVE_PREFLIGHT is produced only as two validated decimal counters.
+# shellcheck disable=SC2086
 set -- $ARCHIVE_PREFLIGHT
 if [ "$#" -ne 2 ]; then
   echo "kettle install-online.sh: archive preflight returned an ambiguous result." >&2
