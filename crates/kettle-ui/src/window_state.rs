@@ -49,6 +49,155 @@ pub(crate) fn track_consumed_key_release(
     }
 }
 
+const FRAME_RETRY_BASE: std::time::Duration = std::time::Duration::from_millis(16);
+const FRAME_RETRY_MAX: std::time::Duration = std::time::Duration::from_secs(5);
+const OCCLUDED_RETRY_MIN: std::time::Duration = std::time::Duration::from_millis(250);
+const RENDERER_REBUILD_BASE: std::time::Duration = std::time::Duration::from_millis(100);
+const RENDERER_REBUILD_MAX: std::time::Duration = std::time::Duration::from_secs(5);
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum FrameRecoveryAction {
+    Redraw,
+    RebuildRenderer,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum FrameRecoveryPoll {
+    Idle,
+    /// A repair remains armed, but an invisible surface must not acquire or
+    /// create GPU resources. A visibility/window-state event will poll again.
+    Quiescent,
+    Wait(std::time::Duration),
+    Ready(FrameRecoveryAction),
+}
+
+#[derive(Clone, Copy, Debug)]
+struct PendingFrameRecovery {
+    action: FrameRecoveryAction,
+    deadline: std::time::Instant,
+}
+
+/// Per-window frame liveness state.
+///
+/// Surface timeouts can themselves block inside a backend for close to a
+/// second. Keeping retries as one-shot deadlines prevents PTY wakeups, cursor
+/// animation, or already-queued redraw events from turning a persistent
+/// timeout into an event-loop-blocking acquire loop. Renderer rebuilds use a
+/// separate, longer backoff because allocating all retained GPU resources is
+/// substantially more expensive than acquiring a frame.
+#[derive(Debug, Default)]
+pub(crate) struct FrameRecoveryState {
+    pending: Option<PendingFrameRecovery>,
+    transient_attempts: u32,
+    renderer_attempts: u32,
+}
+
+impl FrameRecoveryState {
+    pub(crate) fn schedule_transient_retry(&mut self, now: std::time::Instant) {
+        self.transient_attempts = self.transient_attempts.saturating_add(1);
+        let delay =
+            capped_exponential_delay(FRAME_RETRY_BASE, FRAME_RETRY_MAX, self.transient_attempts);
+        self.arm(FrameRecoveryAction::Redraw, now + delay);
+    }
+
+    pub(crate) fn schedule_occluded_retry(&mut self, now: std::time::Instant) {
+        self.transient_attempts = self.transient_attempts.saturating_add(1);
+        let delay =
+            capped_exponential_delay(FRAME_RETRY_BASE, FRAME_RETRY_MAX, self.transient_attempts)
+                .max(OCCLUDED_RETRY_MIN);
+        self.arm(FrameRecoveryAction::Redraw, now + delay);
+    }
+
+    pub(crate) fn schedule_renderer_rebuild(&mut self, now: std::time::Instant) {
+        self.renderer_attempts = self.renderer_attempts.saturating_add(1);
+        // Recover the first isolated surface/resource failure on this event
+        // turn. If rebuilding or the next frame fails again, progressively
+        // back off until a frame actually presents.
+        let delay = if self.renderer_attempts == 1 {
+            std::time::Duration::ZERO
+        } else {
+            capped_exponential_delay(
+                RENDERER_REBUILD_BASE,
+                RENDERER_REBUILD_MAX,
+                self.renderer_attempts - 1,
+            )
+        };
+        self.arm(FrameRecoveryAction::RebuildRenderer, now + delay);
+    }
+
+    pub(crate) fn poll(
+        &mut self,
+        now: std::time::Instant,
+        render_hidden: bool,
+    ) -> FrameRecoveryPoll {
+        let Some(pending) = self.pending else {
+            return FrameRecoveryPoll::Idle;
+        };
+        if render_hidden {
+            return FrameRecoveryPoll::Quiescent;
+        }
+        if now < pending.deadline {
+            return FrameRecoveryPoll::Wait(pending.deadline.saturating_duration_since(now));
+        }
+        self.pending = None;
+        FrameRecoveryPoll::Ready(pending.action)
+    }
+
+    pub(crate) fn has_pending(&self) -> bool {
+        self.pending.is_some()
+    }
+
+    pub(crate) fn renderer_rebuild_pending(&self) -> bool {
+        self.pending
+            .is_some_and(|pending| pending.action == FrameRecoveryAction::RebuildRenderer)
+    }
+
+    /// A resize, restore, or compositor un-occlusion is new evidence that an
+    /// armed repair can succeed. Keep it state-machine-driven, but make its
+    /// deadline the current event turn instead of waiting out stale backoff.
+    pub(crate) fn expedite(&mut self, now: std::time::Instant) {
+        if let Some(pending) = self.pending.as_mut() {
+            pending.deadline = now;
+        }
+    }
+
+    /// Presentation is the only normal success signal strong enough to reset
+    /// retry history. A successful renderer construction deliberately does not
+    /// reset it: if the next frame fails identically, rebuilding must back off.
+    pub(crate) fn presented(&mut self) {
+        self.clear();
+    }
+
+    pub(crate) fn clear(&mut self) {
+        *self = Self::default();
+    }
+
+    fn arm(&mut self, action: FrameRecoveryAction, deadline: std::time::Instant) {
+        match self.pending.as_mut() {
+            // Rebuilding subsumes a redraw; never let a later transient result
+            // downgrade the stronger repair.
+            Some(pending)
+                if pending.action == FrameRecoveryAction::RebuildRenderer
+                    && action == FrameRecoveryAction::Redraw => {}
+            Some(pending) if pending.action == action => {
+                pending.deadline = pending.deadline.max(deadline);
+            }
+            _ => {
+                self.pending = Some(PendingFrameRecovery { action, deadline });
+            }
+        }
+    }
+}
+
+fn capped_exponential_delay(
+    base: std::time::Duration,
+    cap: std::time::Duration,
+    attempt: u32,
+) -> std::time::Duration {
+    let shift = attempt.saturating_sub(1).min(16);
+    base.saturating_mul(1_u32 << shift).min(cap)
+}
+
 /// Multi-window effort (Peacock): the accent this window resolved + claimed.
 pub(crate) struct WindowAccent {
     /// The live color (recomputed from `slot` when the theme changes).
@@ -283,11 +432,21 @@ pub(crate) struct WindowState {
     /// once the surface is configured; `window_state = hidden` keeps this true
     /// so fallback reveal paths do not show it.
     pub(crate) window_shown: bool,
-    /// C4: per-pane `Terminal::output_generation` values as of this window's
-    /// last paint (snapshotted at the top of `redraw`, before drain_events).
+    /// C4: per-pane `Terminal::output_generation` values consumed by this
+    /// window's last successfully presented frame. During genuine device loss,
+    /// the redraw guard intentionally snapshots these without presentation so
+    /// streaming output quiesces until process-wide recovery forces a redraw.
     /// The fan-out `UserEvent::Wakeup` compares against the live counters to
     /// decide whether THIS window has anything new to paint.
     pub(crate) seen_output_gen: std::collections::HashMap<u64, u64>,
+    /// Recycled candidate map for the frame currently being built. It swaps
+    /// with `seen_output_gen` only after presentation, so an acquire timeout or
+    /// lost/occluded surface cannot silently consume terminal damage.
+    pub(crate) pending_output_gen: std::collections::HashMap<u64, u64>,
+    /// Deadline-driven retry and per-renderer repair state. Kept per window so
+    /// one lost swapchain cannot falsely escalate or stall the healthy
+    /// renderers sharing the same GPU device.
+    pub(crate) frame_recovery: FrameRecoveryState,
     /// Multi-window effort (Peacock): this window's resolved accent claim.
     /// `None` while unresolved (first frame) or when the user opted out
     /// (`accent-color = theme`/`off`/`none` or a pinned hex). Kept in sync
@@ -397,6 +556,8 @@ impl WindowState {
             pending_pane_restarts: Vec::new(),
             window_shown: false,
             seen_output_gen: std::collections::HashMap::new(),
+            pending_output_gen: std::collections::HashMap::new(),
+            frame_recovery: FrameRecoveryState::default(),
             accent: None,
             last_typed: None,
             resize_overlay: None,
@@ -411,6 +572,102 @@ impl WindowState {
 mod tests {
     use super::*;
     use winit::keyboard::{KeyCode, PhysicalKey};
+
+    #[test]
+    fn frame_timeout_retries_are_one_shot_deadlines_with_a_cap() {
+        let mut recovery = FrameRecoveryState::default();
+        let mut now = std::time::Instant::now();
+        let mut last_delay = std::time::Duration::ZERO;
+
+        for _ in 0..12 {
+            recovery.schedule_transient_retry(now);
+            let FrameRecoveryPoll::Wait(delay) = recovery.poll(now, false) else {
+                panic!("a timeout must not request an immediate redraw");
+            };
+            assert!(delay >= last_delay);
+            assert!(delay <= FRAME_RETRY_MAX);
+            assert_eq!(
+                recovery.poll(now + delay, false),
+                FrameRecoveryPoll::Ready(FrameRecoveryAction::Redraw)
+            );
+            assert_eq!(recovery.poll(now + delay, false), FrameRecoveryPoll::Idle);
+            last_delay = delay;
+            now += delay;
+        }
+
+        assert_eq!(last_delay, FRAME_RETRY_MAX);
+    }
+
+    #[test]
+    fn frame_retry_stays_armed_but_quiescent_while_hidden_minimized_or_occluded() {
+        let mut recovery = FrameRecoveryState::default();
+        let now = std::time::Instant::now();
+        recovery.schedule_transient_retry(now);
+        let deadline = now + FRAME_RETRY_BASE;
+
+        assert_eq!(recovery.poll(deadline, true), FrameRecoveryPoll::Quiescent);
+        assert!(recovery.has_pending());
+        assert_eq!(
+            recovery.poll(deadline, false),
+            FrameRecoveryPoll::Ready(FrameRecoveryAction::Redraw)
+        );
+
+        let mut occluded = FrameRecoveryState::default();
+        occluded.schedule_occluded_retry(now);
+        assert_eq!(
+            occluded.poll(now, false),
+            FrameRecoveryPoll::Wait(OCCLUDED_RETRY_MIN)
+        );
+        assert_eq!(
+            occluded.poll(now + OCCLUDED_RETRY_MIN, true),
+            FrameRecoveryPoll::Quiescent
+        );
+    }
+
+    #[test]
+    fn renderer_rebuilds_back_off_until_a_frame_presents() {
+        let mut recovery = FrameRecoveryState::default();
+        let now = std::time::Instant::now();
+
+        recovery.schedule_renderer_rebuild(now);
+        assert_eq!(
+            recovery.poll(now, false),
+            FrameRecoveryPoll::Ready(FrameRecoveryAction::RebuildRenderer)
+        );
+
+        // Constructing a replacement is not proof that it can present. A
+        // repeated surface/render failure therefore receives the next delay.
+        recovery.schedule_renderer_rebuild(now);
+        assert_eq!(
+            recovery.poll(now, false),
+            FrameRecoveryPoll::Wait(RENDERER_REBUILD_BASE)
+        );
+
+        recovery.expedite(now);
+        assert_eq!(
+            recovery.poll(now, false),
+            FrameRecoveryPoll::Ready(FrameRecoveryAction::RebuildRenderer)
+        );
+        recovery.presented();
+        recovery.schedule_renderer_rebuild(now);
+        assert_eq!(
+            recovery.poll(now, false),
+            FrameRecoveryPoll::Ready(FrameRecoveryAction::RebuildRenderer)
+        );
+    }
+
+    #[test]
+    fn renderer_rebuild_supersedes_a_pending_surface_retry() {
+        let mut recovery = FrameRecoveryState::default();
+        let now = std::time::Instant::now();
+        recovery.schedule_transient_retry(now);
+        recovery.schedule_renderer_rebuild(now);
+
+        assert_eq!(
+            recovery.poll(now, false),
+            FrameRecoveryPoll::Ready(FrameRecoveryAction::RebuildRenderer)
+        );
+    }
 
     #[test]
     fn consumed_press_swallows_exactly_its_matching_release() {

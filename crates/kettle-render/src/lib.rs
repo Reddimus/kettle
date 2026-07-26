@@ -878,15 +878,16 @@ pub struct GpuContext {
     pub adapter: wgpu::Adapter,
     pub device: wgpu::Device,
     pub queue: wgpu::Queue,
-    /// v2.31.0: set `true` when wgpu reports an uncaptured error or a device-loss
-    /// (a GPU driver TDR/reset, or VRAM exhaustion). The error handlers installed
-    /// in `install_gpu_error_handlers` LOG and set this flag INSTEAD of letting
-    /// wgpu's default handler panic — which, with the release profile's
-    /// `panic = "abort"`, hard-killed kettle on a GPU reset with no crash log. The
-    /// App checks this (a refcount-shared `Arc`, so every window's clone sees it)
-    /// to stop rendering on a dead device and surface a "GPU device lost" state
-    /// rather than spin or crash. Reset by rebuilding the renderer on a fresh
-    /// context.
+    /// v2.31.0: set `true` when wgpu reports a fatal uncaptured error or a
+    /// device-loss (a GPU driver TDR/reset, VRAM exhaustion, or internal
+    /// backend fault). Validation errors are logged but deliberately excluded.
+    /// The handlers installed in `install_gpu_error_handlers` set this flag
+    /// instead of letting wgpu's default handler panic — which, with the
+    /// release profile's `panic = "abort"`, hard-killed kettle on a GPU reset
+    /// with no crash log. The App checks this (a refcount-shared `Arc`, so every
+    /// window's clone sees it) to stop rendering on a dead device and surface a
+    /// "GPU device lost" state rather than spin or crash. Reset by rebuilding
+    /// the renderer on a fresh context.
     pub gpu_lost: std::sync::Arc<std::sync::atomic::AtomicBool>,
     /// First fatal wgpu error for this device. Error callbacks only latch this
     /// bounded in-memory value; the UI thread owns durable diagnostics so a
@@ -898,6 +899,29 @@ pub struct GpuContext {
 pub struct GpuFault {
     pub kind: String,
     pub message: String,
+}
+
+/// Result of attempting to paint one live surface frame.
+///
+/// A successful Rust return does not necessarily mean pixels reached the
+/// compositor: wgpu reports timeout, occlusion, and swapchain-loss conditions
+/// as normal acquisition outcomes.  Callers must only consume terminal/UI
+/// damage after [`Presented`](Self::Presented).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[must_use]
+pub enum FrameOutcome {
+    /// Queue submission completed and the surface texture was presented.
+    Presented,
+    /// Nothing was presented, but the configured surface remains usable.
+    /// Retain damage and retry through the caller's deadline-driven backoff.
+    RetryLater,
+    /// Nothing was presented because the window is not currently visible.
+    /// Retain damage and wait for an un-occlusion/visibility event.
+    Occluded,
+    /// The surface was lost and must be recreated through
+    /// [`Instance::create_surface`](wgpu::Instance::create_surface) before
+    /// another frame is attempted. The shared device can remain healthy.
+    SurfaceLost,
 }
 
 impl GpuContext {
@@ -1066,14 +1090,6 @@ pub struct Renderer {
     /// Shared CPU/GPU retained-resource scope for this renderer window.
     graphics_budget: kettle_core::GraphicsBudget,
     config: wgpu::SurfaceConfiguration,
-    /// v2.31.0: consecutive frames whose `get_current_texture()` returned a
-    /// non-success state. A handful means a transient surface loss (resize /
-    /// sleep-wake) that the per-frame reconfigure recovers; a sustained streak
-    /// means the GPU device is genuinely gone (a driver TDR/reset where the
-    /// device-lost callback never fired) — at the threshold we flip
-    /// `gpu.gpu_lost` so the App's redraw guard stops spinning the reconfigure
-    /// loop on a dead device. Reset to 0 on any successful acquire.
-    surface_fail_streak: u32,
 
     font_system: FontSystem,
     swash: SwashCache,
@@ -2221,7 +2237,6 @@ impl Renderer {
             gpu,
             graphics_budget,
             config,
-            surface_fail_streak: 0,
             font_system,
             swash,
             atlas,
@@ -2603,7 +2618,7 @@ impl Renderer {
         tabbar: &TabBar,
         cfg: &Config,
         overlay: &Overlay,
-    ) -> Result<()> {
+    ) -> Result<FrameOutcome> {
         self.render_frame_with_status(panes, tabbar, cfg, overlay, &StatusBar::hidden())
     }
 
@@ -2618,7 +2633,7 @@ impl Renderer {
         cfg: &Config,
         overlay: &Overlay,
         status: &StatusBar,
-    ) -> Result<()> {
+    ) -> Result<FrameOutcome> {
         self.render_frame_with_status_and_pre_present(panes, tabbar, cfg, overlay, status, || {})
     }
 
@@ -2731,7 +2746,7 @@ impl Renderer {
         overlay: &Overlay,
         status: &StatusBar,
         pre_present: F,
-    ) -> Result<()>
+    ) -> Result<FrameOutcome>
     where
         F: FnOnce(),
     {
@@ -5269,17 +5284,11 @@ impl Renderer {
             .upload(&self.gpu.device, &self.gpu.queue, [sw, sh], &menu_q);
 
         let (frame, reconfigure_after_present) = match self.surface.get_current_texture() {
-            wgpu::CurrentSurfaceTexture::Success(t) => {
-                self.surface_fail_streak = 0;
-                (t, false)
-            }
+            wgpu::CurrentSurfaceTexture::Success(t) => (t, false),
             // The frame is usable, but no longer matches the underlying
             // surface. Present it once, then refresh the swapchain before the
             // next acquire as required by wgpu 30's explicit outcome model.
-            wgpu::CurrentSurfaceTexture::Suboptimal(t) => {
-                self.surface_fail_streak = 0;
-                (t, true)
-            }
+            wgpu::CurrentSurfaceTexture::Suboptimal(t) => (t, true),
             // v2.31.0 (adversarial review): Occluded and Timeout are BENIGN
             // transient states, NOT device loss. CRITICAL: on macOS the Metal
             // backend returns `Occluded` on EVERY acquire while the window is
@@ -5287,41 +5296,29 @@ impl Renderer {
             // hangs ~1s, so the HAL short-circuits before it), so a minimized
             // window with any active output would otherwise rack up the streak
             // and FALSELY latch `gpu_lost` on a perfectly healthy device. Pure
-            // skip-frame: do NOT count toward the streak and do NOT reconfigure
-            // (reconfiguring an occluded surface can itself hang).
-            wgpu::CurrentSurfaceTexture::Occluded | wgpu::CurrentSurfaceTexture::Timeout => {
-                return Ok(());
-            }
-            // The genuinely surface-fatal states — Outdated
-            // (resize / format change), **Lost** (GPU device reset, sleep/wake,
-            // monitor hot-swap, driver TDR), Validation — reconfigure the surface
-            // and skip this frame; the next redraw paints on the fresh surface.
-            // An earlier version only reconfigured on `Outdated` and let `Lost` fall into a bare
-            // `return Ok(())`, so after a device-lost the surface was never
-            // recovered: every frame returned Lost again and the window froze
-            // permanently. Reconfiguring on the catch-all is the standard wgpu
-            // recovery and is harmless for the rarer fatal states (a fresh
-            // configure simply fails the same way next frame rather than wedging).
-            _ => {
-                // v2.31.0: a transient loss recovers in a frame or two (streak
-                // stays low); a SUSTAINED streak means the device is genuinely
-                // gone — a driver TDR/reset where the device-lost callback never
-                // fired (backend-dependent). At the threshold, flip the shared
-                // `gpu_lost` flag so the App's redraw guard stops re-entering this
-                // arm every frame (the pre-v2.31.0 behavior spun forever / froze
-                // the window on a dead device — the actual user-reported hang).
-                self.surface_fail_streak = self.surface_fail_streak.saturating_add(1);
-                if self.surface_fail_streak == 60 {
-                    log::error!(
-                        "GPU surface unrecoverable for 60 consecutive frames — \
-                         treating the device as lost (driver reset / TDR?)"
-                    );
-                    self.gpu
-                        .gpu_lost
-                        .store(true, std::sync::atomic::Ordering::Relaxed);
-                }
+            // skip-frame: do NOT reconfigure (reconfiguring an occluded surface
+            // can itself hang).
+            wgpu::CurrentSurfaceTexture::Occluded => return Ok(FrameOutcome::Occluded),
+            wgpu::CurrentSurfaceTexture::Timeout => return Ok(FrameOutcome::RetryLater),
+            // Outdated means the existing surface is still valid but its
+            // configuration no longer matches the window. Reconfigure that
+            // surface, retain damage, and let the UI's bounded retry scheduler
+            // decide when to acquire again.
+            wgpu::CurrentSurfaceTexture::Outdated => {
                 self.surface.configure(&self.gpu.device, &self.config);
-                return Ok(());
+                return Ok(FrameOutcome::RetryLater);
+            }
+            // wgpu 30 explicitly requires a Lost surface to be recreated with
+            // Instance::create_surface; configuring the old object cannot
+            // recover it. This is a per-window failure, not evidence that the
+            // process-wide device shared by every renderer is lost.
+            wgpu::CurrentSurfaceTexture::Lost => return Ok(FrameOutcome::SurfaceLost),
+            // The uncaptured-error callback already logs the validation
+            // details. Return an ordinary render error so the UI rebuilds this
+            // renderer's retained resources on a bounded schedule rather than
+            // consuming damage or escalating a healthy shared device.
+            wgpu::CurrentSurfaceTexture::Validation => {
+                return Err(anyhow!("surface acquisition validation error"));
             }
         };
         let target_extent = frame.texture.size();
@@ -5451,7 +5448,7 @@ impl Renderer {
         if need_prepare {
             self.atlas.trim();
         }
-        Ok(())
+        Ok(FrameOutcome::Presented)
     }
 
     fn prepare_live_screenshot(

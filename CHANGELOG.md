@@ -6,6 +6,21 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+  ### Fixed
+  - Surface timeouts, occlusion, and swapchain reconfiguration no longer count
+    as painted frames. On the normal render path, Kettle now consumes PTY output
+    generations, advances paint timestamps, and updates flood pacing only after
+    wgpu presents the frame. (Visible startup windows are still revealed after
+    renderer initialization, before their first redraw; the device-loss guard
+    still snapshots generations without presentation to quiesce output while
+    recovery is in progress.)
+  - Surface acquisition and renderer failures can no longer strand terminal
+    damage or enter an immediate redraw loop. Timeout/outdated retries use a
+    capped per-window deadline backoff, invisible windows keep repairs armed
+    without GPU wakeups, `Lost` recreates only the affected wgpu surface on the
+    healthy shared device, and non-device render errors rebuild that renderer's
+    retained resources on a separate capped backoff.
+
 ## [2.42.0] — 2026-07-24
 
   ### Added

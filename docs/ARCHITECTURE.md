@@ -151,9 +151,24 @@ putting a user path on the wire.
   capped, rotated, terminal-content-free JSONL incident records under the
   per-user cache. Surface acquisition treats both `Success` and `Suboptimal`
   outcomes as renderable; a suboptimal frame is submitted and presented before
-  the surface is reconfigured for the next acquisition. `Occluded` and
-  `Timeout` skip only that frame, while sustained fatal outcomes enter the
-  shared recovery path.
+  the surface is reconfigured for the next acquisition. Rendering is a UI
+  transaction: `Renderer::render_frame*` returns `Presented`, `RetryLater`,
+  `Occluded`, or `SurfaceLost`, and the normal `kettle-ui` render path commits
+  output-generation counters, the paint timestamp, and flood-pacing state only
+  for `Presented`. Candidate output-generation maps are recycled and swapped on
+  commit, so this correctness boundary adds no steady-state per-frame
+  allocation. Visible startup windows are a lifecycle exception: they are
+  revealed immediately after renderer initialization, before the first redraw.
+  Genuine device loss is the other deliberate exception: the redraw guard
+  snapshots output generations without presentation so a streaming PTY cannot
+  spin while all renderers are being recovered; recovery then forces redraws.
+  Timeout and `Outdated` retain damage and enter a capped, deadline-driven
+  per-window retry. Hidden, minimized, or compositor-occluded windows leave that
+  repair armed without a wake deadline. wgpu 30 `Lost` recreates the affected
+  surface/renderer through `Instance::create_surface` while keeping the healthy
+  shared device; only the device-lost callback, out-of-memory, or internal GPU
+  errors enter process-wide adapter/device recovery. Other render errors rebuild
+  the affected renderer's retained resources on their own capped backoff.
 - **Presentation and readback respect the window-system boundary** — every live
   frame calls winit's `pre_present_notify` after queue submission and
   immediately before `present`, which is required for correct compositor frame
