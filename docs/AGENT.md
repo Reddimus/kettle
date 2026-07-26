@@ -336,15 +336,19 @@ just agent-tui-smoke
 
 Starts a real grid-renderer Kettle window in explicit `native` shell mode,
 using PowerShell on Windows and deterministic non-rc Bash on Unix/macOS. The
-recipe first builds and selects the current checkout's release binary, then
-drives a shell marker, optional Codex
+recipe asks Cargo to build and report the current checkout's exact release
+executable (including a custom `CARGO_TARGET_DIR` or configured target triple),
+then drives a shell marker, optional Codex
 CLI and Claude Code CLI `--version` probes plus `codex exec --help` /
 `claude --print --help` output captures, a prompt-shaped `➜  ~` marker, a
 deterministic Windows Codex active-placeholder and queued-input cursor fixtures,
 tmux attach/send/capture
 when `tmux` is installed, and clean/configured
 Neovim/AstroNvim marker buffers plus clean and configured Neovim vertical-split
-workflow states through `kettle ctl`. Set `KETTLE_AGENT_AUTH_SMOKE=1` to also
+workflow states through `kettle ctl`. The awaited editor text is assembled from
+separate halves inside Vimscript and never appears literally in the typed shell
+command, so shell command echo cannot pass an editor-state probe. Set
+`KETTLE_AGENT_AUTH_SMOKE=1` to also
 run serialized real authenticated `codex exec` / `claude --print` marker prompts inside
 the Kettle pane. A probe passes only when the child exits zero and emits the
 exact response inside its generated output frame, so command echo and a stale
@@ -370,12 +374,18 @@ $env:KETTLE_SMOKE_NVIM_DATA = "/home/me/.local/share/nvim"
 just agent-tui-wsl-smoke
 ```
 
-This builds the current checkout's Windows release binary, launches `wsl.exe`
-with deterministic non-rc Bash, probes the augmented WSL `PATH`, and addresses
-tmux through that same environment. Before configured Neovim or AstroNvim
-runs, the helper creates an unpredictable, owner-private directory inside the
-target distro. It copies the config plus the existing `lazy`/`site` plugin
-runtime while dereferencing symlinks, then redirects `HOME`,
+This builds the exact current checkout Windows executable reported by Cargo,
+launches `wsl.exe` with deterministic non-rc Bash, strips Windows
+`/mnt/<drive>` entries from the target `PATH`, and rejects or reports any tool
+whose canonical path still resolves to a Windows-host mount. tmux uses a
+cryptographically random private socket, the Bash executable resolved inside
+that distro (not a hard-coded `/bin/bash`), and checked cleanup registered
+before the session starts. Before configured Neovim or AstroNvim runs, the
+helper creates an unpredictable, owner-private directory inside the target
+distro. It copies only regular files from the config plus existing
+`lazy`/`site` plugin runtime while dereferencing symlinks; cycles, special
+files, more than 100,000 entries or 64 levels, a file over 256 MiB, and an
+aggregate over 2 GiB are rejected. It then redirects `HOME`,
 `XDG_CONFIG_HOME`, `XDG_DATA_HOME`, `XDG_STATE_HOME`, and `XDG_CACHE_HOME` to
 that snapshot; `XDG_RUNTIME_DIR` is isolated there as well. Clean Neovim uses
 the same isolation; the directory is removed at the end.

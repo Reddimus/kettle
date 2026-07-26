@@ -477,8 +477,10 @@ These need a real display and are run by hand (or on real hardware):
     than a portable CI gate.
   - **Live agent/TUI window**: `just agent-tui-smoke` opens a real
     grid-renderer Kettle window in explicit native-shell mode: PowerShell on
-    Windows and deterministic non-rc Bash on Unix/macOS. The recipe builds and
-    selects the current checkout's release binary, then drives a shell marker,
+    Windows and deterministic non-rc Bash on Unix/macOS. The recipe consumes
+    Cargo's JSON build artifact to select the current checkout's exact release
+    executable, including custom target directories and configured target
+    triples, then drives a shell marker,
     a prompt-shaped `➜  ~`
     marker, deterministic Windows Codex active-placeholder and queued-input
     cursor fixtures with cell-level pixel assertions, optional
@@ -493,6 +495,11 @@ These need a real display and are run by hand (or on real hardware):
     present, the run includes `tmux.png`, `tmux-split.png`, matching screen
     JSON, and matching cells JSON. When Neovim is present, it includes both
     `nvim-split-clean` and `nvim-split-configured` states.
+    Editor markers are assembled from separate string halves by Vimscript and
+    never occur literally in the typed launch command, so shell echo cannot
+    satisfy the editor-state waits. The tmux server uses an unpredictable
+    private socket, the target-resolved Bash path, and checked cleanup on every
+    Kettle exit path.
     `KETTLE_AGENT_AUTH_SMOKE=1 just agent-tui-smoke` additionally runs real
     serialized authenticated `codex exec` / `claude --print` marker prompts
     inside the Kettle pane and records `*-auth-session` probes. Success requires
@@ -508,13 +515,18 @@ These need a real display and are run by hand (or on real hardware):
     Bash through
     `wsl.exe`; `KETTLE_SMOKE_WSL_DISTRO` selects a distro. Tool detection,
     tmux control, Neovim/AstroNvim, and agent commands then run inside that
-    distro rather than against the Windows host `PATH`.
+    distro. The harness removes `/mnt/<drive>` entries from WSL `PATH`, resolves
+    candidate executables canonically, and reports Windows-host shims as skips
+    rather than treating them as Linux coverage.
     `KETTLE_SMOKE_ASTRO_CONFIG` can select the target-shell config directory.
     `KETTLE_SMOKE_NVIM_DATA` can select its installed plugin data. The helper
     creates an unpredictable owner-private directory inside the target distro,
-    copies the config and existing `lazy`/`site` runtime while dereferencing
-    symlinks, and redirects `HOME` plus every Neovim XDG
+    copies only regular files from the config and existing `lazy`/`site`
+    runtime while dereferencing symlinks, and redirects `HOME` plus every
+    Neovim XDG
     config/data/state/cache/runtime path to that snapshot before removing it.
+    The streaming copy rejects cycles and special files and caps the snapshot at
+    100,000 entries, 64 directory levels, 256 MiB per file, and 2 GiB total.
     Ordinary writes that honor those paths cannot edit live configuration.
     This is not an OS security sandbox; config code that deliberately uses a
     hard-coded absolute path can still reach that path.

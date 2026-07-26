@@ -16524,6 +16524,15 @@ fn parse_key_token(token: &str, allow_super_character: bool) -> Option<(Modifier
                         if ch.next().is_some() {
                             return None;
                         }
+                        // A bare uppercase ASCII token represents the same
+                        // logical action as a GUI Shift+letter press. Preserve
+                        // that inferred modifier so negotiated Kitty CSI-u can
+                        // report the unshifted primary key and shifted
+                        // alternate key instead of misreporting a Caps-Lock
+                        // style unmodified uppercase key.
+                        if c.is_ascii_uppercase() {
+                            mods |= ModifiersState::SHIFT;
+                        }
                         // `super+<char>` has no portable legacy PTY encoding,
                         // so fail loudly rather than silently dropping the
                         // modifier. Keep SHIFT on alphabetic chords while
@@ -22739,10 +22748,11 @@ mod tests {
                 Key::Named(NamedKey::F5)
             ))
         );
-        // Character case is PRESERVED — `G` (vim: jump to end) is not `g`.
+        // Character case and its implied Shift are preserved — `G` (vim:
+        // jump to end) is not an unmodified `g`.
         assert_eq!(
             parse_send_key("G"),
-            Some((none, Key::Character("G".into())))
+            Some((ModifiersState::SHIFT, Key::Character("G".into())))
         );
         assert_eq!(
             parse_send_key(":"),
@@ -22839,6 +22849,14 @@ mod tests {
                 TermMode::REPORT_ALL_KEYS_AS_ESC | TermMode::REPORT_ALTERNATE_KEYS
             ),
             Some(b"\x1b[103:71;2u".to_vec())
+        );
+        assert_eq!(
+            enc(
+                "G",
+                TermMode::REPORT_ALL_KEYS_AS_ESC | TermMode::REPORT_ALTERNATE_KEYS
+            ),
+            Some(b"\x1b[103:71;2u".to_vec()),
+            "bare uppercase tokens must retain Kitty's Shift semantics"
         );
         assert_eq!(
             enc(
