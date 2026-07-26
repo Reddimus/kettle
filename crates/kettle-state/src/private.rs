@@ -1049,7 +1049,9 @@ mod unix {
                 guard.directory().as_raw_fd(),
                 name.as_ptr(),
                 flags | libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC,
-                mode,
+                // C's default variadic argument promotions require an integer
+                // at least as wide as `c_uint`; Darwin's `mode_t` is `u16`.
+                mode as libc::c_uint,
             )
         };
         if fd < 0 {
