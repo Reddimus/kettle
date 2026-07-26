@@ -13,8 +13,8 @@ use kettle_config::{
 };
 use kettle_core::{Scroll, TermEvent};
 use kettle_render::{
-    ContextMenu, ContextMenuRow, HighlightRect, HintLabel, ImePreedit, Overlay, PaneSnapshot,
-    PaneView, Renderer, TabActivity as RenderTabActivity, TabBar, TabSeg,
+    ContextMenu, ContextMenuRow, FrameOutcome, HighlightRect, HintLabel, ImePreedit, Overlay,
+    PaneSnapshot, PaneView, Renderer, TabActivity as RenderTabActivity, TabBar, TabSeg,
 };
 use unicode_width::UnicodeWidthStr as _;
 use winit::application::ApplicationHandler;
@@ -38,6 +38,18 @@ const ACCESSIBILITY_SEARCH_CONTAINER_ID: NodeId = NodeId(ACCESSIBILITY_SEARCH_ID
 const ACCESSIBILITY_SEARCH_TEXT_ID: NodeId = NodeId(ACCESSIBILITY_SEARCH_ID_MASK | 16);
 const ACCESSIBILITY_SEARCH_STATUS_ID: NodeId = NodeId(ACCESSIBILITY_SEARCH_ID_MASK | 17);
 const ACCESSIBILITY_UPDATE_INTERVAL: std::time::Duration = std::time::Duration::from_millis(100);
+
+fn apply_output_generation_outcome(
+    outcome: FrameOutcome,
+    committed: &mut std::collections::HashMap<u64, u64>,
+    candidate: &mut std::collections::HashMap<u64, u64>,
+) -> bool {
+    if outcome != FrameOutcome::Presented {
+        return false;
+    }
+    std::mem::swap(committed, candidate);
+    true
+}
 
 fn accessibility_pane_id(pane_id: u64) -> NodeId {
     NodeId::from(ACCESSIBILITY_PANE_ID_MASK | pane_id)
@@ -7926,14 +7938,6 @@ impl App {
         // B (Peacock): resolve/refresh this window's accent claim (cheap in
         // the steady state; full pool walk only on first frame/theme switch).
         self.sync_window_accent(ws);
-        // C4: record the per-pane output generations this paint consumes —
-        // BEFORE drain_events pulls the channels, so output landing during
-        // the paint stays "unseen" and re-triggers a wakeup repaint (an
-        // extra frame beats a missed one).
-        ws.seen_output_gen.clear();
-        for (id, p) in &ws.mux.panes {
-            ws.seen_output_gen.insert(*id, p.term.output_generation());
-        }
         self.drain_events(ws);
         self.poll_remote_contexts(ws);
         self.poll_theme_schedule(ws);
@@ -8085,6 +8089,16 @@ impl App {
         let focus = ws.mux.active_focus();
         let window = ws.window.clone();
 
+        // Capture the output generations represented by this candidate frame
+        // before taking any pane snapshots. Output that races the snapshot can
+        // therefore cause one harmless extra repaint, never a missed repaint.
+        // The recycled map is committed only after the surface is presented.
+        ws.pending_output_gen.clear();
+        for (id, p) in &ws.mux.panes {
+            ws.pending_output_gen
+                .insert(*id, p.term.output_generation());
+        }
+
         let Some(renderer) = ws.renderer.as_mut() else {
             return;
         };
@@ -8182,7 +8196,7 @@ impl App {
             .collect();
         // Status bar built BEFORE the &mut renderer borrow
         // (the helper reads `ws.mux` immutably). Cheap when off.
-        if let Err(e) = renderer.render_frame_with_status_and_pre_present(
+        let frame_result = renderer.render_frame_with_status_and_pre_present(
             &panes,
             &tabbar,
             &self.cfg,
@@ -8193,38 +8207,79 @@ impl App {
                     window.pre_present_notify();
                 }
             },
-        ) {
-            log::warn!("render error: {e}");
-        }
+        );
         // Return the snapshot pool (cell-Vec capacity recycles next frame).
         drop(panes);
         ws.pane_snapshots = snaps;
-        // Fallback reveal: normal startup reveals as soon as renderer init
-        // succeeds, then paints immediately. Keep this guard so any future path
-        // that reaches a rendered frame while still hidden cannot leave a
-        // visible-state window invisible forever. No-op after the first reveal
-        // and for `window_state = hidden`.
-        if !ws.window_shown {
-            if let Some(w) = &ws.window {
-                w.set_visible(true);
+        match frame_result {
+            Ok(outcome) => {
+                let presented = apply_output_generation_outcome(
+                    outcome,
+                    &mut ws.seen_output_gen,
+                    &mut ws.pending_output_gen,
+                );
+                match outcome {
+                    FrameOutcome::Presented => {
+                        debug_assert!(presented);
+                        // Commit the rest of the frame transaction only after
+                        // presentation. The former eager output-generation
+                        // update at the top of redraw lost terminal damage
+                        // whenever surface acquisition timed out.
+                        ws.window_occluded = false;
+
+                        // Fallback reveal: normal startup reveals as soon as
+                        // renderer init succeeds, then paints immediately.
+                        // Keep this guard so any future path that reaches a
+                        // rendered frame while still hidden cannot leave a
+                        // visible-state window invisible forever. No-op after
+                        // the first reveal and for `window_state = hidden`.
+                        if !ws.window_shown {
+                            if let Some(w) = &ws.window {
+                                w.set_visible(true);
+                            }
+                            ws.window_shown = true;
+                        }
+                        ws.last_paint = Some(std::time::Instant::now());
+                        ws.coalescing_paint = false;
+                        // v2.21.1 (throughput): track sustained-flood depth. A
+                        // frame that flushed coalesced output bumps the
+                        // counter; any other paint resets it. Failed
+                        // presentation does neither because no output was
+                        // actually flushed to the display.
+                        ws.flood_paints = if was_coalescing_paint {
+                            ws.flood_paints.saturating_add(1)
+                        } else {
+                            0
+                        };
+                    }
+                    FrameOutcome::RetrySoon => {
+                        debug_assert!(!presented);
+                        // Retain output generations and scheduling state until
+                        // a frame actually presents. Surface timeouts and
+                        // post-reconfigure retries are transient, so retry
+                        // without waiting for another input or PTY event.
+                        if let Some(w) = &ws.window {
+                            w.request_redraw();
+                        }
+                    }
+                    FrameOutcome::Occluded => {
+                        debug_assert!(!presented);
+                        // Retain damage for the forced redraw on
+                        // un-occlusion, but do not spin the output coalescer
+                        // while the compositor says this surface cannot be
+                        // shown.
+                        ws.window_occluded = true;
+                        ws.coalescing_paint = false;
+                    }
+                }
             }
-            ws.window_shown = true;
+            Err(e) => {
+                // Renderer errors can be persistent (for example a validation
+                // fault), so the GPU fault/recovery path owns any retry rather
+                // than creating an unbounded redraw loop here.
+                log::warn!("render error: {e}");
+            }
         }
-        // Record the paint time and clear any pending coalesced
-        // output paint now that this settled frame is on the surface.
-        ws.last_paint = Some(std::time::Instant::now());
-        ws.coalescing_paint = false;
-        // v2.21.1 (throughput): track sustained-flood depth. A frame that
-        // flushed coalesced output (output faster than the budget) bumps the
-        // counter; any other paint (idle/blink/input echo, or output slower
-        // than the budget) resets it — so a brief burst never throttles and the
-        // settled post-flood frame drops back to 60 fps. Drives
-        // `effective_output_budget`.
-        ws.flood_paints = if was_coalescing_paint {
-            ws.flood_paints.saturating_add(1)
-        } else {
-            0
-        };
     }
 
     /// Compose the status-bar contents (HH:MM:SS · theme ·
@@ -18979,6 +19034,14 @@ impl App {
                 // event even if they're focused on another OS window.
                 // Cheap when triggers are empty (which is the default).
                 self.run_triggers(ws);
+                if ws.window_occluded {
+                    // A surface-level occlusion can arrive before winit's
+                    // WindowEvent::Occluded. Keep terminal damage pending for
+                    // the mandatory un-occlusion redraw without scheduling
+                    // invisible GPU work for each PTY burst.
+                    ws.coalescing_paint = false;
+                    return;
+                }
                 // R2: coalesce rapid PTY-output paints to ~one per
                 // frame budget so a non-atomic repaint burst settles before we
                 // snapshot the grid. When deferred, `about_to_wait` schedules
@@ -21032,13 +21095,51 @@ mod modal_discipline_guard {
 #[cfg(test)]
 mod tests {
     use super::{
-        App, ContextMenuItem, assign_mnemonics, count_rows_fitting, filter_disabled,
-        find_menu_row_y, modal_swallows_pointer, rank_layouts, sanitize_native_window_title,
-        sanitize_title, selection_kind, should_restore_session, should_reveal_after_renderer_init,
-        startup_inner_size_px, typeahead_match, vi_mode_invalidated_by_resize,
+        App, ContextMenuItem, apply_output_generation_outcome, assign_mnemonics,
+        count_rows_fitting, filter_disabled, find_menu_row_y, modal_swallows_pointer, rank_layouts,
+        sanitize_native_window_title, sanitize_title, selection_kind, should_restore_session,
+        should_reveal_after_renderer_init, startup_inner_size_px, typeahead_match,
+        vi_mode_invalidated_by_resize,
     };
     use kettle_config::Action;
     use kettle_core::SelectionType;
+    use kettle_render::FrameOutcome;
+
+    #[test]
+    fn output_generations_commit_only_after_presentation() {
+        let mut committed = std::collections::HashMap::from([(1, 10), (2, 20)]);
+        let mut candidate = std::collections::HashMap::from([(1, 11), (2, 21)]);
+
+        for outcome in [FrameOutcome::RetrySoon, FrameOutcome::Occluded] {
+            assert!(!apply_output_generation_outcome(
+                outcome,
+                &mut committed,
+                &mut candidate,
+            ));
+            assert_eq!(
+                committed,
+                std::collections::HashMap::from([(1, 10), (2, 20)])
+            );
+            assert_eq!(
+                candidate,
+                std::collections::HashMap::from([(1, 11), (2, 21)])
+            );
+        }
+
+        assert!(apply_output_generation_outcome(
+            FrameOutcome::Presented,
+            &mut committed,
+            &mut candidate,
+        ));
+        assert_eq!(
+            committed,
+            std::collections::HashMap::from([(1, 11), (2, 21)])
+        );
+        assert_eq!(
+            candidate,
+            std::collections::HashMap::from([(1, 10), (2, 20)])
+        );
+    }
 
     #[test]
     fn watcher_accepts_changes_to_exact_path_only() {

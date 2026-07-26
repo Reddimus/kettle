@@ -258,6 +258,15 @@ flowchart LR
 
 Guarded by the pure `output_paint_coalesces_within_frame_budget` (kettle-ui).
 
+**Frame presentation transaction.** A successful Rust return from surface
+acquisition does not always mean pixels reached the compositor. The
+`output_generations_commit_only_after_presentation` regression drives
+`Presented`, `RetrySoon`, and `Occluded` through the same commit helper used by
+the live UI and proves that only `Presented` advances the window's consumed
+output map. Renderer and UI compilation keeps the public `FrameOutcome`
+contract exhaustive; native live-render smoke remains responsible for actual
+window-system presentation.
+
 **`.cast` replay.** `replays_asciicast_v2_output_into_grid` parses an asciicast
 v2 trace — the exact format [`docs/RECORDING.md`](RECORDING.md)'s recorder
 writes — and feeds its `o` (output) events through the harness, asserting grid

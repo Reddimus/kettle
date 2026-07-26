@@ -153,7 +153,14 @@ putting a user path on the wire.
   outcomes as renderable; a suboptimal frame is submitted and presented before
   the surface is reconfigured for the next acquisition. `Occluded` and
   `Timeout` skip only that frame, while sustained fatal outcomes enter the
-  shared recovery path.
+  shared recovery path. Rendering is a UI transaction:
+  `Renderer::render_frame*` returns `Presented`, `RetrySoon`, or `Occluded`,
+  and `kettle-ui` commits output-generation counters, the paint timestamp,
+  startup reveal, and flood-pacing state only for `Presented`. A retry retains
+  damage and immediately requests another frame; occlusion retains damage and
+  waits for the window-system visibility event. Candidate output-generation
+  maps are recycled and swapped on commit, so this correctness boundary does
+  not add a steady-state per-frame allocation.
 - **Presentation and readback respect the window-system boundary** — every live
   frame calls winit's `pre_present_notify` after queue submission and
   immediately before `present`, which is required for correct compositor frame

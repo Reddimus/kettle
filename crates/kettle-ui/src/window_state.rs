@@ -283,11 +283,15 @@ pub(crate) struct WindowState {
     /// once the surface is configured; `window_state = hidden` keeps this true
     /// so fallback reveal paths do not show it.
     pub(crate) window_shown: bool,
-    /// C4: per-pane `Terminal::output_generation` values as of this window's
-    /// last paint (snapshotted at the top of `redraw`, before drain_events).
-    /// The fan-out `UserEvent::Wakeup` compares against the live counters to
-    /// decide whether THIS window has anything new to paint.
+    /// C4: per-pane `Terminal::output_generation` values consumed by this
+    /// window's last successfully presented frame. The fan-out
+    /// `UserEvent::Wakeup` compares against the live counters to decide whether
+    /// THIS window has anything new to paint.
     pub(crate) seen_output_gen: std::collections::HashMap<u64, u64>,
+    /// Recycled candidate map for the frame currently being built. It swaps
+    /// with `seen_output_gen` only after presentation, so an acquire timeout or
+    /// lost/occluded surface cannot silently consume terminal damage.
+    pub(crate) pending_output_gen: std::collections::HashMap<u64, u64>,
     /// Multi-window effort (Peacock): this window's resolved accent claim.
     /// `None` while unresolved (first frame) or when the user opted out
     /// (`accent-color = theme`/`off`/`none` or a pinned hex). Kept in sync
@@ -397,6 +401,7 @@ impl WindowState {
             pending_pane_restarts: Vec::new(),
             window_shown: false,
             seen_output_gen: std::collections::HashMap::new(),
+            pending_output_gen: std::collections::HashMap::new(),
             accent: None,
             last_typed: None,
             resize_overlay: None,

@@ -6,6 +6,14 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+  ### Fixed
+  - Surface timeouts, occlusion, and swapchain reconfiguration no longer count
+    as painted frames. Kettle now consumes PTY output generations, reveals a
+    startup window, advances paint timestamps, and updates flood pacing only
+    after wgpu presents the frame. Transient acquisition failures retain damage
+    and retry; occluded windows retain damage until the compositor reports them
+    visible without scheduling invisible GPU work for every output burst.
+
 ## [2.42.0] — 2026-07-24
 
   ### Added

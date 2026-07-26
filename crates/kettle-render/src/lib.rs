@@ -900,6 +900,24 @@ pub struct GpuFault {
     pub message: String,
 }
 
+/// Result of attempting to paint one live surface frame.
+///
+/// A successful Rust return does not necessarily mean pixels reached the
+/// compositor: wgpu reports timeout, occlusion, and swapchain-loss conditions
+/// as normal acquisition outcomes.  Callers must only consume terminal/UI
+/// damage after [`Presented`](Self::Presented).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[must_use]
+pub enum FrameOutcome {
+    /// Queue submission completed and the surface texture was presented.
+    Presented,
+    /// Nothing was presented, but the surface should be tried again promptly.
+    RetrySoon,
+    /// Nothing was presented because the window is not currently visible.
+    /// Retain damage and wait for an un-occlusion/visibility event.
+    Occluded,
+}
+
 impl GpuContext {
     /// v2.31.0: has the GPU device been lost (driver reset / TDR) or hit an
     /// uncaptured error (e.g. VRAM exhaustion)? Once `true`, no rendering will
@@ -2603,7 +2621,7 @@ impl Renderer {
         tabbar: &TabBar,
         cfg: &Config,
         overlay: &Overlay,
-    ) -> Result<()> {
+    ) -> Result<FrameOutcome> {
         self.render_frame_with_status(panes, tabbar, cfg, overlay, &StatusBar::hidden())
     }
 
@@ -2618,7 +2636,7 @@ impl Renderer {
         cfg: &Config,
         overlay: &Overlay,
         status: &StatusBar,
-    ) -> Result<()> {
+    ) -> Result<FrameOutcome> {
         self.render_frame_with_status_and_pre_present(panes, tabbar, cfg, overlay, status, || {})
     }
 
@@ -2731,7 +2749,7 @@ impl Renderer {
         overlay: &Overlay,
         status: &StatusBar,
         pre_present: F,
-    ) -> Result<()>
+    ) -> Result<FrameOutcome>
     where
         F: FnOnce(),
     {
@@ -5289,9 +5307,8 @@ impl Renderer {
             // and FALSELY latch `gpu_lost` on a perfectly healthy device. Pure
             // skip-frame: do NOT count toward the streak and do NOT reconfigure
             // (reconfiguring an occluded surface can itself hang).
-            wgpu::CurrentSurfaceTexture::Occluded | wgpu::CurrentSurfaceTexture::Timeout => {
-                return Ok(());
-            }
+            wgpu::CurrentSurfaceTexture::Occluded => return Ok(FrameOutcome::Occluded),
+            wgpu::CurrentSurfaceTexture::Timeout => return Ok(FrameOutcome::RetrySoon),
             // The genuinely surface-fatal states — Outdated
             // (resize / format change), **Lost** (GPU device reset, sleep/wake,
             // monitor hot-swap, driver TDR), Validation — reconfigure the surface
@@ -5316,12 +5333,15 @@ impl Renderer {
                         "GPU surface unrecoverable for 60 consecutive frames — \
                          treating the device as lost (driver reset / TDR?)"
                     );
-                    self.gpu
-                        .gpu_lost
-                        .store(true, std::sync::atomic::Ordering::Relaxed);
+                    latch_gpu_fault(
+                        &self.gpu.gpu_lost,
+                        &self.gpu.gpu_fault,
+                        "surface_unrecoverable",
+                        "surface acquisition failed for 60 consecutive frames".to_string(),
+                    );
                 }
                 self.surface.configure(&self.gpu.device, &self.config);
-                return Ok(());
+                return Ok(FrameOutcome::RetrySoon);
             }
         };
         let target_extent = frame.texture.size();
@@ -5451,7 +5471,7 @@ impl Renderer {
         if need_prepare {
             self.atlas.trim();
         }
-        Ok(())
+        Ok(FrameOutcome::Presented)
     }
 
     fn prepare_live_screenshot(
