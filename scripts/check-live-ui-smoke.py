@@ -1980,12 +1980,20 @@ def run_underline(kettle: str, root: Path) -> Path:
     return out
 
 
+def live_state_screenshot_path(out: Path, label: str) -> Path:
+    return out / f"{label}.png"
+
+
+def live_transition_screenshot_path(out: Path, label: str) -> Path:
+    return out / f"{label}-transition.png"
+
+
 def capture_live_state(live: LiveKettle, out: Path, label: str) -> Dict[str, object]:
     cells = live.read_cells()
     (out / f"{label}.cells.json").write_text(json.dumps(cells, indent=2) + "\n")
     screen = live.json_ctl("read_screen")
     (out / f"{label}.screen.json").write_text(json.dumps(screen, indent=2) + "\n")
-    shot = out / f"{label}.png"
+    shot = live_state_screenshot_path(out, label)
     live.screenshot(shot)
 
     width, height, rgba_rows = read_rgba_png(shot)
@@ -2306,6 +2314,13 @@ def agent_output_contains_marker(
 
 
 def live_helper_selftest() -> None:
+    artifact_root = Path("artifacts")
+    state_shot = live_state_screenshot_path(artifact_root, "search-open")
+    transition_shot = live_transition_screenshot_path(artifact_root, "search-open")
+    assert state_shot == artifact_root / "search-open.png"
+    assert transition_shot == artifact_root / "search-open-transition.png"
+    assert state_shot != transition_shot
+
     marker = "KETTLE_AGENT_AUTH_EXPECTED"
     output_marker = "KETTLE_AGENT_AUTH_OUTPUT_BEGIN"
     done_marker = "KETTLE_AGENT_AUTH_DONE"
@@ -4088,12 +4103,13 @@ def run_interaction(kettle: str, root: Path) -> Path:
         time.sleep(0.3)
         search_geo = live.json_ctl("ui_geometry")
         (out / "search-open.geometry.json").write_text(json.dumps(search_geo, indent=2) + "\n")
-        live.screenshot(out / "search-open.png")
+        search_transition_shot = live_transition_screenshot_path(out, "search-open")
+        live.screenshot(search_transition_shot)
         if not modal_open(search_geo, "search"):
             raise SystemExit("interaction smoke: perform_action start_search did not open search")
         if modal_open(search_geo, "palette"):
             raise SystemExit("interaction smoke: search action did not close the command palette")
-        search_changes = len(changed_pixels(out / "palette-open.png", out / "search-open.png", 0.0, float(palette_geo["surface"]["height"])))  # type: ignore[index]
+        search_changes = len(changed_pixels(out / "palette-open.png", search_transition_shot, 0.0, float(palette_geo["surface"]["height"])))  # type: ignore[index]
         if search_changes < 250:
             raise SystemExit(f"interaction smoke: search overlay changed too few pixels ({search_changes})")
         states.append(capture_live_state(live, out, "search-open"))
@@ -4114,7 +4130,7 @@ def run_interaction(kettle: str, root: Path) -> Path:
             time.sleep(0.3)
             modal_geo = live.json_ctl("ui_geometry")
             (out / f"{label}.geometry.json").write_text(json.dumps(modal_geo, indent=2) + "\n")
-            modal_shot = out / f"{label}.png"
+            modal_shot = live_transition_screenshot_path(out, label)
             live.screenshot(modal_shot)
             if not modal_open(modal_geo, modal_name):
                 raise SystemExit(f"interaction smoke: perform_action {action_name} did not open {modal_name}")
