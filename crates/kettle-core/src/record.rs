@@ -679,17 +679,10 @@ fn prune_recording_directory(
             Err(fs4::TryLockError::WouldBlock) => continue,
             Err(fs4::TryLockError::Error(_)) => continue,
         }
-        let current = match std::fs::symlink_metadata(&candidate.path) {
-            Ok(metadata) if metadata.file_type().is_file() => metadata,
-            _ => continue,
-        };
-        if ensure_same_file(&file.metadata()?, &current, &candidate.path).is_err() {
-            continue;
-        }
-        // Keep the exclusive handle lock alive through unlink. Dropping it
-        // first permits a new recorder to acquire the path between the safety
-        // check and deletion.
-        if std::fs::remove_file(&candidate.path).is_ok() {
+        // Consume the locked handle only after kettle-state has proved the
+        // path still names that exact private file. Windows deletes through
+        // the object handle; Unix unlinks relative to the verified parent.
+        if kettle_state::remove_open_private_file(file, &candidate.path).is_ok() {
             total_bytes = total_bytes.saturating_sub(candidate.size);
             total_files = total_files.saturating_sub(1);
         }
@@ -991,7 +984,8 @@ mod tests {
         let mut owned = Vec::new();
         for index in 0..5 {
             let path = directory.join(format!("kettle-session-{index:03}-1-0.cast"));
-            std::fs::write(&path, vec![b'x'; 10]).unwrap();
+            let mut file = kettle_state::create_private_file_new(&path).unwrap();
+            file.write_all(&[b'x'; 10]).unwrap();
             owned.push(path);
         }
         let active = std::fs::OpenOptions::new()
@@ -1016,7 +1010,7 @@ mod tests {
             let path = temp
                 .path()
                 .join(format!("kettle-session-{index:03}-1-0.cast"));
-            let mut file = std::fs::File::create(path).unwrap();
+            let mut file = kettle_state::create_private_file_new(&path).unwrap();
             file.write_all(&[b'x'; 10]).unwrap();
         }
 

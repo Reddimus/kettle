@@ -31,7 +31,7 @@ pub(crate) fn test_tempdir() -> tempfile::TempDir {
 
 pub use private::{
     create_private_file_new, open_existing_private_file, open_private_file,
-    open_private_file_append, restrict_private_file,
+    open_private_file_append, remove_open_private_file, restrict_private_file,
 };
 
 /// Policy for an atomic file replacement.
@@ -521,6 +521,37 @@ mod tests {
             assert!(private::has_current_user_only_dacl(&file).unwrap());
             assert!(private::owned_by_current_user(&file).unwrap());
         }
+    }
+
+    #[test]
+    fn removes_the_exact_locked_private_file() {
+        let dir = crate::test_tempdir();
+        let path = dir.path().join("expired.cast");
+        let mut created = create_private_file_new(&path).unwrap();
+        created.write_all(b"recording").unwrap();
+        drop(created);
+
+        let file = open_existing_private_file(&path).unwrap();
+        fs4::FileExt::try_lock(&file).unwrap();
+        remove_open_private_file(file, &path).unwrap();
+
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn refuses_to_remove_an_open_file_through_a_different_path() {
+        let dir = crate::test_tempdir();
+        let first = dir.path().join("first.cast");
+        let second = dir.path().join("second.cast");
+        drop(create_private_file_new(&first).unwrap());
+        drop(create_private_file_new(&second).unwrap());
+
+        let file = open_existing_private_file(&first).unwrap();
+        let error = remove_open_private_file(file, &second).unwrap_err();
+
+        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+        assert!(first.exists());
+        assert!(second.exists());
     }
 
     #[test]

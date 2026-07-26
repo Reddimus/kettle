@@ -57,6 +57,10 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   - The Windows remote-command watcher now creates, reads, bounds-checks, and
     truncates its command file through verified no-reparse handles, so a path
     swap cannot redirect command data to another file.
+  - Managed-recording retention now removes the exact locked private file
+    instead of resolving its pathname again. Windows marks the verified kernel
+    object for deletion through a reopened handle; Unix unlinks the verified
+    leaf relative to its held parent directory.
   - Linux self-update verification and extraction now consume one bounded
     in-memory archive buffer, closing the remaining same-inode overwrite gap.
     Unix control connections also keep a stable nonblocking mode and serialize

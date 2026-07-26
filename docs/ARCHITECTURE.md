@@ -60,6 +60,12 @@ share these primitives. Advisory locks let callers serialize compound
 operations; configuration persistence holds one across the complete read,
 validate, backup, and replacement transaction.
 
+Managed-recording retention also deletes through these primitives. It keeps
+the candidate locked while `kettle-state` proves the path still identifies the
+open private object; Windows marks that kernel object for deletion through a
+reopened handle, while Unix unlinks the verified leaf relative to its held
+parent directory.
+
 ## Agent control plane
 
 The agent-first control surface (see [AGENT.md](AGENT.md) for the full

@@ -47,6 +47,17 @@ pub fn restrict_private_file(file: &File) -> io::Result<()> {
     restrict_private_object(file)
 }
 
+/// Remove the private file represented by both `file` and `path`.
+///
+/// `file` must have been returned by [`open_existing_private_file`]. The
+/// operation keeps that exact object open while validating the path. Windows
+/// marks the object for deletion through a reopened handle; Unix unlinks the
+/// verified leaf relative to its held parent directory. A path that no longer
+/// identifies `file` is rejected.
+pub fn remove_open_private_file(file: File, path: &Path) -> io::Result<()> {
+    remove_open_private_file_impl(file, path)
+}
+
 pub(crate) fn discard_created_private_file(file: File, path: &Path) {
     discard_created_private_file_impl(file, path);
 }
@@ -176,6 +187,11 @@ fn restrict_private_object(file: &File) -> io::Result<()> {
 }
 
 #[cfg(unix)]
+fn remove_open_private_file_impl(file: File, path: &Path) -> io::Result<()> {
+    unix::remove_open_private_file(file, path)
+}
+
+#[cfg(unix)]
 fn discard_created_private_file_impl(file: File, path: &Path) {
     unix::discard_created_private_file(file, path);
 }
@@ -183,6 +199,11 @@ fn discard_created_private_file_impl(file: File, path: &Path) {
 #[cfg(windows)]
 fn restrict_private_object(file: &File) -> io::Result<()> {
     windows::restrict_private_object(file)
+}
+
+#[cfg(windows)]
+fn remove_open_private_file_impl(file: File, path: &Path) -> io::Result<()> {
+    windows::remove_open_private_file(file, path)
 }
 
 #[cfg(windows)]
@@ -194,6 +215,24 @@ fn discard_created_private_file_impl(file: File, _path: &Path) {
 #[cfg(not(any(unix, windows)))]
 fn restrict_private_object(_file: &File) -> io::Result<()> {
     Ok(())
+}
+
+#[cfg(not(any(unix, windows)))]
+fn remove_open_private_file_impl(file: File, path: &Path) -> io::Result<()> {
+    require_regular_file(&file, path)?;
+    let opened = file.metadata()?;
+    let current = std::fs::symlink_metadata(path)?;
+    if !current.file_type().is_file()
+        || opened.len() != current.len()
+        || opened.modified().ok() != current.modified().ok()
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "private path no longer identifies the open file",
+        ));
+    }
+    drop(file);
+    std::fs::remove_file(path)
 }
 
 #[cfg(not(any(unix, windows)))]
@@ -961,15 +1000,24 @@ mod unix {
                 .is_some_and(|stat| FileIdentity::from_stat(&stat) == expected))
         }
 
-        fn unlink_if_same(&self, file: &File, name: &OsStr) {
-            if !self.entry_matches(file, name).unwrap_or(false) {
-                return;
+        fn unlink_open_file(&self, file: &File, name: &OsStr) -> io::Result<()> {
+            if !self.entry_matches(file, name)? {
+                return Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    "private path no longer identifies the open file",
+                ));
             }
-            let Ok(name) = c_name(name, "private file name") else {
-                return;
-            };
+            let name = c_name(name, "private file name")?;
             // SAFETY: the directory fd and NUL-terminated name are valid.
-            unsafe { libc::unlinkat(self.directory().as_raw_fd(), name.as_ptr(), 0) };
+            if unsafe { libc::unlinkat(self.directory().as_raw_fd(), name.as_ptr(), 0) } == 0 {
+                Ok(())
+            } else {
+                Err(io::Error::last_os_error())
+            }
+        }
+
+        fn unlink_if_same(&self, file: &File, name: &OsStr) {
+            let _ = self.unlink_open_file(file, name);
         }
 
         pub(super) fn replace_with_open_file(
@@ -1203,6 +1251,16 @@ mod unix {
             guard.unlink_if_same(&file, &name);
         }
         drop(file);
+    }
+
+    pub(super) fn remove_open_private_file(file: File, path: &Path) -> io::Result<()> {
+        require_user_owned_regular(&file, path)?;
+        let guard = PrivateParentGuard::new(path)?;
+        let name = guard.validate_path(path)?;
+        guard.verify()?;
+        guard.unlink_open_file(&file, &name)?;
+        drop(file);
+        Ok(())
     }
 
     pub(super) fn same_file_identity(file: &File, path: &Path) -> io::Result<bool> {
@@ -1765,19 +1823,30 @@ mod windows {
         Ok(file)
     }
 
-    pub(super) fn delete_on_close_best_effort(file: &File) {
+    fn mark_for_deletion(handle: HANDLE) -> io::Result<()> {
         let disposition = FILE_DISPOSITION_INFO { DeleteFile: true };
-        // SAFETY: the handle was created with DELETE access and the buffer
-        // matches FileDispositionInfo. Failure merely leaves an empty private
-        // file behind; cleanup never falls back to a raceable path deletion.
-        unsafe {
+        // SAFETY: `handle` has DELETE access and the buffer matches
+        // FileDispositionInfo.
+        if unsafe {
             SetFileInformationByHandle(
-                file.as_raw_handle() as HANDLE,
+                handle,
                 FileDispositionInfo,
                 std::ptr::addr_of!(disposition).cast(),
                 std::mem::size_of::<FILE_DISPOSITION_INFO>() as u32,
             )
-        };
+        } != 0
+        {
+            Ok(())
+        } else {
+            Err(io::Error::last_os_error())
+        }
+    }
+
+    pub(super) fn delete_on_close_best_effort(file: &File) {
+        // Creation handles already have DELETE access. Failure merely leaves an
+        // empty private file behind; cleanup never falls back to a raceable
+        // path deletion.
+        let _ = mark_for_deletion(file.as_raw_handle() as HANDLE);
     }
 
     pub(super) fn open_existing_private_file(path: &Path, append: bool) -> io::Result<File> {
@@ -1852,6 +1921,37 @@ mod windows {
             ));
         }
         Ok(file)
+    }
+
+    pub(super) fn remove_open_private_file(file: File, path: &Path) -> io::Result<()> {
+        require_regular_non_reparse(&file, path)?;
+        require_single_link(&file, path)?;
+        if !same_file_identity(&file, path)? {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "private path no longer identifies the open file",
+            ));
+        }
+        // `open_existing_private_file` shares deletion but does not request
+        // DELETE itself. ReOpenFile grants that access to the same kernel file
+        // object, so no pathname is resolved between validation and deletion.
+        let handle = unsafe {
+            ReOpenFile(
+                file.as_raw_handle() as HANDLE,
+                DELETE,
+                FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                FILE_FLAG_OPEN_REPARSE_POINT,
+            )
+        };
+        if handle == INVALID_HANDLE_VALUE {
+            return Err(io::Error::last_os_error());
+        }
+        // SAFETY: ReOpenFile transferred ownership of this valid handle.
+        let deletion = unsafe { OwnedHandle::from_raw_handle(handle as RawHandle) };
+        mark_for_deletion(deletion.as_raw_handle() as HANDLE)?;
+        drop(deletion);
+        drop(file);
+        Ok(())
     }
 
     fn private_object_is_exact(file: &File) -> io::Result<bool> {
