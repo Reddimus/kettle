@@ -155,8 +155,9 @@ discipline here.
   pipeline self-test (real wgpu pipelines compile + render through
   Vulkan/Metal/DX12), pure native-backend-order/fallback tests, and a native
   Windows check that Auto selects DX12 while an explicit backend works without
-  a physical GPU pin. Screenshots and self-tests resolve through the same
-  config-aware adapter policy as live windows. Shared-image source-rectangle
+  a physical GPU pin. Screenshots use the loaded configuration; the CI
+  self-test uses the same resolver with `Config::default()` to stay independent
+  of developer state. Shared-image source-rectangle
   UV validation,
   independent inline/wallpaper instance limits, and same-texture draw batching.
   The v2.25.1 grid-regression guard renders

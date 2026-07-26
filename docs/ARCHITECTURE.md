@@ -167,13 +167,18 @@ putting a user path on the wire.
 - **One GPU context** — the wgpu `GpuContext { instance, adapter,
   device, queue }` is created with window 1 and shared; each subsequent
   window gets its own surface via `Renderer::new_with_gpu` (synchronous —
-  no adapter request, no watchdog needed). The adapter is chosen by
-  one resolver shared by live windows, `--gpu-info`, screenshots, offscreen
-  tests, detection, and recovery. A config-pinned GPU (`gpu-vendor-id` /
+  no adapter request, no watchdog needed). Live windows, `--gpu-info`,
+  screenshots, offscreen tests, detection, and recovery share one adapter
+  policy. A config-pinned GPU (`gpu-vendor-id` /
   `-device-id` / `-name`, set via Settings → Graphics) wins; `gpu-backend`
   applies with or without that physical pin. Auto backend order is deterministic
   (DX12 first on Windows, Metal on macOS, Vulkan elsewhere), and unavailable
-  explicit backends log an observable fallback to native order. An absent pin
+  explicit backends log an observable fallback to native order. The common
+  unpinned Auto path enables and probes one backend at a time, so successful
+  Windows DX12 startup does not initialize the Vulkan ICD. Pins and explicit
+  low/high preference use one cross-backend enumeration; low/high ranks the
+  physical GPU before backend. Live instances retain winit's display handle so
+  the GLES fallback can present under Wayland. An absent pin
   (eGPU unplugged, driver swap) falls through to the power policy, so a stale
   portable config never prevents startup. Because the device/surface graph
   can't hot-swap and every window shares the one adapter, GPU changes apply on
