@@ -6584,7 +6584,7 @@ impl App {
         let Some(window) = ws.window.clone() else {
             return Err("primary window is unavailable".to_string());
         };
-        let avoid = self.gpu.as_ref().map(|gpu| gpu.adapter_ids());
+        let avoid = self.gpu.as_ref().map(|gpu| gpu.adapter_key());
         log::warn!("GPU recovery attempt {attempt} ({escalation:?})");
 
         ws.renderer = None;
@@ -16834,6 +16834,8 @@ const GPU_RECOVERY_SETTLE: std::time::Duration = std::time::Duration::from_milli
 fn gpu_escalation_label(escalation: kettle_render::AdapterEscalation) -> &'static str {
     match escalation {
         kettle_render::AdapterEscalation::Preferred => "preferred",
+        kettle_render::AdapterEscalation::AlternateBackend => "alternate_backend",
+        kettle_render::AdapterEscalation::SurfacePreferred => "surface_preferred",
         kettle_render::AdapterEscalation::AnyHardware => "any_hardware",
         kettle_render::AdapterEscalation::ForceSoftware => "force_software",
     }

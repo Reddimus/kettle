@@ -168,18 +168,20 @@ putting a user path on the wire.
   device, queue }` is created with window 1 and shared; each subsequent
   window gets its own surface via `Renderer::new_with_gpu` (synchronous —
   no adapter request, no watchdog needed). The adapter is chosen by
-  `resolve_adapter` (v2.23.0): a config-pinned GPU (`gpu-vendor-id` /
-  `-device-id` / `-name`, set via Settings → Graphics) wins, matched among the
-  *surface-capable* adapters by `(vendor,device,backend) → (vendor,device) →
-  name`; otherwise the `gpu-power-preference` policy applies — defaulting to
-  `auto` so wgpu / the platform chooses, with a software fallback last.
-  An absent pin (eGPU unplugged, driver swap) silently falls through to the
-  policy, so a stale pin never fails startup. Because the device/surface graph
+  one resolver shared by live windows, `--gpu-info`, screenshots, offscreen
+  tests, detection, and recovery. A config-pinned GPU (`gpu-vendor-id` /
+  `-device-id` / `-name`, set via Settings → Graphics) wins; `gpu-backend`
+  applies with or without that physical pin. Auto backend order is deterministic
+  (DX12 first on Windows, Metal on macOS, Vulkan elsewhere), and unavailable
+  explicit backends log an observable fallback to native order. An absent pin
+  (eGPU unplugged, driver swap) falls through to the power policy, so a stale
+  portable config never prevents startup. Because the device/surface graph
   can't hot-swap and every window shares the one adapter, GPU changes apply on
   the next launch (the settings panel shows a "restart to apply" hint).
   A fatal wgpu error latches one bounded in-memory `GpuFault`; the event loop
   then rebuilds every renderer on a pure settle/backoff state machine
-  (configured adapter → other hardware → software) without dropping PTYs.
+  (same physical GPU through an alternate backend → surface-preferred GPU →
+  another physical hardware GPU → software) without dropping PTYs.
   Driver callbacks never perform filesystem I/O. The event-loop thread writes
   capped, rotated, terminal-content-free JSONL incident records under the
   per-user cache. Surface acquisition treats both `Success` and `Suboptimal`
