@@ -677,13 +677,29 @@ live-render-smoke:
 # tmux, and clean/configured Neovim marker + split states. Captures
 # PNG/readback artifacts under target/diagnostics/agent-tui-*. Set
 # KETTLE_AGENT_AUTH_SMOKE=1 to include real Codex/Claude marker prompts.
+# `--cargo-release` selects Cargo's reported executable, including custom target
+# directories/triples, instead of assuming `target/release`.
 [unix]
 agent-tui-smoke:
-    python3 scripts/check-live-ui-smoke.py --kettle ./target/release/kettle agent-tui
+    python3 scripts/check-live-ui-smoke.py --cargo-release --shell-mode native agent-tui
 
 [windows]
 agent-tui-smoke:
-    python scripts/check-live-ui-smoke.py agent-tui
+    python scripts/check-live-ui-smoke.py --cargo-release --shell-mode native agent-tui
+
+# Exercise the Windows Kettle executable + ConPTY boundary while all shell,
+# tmux, Neovim/AstroNvim, Codex, and Claude commands run inside WSL. Set
+# KETTLE_SMOKE_WSL_DISTRO to select a non-default distro and
+# KETTLE_SMOKE_ASTRO_CONFIG / KETTLE_SMOKE_NVIM_DATA to select its config and
+# plugin-data directories. The helper copies bounded regular files into an
+# owner-private snapshot and redirects HOME plus all Neovim XDG paths there.
+[windows]
+agent-tui-wsl-smoke:
+    python scripts/check-live-ui-smoke.py --cargo-release --shell-mode wsl agent-tui
+
+[unix]
+agent-tui-wsl-smoke:
+    @echo "agent-tui-wsl-smoke exercises Windows kettle.exe -> wsl.exe and must run on Windows."
 
 # Drive broader live UI interactions: multiline text entry, scrollback wheel,
 # selection drag, tab creation, context-menu split dispatch, and screenshots.

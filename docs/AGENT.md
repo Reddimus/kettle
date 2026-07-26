@@ -171,7 +171,7 @@ so press Enter with `send_keys`, not a trailing `\n`.
 | `subscribe` | read-only | switches the connection to the event stream |
 | `wait_for` | read-only | v2.20: block until the screen matches (`text` substring / `regex` / `quiet_ms` settle — AND when combined; `timeout_ms` default 30 000). Returns `{matched, elapsed_ms, polls}`; a timeout is `matched: false`, not an error. Runs on the connection thread, polling ≥50 ms — the UI is never blocked. The screen-text regex runs against per-line right-trimmed, newline-joined text — use `(?m)` end-of-line anchors rather than end-of-string |
 | `send_text` | full | type text into a pane (`pane`, `text`) |
-| `send_keys` | full | v2.20: press named keys / chords (`pane`, `keys: ["escape","ctrl+c","down","G",…]`). Tokens: key names (`escape`, `enter`, `tab`, `backspace`, `delete`, `insert`, `space`, arrows, `home`/`end`, `pageup`/`pagedown`, `f1`–`f12`), chords with `ctrl`/`alt`/`shift`/`super` (+ aliases), or single characters (case preserved). Encoded through the same path as GUI keystrokes against the pane's live modes (DECCKM-aware); all tokens parse before any byte is sent |
+| `send_keys` | full | v2.20: press named keys / chords (`pane`, `keys: ["escape","ctrl+c","down","G",…]`). Tokens: key names (`escape`, `enter`, `tab`, `backspace`, `delete`, `insert`, `space`, arrows, `home`/`end`, `pageup`/`pagedown`, `f1`–`f12`), chords with `ctrl`/`alt`/`shift`/`super` (+ aliases), or single characters (case preserved). Encoded through the same path as GUI keystrokes against the pane's live modes (DECCKM- and negotiated Kitty CSI-u-aware); all tokens parse before any byte is sent |
 | `dispatch_keybind` | full | diagnostic app-keybind dispatch (`logical`, `physical`, `mods`) using the same resolver as real window keyboard input. It does not write PTY bytes; it returns the candidate triggers, matched action, and whether a modal blocked dispatch |
 | `dispatch_ui_key` | full | press 1–64 pre-parsed key tokens (each at most 64 bytes) in the currently open supported Kettle modal. Search consumes them through its real Unicode editor/navigation path; no token is encoded or written to the PTY. All tokens validate before the first state change, and a closed modal is an error |
 | `send_mouse` | full | deterministic mouse input for diagnostics (`event`: `move`/`press`/`release`/`click`/`wheel`, window-relative `x`/`y`, `button`, `wheel_lines` **or** `wheel_delta`, optional event-local `mods`). A wheel event takes exactly one of `wheel_lines` (signed whole scroll lines, entering downstream of quantization) or `wheel_delta` (signed raw wheel detents, fractions allowed — runs the real sub-detent accumulator, so it can emulate a precision touchpad) |
@@ -334,14 +334,21 @@ X11/Wayland desktop session.
 just agent-tui-smoke
 ```
 
-Starts a real grid-renderer Kettle window, drives a shell marker, optional Codex
+Starts a real grid-renderer Kettle window in explicit `native` shell mode,
+using PowerShell on Windows and deterministic non-rc Bash on Unix/macOS. The
+recipe asks Cargo to build and report the current checkout's exact release
+executable (including a custom `CARGO_TARGET_DIR` or configured target triple),
+then drives a shell marker, optional Codex
 CLI and Claude Code CLI `--version` probes plus `codex exec --help` /
 `claude --print --help` output captures, a prompt-shaped `➜  ~` marker, a
 deterministic Windows Codex active-placeholder and queued-input cursor fixtures,
 tmux attach/send/capture
 when `tmux` is installed, and clean/configured
 Neovim/AstroNvim marker buffers plus clean and configured Neovim vertical-split
-workflow states through `kettle ctl`. Set `KETTLE_AGENT_AUTH_SMOKE=1` to also
+workflow states through `kettle ctl`. The awaited editor text is assembled from
+separate halves inside Vimscript and never appears literally in the typed shell
+command, so shell command echo cannot pass an editor-state probe. Set
+`KETTLE_AGENT_AUTH_SMOKE=1` to also
 run serialized real authenticated `codex exec` / `claude --print` marker prompts inside
 the Kettle pane. A probe passes only when the child exits zero and emits the
 exact response inside its generated output frame, so command echo and a stale
@@ -354,6 +361,40 @@ should fail the run. It saves PNG screenshots,
 lacks visible terminal cells. Missing optional CLIs/tools are reported as skips;
 the shell and prompt-shaped states always run. When tmux is available, the run
 also writes `tmux.png`, `tmux.screen.json`, and `tmux.cells.json`.
+
+On Windows, use the separate cross-boundary mode to keep the shipped
+`kettle.exe`/ConPTY/window path while running the shell and tools inside WSL:
+
+```powershell
+just agent-tui-wsl-smoke
+# Optional non-default distro and AstroNvim config inside that distro:
+$env:KETTLE_SMOKE_WSL_DISTRO = "Ubuntu"
+$env:KETTLE_SMOKE_ASTRO_CONFIG = "/home/me/.config/nvim"
+$env:KETTLE_SMOKE_NVIM_DATA = "/home/me/.local/share/nvim"
+just agent-tui-wsl-smoke
+```
+
+This builds the exact current checkout Windows executable reported by Cargo,
+launches `wsl.exe` with deterministic non-rc Bash, strips Windows
+`/mnt/<drive>` entries from the target `PATH`, and rejects or reports any tool
+whose canonical path still resolves to a Windows-host mount. tmux uses a
+cryptographically random private socket, the Bash executable resolved inside
+that distro (not a hard-coded `/bin/bash`), and checked cleanup registered
+before the session starts. Before configured Neovim or AstroNvim runs, the
+helper creates an unpredictable, owner-private directory inside the target
+distro. It copies only regular files from the config plus existing
+`lazy`/`site` plugin runtime while dereferencing symlinks; cycles, special
+files, more than 100,000 entries or 64 levels, a file over 256 MiB, and an
+aggregate over 2 GiB are rejected. It then redirects `HOME`,
+`XDG_CONFIG_HOME`, `XDG_DATA_HOME`, `XDG_STATE_HOME`, and `XDG_CACHE_HOME` to
+that snapshot; `XDG_RUNTIME_DIR` is isolated there as well. Clean Neovim uses
+the same isolation; the directory is removed at the end.
+
+This protects ordinary configuration and plugin writes that honor `HOME` or
+Neovim's XDG paths. It is state isolation, not an OS security sandbox: code
+that deliberately writes a hard-coded absolute path can still reach that path.
+Authenticated agent probes remain opt-in and use the target shell's existing
+credentials.
 
 ```sh
 just interaction-smoke

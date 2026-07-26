@@ -20,6 +20,32 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
     without GPU wakeups, `Lost` recreates only the affected wgpu surface on the
     healthy shared device, and non-device render errors rebuild that renderer's
     retained resources on a separate capped backoff.
+  - **Agent `send_keys` now matches negotiated Kitty keyboard input.**
+    Synthetic `Shift` chords retain their modifier in CSI-u (so
+    `ctrl+shift+c` is no longer reported as `ctrl+c`), and synthetic
+    Control chords no longer invent associated text for values such as
+    `ctrl+space`. Bare uppercase tokens now infer that same Shift modifier, so
+    `G` reports Kitty's unshifted `g` primary and shifted `G` alternate instead
+    of an unmodified Caps-Lock-style key.
+  - **Agent/TUI compatibility smoke isolation and shell parity.** Unix native
+    runs now use deterministic non-rc Bash instead of feeding POSIX commands to
+    an arbitrary default shell. WSL removes `/mnt/<drive>` entries from the
+    target `PATH` and rejects canonical tool paths that still resolve to the
+    Windows host. Neovim snapshots use unpredictable private directories,
+    dereference config links through a regular-file-only traversal bounded to
+    100,000 entries, 64 directory levels, 256 MiB per file, and 2 GiB total,
+    and redirect `HOME` plus all XDG state away from live configuration.
+    Neovim/AstroNvim expected markers are assembled only inside Vimscript, so
+    an echoed launch command cannot satisfy a live-state wait. tmux smokes use
+    a cryptographically random private socket, resolve Bash inside the selected
+    target, and register checked cleanup for success and failure paths.
+
+  ### Changed
+  - `just agent-tui-smoke` and Windows `just agent-tui-wsl-smoke` now build and
+    run the exact current-checkout release executable reported by Cargo,
+    honoring `CARGO_TARGET_DIR`, configured target triples, and the platform
+    executable suffix instead of assuming `target/release` or exercising a
+    stale `kettle` from `PATH`.
 
   ### Performance
   - Context-menu highlight redraws now reuse the last validated pane snapshots

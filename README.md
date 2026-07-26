@@ -45,8 +45,8 @@ and **WezTerm** into one tool.
 - **Battle-tested VT core** — built on `alacritty_terminal` + `vte`, so
   vim/tmux/neovim/AstroNvim work out of the box (truecolor, undercurl,
   alt-screen, bracketed paste, mouse, focus reports, and xterm-compatible
-  modified keys). Kettle intentionally does not advertise kitty CSI-u keyboard
-  mode until it has a matching encoder.
+  modified keys). Kettle also supports progressive Kitty CSI-u negotiation and
+  encodes press, repeat, and release events only after the child opts in.
 - **Terminator-style multiplexing** — tabs (clickable tab bar), splits,
   focus cycling, broadcast/group input (with a yellow active-tab and
   focused-pane accent so you always know broadcast is on) — with
@@ -219,7 +219,8 @@ override. To use **WSL / Ubuntu**, set `command = wsl.exe -d Ubuntu` — see
 ```sh
 # Linux build deps (Debian/Ubuntu)
 sudo apt-get install -y pkg-config libfontconfig1-dev libfreetype6-dev \
-  libx11-dev libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libxcb1-dev
+  libx11-dev libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libxcb1-dev \
+  libvulkan1 mesa-vulkan-drivers
 
 git clone https://github.com/Reddimus/kettle && cd kettle
 cargo run --release                   # try it
@@ -400,7 +401,7 @@ model.
 - [CHANGELOG.md](CHANGELOG.md) — release history
 - [docs/CONFIG.md](docs/CONFIG.md) — every config key
 - [docs/AGENT.md](docs/AGENT.md) — driving kettle from AI agents (`kettle exec` / `kettle ctl` / `kettle mcp`)
-- [docs/SHELL-INTEGRATION.md](docs/SHELL-INTEGRATION.md) — OSC 133 prompt-mark hooks for bash / zsh / fish
+- [docs/SHELL-INTEGRATION.md](docs/SHELL-INTEGRATION.md) — OSC 133 prompt-mark hooks for PowerShell / bash / zsh / fish
 - [CONTRIBUTING.md](CONTRIBUTING.md) — the audit-cycle pattern + how to land your first change
 
 ## License

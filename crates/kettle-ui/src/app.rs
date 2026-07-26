@@ -14327,10 +14327,14 @@ impl App {
             .unwrap_or_else(kettle_core::TermMode::empty);
         let mut bytes = Vec::new();
         for (mods, key) in &parsed {
-            if let Some(b) = crate::input::encode(key, None, *mods, mode) {
+            if let Some(b) = crate::input::encode_key_press(key, *mods, mode) {
                 // Review fix: honor the user's backspace-binding /
                 // delete-binding remap, exactly like the GUI key path.
-                let b = apply_bs_del_binding(&self.cfg, key, *mods, b);
+                let b = if crate::input::key_press_uses_kitty_sequence(key, *mods, mode) {
+                    b
+                } else {
+                    apply_bs_del_binding(&self.cfg, key, *mods, b)
+                };
                 bytes.extend_from_slice(&b);
             }
         }
@@ -16397,7 +16401,7 @@ fn apply_bs_del_binding(cfg: &Config, key: &Key, mods: ModifiersState, bytes: Ve
 /// v2.20.0 (agent plane): parse one `send_keys` token — `"escape"`,
 /// `"ctrl+c"`, `"shift+tab"`, `"f5"`, `"alt+enter"`, a bare character like
 /// `"G"` — into the `(mods, key)` pair the GUI's PTY encoder
-/// (`input::encode`) consumes. Same `+`-separated grammar and modifier
+/// (`input::encode_key_press`) consumes. Same `+`-separated grammar and modifier
 /// aliases as config keybind triggers (`parse_trigger`), plus the named keys
 /// the keybind grammar has no variant for (escape, backspace, delete,
 /// insert, space) — those are exactly the keys agents drive TUIs with.
@@ -16520,19 +16524,27 @@ fn parse_key_token(token: &str, allow_super_character: bool) -> Option<(Modifier
                         if ch.next().is_some() {
                             return None;
                         }
-                        // Review fixes: `super+<char>` has NO PTY encoding —
-                        // fail loudly rather than silently dropping the
-                        // modifier. `shift+<letter>` normalizes to the
-                        // uppercase character with SHIFT cleared (exactly
-                        // what a human's Shift press delivers; the encoder's
-                        // Character arm ignores SHIFT, so `shift+g` would
-                        // otherwise silently send lowercase `g`).
+                        // A bare uppercase ASCII token represents the same
+                        // logical action as a GUI Shift+letter press. Preserve
+                        // that inferred modifier so negotiated Kitty CSI-u can
+                        // report the unshifted primary key and shifted
+                        // alternate key instead of misreporting a Caps-Lock
+                        // style unmodified uppercase key.
+                        if c.is_ascii_uppercase() {
+                            mods |= ModifiersState::SHIFT;
+                        }
+                        // `super+<char>` has no portable legacy PTY encoding,
+                        // so fail loudly rather than silently dropping the
+                        // modifier. Keep SHIFT on alphabetic chords while
+                        // normalizing their logical character to uppercase:
+                        // the legacy encoder still emits the expected byte,
+                        // while Kitty CSI-u needs the live modifier bit to
+                        // distinguish Ctrl+C from Ctrl+Shift+C.
                         if mods.contains(ModifiersState::SUPER) && !allow_super_character {
                             return None;
                         }
                         if mods.contains(ModifiersState::SHIFT) && c.is_ascii_alphabetic() {
                             c = c.to_ascii_uppercase();
-                            mods.remove(ModifiersState::SHIFT);
                         }
                         Key::Character(c.to_string().into())
                     }
@@ -22736,23 +22748,24 @@ mod tests {
                 Key::Named(NamedKey::F5)
             ))
         );
-        // Character case is PRESERVED — `G` (vim: jump to end) is not `g`.
+        // Character case and its implied Shift are preserved — `G` (vim:
+        // jump to end) is not an unmodified `g`.
         assert_eq!(
             parse_send_key("G"),
-            Some((none, Key::Character("G".into())))
+            Some((ModifiersState::SHIFT, Key::Character("G".into())))
         );
         assert_eq!(
             parse_send_key(":"),
             Some((none, Key::Character(":".into())))
         );
-        // Review fixes: shift+letter normalizes to the uppercase char with
-        // SHIFT cleared (what a human's Shift press delivers — the encoder's
-        // Character arm ignores SHIFT); super+char has no PTY encoding and
-        // fails loudly; the chord/CLI separator characters are reachable
-        // via their names.
+        // Shift+letter normalizes to the uppercase logical character while
+        // retaining SHIFT. Legacy encoding still produces the uppercase byte,
+        // while negotiated CSI-u preserves the actual chord. Super+char has no
+        // portable legacy PTY encoding and fails loudly; the chord/CLI
+        // separator characters are reachable via their names.
         assert_eq!(
             parse_send_key("shift+g"),
-            Some((none, Key::Character("G".into())))
+            Some((ModifiersState::SHIFT, Key::Character("G".into())))
         );
         assert_eq!(parse_send_key("super+x"), None, "super+char unencodable");
         assert_eq!(
@@ -22804,7 +22817,7 @@ mod tests {
         use kettle_core::TermMode;
         let enc = |tok: &str, mode: TermMode| {
             let (mods, key) = parse_send_key(tok).expect(tok);
-            crate::input::encode(&key, None, mods, mode)
+            crate::input::encode_key_press(&key, mods, mode)
         };
         let plain = TermMode::empty();
         assert_eq!(enc("escape", plain), Some(vec![0x1b]));
@@ -22816,6 +22829,43 @@ mod tests {
         assert_eq!(enc("up", TermMode::APP_CURSOR), Some(b"\x1bOA".to_vec()));
         assert_eq!(enc("shift+tab", plain), Some(b"\x1b[Z".to_vec()));
         assert_eq!(enc("G", plain), Some(b"G".to_vec()));
+        assert_eq!(
+            enc("escape", TermMode::DISAMBIGUATE_ESC_CODES),
+            Some(b"\x1b[27u".to_vec()),
+            "send_keys must honor Kitty keyboard negotiation"
+        );
+        assert_eq!(
+            enc("ctrl+c", TermMode::DISAMBIGUATE_ESC_CODES),
+            Some(b"\x1b[99;5u".to_vec())
+        );
+        assert_eq!(
+            enc("ctrl+shift+c", TermMode::DISAMBIGUATE_ESC_CODES),
+            Some(b"\x1b[99;6u".to_vec()),
+            "synthetic chords must retain the same modifiers as GUI input"
+        );
+        assert_eq!(
+            enc(
+                "shift+g",
+                TermMode::REPORT_ALL_KEYS_AS_ESC | TermMode::REPORT_ALTERNATE_KEYS
+            ),
+            Some(b"\x1b[103:71;2u".to_vec())
+        );
+        assert_eq!(
+            enc(
+                "G",
+                TermMode::REPORT_ALL_KEYS_AS_ESC | TermMode::REPORT_ALTERNATE_KEYS
+            ),
+            Some(b"\x1b[103:71;2u".to_vec()),
+            "bare uppercase tokens must retain Kitty's Shift semantics"
+        );
+        assert_eq!(
+            enc(
+                "ctrl+space",
+                TermMode::REPORT_ALL_KEYS_AS_ESC | TermMode::REPORT_ASSOCIATED_TEXT
+            ),
+            Some(b"\x1b[32;5u".to_vec()),
+            "synthetic Control chords must not invent associated text"
+        );
     }
 
     #[test]

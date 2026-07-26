@@ -12,12 +12,14 @@ flake builds directly from the git tag (or `main`).
 ```sh
 nix run github:reddimus/kettle
 # or pin to a tag:
-nix run github:reddimus/kettle/v1.3.5
+nix run "github:reddimus/kettle?ref=<release-tag>"
 ```
 
 Builds the binary in a Nix sandbox, runs it, and leaves the result
 in the Nix store (gc'd when not referenced). Great for trying
-kettle on a NixOS box without committing to an install.
+kettle on a NixOS box without committing to an install. Replace
+`<release-tag>` with a tag from the release page, including its `v`
+prefix.
 
 ### Install into the user profile
 
@@ -62,8 +64,9 @@ wide — the dev shell is fully hermetic.
 
 ## Per-release maintenance
 
-The flake's `version = "1.3.5";` field needs to bump in the same
-PR as `Cargo.toml`'s workspace version. The `cargoLock.lockFile`
+The flake's `version` field must match `Cargo.toml`'s workspace version.
+`scripts/release.sh` updates both in the same release PR and rejects a missing
+or stale Nix version before it creates the commit. The `cargoLock.lockFile`
 auto-resolves crate sources from the in-tree `Cargo.lock`, so no
 separate `cargoSha256` to maintain (the
 `cargoHash`/`cargoVendorDir`/`cargoLock` triad confused enough

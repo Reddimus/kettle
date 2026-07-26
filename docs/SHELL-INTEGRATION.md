@@ -14,40 +14,42 @@ between commands:
 Marks are parsed out of the PTY stream ahead of the VT engine, so they never
 corrupt the screen even on terminals/apps that don't understand them.
 
-## Automatic — no setup required (v2.30, default)
+## Automatic integration: default PowerShell only
 
-**You almost certainly don't need to edit any `$PROFILE` / `.bashrc` / `.zshrc`
-/ `config.fish`.** Since v2.30.0, kettle ships with the config key
-`shell-integration = on` by **default** and auto-injects the wiring into the
-shell it launches for you:
+Since v2.30.0, `shell-integration = on` is the default. Automatic injection is
+currently implemented only when Windows Kettle selects `pwsh` or
+`powershell` as its default shell:
 
 - **OSC 7** (current working directory) — so the tab/title tracks `cd` and new
   tabs / splits inherit the directory.
 - **OSC 133** prompt marks (and **OSC 9;9**) — so prompt-jump (`Ctrl+Up` /
   `Ctrl+Down`) and prompt-aware close-confirmation work.
 
-This happens for kettle's **default shell** (`pwsh` / `powershell` on Windows,
-`bash` / `zsh` / `fish` elsewhere) with **no rc-file edits**: kettle loads your
-existing profile *first*, then wraps the resulting prompt so the OSC sequences
-emit each prompt. Your starship / oh-my-posh / posh-git prompt is preserved.
+Kettle launches that shell with an encoded copy of `kettle.ps1`. The user's
+PowerShell profile loads first; Kettle then wraps the resulting prompt, so
+Starship, oh-my-posh, and posh-git remain in place. No `$PROFILE` edit is
+required. `cmd.exe` is not injected because Kettle can read its changing
+process working directory directly.
 
-You only need the manual snippets in the rest of this document if **either**:
+Automatic injection does **not** currently cover:
 
-1. you set an explicit non-default shell via `command = <shell>` in your config
-   (the auto-injection only wires kettle's *default* shell, not a custom
-   `command =`), **or**
-2. you turn the feature off with `shell-integration = off` (e.g. you prefer to
-   manage the hooks yourself, or your prompt does something exotic that the
-   wrapper doesn't expect).
+- native Linux or macOS bash, zsh, or fish;
+- a Linux shell launched through `command = wsl.exe ...`;
+- any explicit `command = ...`, including explicit PowerShell; or
+- any shell when `shell-integration = off`.
+
+Those cases need the manual snippet below. In particular, install the snippet
+inside the WSL distribution whose shell will emit the marks; changing the
+Windows PowerShell profile does not configure a Linux shell in WSL.
 
 See the **`shell-integration`** key in [CONFIG.md](CONFIG.md) (bool, default
 `on`) to toggle it.
 
 ## Enabling it manually in your shell
 
-> Most users can skip this section — see **Automatic** above. The snippets here
-> are for an explicit non-default `command = <shell>` or when
-> `shell-integration = off`.
+Use this section for Unix shells, WSL shells, an explicit `command =`, or a
+deliberately disabled automatic hook. Default PowerShell users can normally
+skip it.
 
 Most shells need a one-line hook. If you already use **Starship**, kitty's
 shell integration, or iTerm2's, those emit OSC 133 and kettle picks them up

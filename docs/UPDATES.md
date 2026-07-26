@@ -34,8 +34,8 @@ helper only after every Kettle process has exited.
 | Ubuntu/Linux x86_64 installed by the bundled `install.sh` or online installer | Supported |
 | Ubuntu/Linux aarch64 installed by the bundled installer | Supported |
 | Local source build (`local-dev` marker) | Refused; rebuild and reinstall from that checkout |
-| Cargo, distro package, Homebrew, AUR, Nix, or manually copied binary | Refused; update with its owner |
-| macOS app | Use the release page or Homebrew; in-app replacement is not yet supported |
+| Cargo, distro package, Nix, a future Homebrew/AUR package, or manually copied binary | Refused; update with its owner |
+| macOS app | Use the release page; the Homebrew tap is not published and in-app replacement is not yet supported |
 
 Official installers write a small ownership marker beside the managed layout.
 The updater derives the install prefix from the running executable and requires

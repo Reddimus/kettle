@@ -14,8 +14,10 @@ import os
 import platform
 import queue
 import re
+import secrets
 import shlex
 import shutil
+import stat
 import struct
 import subprocess
 import sys
@@ -23,8 +25,50 @@ import tempfile
 import threading
 import time
 import zlib
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Optional, Set, Tuple
+from typing import Callable, Dict, List, Optional, Set, Tuple
+
+
+NVIM_SNAPSHOT_MAX_ENTRIES = 100_000
+NVIM_SNAPSHOT_MAX_BYTES = 2 * 1024 * 1024 * 1024
+NVIM_SNAPSHOT_MAX_FILE_BYTES = 256 * 1024 * 1024
+NVIM_SNAPSHOT_MAX_DEPTH = 64
+NVIM_SNAPSHOT_TAR_OVERHEAD_BYTES = (
+    NVIM_SNAPSHOT_MAX_ENTRIES * 1024 + 1024 * 1024
+)
+COPY_CHUNK_BYTES = 1024 * 1024
+
+
+@dataclass
+class SnapshotCopyBudget:
+    max_entries: int = NVIM_SNAPSHOT_MAX_ENTRIES
+    max_bytes: int = NVIM_SNAPSHOT_MAX_BYTES
+    max_file_bytes: int = NVIM_SNAPSHOT_MAX_FILE_BYTES
+    max_depth: int = NVIM_SNAPSHOT_MAX_DEPTH
+    entries: int = 0
+    bytes: int = 0
+
+    def add_entry(self, source: Path) -> None:
+        self.entries += 1
+        if self.entries > self.max_entries:
+            raise RuntimeError(
+                "Neovim snapshot exceeds the "
+                f"{self.max_entries} entry limit at {source}"
+            )
+
+    def add_file(self, source: Path, size: int) -> None:
+        if size < 0 or size > self.max_file_bytes:
+            raise RuntimeError(
+                "Neovim snapshot file exceeds the "
+                f"{self.max_file_bytes} byte per-file limit: {source} ({size} bytes)"
+            )
+        if self.bytes + size > self.max_bytes:
+            raise RuntimeError(
+                "Neovim snapshot exceeds the "
+                f"{self.max_bytes} aggregate byte limit at {source}"
+            )
+        self.bytes += size
 
 
 def run(
@@ -40,6 +84,81 @@ def run(
         timeout=timeout,
         check=False,
     )
+
+
+def release_kettle_artifact_from_messages(messages: str) -> Path:
+    """Return Cargo's exact release executable from JSON build messages."""
+    executables: List[Path] = []
+    for line in messages.splitlines():
+        try:
+            message = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if message.get("reason") != "compiler-artifact":
+            continue
+        target = message.get("target")
+        if not isinstance(target, dict):
+            continue
+        kinds = target.get("kind")
+        executable = message.get("executable")
+        if (
+            target.get("name") == "kettle"
+            and isinstance(kinds, list)
+            and "bin" in kinds
+            and isinstance(executable, str)
+        ):
+            path = Path(executable).resolve()
+            if path not in executables:
+                executables.append(path)
+    if len(executables) != 1:
+        raise RuntimeError(
+            "cargo did not report exactly one kettle release executable "
+            f"(found {len(executables)}: {executables})"
+        )
+    return executables[0]
+
+
+def resolve_release_kettle() -> str:
+    """Build and select the current checkout's actual Cargo artifact."""
+    if shutil.which("cargo") is None:
+        raise RuntimeError("--cargo-release requires cargo on the host PATH")
+    cp = run(
+        [
+            "cargo",
+            "build",
+            "--release",
+            "-p",
+            "kettle",
+            "--message-format=json-render-diagnostics",
+        ],
+        timeout=None,
+        capture=True,
+    )
+    if cp.returncode != 0:
+        rendered: List[str] = []
+        for line in cp.stdout.splitlines():
+            try:
+                message = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            diagnostic = message.get("message")
+            if isinstance(diagnostic, dict) and isinstance(
+                diagnostic.get("rendered"), str
+            ):
+                rendered.append(diagnostic["rendered"])
+        detail = "".join(rendered[-5:]) or cp.stdout[-4000:]
+        raise RuntimeError(
+            "failed to build the current checkout's release executable:\n"
+            f"{detail}\n{cp.stderr[-4000:]}"
+        )
+    executable = release_kettle_artifact_from_messages(cp.stdout)
+    if not executable.is_file():
+        raise RuntimeError(f"Cargo-reported Kettle executable is missing: {executable}")
+    print(
+        f"live-ui smoke: Cargo selected release executable {executable}",
+        file=sys.stderr,
+    )
+    return str(executable)
 
 
 def require_cmd(cmd: str) -> None:
@@ -152,10 +271,862 @@ def bright_pixels_in_rect(rgba_rows: List[bytes], x0: float, y0: float, x1: floa
     return total
 
 
-def shell_quote(text: str) -> str:
-    if platform.system() == "Windows":
+def shell_quote(text: str, *, windows: Optional[bool] = None) -> str:
+    use_windows = platform.system() == "Windows" if windows is None else windows
+    if use_windows:
         return "'" + text.replace("'", "''") + "'"
     return "'" + text.replace("'", "'\"'\"'") + "'"
+
+
+@dataclass(frozen=True)
+class AgentShellTarget:
+    """The shell exercised by the agent/TUI live-window smoke.
+
+    `wsl` is deliberately a Windows-host mode: the Windows Kettle binary still
+    owns the window and ConPTY, while `wsl.exe` owns the Linux shell and its
+    tools. Keeping this as an explicit target avoids accidentally building
+    PowerShell commands merely because the Python helper itself runs on
+    Windows.
+    """
+
+    mode: str = "native"
+    wsl_distro: Optional[str] = None
+    astro_config: Optional[str] = None
+    nvim_data: Optional[str] = None
+
+    @property
+    def powershell(self) -> bool:
+        return self.mode == "native" and platform.system() == "Windows"
+
+    @property
+    def label(self) -> str:
+        if self.mode == "wsl" and self.wsl_distro:
+            safe_distro = re.sub(r"[^A-Za-z0-9_.-]+", "-", self.wsl_distro).strip("-")
+            return f"wsl-{safe_distro or 'distro'}"
+        return self.mode
+
+    def wsl_base_argv(self) -> List[str]:
+        argv = ["wsl.exe"]
+        if self.wsl_distro:
+            argv += ["--distribution", self.wsl_distro]
+        return argv + ["--cd", "~"]
+
+    def launch_args(self) -> List[str]:
+        if self.mode == "wsl":
+            return [
+                "-e",
+                *self.wsl_base_argv(),
+                "--exec",
+                "bash",
+                "--noprofile",
+                "--norc",
+            ]
+        if self.powershell:
+            return ["-e", "powershell.exe", "-NoLogo", "-NoProfile"]
+        # The commands generated by this harness use Bash/POSIX syntax. Do not
+        # inherit an arbitrary login shell such as fish or Nushell and then
+        # feed it `export`, shell functions, and POSIX loops.
+        return ["-e", "bash", "--noprofile", "--norc"]
+
+    def host_argv(self, argv: List[str]) -> List[str]:
+        if self.mode == "wsl":
+            return [*self.wsl_base_argv(), "--exec", *argv]
+        return argv
+
+    @staticmethod
+    def is_wsl_host_tool_path(path: str) -> bool:
+        normalized = path.replace("\\", "/")
+        return re.match(r"^/mnt/[A-Za-z](?:/|$)", normalized) is not None
+
+    def posix_path_setup(self, *, keep_windows_host_paths: bool = False) -> str:
+        # Deterministic non-rc shell, while retaining the usual user-local
+        # install locations for rustup, standalone Claude, and npm CLIs. WSL
+        # appends the Windows PATH by default; remove those mount entries so a
+        # Windows .exe/shim cannot masquerade as a tool installed in the
+        # selected Linux distribution.
+        prefix = (
+            'export PATH="$HOME/.local/bin:$HOME/.cargo/bin:'
+            '$HOME/.npm-global/bin:$PATH"; unset HISTFILE'
+        )
+        if self.mode != "wsl" or keep_windows_host_paths:
+            return prefix
+        return (
+            'KETTLE_SMOKE_LINUX_PATH=""; KETTLE_SMOKE_PATH_REST=$PATH; '
+            "while :; do "
+            'case "$KETTLE_SMOKE_PATH_REST" in '
+            '*:*) KETTLE_SMOKE_PATH_ENTRY=${KETTLE_SMOKE_PATH_REST%%:*}; '
+            'KETTLE_SMOKE_PATH_REST=${KETTLE_SMOKE_PATH_REST#*:} ;; '
+            '*) KETTLE_SMOKE_PATH_ENTRY=$KETTLE_SMOKE_PATH_REST; '
+            'KETTLE_SMOKE_PATH_REST= ;; esac; '
+            'case "$KETTLE_SMOKE_PATH_ENTRY" in '
+            "/mnt/[A-Za-z]|/mnt/[A-Za-z]/*|'') ;; "
+            '*) KETTLE_SMOKE_LINUX_PATH="${KETTLE_SMOKE_LINUX_PATH}'
+            '${KETTLE_SMOKE_LINUX_PATH:+:}$KETTLE_SMOKE_PATH_ENTRY" ;; esac; '
+            '[ -n "$KETTLE_SMOKE_PATH_REST" ] || break; done; '
+            'export PATH="$HOME/.local/bin:$HOME/.cargo/bin:'
+            '$HOME/.npm-global/bin${KETTLE_SMOKE_LINUX_PATH:+:'
+            '$KETTLE_SMOKE_LINUX_PATH}"; '
+            "unset KETTLE_SMOKE_LINUX_PATH KETTLE_SMOKE_PATH_REST "
+            "KETTLE_SMOKE_PATH_ENTRY HISTFILE"
+        )
+
+    def initial_shell_command(self) -> Optional[str]:
+        if self.powershell:
+            return None
+        return self.posix_path_setup()
+
+    def posix_script_argv(self, script: str) -> List[str]:
+        """Run a script in the same deterministic Bash dialect as the pane."""
+        if self.powershell:
+            raise ValueError("POSIX scripts are not valid for PowerShell targets")
+        return self.host_argv(
+            [
+                "bash",
+                "--noprofile",
+                "--norc",
+                "-c",
+                f"{self.posix_path_setup()}; {script}",
+            ]
+        )
+
+    def command_argv(self, argv: List[str]) -> List[str]:
+        """Build a host command with the target shell's effective PATH."""
+        if self.powershell:
+            return argv
+        return self.posix_script_argv(f"exec {shlex.join(argv)}")
+
+    def _posix_command_path_script(
+        self, command: str, *, keep_windows_host_paths: bool
+    ) -> str:
+        script = (
+            f"{self.posix_path_setup(keep_windows_host_paths=keep_windows_host_paths)}; "
+            f"KETTLE_SMOKE_COMMAND=$(command -v -- {shlex.quote(command)}) "
+            "|| exit 127; "
+            'case "$KETTLE_SMOKE_COMMAND" in /*) ;; *) exit 126 ;; esac; '
+        )
+        if self.mode == "wsl":
+            # WSL's target is a separate filesystem namespace, so resolve
+            # there. GNU readlink is part of the Linux environment and lets us
+            # reject a target-side shim that ultimately points into /mnt/c.
+            script += (
+                'KETTLE_SMOKE_COMMAND=$(readlink -f -- "$KETTLE_SMOKE_COMMAND") '
+                "|| exit 125; "
+            )
+        script += "printf '%s\\n' \"$KETTLE_SMOKE_COMMAND\""
+        return script
+
+    def _posix_command_path(
+        self, command: str, *, keep_windows_host_paths: bool
+    ) -> Optional[str]:
+        script = self._posix_command_path_script(
+            command, keep_windows_host_paths=keep_windows_host_paths
+        )
+        cp = run(
+            self.host_argv(
+                ["bash", "--noprofile", "--norc", "-c", script]
+            ),
+            timeout=60 if self.mode == "wsl" else 30,
+        )
+        paths = cp.stdout.splitlines() if cp.returncode == 0 else []
+        if len(paths) != 1:
+            return None
+        if self.mode == "wsl":
+            return paths[0]
+        # Native Unix/macOS shares the helper's filesystem. Resolve through
+        # Python rather than assuming GNU `readlink -f`, which is unavailable
+        # in the default macOS userland.
+        try:
+            return str(Path(paths[0]).resolve(strict=True))
+        except OSError:
+            return None
+
+    def command_resolution(self, command: str) -> Tuple[str, Optional[str]]:
+        """Classify a tool as target-native, Windows-host, or missing."""
+        if self.powershell:
+            path = shutil.which(command)
+            return ("available", path) if path else ("missing", None)
+
+        path = self._posix_command_path(
+            command, keep_windows_host_paths=False
+        )
+        if path is not None:
+            if self.mode == "wsl" and self.is_wsl_host_tool_path(path):
+                return "windows-host", path
+            return "available", path
+
+        if self.mode == "wsl":
+            host_path = self._posix_command_path(
+                command, keep_windows_host_paths=True
+            )
+            if host_path is not None and self.is_wsl_host_tool_path(host_path):
+                return "windows-host", host_path
+        return "missing", None
+
+    def command_available(self, command: str) -> bool:
+        status, _path = self.command_resolution(command)
+        return status == "available"
+
+    def command_unavailable_reason(self, command: str) -> str:
+        status, path = self.command_resolution(command)
+        if status == "windows-host":
+            return (
+                f"resolved to Windows-host tool {path}; install {command} "
+                f"inside the {self.label} target"
+            )
+        if status == "available":
+            return f"{command} is available"
+        return f"not on {self.label} PATH"
+
+    def require_command_path(self, command: str) -> str:
+        status, path = self.command_resolution(command)
+        if status != "available" or path is None:
+            raise RuntimeError(
+                f"required target command {command!r} unavailable: "
+                f"{self.command_unavailable_reason(command)}"
+            )
+        return path
+
+    def run_command(
+        self, argv: List[str], *, timeout: float = 10
+    ) -> subprocess.CompletedProcess:
+        return run(self.command_argv(argv), timeout=timeout, capture=True)
+
+    def nvim_config_source(self) -> str:
+        if self.astro_config:
+            return self.astro_config
+        if self.mode == "wsl":
+            return "${XDG_CONFIG_HOME:-$HOME/.config}/nvim"
+        if self.powershell:
+            config_home = os.environ.get("XDG_CONFIG_HOME")
+            if config_home:
+                return str(Path(config_home) / "nvim")
+            return str(Path(os.environ.get("LOCALAPPDATA", tempfile.gettempdir())) / "nvim")
+        return str(
+            Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config"))
+            / "nvim"
+        )
+
+    def configured_nvim_available(self) -> bool:
+        source = self.nvim_config_source()
+        if self.mode == "wsl":
+            source_expr = (
+                self.posix_path_expression(source) if self.astro_config else source
+            )
+            cp = run(
+                self.posix_script_argv(f"test -d {source_expr}"),
+                timeout=60,
+            )
+            return cp.returncode == 0
+        return Path(source).expanduser().is_dir()
+
+    def nvim_data_source(self) -> str:
+        if self.nvim_data:
+            return self.nvim_data
+        if self.mode == "wsl":
+            return "${XDG_DATA_HOME:-$HOME/.local/share}/nvim"
+        if self.powershell:
+            return str(
+                Path(os.environ.get("LOCALAPPDATA", tempfile.gettempdir()))
+                / "nvim-data"
+            )
+        return str(
+            Path(os.environ.get("XDG_DATA_HOME", Path.home() / ".local" / "share"))
+            / "nvim"
+        )
+
+    @staticmethod
+    def posix_path_expression(path: str) -> str:
+        """Quote an explicit target-shell path while allowing a leading `~/`."""
+        if path == "~":
+            return '"$HOME"'
+        if path.startswith("~/"):
+            return f'"$HOME"/{shlex.quote(path[2:])}'
+        return shlex.quote(path)
+
+    @staticmethod
+    def path_is_link(path: Path) -> bool:
+        """Recognize links and Windows junctions without following them."""
+        is_junction = getattr(path, "is_junction", None)
+        return path.is_symlink() or (
+            callable(is_junction) and bool(is_junction())
+        )
+
+    @classmethod
+    def validate_native_sandbox_path(cls, sandbox_path: str) -> Path:
+        candidate = Path(sandbox_path)
+        if cls.path_is_link(candidate):
+            raise ValueError(
+                f"refusing linked Neovim sandbox path: {candidate}"
+            )
+        root = candidate.resolve()
+        temp_root = Path(tempfile.gettempdir()).resolve()
+        if root.parent != temp_root or not root.name.startswith(
+            "kettle-agent-tui-"
+        ):
+            raise ValueError(f"refusing unsafe Neovim sandbox path: {root}")
+        return root
+
+    def create_nvim_sandbox_host(self) -> str:
+        """Create an unpredictable owner-private sandbox on the target host."""
+        if self.mode == "wsl":
+            cp = run(
+                self.host_argv(
+                    [
+                        "bash",
+                        "--noprofile",
+                        "--norc",
+                        "-c",
+                        (
+                            "umask 077; "
+                            "root=$(mktemp -d "
+                            "/tmp/kettle-agent-tui-XXXXXXXXXX) || exit 1; "
+                            'chmod 700 -- "$root" || { '
+                            'rm -rf -- "$root"; exit 1; }; '
+                            "printf '%s\\n' \"$root\""
+                        ),
+                    ]
+                ),
+                timeout=60,
+            )
+            paths = cp.stdout.splitlines() if cp.returncode == 0 else []
+            if len(paths) != 1:
+                raise RuntimeError(
+                    "failed to create WSL Neovim sandbox: "
+                    f"stdout={cp.stdout!r} stderr={cp.stderr!r}"
+                )
+            self.validate_wsl_sandbox_path(paths[0])
+            return paths[0]
+
+        root = Path(tempfile.mkdtemp(prefix="kettle-agent-tui-"))
+        try:
+            root.chmod(0o700)
+            return str(self.validate_native_sandbox_path(str(root)))
+        except Exception:
+            shutil.rmtree(root, ignore_errors=True)
+            raise
+
+    @classmethod
+    def assert_snapshot_has_no_links(cls, root: Path) -> None:
+        """Reject a copied tree that still points outside the snapshot."""
+        for current, directories, files in os.walk(root, followlinks=False):
+            current_path = Path(current)
+            for name in [*directories, *files]:
+                candidate = current_path / name
+                if cls.path_is_link(candidate):
+                    raise RuntimeError(
+                        "Neovim snapshot retained a symlink or junction: "
+                        f"{candidate}"
+                    )
+
+    @classmethod
+    def _copy_bounded_regular_file(
+        cls, source: Path, target: Path, budget: SnapshotCopyBudget
+    ) -> None:
+        flags = os.O_RDONLY | getattr(os, "O_BINARY", 0)
+        flags |= getattr(os, "O_NONBLOCK", 0)
+        descriptor = os.open(source, flags)
+        try:
+            source_stat = os.fstat(descriptor)
+            if not stat.S_ISREG(source_stat.st_mode):
+                raise RuntimeError(
+                    f"Neovim snapshot source is not a regular file: {source}"
+                )
+            size = int(source_stat.st_size)
+            budget.add_file(source, size)
+            with os.fdopen(descriptor, "rb", closefd=False) as source_file:
+                with target.open("xb") as target_file:
+                    remaining = size
+                    while remaining > 0:
+                        chunk = source_file.read(min(COPY_CHUNK_BYTES, remaining))
+                        if not chunk:
+                            raise RuntimeError(
+                                "Neovim snapshot source shrank while being copied: "
+                                f"{source}"
+                            )
+                        target_file.write(chunk)
+                        remaining -= len(chunk)
+                    if source_file.read(1):
+                        raise RuntimeError(
+                            "Neovim snapshot source grew while being copied: "
+                            f"{source}"
+                        )
+            executable = bool(
+                source_stat.st_mode
+                & (stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+            )
+            target.chmod(0o700 if executable else 0o600)
+        finally:
+            os.close(descriptor)
+
+    @classmethod
+    def _copy_bounded_regular_directory(
+        cls,
+        source: Path,
+        target: Path,
+        snapshot_root: Path,
+        budget: SnapshotCopyBudget,
+        active_directories: Set[Tuple[int, int, str]],
+        depth: int,
+    ) -> None:
+        if depth > budget.max_depth:
+            raise RuntimeError(
+                "Neovim snapshot exceeds the "
+                f"{budget.max_depth} directory depth limit at {source}"
+            )
+        source_stat = source.stat()
+        if not stat.S_ISDIR(source_stat.st_mode):
+            raise RuntimeError(
+                f"Neovim snapshot source is not a directory: {source}"
+            )
+        resolved = source.resolve(strict=True)
+        try:
+            snapshot_root.relative_to(resolved)
+        except ValueError:
+            pass
+        else:
+            raise RuntimeError(
+                "Neovim snapshot source contains its destination: "
+                f"{source} -> {resolved}"
+            )
+        identity = (
+            int(source_stat.st_dev),
+            int(source_stat.st_ino),
+            os.path.normcase(str(resolved)),
+        )
+        if identity in active_directories:
+            raise RuntimeError(
+                f"Neovim snapshot source contains a directory cycle: {source}"
+            )
+        active_directories.add(identity)
+        try:
+            target.mkdir(mode=0o700)
+            with os.scandir(source) as entries:
+                for entry in entries:
+                    source_entry = Path(entry.path)
+                    target_entry = target / entry.name
+                    budget.add_entry(source_entry)
+                    try:
+                        entry_stat = entry.stat(follow_symlinks=True)
+                    except OSError as error:
+                        raise RuntimeError(
+                            "cannot resolve Neovim snapshot entry "
+                            f"{source_entry}: {error}"
+                        ) from error
+                    if stat.S_ISDIR(entry_stat.st_mode):
+                        cls._copy_bounded_regular_directory(
+                            source_entry,
+                            target_entry,
+                            snapshot_root,
+                            budget,
+                            active_directories,
+                            depth + 1,
+                        )
+                    elif stat.S_ISREG(entry_stat.st_mode):
+                        cls._copy_bounded_regular_file(
+                            source_entry, target_entry, budget
+                        )
+                    else:
+                        raise RuntimeError(
+                            "Neovim snapshot only accepts regular files and "
+                            f"directories: {source_entry}"
+                        )
+        finally:
+            active_directories.remove(identity)
+
+    @classmethod
+    def copy_bounded_regular_tree(
+        cls,
+        source: Path,
+        target: Path,
+        budget: SnapshotCopyBudget,
+    ) -> None:
+        """Dereference a tree without unbounded recursion or special files."""
+        if target.exists() or cls.path_is_link(target):
+            raise RuntimeError(
+                f"Neovim snapshot destination already exists: {target}"
+            )
+        budget.add_entry(source)
+        cls._copy_bounded_regular_directory(
+            source,
+            target,
+            target.resolve(),
+            budget,
+            set(),
+            0,
+        )
+
+    @staticmethod
+    def wsl_bounded_copy_function() -> str:
+        """Bash helper matching the native bounded regular-tree copy."""
+        return (
+            "kettle_smoke_copy_tree() { "
+            "local KETTLE_COPY_SOURCE KETTLE_COPY_TARGET "
+            "KETTLE_COPY_SOURCE_REAL KETTLE_COPY_TARGET_REAL "
+            "KETTLE_COPY_FIFO KETTLE_COPY_MANIFEST KETTLE_COPY_BAD "
+            "KETTLE_COPY_SIZES KETTLE_COPY_FIND_PID KETTLE_COPY_STATUS "
+            "KETTLE_COPY_TYPE KETTLE_COPY_PATH KETTLE_COPY_REL KETTLE_COPY_DEPTH "
+            "KETTLE_COPY_TAIL KETTLE_COPY_SIZE KETTLE_COPY_ACTUAL "
+            "KETTLE_COPY_REMAINING KETTLE_COPY_STREAM_LIMIT; "
+            "local -a KETTLE_COPY_PIPE_STATUS; "
+            "KETTLE_COPY_SOURCE=$1; KETTLE_COPY_TARGET=$2; "
+            "KETTLE_COPY_ENTRIES=$((KETTLE_COPY_ENTRIES + 1)); "
+            f"if [ \"$KETTLE_COPY_ENTRIES\" -gt {NVIM_SNAPSHOT_MAX_ENTRIES} ]; then "
+            'printf "snapshot exceeds entry limit at %s\\n" '
+            '"$KETTLE_COPY_SOURCE" >&2; return 1; fi; '
+            '[ -d "$KETTLE_COPY_SOURCE" ] || { '
+            'printf "snapshot source is not a directory: %s\\n" '
+            '"$KETTLE_COPY_SOURCE" >&2; return 1; }; '
+            '[ ! -e "$KETTLE_COPY_TARGET" ] && '
+            '[ ! -L "$KETTLE_COPY_TARGET" ] || { '
+            'printf "snapshot destination exists: %s\\n" '
+            '"$KETTLE_COPY_TARGET" >&2; return 1; }; '
+            'KETTLE_COPY_SOURCE_REAL=$(readlink -f -- "$KETTLE_COPY_SOURCE") '
+            "|| return 1; "
+            'KETTLE_COPY_TARGET_REAL=$(readlink -f -- "$KETTLE_COPY_TARGET") '
+            "|| return 1; "
+            'case "$KETTLE_COPY_TARGET_REAL/" in '
+            '"$KETTLE_COPY_SOURCE_REAL/"*) '
+            'printf "snapshot source contains destination: %s\\n" '
+            '"$KETTLE_COPY_SOURCE" >&2; return 1 ;; esac; '
+            "KETTLE_COPY_SOURCE=$KETTLE_COPY_SOURCE_REAL; "
+            'KETTLE_COPY_FIFO="$KETTLE_SMOKE_ROOT/run/find-$RANDOM-$$"; '
+            'KETTLE_COPY_MANIFEST="$KETTLE_SMOKE_ROOT/run/manifest-$RANDOM-$$"; '
+            'KETTLE_COPY_BAD="$KETTLE_SMOKE_ROOT/run/bad-$RANDOM-$$"; '
+            'KETTLE_COPY_SIZES="$KETTLE_SMOKE_ROOT/run/sizes-$RANDOM-$$"; '
+            ': >"$KETTLE_COPY_MANIFEST" || return 1; '
+            'chmod 600 -- "$KETTLE_COPY_MANIFEST" || return 1; '
+            'mkfifo -m 600 -- "$KETTLE_COPY_FIFO" || { '
+            'rm -f -- "$KETTLE_COPY_MANIFEST"; return 1; }; '
+            'find -L "$KETTLE_COPY_SOURCE" -mindepth 1 '
+            "-printf '%y\\0%s\\0%p\\0' "
+            '>"$KETTLE_COPY_FIFO" & KETTLE_COPY_FIND_PID=$!; '
+            "KETTLE_COPY_STATUS=0; "
+            "while IFS= read -r -d '' KETTLE_COPY_TYPE && "
+            "IFS= read -r -d '' KETTLE_COPY_SIZE && "
+            "IFS= read -r -d '' KETTLE_COPY_PATH; do "
+            "KETTLE_COPY_ENTRIES=$((KETTLE_COPY_ENTRIES + 1)); "
+            f"if [ \"$KETTLE_COPY_ENTRIES\" -gt {NVIM_SNAPSHOT_MAX_ENTRIES} ]; then "
+            'printf "snapshot exceeds entry limit at %s\\n" '
+            '"$KETTLE_COPY_PATH" >&2; KETTLE_COPY_STATUS=1; break; fi; '
+            'case "$KETTLE_COPY_PATH" in "$KETTLE_COPY_SOURCE"/*) '
+            'KETTLE_COPY_REL=${KETTLE_COPY_PATH#"$KETTLE_COPY_SOURCE"/} ;; '
+            '*) printf "snapshot traversal escaped source: %s\\n" '
+            '"$KETTLE_COPY_PATH" >&2; KETTLE_COPY_STATUS=1; break ;; esac; '
+            "KETTLE_COPY_DEPTH=1; KETTLE_COPY_TAIL=$KETTLE_COPY_REL; "
+            'while [ "${KETTLE_COPY_TAIL#*/}" != "$KETTLE_COPY_TAIL" ]; do '
+            "KETTLE_COPY_DEPTH=$((KETTLE_COPY_DEPTH + 1)); "
+            'KETTLE_COPY_TAIL=${KETTLE_COPY_TAIL#*/}; done; '
+            f"if [ \"$KETTLE_COPY_DEPTH\" -gt {NVIM_SNAPSHOT_MAX_DEPTH} ]; then "
+            'printf "snapshot exceeds depth limit at %s\\n" '
+            '"$KETTLE_COPY_PATH" >&2; KETTLE_COPY_STATUS=1; break; fi; '
+            'if [ "$KETTLE_COPY_TYPE" = d ]; then :; '
+            'elif [ "$KETTLE_COPY_TYPE" = f ]; then '
+            'case "$KETTLE_COPY_SIZE" in ""|*[!0-9]*) '
+            'printf "invalid snapshot file size: %s\\n" '
+            '"$KETTLE_COPY_PATH" >&2; KETTLE_COPY_STATUS=1; break ;; esac; '
+            f"if [ \"$KETTLE_COPY_SIZE\" -gt {NVIM_SNAPSHOT_MAX_FILE_BYTES} ]; then "
+            'printf "snapshot file exceeds per-file limit: %s\\n" '
+            '"$KETTLE_COPY_PATH" >&2; KETTLE_COPY_STATUS=1; break; fi; '
+            "KETTLE_COPY_BYTES=$((KETTLE_COPY_BYTES + KETTLE_COPY_SIZE)); "
+            f"if [ \"$KETTLE_COPY_BYTES\" -gt {NVIM_SNAPSHOT_MAX_BYTES} ]; then "
+            'printf "snapshot exceeds aggregate byte limit at %s\\n" '
+            '"$KETTLE_COPY_PATH" >&2; KETTLE_COPY_STATUS=1; break; fi; '
+            "else "
+            'printf "snapshot rejects non-regular entry: %s\\n" '
+            '"$KETTLE_COPY_PATH" >&2; KETTLE_COPY_STATUS=1; break; fi; '
+            "printf '%s\\0' \"$KETTLE_COPY_REL\" "
+            '>>"$KETTLE_COPY_MANIFEST" || { '
+            "KETTLE_COPY_STATUS=1; break; }; "
+            'done <"$KETTLE_COPY_FIFO"; '
+            'if [ "$KETTLE_COPY_STATUS" -ne 0 ]; then '
+            'kill "$KETTLE_COPY_FIND_PID" 2>/dev/null || true; '
+            'wait "$KETTLE_COPY_FIND_PID" 2>/dev/null || true; '
+            "else wait \"$KETTLE_COPY_FIND_PID\" || KETTLE_COPY_STATUS=1; fi; "
+            'rm -f -- "$KETTLE_COPY_FIFO"; '
+            'if [ "$KETTLE_COPY_STATUS" -ne 0 ]; then '
+            'rm -f -- "$KETTLE_COPY_MANIFEST"; return 1; fi; '
+            'mkdir -m 700 -- "$KETTLE_COPY_TARGET" || { '
+            'rm -f -- "$KETTLE_COPY_MANIFEST"; return 1; }; '
+            f"KETTLE_COPY_REMAINING=$(({NVIM_SNAPSHOT_MAX_BYTES} - "
+            "KETTLE_COPY_ACTUAL_BYTES)); "
+            f"KETTLE_COPY_STREAM_LIMIT=$((KETTLE_COPY_REMAINING + "
+            f"{NVIM_SNAPSHOT_TAR_OVERHEAD_BYTES})); "
+            '(cd "$KETTLE_COPY_SOURCE" && '
+            "timeout 300 tar --null --verbatim-files-from --no-recursion "
+            '--dereference -cf - -T "$KETTLE_COPY_MANIFEST") '
+            '| head -c "$KETTLE_COPY_STREAM_LIMIT" '
+            f'| (ulimit -f {NVIM_SNAPSHOT_MAX_FILE_BYTES // 1024} && '
+            'tar --no-same-owner --no-same-permissions -xf - '
+            '-C "$KETTLE_COPY_TARGET"); '
+            'KETTLE_COPY_PIPE_STATUS=("${PIPESTATUS[@]}"); '
+            'if [ "${KETTLE_COPY_PIPE_STATUS[0]}" -ne 0 ] || '
+            '[ "${KETTLE_COPY_PIPE_STATUS[1]}" -ne 0 ] || '
+            '[ "${KETTLE_COPY_PIPE_STATUS[2]}" -ne 0 ]; then '
+            'printf "bounded snapshot archive copy failed: %s\\n" '
+            '"${KETTLE_COPY_PIPE_STATUS[*]}" >&2; '
+            'rm -f -- "$KETTLE_COPY_MANIFEST"; return 1; fi; '
+            'find "$KETTLE_COPY_TARGET" ! -type d ! -type f '
+            '-print -quit >"$KETTLE_COPY_BAD" || return 1; '
+            'if [ -s "$KETTLE_COPY_BAD" ]; then '
+            'printf "snapshot archive produced a non-regular entry\\n" >&2; '
+            'rm -f -- "$KETTLE_COPY_MANIFEST" "$KETTLE_COPY_BAD"; '
+            "return 1; fi; "
+            f'find "$KETTLE_COPY_TARGET" -type f -size +{NVIM_SNAPSHOT_MAX_FILE_BYTES}c '
+            '-print -quit >"$KETTLE_COPY_BAD" || return 1; '
+            'if [ -s "$KETTLE_COPY_BAD" ]; then '
+            'printf "snapshot archive exceeded the per-file limit\\n" >&2; '
+            'rm -f -- "$KETTLE_COPY_MANIFEST" "$KETTLE_COPY_BAD"; '
+            "return 1; fi; "
+            'find "$KETTLE_COPY_TARGET" -type f -printf "%s\\n" '
+            '>"$KETTLE_COPY_SIZES" || return 1; '
+            'KETTLE_COPY_ACTUAL=$(awk \'{ total += $1 } '
+            'END { printf "%.0f\\n", total }\' "$KETTLE_COPY_SIZES") '
+            "|| return 1; "
+            "KETTLE_COPY_ACTUAL_BYTES=$((KETTLE_COPY_ACTUAL_BYTES + "
+            "KETTLE_COPY_ACTUAL)); "
+            f'if [ "$KETTLE_COPY_ACTUAL_BYTES" -gt {NVIM_SNAPSHOT_MAX_BYTES} ]; then '
+            'printf "snapshot archive exceeded the aggregate byte limit\\n" >&2; '
+            'rm -f -- "$KETTLE_COPY_MANIFEST" "$KETTLE_COPY_BAD" '
+            '"$KETTLE_COPY_SIZES"; return 1; fi; '
+            'chmod -R u+rwX,go-rwx -- "$KETTLE_COPY_TARGET" || return 1; '
+            'rm -f -- "$KETTLE_COPY_MANIFEST" "$KETTLE_COPY_BAD" '
+            '"$KETTLE_COPY_SIZES"; '
+            'return "$KETTLE_COPY_STATUS"; }; '
+        )
+
+    def prepare_nvim_sandbox_host(self, sandbox_path: str) -> None:
+        """Populate a native sandbox without preserving links to live state."""
+        if self.mode == "wsl":
+            return
+        root = self.validate_native_sandbox_path(sandbox_path)
+        if not root.is_dir() or self.path_is_link(root):
+            raise ValueError(f"Neovim sandbox is not a plain directory: {root}")
+
+        for name in ("home", "config", "data", "state", "cache", "run"):
+            (root / name).mkdir(mode=0o700)
+
+        budget = SnapshotCopyBudget()
+        config_source = Path(self.nvim_config_source()).expanduser()
+        if config_source.is_dir():
+            self.copy_bounded_regular_tree(
+                config_source,
+                root / "config" / "nvim",
+                budget,
+            )
+
+        data_source = Path(self.nvim_data_source()).expanduser()
+        data_target = root / "data" / "nvim"
+        data_target.mkdir(mode=0o700)
+        for name in ("lazy", "site"):
+            source = data_source / name
+            if source.is_dir():
+                self.copy_bounded_regular_tree(
+                    source,
+                    data_target / name,
+                    budget,
+                )
+
+        self.assert_snapshot_has_no_links(root)
+
+    def nvim_sandbox_setup_command(
+        self, marker: str, *, sandbox_path: str
+    ) -> str:
+        """Activate a prepared sandbox; WSL also copies target-side inputs."""
+        source = self.nvim_config_source()
+        data_source = self.nvim_data_source()
+        if self.powershell:
+            root = self.validate_native_sandbox_path(sandbox_path)
+            marker_left, marker_right = split_marker(marker)
+            return (
+                "$KettleSmokeRoot="
+                f"{shell_quote(str(root), windows=True)}; "
+                "if (-not (Test-Path -LiteralPath $KettleSmokeRoot "
+                "-PathType Container)) { "
+                "throw 'prepared Neovim sandbox is missing'; }; "
+                "$env:HOME=Join-Path $KettleSmokeRoot 'home'; "
+                "$env:USERPROFILE=$env:HOME; "
+                "$env:XDG_CONFIG_HOME=Join-Path $KettleSmokeRoot 'config'; "
+                "$env:XDG_DATA_HOME=Join-Path $KettleSmokeRoot 'data'; "
+                "$env:XDG_STATE_HOME=Join-Path $KettleSmokeRoot 'state'; "
+                "$env:XDG_CACHE_HOME=Join-Path $KettleSmokeRoot 'cache'; "
+                "$env:XDG_RUNTIME_DIR=Join-Path $KettleSmokeRoot 'run'; "
+                "Write-Output ("
+                f"{shell_quote(marker_left, windows=True)} + "
+                f"{shell_quote(marker_right, windows=True)})"
+            )
+
+        if self.mode == "wsl":
+            self.validate_wsl_sandbox_path(sandbox_path)
+            source_expr = (
+                self.posix_path_expression(source)
+                if self.astro_config
+                else source
+            )
+            data_source_expr = (
+                self.posix_path_expression(data_source)
+                if self.nvim_data
+                else data_source
+            )
+            copy_commands = (
+                self.wsl_bounded_copy_function()
+                + "KETTLE_COPY_ENTRIES=0; KETTLE_COPY_BYTES=0; "
+                + "KETTLE_COPY_ACTUAL_BYTES=0; "
+                f"KETTLE_NVIM_SOURCE={source_expr}; "
+                f"KETTLE_NVIM_DATA_SOURCE={data_source_expr}; "
+                'if [ -d "$KETTLE_NVIM_SOURCE" ]; then '
+                'kettle_smoke_copy_tree "$KETTLE_NVIM_SOURCE" '
+                '"$KETTLE_SMOKE_ROOT/config/nvim" || return 1; fi; '
+                'mkdir -p "$KETTLE_SMOKE_ROOT/data/nvim" || return 1; '
+                "for name in lazy site; do "
+                'if [ -d "$KETTLE_NVIM_DATA_SOURCE/$name" ]; then '
+                'kettle_smoke_copy_tree '
+                '"$KETTLE_NVIM_DATA_SOURCE/$name" '
+                '"$KETTLE_SMOKE_ROOT/data/nvim/$name" || return 1; '
+                "fi; done; "
+            )
+        else:
+            root = self.validate_native_sandbox_path(sandbox_path)
+            sandbox_path = str(root)
+            copy_commands = ""
+
+        common_setup = (
+            f"KETTLE_SMOKE_ROOT={shlex.quote(sandbox_path)}; "
+            '[ -d "$KETTLE_SMOKE_ROOT" ] || return 1; '
+            'mkdir -p "$KETTLE_SMOKE_ROOT/home" '
+            '"$KETTLE_SMOKE_ROOT/config" "$KETTLE_SMOKE_ROOT/data" '
+            '"$KETTLE_SMOKE_ROOT/state" "$KETTLE_SMOKE_ROOT/cache" '
+            '"$KETTLE_SMOKE_ROOT/run" || return 1; '
+            'chmod 700 "$KETTLE_SMOKE_ROOT/home" '
+            '"$KETTLE_SMOKE_ROOT/config" "$KETTLE_SMOKE_ROOT/data" '
+            '"$KETTLE_SMOKE_ROOT/state" "$KETTLE_SMOKE_ROOT/cache" '
+            '"$KETTLE_SMOKE_ROOT/run" || return 1; '
+        )
+        marker_left, marker_right = split_marker(marker)
+        activation = (
+            'export HOME="$KETTLE_SMOKE_ROOT/home" '
+            'XDG_CONFIG_HOME="$KETTLE_SMOKE_ROOT/config" '
+            'XDG_DATA_HOME="$KETTLE_SMOKE_ROOT/data" '
+            'XDG_STATE_HOME="$KETTLE_SMOKE_ROOT/state" '
+            'XDG_CACHE_HOME="$KETTLE_SMOKE_ROOT/cache"; '
+            'export XDG_RUNTIME_DIR="$KETTLE_SMOKE_ROOT/run"; '
+            "printf '%s%s\\n' "
+            f"{shlex.quote(marker_left)} {shlex.quote(marker_right)}; "
+        )
+        return (
+            "kettle_smoke_setup_nvim() { "
+            + common_setup
+            + copy_commands
+            + activation
+            + "}; kettle_smoke_setup_nvim; "
+            + "KETTLE_SMOKE_SETUP_STATUS=$?; "
+            + "unset -f kettle_smoke_setup_nvim kettle_smoke_copy_tree "
+            + "2>/dev/null; "
+            + "unset KETTLE_COPY_ENTRIES KETTLE_COPY_BYTES "
+            + "KETTLE_COPY_ACTUAL_BYTES "
+            + "KETTLE_NVIM_SOURCE KETTLE_NVIM_DATA_SOURCE name; "
+            + 'if [ "$KETTLE_SMOKE_SETUP_STATUS" -eq 0 ]; then '
+            + "unset KETTLE_SMOKE_SETUP_STATUS; "
+            + "else unset KETTLE_SMOKE_SETUP_STATUS; false; fi"
+        )
+
+    def nvim_sandbox_cleanup_command(self, marker: str) -> str:
+        marker_left, marker_right = split_marker(marker)
+        if self.powershell:
+            return (
+                "if ($KettleSmokeRoot -and "
+                "(Test-Path -LiteralPath $KettleSmokeRoot -PathType Container)) { "
+                "Remove-Item -LiteralPath $KettleSmokeRoot -Recurse -Force; }; "
+                "Write-Output ("
+                f"{shell_quote(marker_left, windows=True)} + "
+                f"{shell_quote(marker_right, windows=True)})"
+            )
+        return (
+            'if [ -n "${KETTLE_SMOKE_ROOT:-}" ] && '
+            '[ -d "$KETTLE_SMOKE_ROOT" ]; then rm -rf -- "$KETTLE_SMOKE_ROOT"; fi; '
+            "printf '%s%s\\n' "
+            f"{shlex.quote(marker_left)} {shlex.quote(marker_right)}"
+        )
+
+    @staticmethod
+    def validate_wsl_sandbox_path(sandbox_path: str) -> None:
+        if not re.fullmatch(
+            r"/tmp/kettle-agent-tui-[A-Za-z0-9_.-]+", sandbox_path
+        ):
+            raise ValueError(f"refusing unsafe WSL sandbox path: {sandbox_path}")
+
+    def terminate_nvim_sandbox_host(self, sandbox_path: str) -> None:
+        """Terminate only Neovim processes using this WSL smoke sandbox."""
+        if self.mode != "wsl":
+            raise ValueError("targeted host-side Neovim termination requires WSL")
+        self.validate_wsl_sandbox_path(sandbox_path)
+        cp = self.run_command(
+            [
+                "bash",
+                "--noprofile",
+                "--norc",
+                "-c",
+                (
+                    'pids=""; '
+                    'for envfile in /proc/[0-9]*/environ; do '
+                    '[ -r "$envfile" ] || continue; '
+                    'pid=${envfile#/proc/}; pid=${pid%/environ}; '
+                    '[ "$(cat "/proc/$pid/comm" 2>/dev/null)" = nvim ] '
+                    '|| continue; '
+                    'if tr "\\0" "\\n" <"$envfile" 2>/dev/null '
+                    '| grep -Fqx "XDG_CONFIG_HOME=$1/config"; then '
+                    'pids="$pids $pid"; fi; done; '
+                    '[ -z "$pids" ] || kill -TERM $pids 2>/dev/null || true; '
+                    'sleep 1; '
+                    '[ -z "$pids" ] || kill -KILL $pids 2>/dev/null || true'
+                ),
+                "kettle-nvim-stop",
+                sandbox_path,
+            ],
+            timeout=15,
+        )
+        if cp.returncode != 0:
+            raise RuntimeError(
+                f"failed to stop WSL Neovim in {sandbox_path}: {cp.stderr}"
+            )
+
+    def cleanup_nvim_sandbox_host(self, sandbox_path: str) -> None:
+        """Best-effort cleanup after Kettle exits, including failed smokes."""
+        if self.mode == "wsl":
+            self.validate_wsl_sandbox_path(sandbox_path)
+            cp = self.run_command(
+                [
+                    "bash",
+                    "--noprofile",
+                    "--norc",
+                    "-c",
+                    (
+                        'pids=""; '
+                        'for envfile in /proc/[0-9]*/environ; do '
+                        '[ -r "$envfile" ] || continue; '
+                        'if tr "\\0" "\\n" <"$envfile" 2>/dev/null '
+                        '| grep -Fqx "XDG_CONFIG_HOME=$1/config"; then '
+                        'pid=${envfile#/proc/}; pid=${pid%/environ}; '
+                        'pids="$pids $pid"; fi; done; '
+                        'if [ -n "$pids" ]; then kill -TERM $pids 2>/dev/null || true; '
+                        'sleep 1; kill -KILL $pids 2>/dev/null || true; fi; '
+                        'for attempt in 1 2 3 4 5; do '
+                        'rm -rf -- "$1" 2>/dev/null || true; '
+                        '[ ! -e "$1" ] && exit 0; sleep 1; done; exit 1'
+                    ),
+                    "kettle-cleanup",
+                    sandbox_path,
+                ],
+                timeout=120,
+            )
+            if cp.returncode != 0:
+                raise RuntimeError(
+                    f"failed to remove WSL Neovim sandbox {sandbox_path}: {cp.stderr}"
+                )
+            return
+
+        root = self.validate_native_sandbox_path(sandbox_path)
+        if root.exists():
+            shutil.rmtree(root)
 
 
 class LiveKettle:
@@ -165,6 +1136,7 @@ class LiveKettle:
         self.log = log
         self.extra_args = extra_args or []
         self.proc: Optional[subprocess.Popen] = None
+        self._post_exit_cleanup: List[Callable[[], None]] = []
 
     def __enter__(self) -> "LiveKettle":
         # Machine-local escape hatch. Every scenario writes its own minimal
@@ -199,7 +1171,9 @@ class LiveKettle:
             time.sleep(0.1)
         raise SystemExit("live-ui smoke: timed out waiting for control server")
 
-    def __exit__(self, *_exc: object) -> None:
+    def __exit__(
+        self, exc_type: object, _exc_value: object, _traceback: object
+    ) -> None:
         if self.proc is not None and self.proc.poll() is None:
             self.proc.terminate()
             try:
@@ -207,6 +1181,24 @@ class LiveKettle:
             except subprocess.TimeoutExpired:
                 self.proc.kill()
                 self.proc.wait(timeout=5)
+        cleanup_errors: List[Exception] = []
+        for cleanup in reversed(self._post_exit_cleanup):
+            try:
+                cleanup()
+            except Exception as error:
+                cleanup_errors.append(error)
+                print(
+                    f"live-ui smoke: post-exit cleanup failed: {error}",
+                    file=sys.stderr,
+                )
+        if cleanup_errors and exc_type is None:
+            raise RuntimeError(
+                "live-ui smoke: post-exit cleanup failed: "
+                + "; ".join(str(error) for error in cleanup_errors)
+            )
+
+    def add_post_exit_cleanup(self, cleanup: Callable[[], None]) -> None:
+        self._post_exit_cleanup.append(cleanup)
 
     @property
     def pid(self) -> int:
@@ -1056,38 +2048,60 @@ def wait_for_search_result(
     )
 
 
-def command_with_marker(command: str, marker: str) -> str:
+def command_with_marker(
+    command: str, marker: str, *, windows: Optional[bool] = None
+) -> str:
     split = max(1, len(marker) // 2)
     left = marker[:split]
     right = marker[split:]
-    if platform.system() == "Windows":
-        return f"{command}; Write-Output ({shell_quote(left)} + {shell_quote(right)})"
-    return f"{command}; printf '%s\\n' {shell_quote(left)}{shell_quote(right)}"
+    use_windows = platform.system() == "Windows" if windows is None else windows
+    if use_windows:
+        return (
+            f"{command}; Write-Output "
+            f"({shell_quote(left, windows=True)} + {shell_quote(right, windows=True)})"
+        )
+    return (
+        f"{command}; printf '%s\\n' "
+        f"{shell_quote(left, windows=False)}{shell_quote(right, windows=False)}"
+    )
 
 
-def first_lines_command(command: str, lines: int = 22) -> str:
-    if platform.system() == "Windows":
+def first_lines_command(
+    command: str, lines: int = 22, *, windows: Optional[bool] = None
+) -> str:
+    use_windows = platform.system() == "Windows" if windows is None else windows
+    if use_windows:
         return f"{command} | Select-Object -First {lines}"
     return f"{command} | sed -n '1,{lines}p'"
 
 
-def prompt_marker_command(marker: str) -> str:
+def prompt_marker_command(
+    marker: str, *, windows: Optional[bool] = None
+) -> str:
     split = max(1, len(marker) // 2)
     left = marker[:split]
     right = marker[split:]
-    if platform.system() == "Windows":
+    use_windows = platform.system() == "Windows" if windows is None else windows
+    if use_windows:
         return (
             "$arrow=[char]0x279c; "
-            f"Write-Output ($arrow + '  ~ ' + ({shell_quote(left)} + {shell_quote(right)}))"
+            "Write-Output ($arrow + '  ~ ' + "
+            f"({shell_quote(left, windows=True)} + {shell_quote(right, windows=True)}))"
         )
-    return f"printf '\\342\\236\\234  ~ %s\\n' {shell_quote(left)}{shell_quote(right)}"
+    return (
+        "printf '\\342\\236\\234  ~ %s\\n' "
+        f"{shell_quote(left, windows=False)}{shell_quote(right, windows=False)}"
+    )
 
 
-def codex_cursor_fixture_command(*, queued_input: bool) -> Tuple[str, int, int]:
+def codex_cursor_fixture_command(
+    *, queued_input: bool, windows: Optional[bool] = None
+) -> Tuple[str, int, int]:
     row = 6
     text = "queued work" if queued_input else "Explain this codebase"
     col = 3 + len(text) if queued_input else 3
-    if platform.system() == "Windows":
+    use_windows = platform.system() == "Windows" if windows is None else windows
+    if use_windows:
         style = "" if queued_input else "$esc + '[2m' + "
         reset = "" if queued_input else "+ $esc + '[22m'"
         command = (
@@ -1228,8 +2242,8 @@ def agent_auth_command(
     use_windows = platform.system() == "Windows" if windows is None else windows
     output_left, output_right = split_marker(output_marker)
     if use_windows:
-        ps_argv = " ".join(shell_quote(part) for part in argv)
-        done = shell_quote(done_marker)
+        ps_argv = " ".join(shell_quote(part, windows=True) for part in argv)
+        done = shell_quote(done_marker, windows=True)
         return (
             "$tmp=[System.IO.Path]::GetTempFileName(); $rc=125; "
             "try { "
@@ -1239,7 +2253,9 @@ def agent_auth_command(
             "} catch { "
             "$rc=125; $_ | Out-File -LiteralPath $tmp -Append -Encoding utf8; "
             "}; "
-            f"Write-Output ({shell_quote(output_left)} + {shell_quote(output_right)}); "
+            "Write-Output "
+            f"({shell_quote(output_left, windows=True)} + "
+            f"{shell_quote(output_right, windows=True)}); "
             "Get-Content -LiteralPath $tmp; "
             "Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue; "
             f"Write-Output ({done} + ':' + $rc)"
@@ -1333,6 +2349,33 @@ def live_helper_selftest() -> None:
     assert done_marker_status(f"{done_marker}:17", done_marker) == 17
     assert done_marker_status("no completion marker", done_marker) is None
 
+    # Cargo's JSON artifact is authoritative: it preserves custom target
+    # directories, configured target triples, and Windows's `.exe` suffix.
+    cargo_fixture = Path(tempfile.gettempdir()) / "custom-target" / (
+        "kettle.exe" if platform.system() == "Windows" else "kettle"
+    )
+    cargo_messages = "\n".join(
+        [
+            json.dumps(
+                {
+                    "reason": "compiler-artifact",
+                    "target": {"name": "kettle_ui", "kind": ["lib"]},
+                    "executable": None,
+                }
+            ),
+            json.dumps(
+                {
+                    "reason": "compiler-artifact",
+                    "target": {"name": "kettle", "kind": ["bin"]},
+                    "executable": str(cargo_fixture),
+                }
+            ),
+        ]
+    )
+    assert release_kettle_artifact_from_messages(cargo_messages) == (
+        cargo_fixture.resolve()
+    )
+
     # cwd_title_command: the tab-title/split-titlebar fixtures used to be
     # POSIX-only. Exercise both command shapes from whichever host actually
     # runs this self-test, the same `windows=`-override pattern
@@ -1354,7 +2397,10 @@ def live_helper_selftest() -> None:
     assert "]9;9;" in win_cwd_command
     assert "]2;" in win_cwd_command
     assert "file://" not in win_cwd_command
-    assert f"Write-Output {shell_quote(cwd_marker)}" in win_cwd_command
+    assert (
+        f"Write-Output {shell_quote(cwd_marker, windows=True)}"
+        in win_cwd_command
+    )
     assert "Start-Sleep -Seconds 5" in win_cwd_command
     # POSIX: unchanged `cd` + `printf` OSC 7 shape.
     assert "printf" in posix_cwd_command
@@ -1364,30 +2410,479 @@ def live_helper_selftest() -> None:
     assert f"{cwd_marker}\\n" in posix_cwd_command
     assert "sleep 5" in posix_cwd_command
 
+    # The host OS and target shell dialect are separate decisions. In
+    # particular, Windows Kettle -> WSL must construct POSIX commands and must
+    # launch a deterministic shell without sourcing or editing user rc files.
+    native_target = AgentShellTarget(mode="native")
+    wsl_target = AgentShellTarget(
+        mode="wsl",
+        wsl_distro="Ubuntu Test",
+        astro_config="/home/test/.config/nvim",
+    )
+    assert wsl_target.wsl_base_argv() == [
+        "wsl.exe",
+        "--distribution",
+        "Ubuntu Test",
+        "--cd",
+        "~",
+    ]
+    assert wsl_target.launch_args() == [
+        "-e",
+        "wsl.exe",
+        "--distribution",
+        "Ubuntu Test",
+        "--cd",
+        "~",
+        "--exec",
+        "bash",
+        "--noprofile",
+        "--norc",
+    ]
+    assert wsl_target.host_argv(["tmux", "-V"])[-3:] == [
+        "--exec",
+        "tmux",
+        "-V",
+    ]
+    wsl_tmux_argv = wsl_target.command_argv(["tmux", "-V"])
+    assert wsl_tmux_argv[:5] == [
+        "wsl.exe",
+        "--distribution",
+        "Ubuntu Test",
+        "--cd",
+        "~",
+    ]
+    assert wsl_tmux_argv[-5:-2] == ["bash", "--noprofile", "--norc"]
+    assert "exec tmux -V" in wsl_tmux_argv[-1]
+    assert ".npm-global/bin" in wsl_tmux_argv[-1]
+    assert "/mnt/[A-Za-z]/*" in wsl_target.posix_path_setup()
+    assert "KETTLE_SMOKE_LINUX_PATH" in wsl_target.posix_path_setup()
+    assert "KETTLE_SMOKE_LINUX_PATH" not in wsl_target.posix_path_setup(
+        keep_windows_host_paths=True
+    )
+    assert "readlink -f" in wsl_target._posix_command_path_script(
+        "nvim", keep_windows_host_paths=False
+    )
+    assert "readlink -f" not in native_target._posix_command_path_script(
+        "nvim", keep_windows_host_paths=False
+    )
+    assert wsl_target.is_wsl_host_tool_path(
+        "/mnt/c/Program Files/nodejs/nvim.exe"
+    )
+    assert wsl_target.is_wsl_host_tool_path("/mnt/C/tools/tmux.exe")
+    assert not wsl_target.is_wsl_host_tool_path("/home/test/bin/nvim")
+    assert not wsl_target.is_wsl_host_tool_path("/mnt/container/bin/nvim")
 
-def nvim_marker_command(marker: str, configured: bool) -> str:
+    class WindowsHostOnlyTarget(AgentShellTarget):
+        def _posix_command_path(
+            self, command: str, *, keep_windows_host_paths: bool
+        ) -> Optional[str]:
+            del command
+            return (
+                "/mnt/c/Program Files/nodejs/codex.exe"
+                if keep_windows_host_paths
+                else None
+            )
+
+    host_only = WindowsHostOnlyTarget(mode="wsl")
+    assert not host_only.command_available("codex")
+    assert "Windows-host tool /mnt/c/" in host_only.command_unavailable_reason(
+        "codex"
+    )
+    if platform.system() == "Windows":
+        assert native_target.launch_args() == [
+            "-e",
+            "powershell.exe",
+            "-NoLogo",
+            "-NoProfile",
+        ]
+    else:
+        assert native_target.launch_args() == [
+            "-e",
+            "bash",
+            "--noprofile",
+            "--norc",
+        ]
+
+    wsl_marker_command = command_with_marker(
+        "codex --version", "KETTLE_WSL_MARKER", windows=wsl_target.powershell
+    )
+    assert "printf" in wsl_marker_command
+    assert "Write-Output" not in wsl_marker_command
+    assert "sed -n" in first_lines_command(
+        "claude --print --help", windows=wsl_target.powershell
+    )
+    assert "Select-Object" not in first_lines_command(
+        "claude --print --help", windows=wsl_target.powershell
+    )
+    assert "printf" in prompt_marker_command(
+        "KETTLE_WSL_PROMPT", windows=wsl_target.powershell
+    )
+    wsl_auth = agent_auth_command(
+        "codex",
+        marker,
+        output_marker,
+        done_marker,
+        windows=wsl_target.powershell,
+    )
+    assert "mktemp" in wsl_auth
+    assert "GetTempFileName" not in wsl_auth
+
+    sandbox_marker = "KETTLE_NVIM_SANDBOX_READY"
+    sandbox_path = "/tmp/kettle-agent-tui-A1b2C3d4E5"
+    wsl_target.validate_wsl_sandbox_path(sandbox_path)
+    wsl_sandbox = wsl_target.nvim_sandbox_setup_command(
+        sandbox_marker, sandbox_path=sandbox_path
+    )
+    assert "cp -aL" not in wsl_sandbox
+    assert "find -L" in wsl_sandbox
+    assert "-printf '%y\\0%s\\0%p\\0'" in wsl_sandbox
+    assert "stat -Lc" not in wsl_sandbox
+    assert "tar --null" in wsl_sandbox
+    assert "head -c" in wsl_sandbox
+    assert "KETTLE_COPY_ACTUAL_BYTES" in wsl_sandbox
+    assert "snapshot rejects non-regular entry" in wsl_sandbox
+    assert str(NVIM_SNAPSHOT_MAX_ENTRIES) in wsl_sandbox
+    assert str(NVIM_SNAPSHOT_MAX_BYTES) in wsl_sandbox
+    assert str(NVIM_SNAPSHOT_MAX_FILE_BYTES) in wsl_sandbox
+    assert str(NVIM_SNAPSHOT_MAX_DEPTH) in wsl_sandbox
+    assert "/home/test/.config/nvim" in wsl_sandbox
+    assert "${XDG_DATA_HOME:-$HOME/.local/share}/nvim" in wsl_sandbox
+    assert sandbox_path in wsl_sandbox
+    assert "mktemp" not in wsl_sandbox
+    assert 'HOME="$KETTLE_SMOKE_ROOT/home"' in wsl_sandbox
+    assert 'XDG_CONFIG_HOME="$KETTLE_SMOKE_ROOT/config"' in wsl_sandbox
+    assert 'XDG_DATA_HOME="$KETTLE_SMOKE_ROOT/data"' in wsl_sandbox
+    assert ".bashrc" not in wsl_sandbox
+    assert ".zshrc" not in wsl_sandbox
+    assert sandbox_marker not in wsl_sandbox
+    tilde_target = AgentShellTarget(
+        mode="wsl",
+        astro_config="~/.config/nvim",
+        nvim_data="~/.local/share/nvim",
+    )
+    tilde_sandbox = tilde_target.nvim_sandbox_setup_command(
+        sandbox_marker, sandbox_path="/tmp/kettle-agent-tui-tilde"
+    )
+    assert 'KETTLE_NVIM_SOURCE="$HOME"/.config/nvim' in tilde_sandbox
+    assert 'KETTLE_NVIM_DATA_SOURCE="$HOME"/.local/share/nvim' in tilde_sandbox
+    cleanup_marker = "KETTLE_NVIM_SANDBOX_CLEAN"
+    cleanup_command = wsl_target.nvim_sandbox_cleanup_command(cleanup_marker)
+    assert "rm -rf --" in cleanup_command
+    assert cleanup_marker not in cleanup_command
+    try:
+        wsl_target.cleanup_nvim_sandbox_host("/tmp/not-a-kettle-sandbox")
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("unsafe WSL cleanup path must be rejected")
+    try:
+        wsl_target.terminate_nvim_sandbox_host("/tmp/not-a-kettle-sandbox")
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("unsafe WSL process target must be rejected")
+
+    # Native snapshots are created with an unpredictable tempfile name and
+    # dereference both a symlinked config root and nested file links when the
+    # host permits creating them. The copied tree may never retain a route back
+    # to live configuration.
+    with tempfile.TemporaryDirectory(prefix="kettle-nvim-fixture-") as fixture:
+        fixture_root = Path(fixture)
+        real_config = fixture_root / "real-config"
+        real_config.mkdir()
+        (real_config / "init.lua").write_text(
+            "-- isolated fixture\n", encoding="utf-8"
+        )
+        external = fixture_root / "external.lua"
+        external.write_text("-- external fixture\n", encoding="utf-8")
+        nested_link_created = False
+        try:
+            (real_config / "linked.lua").symlink_to(external)
+            nested_link_created = True
+        except (NotImplementedError, OSError):
+            pass
+
+        config_source = fixture_root / "config-link"
+        root_link_created = False
+        try:
+            config_source.symlink_to(real_config, target_is_directory=True)
+            root_link_created = True
+        except (NotImplementedError, OSError):
+            config_source = real_config
+
+        data_source = fixture_root / "nvim-data"
+        (data_source / "lazy" / "fixture").mkdir(parents=True)
+        (data_source / "lazy" / "fixture" / "plugin.lua").write_text(
+            "-- plugin fixture\n", encoding="utf-8"
+        )
+        snapshot_target = AgentShellTarget(
+            mode="native",
+            astro_config=str(config_source),
+            nvim_data=str(data_source),
+        )
+        native_sandbox_path = snapshot_target.create_nvim_sandbox_host()
+        try:
+            snapshot_target.prepare_nvim_sandbox_host(native_sandbox_path)
+            native_root = Path(native_sandbox_path)
+            assert native_root.name.startswith("kettle-agent-tui-")
+            assert (native_root / "config" / "nvim" / "init.lua").is_file()
+            assert (
+                native_root
+                / "data"
+                / "nvim"
+                / "lazy"
+                / "fixture"
+                / "plugin.lua"
+            ).is_file()
+            if root_link_created:
+                assert not snapshot_target.path_is_link(
+                    native_root / "config" / "nvim"
+                )
+            if nested_link_created:
+                copied_link = native_root / "config" / "nvim" / "linked.lua"
+                assert copied_link.read_text(encoding="utf-8") == (
+                    "-- external fixture\n"
+                )
+                assert not snapshot_target.path_is_link(copied_link)
+            native_setup = snapshot_target.nvim_sandbox_setup_command(
+                sandbox_marker, sandbox_path=native_sandbox_path
+            )
+            assert "HOME" in native_setup
+            assert "XDG_CONFIG_HOME" in native_setup
+            assert "Copy-Item" not in native_setup
+        finally:
+            snapshot_target.cleanup_nvim_sandbox_host(native_sandbox_path)
+
+    # Limits are checked while traversing and before any file body can grow
+    # the snapshot without bound.
+    with tempfile.TemporaryDirectory(
+        prefix="kettle-nvim-limit-fixture-"
+    ) as fixture:
+        fixture_root = Path(fixture)
+        source = fixture_root / "source"
+        source.mkdir()
+        (source / "too-large.lua").write_bytes(b"12345")
+        try:
+            AgentShellTarget.copy_bounded_regular_tree(
+                source,
+                fixture_root / "copy-too-large",
+                SnapshotCopyBudget(max_file_bytes=4),
+            )
+        except RuntimeError as error:
+            assert "per-file limit" in str(error)
+        else:
+            raise AssertionError("oversized snapshot file must be rejected")
+
+        (source / "second.lua").write_text("-- second\n", encoding="utf-8")
+        try:
+            AgentShellTarget.copy_bounded_regular_tree(
+                source,
+                fixture_root / "copy-too-many",
+                SnapshotCopyBudget(max_entries=1),
+            )
+        except RuntimeError as error:
+            assert "entry limit" in str(error)
+        else:
+            raise AssertionError("snapshot entry limit must be enforced")
+
+        cycle = source / "cycle"
+        cycle_created = False
+        try:
+            cycle.symlink_to(source, target_is_directory=True)
+            cycle_created = True
+        except (NotImplementedError, OSError):
+            pass
+        if cycle_created:
+            try:
+                AgentShellTarget.copy_bounded_regular_tree(
+                    source,
+                    fixture_root / "copy-cycle",
+                    SnapshotCopyBudget(),
+                )
+            except (OSError, RuntimeError) as error:
+                assert "cycle" in str(error).lower() or "resolve" in str(error).lower()
+            else:
+                raise AssertionError("snapshot directory cycle must be rejected")
+
+        deep_source = fixture_root / "deep-source"
+        (deep_source / "one" / "two").mkdir(parents=True)
+        try:
+            AgentShellTarget.copy_bounded_regular_tree(
+                deep_source,
+                fixture_root / "copy-too-deep",
+                SnapshotCopyBudget(max_depth=1),
+            )
+        except RuntimeError as error:
+            assert "depth limit" in str(error)
+        else:
+            raise AssertionError("snapshot depth limit must be enforced")
+
+        aggregate_source = fixture_root / "aggregate-source"
+        aggregate_source.mkdir()
+        (aggregate_source / "one").write_bytes(b"123")
+        (aggregate_source / "two").write_bytes(b"456")
+        try:
+            AgentShellTarget.copy_bounded_regular_tree(
+                aggregate_source,
+                fixture_root / "copy-too-large-in-aggregate",
+                SnapshotCopyBudget(max_bytes=5),
+            )
+        except RuntimeError as error:
+            assert "aggregate byte limit" in str(error)
+        else:
+            raise AssertionError("snapshot aggregate byte limit must be enforced")
+
+        if hasattr(os, "mkfifo"):
+            special_source = fixture_root / "special-source"
+            special_source.mkdir()
+            os.mkfifo(special_source / "fifo")
+            try:
+                AgentShellTarget.copy_bounded_regular_tree(
+                    special_source,
+                    fixture_root / "copy-special",
+                    SnapshotCopyBudget(),
+                )
+            except RuntimeError as error:
+                assert "regular files and directories" in str(error)
+            else:
+                raise AssertionError("snapshot special files must be rejected")
+
+    nvim_marker = "KETTLE_NVIM_RUNTIME_ONLY"
+    marker_command = nvim_marker_command(
+        nvim_marker, False, windows=False
+    )
+    assert "nvim --clean -n" in marker_command
+    assert nvim_marker not in marker_command
+    left_marker = "KETTLE_ASTRO_LEFT_RUNTIME"
+    right_marker = "KETTLE_ASTRO_RIGHT_RUNTIME"
+    split_command = nvim_split_command(
+        left_marker, right_marker, True, windows=False
+    )
+    assert "nvim -n" in split_command
+    assert left_marker not in split_command
+    assert right_marker not in split_command
+
+    first_socket = new_tmux_socket_name()
+    second_socket = new_tmux_socket_name()
+    assert first_socket != second_socket
+    assert re.fullmatch(r"kettle-smoke-[0-9a-f]{24}", first_socket)
+    target_bash = "/nix/store/test-bash/bin/bash"
+    session_command = tmux_session_command(first_socket, target_bash)
+    split_commands = tmux_split_commands(
+        first_socket, target_bash, "LEFT", "RIGHT"
+    )
+    assert target_bash in session_command
+    assert split_commands[0][-1] == target_bash
+    assert split_commands[0][-1] != "/bin/bash"
+    assert target_bash in split_commands[1][-1]
+    marker_commands = [split_commands[3][-2], split_commands[4][-2]]
+    assert "LEFT" not in marker_commands[0]
+    assert "RIGHT" not in marker_commands[1]
+    try:
+        cleanup_tmux_server(wsl_target, "unsafe")
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("unsafe tmux cleanup socket must be rejected")
+
+    class FakeTmuxTarget:
+        def __init__(self, result: subprocess.CompletedProcess):
+            self.result = result
+            self.calls = 0
+
+        def run_command(
+            self, argv: List[str], *, timeout: float
+        ) -> subprocess.CompletedProcess:
+            assert argv[-1] == "kill-server"
+            assert timeout == 5
+            self.calls += 1
+            return self.result
+
+    success_target = FakeTmuxTarget(
+        subprocess.CompletedProcess([], 0, "", "")
+    )
+    cleanup_tmux_server(success_target, first_socket)  # type: ignore[arg-type]
+    assert success_target.calls == 1
+    absent_target = FakeTmuxTarget(
+        subprocess.CompletedProcess([], 1, "", "no server running")
+    )
+    cleanup_tmux_server(absent_target, first_socket)  # type: ignore[arg-type]
+    failed_target = FakeTmuxTarget(
+        subprocess.CompletedProcess([], 1, "", "permission denied")
+    )
+    try:
+        cleanup_tmux_server(failed_target, first_socket)  # type: ignore[arg-type]
+    except RuntimeError as error:
+        assert "permission denied" in str(error)
+    else:
+        raise AssertionError("unexpected tmux cleanup failure must be fatal")
+
+
+def nvim_string_expression(
+    value: str, *, windows: Optional[bool] = None
+) -> str:
+    """Build a Vimscript string without embedding the awaited value."""
+    if len(value) < 2:
+        raise ValueError("Neovim smoke markers must contain at least two characters")
+    left, right = split_marker(value)
+    return (
+        f"{shell_quote(left, windows=windows)} . "
+        f"{shell_quote(right, windows=windows)}"
+    )
+
+
+def nvim_marker_command(
+    marker: str, configured: bool, *, windows: Optional[bool] = None
+) -> str:
     base = "nvim -n" if configured else "nvim --clean -n"
+    marker_expression = nvim_string_expression(marker, windows=windows)
     return (
         f'{base} "+set termguicolors" '
-        f'"+call setline(1, {shell_quote(marker)})" '
+        f'"+call setline(1, {marker_expression})" '
         '"+normal! gg"'
     )
 
 
-def nvim_split_command(left_marker: str, right_marker: str, configured: bool) -> str:
+def nvim_split_command(
+    left_marker: str,
+    right_marker: str,
+    configured: bool,
+    *,
+    windows: Optional[bool] = None,
+) -> str:
     base = "nvim -n" if configured else "nvim --clean -n"
+    left_expression = nvim_string_expression(left_marker, windows=windows)
+    left_line_expression = nvim_string_expression(
+        left_marker + "_LINE_2", windows=windows
+    )
+    right_expression = nvim_string_expression(right_marker, windows=windows)
+    right_line_expression = nvim_string_expression(
+        right_marker + "_LINE_2", windows=windows
+    )
     return (
         f'{base} "+set termguicolors cursorline laststatus=2" '
-        f'"+call setline(1, [{shell_quote(left_marker)}, {shell_quote(left_marker + "_LINE_2")}])" '
+        f'"+call setline(1, [{left_expression}, {left_line_expression}])" '
         '"+vsplit" '
         '"+wincmd l" '
         '"+enew" '
-        f'"+call setline(1, [{shell_quote(right_marker)}, {shell_quote(right_marker + "_LINE_2")}])" '
+        f'"+call setline(1, [{right_expression}, {right_line_expression}])" '
         '"+wincmd h"'
     )
 
 
 def exit_nvim(live: LiveKettle) -> None:
+    # Configured distributions can surface a plugin error behind Neovim's
+    # hit-enter prompt even after the requested marker is visible. Enter first
+    # dismisses that prompt (and is harmless in a normal-mode buffer), then the
+    # remaining keys force every window to close. Keep these as separate PTY
+    # writes because Neovim deliberately flushes queued typeahead when it
+    # dismisses the prompt.
+    live.ctl(
+        "send_keys",
+        params={"keys": ["enter"]},
+        timeout=8,
+    )
+    time.sleep(0.2)
     live.ctl(
         "send_keys",
         params={"keys": ["escape", ":", "q", "a", "l", "l", "!", "enter"]},
@@ -1395,8 +2890,161 @@ def exit_nvim(live: LiveKettle) -> None:
     )
 
 
-def run_agent_tui(kettle: str, root: Path) -> Path:
-    out = root / f"agent-tui-{time.strftime('%Y%m%d-%H%M%S')}"
+def exit_nvim_to_shell(
+    live: LiveKettle,
+    shell_target: AgentShellTarget,
+    sandbox_path: str,
+    exit_probe: str,
+    shell_marker: str,
+) -> None:
+    exit_nvim(live)
+    time.sleep(0.6)
+    marked_command = command_with_marker(
+        exit_probe,
+        shell_marker,
+        windows=shell_target.powershell,
+    )
+    try:
+        live_shell_command(
+            live,
+            marked_command,
+            shell_marker,
+            timeout_ms=2500 if shell_target.mode == "wsl" else 10000,
+        )
+    except SystemExit as error:
+        if (
+            shell_target.mode != "wsl"
+            or "timed out waiting" not in str(error)
+        ):
+            raise
+        # An isolated AstroNvim config may surface repeated asynchronous plugin
+        # errors behind hit-enter prompts. Stop only Neovim processes carrying
+        # this unique sandbox environment, then verify the shell responds.
+        shell_target.terminate_nvim_sandbox_host(sandbox_path)
+        time.sleep(0.5)
+        live_shell_command(
+            live,
+            marked_command,
+            shell_marker,
+            timeout_ms=10000,
+        )
+
+
+def new_tmux_socket_name() -> str:
+    return f"kettle-smoke-{secrets.token_hex(12)}"
+
+
+def cleanup_tmux_server(
+    shell_target: AgentShellTarget, tmux_socket: str
+) -> None:
+    """Stop one private tmux server or prove that it is already absent."""
+    if re.fullmatch(r"kettle-smoke-[0-9a-f]{24}", tmux_socket) is None:
+        raise ValueError(f"refusing unsafe tmux socket name: {tmux_socket}")
+    cp = shell_target.run_command(
+        ["tmux", "-L", tmux_socket, "kill-server"], timeout=5
+    )
+    if cp.returncode == 0:
+        return
+    diagnostic = f"{cp.stdout}\n{cp.stderr}".lower()
+    server_absent = (
+        "no server running" in diagnostic
+        or "failed to connect to server" in diagnostic
+        or (
+            "error connecting to" in diagnostic
+            and "no such file or directory" in diagnostic
+        )
+    )
+    if server_absent:
+        return
+    raise RuntimeError(
+        "failed to clean up private tmux server "
+        f"{tmux_socket}: rc={cp.returncode} "
+        f"stdout={cp.stdout!r} stderr={cp.stderr!r}"
+    )
+
+
+def tmux_session_command(tmux_socket: str, bash_path: str) -> str:
+    command = shlex.join([bash_path, "--noprofile", "--norc"])
+    return (
+        f"tmux -L {shlex.quote(tmux_socket)} -f /dev/null "
+        "new-session -A -s kettle_smoke "
+        f"{shlex.quote(command)}"
+    )
+
+
+def posix_runtime_marker_command(marker: str) -> str:
+    left, right = split_marker(marker)
+    return (
+        "printf '%s%s\\n' "
+        f"{shell_quote(left, windows=False)} "
+        f"{shell_quote(right, windows=False)}"
+    )
+
+
+def tmux_split_commands(
+    tmux_socket: str,
+    bash_path: str,
+    left_marker: str,
+    right_marker: str,
+) -> List[List[str]]:
+    command = shlex.join([bash_path, "--noprofile", "--norc"])
+    return [
+        [
+            "tmux",
+            "-L",
+            tmux_socket,
+            "set-option",
+            "-g",
+            "default-shell",
+            bash_path,
+        ],
+        [
+            "tmux",
+            "-L",
+            tmux_socket,
+            "set-option",
+            "-g",
+            "default-command",
+            command,
+        ],
+        [
+            "tmux",
+            "-L",
+            tmux_socket,
+            "split-window",
+            "-h",
+            "-t",
+            "kettle_smoke:0.0",
+        ],
+        [
+            "tmux",
+            "-L",
+            tmux_socket,
+            "send-keys",
+            "-t",
+            "kettle_smoke:0.0",
+            posix_runtime_marker_command(left_marker),
+            "C-m",
+        ],
+        [
+            "tmux",
+            "-L",
+            tmux_socket,
+            "send-keys",
+            "-t",
+            "kettle_smoke:0.1",
+            posix_runtime_marker_command(right_marker),
+            "C-m",
+        ],
+    ]
+
+
+def run_agent_tui(
+    kettle: str, root: Path, shell_target: AgentShellTarget
+) -> Path:
+    out = root / (
+        f"agent-tui-{shell_target.label}-{time.strftime('%Y%m%d-%H%M%S')}"
+    )
     out.mkdir(parents=True, exist_ok=True)
     cfg = out / "config"
     cfg.write_text(
@@ -1420,22 +3068,63 @@ def run_agent_tui(kettle: str, root: Path) -> Path:
         )
         + "\n"
     )
-    extra_args = ["-e", "powershell.exe", "-NoLogo", "-NoProfile"] if platform.system() == "Windows" else []
+    extra_args = shell_target.launch_args()
     states: List[Dict[str, object]] = []
     probes: List[Dict[str, object]] = []
     run_auth_smoke = env_flag("KETTLE_AGENT_AUTH_SMOKE")
     require_auth_smoke = env_strict("KETTLE_AGENT_AUTH_SMOKE")
+    nvim_available = shell_target.command_available("nvim")
+    configured_nvim_available = (
+        nvim_available and shell_target.configured_nvim_available()
+    )
     with LiveKettle(kettle, cfg, out / "kettle.log", extra_args=extra_args) as live:
+        initial_command = shell_target.initial_shell_command()
+        if initial_command is not None:
+            setup_marker = "KETTLE_AGENT_TUI_SHELL_TARGET_READY"
+            live_shell_command(
+                live,
+                command_with_marker(
+                    initial_command,
+                    setup_marker,
+                    windows=shell_target.powershell,
+                ),
+                setup_marker,
+            )
+
         marker = "KETTLE_AGENT_TUI_SHELL_SMOKE"
-        live_shell_command(live, command_with_marker("printf 'shell-live-ok\\n'" if platform.system() != "Windows" else "Write-Output shell-live-ok", marker), marker)
+        shell_probe = (
+            "Write-Output shell-live-ok"
+            if shell_target.powershell
+            else "printf 'shell-live-ok\\n'"
+        )
+        live_shell_command(
+            live,
+            command_with_marker(
+                shell_probe, marker, windows=shell_target.powershell
+            ),
+            marker,
+        )
         states.append(capture_live_state(live, out, "shell"))
-        probes.append({"name": "shell", "status": "ok"})
+        probes.append(
+            {
+                "name": "shell",
+                "status": "ok",
+                "mode": shell_target.mode,
+                "distro": shell_target.wsl_distro,
+            }
+        )
 
         prompt_marker = "KETTLE_AGENT_TUI_PROMPT_SHAPE"
-        live_shell_command(live, prompt_marker_command(prompt_marker), prompt_marker)
+        live_shell_command(
+            live,
+            prompt_marker_command(
+                prompt_marker, windows=shell_target.powershell
+            ),
+            prompt_marker,
+        )
         prompt_screen = live.json_ctl("read_screen")
         prompt_text = screen_text(prompt_screen)
-        if platform.system() == "Windows":
+        if shell_target.powershell:
             prompt_visible = prompt_marker in prompt_text
         else:
             prompt_visible = f"\u279c  ~ {prompt_marker}" in prompt_text
@@ -1444,13 +3133,13 @@ def run_agent_tui(kettle: str, root: Path) -> Path:
         states.append(capture_live_state(live, out, "prompt-shape"))
         probes.append({"name": "prompt-shape", "status": "ok"})
 
-        if platform.system() == "Windows":
+        if shell_target.powershell:
             for queued_input, label in (
                 (False, "codex-active-placeholder-cursor"),
                 (True, "codex-active-queued-input-cursor"),
             ):
                 command, cursor_row, cursor_col = codex_cursor_fixture_command(
-                    queued_input=queued_input
+                    queued_input=queued_input, windows=True
                 )
                 live.ctl("send_text", params={"text": command}, timeout=8)
                 live.ctl("send_keys", params={"keys": ["enter"]}, timeout=8)
@@ -1516,32 +3205,72 @@ def run_agent_tui(kettle: str, root: Path) -> Path:
                 states.append(state)
                 live.ctl("send_keys", params={"keys": ["ctrl+c"]}, timeout=8)
                 time.sleep(0.3)
+        elif platform.system() == "Windows":
+            for label in (
+                "codex-active-placeholder-cursor",
+                "codex-active-queued-input-cursor",
+            ):
+                probes.append(
+                    {
+                        "name": label,
+                        "status": "skipped",
+                        "reason": "native PowerShell/ConPTY cursor fixture; WSL is a separate target",
+                    }
+                )
 
         for tool in ("codex", "claude"):
-            if shutil.which(tool) is None:
-                probes.append({"name": tool, "status": "skipped", "reason": "not on PATH"})
+            if not shell_target.command_available(tool):
+                probes.append(
+                    {
+                        "name": tool,
+                        "status": "skipped",
+                        "reason": shell_target.command_unavailable_reason(tool),
+                    }
+                )
                 continue
             marker = f"KETTLE_AGENT_TUI_{tool.upper()}_SMOKE"
-            live_shell_command(live, command_with_marker(f"{tool} --version", marker), marker, timeout_ms=12000)
+            live_shell_command(
+                live,
+                command_with_marker(
+                    f"{tool} --version",
+                    marker,
+                    windows=shell_target.powershell,
+                ),
+                marker,
+                timeout_ms=12000,
+            )
             states.append(capture_live_state(live, out, tool))
             probes.append({"name": tool, "status": "ok"})
             if tool == "codex":
                 help_label = "codex-exec-help"
                 help_marker = "KETTLE_AGENT_TUI_CODEX_EXEC_HELP"
                 expected = "Run Codex non-interactively"
-                help_command = first_lines_command("codex exec --help")
+                help_command = first_lines_command(
+                    "codex exec --help", windows=shell_target.powershell
+                )
             else:
                 help_label = "claude-print-help"
                 help_marker = "KETTLE_AGENT_TUI_CLAUDE_PRINT_HELP"
                 expected = "non-interactive output"
-                help_command = first_lines_command("claude --print --help")
+                help_command = first_lines_command(
+                    "claude --print --help", windows=shell_target.powershell
+                )
             live_shell_command(
                 live,
-                command_with_marker(help_command, help_marker),
+                command_with_marker(
+                    help_command,
+                    help_marker,
+                    windows=shell_target.powershell,
+                ),
                 help_marker,
                 timeout_ms=12000,
             )
-            help_screen = live.json_ctl("read_screen")
+            # High-DPI windows can have fewer visible rows than the 22-line
+            # help excerpt. Include bounded scrollback so the lead-line
+            # assertion does not depend on physical DPI or font metrics.
+            help_screen = live.json_ctl(
+                "read_screen", params={"scrollback_lines": 80}
+            )
             if expected not in screen_text(help_screen):
                 raise SystemExit(f"agent-tui smoke: {help_label} did not render expected help text")
             states.append(capture_live_state(live, out, help_label))
@@ -1555,7 +3284,11 @@ def run_agent_tui(kettle: str, root: Path) -> Path:
                     "send_text",
                     params={
                         "text": agent_auth_command(
-                            tool, auth_marker, output_marker, done_marker
+                            tool,
+                            auth_marker,
+                            output_marker,
+                            done_marker,
+                            windows=shell_target.powershell,
                         )
                     },
                     timeout=8,
@@ -1593,30 +3326,57 @@ def run_agent_tui(kettle: str, root: Path) -> Path:
                 if status != "ok" and require_auth_smoke:
                     raise SystemExit(f"agent-tui smoke: {auth_label} failed: {reason}")
 
-        if platform.system() == "Windows" or shutil.which("tmux") is None:
-            probes.append({"name": "tmux", "status": "skipped", "reason": "not on PATH"})
+        if shell_target.powershell or not shell_target.command_available("tmux"):
+            reason = (
+                "native Windows shell target"
+                if shell_target.powershell
+                else shell_target.command_unavailable_reason("tmux")
+            )
+            probes.append(
+                {"name": "tmux", "status": "skipped", "reason": reason}
+            )
+            probes.append(
+                {"name": "tmux-split", "status": "skipped", "reason": reason}
+            )
         else:
-            tmux_socket = f"kettle-smoke-{live.pid}"
-            tmux_marker = "KETTLE_AGENT_TUI_TMUX_SMOKE"
-            tmux_left_marker = "KETTLE_AGENT_TUI_TMUX_SPLIT_LEFT"
-            tmux_right_marker = "KETTLE_AGENT_TUI_TMUX_SPLIT_RIGHT"
+            tmux_socket = new_tmux_socket_name()
+            tmux_bash = shell_target.require_command_path("bash")
+            live.add_post_exit_cleanup(
+                lambda target=shell_target, socket=tmux_socket: cleanup_tmux_server(
+                    target, socket
+                )
+            )
+            # Keep markers below one half-pane on a small/HiDPI smoke window.
+            # `wait_for` reads physical grid rows; a marker soft-wrapped by the
+            # tmux split is intentionally not rejoined into one text match.
+            tmux_marker = "KTL_TMUX_OK"
+            tmux_left_marker = "KTL_TMUX_LEFT"
+            tmux_right_marker = "KTL_TMUX_RIGHT"
             live.ctl(
                 "send_text",
-                params={"text": f"tmux -L {tmux_socket} -f /dev/null new-session -A -s kettle_smoke"},
+                params={
+                    "text": tmux_session_command(tmux_socket, tmux_bash)
+                },
             )
             live.ctl("send_keys", params={"keys": ["enter"]})
             time.sleep(1.0)
-            live.ctl("send_text", params={"text": f"printf '%s\\n' {shell_quote(tmux_marker)}"})
+            live.ctl(
+                "send_text",
+                params={
+                    "text": posix_runtime_marker_command(tmux_marker)
+                },
+            )
             live.ctl("send_keys", params={"keys": ["enter"]})
             live.wait_for_text(tmux_marker, timeout_ms=12000, quiet_ms=500)
             states.append(capture_live_state(live, out, "tmux"))
-            tmux_cmds = [
-                ["tmux", "-L", tmux_socket, "split-window", "-h", "-t", "kettle_smoke:0.0"],
-                ["tmux", "-L", tmux_socket, "send-keys", "-t", "kettle_smoke:0.0", f"printf '%s\\n' {shell_quote(tmux_left_marker)}", "C-m"],
-                ["tmux", "-L", tmux_socket, "send-keys", "-t", "kettle_smoke:0.1", f"printf '%s\\n' {shell_quote(tmux_right_marker)}", "C-m"],
-            ]
+            tmux_cmds = tmux_split_commands(
+                tmux_socket,
+                tmux_bash,
+                tmux_left_marker,
+                tmux_right_marker,
+            )
             for cmd in tmux_cmds:
-                cp = run(cmd, timeout=5, capture=True)
+                cp = shell_target.run_command(cmd, timeout=5)
                 if cp.returncode != 0:
                     raise SystemExit(
                         "agent-tui smoke: tmux split workflow failed:\n"
@@ -1633,74 +3393,185 @@ def run_agent_tui(kettle: str, root: Path) -> Path:
             states.append(capture_live_state(live, out, "tmux-split"))
             live.ctl("send_text", params={"text": "exit"})
             live.ctl("send_keys", params={"keys": ["enter"]})
-            run(["tmux", "-L", tmux_socket, "kill-server"], timeout=3, capture=True)
+            cleanup_tmux_server(shell_target, tmux_socket)
             tmux_exit_marker = "KETTLE_AGENT_TUI_TMUX_EXITED"
             time.sleep(0.5)
             live_shell_command(
                 live,
-                command_with_marker("printf 'tmux-exited\\n'", tmux_exit_marker),
+                command_with_marker(
+                    "printf 'tmux-exited\\n'",
+                    tmux_exit_marker,
+                    windows=False,
+                ),
                 tmux_exit_marker,
                 timeout_ms=12000,
             )
             probes.append({"name": "tmux", "status": "ok"})
             probes.append({"name": "tmux-split", "status": "ok"})
 
-        if shutil.which("nvim") is None:
-            probes.append({"name": "nvim-clean", "status": "skipped", "reason": "not on PATH"})
-            probes.append({"name": "nvim-configured", "status": "skipped", "reason": "not on PATH"})
-            probes.append({"name": "nvim-split-clean", "status": "skipped", "reason": "not on PATH"})
-            probes.append({"name": "nvim-split-configured", "status": "skipped", "reason": "not on PATH"})
+        if not nvim_available:
+            reason = shell_target.command_unavailable_reason("nvim")
+            for label in (
+                "nvim-clean",
+                "nvim-configured",
+                "nvim-split-clean",
+                "nvim-split-configured",
+            ):
+                probes.append(
+                    {"name": label, "status": "skipped", "reason": reason}
+                )
         else:
+            sandbox_marker = "KETTLE_AGENT_TUI_NVIM_SANDBOX_READY"
+            sandbox_path = shell_target.create_nvim_sandbox_host()
+            live.add_post_exit_cleanup(
+                lambda path=sandbox_path: shell_target.cleanup_nvim_sandbox_host(
+                    path
+                )
+            )
+            shell_target.prepare_nvim_sandbox_host(sandbox_path)
+            live_shell_command(
+                live,
+                shell_target.nvim_sandbox_setup_command(
+                    sandbox_marker, sandbox_path=sandbox_path
+                ),
+                sandbox_marker,
+                timeout_ms=360000,
+            )
             for label, configured in (("nvim-clean", False), ("nvim-configured", True)):
+                if configured and not configured_nvim_available:
+                    probes.append(
+                        {
+                            "name": label,
+                            "status": "skipped",
+                            "reason": (
+                                "no configured Neovim/AstroNvim directory at "
+                                f"{shell_target.nvim_config_source()}"
+                            ),
+                        }
+                    )
+                    continue
                 marker = f"KETTLE_AGENT_TUI_{label.replace('-', '_').upper()}_SMOKE"
-                live.ctl("send_text", params={"text": nvim_marker_command(marker, configured)})
+                live.ctl(
+                    "send_text",
+                    params={
+                        "text": nvim_marker_command(
+                            marker,
+                            configured,
+                            windows=shell_target.powershell,
+                        )
+                    },
+                )
                 live.ctl("send_keys", params={"keys": ["enter"]})
-                live.wait_for_text(marker, timeout_ms=18000, quiet_ms=500)
+                # A copied AstroNvim config may bootstrap its plugin tree into
+                # the disposable XDG data directory on first use. Keep clean
+                # Neovim fast while allowing that isolated startup to finish.
+                nvim_timeout_ms = 120000 if configured else 18000
+                live.wait_for_text(
+                    marker, timeout_ms=nvim_timeout_ms, quiet_ms=500
+                )
                 states.append(capture_live_state(live, out, label))
-                exit_nvim(live)
-                time.sleep(0.6)
                 shell_marker = f"{marker}_EXITED"
-                live_shell_command(live, command_with_marker("printf 'nvim-exited\\n'" if platform.system() != "Windows" else "Write-Output nvim-exited", shell_marker), shell_marker)
+                exit_probe = (
+                    "Write-Output nvim-exited"
+                    if shell_target.powershell
+                    else "printf 'nvim-exited\\n'"
+                )
+                exit_nvim_to_shell(
+                    live,
+                    shell_target,
+                    sandbox_path,
+                    exit_probe,
+                    shell_marker,
+                )
                 probes.append({"name": label, "status": "ok"})
             for label, configured in (
                 ("nvim-split-clean", False),
                 ("nvim-split-configured", True),
             ):
+                if configured and not configured_nvim_available:
+                    probes.append(
+                        {
+                            "name": label,
+                            "status": "skipped",
+                            "reason": (
+                                "no configured Neovim/AstroNvim directory at "
+                                f"{shell_target.nvim_config_source()}"
+                            ),
+                        }
+                    )
+                    continue
                 base = label.replace("-", "_").upper()
-                left_marker = f"KETTLE_AGENT_TUI_{base}_LEFT"
-                right_marker = f"KETTLE_AGENT_TUI_{base}_RIGHT"
+                # A 120x36 logical window can be only ~61 columns on a HiDPI
+                # display; each Neovim split is then about 30 cells wide.
+                # `wait_for` matches physical rows rather than rejoining soft
+                # wraps, so keep each split marker well below that boundary.
+                mode_tag = "CFG" if configured else "CLEAN"
+                left_marker = f"KTL_NV_{mode_tag}_L"
+                right_marker = f"KTL_NV_{mode_tag}_R"
                 live.ctl(
                     "send_text",
-                    params={"text": nvim_split_command(left_marker, right_marker, configured)},
+                    params={
+                        "text": nvim_split_command(
+                            left_marker,
+                            right_marker,
+                            configured,
+                            windows=shell_target.powershell,
+                        )
+                    },
                 )
                 live.ctl("send_keys", params={"keys": ["enter"]})
-                live.wait_for_text(left_marker, timeout_ms=30000, quiet_ms=500)
-                live.wait_for_text(right_marker, timeout_ms=30000, quiet_ms=500)
+                nvim_timeout_ms = 120000 if configured else 30000
+                live.wait_for_text(
+                    left_marker, timeout_ms=nvim_timeout_ms, quiet_ms=500
+                )
+                live.wait_for_text(
+                    right_marker, timeout_ms=nvim_timeout_ms, quiet_ms=500
+                )
                 split_screen = live.json_ctl("read_screen")
                 split_text = screen_text(split_screen)
                 if left_marker not in split_text or right_marker not in split_text:
                     raise SystemExit(f"agent-tui smoke: {label} split markers are not both visible")
                 states.append(capture_live_state(live, out, label))
-                exit_nvim(live)
-                time.sleep(0.6)
                 shell_marker = f"KETTLE_AGENT_TUI_{base}_EXITED"
-                live_shell_command(
+                exit_nvim_to_shell(
                     live,
-                    command_with_marker(
-                        "printf 'nvim-split-exited\\n'"
-                        if platform.system() != "Windows"
-                        else "Write-Output nvim-split-exited",
-                        shell_marker,
+                    shell_target,
+                    sandbox_path,
+                    (
+                        "Write-Output nvim-split-exited"
+                        if shell_target.powershell
+                        else "printf 'nvim-split-exited\\n'"
                     ),
                     shell_marker,
                 )
                 probes.append({"name": label, "status": "ok"})
+            cleanup_marker = "KETTLE_AGENT_TUI_NVIM_SANDBOX_CLEAN"
+            live_shell_command(
+                live,
+                shell_target.nvim_sandbox_cleanup_command(cleanup_marker),
+                cleanup_marker,
+                timeout_ms=120000,
+            )
 
     ok = [p for p in probes if p.get("status") == "ok"]
     if not ok:
         raise SystemExit("agent-tui smoke: no probes ran")
     (out / "analysis.json").write_text(
-        json.dumps({"probes": probes, "states": states}, indent=2) + "\n"
+        json.dumps(
+            {
+                "shell": {
+                    "mode": shell_target.mode,
+                    "wsl_distro": shell_target.wsl_distro,
+                    "configured_nvim_source": shell_target.nvim_config_source(),
+                    "nvim_data_source": shell_target.nvim_data_source(),
+                    "configured_nvim_copied_to_sandbox": configured_nvim_available,
+                },
+                "probes": probes,
+                "states": states,
+            },
+            indent=2,
+        )
+        + "\n"
     )
     return out
 
@@ -2858,8 +4729,50 @@ def main() -> int:
             "all",
         ],
     )
-    parser.add_argument("--kettle", default=os.environ.get("KETTLE_BIN", "kettle"))
+    kettle_source = parser.add_mutually_exclusive_group()
+    kettle_source.add_argument(
+        "--kettle", default=os.environ.get("KETTLE_BIN", "kettle")
+    )
+    kettle_source.add_argument(
+        "--cargo-release",
+        action="store_true",
+        help=(
+            "build kettle --release and select the exact executable reported "
+            "by Cargo (honors CARGO_TARGET_DIR and configured target triples)"
+        ),
+    )
     parser.add_argument("--out-dir", default=os.environ.get("KETTLE_DIAG_DIR", "target/diagnostics"))
+    parser.add_argument(
+        "--shell-mode",
+        choices=["native", "wsl"],
+        default="native",
+        help=(
+            "shell target for agent-tui: PowerShell on native Windows, "
+            "non-rc Bash on native Unix, or Windows Kettle launching non-rc "
+            "Bash through wsl.exe"
+        ),
+    )
+    parser.add_argument(
+        "--wsl-distro",
+        default=os.environ.get("KETTLE_SMOKE_WSL_DISTRO"),
+        help="optional WSL distribution name (defaults to the user's WSL default)",
+    )
+    parser.add_argument(
+        "--astro-config",
+        default=os.environ.get("KETTLE_SMOKE_ASTRO_CONFIG"),
+        help=(
+            "configured Neovim/AstroNvim directory in the target shell; the "
+            "harness dereferences links into an isolated copy before use"
+        ),
+    )
+    parser.add_argument(
+        "--nvim-data",
+        default=os.environ.get("KETTLE_SMOKE_NVIM_DATA"),
+        help=(
+            "Neovim data directory in the target shell; installed plugin "
+            "runtime is copied into the disposable smoke sandbox"
+        ),
+    )
     args = parser.parse_args()
 
     if args.case == "self-test":
@@ -2867,9 +4780,28 @@ def main() -> int:
         print("live-ui helper self-test: OK")
         return 0
 
+    if args.shell_mode != "native" and args.case != "agent-tui":
+        parser.error("--shell-mode applies only to the agent-tui case")
+    if args.wsl_distro and args.shell_mode != "wsl":
+        parser.error("--wsl-distro requires --shell-mode wsl")
+    if args.shell_mode == "wsl" and platform.system() != "Windows":
+        parser.error("--shell-mode wsl requires the helper to run on Windows")
+    if args.shell_mode == "wsl":
+        require_cmd("wsl.exe")
+
+    shell_target = AgentShellTarget(
+        mode=args.shell_mode,
+        wsl_distro=args.wsl_distro,
+        astro_config=args.astro_config,
+        nvim_data=args.nvim_data,
+    )
+
     if platform.system() != "Windows" and not (os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")):
         print("live-ui smoke: skipped (no DISPLAY or WAYLAND_DISPLAY)", file=sys.stderr)
         return 0
+
+    if args.cargo_release:
+        args.kettle = resolve_release_kettle()
 
     root = Path(args.out_dir).resolve()
     root.mkdir(parents=True, exist_ok=True)
@@ -2899,7 +4831,7 @@ def main() -> int:
             out = run_underline(args.kettle, root)
             print(f"underline-scroll smoke: OK artifacts={out}")
     if args.case in ("agent-tui", "all"):
-        out = run_agent_tui(args.kettle, root)
+        out = run_agent_tui(args.kettle, root, shell_target)
         print(f"agent-tui smoke: OK artifacts={out}")
     if args.case in ("search-history", "all"):
         out = run_search_history(args.kettle, root)

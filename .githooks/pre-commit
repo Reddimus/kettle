@@ -55,18 +55,22 @@ fi
 # Warm-cache incremental rebuilds finish in <5s.
 start_sec=$(date +%s)
 
-# If any shell scripts are touched, run shellcheck against the
-# changed scripts. Catches bugs such as backticks inside a
-# double-quoted echo running as command substitution, at commit
-# time. Skipped silently if shellcheck isn't installed — same
-# opt-in spirit as the hook itself.
-shell_changes=$(git diff --cached --name-only --diff-filter=ACMRD \
-    | grep -E '^(scripts/|\.githooks/)' \
-    || true)
-if [ -n "$shell_changes" ] && command -v shellcheck >/dev/null 2>&1; then
-    echo "pre-commit: running shellcheck on $(echo "$shell_changes" | tr '\n' ' ')..." >&2
-    # shellcheck disable=SC2086  # we want word-splitting here
-    shellcheck $shell_changes
+# If any shell scripts are touched, run shellcheck against those shell scripts
+# only. The old directory-only filter also passed scripts/*.py and *.ps1 to
+# shellcheck, so an unrelated Python/PowerShell edit failed before the real
+# gate started. Exclude deleted paths from direct linters, and use an array so
+# a legal path containing spaces remains one argument.
+shell_changes=()
+while IFS= read -r -d '' path; do
+    case "$path" in
+        scripts/*.sh|.githooks/*.sh|.githooks/pre-commit)
+            shell_changes+=("$path")
+            ;;
+    esac
+done < <(git diff --cached --name-only --diff-filter=ACMR -z)
+if [ "${#shell_changes[@]}" -gt 0 ] && command -v shellcheck >/dev/null 2>&1; then
+    echo "pre-commit: running shellcheck on ${shell_changes[*]}..." >&2
+    shellcheck "${shell_changes[@]}"
 fi
 
 echo "pre-commit: running cargo fmt --check + cargo clippy + cargo test + cargo doc ..." >&2
