@@ -274,12 +274,21 @@ pub fn menu_row_chars(row: &ContextMenuRow) -> usize {
 /// The highlighted row is deliberately excluded: moving the pointer changes
 /// only a cheap quad. Text must be prepared again when its content, color,
 /// position, or visible scroll window changes.
-fn context_menu_text_damage_key(menu: Option<&ContextMenu>) -> u64 {
+fn context_menu_text_damage_key(
+    menu: Option<&ContextMenu>,
+    foreground: Rgb,
+    background: Rgb,
+) -> u64 {
     use std::hash::{Hash, Hasher};
 
     let mut hash = std::hash::DefaultHasher::new();
     menu.is_some().hash(&mut hash);
     if let Some(menu) = menu {
+        // glyphon bakes TextArea::default_color into retained vertices. Include
+        // both colors: enabled rows use foreground directly, while disabled
+        // rows blend it toward the panel background.
+        (foreground.r, foreground.g, foreground.b).hash(&mut hash);
+        (background.r, background.g, background.b).hash(&mut hash);
         menu.anchor.0.to_bits().hash(&mut hash);
         menu.anchor.1.to_bits().hash(&mut hash);
         menu.scroll_offset.hash(&mut hash);
@@ -1220,6 +1229,11 @@ pub struct Renderer {
     /// `prepare` (which re-encodes EVERY visible glyph's vertices) is skipped
     /// and the cached vertex buffers are re-rendered as-is.
     last_chrome_hash: u64,
+    /// Set before a fallible shared-atlas text prepare and cleared only after
+    /// every text renderer succeeds. Buffer/damage caches are updated while
+    /// the frame is assembled, so this latch forces a retry after an error
+    /// instead of accepting partially retained vertices as current.
+    text_prepare_dirty: bool,
     /// v2.23.0 fix: whether ANY text overlay (settings, palette, search, menu,
     /// …) was open the previous frame. The `need_prepare` damage gate forces a
     /// glyphon prepare while an overlay is open, but the frame an overlay
@@ -2315,6 +2329,7 @@ impl Renderer {
             line_text_scratch: String::new(),
             chrome_style_key: 0,
             last_chrome_hash: 0,
+            text_prepare_dirty: true,
             last_overlay_open: false,
             cursor_glyph_renderer,
             cursor_glyph_buffer,
@@ -5189,7 +5204,12 @@ impl Renderer {
             self.new_tab_arrow_text.hash(&mut h);
             self.resize_overlay_text.hash(&mut h);
             self.ime_text.hash(&mut h);
-            context_menu_text_damage_key(overlay.context_menu.as_ref()).hash(&mut h);
+            context_menu_text_damage_key(
+                overlay.context_menu.as_ref(),
+                theme.foreground,
+                theme.background,
+            )
+            .hash(&mut h);
             h.finish()
         };
         let chrome_changed = chrome_hash != self.last_chrome_hash;
@@ -5214,7 +5234,8 @@ impl Renderer {
         // covers the open state; this covers the close edge.
         let overlay_changed = overlay_open != self.last_overlay_open;
         self.last_overlay_open = overlay_open;
-        let need_prepare = any_pane_text_changed
+        let need_prepare = self.text_prepare_dirty
+            || any_pane_text_changed
             || chrome_changed
             || text_layout_changed
             || non_context_text_overlay_open
@@ -5223,10 +5244,22 @@ impl Renderer {
         let cursor_glyph_key =
             cursor_glyph_damage_key(self.pending_cursor_glyph.as_ref(), metrics, &family);
         let cursor_glyph_changed = cursor_glyph_key != self.last_cursor_glyph_key;
+        let need_cursor_prepare =
+            self.pending_cursor_glyph.is_some() && (need_prepare || cursor_glyph_changed);
         if cursor_glyph_key.is_none() {
             self.last_cursor_glyph_key = None;
         }
+        let preparing_text = need_prepare || need_cursor_prepare;
+        if preparing_text {
+            // Every glyphon renderer shares the atlas. Arm the retry latch even
+            // for a cursor-only prepare so a partial atlas mutation cannot
+            // leave otherwise-retained pane or menu vertices looking current.
+            self.text_prepare_dirty = true;
+        }
         if need_prepare {
+            // Buffer and damage caches above have already advanced to this
+            // frame. Any `?` return leaves the retry latch set for the next
+            // redraw.
             self.text_renderer.prepare(
                 &self.gpu.device,
                 &self.gpu.queue,
@@ -5279,7 +5312,7 @@ impl Renderer {
             .pending_cursor_glyph
             .as_ref()
             .map(|c| (c.x, c.y, c.ch, c.color, c.clip))
-            .filter(|_| need_prepare || cursor_glyph_changed)
+            .filter(|_| need_cursor_prepare)
         {
             let mut enc = [0u8; 4];
             self.cursor_glyph_buffer.set_metrics(metrics);
@@ -5318,6 +5351,9 @@ impl Renderer {
             // transient atlas/device error must retry rather than treating
             // stale vertices as current on the next frame.
             self.last_cursor_glyph_key = cursor_glyph_key;
+        }
+        if preparing_text {
+            self.text_prepare_dirty = false;
         }
         self.quads
             .upload(&self.gpu.device, &self.gpu.queue, [sw, sh], &quads);
@@ -10517,7 +10553,7 @@ mod titlebar_glyph_fallback_tests {
 #[cfg(test)]
 mod pane_buffer_lifecycle_tests {
     #[test]
-    fn context_menu_hover_changes_only_quad_damage() {
+    fn context_menu_hover_preserves_text_damage_key() {
         let mut menu = super::ContextMenu {
             anchor: (20.0, 30.0),
             rows: vec![
@@ -10538,20 +10574,46 @@ mod pane_buffer_lifecycle_tests {
             scroll_offset: 0,
             panel_h_clamped: 120.0,
         };
-        let initial = super::context_menu_text_damage_key(Some(&menu));
+        let foreground = kettle_config::Rgb::new(220, 220, 220);
+        let background = kettle_config::Rgb::new(20, 20, 20);
+        let initial = super::context_menu_text_damage_key(Some(&menu), foreground, background);
 
         menu.highlight = 1;
         assert_eq!(
-            super::context_menu_text_damage_key(Some(&menu)),
+            super::context_menu_text_damage_key(Some(&menu), foreground, background),
             initial,
             "highlight motion changes quads, not shaped menu text"
         );
 
         menu.scroll_offset = 1;
-        assert_ne!(super::context_menu_text_damage_key(Some(&menu)), initial);
+        assert_ne!(
+            super::context_menu_text_damage_key(Some(&menu), foreground, background),
+            initial
+        );
         menu.scroll_offset = 0;
         menu.rows[0].enabled = false;
-        assert_ne!(super::context_menu_text_damage_key(Some(&menu)), initial);
+        assert_ne!(
+            super::context_menu_text_damage_key(Some(&menu), foreground, background),
+            initial
+        );
+        assert_ne!(
+            super::context_menu_text_damage_key(
+                Some(&menu),
+                kettle_config::Rgb::new(221, 220, 220),
+                background,
+            ),
+            initial,
+            "glyphon retains the menu foreground in prepared vertices"
+        );
+        assert_ne!(
+            super::context_menu_text_damage_key(
+                Some(&menu),
+                foreground,
+                kettle_config::Rgb::new(21, 20, 20),
+            ),
+            initial,
+            "disabled-row colors depend on the menu background"
+        );
     }
 
     #[test]
@@ -10598,6 +10660,37 @@ mod pane_buffer_lifecycle_tests {
         assert_eq!(
             super::cursor_glyph_damage_key(None, glyphon::Metrics::new(14.0, 18.0), "Kettle Mono",),
             None
+        );
+    }
+
+    #[test]
+    fn failed_text_prepare_keeps_the_retry_latch_armed() {
+        let src = include_str!("lib.rs");
+        let start = src
+            .find("let need_prepare = self.text_prepare_dirty")
+            .expect("prepare retry latch participates in damage");
+        let body = &src[start..];
+        let arm = body
+            .find("self.text_prepare_dirty = true;")
+            .expect("retry latch armed before fallible prepares");
+        let main_prepare = body
+            .find("self.text_renderer.prepare(")
+            .expect("main text prepare present");
+        let menu_prepare = body
+            .find("self.menu_text_renderer.prepare(")
+            .expect("menu text prepare present");
+        let cursor_prepare = body
+            .find("self.cursor_glyph_renderer.prepare(")
+            .expect("cursor text prepare present");
+        let clear = body
+            .find("self.text_prepare_dirty = false;")
+            .expect("retry latch clears after successful prepares");
+        assert!(
+            arm < main_prepare
+                && main_prepare < menu_prepare
+                && menu_prepare < cursor_prepare
+                && cursor_prepare < clear,
+            "the retry latch must remain armed across every fallible shared-atlas prepare"
         );
     }
 

@@ -531,11 +531,19 @@ text, so its bitmap is already resident).
   highlight changes arm a one-shot snapshot-reuse hint. Before taking the fast
   path, the UI compares every visible pane's stable id, atomic output
   generation, columns, rows, and order with the pooled snapshot keys. Any
-  intervening input/user event clears the hint, and any key mismatch falls back
-  to the full drain/snapshot path. A reused snapshot also carries the captured
-  cursor-blink bit, so building the overlay does not reacquire the focused
-  `Term`. Renderer text damage excludes the highlighted menu row (a quad-only
-  change) but includes labels, enabled colors, anchor, and scroll window.
+  intervening input/user event clears the hint, active pointer gestures disable
+  reuse, and any key mismatch falls back to the full drain/snapshot path.
+  Opening a menu also ends selection/scrollbar/split/tab gestures so
+  `CursorMoved` cannot mutate terminal state behind it. A reused snapshot
+  stages its exact visible-pane output generations into the presentation
+  transaction while preserving the last committed generations for background
+  panes, so racing output stays pending. It also carries the captured
+  cursor-blink bit; both overlay construction and the event-loop blink
+  scheduler use it instead of reacquiring the focused `Term`.
+  Renderer text damage excludes the highlighted menu row but includes labels,
+  enabled state, theme colors, anchor, and scroll window. The renderer still
+  walks the cached snapshots and rebuilds its quad batches; the optimization
+  avoids terminal capture and retained-text preparation, not all frame work.
 - **Lua VM** is parked on the App struct (single-threaded
   `LuaEngine`) — `mlua`'s `send` feature makes the handle `Send + Sync`
   but kettle never clones it across threads. Event hooks
