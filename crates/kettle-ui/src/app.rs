@@ -28,7 +28,9 @@ use winit::window::{
 use crate::gpu_diagnostics::{IncidentLog, RecoveryAction, RecoveryState};
 use crate::input;
 use crate::mux::{Dir, Mux, Rect};
-use crate::window_state::{WindowState, track_consumed_key_release};
+use crate::window_state::{
+    FrameRecoveryAction, FrameRecoveryPoll, WindowState, track_consumed_key_release,
+};
 
 const ACCESSIBILITY_ROOT_ID: NodeId = NodeId(0);
 const ACCESSIBILITY_PANE_ID_MASK: u64 = 1 << 63;
@@ -49,6 +51,14 @@ fn apply_output_generation_outcome(
     }
     std::mem::swap(committed, candidate);
     true
+}
+
+fn window_is_render_hidden(ws: &WindowState) -> bool {
+    ws.window_occluded
+        || ws.window.as_ref().is_some_and(|window| {
+            window.is_minimized().unwrap_or(false)
+                || (ws.window_shown && !window.is_visible().unwrap_or(true))
+        })
 }
 
 fn accessibility_pane_id(pane_id: u64) -> NodeId {
@@ -5872,7 +5882,10 @@ impl App {
         // configure on the lost device. The grid resize below still runs so the
         // layout is correct if the user reopens.
         let gpu_lost = self.gpu.as_ref().is_some_and(|g| g.is_lost());
-        if !gpu_lost && let Some(r) = ws.renderer.as_mut() {
+        if !gpu_lost
+            && !ws.frame_recovery.renderer_rebuild_pending()
+            && let Some(r) = ws.renderer.as_mut()
+        {
             r.resize(width, height);
         }
         self.resize_all(ws);
@@ -6385,6 +6398,63 @@ impl App {
         }
     }
 
+    /// Recreate one window's surface and retained renderer resources while
+    /// keeping the healthy process-wide adapter/device/queue. wgpu 30 requires
+    /// this for `CurrentSurfaceTexture::Lost`; it is also the bounded repair
+    /// path for non-device renderer errors whose retained damage keys may have
+    /// advanced before a fallible glyph preparation step.
+    fn try_recover_window_renderer(&mut self, ws: &mut WindowState) -> Result<(), String> {
+        let Some(gpu) = self.gpu.as_ref() else {
+            return Err("shared GPU context is unavailable".to_string());
+        };
+        if gpu.is_lost() {
+            return Err("shared GPU device is lost".to_string());
+        }
+        let Some(window) = ws.window.clone() else {
+            return Err("window is unavailable".to_string());
+        };
+        let Some(old_renderer) = ws.renderer.as_ref() else {
+            return Err("window renderer is unavailable".to_string());
+        };
+
+        let font_size = old_renderer.font_size();
+        let cell_scale = (old_renderer.cell_scale_w, old_renderer.cell_scale_h);
+        let pending_screenshot = old_renderer.pending_screenshot.clone();
+        let size = window.inner_size();
+        let scale = window.scale_factor() as f32;
+        let mut replacement = Renderer::new_with_gpu(
+            gpu,
+            window,
+            size.width.max(1),
+            size.height.max(1),
+            scale,
+            &self.cfg,
+        )
+        .map_err(|error| error.to_string())?;
+
+        // These values can diverge from Config at runtime (font zoom and live
+        // reload), so rebuilding from Config alone would visibly reset the
+        // affected window after recovery.
+        replacement.set_font_size(font_size);
+        replacement.set_cell_scale(cell_scale.0, cell_scale.1);
+        replacement.set_accent_override(ws.accent.as_ref().map(|accent| accent.color));
+        if let Some(request) = pending_screenshot
+            && replacement.set_pending_screenshot(request).is_err()
+        {
+            // A fresh renderer has neither a queued nor in-flight screenshot;
+            // keep this defensive branch explicit so a future constructor
+            // change cannot silently discard a ctl completion request.
+            return Err("replacement renderer rejected the queued screenshot".to_string());
+        }
+
+        // Commit only after the replacement is fully initialized. A failed
+        // candidate leaves the old renderer in place while the state machine
+        // backs off and tries again.
+        ws.renderer = Some(replacement);
+        self.resize_all(ws);
+        Ok(())
+    }
+
     fn try_recover_gpu(
         &mut self,
         ws: &mut WindowState,
@@ -6458,9 +6528,11 @@ impl App {
         // the candidate adapter. A partial commit would leave some windows
         // permanently blank and stop the escalation loop on a "success".
         ws.renderer = Some(new_renderer);
+        ws.frame_recovery.clear();
         for (seq, renderer) in secondary_renderers {
             if let Some(other) = self.windows.get_mut(&seq) {
                 other.renderer = Some(renderer);
+                other.frame_recovery.clear();
             }
         }
         self.gpu_software_fallback = new_gpu.is_software();
@@ -8089,6 +8161,15 @@ impl App {
         let focus = ws.mux.active_focus();
         let window = ws.window.clone();
 
+        // A failed acquire/render owns the next GPU attempt until its one-shot
+        // deadline is polled in about_to_wait. This gate also stops unrelated
+        // cursor/input/output redraw requests from bypassing the backoff. Do
+        // the non-GPU state maintenance above, but neither snapshot terminal
+        // contents nor touch an invisible surface.
+        if ws.frame_recovery.has_pending() || window_is_render_hidden(ws) {
+            return;
+        }
+
         // Capture the output generations represented by this candidate frame
         // before taking any pane snapshots. Output that races the snapshot can
         // therefore cause one harmless extra repaint, never a missed repaint.
@@ -8225,7 +8306,7 @@ impl App {
                         // presentation. The former eager output-generation
                         // update at the top of redraw lost terminal damage
                         // whenever surface acquisition timed out.
-                        ws.window_occluded = false;
+                        ws.frame_recovery.presented();
 
                         // Fallback reveal: normal startup reveals as soon as
                         // renderer init succeeds, then paints immediately.
@@ -8252,32 +8333,49 @@ impl App {
                             0
                         };
                     }
-                    FrameOutcome::RetrySoon => {
+                    FrameOutcome::RetryLater => {
                         debug_assert!(!presented);
-                        // Retain output generations and scheduling state until
-                        // a frame actually presents. Surface timeouts and
-                        // post-reconfigure retries are transient, so retry
-                        // without waiting for another input or PTY event.
-                        if let Some(w) = &ws.window {
-                            w.request_redraw();
-                        }
+                        // A backend acquire timeout may already have blocked
+                        // for close to a second; Outdated has just
+                        // reconfigured the existing surface. In either case,
+                        // retain damage and let the one-shot backoff schedule
+                        // the next acquire.
+                        ws.frame_recovery
+                            .schedule_transient_retry(std::time::Instant::now());
                     }
                     FrameOutcome::Occluded => {
                         debug_assert!(!presented);
-                        // Retain damage for the forced redraw on
-                        // un-occlusion, but do not spin the output coalescer
-                        // while the compositor says this surface cannot be
-                        // shown.
-                        ws.window_occluded = true;
-                        ws.coalescing_paint = false;
+                        // The wgpu result can precede winit's OS occlusion
+                        // event. Keep a slow self-healing deadline for a
+                        // spurious/transient result, while the state machine
+                        // becomes fully quiescent as soon as the window system
+                        // confirms hidden/minimized/occluded state.
+                        ws.frame_recovery
+                            .schedule_occluded_retry(std::time::Instant::now());
+                    }
+                    FrameOutcome::SurfaceLost => {
+                        debug_assert!(!presented);
+                        // wgpu 30 requires Instance::create_surface here.
+                        // Rebuild only this renderer on the healthy shared
+                        // device; genuine device loss is handled separately by
+                        // the process-wide recovery guard.
+                        ws.frame_recovery
+                            .schedule_renderer_rebuild(std::time::Instant::now());
                     }
                 }
             }
             Err(e) => {
-                // Renderer errors can be persistent (for example a validation
-                // fault), so the GPU fault/recovery path owns any retry rather
-                // than creating an unbounded redraw loop here.
                 log::warn!("render error: {e}");
+                // Fallible glyph preparation can advance retained renderer
+                // damage keys before returning (for example AtlasFull). A
+                // plain redraw could therefore reuse inconsistent caches and
+                // strand terminal damage. Rebuild the affected renderer on a
+                // bounded schedule unless the device callback already routed
+                // this failure into process-wide recovery.
+                if !self.gpu.as_ref().is_some_and(|gpu| gpu.is_lost()) {
+                    ws.frame_recovery
+                        .schedule_renderer_rebuild(std::time::Instant::now());
+                }
             }
         }
     }
@@ -19034,11 +19132,10 @@ impl App {
                 // event even if they're focused on another OS window.
                 // Cheap when triggers are empty (which is the default).
                 self.run_triggers(ws);
-                if ws.window_occluded {
-                    // A surface-level occlusion can arrive before winit's
-                    // WindowEvent::Occluded. Keep terminal damage pending for
-                    // the mandatory un-occlusion redraw without scheduling
-                    // invisible GPU work for each PTY burst.
+                if ws.window_occluded || ws.frame_recovery.has_pending() {
+                    // Keep terminal damage pending while the surface is
+                    // invisible or its one-shot repair deadline is armed.
+                    // Output bursts must not bypass timeout backoff.
                     ws.coalescing_paint = false;
                     return;
                 }
@@ -19196,6 +19293,7 @@ impl App {
                 if size.width == 0 || size.height == 0 {
                     return;
                 }
+                ws.frame_recovery.expedite(std::time::Instant::now());
                 self.apply_window_resize(ws, size.width, size.height);
                 // Record the new grid size into the asciicast trace.
                 if self.recorder.is_some() {
@@ -19217,7 +19315,10 @@ impl App {
                 // surface itself is reconfigured by the Resized event winit
                 // emits alongside this one. Re-grid so panes reflow to the new
                 // cell dimensions.
-                if let Some(r) = ws.renderer.as_mut() {
+                ws.frame_recovery.expedite(std::time::Instant::now());
+                if !ws.frame_recovery.renderer_rebuild_pending()
+                    && let Some(r) = ws.renderer.as_mut()
+                {
                     r.set_scale(scale_factor as f32);
                 }
                 self.resize_all(ws);
@@ -20231,6 +20332,9 @@ impl App {
             }
             WindowEvent::Focused(f) => {
                 ws.window_focused = f;
+                if f {
+                    ws.frame_recovery.expedite(std::time::Instant::now());
+                }
                 // D1 (audit v2.32.0): track the OS focus in `focused_seq` so
                 // window-less events (RemoteCommand, ctl "focused-window" ops,
                 // the UpdateAvailable banner) and the agent-facing
@@ -20340,8 +20444,11 @@ impl App {
                 // (the new default) safe. On un-occlude, repaint at once so the
                 // wallpaper catches up to its true time.
                 ws.window_occluded = occluded;
-                if !occluded && let Some(w) = &ws.window {
-                    w.request_redraw();
+                if !occluded {
+                    ws.frame_recovery.expedite(std::time::Instant::now());
+                    if let Some(w) = &ws.window {
+                        w.request_redraw();
+                    }
                 }
             }
             WindowEvent::Ime(ime) => {
@@ -20807,21 +20914,73 @@ impl App {
             }
         }
         let now = std::time::Instant::now();
+        let render_hidden = window_is_render_hidden(ws);
+        let mut frame_recovery_wait_ms = None;
+        match ws.frame_recovery.poll(now, render_hidden) {
+            FrameRecoveryPoll::Idle | FrameRecoveryPoll::Quiescent => {}
+            FrameRecoveryPoll::Wait(wait) => {
+                frame_recovery_wait_ms = Some((wait.as_millis() as u64).max(1));
+            }
+            FrameRecoveryPoll::Ready(FrameRecoveryAction::Redraw) => {
+                if let Some(window) = &ws.window {
+                    window.request_redraw();
+                }
+            }
+            FrameRecoveryPoll::Ready(FrameRecoveryAction::RebuildRenderer) => {
+                match self.try_recover_window_renderer(ws) {
+                    Ok(()) => {
+                        log::info!("window {} renderer/surface recovery succeeded", ws.seq);
+                        if let Some(window) = &ws.window {
+                            window.request_redraw();
+                        }
+                    }
+                    Err(error) => {
+                        log::warn!(
+                            "window {} renderer/surface recovery failed: {error}",
+                            ws.seq
+                        );
+                        if self.gpu.as_ref().is_some_and(|gpu| gpu.is_lost()) {
+                            // The device callback owns escalation. Ensure the
+                            // event loop turns once more even if no animation
+                            // or PTY event is active.
+                            frame_recovery_wait_ms = Some(1);
+                        } else {
+                            ws.frame_recovery.schedule_renderer_rebuild(now);
+                            match ws.frame_recovery.poll(now, render_hidden) {
+                                FrameRecoveryPoll::Wait(wait) => {
+                                    frame_recovery_wait_ms = Some((wait.as_millis() as u64).max(1));
+                                }
+                                FrameRecoveryPoll::Quiescent => {}
+                                FrameRecoveryPoll::Idle | FrameRecoveryPoll::Ready(_) => {
+                                    // A failed rebuild after the first
+                                    // immediate attempt always arms a positive
+                                    // backoff. Keep a defensive one-turn wake
+                                    // if that invariant changes.
+                                    frame_recovery_wait_ms = Some(1);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
         // Drive cursor blink + visual-bell decay without busy-looping: only
         // schedule wake-ups while something is actually animating.
-        let bell_active = ws
-            .last_bell
-            .map(|t| t.elapsed() < std::time::Duration::from_millis(300))
-            .unwrap_or(false);
+        let bell_active = !render_hidden
+            && ws
+                .last_bell
+                .map(|t| t.elapsed() < std::time::Duration::from_millis(300))
+                .unwrap_or(false);
         // v2.20.0: the resize chip needs repaints until it expires (then one
         // more to erase it); clear the state once it has.
-        let resize_chip_active = ws
+        let resize_chip_live = ws
             .resize_overlay
             .map(|(_, _, t)| t.elapsed() < RESIZE_OVERLAY_DURATION)
             .unwrap_or(false);
-        if !resize_chip_active && ws.resize_overlay.is_some() {
+        let resize_chip_active = resize_chip_live && !render_hidden;
+        if !resize_chip_live && ws.resize_overlay.is_some() {
             ws.resize_overlay = None;
-            if let Some(w) = &ws.window {
+            if !render_hidden && let Some(w) = &ws.window {
                 w.request_redraw();
             }
         }
@@ -20831,8 +20990,8 @@ impl App {
             .and_then(|id| ws.mux.panes.get(&id))
             .map(|pane| pane.term.cursor_blinking())
             .unwrap_or(true);
-        let blink_active =
-            cursor_blink_active(self.cfg.cursor_blink, pane_blink, ws.window_focused);
+        let blink_active = !render_hidden
+            && cursor_blink_active(self.cfg.cursor_blink, pane_blink, ws.window_focused);
         let blink_interval = std::time::Duration::from_millis(self.cfg.cursor_blink_interval);
         let blink_elapsed = now.saturating_duration_since(ws.last_blink);
         let next_blink =
@@ -20846,11 +21005,12 @@ impl App {
             ws.blink_on = next_blink;
             ws.last_blink = now;
         }
-        let term_anim = ws
-            .mux
-            .panes
-            .values()
-            .any(|p| p.term.has_running_animation());
+        let term_anim = !render_hidden
+            && ws
+                .mux
+                .panes
+                .values()
+                .any(|p| p.term.has_running_animation());
         // v2.23.1: an animated background (a starfield, or a GIF/APNG/WebP
         // image) wakes at its OWN frame rate, not a fixed 30 fps — at 30 fps an
         // 8 fps GIF repaints the same frame ~22×/s (wasted present()s, the ~55%
@@ -20863,17 +21023,10 @@ impl App {
             .renderer
             .as_ref()
             .and_then(|r| r.bg_anim_interval_ms(&self.cfg, ws.window_focused));
-        // v2.24.0 freeze-when-hidden: an occluded or minimized window can't show
-        // the animation, so it must cost zero idle — this is what makes the new
-        // always-on default safe. Only probe `is_minimized()` (an OS call) when
-        // a bg is actually animating, so the common no-wallpaper case pays
-        // nothing here.
-        let bg_hidden = bg_anim_interval_raw.is_some()
-            && (ws.window_occluded
-                || ws
-                    .window
-                    .as_ref()
-                    .is_some_and(|w| w.is_minimized().unwrap_or(false)));
+        // v2.24.0 freeze-when-hidden: an occluded, minimized, or explicitly
+        // hidden window cannot show the animation, so it must cost zero idle.
+        // Reuse the visibility snapshot taken for frame-recovery scheduling.
+        let bg_hidden = bg_anim_interval_raw.is_some() && render_hidden;
         let bg_anim_interval = if bg_hidden {
             None
         } else {
@@ -20901,7 +21054,7 @@ impl App {
         // animation — without an active wake-up the loop sits idle waiting
         // for a fresh CursorMoved, so the drag-past-edge case would freeze
         // until the user wiggled the mouse.
-        let autoscroll_active = ws.selecting && {
+        let autoscroll_active = !render_hidden && ws.selecting && {
             let area = self.area(ws);
             self.focused_rect(ws, area)
                 .map(|r| selection_autoscroll_lines(ws.cursor.y as f32, r.1, r.1 + r.3) != 0)
@@ -20911,7 +21064,9 @@ impl App {
         // `OUTPUT_FRAME_BUDGET` after the last frame. Until then it stays
         // pending and we wake at its deadline so the burst paints exactly once.
         let output_budget = effective_output_budget(ws.flood_paints);
-        let coalesce_due = ws.coalescing_paint
+        let coalesce_due = !render_hidden
+            && !ws.frame_recovery.has_pending()
+            && ws.coalescing_paint
             && ws
                 .last_paint
                 .map(|t| now.saturating_duration_since(t) >= output_budget)
@@ -20947,7 +21102,10 @@ impl App {
             } else {
                 None
             };
-        if ws.coalescing_paint {
+        if let Some(ms) = frame_recovery_wait_ms {
+            wait_ms = Some(wait_ms.map_or(ms, |wait| wait.min(ms)));
+        }
+        if ws.coalescing_paint && !render_hidden && !ws.frame_recovery.has_pending() {
             let remaining = ws
                 .last_paint
                 .map(|t| output_budget.saturating_sub(now.saturating_duration_since(t)))
@@ -21110,7 +21268,11 @@ mod tests {
         let mut committed = std::collections::HashMap::from([(1, 10), (2, 20)]);
         let mut candidate = std::collections::HashMap::from([(1, 11), (2, 21)]);
 
-        for outcome in [FrameOutcome::RetrySoon, FrameOutcome::Occluded] {
+        for outcome in [
+            FrameOutcome::RetryLater,
+            FrameOutcome::Occluded,
+            FrameOutcome::SurfaceLost,
+        ] {
             assert!(!apply_output_generation_outcome(
                 outcome,
                 &mut committed,

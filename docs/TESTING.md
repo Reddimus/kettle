@@ -261,11 +261,20 @@ Guarded by the pure `output_paint_coalesces_within_frame_budget` (kettle-ui).
 **Frame presentation transaction.** A successful Rust return from surface
 acquisition does not always mean pixels reached the compositor. The
 `output_generations_commit_only_after_presentation` regression drives
-`Presented`, `RetrySoon`, and `Occluded` through the same commit helper used by
-the live UI and proves that only `Presented` advances the window's consumed
-output map. Renderer and UI compilation keeps the public `FrameOutcome`
-contract exhaustive; native live-render smoke remains responsible for actual
-window-system presentation.
+`Presented`, `RetryLater`, `Occluded`, and `SurfaceLost` through the same commit
+helper used by the live UI and proves that only `Presented` advances the
+window's consumed output map.
+
+The pure `FrameRecoveryState` regressions
+`frame_timeout_retries_are_one_shot_deadlines_with_a_cap`,
+`frame_retry_stays_armed_but_quiescent_while_hidden_minimized_or_occluded`,
+`renderer_rebuilds_back_off_until_a_frame_presents`, and
+`renderer_rebuild_supersedes_a_pending_surface_retry` verify capped timeout
+pacing, hidden/minimized/occluded quiescence, stronger-repair precedence, and
+the rule that only presentation resets renderer-rebuild history. Renderer and
+UI compilation keeps the public `FrameOutcome` contract exhaustive; native
+live-render smoke remains responsible for actual window-system presentation
+and wgpu surface recreation.
 
 **`.cast` replay.** `replays_asciicast_v2_output_into_grid` parses an asciicast
 v2 trace — the exact format [`docs/RECORDING.md`](RECORDING.md)'s recorder
