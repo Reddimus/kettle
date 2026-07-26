@@ -30,7 +30,6 @@ anyhow.workspace = true
 # kettle still never WRITES an image to the clipboard; only reads one.
 arboard = { version = "3.6.1", default-features = false, features = ["image-data"] }
 crossbeam-channel = "0.5.15"
-fs4 = "1.1"
 # Decode the embedded PNG app icon into a winit window icon so
 # the title bar (system-menu glyph), taskbar button, and Alt-Tab show
 # kettle's icon for the *running* window. Only the `png` feature — the icon
@@ -44,9 +43,7 @@ kettle-config.workspace = true
 # `asciicast` is enabled unconditionally: the GUI session recorder is a
 # runtime toggle (config `record = on` / `--record`) present in every build,
 # not a compile-time feature. The recorder engine lives in kettle-core
-# (`record.rs`); this feature compiles it in. fs4/log/serde_json (its other
-# deps) are already unconditional kettle-ui dependencies, so this adds no new
-# crates to the graph.
+# (`record.rs`); this feature compiles it in.
 kettle-core = { workspace = true, features = ["asciicast"] }
 # The App hosts the control server over kettle-ctl's transport + protocol so
 # an agent (or `kettle ctl`/`kettle mcp`) can read the screen and drive panes.

@@ -103,12 +103,17 @@ or using metadata it verifies the signature over a domain-separated payload.
 The signed manifest binds each supported target to an exact archive name, byte
 length, and SHA-256 digest.
 
-Downloads are capped at 256 MiB. Extraction accepts at most 128 entries and 512
+Downloads are capped at 256 MiB. On Linux, the downloader reserves one buffer
+from the signed artifact size, rejects allocation failure explicitly, hashes
+that exact buffer, and extracts through a `Cursor` over the same bytes. No
+writable archive inode exists between verification and extraction. Windows
+uses one exclusively range-locked temporary-file handle for download,
+verification, and extraction. Extraction accepts at most 128 entries and 512
 MiB of actual output. Absolute paths, traversal, duplicates and case aliases,
-file/directory prefix conflicts, encrypted entries, links, special/sparse files,
-Windows device names, and declared/actual size mismatches are rejected. Updates
-acquire an install-prefix lock and atomically replace each destination on its own
-filesystem.
+file/directory prefix conflicts, encrypted entries, links, special/sparse
+files, Windows device names, and declared/actual size mismatches are rejected.
+Updates acquire an install-prefix lock and atomically replace each destination
+on its own filesystem.
 
 Linux and Windows update archives from v2.36 onward contain
 `kettle-package-manifest.json`. Kettle binds its product/version/target and

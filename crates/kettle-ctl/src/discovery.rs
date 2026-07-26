@@ -15,9 +15,8 @@
 //! The `kind` field is reserved so the future `kettle-muxd` daemon can register
 //! as `"muxd"` alongside `"gui"` without a format change.
 
-use std::io::{Read as _, Write as _};
+use std::io::Read as _;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde::{Deserialize, Serialize};
 #[cfg(windows)]
@@ -147,8 +146,6 @@ fn entry_path(dir: &std::path::Path, pid: u32) -> PathBuf {
     dir.join(format!("{pid}.json"))
 }
 
-static NEXT_TEMP: AtomicU64 = AtomicU64::new(1);
-
 fn registry_entry_is_valid(dir: &std::path::Path, file_pid: u32, entry: &RegistryEntry) -> bool {
     entry.v == 1
         && entry.pid == file_pid
@@ -275,58 +272,11 @@ pub fn register(dir: &std::path::Path, entry: &RegistryEntry) -> std::io::Result
     }
     let path = entry_path(dir, entry.pid);
     let json = serde_json::to_string(entry).map_err(std::io::Error::other)?;
-    let suffix = NEXT_TEMP.fetch_add(1, Ordering::Relaxed);
-    let tmp = dir.join(format!(
-        ".{}.json.tmp-{}-{suffix}",
-        entry.pid,
-        std::process::id()
-    ));
-    let mut options = std::fs::OpenOptions::new();
-    options.write(true).create_new(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt as _;
-        options.mode(0o600);
-    }
-    let write_result = (|| {
-        let mut file = options.open(&tmp)?;
-        file.write_all(json.as_bytes())?;
-        file.sync_all()?;
-        #[cfg(unix)]
-        std::fs::rename(&tmp, &path)?;
-        #[cfg(windows)]
-        {
-            use std::os::windows::ffi::OsStrExt as _;
-            use windows_sys::Win32::Storage::FileSystem::{
-                MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW,
-            };
-
-            let from: Vec<u16> = tmp.as_os_str().encode_wide().chain(Some(0)).collect();
-            let to: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
-            // SAFETY: both path buffers are NUL-terminated and remain alive for
-            // the call. The files share a directory, so replacement stays on
-            // one volume and is atomic from readers' perspective.
-            if unsafe {
-                MoveFileExW(
-                    from.as_ptr(),
-                    to.as_ptr(),
-                    MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
-                )
-            } == 0
-            {
-                return Err(std::io::Error::last_os_error());
-            }
-        }
-        #[cfg(unix)]
-        if let Ok(directory) = std::fs::File::open(dir) {
-            let _ = directory.sync_all();
-        }
-        Ok::<(), std::io::Error>(())
-    })();
-    if write_result.is_err() {
-        let _ = std::fs::remove_file(&tmp);
-    }
-    write_result?;
+    kettle_state::atomic_replace(
+        &path,
+        json.as_bytes(),
+        kettle_state::AtomicWriteOptions::PRIVATE,
+    )?;
     Ok(path)
 }
 

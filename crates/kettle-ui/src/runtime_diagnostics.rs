@@ -225,7 +225,14 @@ fn create_private_file(dir: &Path, unix_ms: u128, pid: u32) -> io::Result<(PathB
             options.mode(0o600);
         }
         match options.open(&path) {
-            Ok(file) => return Ok((path, file)),
+            Ok(file) => {
+                if let Err(error) = kettle_state::restrict_private_file(&file) {
+                    drop(file);
+                    let _ = std::fs::remove_file(&path);
+                    return Err(error);
+                }
+                return Ok((path, file));
+            }
             Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
             Err(error) => return Err(error),
         }

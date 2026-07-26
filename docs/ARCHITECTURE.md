@@ -34,9 +34,15 @@ graph TD
 sessions, and the updater. It stages with `create_new` beside the destination,
 syncs file data before replacement, uses write-through replacement on Windows,
 syncs the parent directory on Unix, preserves existing permissions when asked,
-and rejects symlink destinations by default. Its advisory lock lets callers
-serialize compound operations; configuration persistence holds it across the
-complete read, validate, backup, and replacement transaction.
+and rejects symlink destinations by default. Private files use mode `0600` on
+Unix and a protected Windows DACL containing one full-access ACE for the
+current token user. The Windows helper reopens the same kernel file object with
+`WRITE_DAC`, verifies its owner SID, and never resolves a caller-controlled
+path while changing security. State files, lock files, recordings, terminal
+logs, and runtime/GPU/crash diagnostics share this primitive. Its advisory
+lock lets callers serialize compound operations; configuration persistence
+holds it across the complete read, validate, backup, and replacement
+transaction.
 
 ## Agent control plane
 
@@ -89,7 +95,12 @@ dispatches tool calls through a four-worker, 16-request bounded queue with
 JSON-RPC cancellation tracking. The blocking control client reads frames
 incrementally under method-aware deadlines, preserves events interleaved before
 a response, and treats malformed frames or mismatched response ids as terminal
-protocol errors.
+protocol errors. Unix connections enter nonblocking mode once, before cloning;
+the transport restores ordinary blocking `Read`/`Write` semantics with
+`poll(2)` and serializes complete deadline-aware writes through one
+connection-wide gate. No operation toggles `O_NONBLOCK` on a shared open-file
+description, while macOS retains the fd-level nonblocking behavior required to
+make a full AF_UNIX send buffer deadline-aware.
 
 The discovery registry reserves a `kind` field — `"gui"` today — as the
 forward-compat seam for the optional `kettle-muxd` session daemon (see

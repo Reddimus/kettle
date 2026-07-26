@@ -816,6 +816,10 @@ fn install_panic_hook() {
             .create(true)
             .append(true)
             .open(&path)
+            .and_then(|file| {
+                kettle_state::restrict_private_file(&file)?;
+                Ok(file)
+            })
         {
             use std::io::Write as _;
             let _ = f.write_all(report.as_bytes());

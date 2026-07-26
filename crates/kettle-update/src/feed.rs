@@ -10,7 +10,7 @@ use crate::{MANIFEST_URL, SIGNATURE_URL, SIGNING_CONTEXT, UPDATE_PUBLIC_KEY, cur
 
 const MAX_MANIFEST_BYTES: usize = 128 * 1024;
 const MAX_SIGNATURE_BYTES: usize = 1024;
-const MAX_ARTIFACT_BYTES: u64 = 256 * 1024 * 1024;
+pub(crate) const MAX_ARTIFACT_BYTES: u64 = 256 * 1024 * 1024;
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 const IO_TIMEOUT: Duration = Duration::from_secs(10);
 const TOTAL_TIMEOUT: Duration = Duration::from_secs(20);
@@ -201,6 +201,43 @@ impl FeedClient {
             });
         }
         Ok(())
+    }
+
+    /// Download one Linux update into the single bounded buffer that both the
+    /// digest verifier and archive extractor consume. Keeping verified bytes
+    /// off disk closes the remaining same-user in-place-overwrite window
+    /// between two reads of a temporary archive inode.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn download_bytes(&self, update: &AvailableUpdate) -> Result<Vec<u8>, UpdateError> {
+        let asset = update
+            .asset
+            .as_ref()
+            .ok_or(UpdateError::UnsupportedPlatform)?;
+        if asset.size == 0 || asset.size > MAX_ARTIFACT_BYTES {
+            return Err(UpdateError::MalformedManifest(
+                "artifact size is outside the accepted range".to_string(),
+            ));
+        }
+        let capacity = usize::try_from(asset.size).map_err(|_| {
+            UpdateError::MalformedManifest(
+                "artifact size does not fit this platform's address space".to_string(),
+            )
+        })?;
+        let reserve = capacity.checked_add(1).ok_or_else(|| {
+            UpdateError::MalformedManifest(
+                "artifact size does not fit this platform's address space".to_string(),
+            )
+        })?;
+        let mut bytes = Vec::new();
+        // One sentinel byte lets `download_to` detect an overlong body without
+        // growing the Vec beyond this explicit signed-size-derived bound.
+        bytes.try_reserve_exact(reserve).map_err(|error| {
+            UpdateError::Io(std::io::Error::other(format!(
+                "could not reserve the signed {capacity}-byte update buffer plus sentinel: {error}"
+            )))
+        })?;
+        self.download_to(update, &mut bytes)?;
+        Ok(bytes)
     }
 
     fn get_limited(&self, url: &str, limit: usize) -> Result<Vec<u8>, UpdateError> {

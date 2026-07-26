@@ -3,6 +3,8 @@
 //! Writes are staged beside their destination, synced, atomically replaced,
 //! and followed by a parent-directory sync on platforms that support it.
 
+mod private;
+
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
@@ -10,6 +12,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+pub use private::restrict_private_file;
 
 /// Policy for an atomic file replacement.
 #[derive(Clone, Copy, Debug)]
@@ -24,8 +28,9 @@ pub struct AtomicWriteOptions {
 }
 
 impl AtomicWriteOptions {
-    /// Enforced private user state (`0600`), rejecting symbolic-link
-    /// destinations even when replacing a more permissive legacy file.
+    /// Enforced private user state (`0600` on Unix; a protected current-user
+    /// DACL on Windows), rejecting symbolic-link destinations even when
+    /// replacing a more permissive legacy file.
     pub const PRIVATE: Self = Self {
         unix_mode: 0o600,
         preserve_permissions: false,
@@ -93,8 +98,8 @@ pub fn atomic_replace(
     let mut cleanup = TempCleanup(Some(staged_path.clone()));
     staged.write_all(bytes)?;
     staged.flush()?;
-    if let Some(permissions) = existing_permissions {
-        staged.set_permissions(permissions)?;
+    if let Some(permissions) = existing_permissions.as_ref() {
+        staged.set_permissions(permissions.clone())?;
     } else {
         set_unix_mode(&staged, options.unix_mode)?;
     }
@@ -103,6 +108,9 @@ pub fn atomic_replace(
 
     replace_file(&staged_path, destination)?;
     cleanup.0 = None;
+    if !options.preserve_permissions || existing_permissions.is_none() {
+        restrict_private_path(destination)?;
+    }
     sync_parent(parent)?;
     Ok(())
 }
@@ -221,7 +229,14 @@ fn create_staged_file(
         open.create_new(true).write(true).read(true);
         set_open_mode(&mut open, unix_mode);
         match open.open(&path) {
-            Ok(file) => return Ok((file, path)),
+            Ok(file) => {
+                if let Err(error) = restrict_private_file(&file) {
+                    drop(file);
+                    let _ = fs::remove_file(&path);
+                    return Err(error);
+                }
+                return Ok((file, path));
+            }
             Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
             Err(error) => return Err(error),
         }
@@ -382,8 +397,22 @@ fn open_lock_file(path: &Path) -> io::Result<File> {
             format!("lock path is not a regular file: {}", path.display()),
         ));
     }
-    set_unix_mode(&file, 0o600)?;
+    restrict_private_file(&file)?;
     Ok(file)
+}
+
+fn restrict_private_path(path: &Path) -> io::Result<()> {
+    let mut open = OpenOptions::new();
+    open.read(true).write(true);
+    set_lock_open_flags(&mut open);
+    let file = open.open(path)?;
+    if !file.metadata()?.file_type().is_file() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("private path is not a regular file: {}", path.display()),
+        ));
+    }
+    restrict_private_file(&file)
 }
 
 #[cfg(unix)]

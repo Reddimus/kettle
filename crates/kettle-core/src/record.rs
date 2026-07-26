@@ -17,9 +17,10 @@
 //! - `[t, "m", <json>]`   — kettle UI/UX markers (players ignore them)
 //! - `[t, "i", <token>]`  — keystroke TOKENS, never raw typed chars
 //!
-//! The file is created `0600` on Unix and is purely local — kettle never
-//! uploads it. Writes are best-effort: the first I/O error disables the
-//! recorder (a full disk must never crash the terminal).
+//! The file is owner-only (`0600` on Unix; a protected current-user DACL on
+//! Windows) and purely local — kettle never uploads it. Writes are
+//! best-effort: the first I/O error disables the recorder (a full disk must
+//! never crash the terminal).
 //!
 //! Privacy: terminal OUTPUT is VERBATIM and cannot be redacted — a terminal
 //! can't tell a secret from normal output, so anything printed/echoed on
@@ -530,22 +531,20 @@ fn configure_private_directory_open(options: &mut std::fs::OpenOptions) {
 }
 
 fn set_private_file_mode(file: &File) -> std::io::Result<()> {
-    set_unix_mode(file, 0o600)
+    kettle_state::restrict_private_file(file)
 }
 
 fn set_private_directory_mode(file: &File) -> std::io::Result<()> {
-    set_unix_mode(file, 0o700)
-}
-
-#[cfg(unix)]
-fn set_unix_mode(file: &File, mode: u32) -> std::io::Result<()> {
-    use std::os::unix::fs::PermissionsExt as _;
-    file.set_permissions(std::fs::Permissions::from_mode(mode))
-}
-
-#[cfg(not(unix))]
-fn set_unix_mode(_file: &File, _mode: u32) -> std::io::Result<()> {
-    Ok(())
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        file.set_permissions(std::fs::Permissions::from_mode(0o700))
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = file;
+        Ok(())
+    }
 }
 
 fn ensure_same_file(

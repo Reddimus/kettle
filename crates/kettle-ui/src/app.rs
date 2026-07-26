@@ -11312,7 +11312,10 @@ impl App {
                             .create(true)
                             .append(true)
                             .open(&path)
-                        {
+                            .and_then(|file| {
+                                kettle_state::restrict_private_file(&file)?;
+                                Ok(file)
+                            }) {
                             Ok(f) => {
                                 log::info!("toggle-session-log: writing to {}", path.display());
                                 // Propagate the config's

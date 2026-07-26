@@ -92,8 +92,24 @@ discipline here.
 - **kettle-state**: creates and replaces private state without leaving staging
   files, preserves an existing destination's permissions, rejects symlink
   destinations, and proves exclusive advisory locks block competing handles
-  and release on drop. Configuration, session, and updater tests separately pin
-  each caller's validation and recovery policy on top of these primitives.
+  and release on drop. Native Unix tests assert mode `0600`; native Windows
+  tests inspect the resulting ACL and require exactly one full-access ACE for
+  the current owner SID. Configuration, session, diagnostics, recording, and
+  updater callers fail closed when that shared privacy primitive fails.
+
+- **kettle-ctl transport**: the split-handle loopback runs on every native CI
+  OS. Unix additionally asserts the shared open-file description remains
+  stably nonblocking while a cloned reader retains blocking semantics; stalled
+  peers prove deadline and cancellation exits. These regressions must run on a
+  real macOS runner because AF_UNIX full-buffer behavior cannot be claimed from
+  Linux alone.
+
+- **kettle-update archive boundary**: Linux tests hash and extract one bounded
+  in-memory archive buffer, overwrite the former download path between those
+  operations, and prove only verified bytes reach staging. Hash mismatch,
+  entry count, unpacked bytes, path, link/special/sparse-file, mode, and
+  package-manifest failures remain fail-closed. Windows separately exercises
+  its mandatory archive range lock.
 
 - **kettle-core VT conformance** (150+ tests): drives the *real*
   vte + alacritty_terminal path used by the PTY reader and asserts

@@ -19,7 +19,7 @@ const PACKAGED: bool = option_env!("KETTLE_PACKAGED").is_some();
 static CHECK_IN_FLIGHT: AtomicBool = AtomicBool::new(false);
 
 struct CheckInFlight {
-    _file_lock: Option<std::fs::File>,
+    _file_lock: Option<kettle_state::ExclusiveFileLock>,
 }
 
 impl Drop for CheckInFlight {
@@ -29,7 +29,7 @@ impl Drop for CheckInFlight {
 }
 
 enum CheckLockAttempt {
-    Acquired(Option<std::fs::File>),
+    Acquired(Option<kettle_state::ExclusiveFileLock>),
     Busy,
 }
 
@@ -45,16 +45,9 @@ fn try_acquire_check_lock() -> std::io::Result<CheckLockAttempt> {
 }
 
 fn try_acquire_file_lock(path: &std::path::Path) -> std::io::Result<CheckLockAttempt> {
-    let lock = std::fs::OpenOptions::new()
-        .create(true)
-        .truncate(false)
-        .read(true)
-        .write(true)
-        .open(path)?;
-    match fs4::FileExt::try_lock(&lock) {
-        Ok(()) => Ok(CheckLockAttempt::Acquired(Some(lock))),
-        Err(fs4::TryLockError::WouldBlock) => Ok(CheckLockAttempt::Busy),
-        Err(fs4::TryLockError::Error(error)) => Err(error),
+    match kettle_state::ExclusiveFileLock::try_acquire(path)? {
+        Some(lock) => Ok(CheckLockAttempt::Acquired(Some(lock))),
+        None => Ok(CheckLockAttempt::Busy),
     }
 }
 

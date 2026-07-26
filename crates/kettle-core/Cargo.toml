@@ -18,13 +18,14 @@ workspace = true
 # / `record = on`, a runtime toggle in every build) and the bin crate
 # (`kettle exec --record`). Pulls in serde_json for JSON escaping and fs4 for
 # cross-platform active-cast locks.
-asciicast = ["dep:serde_json", "dep:log", "dep:fs4"]
+asciicast = ["dep:serde_json", "dep:log", "dep:fs4", "dep:kettle-state"]
 
 [dependencies]
 alacritty_terminal = "0.26.0"
 anyhow.workspace = true
 crossbeam-channel = "0.5.15"
 kettle-vt.workspace = true
+kettle-state = { workspace = true, optional = true }
 portable-pty = "0.9.0"
 regex.workspace = true
 regex-automata.workspace = true
@@ -55,6 +56,7 @@ windows-sys = { version = "0.61", features = [
 # tests + the replay test run in the plain suite; it calls `log::warn!`,
 # so `log` must be present at test time even when `asciicast` is off.
 fs4 = "1.1"
+kettle-state.workspace = true
 log.workspace = true
 serde_json = "1"
 tempfile = "3"
