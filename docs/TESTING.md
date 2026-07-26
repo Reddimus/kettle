@@ -877,7 +877,9 @@ Separate workflows:
   `LD_LIBRARY_PATH`, then explicitly builds the package without creating a
   result symlink. The separately named launch check proves the appended
   RUNPATH retains Nix's glibc/libgcc paths and contains the dynamically loaded
-  GUI dependencies rather than borrowing them from the runner.
+  GUI dependencies rather than borrowing them from the runner. ARM Linux and
+  Apple Silicon outputs are evaluation-only in this workflow and are not
+  reported as native Nix build/runtime passes.
 - `.github/workflows/release.yml` — mandatory Windows, macOS, Linux x86_64,
   and Linux aarch64 packaging on every verified `v*` tag. One protected
   finalizer validates all archives and sidecars, requires the signing secret

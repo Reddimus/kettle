@@ -117,6 +117,11 @@ be the single source of truth for Rust dependencies).
   the patched-rpath behavior of the built package. Darwin uses the
   frameworks supplied by the Nix stdenv instead.
 
+The repository workflow builds and launches the x86_64 Linux output. It
+evaluates, but does not claim a native build or runtime pass for,
+`aarch64-linux` or `aarch64-darwin`; those outputs need a native ARM runner
+before a release can describe them as Nix-tested.
+
 ## Why this lives in the main repo
 
 Same rationale as `packaging/{homebrew,arch}/` — the flake version
