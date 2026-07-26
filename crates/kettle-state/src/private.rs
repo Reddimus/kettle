@@ -7,7 +7,9 @@ use std::io;
 ///
 /// Unix applies mode `0600`. Windows replaces the inherited DACL with one
 /// protected, full-access ACE for the current token user after confirming that
-/// user owns the object. The Windows implementation reopens the same kernel
+/// the object owner is either that user or the token's default owner. The
+/// latter matters for elevated tokens whose newly created objects are owned by
+/// the Administrators SID. The Windows implementation reopens the same kernel
 /// file object with `WRITE_DAC`, so it cannot be redirected through a path race.
 pub fn restrict_private_file(file: &File) -> io::Result<()> {
     restrict_private_object(file)
@@ -41,8 +43,8 @@ mod windows {
     use windows_sys::Win32::Security::{
         ACCESS_ALLOWED_ACE, ACL, ACL_REVISION, AddAccessAllowedAceEx, DACL_SECURITY_INFORMATION,
         EqualSid, GetLengthSid, GetTokenInformation, IsValidSid, OWNER_SECURITY_INFORMATION,
-        PROTECTED_DACL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID, TOKEN_QUERY, TOKEN_USER,
-        TokenUser,
+        PROTECTED_DACL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID, TOKEN_OWNER, TOKEN_QUERY,
+        TOKEN_USER, TokenOwner, TokenUser,
     };
     use windows_sys::Win32::Storage::FileSystem::{
         FILE_ALL_ACCESS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_DELETE, FILE_SHARE_READ,
@@ -109,6 +111,56 @@ mod windows {
         })
     }
 
+    struct TokenOwnerSid {
+        _buffer: Vec<u64>,
+        sid: PSID,
+    }
+
+    fn current_default_owner_sid() -> io::Result<TokenOwnerSid> {
+        let mut token = std::ptr::null_mut();
+        // SAFETY: GetCurrentProcess returns a valid pseudo-handle and `token`
+        // points to writable storage for the returned real token handle.
+        if unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) } == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        let token = TokenHandle(token);
+
+        let mut len = 0_u32;
+        // SAFETY: the null-buffer call is the documented size query.
+        unsafe { GetTokenInformation(token.0, TokenOwner, std::ptr::null_mut(), 0, &mut len) };
+        if len == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        let words = (len as usize).div_ceil(std::mem::size_of::<u64>());
+        let mut buffer = vec![0_u64; words];
+        // SAFETY: `buffer` is aligned and at least `len` bytes long.
+        if unsafe {
+            GetTokenInformation(
+                token.0,
+                TokenOwner,
+                buffer.as_mut_ptr().cast(),
+                len,
+                &mut len,
+            )
+        } == 0
+        {
+            return Err(io::Error::last_os_error());
+        }
+        // SAFETY: successful GetTokenInformation populated a TOKEN_OWNER
+        // header whose SID points into `buffer`, retained by TokenOwnerSid.
+        let sid = unsafe { (*buffer.as_ptr().cast::<TOKEN_OWNER>()).Owner };
+        if sid.is_null() || unsafe { IsValidSid(sid) } == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "the current process token has an invalid default-owner SID",
+            ));
+        }
+        Ok(TokenOwnerSid {
+            _buffer: buffer,
+            sid,
+        })
+    }
+
     fn reopen_for_acl(file: &File) -> io::Result<OwnedHandle> {
         // SAFETY: `file` owns a valid handle. ReOpenFile resolves that same
         // kernel object rather than a path and returns a separately owned
@@ -140,7 +192,11 @@ mod windows {
         }
     }
 
-    fn require_current_user_owner(handle: HANDLE, current_user: PSID) -> io::Result<()> {
+    fn require_current_token_owner(
+        handle: HANDLE,
+        current_user: PSID,
+        default_owner: PSID,
+    ) -> io::Result<()> {
         let mut owner = std::ptr::null_mut();
         let mut descriptor = std::ptr::null_mut();
         // SAFETY: every output pointer is valid and the reopened handle has
@@ -161,10 +217,13 @@ mod windows {
             return Err(io::Error::from_raw_os_error(status as i32));
         }
         let _descriptor = SecurityDescriptor(descriptor);
-        if owner.is_null() || unsafe { EqualSid(owner, current_user) } == 0 {
+        if owner.is_null()
+            || (unsafe { EqualSid(owner, current_user) } == 0
+                && unsafe { EqualSid(owner, default_owner) } == 0)
+        {
             return Err(io::Error::new(
                 io::ErrorKind::PermissionDenied,
-                "refusing to change the ACL of an object not owned by the current user",
+                "refusing to change the ACL of an object not owned by the current token",
             ));
         }
         Ok(())
@@ -172,8 +231,13 @@ mod windows {
 
     pub(super) fn restrict_private_object(file: &File) -> io::Result<()> {
         let current_user = current_user_sid()?;
+        let default_owner = current_default_owner_sid()?;
         let handle = reopen_for_acl(file)?;
-        require_current_user_owner(handle.as_raw_handle() as HANDLE, current_user.sid)?;
+        require_current_token_owner(
+            handle.as_raw_handle() as HANDLE,
+            current_user.sid,
+            default_owner.sid,
+        )?;
 
         // One ACCESS_ALLOWED_ACE has a four-byte SID placeholder. Add the
         // actual variable-length SID and round storage up to u64 alignment.
@@ -226,6 +290,7 @@ mod windows {
         use windows_sys::Win32::Security::GetAce;
 
         let current_user = current_user_sid()?;
+        let default_owner = current_default_owner_sid()?;
         let handle = reopen_for_acl(file)?;
         let mut owner = std::ptr::null_mut();
         let mut dacl = std::ptr::null_mut();
@@ -249,7 +314,8 @@ mod windows {
         let _descriptor = SecurityDescriptor(descriptor);
         if owner.is_null()
             || dacl.is_null()
-            || unsafe { EqualSid(owner, current_user.sid) } == 0
+            || (unsafe { EqualSid(owner, current_user.sid) } == 0
+                && unsafe { EqualSid(owner, default_owner.sid) } == 0)
             || unsafe { (*dacl).AceCount } != 1
         {
             return Ok(false);
