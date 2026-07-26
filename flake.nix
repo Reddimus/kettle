@@ -11,7 +11,11 @@
   };
 
   outputs = { self, nixpkgs, flake-utils, rust-overlay }:
-    flake-utils.lib.eachDefaultSystem (system:
+    flake-utils.lib.eachSystem [
+      "aarch64-darwin"
+      "aarch64-linux"
+      "x86_64-linux"
+    ] (system:
       let
         overlays = [ (import rust-overlay) ];
         pkgs = import nixpkgs { inherit system overlays; };
@@ -26,20 +30,66 @@
           rustc = rustToolchain;
         };
 
-        # Runtime libraries the wgpu / winit / glyphon / portable-pty
-        # stack dlopens at runtime — same set the release.yml
-        # ubuntu-latest runner installs.
-        runtimeLibs = with pkgs; [
+        # Complete Linux runtime closure for libraries the wgpu /
+        # winit / glyphon stack loads dynamically. In particular,
+        # winit's X11 backend opens Xcursor and XInput2 even when
+        # those libraries were not linked directly. Darwin uses
+        # system frameworks supplied by its stdenv instead.
+        runtimeLibs = pkgs.lib.optionals pkgs.stdenv.isLinux (with pkgs; [
           fontconfig
           freetype
           libGL
           libxkbcommon
+          libxkbfile
+          libX11
+          libxcb
+          libxcursor
+          libxi
           vulkan-loader
           wayland
-          xorg.libX11
-          xorg.libxcb
-          xorg.libxkbfile
-        ];
+        ]);
+
+        # Prove the installed binary can create a visible X11 window
+        # using only its patched RUNPATH. This catches missing
+        # dynamically-loaded libraries that compile-time tests do not
+        # exercise (for example Xcursor and XInput2).
+        runtimeSmokeScript = pkgs.writeShellScript "kettle-x11-runtime-smoke" ''
+          set -eu
+
+          log="$TMPDIR/kettle-runtime-smoke.log"
+          "${self.packages.${system}.default}/bin/kettle" \
+            --config "$KETTLE_SMOKE_CONFIG" \
+            --new-process >"$log" 2>&1 &
+          kettle_pid=$!
+
+          cleanup() {
+            kill "$kettle_pid" 2>/dev/null || true
+            wait "$kettle_pid" 2>/dev/null || true
+          }
+          trap cleanup EXIT HUP INT TERM
+
+          attempt=0
+          while [ "$attempt" -lt 200 ]; do
+            if ! kill -0 "$kettle_pid" 2>/dev/null; then
+              wait "$kettle_pid" || status=$?
+              cat "$log" >&2
+              echo "kettle exited before creating an X11 window (status ''${status:-0})" >&2
+              exit 1
+            fi
+
+            if ${pkgs.xdotool}/bin/xdotool search \
+              --onlyvisible --pid "$kettle_pid" >/dev/null 2>&1; then
+              exit 0
+            fi
+
+            sleep 0.1
+            attempt=$((attempt + 1))
+          done
+
+          cat "$log" >&2
+          echo "kettle did not create a visible X11 window within 20 seconds" >&2
+          exit 1
+        '';
       in {
         packages.default = rustPlatform.buildRustPackage {
           pname = "kettle";
@@ -52,12 +102,23 @@
             lockFile = ./Cargo.lock;
           };
 
-          nativeBuildInputs = with pkgs; [
-            pkg-config
-            # `makeWrapper` provides `wrapProgram` used in postFixup
-            # below to inject the runtime library search path.
-            makeWrapper
-          ];
+          nativeBuildInputs = [ pkgs.pkg-config ]
+            ++ pkgs.lib.optionals pkgs.stdenv.isLinux [ pkgs.patchelf ];
+
+          # Process-tree tests invoke these tools by name from inside
+          # a PTY. Nix's check sandbox does not inherit the host PATH,
+          # so declare every fixture command explicitly.
+          nativeCheckInputs = [ (pkgs.lib.getBin pkgs.bash) pkgs.coreutils ]
+            ++ pkgs.lib.optionals pkgs.stdenv.isLinux [
+              (pkgs.lib.getBin pkgs.util-linux)
+            ];
+
+          # Nix deliberately supplies a non-existent HOME. portable-pty
+          # resolves an unset command cwd through HOME before spawning, so
+          # give the tests a private, existing sandbox directory.
+          preCheck = ''
+            export HOME="$TMPDIR"
+          '';
 
           buildInputs = runtimeLibs;
 
@@ -67,19 +128,33 @@
           # "failed to create wgpu instance: NoAdapterFound" on
           # systems where the loader isn't otherwise on
           # LD_LIBRARY_PATH.
-          postFixup = ''
+          postFixup = pkgs.lib.optionalString pkgs.stdenv.isLinux ''
             patchelf \
-              --set-rpath "${pkgs.lib.makeLibraryPath runtimeLibs}" \
+              --add-rpath "${pkgs.lib.makeLibraryPath runtimeLibs}" \
               $out/bin/kettle
+
+            final_rpath="$(patchelf --print-rpath $out/bin/kettle)"
+            for required in \
+              "${pkgs.stdenv.cc.libc}/lib" \
+              "${pkgs.stdenv.cc.cc.lib}/lib"
+            do
+              case ":$final_rpath:" in
+                *":$required:"*) ;;
+                *)
+                  echo "kettle RUNPATH lost required stdenv path: $required" >&2
+                  exit 1
+                  ;;
+              esac
+            done
           '';
 
-          # Skip the offscreen GPU self-test during `nix build` —
-          # the Nix sandbox has no Vulkan-capable GPU, the offscreen
-          # GPU self-test would fail. CI on a real runner still
-          # exercises it.
+          # Skip the offscreen GPU and visual-regression tests during
+          # `nix build`: the sandbox has no Vulkan-capable GPU. CI on
+          # a real runner still exercises them.
           checkFlags = [
             "--skip=gpu_tests::gpu_pipelines_compile_and_render_offscreen"
             "--skip=context_menu_renders_visibly_with_text"
+            "--skip=compact_scrollbar_is_visible_contrasting_and_edge_scoped"
           ];
 
           meta = with pkgs.lib; {
@@ -87,7 +162,7 @@
             homepage = "https://github.com/Reddimus/kettle";
             license = licenses.mit;
             mainProgram = "kettle";
-            platforms = platforms.unix;
+            platforms = [ system ];
           };
         };
 
@@ -106,11 +181,54 @@
         # Standard `nix flake check` entrypoint — runs `cargo test`
         # against the workspace MSRV. Excludes the GPU + visual
         # regression tests for the same reason `checkFlags` above
-        # does. Add other lints (clippy, fmt) here when adopting
-        # `nix-fast-build` style CI.
-        checks.cargo-test = self.packages.${system}.default.overrideAttrs (old: {
-          doCheck = true;
-          checkFlags = old.checkFlags or [];
-        });
+        # does. Linux additionally launches the installed binary
+        # under Xvfb without LD_LIBRARY_PATH so its RUNPATH is tested.
+        checks = {
+          cargo-test = self.packages.${system}.default;
+        } // pkgs.lib.optionalAttrs pkgs.stdenv.isLinux {
+          runtime-smoke = pkgs.runCommand "kettle-x11-runtime-smoke" {
+            nativeBuildInputs = [ pkgs.coreutils pkgs.xvfb-run ];
+          } ''
+            export HOME="$TMPDIR/home"
+            export XDG_CACHE_HOME="$TMPDIR/cache"
+            export XDG_CONFIG_HOME="$TMPDIR/config"
+            export XDG_DATA_HOME="$TMPDIR/data"
+            export XDG_RUNTIME_DIR="$TMPDIR/runtime"
+            export SHELL="${pkgs.bash}/bin/bash"
+            export KETTLE_SMOKE_CONFIG="$TMPDIR/kettle.config"
+            unset LD_LIBRARY_PATH WAYLAND_DISPLAY
+
+            mkdir -p \
+              "$HOME" \
+              "$XDG_CACHE_HOME" \
+              "$XDG_CONFIG_HOME" \
+              "$XDG_DATA_HOME" \
+              "$XDG_RUNTIME_DIR"
+            chmod 0700 "$XDG_RUNTIME_DIR"
+
+            # Wgpu's GL backend cannot create an EGL surface on every Xvfb
+            # build. Use Mesa's CPU Vulkan implementation so this remains a
+            # deterministic no-GPU launch while still exercising a real wgpu
+            # surface. Nix names the ICD for the package architecture.
+            set -- "${pkgs.mesa}"/share/vulkan/icd.d/lvp_icd.*.json
+            test "$#" -eq 1
+            test -f "$1"
+            export VK_DRIVER_FILES="$1"
+
+            printf '%s\n' \
+              "shell = ${pkgs.bash}/bin/bash" \
+              "gpu-backend = vulkan" \
+              "gpu-force-software = true" \
+              "restore-session = false" \
+              "update-policy = off" \
+              "window-title-format = kettle-nix-runtime-smoke" \
+              > "$KETTLE_SMOKE_CONFIG"
+
+            ${pkgs.xvfb-run}/bin/xvfb-run \
+              -a -s "-screen 0 1280x800x24 -nolisten tcp" \
+              ${runtimeSmokeScript}
+            touch "$out"
+          '';
+        };
       });
 }
