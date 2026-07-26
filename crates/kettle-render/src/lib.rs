@@ -269,6 +269,41 @@ pub fn menu_row_chars(row: &ContextMenuRow) -> usize {
         }
 }
 
+/// Text/layout damage key for the context-menu renderer.
+///
+/// The highlighted row is deliberately excluded: moving the pointer changes
+/// only a cheap quad. Text must be prepared again when its content, color,
+/// position, or visible scroll window changes.
+fn context_menu_text_damage_key(
+    menu: Option<&ContextMenu>,
+    foreground: Rgb,
+    background: Rgb,
+) -> u64 {
+    use std::hash::{Hash, Hasher};
+
+    let mut hash = std::hash::DefaultHasher::new();
+    menu.is_some().hash(&mut hash);
+    if let Some(menu) = menu {
+        // glyphon bakes TextArea::default_color into retained vertices. Include
+        // both colors: enabled rows use foreground directly, while disabled
+        // rows blend it toward the panel background.
+        (foreground.r, foreground.g, foreground.b).hash(&mut hash);
+        (background.r, background.g, background.b).hash(&mut hash);
+        menu.anchor.0.to_bits().hash(&mut hash);
+        menu.anchor.1.to_bits().hash(&mut hash);
+        menu.scroll_offset.hash(&mut hash);
+        menu.panel_h_clamped.to_bits().hash(&mut hash);
+        menu.rows.len().hash(&mut hash);
+        for row in &menu.rows {
+            row.label.hash(&mut hash);
+            row.separator.hash(&mut hash);
+            row.enabled.hash(&mut hash);
+            row.hint.hash(&mut hash);
+        }
+    }
+    hash.finish()
+}
+
 /// Disabled / secondary menu text: blend the foreground toward the panel
 /// background (~55% mute) without alpha-blending through to whatever lives
 /// under the panel.
@@ -1066,6 +1101,31 @@ struct PendingCursorGlyph {
     clip: (f32, f32, f32, f32),
 }
 
+fn cursor_glyph_damage_key(
+    cursor: Option<&PendingCursorGlyph>,
+    metrics: Metrics,
+    family: &str,
+) -> Option<u64> {
+    use std::hash::{Hash, Hasher};
+
+    let cursor = cursor?;
+    let mut hash = std::hash::DefaultHasher::new();
+    cursor.x.to_bits().hash(&mut hash);
+    cursor.y.to_bits().hash(&mut hash);
+    cursor.ch.hash(&mut hash);
+    cursor.color.r.hash(&mut hash);
+    cursor.color.g.hash(&mut hash);
+    cursor.color.b.hash(&mut hash);
+    cursor.clip.0.to_bits().hash(&mut hash);
+    cursor.clip.1.to_bits().hash(&mut hash);
+    cursor.clip.2.to_bits().hash(&mut hash);
+    cursor.clip.3.to_bits().hash(&mut hash);
+    metrics.font_size.to_bits().hash(&mut hash);
+    metrics.line_height.to_bits().hash(&mut hash);
+    family.hash(&mut hash);
+    Some(hash.finish())
+}
+
 /// v2.21.x: the decoded background-image, animated. A still image is one frame;
 /// an animated GIF / APNG / animated WebP is many. `frames.is_empty()` encodes a
 /// FAILED decode (drives the retry throttle, like the old inner `Option::None`).
@@ -1169,6 +1229,11 @@ pub struct Renderer {
     /// `prepare` (which re-encodes EVERY visible glyph's vertices) is skipped
     /// and the cached vertex buffers are re-rendered as-is.
     last_chrome_hash: u64,
+    /// Set before a fallible shared-atlas text prepare and cleared only after
+    /// every text renderer succeeds. Buffer/damage caches are updated while
+    /// the frame is assembled, so this latch forces a retry after an error
+    /// instead of accepting partially retained vertices as current.
+    text_prepare_dirty: bool,
     /// v2.23.0 fix: whether ANY text overlay (settings, palette, search, menu,
     /// …) was open the previous frame. The `need_prepare` damage gate forces a
     /// glyphon prepare while an overlay is open, but the frame an overlay
@@ -1189,6 +1254,11 @@ pub struct Renderer {
     /// Set during the focused pane's `build_pane` when a solid block cursor is
     /// visible; consumed (and reset) each frame in `render_frame_with_status`.
     pending_cursor_glyph: Option<PendingCursorGlyph>,
+    /// Vertex/layout key last prepared into `cursor_glyph_renderer`. Stable
+    /// cursor frames (including menu hover) can render its retained vertices;
+    /// any main text prepare still forces a refresh in case the shared atlas
+    /// repacked.
+    last_cursor_glyph_key: Option<u64>,
     /// The cursor-cell glyph shaped last frame. A change forces a `prepare` so
     /// the new glyph is guaranteed resident in the atlas before the cursor pass
     /// reuses its bitmap (the only way the 1-glyph cursor prepare could grow
@@ -2259,10 +2329,12 @@ impl Renderer {
             line_text_scratch: String::new(),
             chrome_style_key: 0,
             last_chrome_hash: 0,
+            text_prepare_dirty: true,
             last_overlay_open: false,
             cursor_glyph_renderer,
             cursor_glyph_buffer,
             pending_cursor_glyph: None,
+            last_cursor_glyph_key: None,
             last_cursor_char: None,
             pane_titlebar_texts: Vec::new(),
             tab_texts: Vec::new(),
@@ -5108,7 +5180,7 @@ impl Renderer {
         // without a following prepare would clear the in-use set and let a
         // later prepare evict still-displayed glyphs out from under the cached
         // vertices.
-        let overlay_open = overlay.search.is_some()
+        let non_context_text_overlay_open = overlay.search.is_some()
             || overlay.search_query.is_some()
             || !overlay.hint_labels.is_empty()
             || overlay.ime_preedit.is_some()
@@ -5116,11 +5188,11 @@ impl Renderer {
             || overlay.palette_query.is_some()
             || overlay.layout_picker_query.is_some()
             || overlay.edit_title.is_some()
-            || overlay.context_menu.is_some()
             || overlay.confirm_dialog.is_some()
             || overlay.settings.is_some()
             || overlay.resize_overlay.is_some()
             || overlay.update_available.is_some();
+        let overlay_open = non_context_text_overlay_open || overlay.context_menu.is_some();
         let chrome_hash = {
             use std::hash::{Hash, Hasher};
             let mut h = std::hash::DefaultHasher::new();
@@ -5132,6 +5204,12 @@ impl Renderer {
             self.new_tab_arrow_text.hash(&mut h);
             self.resize_overlay_text.hash(&mut h);
             self.ime_text.hash(&mut h);
+            context_menu_text_damage_key(
+                overlay.context_menu.as_ref(),
+                theme.foreground,
+                theme.background,
+            )
+            .hash(&mut h);
             h.finish()
         };
         let chrome_changed = chrome_hash != self.last_chrome_hash;
@@ -5156,13 +5234,32 @@ impl Renderer {
         // covers the open state; this covers the close edge.
         let overlay_changed = overlay_open != self.last_overlay_open;
         self.last_overlay_open = overlay_open;
-        let need_prepare = any_pane_text_changed
+        let need_prepare = self.text_prepare_dirty
+            || any_pane_text_changed
             || chrome_changed
             || text_layout_changed
-            || overlay_open
+            || non_context_text_overlay_open
             || cursor_char_changed
             || overlay_changed;
+        let cursor_glyph_key =
+            cursor_glyph_damage_key(self.pending_cursor_glyph.as_ref(), metrics, &family);
+        let cursor_glyph_changed = cursor_glyph_key != self.last_cursor_glyph_key;
+        let need_cursor_prepare =
+            self.pending_cursor_glyph.is_some() && (need_prepare || cursor_glyph_changed);
+        if cursor_glyph_key.is_none() {
+            self.last_cursor_glyph_key = None;
+        }
+        let preparing_text = need_prepare || need_cursor_prepare;
+        if preparing_text {
+            // Every glyphon renderer shares the atlas. Arm the retry latch even
+            // for a cursor-only prepare so a partial atlas mutation cannot
+            // leave otherwise-retained pane or menu vertices looking current.
+            self.text_prepare_dirty = true;
+        }
         if need_prepare {
+            // Buffer and damage caches above have already advanced to this
+            // frame. Any `?` return leaves the retry latch set for the next
+            // redraw.
             self.text_renderer.prepare(
                 &self.gpu.device,
                 &self.gpu.queue,
@@ -5207,15 +5304,15 @@ impl Renderer {
             self.glyph_clips = gc;
             self.grid_glyphs_dirty = false;
         }
-        // v2.21.0 (idle perf): prepare the focused solid-block cursor's inverted
-        // glyph in its own renderer. Runs EVERY frame a block cursor is visible
-        // (cheap: 1 glyph, bitmap already in the atlas), so a blink toggles this
-        // 1-glyph prepare + the block quad while the pane buffers — and their
-        // whole-viewport prepare — stay untouched.
+        // Prepare the focused solid-block cursor's inverted glyph only when its
+        // text/position/style changed. A main text prepare also forces this tiny
+        // prepare because both renderers share an atlas that may have repacked.
+        // Menu-highlight and other quad-only frames reuse retained vertices.
         if let Some((gx, gy, gch, gcolor, gclip)) = self
             .pending_cursor_glyph
             .as_ref()
             .map(|c| (c.x, c.y, c.ch, c.color, c.clip))
+            .filter(|_| need_cursor_prepare)
         {
             let mut enc = [0u8; 4];
             self.cursor_glyph_buffer.set_metrics(metrics);
@@ -5250,6 +5347,13 @@ impl Renderer {
                 [area],
                 &mut self.swash,
             )?;
+            // Commit the retained-vertex key only after prepare succeeds. A
+            // transient atlas/device error must retry rather than treating
+            // stale vertices as current on the next frame.
+            self.last_cursor_glyph_key = cursor_glyph_key;
+        }
+        if preparing_text {
+            self.text_prepare_dirty = false;
         }
         self.quads
             .upload(&self.gpu.device, &self.gpu.queue, [sw, sh], &quads);
@@ -10448,6 +10552,148 @@ mod titlebar_glyph_fallback_tests {
 
 #[cfg(test)]
 mod pane_buffer_lifecycle_tests {
+    #[test]
+    fn context_menu_hover_preserves_text_damage_key() {
+        let mut menu = super::ContextMenu {
+            anchor: (20.0, 30.0),
+            rows: vec![
+                super::ContextMenuRow {
+                    label: "Copy".to_string(),
+                    separator: false,
+                    enabled: true,
+                    hint: "Ctrl+Shift+C".to_string(),
+                },
+                super::ContextMenuRow {
+                    label: "Paste".to_string(),
+                    separator: false,
+                    enabled: true,
+                    hint: "Ctrl+Shift+V".to_string(),
+                },
+            ],
+            highlight: 0,
+            scroll_offset: 0,
+            panel_h_clamped: 120.0,
+        };
+        let foreground = kettle_config::Rgb::new(220, 220, 220);
+        let background = kettle_config::Rgb::new(20, 20, 20);
+        let initial = super::context_menu_text_damage_key(Some(&menu), foreground, background);
+
+        menu.highlight = 1;
+        assert_eq!(
+            super::context_menu_text_damage_key(Some(&menu), foreground, background),
+            initial,
+            "highlight motion changes quads, not shaped menu text"
+        );
+
+        menu.scroll_offset = 1;
+        assert_ne!(
+            super::context_menu_text_damage_key(Some(&menu), foreground, background),
+            initial
+        );
+        menu.scroll_offset = 0;
+        menu.rows[0].enabled = false;
+        assert_ne!(
+            super::context_menu_text_damage_key(Some(&menu), foreground, background),
+            initial
+        );
+        assert_ne!(
+            super::context_menu_text_damage_key(
+                Some(&menu),
+                kettle_config::Rgb::new(221, 220, 220),
+                background,
+            ),
+            initial,
+            "glyphon retains the menu foreground in prepared vertices"
+        );
+        assert_ne!(
+            super::context_menu_text_damage_key(
+                Some(&menu),
+                foreground,
+                kettle_config::Rgb::new(21, 20, 20),
+            ),
+            initial,
+            "disabled-row colors depend on the menu background"
+        );
+    }
+
+    #[test]
+    fn cursor_glyph_damage_key_reuses_only_identical_vertices() {
+        let mut cursor = super::PendingCursorGlyph {
+            x: 10.0,
+            y: 20.0,
+            ch: 'x',
+            color: kettle_config::Rgb::new(1, 2, 3),
+            clip: (0.0, 0.0, 100.0, 80.0),
+        };
+        let initial = super::cursor_glyph_damage_key(
+            Some(&cursor),
+            glyphon::Metrics::new(14.0, 18.0),
+            "Kettle Mono",
+        );
+        assert_eq!(
+            super::cursor_glyph_damage_key(
+                Some(&cursor),
+                glyphon::Metrics::new(14.0, 18.0),
+                "Kettle Mono",
+            ),
+            initial
+        );
+
+        cursor.x = 11.0;
+        assert_ne!(
+            super::cursor_glyph_damage_key(
+                Some(&cursor),
+                glyphon::Metrics::new(14.0, 18.0),
+                "Kettle Mono",
+            ),
+            initial
+        );
+        cursor.x = 10.0;
+        assert_ne!(
+            super::cursor_glyph_damage_key(
+                Some(&cursor),
+                glyphon::Metrics::new(15.0, 19.0),
+                "Kettle Mono",
+            ),
+            initial
+        );
+        assert_eq!(
+            super::cursor_glyph_damage_key(None, glyphon::Metrics::new(14.0, 18.0), "Kettle Mono",),
+            None
+        );
+    }
+
+    #[test]
+    fn failed_text_prepare_keeps_the_retry_latch_armed() {
+        let src = include_str!("lib.rs");
+        let start = src
+            .find("let need_prepare = self.text_prepare_dirty")
+            .expect("prepare retry latch participates in damage");
+        let body = &src[start..];
+        let arm = body
+            .find("self.text_prepare_dirty = true;")
+            .expect("retry latch armed before fallible prepares");
+        let main_prepare = body
+            .find("self.text_renderer.prepare(")
+            .expect("main text prepare present");
+        let menu_prepare = body
+            .find("self.menu_text_renderer.prepare(")
+            .expect("menu text prepare present");
+        let cursor_prepare = body
+            .find("self.cursor_glyph_renderer.prepare(")
+            .expect("cursor text prepare present");
+        let clear = body
+            .find("self.text_prepare_dirty = false;")
+            .expect("retry latch clears after successful prepares");
+        assert!(
+            arm < main_prepare
+                && main_prepare < menu_prepare
+                && menu_prepare < cursor_prepare
+                && cursor_prepare < clear,
+            "the retry latch must remain armed across every fallible shared-atlas prepare"
+        );
+    }
+
     /// Drift guard. The per-pane text-buffer vecs are grown with
     /// `while len < panes.len()` and must be truncated back down when panes
     /// close, or they sit at the session's high-water pane count holding idle

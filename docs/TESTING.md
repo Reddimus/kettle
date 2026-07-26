@@ -276,6 +276,27 @@ UI compilation keeps the public `FrameOutcome` contract exhaustive; native
 live-render smoke remains responsible for actual window-system presentation
 and wgpu surface recreation.
 
+**Context-menu frame fast path.**
+`pane_snapshot_reuse_fails_closed_on_output_layout_or_order_changes`
+exercises the snapshot identity/generation/dimension gate, and
+`hover_generation_candidate_preserves_racing_output_as_pending` verifies that
+cached visible-pane and background-pane generations retain damage that races a
+hover frame until a later presentation.
+`context_menu_snapshot_reuse_rejects_live_pointer_gestures` covers UI-side
+selection/scroll/layout invalidation.
+`context_menu_hover_preserves_text_damage_key` proves the menu text-damage key
+ignores highlight motion but changes for scrolling, enabled state, and theme
+colors.
+`capture_carries_cursor_blink_state_for_lock_free_ui_redraws` keeps the cached
+blink bit wired through `PaneSnapshot::capture`, and
+`cached_cursor_blink_lookup_tracks_the_active_snapshot` verifies a validated
+lookup never falls through to the live terminal.
+`cursor_glyph_damage_key_reuses_only_identical_vertices` covers the retained
+cursor-glyph vertices; `failed_text_prepare_keeps_the_retry_latch_armed` guards
+the fallible shared-atlas preparation transaction. These are focused structural
+invariants; native interaction capture remains the evidence for end-to-end
+input-to-present latency, lock contention, and frame pacing.
+
 **`.cast` replay.** `replays_asciicast_v2_output_into_grid` parses an asciicast
 v2 trace — the exact format [`docs/RECORDING.md`](RECORDING.md)'s recorder
 writes — and feeds its `o` (output) events through the harness, asserting grid

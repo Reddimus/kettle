@@ -481,6 +481,14 @@ pub(crate) struct WindowState {
     /// present. High-water pooled: each snapshot's `cells` Vec keeps its
     /// capacity across frames; truncated to the visible pane count.
     pub(crate) pane_snapshots: Vec<kettle_render::PaneSnapshot>,
+    /// Pane id, output generation, and grid dimensions represented by each
+    /// pooled snapshot. This makes the context-menu-only redraw fast path fail
+    /// closed when output, layout, or font metrics changed.
+    pub(crate) pane_snapshot_keys: Vec<(u64, u64, usize, usize)>,
+    /// One-shot hint set only by context-menu visual state changes. The next
+    /// redraw may reuse pane snapshots after validating `pane_snapshot_keys`;
+    /// every subsequent window/user event clears the hint first.
+    pub(crate) reuse_pane_snapshots_once: bool,
 }
 
 impl WindowState {
@@ -564,6 +572,8 @@ impl WindowState {
             seen_first_resize: false,
             spawned_at: std::time::Instant::now(),
             pane_snapshots: Vec::new(),
+            pane_snapshot_keys: Vec::new(),
+            reuse_pane_snapshots_once: false,
         }
     }
 }
