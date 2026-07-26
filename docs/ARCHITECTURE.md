@@ -177,8 +177,10 @@ putting a user path on the wire.
   unpinned Auto path enables and probes one backend at a time, so successful
   Windows DX12 startup does not initialize the Vulkan ICD. Pins and explicit
   low/high preference use one cross-backend enumeration; low/high ranks the
-  physical GPU before backend. Live instances retain winit's display handle so
-  the GLES fallback can present under Wayland. An absent pin
+  physical GPU before backend and preserves the platform-preferred adapter for
+  equal-class ties. Live instances retain winit's event-loop-owned
+  `OwnedDisplayHandle` so the GLES fallback can present under Wayland without
+  keeping window 1 alive. An absent pin
   (eGPU unplugged, driver swap) falls through to the power policy, so a stale
   portable config never prevents startup. Because the device/surface graph
   can't hot-swap and every window shares the one adapter, GPU changes apply on

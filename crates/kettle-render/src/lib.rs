@@ -2062,6 +2062,12 @@ mod bg_image_worker_tests {
 }
 
 impl Renderer {
+    /// Compatibility constructor for embedders that only provide a window.
+    ///
+    /// Winit applications should prefer [`Renderer::new_with_display_handle`]
+    /// and pass `ActiveEventLoop::owned_display_handle()`. The owned event-loop
+    /// handle lets wgpu initialize the Wayland GLES presentation path without
+    /// retaining the window for the lifetime of the shared GPU context.
     pub async fn new<W>(
         window: Arc<W>,
         width: u32,
@@ -2084,6 +2090,36 @@ impl Renderer {
         .await
     }
 
+    /// Create a renderer while retaining an owned display connection separately
+    /// from the surface window.
+    ///
+    /// For winit, `display_handle` should be
+    /// `ActiveEventLoop::owned_display_handle()`. It is cheap to clone and,
+    /// unlike an `Arc<Window>`, does not keep a closed OS window alive.
+    pub async fn new_with_display_handle<W, D>(
+        window: Arc<W>,
+        display_handle: D,
+        width: u32,
+        height: u32,
+        scale: f32,
+        cfg: &Config,
+    ) -> Result<Renderer>
+    where
+        W: HasWindowHandle + HasDisplayHandle + Send + Sync + 'static,
+        D: HasDisplayHandle + Send + Sync + 'static,
+    {
+        Self::new_with_escalation_and_display_handle(
+            window,
+            display_handle,
+            width,
+            height,
+            scale,
+            cfg,
+            AdapterSelection::new(AdapterEscalation::Preferred, None),
+        )
+        .await
+    }
+
     pub async fn new_with_escalation<W>(
         window: Arc<W>,
         width: u32,
@@ -2096,12 +2132,69 @@ impl Renderer {
     where
         W: HasWindowHandle + HasDisplayHandle + Send + Sync + 'static,
     {
+        Self::new_with_escalation_inner(
+            window,
+            None,
+            width,
+            height,
+            scale,
+            cfg,
+            AdapterSelection::new(escalation, avoid),
+        )
+        .await
+    }
+
+    /// Recovery-capable variant of [`Renderer::new_with_display_handle`].
+    pub async fn new_with_escalation_and_display_handle<W, D>(
+        window: Arc<W>,
+        display_handle: D,
+        width: u32,
+        height: u32,
+        scale: f32,
+        cfg: &Config,
+        selection: AdapterSelection,
+    ) -> Result<Renderer>
+    where
+        W: HasWindowHandle + HasDisplayHandle + Send + Sync + 'static,
+        D: HasDisplayHandle + Send + Sync + 'static,
+    {
+        Self::new_with_escalation_inner(
+            window,
+            Some(OwnedGpuDisplayHandle::new(display_handle)),
+            width,
+            height,
+            scale,
+            cfg,
+            selection,
+        )
+        .await
+    }
+
+    async fn new_with_escalation_inner<W>(
+        window: Arc<W>,
+        display_handle: Option<OwnedGpuDisplayHandle>,
+        width: u32,
+        height: u32,
+        scale: f32,
+        cfg: &Config,
+        selection: AdapterSelection,
+    ) -> Result<Renderer>
+    where
+        W: HasWindowHandle + HasDisplayHandle + Send + Sync + 'static,
+    {
         // Default, unpinned Auto startup probes one native backend at a time.
         // On Windows a successful DX12 request therefore never loads the
         // Vulkan ICD. Pins and explicit low/high policy need a cross-backend
         // view, while recovery deliberately inspects alternate adapters.
-        let (instance, surface, adapter) =
-            resolve_window_adapter(window, cfg, escalation, avoid, "Renderer::new").await?;
+        let (instance, surface, adapter) = resolve_window_adapter(
+            window,
+            display_handle.as_ref(),
+            cfg,
+            selection.escalation,
+            selection.avoid,
+            "Renderer::new",
+        )
+        .await?;
         let (device, queue) = adapter
             .request_device(&wgpu::DeviceDescriptor {
                 label: Some("kettle-device"),
@@ -6770,31 +6863,54 @@ fn gpu_instance_for_backends(backends: wgpu::Backends) -> wgpu::Instance {
     wgpu::Instance::new(descriptor)
 }
 
-/// Own an `Arc<W>` for wgpu's display-handle lifetime without requiring the
-/// window type itself to implement `Debug`.
-struct SharedDisplayHandle<W>(Arc<W>);
+trait GpuDisplayHandleOwner: HasDisplayHandle + Send + Sync + 'static {}
 
-impl<W> std::fmt::Debug for SharedDisplayHandle<W> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("SharedDisplayHandle")
+impl<T> GpuDisplayHandleOwner for T where T: HasDisplayHandle + Send + Sync + 'static {}
+
+/// Cloneable, type-erased owner of the platform display connection.
+///
+/// Kettle supplies winit's `OwnedDisplayHandle`, which owns only the event-loop
+/// display connection. It deliberately does not own a window: the process-wide
+/// [`GpuContext`] can therefore outlive window 1 without preventing that
+/// window's native resources from being destroyed.
+#[derive(Clone)]
+struct OwnedGpuDisplayHandle(Arc<dyn GpuDisplayHandleOwner>);
+
+impl OwnedGpuDisplayHandle {
+    fn new<D>(display_handle: D) -> Self
+    where
+        D: HasDisplayHandle + Send + Sync + 'static,
+    {
+        Self(Arc::new(display_handle))
     }
 }
 
-impl<W: HasDisplayHandle> HasDisplayHandle for SharedDisplayHandle<W> {
+impl std::fmt::Debug for OwnedGpuDisplayHandle {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("OwnedGpuDisplayHandle")
+    }
+}
+
+impl HasDisplayHandle for OwnedGpuDisplayHandle {
     fn display_handle(&self) -> std::result::Result<DisplayHandle<'_>, HandleError> {
         self.0.display_handle()
     }
 }
 
-/// Live instances retain the display handle required by wgpu's GLES backend,
-/// notably for Wayland presentation. Headless diagnostics intentionally use
+/// Kettle's live path retains the display handle required by wgpu's GLES
+/// backend, notably for Wayland presentation. Compatibility constructors that
+/// were given only a window pass `None`; headless diagnostics intentionally use
 /// [`gpu_instance_for_backends`] instead.
-fn gpu_instance_for_window<W>(window: Arc<W>, backends: wgpu::Backends) -> wgpu::Instance
-where
-    W: HasDisplayHandle + Send + Sync + 'static,
-{
-    let mut descriptor =
-        wgpu::InstanceDescriptor::new_with_display_handle(Box::new(SharedDisplayHandle(window)));
+fn gpu_instance_for_live_display(
+    display_handle: Option<&OwnedGpuDisplayHandle>,
+    backends: wgpu::Backends,
+) -> wgpu::Instance {
+    let mut descriptor = match display_handle {
+        Some(display_handle) => {
+            wgpu::InstanceDescriptor::new_with_display_handle(Box::new(display_handle.clone()))
+        }
+        None => wgpu::InstanceDescriptor::new_without_display_handle(),
+    };
     descriptor.backends = backends;
     wgpu::Instance::new(descriptor)
 }
@@ -6806,6 +6922,23 @@ pub enum AdapterEscalation {
     SurfacePreferred,
     AnyHardware,
     ForceSoftware,
+}
+
+/// Adapter-selection state grouped for display-handle-aware renderer rebuilds.
+///
+/// The existing [`Renderer::new_with_escalation`] signature remains available
+/// for compatibility; new winit integrations pass this value alongside an
+/// event-loop-owned display handle.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AdapterSelection {
+    escalation: AdapterEscalation,
+    avoid: Option<GpuAdapterKey>,
+}
+
+impl AdapterSelection {
+    pub const fn new(escalation: AdapterEscalation, avoid: Option<GpuAdapterKey>) -> Self {
+        Self { escalation, avoid }
+    }
 }
 
 pub fn escalation_for_attempt(attempt: u32) -> AdapterEscalation {
@@ -7019,17 +7152,20 @@ fn adapter_priority_for(
     device_type: wgpu::DeviceType,
     preference: kettle_config::GpuPowerPreference,
     preferred: bool,
-) -> (u8, u8, bool) {
+) -> (u8, u8, u8) {
     use kettle_config::GpuPowerPreference;
     let backend = backend_rank_for(platform, backend);
     let device = device_rank(device_type, preference);
+    let not_preferred = u8::from(!preferred);
     match preference {
         // Auto is the native-backend policy. Within one backend, wgpu's
         // surface-preferred physical adapter breaks otherwise equal hardware.
-        GpuPowerPreference::Auto => (backend, device, !preferred),
+        GpuPowerPreference::Auto => (backend, device, not_preferred),
         // Explicit low/high is a physical-GPU request and must win even when
-        // that GPU is available only through a lower-ranked backend.
-        GpuPowerPreference::Low | GpuPowerPreference::High => (device, backend, !preferred),
+        // that GPU is available only through a lower-ranked backend. When
+        // several adapters have the requested class, preserve wgpu/the
+        // platform's physical-adapter preference before choosing a backend.
+        GpuPowerPreference::Low | GpuPowerPreference::High => (device, not_preferred, backend),
     }
 }
 
@@ -7039,6 +7175,16 @@ fn has_gpu_pin(cfg: &Config) -> bool {
 
 fn can_probe_native_backend_directly(cfg: &Config) -> bool {
     !has_gpu_pin(cfg) && cfg.gpu_power_preference == kettle_config::GpuPowerPreference::Auto
+}
+
+fn should_query_preferred_adapter(escalation: AdapterEscalation, force_software: bool) -> bool {
+    !force_software
+        && matches!(
+            escalation,
+            AdapterEscalation::Preferred
+                | AdapterEscalation::SurfacePreferred
+                | AdapterEscalation::AnyHardware
+        )
 }
 
 fn same_physical(a: &wgpu::AdapterInfo, b: GpuAdapterKey) -> bool {
@@ -7328,6 +7474,7 @@ fn direct_probe_passes(force_software: bool) -> &'static [bool] {
 /// before software fallback.
 async fn resolve_window_adapter<W>(
     window: Arc<W>,
+    display_handle: Option<&OwnedGpuDisplayHandle>,
     cfg: &Config,
     escalation: AdapterEscalation,
     avoid: Option<GpuAdapterKey>,
@@ -7340,7 +7487,7 @@ where
         let mut failures = Vec::new();
         for &software_pass in direct_probe_passes(cfg.gpu_force_software) {
             for backend in backend_attempt_order(cfg) {
-                let instance = gpu_instance_for_window(window.clone(), backend_mask(backend));
+                let instance = gpu_instance_for_live_display(display_handle, backend_mask(backend));
                 let surface = match instance.create_surface(window.clone()) {
                     Ok(surface) => surface,
                     Err(error) => {
@@ -7382,7 +7529,7 @@ where
 
     // Pins and low/high preference need a cross-backend view. Recovery also
     // inspects alternate backends and physical GPUs deliberately.
-    let instance = gpu_instance_for_window(window.clone(), wgpu::Backends::all());
+    let instance = gpu_instance_for_live_display(display_handle, wgpu::Backends::all());
     let surface = instance.create_surface(window)?;
     let adapter =
         resolve_adapter(&instance, Some(&surface), cfg, escalation, avoid, context).await?;
@@ -7459,11 +7606,7 @@ async fn resolve_adapter(
 ) -> Result<wgpu::Adapter> {
     let requested = configured_backend(cfg.gpu_backend);
     let force_software = cfg.gpu_force_software || escalation == AdapterEscalation::ForceSoftware;
-    let preferred = if !force_software
-        && matches!(
-            escalation,
-            AdapterEscalation::SurfacePreferred | AdapterEscalation::AnyHardware
-        ) {
+    let preferred = if should_query_preferred_adapter(escalation, force_software) {
         preferred_adapter_key(instance, surface, cfg).await
     } else {
         None
@@ -9973,9 +10116,10 @@ pub fn offscreen_selftest() -> anyhow::Result<bool> {
     offscreen_selftest_with_config(&Config::default())
 }
 
-/// Keep the policy input explicit internally; the public CI entry point passes
-/// `Config::default()` so repository gates never depend on user configuration.
-fn offscreen_selftest_with_config(cfg: &Config) -> anyhow::Result<bool> {
+/// Config-aware self-test entry point retained for embedders and focused
+/// diagnostics. Repository CI calls [`offscreen_selftest`], which supplies
+/// `Config::default()` so the gate never depends on developer configuration.
+pub fn offscreen_selftest_with_config(cfg: &Config) -> anyhow::Result<bool> {
     pollster::block_on(async {
         let (_instance, adapter) = match resolve_headless_adapter(cfg, "offscreen_selftest").await {
             Ok(a) => a,
@@ -10070,50 +10214,98 @@ mod gpu_tests {
 
     #[cfg(target_os = "windows")]
     #[test]
-    fn windows_auto_prefers_dx12_and_explicit_backend_needs_no_gpu_pin() {
+    fn windows_auto_prefers_dx12_without_preinitializing_vulkan() {
         pollster::block_on(async {
-            let instance = gpu_instance();
-            let adapters = instance.enumerate_adapters(wgpu::Backends::all()).await;
-            let has_hardware = |backend| {
-                adapters.iter().any(|adapter| {
-                    let info = adapter.get_info();
-                    info.backend == backend && info.device_type != wgpu::DeviceType::Cpu
-                })
+            // Exercise the real default resolver first. In particular, do not
+            // construct an all-backend discovery instance just to decide
+            // whether this assertion should run: that setup used to initialize
+            // Vulkan before the DX12-only path it purported to protect.
+            let cfg = Config::default();
+            let (_instance, adapter) = resolve_headless_adapter(&cfg, "windows_auto_policy_test")
+                .await
+                .expect("resolve default Windows adapter");
+            if adapter.get_info().backend != wgpu::Backend::Dx12 {
+                eprintln!("DX12 hardware unavailable on this Windows host; skipped");
+                return;
+            }
+            assert_eq!(adapter.get_info().backend, wgpu::Backend::Dx12);
+
+            let unavailable = Config {
+                gpu_backend: kettle_config::GpuBackend::Metal,
+                ..Config::default()
             };
+            let (_instance, adapter) =
+                resolve_headless_adapter(&unavailable, "windows_backend_fallback_test")
+                    .await
+                    .expect("fall back from unavailable Metal on Windows");
+            assert_eq!(adapter.get_info().backend, wgpu::Backend::Dx12);
+        });
+    }
 
-            if has_hardware(wgpu::Backend::Dx12) {
-                let cfg = Config::default();
-                let (_instance, adapter) =
-                    resolve_headless_adapter(&cfg, "windows_auto_policy_test")
-                        .await
-                        .expect("resolve default Windows adapter");
-                assert_eq!(adapter.get_info().backend, wgpu::Backend::Dx12);
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_stale_auto_pin_preserves_dx12_platform_preference() {
+        pollster::block_on(async {
+            // Keep this regression DX12-only too. A stale pin forces the
+            // cross-adapter resolver, but its Auto fallback must still select
+            // the physical adapter returned by wgpu/the platform rather than
+            // the lowest numeric PCI vendor id.
+            let instance = gpu_instance_for_backends(wgpu::Backends::DX12);
+            let cfg = Config {
+                gpu_name: "__kettle_missing_adapter_regression__".to_string(),
+                ..Config::default()
+            };
+            let Some(expected) = preferred_adapter_key(&instance, None, &cfg).await else {
+                eprintln!("DX12 adapter unavailable on this Windows host; skipped");
+                return;
+            };
+            let chosen = resolve_adapter(
+                &instance,
+                None,
+                &cfg,
+                AdapterEscalation::Preferred,
+                None,
+                "windows_stale_pin_policy_test",
+            )
+            .await
+            .expect("stale pin must fall back to the Auto power policy");
+            assert_eq!(
+                GpuAdapterKey::from_info(&chosen.get_info()),
+                expected,
+                "stale Auto pin fallback must preserve wgpu's physical adapter"
+            );
+        });
+    }
 
-                let unavailable = Config {
-                    gpu_backend: kettle_config::GpuBackend::Metal,
-                    ..Config::default()
-                };
-                let (_instance, adapter) =
-                    resolve_headless_adapter(&unavailable, "windows_backend_fallback_test")
-                        .await
-                        .expect("fall back from unavailable Metal on Windows");
-                assert_eq!(adapter.get_info().backend, wgpu::Backend::Dx12);
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_explicit_vulkan_needs_no_gpu_pin_when_available() {
+        pollster::block_on(async {
+            // This is deliberately isolated from the default-DX12 regression
+            // above and enables only Vulkan while checking availability.
+            let probe = gpu_instance_for_backends(wgpu::Backends::VULKAN);
+            let has_vulkan_hardware = probe
+                .enumerate_adapters(wgpu::Backends::VULKAN)
+                .await
+                .into_iter()
+                .any(|adapter| adapter.get_info().device_type != wgpu::DeviceType::Cpu);
+            if !has_vulkan_hardware {
+                eprintln!("Vulkan hardware unavailable on this Windows host; skipped");
+                return;
             }
 
-            if has_hardware(wgpu::Backend::Vulkan) {
-                let cfg = Config {
-                    gpu_backend: kettle_config::GpuBackend::Vulkan,
-                    gpu_vendor_id: 0,
-                    gpu_device_id: 0,
-                    gpu_name: String::new(),
-                    ..Config::default()
-                };
-                let (_instance, adapter) =
-                    resolve_headless_adapter(&cfg, "windows_explicit_policy_test")
-                        .await
-                        .expect("resolve explicit Vulkan adapter without a GPU pin");
-                assert_eq!(adapter.get_info().backend, wgpu::Backend::Vulkan);
-            }
+            let cfg = Config {
+                gpu_backend: kettle_config::GpuBackend::Vulkan,
+                gpu_vendor_id: 0,
+                gpu_device_id: 0,
+                gpu_name: String::new(),
+                ..Config::default()
+            };
+            let (_instance, adapter) =
+                resolve_headless_adapter(&cfg, "windows_explicit_policy_test")
+                    .await
+                    .expect("resolve explicit Vulkan adapter without a GPU pin");
+            assert_eq!(adapter.get_info().backend, wgpu::Backend::Vulkan);
         });
     }
 
@@ -11631,8 +11823,8 @@ mod pane_buffer_lifecycle_tests {
     #[test]
     fn backend_policy_is_native_first_and_explicit_when_available() {
         use super::{
-            BackendPlatform, adapter_priority_for, backend_attempt_order_for, backend_rank_for,
-            effective_backend,
+            AdapterEscalation, BackendPlatform, adapter_priority_for, backend_attempt_order_for,
+            backend_rank_for, effective_backend, should_query_preferred_adapter,
         };
         use kettle_config::GpuPowerPreference;
         use wgpu::{Backend, DeviceType};
@@ -11671,6 +11863,18 @@ mod pane_buffer_lifecycle_tests {
             [Backend::Vulkan, Backend::Dx12, Backend::Gl],
             "an explicit backend is tried once, then native fallback order"
         );
+        assert!(
+            should_query_preferred_adapter(AdapterEscalation::Preferred, false),
+            "cross-backend initial selection needs wgpu's physical-adapter preference"
+        );
+        assert!(!should_query_preferred_adapter(
+            AdapterEscalation::Preferred,
+            true
+        ));
+        assert!(!should_query_preferred_adapter(
+            AdapterEscalation::AlternateBackend,
+            false
+        ));
 
         assert!(
             adapter_priority_for(
@@ -11719,6 +11923,38 @@ mod pane_buffer_lifecycle_tests {
                 false,
             ),
             "Auto remains native-backend first"
+        );
+        assert!(
+            adapter_priority_for(
+                BackendPlatform::Windows,
+                Backend::Dx12,
+                DeviceType::IntegratedGpu,
+                GpuPowerPreference::Auto,
+                true,
+            ) < adapter_priority_for(
+                BackendPlatform::Windows,
+                Backend::Dx12,
+                DeviceType::DiscreteGpu,
+                GpuPowerPreference::Auto,
+                false,
+            ),
+            "a stale pin falling back to Auto must preserve wgpu's preferred physical GPU"
+        );
+        assert!(
+            adapter_priority_for(
+                BackendPlatform::Windows,
+                Backend::Vulkan,
+                DeviceType::DiscreteGpu,
+                GpuPowerPreference::High,
+                true,
+            ) < adapter_priority_for(
+                BackendPlatform::Windows,
+                Backend::Dx12,
+                DeviceType::DiscreteGpu,
+                GpuPowerPreference::High,
+                false,
+            ),
+            "equal-class low/high ties must preserve wgpu's physical GPU before backend rank"
         );
     }
 

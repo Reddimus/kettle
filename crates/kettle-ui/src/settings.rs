@@ -667,7 +667,8 @@ fn read_choice(cfg: &Config, key: &str) -> String {
         // values: "<vendor-hex>:<device-hex>:<name>" when pinned, else "auto".
         // Must match the token app.rs builds from a detected GpuAdapterInfo.
         "gpu" => {
-            if cfg.gpu_vendor_id != 0 && cfg.gpu_device_id != 0 {
+            if (cfg.gpu_vendor_id != 0 && cfg.gpu_device_id != 0) || !cfg.gpu_name.trim().is_empty()
+            {
                 format!(
                     "{:x}:{:x}:{}",
                     cfg.gpu_vendor_id, cfg.gpu_device_id, cfg.gpu_name
@@ -774,6 +775,10 @@ mod tests {
                 "8086:9a49:Intel(R) Iris(R) Plus Graphics".to_string(),
                 "Intel(R) Iris(R) Plus Graphics (Integrated)".to_string(),
             ),
+            (
+                "0:0:llvmpipe (LLVM 19.1.7)".to_string(),
+                "llvmpipe (LLVM 19.1.7) (Software)".to_string(),
+            ),
         ];
         let cats = categories(&gpus);
         let graphics = cats
@@ -812,6 +817,15 @@ mod tests {
         cfg.gpu_vendor_id = 0xdead;
         cfg.gpu_device_id = 0xbeef;
         assert_eq!(read(&cfg, gpu_field), "Phantom GPU 9000 (not detected)");
+
+        // Software adapters commonly expose zero PCI ids. Their name remains
+        // the pin identity, so Settings must not relabel an active software pin
+        // as Automatic after persistence/reload.
+        cfg.gpu_vendor_id = 0;
+        cfg.gpu_device_id = 0;
+        cfg.gpu_name = "llvmpipe (LLVM 19.1.7)".to_string();
+        assert_eq!(read(&cfg, gpu_field), "llvmpipe (LLVM 19.1.7) (Software)");
+        assert_eq!(next_value(&cfg, gpu_field, 1), "auto");
     }
 
     #[test]

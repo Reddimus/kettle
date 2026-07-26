@@ -153,9 +153,11 @@ discipline here.
   `cap_axis_cells` GPU-texture safety guard, color
   resolve / dim / minimum-contrast WCAG math, the offscreen GPU
   pipeline self-test (real wgpu pipelines compile + render through
-  Vulkan/Metal/DX12), pure native-backend-order/fallback tests, and a native
-  Windows check that Auto selects DX12 while an explicit backend works without
-  a physical GPU pin. Screenshots use the loaded configuration; the CI
+  Vulkan/Metal/DX12), pure native-backend-order/fallback tests, and isolated
+  native Windows checks: the Auto test selects DX12 without first constructing
+  an all-backend/Vulkan instance, the DX12-only stale-pin test preserves the
+  platform-preferred adapter, and the explicit-Vulkan test works without a
+  physical GPU pin. Screenshots use the loaded configuration; the CI
   self-test uses the same resolver with `Config::default()` to stay independent
   of developer state. Shared-image source-rectangle
   UV validation,
