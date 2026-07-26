@@ -133,11 +133,12 @@ ttf-parser-scope:
 # packaging-only change. Folded into `gauntlet-full` above.
 
 # Validate the Homebrew/AUR package templates and their renderer
-# (scripts/render-package-templates.py). Default `--auto` mode also
-# checks the current tag's *published* release assets once they exist
-# — a harmless no-op before a tag is cut, so this is safe to run any
-# time. Mirrors CI's Linux-only "Package template lockstep" step; the
-# script is portable bash + python3 so it also runs unmodified on macOS.
+# (scripts/render-package-templates.py). At an exact clean release tag,
+# default `--auto` mode also checks the published assets; feature
+# branches validate source rendering without comparing against an older
+# tag that happens to share the current Cargo version. Mirrors CI's
+# Linux-only "Package template lockstep" step; the script is portable
+# Bash 3.2 + Python 3 and also runs unmodified on macOS.
 [unix]
 package-templates:
     ./scripts/check-package-templates.sh
@@ -158,6 +159,16 @@ update-manifest-test:
 update-manifest-test:
     python scripts/test-update-manifest.py
 
+# Validate the exact GitHub draft-release shape and local size/SHA-256 binding
+# used by the token-only publisher job.
+[unix]
+release-assets-test:
+    python3 scripts/test-verify-release-assets.py
+
+[windows]
+release-assets-test:
+    python scripts/test-verify-release-assets.py
+
 # Hermetic unit tests for scripts/package-manifest.py (the inner
 # release-tarball manifest generator/verifier). Mirrors CI's
 # Linux-only "Inner package manifest generator and verifier" step.
@@ -168,6 +179,18 @@ package-manifest-test:
 [windows]
 package-manifest-test:
     python scripts/test-package-manifest.py
+
+# Hermetic Linux/POSIX tests for install-online.sh. A private fake curl serves
+# authenticated fixtures so the safe archive path, modern no-downgrade policy,
+# sidecar parser, and malicious tar rejection run without network access.
+[unix]
+online-installer-test:
+    python3 scripts/test-install-online.py
+
+[windows]
+online-installer-test:
+    @echo "online-installer-test exercises the Linux/POSIX one-line installer."
+    @echo "Run it under WSL, or trust the Linux CI leg."
 
 # Rebuild packaging/macos/kettle.iconset into a .icns via the same
 # `iconutil` CI uses, and sanity-check the result isn't a malformed or
@@ -275,7 +298,7 @@ gauntlet-strict: gauntlet deny machete tracked-audit
 # Run this before a release cut, or before any change to packaging/*,
 # scripts/install*, scripts/*manifest*.{py,ps1}, or the renderer —
 # `gauntlet`/`gauntlet-strict` alone won't catch a regression there.
-gauntlet-full: gauntlet-strict package-templates update-manifest-test package-manifest-test icns-smoke ico-smoke linux-installer-smoke windows-installer-smoke headless-gpu-smoke gpu-render-smoke cli-smoke touchpad-scroll-smoke
+gauntlet-full: gauntlet-strict package-templates update-manifest-test release-assets-test package-manifest-test online-installer-test icns-smoke ico-smoke linux-installer-smoke windows-installer-smoke headless-gpu-smoke gpu-render-smoke cli-smoke touchpad-scroll-smoke
     @echo ""
     @echo "FULL GAUNTLET PASSED — every ci.yml check this OS can run locally is green."
 

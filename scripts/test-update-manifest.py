@@ -3,8 +3,11 @@
 
 from __future__ import annotations
 
+import base64
+import hashlib
 import importlib.util
 from pathlib import Path
+import re
 import sys
 import tempfile
 import unittest
@@ -12,6 +15,7 @@ import unittest
 
 sys.dont_write_bytecode = True
 SCRIPT = Path(__file__).with_name("make-update-manifest.py")
+ROOT = SCRIPT.parent.parent
 SPEC = importlib.util.spec_from_file_location("make_update_manifest", SCRIPT)
 assert SPEC and SPEC.loader
 MODULE = importlib.util.module_from_spec(SPEC)
@@ -39,6 +43,29 @@ class ManifestTests(unittest.TestCase):
             self.assertEqual(len(first["assets"]), 3)
             self.assertTrue(all(len(asset["sha256"]) == 64 for asset in first["assets"]))
 
+    def test_existing_signed_manifest_binds_exact_local_artifacts(self):
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            assets = self.assets(root)
+            manifest = MODULE.build_manifest(
+                "v2.43.0",
+                "2026-07-26T10:00:00-07:00",
+                assets,
+            )
+            path = root / "kettle-update-manifest.json"
+            canonical = MODULE.encode_manifest(manifest)
+            path.write_bytes(canonical)
+            MODULE.verify_manifest(path, "v2.43.0", assets)
+
+            path.write_bytes(canonical[:-1] + b" \n")
+            with self.assertRaisesRegex(ValueError, "exactly bind"):
+                MODULE.verify_manifest(path, "v2.43.0", assets)
+
+            path.write_bytes(canonical)
+            assets[0][1].write_bytes(b"substituted")
+            with self.assertRaisesRegex(ValueError, "exactly bind"):
+                MODULE.verify_manifest(path, "v2.43.0", assets)
+
     def test_rejects_prerelease_missing_and_misnamed_assets(self):
         with tempfile.TemporaryDirectory() as raw:
             assets = self.assets(Path(raw))
@@ -51,6 +78,184 @@ class ManifestTests(unittest.TestCase):
             wrong[0][1].write_bytes(b"wrong")
             with self.assertRaises(ValueError):
                 MODULE.build_manifest("v2.35.0", "now", wrong)
+
+    def test_release_generator_matches_shipped_client_artifact_limit(self):
+        feed_source = (
+            ROOT / "crates" / "kettle-update" / "src" / "feed.rs"
+        ).read_text(encoding="utf-8")
+        rust_match = re.search(
+            r"const MAX_ARTIFACT_BYTES: u64 = ([0-9]+) \* 1024 \* 1024;",
+            feed_source,
+        )
+        self.assertIsNotNone(rust_match)
+        rust_limit = int(rust_match.group(1)) * 1024 * 1024
+        self.assertEqual(MODULE.MAX_ARTIFACT_BYTES, rust_limit)
+
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            assets = self.assets(root)
+            oversized = root / MODULE.EXPECTED_NAMES["aarch64-unknown-linux-gnu"]
+            with oversized.open("wb") as stream:
+                stream.truncate(MODULE.MAX_ARTIFACT_BYTES + 1)
+            with self.assertRaisesRegex(ValueError, "outside the accepted range"):
+                MODULE.build_manifest("v2.35.0", "now", assets)
+
+    def test_production_trust_root_is_locked_across_release_consumers(self):
+        trusted_pem = (ROOT / "packaging" / "update-public.pem").read_text(
+            encoding="ascii"
+        )
+        self.assertTrue(trusted_pem.endswith("\n"))
+        pem_lines = trusted_pem.strip().splitlines()
+        self.assertEqual(pem_lines[0], "-----BEGIN PUBLIC KEY-----")
+        self.assertEqual(pem_lines[-1], "-----END PUBLIC KEY-----")
+        public_der = base64.b64decode("".join(pem_lines[1:-1]), validate=True)
+        ed25519_spki_prefix = bytes.fromhex("302a300506032b6570032100")
+        self.assertTrue(public_der.startswith(ed25519_spki_prefix))
+        public_key = public_der[len(ed25519_spki_prefix) :]
+        self.assertEqual(len(public_key), 32)
+        self.assertEqual(
+            hashlib.sha256(public_key).hexdigest(),
+            "e8e73619a959b34c24fa255714719a61c9cee810340bf041497c39475ab2dbb7",
+        )
+
+        rust_source = (
+            ROOT / "crates" / "kettle-update" / "src" / "lib.rs"
+        ).read_text(encoding="utf-8")
+        rust_match = re.search(
+            r"pub const UPDATE_PUBLIC_KEY: \[u8; 32\] = \[(.*?)\];",
+            rust_source,
+            flags=re.DOTALL,
+        )
+        self.assertIsNotNone(rust_match)
+        rust_key = bytes(
+            int(value, 16)
+            for value in re.findall(r"0x([0-9a-fA-F]{2})", rust_match.group(1))
+        )
+        self.assertEqual(rust_key, public_key)
+
+        installer = (ROOT / "scripts" / "install-online.sh").read_text(
+            encoding="utf-8"
+        )
+        installer_match = re.search(
+            r"MANIFEST_PUBLIC_KEY_PEM='(-----BEGIN PUBLIC KEY-----\n"
+            r".*?\n-----END PUBLIC KEY-----)'",
+            installer,
+            flags=re.DOTALL,
+        )
+        self.assertIsNotNone(installer_match)
+        self.assertEqual(installer_match.group(1), trusted_pem.strip())
+
+        release_workflow = (
+            ROOT / ".github" / "workflows" / "release.yml"
+        ).read_text(encoding="utf-8")
+        self.assertIn(
+            "openssl pkey -pubin -in packaging/update-public.pem",
+            release_workflow,
+        )
+        self.assertIn(
+            "openssl pkeyutl -verify -rawin -pubin "
+            "-inkey packaging/update-public.pem",
+            release_workflow,
+        )
+
+    def test_release_finalizer_uses_the_bounded_extractor_and_remote_digests(self):
+        release_workflow = (
+            ROOT / ".github" / "workflows" / "release.yml"
+        ).read_text(encoding="utf-8")
+        self.assertEqual(
+            release_workflow.count("scripts/package-manifest.py extract"),
+            6,
+        )
+        for archive, target in (
+            (
+                "dist/kettle-linux-x86_64.tar.gz",
+                "x86_64-unknown-linux-gnu",
+            ),
+            (
+                "dist/kettle-linux-aarch64.tar.gz",
+                "aarch64-unknown-linux-gnu",
+            ),
+            (
+                "dist/kettle-windows-x86_64.zip",
+                "x86_64-pc-windows-msvc",
+            ),
+        ):
+            self.assertEqual(release_workflow.count(f"--archive {archive}"), 2)
+            self.assertGreaterEqual(release_workflow.count(f"--target {target}"), 2)
+        self.assertNotIn("tar -xzf dist/kettle-", release_workflow)
+        self.assertNotIn("unzip -q dist/kettle-", release_workflow)
+        self.assertIn(
+            "python3 scripts/verify-release-assets.py",
+            release_workflow,
+        )
+        self.assertIn(
+            "--verify-existing dist/kettle-update-manifest.json",
+            release_workflow,
+        )
+        self.assertGreaterEqual(release_workflow.count("cmp -s"), 4)
+        self.assertEqual(
+            release_workflow.count("persist-credentials: false"),
+            4,
+        )
+        finalize = release_workflow.split("\n  finalize:\n", 1)[1].split(
+            "\n  publish:\n", 1
+        )[0]
+        publish = release_workflow.split("\n  publish:\n", 1)[1]
+        self.assertIn("environment: release-signing", finalize)
+        self.assertIn("contents: read", finalize)
+        self.assertNotIn("contents: write", finalize)
+        self.assertNotIn("GH_TOKEN:", finalize)
+        self.assertIn("contents: write", publish)
+        self.assertIn("GH_TOKEN:", publish)
+        self.assertNotIn("KETTLE_UPDATE_SIGNING_KEY_PEM", publish)
+        self.assertNotIn("runs-on: ubuntu-latest", release_workflow)
+        self.assertNotIn("runs-on: macos-latest", release_workflow)
+        self.assertNotIn("runs-on: windows-latest", release_workflow)
+        self.assertNotIn("toolchain: stable", release_workflow)
+        for cargo_line in re.findall(
+            r"^\s*cargo (?:build|test)\b.*$",
+            release_workflow,
+            flags=re.MULTILINE,
+        ):
+            self.assertIn("--locked", cargo_line)
+
+    def test_online_installer_shares_the_signed_channel_bounds(self):
+        installer = (ROOT / "scripts" / "install-online.sh").read_text(
+            encoding="utf-8"
+        )
+        constants = dict(
+            re.findall(
+                r"^((?:MAX|CURL)_[A-Z_]+)=([0-9]+)$",
+                installer,
+                flags=re.MULTILINE,
+            )
+        )
+        self.assertEqual(
+            int(constants["MAX_ARCHIVE_BYTES"]),
+            MODULE.MAX_ARTIFACT_BYTES,
+        )
+        self.assertEqual(int(constants["MAX_MANIFEST_BYTES"]), 128 * 1024)
+        self.assertEqual(int(constants["MAX_SIGNATURE_BYTES"]), 1024)
+        self.assertEqual(int(constants["MAX_ARCHIVE_ENTRIES"]), 128)
+        self.assertEqual(int(constants["MAX_UNPACKED_BYTES"]), 512 * 1024 * 1024)
+        self.assertEqual(int(constants["MAX_LATEST_HEADERS_BYTES"]), 128 * 1024)
+        self.assertEqual(int(constants["CURL_CONNECT_TIMEOUT_SECONDS"]), 15)
+        self.assertEqual(int(constants["CURL_TOTAL_TIMEOUT_SECONDS"]), 600)
+        self.assertIn("ulimit -f", installer)
+        self.assertIn("--proto-redir =https", installer)
+        self.assertIn("--max-redirs ${CURL_MAX_REDIRECTS}", installer)
+        self.assertIn("LC_ALL=C", installer)
+        self.assertIn("PACKAGE_MANIFEST_REQUIRED=", installer)
+        self.assertIn("Install OpenSSL 3.0 or newer", installer)
+        self.assertNotIn("OpenSSL 1.1.1", installer)
+        self.assertIn(
+            "Refusing to downgrade to the weaker same-origin checksum. Aborting.",
+            installer,
+        )
+        self.assertIn(
+            "authenticated archive failed the bounded structural preflight.",
+            installer,
+        )
 
 
 if __name__ == "__main__":
