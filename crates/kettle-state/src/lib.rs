@@ -572,6 +572,23 @@ mod tests {
         assert_eq!(fs::read(path).unwrap(), b"state");
     }
 
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn atomic_replace_accepts_a_held_proc_self_fd_directory() {
+        use std::os::fd::AsRawFd as _;
+
+        let dir = crate::test_tempdir();
+        let directory = File::open(dir.path()).unwrap();
+        let anchored = PathBuf::from(format!(
+            "/proc/self/fd/{}/state.json",
+            directory.as_raw_fd()
+        ));
+
+        atomic_replace(&anchored, b"state", AtomicWriteOptions::PRIVATE).unwrap();
+
+        assert_eq!(fs::read(dir.path().join("state.json")).unwrap(), b"state");
+    }
+
     #[cfg(unix)]
     #[test]
     fn preserves_existing_permissions() {

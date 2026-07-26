@@ -497,6 +497,29 @@ mod unix {
         Ok(())
     }
 
+    #[cfg(target_os = "linux")]
+    fn is_proc_self_fd_directory_link(
+        path: &Path,
+        link: &std::fs::Metadata,
+        parent: &std::fs::Metadata,
+    ) -> bool {
+        let mut components = path.components().filter_map(|component| match component {
+            Component::Normal(name) => Some(name),
+            _ => None,
+        });
+        let exact_shape = components.next() == Some(OsStr::new("proc"))
+            && components.next() == Some(OsStr::new("self"))
+            && components.next() == Some(OsStr::new("fd"))
+            && components
+                .next()
+                .is_some_and(|fd| !fd.is_empty() && fd.as_bytes().iter().all(u8::is_ascii_digit))
+            && components.next().is_none();
+        exact_shape
+            && link.uid() == current_user()
+            && parent.uid() == current_user()
+            && parent.mode() & 0o022 == 0
+    }
+
     fn validate_symlink_ancestors(path: &Path) -> io::Result<()> {
         let absolute = std::path::absolute(path)?;
         let mut cursor = PathBuf::from("/");
@@ -512,10 +535,15 @@ mod unix {
                     // root-owned, non-group/world-writable directory (for
                     // example macOS /tmp and /var). User-controlled ancestor
                     // symlinks are rejected before any mutation.
-                    if metadata.uid() != 0
-                        || parent_metadata.uid() != 0
-                        || parent_metadata.mode() & 0o022 != 0
-                    {
+                    let root_managed = metadata.uid() == 0
+                        && parent_metadata.uid() == 0
+                        && parent_metadata.mode() & 0o022 == 0;
+                    #[cfg(target_os = "linux")]
+                    let held_self_fd =
+                        is_proc_self_fd_directory_link(&cursor, &metadata, &parent_metadata);
+                    #[cfg(not(target_os = "linux"))]
+                    let held_self_fd = false;
+                    if !root_managed && !held_self_fd {
                         return Err(io::Error::new(
                             io::ErrorKind::PermissionDenied,
                             format!(
@@ -524,6 +552,11 @@ mod unix {
                             ),
                         ));
                     }
+                    // `/proc/self/fd/<n>` is a kernel-managed capability to an
+                    // already-open object, not a filesystem-controlled
+                    // redirection. Canonicalization below resolves it once;
+                    // the resulting real path is then reopened and every
+                    // directory edge is checked normally.
                     let target = std::fs::metadata(&cursor)?;
                     if !target.file_type().is_dir() || !trusted_identity(target.uid()) {
                         return Err(io::Error::new(
