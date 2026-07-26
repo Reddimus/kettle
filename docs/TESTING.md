@@ -1,8 +1,12 @@
 # Testing
 
 kettle is verified by a fast, deterministic test suite plus CI smoke runs on
-all three OSes. No GPU or PTY is required for the unit suite, so it runs
-everywhere including CI.
+all three OSes. Most parser, state, and UI-decision tests need neither a GPU
+nor a PTY. The full workspace suite intentionally also opens an offscreen wgpu
+device and runs a small number of native PTY/ConPTY lifecycle tests. An
+adapter-less host can soft-skip the GPU test and a restricted sandbox can
+soft-skip the PTY tests, but that is reduced coverage and must not be reported
+as a native GPU or PTY pass.
 
 ## Run it
 
@@ -11,6 +15,18 @@ cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 ```
+
+For full Linux coverage, install the source-build dependencies from
+[INSTALL.md](INSTALL.md#from-source-all-platforms) plus `libvulkan1` and
+`mesa-vulkan-drivers`. No graphical session is needed for
+`gpu_pipelines_compile_and_render_offscreen`, but a working Vulkan loader and
+hardware or software adapter are. Windows uses DX12/WARP or another available
+wgpu backend; macOS uses Metal. The native PTY checks also need permission to
+create `/dev/ptmx` children on Unix or a ConPTY on Windows.
+
+Read test output for `no GPU adapter ... skipped` and `no PTY ...` messages.
+Those messages leave the portable suite green by design; record the missing
+coverage instead of treating the exit code alone as platform validation.
 
 Performance changes that claim cross-terminal movement should also run the
 Windows harness and score gate:
@@ -460,7 +476,8 @@ These need a real display and are run by hand (or on real hardware):
     optional tools are reported as skips, so this is a real-machine smoke rather
     than a portable CI gate.
   - **Live agent/TUI window**: `just agent-tui-smoke` opens a real
-    grid-renderer Kettle window, drives a shell marker, a prompt-shaped `➜  ~`
+    grid-renderer Kettle window in explicit native-shell mode, drives a shell
+    marker, a prompt-shaped `➜  ~`
     marker, deterministic Windows Codex active-placeholder and queued-input
     cursor fixtures with cell-level pixel assertions, optional
     Codex/Claude CLI version probes plus `codex exec --help` /
@@ -484,6 +501,16 @@ These need a real display and are run by hand (or on real hardware):
     a failed-command/stale-exit-code transcript. External auth failures are
     captured as `auth_failed`; set `KETTLE_AGENT_AUTH_SMOKE=strict` when missing
     credentials should fail the run.
+    On Windows, `just agent-tui-wsl-smoke` instead keeps the Windows
+    `kettle.exe`/ConPTY/render path and launches a non-rc bash through
+    `wsl.exe`; `KETTLE_SMOKE_WSL_DISTRO` selects a distro. Tool detection,
+    tmux control, Neovim/AstroNvim, and agent commands then run inside that
+    distro rather than against the Windows host `PATH`.
+    `KETTLE_SMOKE_ASTRO_CONFIG` can select the target-shell config directory.
+    `KETTLE_SMOKE_NVIM_DATA` can select its installed plugin data. The helper
+    copies the config and existing `lazy`/`site` runtime, redirects every
+    Neovim XDG config/data/state/cache path to disposable storage, then removes
+    it, so a compatibility smoke cannot edit the user's live configuration.
   - **Live interaction window**: `just interaction-smoke` opens a real
     grid-renderer Kettle window and drives multiline text entry, scrollback
     mouse wheel movement, local selection drag, the exact keyboard/Shift-click

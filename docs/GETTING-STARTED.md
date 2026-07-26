@@ -18,8 +18,8 @@ built-in **Settings** panel for the common things.
 - **macOS** — download `kettle-macos-universal.zip`, unzip, drag `kettle.app`
   to Applications, right-click → Open the first time.
 
-See [INSTALL.md](INSTALL.md) for package managers (AUR, Homebrew, Nix) and
-SHA-256 verification.
+See [INSTALL.md](INSTALL.md) for Nix, the generated-but-not-yet-published
+Homebrew/AUR metadata, and SHA-256 verification.
 
 ## 2. Your first window
 

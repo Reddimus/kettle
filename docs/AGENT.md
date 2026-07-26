@@ -334,7 +334,8 @@ X11/Wayland desktop session.
 just agent-tui-smoke
 ```
 
-Starts a real grid-renderer Kettle window, drives a shell marker, optional Codex
+Starts a real grid-renderer Kettle window in explicit `native` shell mode,
+drives a shell marker, optional Codex
 CLI and Claude Code CLI `--version` probes plus `codex exec --help` /
 `claude --print --help` output captures, a prompt-shaped `➜  ~` marker, a
 deterministic Windows Codex active-placeholder and queued-input cursor fixtures,
@@ -354,6 +355,28 @@ should fail the run. It saves PNG screenshots,
 lacks visible terminal cells. Missing optional CLIs/tools are reported as skips;
 the shell and prompt-shaped states always run. When tmux is available, the run
 also writes `tmux.png`, `tmux.screen.json`, and `tmux.cells.json`.
+
+On Windows, use the separate cross-boundary mode to keep the shipped
+`kettle.exe`/ConPTY/window path while running the shell and tools inside WSL:
+
+```powershell
+just agent-tui-wsl-smoke
+# Optional non-default distro and AstroNvim config inside that distro:
+$env:KETTLE_SMOKE_WSL_DISTRO = "Ubuntu"
+$env:KETTLE_SMOKE_ASTRO_CONFIG = "/home/me/.config/nvim"
+$env:KETTLE_SMOKE_NVIM_DATA = "/home/me/.local/share/nvim"
+just agent-tui-wsl-smoke
+```
+
+This launches `wsl.exe` with a deterministic non-rc bash, probes the WSL
+`PATH`, and addresses tmux through that distro. Before configured Neovim or
+AstroNvim runs, the helper copies its config plus the existing `lazy`/`site`
+plugin runtime and redirects
+`XDG_CONFIG_HOME`, `XDG_DATA_HOME`, `XDG_STATE_HOME`, and `XDG_CACHE_HOME` to
+one disposable directory. The original config and state are never written.
+Clean Neovim uses the same isolation; the directory is removed at the end.
+Authenticated agent probes remain opt-in and use the target shell's existing
+credentials.
 
 ```sh
 just interaction-smoke

@@ -63,6 +63,7 @@ Legend: ✅ implemented · 🟡 partial · ⛔ not yet · — n/a.
 | **Quick-select / URL hints** | ✅ `Ctrl+Shift+H` (v1.0) | ⛔ | ✅ `kitten hints` origin | ✅ `QuickSelect` | ⛔ | ⛔ |
 | **Search overlay** | ✅ `Ctrl+Shift+F`; Terminator-style bottom bar; strict regex; Smart/Match/Ignore; wrap/invert; signed history + bounded soft-wrap highlights; incremental scan + Results limited | ✅ | ✅ | ✅ | ✅ | ✅ |
 | **Shell integration (OSC 133)** | ✅ bundled `kettle --shell-integration <shell>` + `Ctrl+Up/Down` jump | ✅ | ✅ | ✅ | ⛔ | 🟡 |
+| **Kitty keyboard protocol** | ✅ progressive CSI-u negotiation + press/repeat/release encoder | ✅ | ✅ (origin) | ✅ | 🟡 (version/config dependent) | 🟡 |
 | **SSH launcher** | ✅ `Ctrl+Shift+S` fuzzy, configured + freeform | ⛔ | ⛔ | ⛔ | 🟡 (`ssh-host` plugin) | ⛔ |
 | **Vi-mode for scrollback** | ✅ `Ctrl+Shift+Space` | ⛔ | ⛔ | ⛔ | ⛔ | ✅ origin |
 | **Remote-control IPC** | ✅ `kettle --remote-send TEXT` | ⛔ | ✅ `kitty @` origin | 🟡 (Lua API) | ⛔ | ⛔ |
@@ -74,7 +75,7 @@ Legend: ✅ implemented · 🟡 partial · ⛔ not yet · — n/a.
 | **Annotated screenshots** | ✅ `--annotate TEXT` (caption variant) | ⛔ | ⛔ | ⛔ | ⛔ | ⛔ |
 | **Status bar widget** | ✅ `status-bar = top\|bottom` | ⛔ | ✅ origin | ✅ Lua | ⛔ | ⛔ |
 | **Cursor** | ✅ block/bar/underline | ✅ | ✅ | ✅ | ✅ | ✅ |
-| Hollow when unfocused | ✅ | 🟡 | ✅ | ✅ | 🟡 | ✅ (origin) |
+| Cursor when unfocused | ✅ hidden; exact child-selected shape restored on refocus | 🟡 hollow | ✅ hollow | ✅ hollow | 🟡 | ✅ hollow (origin) |
 | Blink interval config | ✅ `cursor-blink-interval` ms | ✅ | ✅ | ✅ | ✅ | ✅ (origin, 750) |
 | **Selection** | ✅ word/line/drag | ✅ | ✅ | ✅ | ✅ | ✅ |
 | Copy-on-select toggle | ✅ `copy-on-select` | ✅ | ✅ | ✅ | ✅ | ✅ (origin) |
@@ -221,9 +222,10 @@ Future → Done since the v1.0 cut of this matrix"):
   reorder (kitty/iTerm2/Ghostty).
 - v1.3.3+ refinements: per-tab silence watcher (Terminator
   Silence Watcher), ghost-render of the dragged tab during reorder
-  (v1.3.5), Homebrew formula template + AUR PKGBUILD + Nix flake
-  for the install paths, SHA-256 sidecars on every release artifact
-  for supply-chain integrity.
+  (v1.3.5), generated Homebrew formula and AUR PKGBUILD **release
+  assets** plus a directly usable Nix flake, and SHA-256 sidecars on
+  every release artifact. The formula/AUR templates did not by
+  themselves publish a Homebrew tap or AUR package.
 
 **Shipped in v1.4.0 → v1.7.0** (all in `main`):
 
@@ -328,7 +330,7 @@ Xvfb :97 -screen 0 1000x650x24 & DISPLAY=:97 \
 DISPLAY=:97 import -window root docs/images/refs/xterm.png
 ```
 
-## v2.20.0 Terminator + Ghostty deep-dive — integration matrix
+## Historical v2.20.0 Terminator + Ghostty decision record
 
 An 11-agent source-level analysis walked the **full Terminator
 (`terminatorlib/`) and Ghostty (`src/`) trees** against kettle's codebase:
@@ -337,6 +339,12 @@ highest-relevance claims **adversarially cross-checked against kettle source
 with file:line evidence** (the cross-check corrected 11 inventory statuses —
 see the note at the end). Verdicts below; the six "now" picks that fit the
 v2.20.0 decision gate shipped, the rest are tracked.
+
+> This section preserves the v2.20.0 point-in-time inventory and its original
+> prioritization. Its ⛔/backlog cells are not a current capability matrix;
+> later releases shipped some of them. Use the current matrix above and
+> [TERMINAL-CLIENT-COMPATIBILITY.md](TERMINAL-CLIENT-COMPATIBILITY.md) for
+> current behavior.
 
 ### Shipped in v2.20.0
 
@@ -349,14 +357,13 @@ v2.20.0 decision gate shipped, the rest are tracked.
 | Regex capture-group substitution in `trigger = REGEX :: cmd` | Terminator `run_cmd_on_match` parity completion | `{n}` tokens (`{0}` = whole match) substitute match groups per argv element — open-file-at-line style automation, command stays data not shell | high · S |
 | `equalize_splits` action | Ghostty / Terminator | One action rebalances every split in the tab to equal ratios | low · S |
 
-### Upcoming headliners (tracked)
+### Deferred at the v2.20.0 decision gate
 
 - **Kitty keyboard protocol (CSI-u progressive enhancement)** — the single
-  biggest TUI-compat unlock left: Neovim, fish 4.x, helix, kakoune, zellij
-  and crossterm-based TUIs all negotiate it and silently fall back today.
-  The engine flag already exists; the work is a CSI-u encoder honoring the
-  TermMode bits (M effort). Deliberately **not** landed alongside this
-  release's render refactors.
+  biggest TUI-compat unlock then left. It was deliberately not landed beside
+  v2.20's render refactors and therefore appears missing in the historical
+  table below. It shipped in a later release with capability replies,
+  set/push/pop mode handling, and the CSI-u event encoder.
 - **Terminal-reply layer cluster** — XTGETTCAP, DECRQSS, structured DA1
   advertisement (sixel=4, clipboard=52), kitty graphics `a=q` query replies:
   one shared pre-engine plumbing effort in `kettle-vt` (the `extract.rs`
@@ -397,7 +404,7 @@ are marked, so the 11 shipped features occupy 13 "now" rows.
 | `resize-overlay` (+ `-position`, `-duration`) | Ghostty | ⛔ | medium | S | ✅ shipped v2.20.0 (mode key only; `-position`/`-duration` not adopted — chip centered, 750 ms fixed) | Isolated render feature on existing overlay machinery; pairs with `geometry-hinting`. |
 | Custom theme files + user theme directory | Ghostty | ⛔ | medium | S | → backlog (capped by the v2.20.0 decision gate) | A theme file is a constrained reuse of the existing key=value parser; unlocks the iTerm2/Gogh ecosystem. |
 | `command-palette-entry` (user-defined palette commands) | Ghostty | ⛔ | medium | S | → backlog (capped by the v2.20.0 decision gate) | Palette and parsed action grammar both exist; mirrors `menu-item`, compounds with the agent server. |
-| Kitty keyboard protocol (CSI-u progressive enhancement) | Ghostty | ⛔ | high | M | → backlog (capped by the v2.20.0 decision gate) | Biggest TUI-compat unlock (Neovim/fish/helix); engine flag exists, needs a CSI-u encoder honoring TermMode bits. |
+| Kitty keyboard protocol (CSI-u progressive enhancement) | Ghostty | ⛔ at v2.20 | high | M | → backlog at the v2.20.0 decision gate; shipped later | At this historical gate the engine flag existed but the encoder did not. Current Kettle answers capability queries and emits negotiated CSI-u events. |
 | Kitty graphics query replies (`a=q` OK/error + quiet flags) | Ghostty | ⛔ | high | S | → backlog (capped by the v2.20.0 decision gate) | kitten-icat-style probing cannot see kettle's shipped graphics; the PtyWrite reply channel already exists. |
 | XTGETTCAP (DCS `+q`) capability queries | Ghostty | ⛔ | medium | M | → backlog (capped by the v2.20.0 decision gate) | TUIs probe capabilities via DCS; a small static cap table on the existing pre-engine interception. |
 | DA1 feature advertisement (sixel=4, clipboard=52) | Ghostty | ✅ | medium | S | ✅ shipped v2.25.1 | Primary DA now reports `CSI ? 6 ; 4 ; 52 c`, so capability probers can discover Kettle's shipped sixel decoder and OSC 52 clipboard support. |

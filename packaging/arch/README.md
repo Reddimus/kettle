@@ -4,8 +4,9 @@ Every stable GitHub release includes a ready-to-use `PKGBUILD` for the Linux
 x86_64 binary. The source tree stores [`PKGBUILD.in`](PKGBUILD.in); release CI
 fills its version and SHA-256 only after verifying the final archive.
 
-Arch, Manjaro, and EndeavourOS users can install the published AUR package with
-an AUR helper once it has been submitted:
+The `kettle-bin` package is not currently submitted to the AUR. Consequently,
+`yay -S kettle-bin` and `paru -S kettle-bin` do not resolve today. The commands
+below become valid only after the one-time submission workflow has completed:
 
 ```sh
 yay -S kettle-bin
@@ -53,3 +54,7 @@ scripts/check-package-templates.sh --require-release
 The package is named `kettle-bin` because it installs the optimized prebuilt
 binary. A source-building `kettle` package would require Rust and the complete
 font, window-system, and graphics development stack.
+
+Until AUR publication, download `PKGBUILD` from the matching GitHub release,
+inspect it, place it in an empty directory, and run `makepkg -si` there; or use
+the bundled Linux installer.

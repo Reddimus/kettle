@@ -14327,10 +14327,14 @@ impl App {
             .unwrap_or_else(kettle_core::TermMode::empty);
         let mut bytes = Vec::new();
         for (mods, key) in &parsed {
-            if let Some(b) = crate::input::encode(key, None, *mods, mode) {
+            if let Some(b) = crate::input::encode_key_press(key, *mods, mode) {
                 // Review fix: honor the user's backspace-binding /
                 // delete-binding remap, exactly like the GUI key path.
-                let b = apply_bs_del_binding(&self.cfg, key, *mods, b);
+                let b = if crate::input::key_press_uses_kitty_sequence(key, *mods, mode) {
+                    b
+                } else {
+                    apply_bs_del_binding(&self.cfg, key, *mods, b)
+                };
                 bytes.extend_from_slice(&b);
             }
         }
@@ -16397,7 +16401,7 @@ fn apply_bs_del_binding(cfg: &Config, key: &Key, mods: ModifiersState, bytes: Ve
 /// v2.20.0 (agent plane): parse one `send_keys` token — `"escape"`,
 /// `"ctrl+c"`, `"shift+tab"`, `"f5"`, `"alt+enter"`, a bare character like
 /// `"G"` — into the `(mods, key)` pair the GUI's PTY encoder
-/// (`input::encode`) consumes. Same `+`-separated grammar and modifier
+/// (`input::encode_key_press`) consumes. Same `+`-separated grammar and modifier
 /// aliases as config keybind triggers (`parse_trigger`), plus the named keys
 /// the keybind grammar has no variant for (escape, backspace, delete,
 /// insert, space) — those are exactly the keys agents drive TUIs with.
@@ -22804,7 +22808,7 @@ mod tests {
         use kettle_core::TermMode;
         let enc = |tok: &str, mode: TermMode| {
             let (mods, key) = parse_send_key(tok).expect(tok);
-            crate::input::encode(&key, None, mods, mode)
+            crate::input::encode_key_press(&key, mods, mode)
         };
         let plain = TermMode::empty();
         assert_eq!(enc("escape", plain), Some(vec![0x1b]));
@@ -22816,6 +22820,15 @@ mod tests {
         assert_eq!(enc("up", TermMode::APP_CURSOR), Some(b"\x1bOA".to_vec()));
         assert_eq!(enc("shift+tab", plain), Some(b"\x1b[Z".to_vec()));
         assert_eq!(enc("G", plain), Some(b"G".to_vec()));
+        assert_eq!(
+            enc("escape", TermMode::DISAMBIGUATE_ESC_CODES),
+            Some(b"\x1b[27u".to_vec()),
+            "send_keys must honor Kitty keyboard negotiation"
+        );
+        assert_eq!(
+            enc("ctrl+c", TermMode::DISAMBIGUATE_ESC_CODES),
+            Some(b"\x1b[99;5u".to_vec())
+        );
     }
 
     #[test]

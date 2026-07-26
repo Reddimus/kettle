@@ -78,7 +78,8 @@ everything in a `mktemp -d` cleaned up on exit. Uninstall later via
 ```sh
 # Build deps (Debian / Ubuntu)
 sudo apt-get install -y pkg-config libfontconfig1-dev libfreetype6-dev \
-  libx11-dev libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libxcb1-dev
+  libx11-dev libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libxcb1-dev \
+  libvulkan1 mesa-vulkan-drivers
 
 git clone https://github.com/Reddimus/kettle
 cd kettle
@@ -136,8 +137,10 @@ GitHub runners for every platform:
   path above, or copy the files manually. Arch / Manjaro / EndeavourOS
   users: each release includes a ready-to-use `PKGBUILD`, rendered from
   [`packaging/arch/PKGBUILD.in`](../packaging/arch/PKGBUILD.in) after CI knows
-  the archive checksum; see [`packaging/arch/README.md`](../packaging/arch/README.md)
-  for the AUR publication workflow that enables `yay -S kettle-bin`.
+  the archive checksum. `kettle-bin` is not currently published in AUR, so
+  `yay -S kettle-bin` does not resolve; see
+  [`packaging/arch/README.md`](../packaging/arch/README.md) for local
+  `makepkg` use and the outstanding publication workflow.
   NixOS / nix-flake users:
   `nix run github:reddimus/kettle` runs without installing; see
   [`packaging/nix/README.md`](../packaging/nix/README.md) for
@@ -156,9 +159,11 @@ GitHub runners for every platform:
 
   Each release includes a ready-to-use `kettle.rb` formula rendered from
   [`packaging/homebrew/kettle.rb.in`](../packaging/homebrew/kettle.rb.in);
-  see [`packaging/homebrew/README.md`](../packaging/homebrew/README.md) for
-  tap setup and updates with
-  `brew tap reddimus/kettle && brew install kettle`.
+  however, the `Reddimus/homebrew-kettle` tap repository is not currently
+  published, so `brew tap reddimus/kettle` does not resolve. See
+  [`packaging/homebrew/README.md`](../packaging/homebrew/README.md) for the
+  remaining publication workflow. Until then, install the release `.app`
+  directly.
 - **Windows 11** — `kettle-windows-x86_64.zip` containing `kettle.exe`, the
   `kettle.com` console launcher, and `install.ps1`. Unzip anywhere, then run the bundled installer for
   Start menu + PATH integration:
@@ -331,7 +336,11 @@ cargo run -p kettle -- --list-themes | wc -l   # 500+ (currently 532)
 
 The GPU self-test (`kettle_render::offscreen_selftest`) compiles the WGSL
 shaders on the platform backend (Vulkan/Metal/DX12) and runs an offscreen
-render pass — it executes in CI on Linux, macOS and Windows.
+render pass — it executes in CI on Linux, macOS and Windows. It does not need
+a visible desktop, but full local coverage does need a usable graphics backend
+(the Linux packages above provide the Vulkan loader and Mesa software/hardware
+drivers). The workspace also contains native PTY/ConPTY lifecycle tests. See
+[TESTING.md](TESTING.md) for their prerequisites and soft-skip semantics.
 
 ## Regenerating the app icons (contributors)
 

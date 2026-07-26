@@ -1,11 +1,17 @@
-# Homebrew tap setup
+# Homebrew formula asset (tap not yet published)
 
 Every stable GitHub release includes a ready-to-use `kettle.rb` formula. The
 source tree stores [`kettle.rb.in`](kettle.rb.in), whose version and checksums
 are deliberately unresolved until release CI has built and verified the exact
 macOS and Linux archives.
 
-## One-time setup
+There is currently no public `Reddimus/homebrew-kettle` repository. Therefore
+`brew tap reddimus/kettle` and `brew install reddimus/kettle/kettle` do not
+resolve yet. The generated formula is a verified release asset and the
+instructions below are the remaining maintainer publication workflow, not a
+claim that the tap is live.
+
+## One-time publication setup
 
 1. Create a public `homebrew-kettle` repository under the same GitHub owner.
    Homebrew maps `brew tap reddimus/kettle` to that repository.
@@ -19,7 +25,7 @@ macOS and Linux archives.
 
 3. Commit and push `Formula/kettle.rb`.
 
-Users can then install on macOS or Linuxbrew with:
+Only after those steps succeed can users install on macOS or Linuxbrew with:
 
 ```sh
 brew tap reddimus/kettle
@@ -53,6 +59,7 @@ formula and AUR metadata match their release sidecars:
 scripts/check-package-templates.sh --require-release
 ```
 
-The tap remains the deployment target. The `.in` file in this repository is
-the reviewed source template, and the generated release asset is the only
-formula intended for installation.
+The tap is the intended deployment target. Until it exists, install the macOS
+application or Linux archive from the GitHub release. The `.in` file in this
+repository is the reviewed source template, and the generated release asset is
+the formula intended for eventual tap publication.

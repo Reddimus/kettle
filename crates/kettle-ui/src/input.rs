@@ -520,6 +520,27 @@ pub fn encode_key_event(event: &KeyEvent, mods: ModifiersState, mode: TermMode) 
     encode_kitty_key_event(&event, mods, mode)
 }
 
+/// Encode a synthetic key press, such as an agent-server `send_keys` token.
+///
+/// Synthetic input has no platform [`KeyEvent`], but it must still honor the
+/// focused application's Kitty keyboard negotiation. In particular, Neovim
+/// requests disambiguated Escape (`CSI 27 u`); sending a legacy bare Escape
+/// after that negotiation leaves agent-driven editor commands stuck.
+pub fn encode_key_press(key: &Key, mods: ModifiersState, mode: TermMode) -> Option<Vec<u8>> {
+    if !mode.intersects(TermMode::KITTY_KEYBOARD_PROTOCOL) {
+        return encode(key, None, mods, mode);
+    }
+
+    encode_kitty_key_event(&synthetic_key_event(key, mods), mods, mode)
+}
+
+/// Whether [`encode_key_press`] uses a Kitty sequence instead of the legacy
+/// xterm encoding. Callers use this to avoid applying legacy Backspace/Delete
+/// byte remaps to an already encoded CSI-u sequence.
+pub fn key_press_uses_kitty_sequence(key: &Key, mods: ModifiersState, mode: TermMode) -> bool {
+    kitty_event_uses_sequence(&synthetic_key_event(key, mods), mods, mode)
+}
+
 /// Whether this event is represented by Kitty CSI-u rather than Kettle's
 /// legacy xterm encoder. Pure enhancement flags and legacy-compatible keys can
 /// keep downstream compatibility behavior such as Backspace/Delete remaps.
@@ -593,6 +614,47 @@ impl From<&KeyEvent> for KittyKeyEvent {
             state: event.state,
             repeat: event.repeat,
         }
+    }
+}
+
+fn synthetic_key_event(key: &Key, mods: ModifiersState) -> KittyKeyEvent {
+    let text = match key {
+        Key::Character(text) => Some(text.to_string()),
+        Key::Named(NamedKey::Space) => Some(" ".to_owned()),
+        Key::Named(NamedKey::Enter) => Some("\r".to_owned()),
+        Key::Named(NamedKey::Tab) => Some("\t".to_owned()),
+        Key::Named(NamedKey::Backspace) => Some("\u{8}".to_owned()),
+        Key::Named(NamedKey::Escape) => Some("\u{1b}".to_owned()),
+        _ => None,
+    };
+    let text_with_all_modifiers = match key {
+        Key::Character(_) if mods.control_key() => {
+            let mut encoded = encode(key, text.as_deref(), mods, TermMode::empty())
+                .and_then(|bytes| String::from_utf8(bytes).ok())
+                .unwrap_or_default();
+            // Alt prefixes the PTY encoding with Escape, but is not itself
+            // associated text in the Kitty protocol.
+            if mods.alt_key() {
+                encoded = encoded
+                    .strip_prefix('\u{1b}')
+                    .unwrap_or(&encoded)
+                    .to_owned();
+            }
+            encoded
+        }
+        _ => text.clone().unwrap_or_default(),
+    };
+
+    KittyKeyEvent {
+        logical_key: key.clone(),
+        // Agent tokens describe logical keys rather than a physical keyboard
+        // position, so no layout-derived alternate key is available.
+        key_without_modifiers: key.clone(),
+        text,
+        text_with_all_modifiers,
+        location: KeyLocation::Standard,
+        state: ElementState::Pressed,
+        repeat: false,
     }
 }
 
