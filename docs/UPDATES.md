@@ -139,5 +139,51 @@ v2.34 remain recoverable in the corrected order.
 
 Release CI accepts only a GitHub-verified annotated tag. All required platform
 artifacts must finish before the signing job can access its environment secret.
-Assets are uploaded to a draft and checked against local names and sizes before
-the release becomes public, preventing a partially published update feed.
+The release jobs use pinned runner images and an exact Rust toolchain, and every
+Cargo invocation is lock-file constrained. The protected signer has read-only
+repository permission: it reopens each archive through the bounded
+package-manifest extractor, signs the feed, and passes only the exact finalized
+asset set across an Actions-artifact boundary. A separate publisher has
+repository write permission but no signing secret. It re-verifies the
+signature, canonical sidecars, archives, and package metadata before uploading
+a draft. The GitHub API response must then identify the exact draft tag and
+contain one uploaded asset per expected name with the exact local byte length
+and streamed SHA-256 before the release becomes public. This prevents a
+partial or substituted update feed without exposing the signing key and
+publication credential to the same job.
+
+The macOS universal archive is deliberately outside the signed self-update
+manifest because Kettle does not replace `.app` bundles in place. Its release
+assurance boundary is therefore distinct: the publisher requires the exact
+staged archive and canonical SHA-256 sidecar, regenerates the Homebrew formula
+from those bytes, and verifies the uploaded draft's reported size and streamed
+digest before publication. This does not claim that the macOS archive is bound
+by the updater's Ed25519 signature; adding macOS to that schema would be a
+future defense-in-depth improvement.
+
+## Signing-key rotation
+
+The stable manifest currently has one active Ed25519 trust root and no key
+identifier. That makes an unannounced key replacement intentionally fail closed
+in every installed client. Do not rotate the release-environment secret by
+itself: the finalizer compares its derived public key with
+`packaging/update-public.pem` and will reject the release.
+
+A planned rotation must use a bridge release:
+
+1. Generate the successor key under the release key-custody process; never add
+   its private key to the repository or a developer workstation.
+2. Add multi-key verification and an explicit key identifier to the updater,
+   online installer, manifest generator, checked-in public-key set, and
+   cross-consumer tests. Continue signing the bridge release with the old key.
+3. After the bridge release has been distributed through every supported
+   installer and package channel, select the successor key in the protected
+   release environment and publish a release signed by it.
+4. Retain the old public key for a documented migration window. Remove it only
+   after the supported upgrade floor can verify the successor key.
+
+If the active private key is suspected compromised, disable the release
+environment and updater publication immediately. Existing signatures can no
+longer establish authenticity; recovery must use independently authenticated
+OS/package-manager distribution and a reviewed bridge build, not a manifest
+signed by either the suspected key or a silent replacement.

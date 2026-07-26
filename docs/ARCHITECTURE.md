@@ -933,3 +933,61 @@ Four notable invariants preserved by this flow:
 
 See [`docs/ROADMAP.md`](ROADMAP.md) for the full ledger of
 session-restore hardening.
+
+## Performance evidence boundary
+
+The Windows comparison suite in `scripts/perf/` is a release-evidence system,
+not a collection of ad-hoc timers. The orchestrator creates a new result
+directory, resolves and read-locks every production harness script and
+generated comparator configuration, records their SHA-256 identities, and
+holds those locks until the live run finishes. Release evidence compares a
+clean current checkout with an exact executable from a verified prior release;
+both candidates carry full source-commit and binary identities.
+
+```mermaid
+flowchart LR
+    O["perf-all.ps1<br/>lock harness + configs<br/>capture machine/display/toolchain"] --> S["Williams-balanced<br/>terminal schedules"]
+    S --> P["startup / idle / latency /<br/>throughput / hover / monitor probes"]
+    P --> C["current-user named pipes<br/>nonce + exact client PID<br/>bounded binary/JSON frames"]
+    W["pinned WSL launcher +<br/>pinned vtebench source"] --> R["locked Windows relay<br/>private binary stderr frame"]
+    R --> C
+    C --> E["raw JSON and DAT evidence"]
+    E --> V["retained no-follow snapshot<br/>strict UTF-8 + bounded tree"]
+    V --> G["score.ps1<br/>schema + provenance +<br/>statistics gates"]
+    G --> U["sanitized JSON-only bundle<br/>exact-handle revalidation"]
+```
+
+Several boundaries are deliberate:
+
+- Live result transfer never trusts a predictable temporary pathname.
+  Throughput and vtebench relays use current-user-only named pipes, random
+  capabilities, exact client-process ancestry, bounded frames, strict UTF-8
+  where the payload is textual, and finite connect/read/process deadlines.
+- WSL vtebench inherits terminal output so the emulator receives the real
+  workload, while a separate binary control frame carries only the exit status
+  and bounded DAT evidence back to the locked Windows relay. The Windows WSL
+  launcher, relay, Linux source revision, built binary, and workload runner are
+  part of the recorded toolchain rather than ambient command-name lookups.
+- Scoring opens a bounded, no-follow snapshot of every authoritative input and
+  retains identity locks for the full evaluation. Duplicate or
+  case-equivalent JSON keys, byte-order marks, invalid UTF-8, oversized files,
+  reparse points, and post-open identity changes are fatal.
+- Publication copies only the allowlisted JSON result set into a newly created
+  staging tree. The sanitizer retains exact handles, revalidates the complete
+  tree after the move, and rolls back if a path, stream, child set, or content
+  identity changed. Raw evidence remains private and is never modified in
+  place.
+- Physical-display identity prefers a unique active WMI monitor mapping. The
+  fallback binds one desktop source to one active physical CCD path, requires
+  its exact `GUID_DEVINTERFACE_MONITOR` class, derives a single registry location
+  from that strict path, and validates the complete EDID and CCD identifiers. It
+  never scans registry instances by model; missing, ambiguous, or inconsistent
+  evidence remains unidentified.
+- Display topology is part of the run identity. Only the dedicated transition
+  probe may move Kettle between the two pinned EDID-backed screens; any other
+  topology change invalidates release evidence. Virtual or fallback displays
+  can exercise the manifest and synthetic protocol paths but cannot support a
+  comparative release claim.
+
+`docs/TESTING.md` defines the validation gates and
+`docs/PERFORMANCE.md` defines the claims that may be made from a passing run.

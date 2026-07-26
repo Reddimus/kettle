@@ -178,6 +178,9 @@ Super-key, or run `kettle` from any shell on your `$PATH`.
 Pin a specific version: `KETTLE_VERSION=v2.42.0 sh` instead of `sh`.
 System-wide install: `KETTLE_PREFIX=/usr/local sh` (needs write access).
 Uninstall later: `~/.local/share/kettle/install.sh --uninstall`.
+The one-line path requires a current `curl`, GNU `tar`, and OpenSSL 3.0+
+with Ed25519 support. Current releases require the bounded signed manifest;
+an explicitly pinned legacy release requires its exact bounded checksum.
 
 ### macOS
 
@@ -385,6 +388,22 @@ claude mcp add kettle -- kettle mcp   # register kettle as MCP tools for Claude 
 See [docs/AGENT.md](docs/AGENT.md) for the full surface, methods, and security
 model.
 
+## Performance benchmarking
+
+The Windows release harness compares Kettle with Windows Terminal, Alacritty,
+WezTerm, Rio, and Tabby using balanced raw observations. Five terminals receive
+run-local isolated configs; Windows Terminal is advisory because the installed
+application has no per-launch settings-file switch. Release claims require
+physical EDID-backed displays, both fixed-size and native-display context-menu
+ROI checks, a two-monitor transition probe, end-to-drain throughput, paired
+bootstrap/drift gates, the exact binary from a compatible signed prior release
+as a pinned baseline, and a clean release-candidate build. Smoke and synthetic
+self-tests validate the harness but are not live GPU/display evidence.
+
+Start with [the performance harness guide](scripts/perf/README.md) for exact
+commands, prerequisites, sample counts, statistical margins, and the
+privacy-sanitized publication flow.
+
 ## Documentation
 
 - [docs/GETTING-STARTED.md](docs/GETTING-STARTED.md) — friendly first-run walkthrough (no jargon)
@@ -397,7 +416,7 @@ model.
 - [docs/TESTING.md](docs/TESTING.md) — test suite + CI
 - [docs/AUDIT-2026-07.md](docs/AUDIT-2026-07.md) — Windows reliability investigation + tracked-tree audit
 - [docs/AUDIT-2026-07-22-SEARCH.md](docs/AUDIT-2026-07-22-SEARCH.md) — frame-by-frame search regression evidence + implementation audit
-- [docs/PERFORMANCE.md](docs/PERFORMANCE.md) — measured startup / memory / render numbers
+- [docs/PERFORMANCE.md](docs/PERFORMANCE.md) — measured results and release benchmark methodology
 - [CHANGELOG.md](CHANGELOG.md) — release history
 - [docs/CONFIG.md](docs/CONFIG.md) — every config key
 - [docs/AGENT.md](docs/AGENT.md) — driving kettle from AI agents (`kettle exec` / `kettle ctl` / `kettle mcp`)

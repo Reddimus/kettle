@@ -12,9 +12,17 @@ as a native GPU or PTY pass.
 
 ```sh
 cargo fmt --all --check
-cargo clippy --workspace --all-targets -- -D warnings
-cargo test --workspace
+just gauntlet
 ```
+
+Before a release or supply-chain change, also run:
+
+```sh
+just gauntlet-strict
+```
+
+The strict gate includes the normal gauntlet plus dependency-policy and unused
+dependency checks; install `cargo-deny` and `cargo-machete` locally first.
 
 For full Linux coverage, install the source-build dependencies from
 [INSTALL.md](INSTALL.md#from-source-all-platforms) plus `libvulkan1` and
@@ -28,18 +36,137 @@ Read test output for `no GPU adapter ... skipped` and `no PTY ...` messages.
 Those messages leave the portable suite green by design; record the missing
 coverage instead of treating the exit code alone as platform validation.
 
-Performance changes that claim cross-terminal movement should also run the
-Windows harness and score gate:
+Performance-harness changes first run GUI-free fixtures under both supported
+PowerShell hosts:
 
 ```pwsh
-cargo build --release -p kettle
-pwsh -File scripts/perf/perf-all.ps1 -Label after
-pwsh -File scripts/perf/score.ps1 -ResultsDir target/perf-results/after
+pwsh.exe -NoLogo -NoProfile -File scripts/perf/self-test.ps1
+powershell.exe -NoLogo -NoProfile -File scripts/perf/self-test.ps1
 ```
 
-For before/after work on the same machine, pass
-`-BaselineResultsDir target/perf-results/before` so regressions beyond the
-allowed threshold fail the gate.
+These tests cover strict schemas, deterministic Williams schedules and
+bootstrap output, config generation, startup and throughput marker tampering,
+drift and non-inferiority policy, evidence snapshots, harness provenance,
+sanitization, synthetic EDID/CCD display-identity resolution, and complete
+schema-3 release-scorer rejection paths. The display fixture covers exact-path
+fallback, WMI precedence, and ambiguity, checksum, product, and path tampering.
+These remain synthetic checks: no terminal window, GPU adapter, input
+injection, live monitor registry entry, or monitor transition is exercised.
+
+Use smoke mode to inspect live discovery without claiming a benchmark:
+
+```pwsh
+pwsh -NoLogo -NoProfile -File scripts/perf/perf-all.ps1 `
+  -Mode smoke -ManifestOnly -AllowUnidentifiedDisplay `
+  -Label ("topology-" + (Get-Date -Format 'yyyyMMdd-HHmmss'))
+```
+
+Performance changes that claim cross-terminal movement must run the full
+PowerShell 7 suite with the exact GUI binary from a verified signed prior
+release and again with the clean current checkout, then run the score gate.
+The following assumes the prior archive has already been signature-verified
+and extracted:
+
+```pwsh
+$baselineExe = (Resolve-Path 'C:\path\to\previous-release\kettle.exe').Path
+$baselineTag = (git describe --tags --abbrev=0).Trim()
+$baselineCommit = (git rev-parse "$baselineTag^{commit}").Trim()
+$baselineSha = (Get-FileHash -LiteralPath $baselineExe -Algorithm SHA256).Hash
+$baselineLabel = "baseline-$baselineTag"
+$baselineDir = Join-Path 'target/perf-results' $baselineLabel
+
+pwsh -NoLogo -NoProfile -File scripts/perf/perf-all.ps1 `
+  -Mode release -KettleCandidate baseline -KettleExe $baselineExe `
+  -SkipKettleBuild -ExpectedKettleCommit $baselineCommit `
+  -ExpectedKettleSha256 $baselineSha -Label $baselineLabel
+pwsh -NoLogo -NoProfile -File scripts/perf/perf-all.ps1 `
+  -Mode release -KettleCandidate current -Label release-candidate
+pwsh -NoLogo -NoProfile -File scripts/perf/score.ps1 `
+  -ResultsDir target/perf-results/release-candidate `
+  -BaselineResultsDir $baselineDir `
+  -RequireLatency -RequireMenuHover -RequireVtebench `
+  -RequireMonitorTransition
+```
+
+The baseline requires both pins, a full commit that is an ancestor of the
+current checkout, the exact GUI hash, and the colocated CLI's embedded clean
+commit. The generated configuration paths may differ between the two labels,
+but their bytes and hashes, all comparator terminal binaries, schedules,
+toolchain and harness hashes, and every material environment field must match.
+The Kettle executable identities differ by design. Result labels must be new:
+an existing label directory is rejected even when empty.
+
+Release mode requires all six named terminals and the pinned 12 startup, 6
+idle, 60 latency, 6 throughput, and 200-per-hover-leg samples. It generates
+isolated configs for Kettle, Alacritty, WezTerm, Rio, and Tabby. Windows
+Terminal has no per-launch config-file switch, so it remains descriptive and
+cannot contribute a confirmed win or loss.
+
+The confirmed comparison uses raw Williams-balanced clusters, deterministic
+10,000-resample 90% paired bootstrap intervals, practical margins, and 10%
+trend/20% peak-to-peak drift limits. Kettle needs confirmed primary wins
+against at least three of the four isolated peers with at most one confirmed
+loss. Uncertainty never establishes a metric or peer win, but the authoritative
+3-of-4 metric rule can confirm a peer with one uncertain metric, and the
+3-of-4-peer rule can pass with one uncertain peer. Throughput additionally
+requires all six paired round composites to remain positive after its 5%
+margin.
+
+The release baseline is mandatory. It must match OS, machine, CPU/GPU and
+drivers, power scheme, comparator terminal binaries, isolated config bytes,
+schedules, PowerShell and harness identities, and display topology. Every
+required Kettle metric must pass paired non-inferiority and drift; a missing or
+uncertain result fails.
+
+The release desktop must expose the target as exactly one EDID-backed physical
+monitor and must expose a second eligible physical screen for the mandatory
+monitor-transition probe. Both screens must fit the 1280×800 physical-pixel
+client. The fixed and native-display context-menu ROI legs are mandatory. The
+transition probe chooses the maximum-contrast eligible pair deterministically
+across DPI, refresh, and screen/working-area size, then intentionally moves
+Kettle between those pinned monitors. The scorer independently reconstructs
+that choice and every closed/open sample, direction, capture, DPI, refresh,
+menu, geometry, and summary invariant. Combined and per-state p95 must be at
+most 1000 ms and maximum at most 2000 ms; all six p95/max summaries must also
+stay within `max(100 ms, 25% of baseline)`. Any other switch or topology change
+invalidates the result.
+
+The identity resolver prefers a unique active `WmiMonitorID`. Its fallback
+requires exactly one active physical CCD path for the desktop source, requires
+the returned path's exact `GUID_DEVINTERFACE_MONITOR` class, and reads EDID only
+from the registry key derived from that path. Header, length, extension count,
+per-block checksums, manufacturer, and product must agree; the harness never
+scans registry instances by monitor model.
+Unavailable, ambiguous, or inconsistent evidence stays unidentified and fails
+the release gate.
+
+CI runs the PowerShell 7 and Windows PowerShell 5.1 performance suites as
+separate Windows jobs with independent 30-minute limits. This keeps each
+10,000-resample release-scorer fixture bounded without consuming the
+45-minute Rust/OS matrix budget.
+
+Vtebench validation also requires the pinned WSL launcher and exact registered
+distribution, clean before/after source-state signatures for every terminal
+leg, and canonical path/SHA-256/version identities for Rustup, Cargo,
+`timeout`, `setsid`, and `script`. Its generator and preflight run in a fixed
+pseudo-TTY, all phases are bounded, and timeout cleanup is confined to the
+nonce-marked Linux process group. The typed-latency fixture verifies that raw
+rows match the manifest's exact `cmd.exe` path and hash. The release-score
+self-test includes negative cases for each contract; those remain synthetic
+tests and do not claim a live WSL terminal, GPU, or display pass.
+
+Publish only sanitized JSON evidence:
+
+```pwsh
+pwsh -NoLogo -NoProfile -File scripts/perf/sanitize-results.ps1 `
+  -ResultsDir target/perf-results/release-candidate `
+  -OutputDir target/perf-public-release-candidate
+```
+
+The raw result directory remains private because it contains paths, commands,
+device identifiers, and helper artifacts. See
+[the harness README](../scripts/perf/README.md) for the exact timing boundaries,
+sample design, margins, and limitations.
 
 ## What's covered (automated)
 
@@ -482,6 +609,34 @@ its navigation statuses were Wrapped/Match/Match/Match. These are local Linux
 artifacts, not substitutes for the still-pending workspace/strict gates,
 GitHub CI, or native Windows/macOS checks.
 
+## Supply-chain fixture gates
+
+Release and installer changes have hermetic regression suites in addition to
+the Rust updater tests:
+
+```sh
+python3 scripts/test-update-manifest.py
+python3 scripts/test-verify-release-assets.py
+python3 scripts/test-package-manifest.py
+python3 scripts/test-install-online.py
+```
+
+The current suites cover seven signed-update-manifest cases, six exact
+draft-release cases, fifteen package-manifest cases (one platform-specific
+skip), and nine POSIX online-installer cases. They pin the checked-in Ed25519
+trust root, canonical manifest bytes and sidecars, no-follow same-handle
+artifact hashing, exact local-to-GitHub name/size/SHA-256 binding, bounded
+archive structure and extraction, modern no-downgrade behavior, compatible
+legacy sidecars, and hostile archive/network/parser fixtures.
+
+Release CI keeps the two capabilities separate: the protected signer has the
+Ed25519 secret and read-only repository permission, while the publisher has
+repository write permission and no signing secret. The publisher must
+re-verify the signature, bind every local archive back to the canonical signed
+manifest, regenerate package metadata, and verify the exact remote draft before
+making it public. Run all four fixture suites after changing either job,
+installer parsing, archive handling, or release metadata.
+
 ## Manual / interactive checks
 
 These need a real display and are run by hand (or on real hardware):
@@ -715,15 +870,25 @@ Separate workflows:
 
 - `.github/workflows/audit.yml` — `rustsec/audit-
   check` on every Cargo.lock change + daily 06:00 UTC cron.
+- `.github/workflows/nix.yml` — on changes to the Rust workspace or flake/Cargo
+  packaging inputs, installs upstream Nix, rejects lock-file drift, evaluates
+  every supported system, builds the x86_64 Linux cargo-test check, launches
+  the installed package under Xvfb with Mesa software Vulkan and no
+  `LD_LIBRARY_PATH`, then explicitly builds the package without creating a
+  result symlink. The separately named launch check proves the appended
+  RUNPATH retains Nix's glibc/libgcc paths and contains the dynamically loaded
+  GUI dependencies rather than borrowing them from the runner.
 - `.github/workflows/release.yml` — mandatory Windows, macOS, Linux x86_64,
   and Linux aarch64 packaging on every verified `v*` tag. One protected
-  finalizer validates all archives and sidecars, signs the update manifest,
-  renders Homebrew/AUR metadata from the archive bytes, verifies the exact
-  14-asset draft, and publishes it once.
+  finalizer validates all archives and sidecars, requires the signing secret
+  to match the checked-in production trust root, signs and verifies the update
+  manifest with that root, renders Homebrew/AUR metadata from the archive
+  bytes, verifies the exact 14-asset draft, and publishes it once.
 - `scripts/check-package-templates.sh` — tests deterministic Homebrew/AUR
-  rendering from source `.in` files and, once the matching release exists,
-  checks its generated `kettle.rb` and `PKGBUILD` against the published
-  `.sha256` sidecars. CI runs it on Linux.
+  rendering from source `.in` files. At an exact clean release tag, auto mode
+  also checks its generated `kettle.rb` and `PKGBUILD` against the published
+  `.sha256` sidecars; `--require-release` makes that publication check
+  unconditional. CI runs auto mode on Linux.
 - `scripts/check-linux-installers.sh` — starts from the release binary produced
   by CI, installs into throwaway custom prefixes, and verifies desktop, man,
   icon, helper, and `local-dev` ownership state. It proves that this normal

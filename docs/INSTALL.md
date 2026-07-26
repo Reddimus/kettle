@@ -66,11 +66,25 @@ curl -fsSL https://raw.githubusercontent.com/Reddimus/kettle/main/scripts/instal
 # binary at /usr/local/bin/kettle, launcher under /usr/local/share/applications
 ```
 
-`KETTLE_VERSION` and `KETTLE_PREFIX` compose — pin both at once.
+`KETTLE_VERSION` and `KETTLE_PREFIX` compose — pin both at once. The installer
+requires a current `curl` with `--max-filesize`, GNU `tar`, and OpenSSL 3.0+
+with Ed25519 support. On Alpine, install the GNU `tar` package rather than
+using BusyBox tar.
 
-The script verifies the gzip magic bytes on the downloaded tarball,
-checks the SHA-256 against the published sidecar (every release ships one), and runs
-everything in a `mktemp -d` cleaned up on exit. Uninstall later via
+The script accepts only an exact `vMAJOR.MINOR.PATCH`, caps the archive at
+256 MiB, and caps the signed manifest/signature separately. HTTPS-only
+redirects, finite connection/transfer/low-speed deadlines, curl's declared
+size check, a POSIX file-size resource limit, and a final byte count cover both
+known-length and chunked responses. For v2.35.0 and newer it verifies the
+Ed25519 signature, canonical product/channel/tag/target identity, signed byte
+count, and SHA-256 without permitting a checksum-only downgrade. Older
+releases must provide their exact same-origin SHA-256 sidecar; checksum-less
+releases are refused. Before extraction it permits at most 128 safe regular
+files or directories under one `kettle/` root and 512 MiB unpacked, rejecting
+links, devices, aliases, unsafe permissions, and path traversal. Archives from
+v2.36.0 onward must also contain the inner package manifest; older packages
+remain compatible with their documented checksum-only policy. All work stays
+in a private `mktemp -d` cleaned on exit. Uninstall later via
 `~/.local/share/kettle/install.sh --uninstall`.
 
 ### From source (cloned repo)
@@ -306,9 +320,11 @@ if ($expected -eq $actual) { "OK" } else { "MISMATCH" }
 ```
 
 The one-line installer
-([`scripts/install-online.sh`](../scripts/install-online.sh))
-performs this check automatically. A failed verification aborts the
-install with a clear error.
+([`scripts/install-online.sh`](../scripts/install-online.sh)) uses these
+sidecars only for releases older than the signed-manifest channel. Current
+releases require the independent Ed25519 trust root and additionally bind the
+archive size and platform identity. Any missing or failed required
+verification aborts before extraction.
 
 ## From source (all platforms)
 

@@ -24,6 +24,108 @@ recapturing an otherwise-current terminal snapshot. Cross-terminal
 frame-latency numbers belong to the machine-local benchmark artifact and are
 not claimed by portable unit tests.
 
+## Next release — paired six-terminal and physical-display gates
+
+The Windows harness measures Kettle, Windows Terminal, Alacritty, WezTerm, Rio,
+and Tabby in one interleaved session. `-Mode release` is the publication gate;
+`-Mode smoke` is explicitly non-release evidence and allows shortened/skipped
+probes or manifest-only discovery. Release mode pins PowerShell 7, the
+release-candidate binary and source identity, every executable, exact raw sample
+counts, all workload hashes, and the complete display topology.
+
+Kettle, Alacritty, WezTerm, Rio, and Tabby receive run-local configs with the
+same font, scrollback, colors, opacity, padding, cursor, and disabled effects.
+The installed Windows Terminal has no per-launch settings-file switch, so its
+configuration is recorded but its numbers are advisory. Confirmed release
+claims use only the four isolated peers: Alacritty, WezTerm, Rio, and Tabby.
+
+Startup no longer stops at the first HWND. A common PowerShell 7 child waits for
+an atomic GO marker, paints and flushes a nonce-derived truecolor rectangle,
+requires the terminal's `CSI 5 n` → `CSI 0 n` parser round trip, and atomically
+publishes READY. The timer stops only after exact client placement plus both the
+validated READY marker and painted pixels. Startup polling captures a top-left
+ROI capped at 1024×384 instead of transferring an entire high-resolution frame.
+Process-tree/CIM attribution runs after that endpoint and is reported
+separately, with each placement and readiness milestone retained for audit.
+
+The hover regression has two Kettle legs: the common 1280×800 comparator client
+and a `native-display` client derived from the selected monitor's working area.
+Both use real foreground pointer movement and poll only the context-menu ROI
+over 200 samples in blocks of 20. This software-capture boundary includes
+dispatch, redraw, GPU submission, composition, and PrintWindow cost; it is
+comparative evidence, not input-to-photon measurement.
+
+Release evidence requires the target screen to map to one active EDID-backed
+physical monitor and fit the requested client. The mandatory transition probe
+also requires a second eligible physical screen and measures recovery with the
+context menu closed and open. Display bounds, DPI, refresh, EDID, connection,
+and primary mapping must remain identical from the suite's start to its end.
+The probe deliberately moves Kettle between the two pinned screens; any
+operator-initiated switch or topology change outside it invalidates the entire
+result. A virtual/default 1024×768 desktop can run synthetic or manifest smoke
+checks but cannot produce release evidence.
+
+Physical-monitor identity acquisition is versioned and fail-closed. A unique
+active `WmiMonitorID` mapping remains preferred. If WMI is empty or ambiguous,
+the fallback accepts only one active physical CCD path for the desktop source,
+requires its path to use the exact `GUID_DEVINTERFACE_MONITOR` class, derives
+one registry key from that strict device-interface name, and validates the
+complete EDID header, block count, checksums, manufacturer, and product against
+the CCD identifiers. It never searches the
+registry for a matching model. Missing, duplicate, malformed, or inconsistent
+evidence leaves the screen unidentified and therefore cannot pass a release
+gate.
+
+The vtebench leg pins the Windows WSL engine, one exact registered
+distribution, and the Linux Rustup, Cargo, `timeout`, `setsid`, and `script`
+executables by canonical path, SHA-256, and version. Its clean source/build
+signature is checked before and after every terminal leg, every phase has a
+finite deadline, and timed-out descendants are terminated by their exact Linux
+process group. Typed-latency rows likewise bind the exact Windows workload
+shell path and hash. These identities are baseline compatibility requirements,
+not descriptive metadata.
+
+Startup, idle/fresh-memory, typed latency blocks, and throughput rounds use
+seeded Williams-balanced schedules so position and predecessor effects are
+balanced. Throughput begins only after the exact terminal window acknowledges a
+locked, unpredictable GO capability and records its client-pixel and
+console-cell geometry. It times console-write start through the terminal's DSR
+response, not just writer acceptance. Every visit runs the exact
+ASCII/SGR/Unicode payloads once, and the score derives a paired per-round
+geometric-mean composite.
+
+The release decision comes from raw paired observations. Deterministic
+10,000-resample, 90% paired-cluster bootstrap intervals apply practical margins
+to startup, idle CPU, fresh working set, latency, and throughput. An uncertain
+interval never establishes a win. The authoritative peer rule confirms a win
+from at least three of four confirmed metric wins with at most one confirmed
+loss, so its unused fourth metric may be uncertain; the aggregate rule likewise
+requires at least three confirmed peer wins and at most one confirmed loss.
+Each series must also remain within 10% absolute fitted first-to-last drift and
+20% normalized peak-to-peak spread. Every throughput round must remain positive
+after its 5% margin. A mandatory same-machine baseline must match the
+environment and pass paired non-inferiority for every required metric; because
+that is an all-metrics gate, baseline uncertainty fails closed.
+
+Release scoring pairs a `current` candidate built from the clean checkout with
+a `baseline` candidate taken from a previously verified signed release
+archive. The baseline is an external binary pinned by exact SHA-256 and full
+ancestor commit; both candidates run through the current, byte-identical
+harness and isolated configurations on the same stable machine session.
+
+The raw result directory is private audit evidence. Use
+`sanitize-results.ps1` to publish a separate JSON-only bundle with local paths,
+commands, monitor serials, and device identifiers replaced by run-salted
+tokens. Source/stage identities, reparse rejection, bounded flat-file
+publication, and atomic directory rename keep that sanitizer fail-closed.
+Exact commands, sample counts, margins, validation steps, and caveats
+are in [`scripts/perf/README.md`](../scripts/perf/README.md).
+
+No fresh Windows release comparison is claimed in this section until the full
+suite completes on the stated physical displays. GUI-free PowerShell
+self-tests and manifest smoke runs validate the harness logic, but they do not
+substitute for live GPU, input, or monitor-transition measurements.
+
 ## v2.25.1 — grid cursor-blink regression fix
 
 The grid renderer fix keeps cell-locked pane glyph uploads on their own damage
@@ -264,7 +366,7 @@ with a number against it.
 ### Input latency
 
 `scripts/perf/latency.ps1` — SendInput a key, poll
-`PrintWindow(PW_RENDERFULLCONTENT)` until the client pixels change beyond
+client-only `PrintWindow(PW_RENDERFULLCONTENT)` until the pixels change beyond
 an auto-calibrated blink-noise floor. Capture cost bounds resolution at
 ~5–15 ms, so these are **comparative between terminals captured the same
 way**, not absolute input-to-photon numbers. The probe requires an
@@ -280,26 +382,57 @@ needs an interactive session.
 ### Methodology / reproducing
 
 ```pwsh
-cargo build --release
-pwsh -File scripts/perf/throughput.ps1       # all four terminals
-pwsh -File scripts/perf/startup-idle.ps1
-pwsh -File scripts/perf/latency.ps1
-pwsh -File scripts/perf/vtebench-wsl.ps1     # vtebench inside WSL panes
+pwsh -NoLogo -NoProfile -File scripts/perf/perf-all.ps1 `
+  -Mode release -KettleCandidate current -Label release-candidate
+pwsh -NoLogo -NoProfile -File scripts/perf/score.ps1 `
+  -ResultsDir target/perf-results/release-candidate `
+  -BaselineResultsDir target/perf-results/baseline-previous-release `
+  -RequireLatency -RequireMenuHover -RequireVtebench `
+  -RequireMonitorTransition
 ```
 
-Caveats pinned in `scripts/perf/README.md`: GDI captures cannot see
-flip-model swapchains (hence PrintWindow), `wt.exe` may route into an
-existing WindowsTerminal process (the harness never kills pre-existing
-pids), thermals on a Surface-class device make medians-of-5 the floor for
-honest numbers.
+The prior release baseline must first be acquired and pinned with the
+`-KettleCandidate baseline`, `-KettleExe`, `-SkipKettleBuild`,
+`-ExpectedKettleCommit`, and `-ExpectedKettleSha256` arguments documented in
+[`scripts/perf/README.md`](../scripts/perf/README.md). The orchestrator builds
+the current candidate, creates and locks isolated configs, and runs probes in
+the pinned order. Do not replace it with direct probe invocations for release
+evidence. A manifest-only smoke is:
+
+```pwsh
+pwsh -NoLogo -NoProfile -File scripts/perf/perf-all.ps1 `
+  -Mode smoke -ManifestOnly -AllowUnidentifiedDisplay `
+  -Label ("topology-" + (Get-Date -Format 'yyyyMMdd-HHmmss'))
+```
+
+That smoke validates discovery and schema paths only. It does not exercise a
+native GPU window or physical-display interaction.
 
 ### Current performance gate
 
-New Windows performance work should publish a same-machine `perf-all.ps1` result
-and run `scripts/perf/score.ps1` on it. The score gate normalizes throughput,
-startup, idle CPU, and memory against the best terminal in the run; it fails if
-kettle is outside the top half, beats fewer than two peer terminals, or regresses
-more than the configured threshold when a baseline directory is supplied.
+New Windows performance work should publish a sanitized bundle derived from a
+clean same-machine release run. The confirmed gate excludes advisory Windows
+Terminal and uses paired bootstrap intervals against the four isolated peers.
+It requires at least three confirmed primary peer wins, at most one confirmed
+loss, all throughput rounds positive after the 5% margin, bounded drift, both
+context-menu legs, vtebench, two-screen monitor-transition evidence, and stable
+start/end display topology. Uncertain evidence never contributes a confirmed
+win, but an unused fourth metric or peer may be uncertain under those explicit
+3-of-4 and 3-of-4-peer count rules. When a compatible baseline is supplied,
+every required Kettle metric must be non-inferior; missing or uncertain
+baseline evidence fails closed.
+
+For monitor-transition evidence, every eligible display pair is ranked by
+meaningful DPI, refresh, and screen/working-area size contrast, with an ordinal
+device-pair tie-break. The scorer reconstructs that ranking from start topology
+and validates exact closed/open sample keys, alternating endpoints, captures,
+DPI/refresh readings, menu state, stable geometry, and all raw-derived
+summaries. Each state and the combined result must keep p95 at or below 1000 ms
+and maximum at or below 2000 ms; all six summaries must also remain within
+`max(100 ms, 25% of baseline)` against the mandatory same-machine baseline.
+Fresh-memory and idle-CPU evidence likewise requires unique,
+nonoverlapping included/excluded PID sets and identical included membership
+before and after the idle interval.
 
 Linux desktop performance work should also run `just linux-perf` when Terminator
 and Ghostty are installed. That gate is intentionally narrower than the Windows
@@ -397,8 +530,8 @@ for each invocation.
 
 > Captured at v1.3.8 (the Linux box wasn't available for a re-bench at later
 > cuts). There's been no major architectural change to the render/startup paths
-> since, so these should still be in the same ballpark on the current release
-> (v2.18.x) — but treat them as "what we measured then" and run
+> since, so these may still be in the same ballpark on a current release —
+> whose version may differ — but treat them as "what we measured then" and run
 > `scripts/bench.sh` for a fresh data point on your own machine.
 
 | Measurement | Value | Notes |
@@ -412,7 +545,7 @@ for each invocation.
 
 > Captured on a Surface Book 3 (Intel Iris Plus Graphics, x64,
 > Windows 11 build 26200) the day the v1.46.0 release was cut (a fixed data
-> point — the current release is v2.18.x; re-run `scripts/bench.ps1` for fresh
+> point — the current release may differ; re-run `scripts/bench.ps1` for fresh
 > numbers). wgpu
 > picked the **Vulkan** backend (Intel driver, integrated GPU) — the
 > same selection a user with the same hardware would see. Wall-clock

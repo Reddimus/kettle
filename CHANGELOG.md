@@ -98,6 +98,122 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
     block-cursor glyph vertices are retained too and are refreshed on glyph,
     geometry, style, font, or shared-atlas damage.
 
+  ### Added
+  - Expanded the Windows performance harness from four terminals to Kettle,
+    Windows Terminal, Alacritty, WezTerm, Rio, and Tabby. Executable discovery
+    is centralized; every probe records binary, version, configuration, run,
+    schedule, and source/build provenance.
+  - Added explicit `release` and `smoke` harness modes. Release mode pins all
+    probes and sample counts and rejects skips, unidentified displays, custom
+    Kettle config, or non-release toolchains. Manifest-only smoke records
+    discovery and topology without presenting it as live benchmark evidence.
+  - Added run-local isolated configs for Kettle, Alacritty, WezTerm, Rio, and
+    Tabby with a common font, palette, scrollback, padding, opacity, cursor, and
+    disabled effects/update/telemetry settings. Windows Terminal is recorded as
+    advisory because it has no supported per-launch settings-file switch.
+  - Added deterministic seeded Williams-balanced schedules for startup,
+    idle/fresh-memory, latency blocks, and throughput rounds.
+  - Added a controlled startup-ready protocol: an atomic GO marker, flushed
+    truecolor paint, `CSI 5 n` → `CSI 0 n` parser round trip, atomic READY
+    marker, and validated painted ROI now define the startup boundary.
+    Process-tree attribution is deferred until after that endpoint and recorded
+    separately so CIM latency cannot inflate startup.
+  - Added a locked, unpredictable throughput GO capability. Workloads cannot
+    begin before the exact attributed window is sized and focused, and each
+    observation retains client-pixel, console-cell, and handshake evidence.
+  - Added high-DPI context-menu latency probes for both the common 1280×800
+    comparator window and a native-display window derived from the active
+    monitor. Both capture only the context-menu ROI over 200 blocked samples.
+  - Added a two-screen physical-monitor transition probe that measures
+    capturable `ui_geometry` recovery with Kettle's context menu closed and
+    open and invalidates results if topology changes.
+  - Added raw paired release statistics: deterministic 10,000-resample 90%
+    bootstrap intervals, practical margins, Theil-Sen/peak-to-peak drift gates,
+    confirmed isolated-peer policy, strict per-round throughput margins, and
+    mandatory matched current-versus-baseline non-inferiority. The deterministic
+    bootstrap hot loop uses a pinned in-memory C# kernel with cross-engine
+    fixtures that preserve the prior algorithm byte-for-byte.
+  - Added JSON-only evidence sanitization. Public bundles replace local paths,
+    commands, monitor serials, and device identifiers with run-salted tokens
+    and never copy raw logs, `.dat`, screenshots, or artifact directories.
+    Flat bounded staging, retained identity checks, reparse rejection, exact
+    cleanup, and atomic publication prevent path-swap escape.
+  - Added complete GUI-free performance-harness integration fixtures under
+    PowerShell 7 and Windows PowerShell 5.1, including positive schema-3
+    release evidence and tampered baseline/provenance/geometry cases.
+  - Added bounded no-follow evidence snapshots with strict BOM-free UTF-8,
+    JSON depth/node/byte limits, duplicate-key rejection, retained identity
+    locks, and deterministic hashes. Release runs also hash and read-lock every
+    production harness script and require current/baseline harness identity.
+  - Replaced the predictable throughput sample-file handoff with a bounded,
+    nonce-authenticated, current-user named-pipe protocol with finite timeouts
+    and client-process ancestry validation.
+  - Added a committed Nix flake lock and path-scoped CI that checks the locked
+    flake and builds the x86_64 Linux package.
+
+  ### Benchmark, packaging, and release hardening
+  - Windows performance runs now retain a unique active `WmiMonitorID` as the
+    preferred physical-display identity and use a versioned, fail-closed CCD
+    fallback when WMI is absent or ambiguous. The fallback reads only the exact
+    registry EDID named by the active device-interface path, validates every
+    block plus CCD manufacturer/product agreement, rejects ambiguity and
+    tampering, and never searches stale monitor instances by model.
+  - Homebrew's macOS install now writes bundled documentation through a
+    platform-independent share path instead of a Linux-only local variable.
+  - Nix outputs no longer apply Linux-only libraries and `patchelf` fixups on
+    Darwin, advertise the x86_64 Darwin platform dropped by nixpkgs unstable,
+    or omit the shell/process tools required by sandboxed PTY tests.
+  - Nix Linux packages now include winit's dynamically loaded Xcursor and
+    XInput2 libraries without replacing Nix's glibc/libgcc RUNPATH. A
+    clean-environment Xvfb and Mesa software-Vulkan launch check verifies the
+    installed binary creates a visible rendered window.
+  - Windows comparator discovery now recognizes Rio's current Winget MSI
+    layout (`Program Files\Rio\rio.exe`) as well as its legacy `bin` layout.
+  - Performance runs now force a separate Kettle process and stop attributing
+    unrelated Windows Terminal tabs to one benchmark window's memory/idle CPU.
+    Workload child processes are also excluded from fresh and post-flood
+    terminal-tree memory/CPU accounting.
+  - Windows benchmark input/capture now opts into per-monitor-v2 DPI awareness,
+    keeping physical Kettle geometry, pointer targets, and PrintWindow pixels
+    aligned on scaled 4K/5K displays. Startup and menu polling use bounded ROIs
+    rather than transferring a full high-resolution frame on every poll.
+  - Throughput now measures console-write start through the terminal's DSR
+    parser-drain response. Writer acceptance remains diagnostic and cannot make
+    a backlogged terminal look faster.
+  - Release scoring now fails closed on missing/inconsistent raw samples,
+    censored evidence beyond policy, uncertain bootstrap intervals, drift,
+    altered payloads, non-UTF-8 output, dirty/unknown source identity, changed
+    configs, unstable display topology, or incomplete native-display and
+    monitor-transition evidence. Tabby's command probes retain their bounded
+    native confirmation and byte-verified, read-locked one-use wrapper.
+  - Public-evidence publication now retains the exact staging object through
+    its handle-relative rename, revalidates the exact flat set, alternate data
+    streams, and hashes after the move, and rolls the same object back if any
+    post-publication invariant fails.
+  - Release signing now rejects a secret whose Ed25519 public key differs from
+    the checked-in production trust root and verifies the manifest with that
+    pinned key, preventing a misconfigured or rotated secret from publishing
+    updates that every shipped client would reject.
+  - Release archives are now reopened and validated through one bounded,
+    manifest-aware extractor in the protected finalizer. It rejects link,
+    device, sparse, PAX override, traversal, alias, prefix-conflict,
+    permission, count, and expanded-size hazards without a raw `tar` or
+    `Expand-Archive` pass, and the manifest generator shares the updater's
+    256 MiB artifact ceiling.
+  - The Linux one-line installer now bounds every response, requires
+    Ed25519 verification for modern releases without a checksum downgrade,
+    binds the canonical manifest target/name/size/hash tuple, and preflights
+    the authenticated archive before extracting only regular files and
+    directories into a private root. Legacy releases without an exact
+    same-origin checksum are refused rather than executed unauthenticated.
+  - Release builds now use pinned runner images, an exact Rust toolchain, and
+    `--locked` Cargo commands. The protected signer is read-only and hands its
+    exact finalized set to a separate publisher that has no signing secret.
+    Before publication that job re-verifies the signature, canonical
+    sidecars, archives, package metadata, draft identity/state, and the exact
+    14 local byte lengths and streamed SHA-256 digests reported by GitHub,
+    closing the prior shared-credential and name-and-size-only gaps.
+
 ## [2.42.0] — 2026-07-24
 
   ### Added

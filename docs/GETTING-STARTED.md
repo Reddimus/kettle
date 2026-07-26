@@ -14,6 +14,8 @@ built-in **Settings** panel for the common things.
   ```sh
   curl -fsSL https://raw.githubusercontent.com/Reddimus/kettle/main/scripts/install-online.sh | sh
   ```
+  This path needs a current `curl`, GNU `tar`, and OpenSSL 3.0 or newer;
+  it stops before extraction if the bounded signed-release checks cannot run.
   Then press **Super** and type **kettle**.
 - **macOS** — download `kettle-macos-universal.zip`, unzip, drag `kettle.app`
   to Applications, right-click → Open the first time.
