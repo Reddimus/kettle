@@ -300,7 +300,7 @@ mod tests {
     use super::*;
 
     fn tmp(label: &str) -> PathBuf {
-        let d = std::env::temp_dir().join(format!(
+        let d = crate::test_scratch_root().join(format!(
             "kettle-presence-{label}-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()

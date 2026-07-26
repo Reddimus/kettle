@@ -809,18 +809,7 @@ fn install_panic_hook() {
         }
 
         let path = crash_log_path(when, std::process::id(), |k| std::env::var(k).ok());
-        if let Some(parent) = path.parent() {
-            let _ = std::fs::create_dir_all(parent);
-        }
-        if let Ok(mut f) = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&path)
-            .and_then(|file| {
-                kettle_state::restrict_private_file(&file)?;
-                Ok(file)
-            })
-        {
+        if let Ok(mut f) = kettle_state::open_private_file_append(&path) {
             use std::io::Write as _;
             let _ = f.write_all(report.as_bytes());
         }
@@ -1796,56 +1785,15 @@ fn default_remote_file() -> Option<std::path::PathBuf> {
 /// local user read every command ever sent until the watching kettle process
 /// consumes and truncates the file.
 ///
-/// Unix: parent directory is created (if needed) at `0700` and the file at
-/// `0600`, set explicitly rather than relying on the umask. `set_permissions`
-/// runs even on an already-existing file — `OpenOptions::mode` only applies
-/// the mode bits when the OS actually creates a new inode, so a file left
-/// over from before this fix (or from a custom `--remote-file` path with a
-/// wider ambient umask) is tightened on next use too, not just newly created
-/// files.
-/// Windows: no mode bits to set — NTFS has no umask/mode-word concept. The
-/// file inherits its ACL from the parent directory, which for the default
-/// path is `%APPDATA%\kettle` — already scoped to the owning user by Windows'
-/// default per-profile ACL. This assumption only holds for that default
-/// path; a `--remote-file` pointed at a directory with a loosened ACL is not
-/// re-tightened here.
+/// Unix: missing parent directories are created at `0700` and the file at
+/// `0600`, set explicitly rather than relying on the umask. Existing parent
+/// chains must not be writable by an untrusted user, while an existing file is
+/// tightened on next use too.
+/// Windows: the file is created with a protected current-user DACL rather than
+/// inheriting the parent ACL. Existing reparse-point leaves and paths beneath
+/// reparse-point parents are rejected, including custom `--remote-file` paths.
 fn open_remote_command_file(path: &std::path::Path) -> std::io::Result<std::fs::File> {
-    if let Some(parent) = path.parent() {
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::DirBuilderExt;
-            std::fs::DirBuilder::new()
-                .recursive(true)
-                .mode(0o700)
-                .create(parent)?;
-            // As with the file mode below: `DirBuilder::mode` only governs
-            // permissions the OS assigns at creation time (and is still
-            // subject to the process umask for the bits it does set). A
-            // parent directory left over from before this fix — or one that
-            // already existed for an unrelated reason — is untouched by
-            // `create()`, so pin it down explicitly too.
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700))?;
-        }
-        #[cfg(not(unix))]
-        {
-            std::fs::create_dir_all(parent)?;
-        }
-    }
-    let mut options = std::fs::OpenOptions::new();
-    options.create(true).append(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
-    }
-    let file = options.open(path)?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
-    }
-    Ok(file)
+    kettle_state::open_private_file_append(path)
 }
 
 /// Resolve the effective config file path from
@@ -2998,9 +2946,9 @@ mod tests {
 
     /// `open_remote_command_file` must not rely on the process umask: the
     /// remote-command file carries literal `--remote-send TEXT` payloads, so
-    /// on a shared Unix host with a `022` umask it must still come out
-    /// owner-only (0600), inside an owner-only (0700) parent directory,
-    /// rather than the world-readable 644/755 the umask alone would produce.
+    /// it must come out owner-only (0600), inside newly created owner-only
+    /// (0700) parent directories. A pre-existing untrusted writable ancestor
+    /// is rejected rather than chmodded through a caller-controlled path.
     /// Gated `#[cfg(unix)]` for the same reason as
     /// `scripts_menu_shot_exists_and_executable` above: `PermissionsExt::mode`
     /// doesn't exist on non-Unix targets.
@@ -3024,11 +2972,10 @@ mod tests {
         let nested_parent = base.join("nested").join("kettle");
         let path = nested_parent.join("remote.cmd");
 
-        // Simulate a permissive `022` umask by starting from wide-open perms
-        // on a freshly-made ancestor dir; the helper must still tighten what
-        // it creates below that ancestor regardless of the ambient umask.
+        // The existing anchor is trusted. Missing descendants are created
+        // relative to verified directory handles and restored to exact 0700.
         std::fs::create_dir_all(&base).unwrap();
-        std::fs::set_permissions(&base, std::fs::Permissions::from_mode(0o777)).unwrap();
+        std::fs::set_permissions(&base, std::fs::Permissions::from_mode(0o700)).unwrap();
 
         let file = open_remote_command_file(&path).expect("open_remote_command_file");
         drop(file);
@@ -3061,6 +3008,18 @@ mod tests {
             "re-opening a pre-existing wider-mode file must re-tighten it to 0600, got {reopened_mode:o}"
         );
 
+        let untrusted = base.with_extension("untrusted");
+        std::fs::create_dir_all(&untrusted).unwrap();
+        std::fs::set_permissions(&untrusted, std::fs::Permissions::from_mode(0o777)).unwrap();
+        let error = open_remote_command_file(&untrusted.join("nested/remote.cmd"))
+            .expect_err("world-writable ancestor must be rejected");
+        assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
+        assert!(
+            !untrusted.join("nested").exists(),
+            "rejection must happen before mutating an untrusted ancestor"
+        );
+
         let _ = std::fs::remove_dir_all(&base);
+        let _ = std::fs::remove_dir_all(&untrusted);
     }
 }

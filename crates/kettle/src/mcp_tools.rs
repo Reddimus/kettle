@@ -562,11 +562,7 @@ fn ctl_call(
 ) -> Value {
     let mut client = match Client::discover(None) {
         Ok(c) => c,
-        Err(e) => {
-            return error_result(&format!(
-                "{e}\n(start kettle with `kettle --agent-server full` for this tool)"
-            ));
-        }
+        Err(e) => return ctl_discovery_error(&e),
     };
     let response = match cancelled {
         Some(cancelled) => client.call_cancellable(method, params, cancelled),
@@ -583,6 +579,12 @@ fn ctl_call(
         }
         Err(e) => error_result(&format!("{method}: {e}")),
     }
+}
+
+fn ctl_discovery_error(error: &impl std::fmt::Display) -> Value {
+    error_result(&format!(
+        "{error}\n(start kettle with `kettle --agent-server full` for this tool)"
+    ))
 }
 
 /// An MCP error tool-result (isError = true).
@@ -847,8 +849,9 @@ mod tests {
 
     #[test]
     fn ctl_tool_without_server_is_actionable_error() {
-        // No server running in the unit-test environment → actionable isError.
-        let r = call_tool(&json!({"name": "kettle_list_panes", "arguments": {}}));
+        // Exercise the deterministic discovery-failure formatter directly:
+        // a developer may have a real Kettle server running beside this test.
+        let r = ctl_discovery_error(&"no server");
         assert_eq!(r["isError"], true);
         assert!(
             r["content"][0]["text"]

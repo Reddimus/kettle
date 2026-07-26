@@ -56,6 +56,22 @@ const DIRECTORY_RECORD_PREFIX: &str = "kettle-session-";
 const DIRECTORY_RECORD_SUFFIX: &str = ".cast";
 static RECORD_SEQUENCE: AtomicU32 = AtomicU32::new(0);
 
+#[cfg(all(test, windows))]
+pub(crate) fn test_tempdir() -> tempfile::TempDir {
+    let base = std::env::var_os("LOCALAPPDATA")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .expect("Windows tests require LOCALAPPDATA or USERPROFILE");
+    tempfile::Builder::new()
+        .prefix("kettle-core-test-")
+        .tempdir_in(base)
+        .expect("create test directory in the user-private profile")
+}
+
+#[cfg(all(test, not(windows)))]
+pub(crate) fn test_tempdir() -> tempfile::TempDir {
+    tempfile::tempdir().expect("create test directory")
+}
+
 /// Where a GUI development recording should be written.
 ///
 /// Explicit files preserve the historical overwrite behavior. Directory
@@ -123,8 +139,12 @@ impl Recorder {
                 Ok((recorder, path.clone()))
             }
             RecordingTarget::Directory(directory) => {
-                prepare_private_directory(directory)?;
                 let (path, file) = create_unique_private_recording(directory)?;
+                if let Err(error) = prepare_private_directory(directory) {
+                    drop(file);
+                    let _ = std::fs::remove_file(&path);
+                    return Err(error);
+                }
                 let recorder =
                     match Self::start_with_file(file, cols, rows, raw_input, MAX_RECORD_BYTES) {
                         Ok(recorder) => recorder,
@@ -386,13 +406,8 @@ impl Drop for Recorder {
 /// Open `path` for explicit-file recording. Lock before truncating so two
 /// launches targeting the same path cannot corrupt an active trace.
 fn open_private(path: &Path) -> std::io::Result<File> {
-    let mut opts = std::fs::OpenOptions::new();
-    opts.create(true).read(true).write(true).truncate(false);
-    configure_private_file_open(&mut opts, true);
-    let mut file = opts.open(path)?;
-    ensure_regular_file(&file, path)?;
+    let mut file = kettle_state::open_private_file(path)?;
     fs4::FileExt::try_lock(&file).map_err(std::io::Error::from)?;
-    set_private_file_mode(&file)?;
     file.set_len(0)?;
     file.seek(std::io::SeekFrom::Start(0))?;
     Ok(file)
@@ -409,14 +424,10 @@ fn create_unique_private_recording(directory: &Path) -> std::io::Result<(PathBuf
         let path = directory.join(format!(
             "{DIRECTORY_RECORD_PREFIX}{seconds}-{pid}-{sequence}{DIRECTORY_RECORD_SUFFIX}"
         ));
-        let mut opts = std::fs::OpenOptions::new();
-        opts.create_new(true).read(true).write(true);
-        configure_private_file_open(&mut opts, true);
-        match opts.open(&path) {
+        match kettle_state::create_private_file_new(&path) {
             Ok(file) => {
                 if let Err(error) = ensure_regular_file(&file, &path)
                     .and_then(|()| fs4::FileExt::try_lock(&file).map_err(std::io::Error::from))
-                    .and_then(|()| set_private_file_mode(&file))
                 {
                     drop(file);
                     let _ = std::fs::remove_file(&path);
@@ -452,10 +463,17 @@ fn prepare_private_directory(directory: &Path) -> std::io::Result<()> {
             ));
         }
         Ok(_) => {}
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                format!(
+                    "private recording directory was not created: {}",
+                    directory.display()
+                ),
+            ));
+        }
         Err(error) => return Err(error),
     }
-    std::fs::create_dir_all(directory)?;
 
     let mut options = std::fs::OpenOptions::new();
     options.read(true);
@@ -492,26 +510,6 @@ fn ensure_regular_file(file: &File, path: &Path) -> std::io::Result<()> {
     ))
 }
 
-fn configure_private_file_open(options: &mut std::fs::OpenOptions, create: bool) {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt as _;
-        if create {
-            options.mode(0o600);
-        }
-        options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
-    }
-    #[cfg(windows)]
-    {
-        use std::os::windows::fs::OpenOptionsExt as _;
-        use windows_sys::Win32::Storage::FileSystem::FILE_FLAG_OPEN_REPARSE_POINT;
-        let _ = create;
-        options.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
-    }
-    #[cfg(not(any(unix, windows)))]
-    let _ = (options, create);
-}
-
 fn configure_private_directory_open(options: &mut std::fs::OpenOptions) {
     #[cfg(unix)]
     {
@@ -528,10 +526,6 @@ fn configure_private_directory_open(options: &mut std::fs::OpenOptions) {
     }
     #[cfg(not(any(unix, windows)))]
     let _ = options;
-}
-
-fn set_private_file_mode(file: &File) -> std::io::Result<()> {
-    kettle_state::restrict_private_file(file)
 }
 
 fn set_private_directory_mode(file: &File) -> std::io::Result<()> {
@@ -670,10 +664,7 @@ fn prune_recording_directory(
         if total_bytes <= max_bytes && total_files <= max_files {
             break;
         }
-        let mut options = std::fs::OpenOptions::new();
-        options.read(true).write(true);
-        configure_private_file_open(&mut options, false);
-        let file = match options.open(&candidate.path) {
+        let file = match kettle_state::open_existing_private_file(&candidate.path) {
             Ok(file) => file,
             Err(_) => continue,
         };
@@ -744,7 +735,7 @@ pub fn printable_token(text: &str, raw: bool) -> String {
 mod tests {
     use super::{
         RecordStatus, Recorder, RecordingTarget, event_line, header_line, printable_token,
-        prune_recording_directory,
+        prune_recording_directory, test_tempdir,
     };
     use std::io::Write as _;
 
@@ -797,7 +788,7 @@ mod tests {
     #[test]
     fn record_output_stitches_split_utf8_across_chunks() {
         use std::io::Read;
-        let temp = tempfile::tempdir().unwrap();
+        let temp = test_tempdir();
         let path = temp.path().join("utf8.cast");
         {
             let mut rec = super::Recorder::start(&path, 80, 24, false).expect("start");
@@ -833,7 +824,7 @@ mod tests {
     #[test]
     fn writes_a_replayable_asciicast_file() {
         use std::io::Read;
-        let temp = tempfile::tempdir().unwrap();
+        let temp = test_tempdir();
         let path = temp.path().join("replay.cast");
         {
             let mut rec = super::Recorder::start(&path, 80, 24, false).expect("start recorder");
@@ -867,7 +858,7 @@ mod tests {
 
     #[test]
     fn directory_target_creates_unique_locked_private_casts() {
-        let temp = tempfile::tempdir().unwrap();
+        let temp = test_tempdir();
         let directory = temp.path().join("missing records");
         let target = RecordingTarget::Directory(directory.clone());
         let (first, first_path) = Recorder::start_target(&target, 80, 24, false).unwrap();
@@ -902,7 +893,7 @@ mod tests {
 
     #[test]
     fn explicit_active_file_is_not_truncated_by_a_second_recorder() {
-        let temp = tempfile::tempdir().unwrap();
+        let temp = test_tempdir();
         let path = temp.path().join("explicit.cast");
         let mut first = Recorder::start(&path, 80, 24, false).unwrap();
         first.record_output(b"preserve me");
@@ -935,7 +926,7 @@ mod tests {
     fn explicit_recording_refuses_a_symbolic_link_without_touching_its_target() {
         use std::os::unix::fs::symlink;
 
-        let temp = tempfile::tempdir().unwrap();
+        let temp = test_tempdir();
         let target = temp.path().join("target.cast");
         let link = temp.path().join("record.cast");
         std::fs::write(&target, b"do not truncate").unwrap();
@@ -958,7 +949,7 @@ mod tests {
     fn directory_recording_refuses_a_symbolic_link_without_creating_a_cast() {
         use std::os::unix::fs::symlink;
 
-        let temp = tempfile::tempdir().unwrap();
+        let temp = test_tempdir();
         let target = temp.path().join("actual");
         let link = temp.path().join("records");
         std::fs::create_dir(&target).unwrap();
@@ -971,7 +962,7 @@ mod tests {
 
     #[test]
     fn session_limit_stops_before_a_partial_event() {
-        let temp = tempfile::tempdir().unwrap();
+        let temp = test_tempdir();
         let path = temp.path().join("bounded.cast");
         let file = super::open_private(&path).unwrap();
         let max_bytes = (header_line(80, 24).len() + 180) as u64;
@@ -992,7 +983,7 @@ mod tests {
 
     #[test]
     fn retention_preserves_active_and_preexisting_casts() {
-        let temp = tempfile::tempdir().unwrap();
+        let temp = test_tempdir();
         let directory = temp.path();
         let legacy = directory.join("session-1718900000.cast");
         std::fs::write(&legacy, b"legacy recording").unwrap();
@@ -1020,7 +1011,7 @@ mod tests {
 
     #[test]
     fn retention_enforces_the_byte_cap() {
-        let temp = tempfile::tempdir().unwrap();
+        let temp = test_tempdir();
         for index in 0..3 {
             let path = temp
                 .path()

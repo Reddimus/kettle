@@ -16,18 +16,21 @@
 //! do inconsistently across platforms.
 //!
 //! **Privacy.** A pasted screenshot is arbitrary user content — it can contain
-//! anything that was on screen. Files are written into a per-process directory
-//! created with owner-only permissions, are bounded in count and total bytes so
-//! a paste loop cannot fill the disk, and are deleted when kettle exits. A
-//! startup sweep removes directories left behind by a previous crash, so
-//! captured screen content does not accumulate indefinitely.
+//! anything that was on screen. Files use owner-only permissions inside a
+//! per-process scratch directory, are bounded in count and total bytes so a
+//! paste loop cannot fill the disk, and are deleted when kettle exits. Windows
+//! uses per-user Local App Data because the process temp directory can grant
+//! sandbox principals delete-child access; other platforms use the OS temp
+//! directory. A startup sweep removes directories left behind by a previous
+//! crash, so captured screen content does not accumulate indefinitely.
 
 use std::io;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-/// Directory-name prefix inside the OS temp dir. Also the sweep key, so it must
-/// stay stable across versions or old directories become unreclaimable.
+/// Directory-name prefix inside the platform scratch root. Also the sweep key,
+/// so it must stay stable across versions or old directories become
+/// unreclaimable.
 const DIR_PREFIX: &str = "kettle-paste-";
 
 /// Per-session ceilings. A paste is a deliberate user action, so these are
@@ -58,8 +61,11 @@ pub(crate) struct PastedImages {
 
 impl PastedImages {
     pub(crate) fn new() -> Self {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |duration| duration.as_nanos());
         Self {
-            dir: std::env::temp_dir().join(format!("{DIR_PREFIX}{}", std::process::id())),
+            dir: scratch_root().join(format!("{DIR_PREFIX}{}-{nonce}", std::process::id())),
             seq: 0,
             files: 0,
             bytes: 0,
@@ -115,7 +121,6 @@ impl PastedImages {
             ));
         }
 
-        create_private_dir(&self.dir)?;
         self.seq += 1;
         let path = self.dir.join(format!("{:04}.png", self.seq));
         let file = create_private_file(&path)?;
@@ -175,8 +180,7 @@ impl PastedImages {
 /// cleanup ran. Age-gated rather than PID-gated: PIDs are reused, and probing
 /// liveness would race a sibling instance that is mid-paste.
 pub(crate) fn sweep_stale() {
-    let tmp = std::env::temp_dir();
-    let own = format!("{DIR_PREFIX}{}", std::process::id());
+    let tmp = scratch_root();
     let Ok(entries) = std::fs::read_dir(&tmp) else {
         return;
     };
@@ -184,7 +188,7 @@ pub(crate) fn sweep_stale() {
     for entry in entries.flatten() {
         let name = entry.file_name();
         let Some(name) = name.to_str() else { continue };
-        if !name.starts_with(DIR_PREFIX) || name == own {
+        if !name.starts_with(DIR_PREFIX) {
             continue;
         }
         let stale = entry
@@ -199,32 +203,18 @@ pub(crate) fn sweep_stale() {
     }
 }
 
-fn create_private_dir(dir: &Path) -> io::Result<()> {
-    #[cfg(unix)]
+fn scratch_root() -> PathBuf {
+    #[cfg(windows)]
     {
-        use std::os::unix::fs::{DirBuilderExt as _, PermissionsExt as _};
-        // `mode` only applies when this call creates the directory, so the
-        // permissions are re-asserted for the already-exists case.
-        std::fs::DirBuilder::new()
-            .recursive(true)
-            .mode(0o700)
-            .create(dir)?;
-        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?;
+        if let Some(local) = std::env::var_os("LOCALAPPDATA") {
+            return PathBuf::from(local).join("kettle").join("paste");
+        }
     }
-    #[cfg(not(unix))]
-    std::fs::create_dir_all(dir)?;
-    Ok(())
+    std::env::temp_dir()
 }
 
 fn create_private_file(path: &Path) -> io::Result<std::fs::File> {
-    let mut options = std::fs::OpenOptions::new();
-    options.write(true).create_new(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt as _;
-        options.mode(0o600);
-    }
-    options.open(path)
+    kettle_state::create_private_file_new(path)
 }
 
 #[cfg(test)]
@@ -232,8 +222,7 @@ mod tests {
     use super::*;
 
     fn scratch(name: &str) -> PathBuf {
-        let dir =
-            std::env::temp_dir().join(format!("kettle-paste-test-{name}-{}", std::process::id()));
+        let dir = scratch_root().join(format!("kettle-paste-test-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         dir
     }
@@ -260,6 +249,17 @@ mod tests {
         assert_ne!(path, second);
         images.cleanup();
         assert!(!dir.exists(), "cleanup removes the whole directory");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn default_windows_scratch_directory_uses_local_app_data() {
+        let images = PastedImages::new();
+        assert_eq!(
+            images.dir.parent(),
+            Some(scratch_root().as_path()),
+            "Windows scratch images must not use a temp directory shared with sandbox principals"
+        );
     }
 
     #[test]
@@ -300,8 +300,8 @@ mod tests {
 
     #[test]
     fn sweep_leaves_this_process_directory_alone() {
-        // The live directory must survive a sweep, or a long session would lose
-        // images it had already handed to the pane.
+        // A fresh live directory is well below the age threshold and must
+        // survive a sweep.
         let mut images = PastedImages::new();
         let own = images.dir.clone();
         images.save_rgba(1, 1, &[1u8, 2, 3, 4]).expect("save");

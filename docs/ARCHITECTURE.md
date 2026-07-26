@@ -32,17 +32,33 @@ graph TD
 
 `kettle-state` is the leaf persistence boundary shared by configuration,
 sessions, and the updater. It stages with `create_new` beside the destination,
-syncs file data before replacement, uses write-through replacement on Windows,
+syncs staged data before publication and the published handle afterward,
 syncs the parent directory on Unix, preserves existing permissions when asked,
 and rejects symlink destinations by default. Private files use mode `0600` on
-Unix and a protected Windows DACL containing one full-access ACE for the
-current token user. The Windows helper reopens the same kernel file object with
-`WRITE_DAC`, verifies its owner SID, and never resolves a caller-controlled
-path while changing security. State files, lock files, recordings, terminal
-logs, and runtime/GPU/crash diagnostics share this primitive. Its advisory
-lock lets callers serialize compound operations; configuration persistence
-holds it across the complete read, validate, backup, and replacement
-transaction.
+Unix. Windows passes `CreateFileW` an explicit owner-and-DACL security
+descriptor: the effective user owns the file and one protected ACE grants only
+that user full access before any content is written. Existing leaves are
+opened as reparse points and rejected; parent handles and file identities pin
+the non-reparse parent across each open or publication. A failed creation is
+discarded through its still-open handle, so cleanup cannot delete a path that
+was swapped after the create.
+
+Private Windows replacement moves that already-secured staged file into place,
+so a permissive legacy destination DACL is never applied to new private bytes.
+Permission-preserving replacement captures the old DACL while holding that
+object against deletion, publishes the restrictive staged object by handle,
+then applies the captured DACL to that same handle. Hardening an existing
+object requires effective-user ownership even when its DACL already looks
+exact, because a different owner retains implicit authority to rewrite that
+DACL. Elevated creation explicitly selects the user SID as owner instead of
+trusting the token's possibly group-valued default owner. Win32 alias spellings
+and alternate-data-stream leaves are rejected, and every child path is derived
+from the already-held parent rather than resolved again through a mutable DOS
+drive mapping. State and lock files, recordings, remote-command payloads,
+terminal logs, screenshots, pasted images, and runtime/GPU/crash diagnostics
+share these primitives. Advisory locks let callers serialize compound
+operations; configuration persistence holds one across the complete read,
+validate, backup, and replacement transaction.
 
 ## Agent control plane
 

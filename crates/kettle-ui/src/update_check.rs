@@ -343,7 +343,7 @@ mod tests {
 
     #[test]
     fn background_check_lock_is_exclusive_and_reusable() {
-        let temp = tempfile::tempdir().unwrap();
+        let temp = crate::test_tempdir();
         let path = temp.path().join("check.lock");
         let first = match super::try_acquire_file_lock(&path).unwrap() {
             CheckLockAttempt::Acquired(Some(lock)) => lock,

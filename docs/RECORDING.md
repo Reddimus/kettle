@@ -62,7 +62,9 @@ uses a collision-safe `kettle-session-<time>-<pid>-<counter>.cast` name,
 `0600` on Unix or a protected current-user DACL on Windows. Two launches in the
 same second therefore cannot truncate or interleave one another. An explicit
 file retains the established overwrite behavior, but Kettle secures and locks
-it before truncating it; a second active writer is refused.
+it before truncating it; a second active writer is refused. Unix symbolic links
+and Windows reparse-point files or parent directories are refused before an
+explicit or managed recording file is opened.
 
 Each session stops at a complete NDJSON event boundary before 512 MiB. When
 space permits, its last event is a `kettle:record_limit` marker. The native

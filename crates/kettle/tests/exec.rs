@@ -10,6 +10,7 @@
 //! teardown tests) so CI without a console doesn't red the suite.
 
 use std::io::{Read, Write};
+use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
@@ -58,6 +59,20 @@ fn run_exec(extra: &[&str], argv: &[&str], stdin_data: Option<&[u8]>) -> (i32, S
 /// True if the run looks like a PTY-less sandbox failure we should soft-skip.
 fn no_pty(code: i32, err: &str) -> bool {
     code == 125 && err.contains("cannot start PTY")
+}
+
+fn private_test_scratch_root() -> PathBuf {
+    #[cfg(windows)]
+    {
+        std::env::var_os("LOCALAPPDATA")
+            .or_else(|| std::env::var_os("USERPROFILE"))
+            .map(PathBuf::from)
+            .expect("Windows tests require LOCALAPPDATA or USERPROFILE")
+    }
+    #[cfg(not(windows))]
+    {
+        std::env::temp_dir()
+    }
 }
 
 #[cfg(windows)]
@@ -145,7 +160,7 @@ fn exec_json_emits_start_and_exit_events() {
         eprintln!("skipping exec_json_emits_start_and_exit_events: no PTY");
         return;
     }
-    assert_eq!(code, 0);
+    assert_eq!(code, 0, "stderr: {err}");
     // Each line is a JSON object; assert the start + exit envelope shapes.
     let mut saw_start = false;
     let mut saw_exit = false;
@@ -169,8 +184,14 @@ fn exec_json_emits_start_and_exit_events() {
 
 #[test]
 fn exec_record_writes_replayable_asciicast() {
-    let dir = std::env::temp_dir();
-    let path = dir.join(format!("kettle-exec-rec-{}.cast", std::process::id()));
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let path = private_test_scratch_root().join(format!(
+        "kettle-exec-rec-{}-{nonce}.cast",
+        std::process::id()
+    ));
     let path_s = path.to_str().unwrap().to_string();
     let mut argv: Vec<&str> = ECHO.to_vec();
     argv.push("recmark-9z");
@@ -180,7 +201,7 @@ fn exec_record_writes_replayable_asciicast() {
         let _ = std::fs::remove_file(&path);
         return;
     }
-    assert_eq!(code, 0);
+    assert_eq!(code, 0, "stderr: {err}");
     let contents = std::fs::read_to_string(&path).expect("recording file written");
     let mut lines = contents.lines();
     // Header is asciicast v2.

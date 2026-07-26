@@ -531,7 +531,7 @@ mod tests {
     }
 
     fn tmp_dir(label: &str) -> std::path::PathBuf {
-        let p = std::env::temp_dir().join(format!(
+        let p = crate::test_scratch_root().join(format!(
             "kettle-session-{label}-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()

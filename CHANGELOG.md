@@ -39,6 +39,29 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
     an echoed launch command cannot satisfy a live-state wait. tmux smokes use
     a cryptographically random private socket, resolve Bash inside the selected
     target, and register checked cleanup for success and failure paths.
+  - **Private files are now fail-closed on Windows.** State, lock, recording,
+    remote-command, terminal-log, diagnostic, pasted-image, screenshot, and
+    crash files receive a protected current-user DACL in the creating
+    `CreateFileW` call, before content exists. Existing reparse-point leaves
+    and reparse-point parents are rejected. Elevated tokens no longer trust
+    the group-valued default-owner SID as file provenance: the user SID is
+    selected as owner explicitly, and every owner/DACL postcondition is
+    verified before the handle is returned. File operations resolve from the
+    held parent handle instead of repeating a mutable DOS-path lookup, and
+    Win32 trailing-dot/space aliases plus NTFS alternate-data-stream names are
+    rejected.
+  - Private atomic replacement on Windows now moves the already-secured staged
+    file into place instead of publishing under a legacy destination DACL and
+    tightening it afterward. A privacy failure therefore cannot leave newly
+    written state visible despite returning an error.
+  - The Windows remote-command watcher now creates, reads, bounds-checks, and
+    truncates its command file through verified no-reparse handles, so a path
+    swap cannot redirect command data to another file.
+  - Linux self-update verification and extraction now consume one bounded
+    in-memory archive buffer, closing the remaining same-inode overwrite gap.
+    Unix control connections also keep a stable nonblocking mode and serialize
+    cloned deadline-aware writers without exposing transient `O_NONBLOCK`
+    changes to readers.
 
   ### Changed
   - `just agent-tui-smoke` and Windows `just agent-tui-wsl-smoke` now build and
@@ -76,12 +99,14 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
     on native Windows. New `paste-images` key (on by default, `paste-image`
     alias); a copied file still wins when both are present.
 
-    Temp files live in an owner-only per-process directory under the OS temp
-    dir, are bounded in count and total bytes so a paste loop cannot fill the
-    disk, reject malformed clipboard geometry before allocating, and are deleted
-    when kettle exits — a directory orphaned by a crash is reclaimed on the next
-    launch. Because they are session-scoped, a path captured in an old
-    transcript will not resolve after kettle closes.
+    Temp files use owner-only permissions inside a per-process scratch
+    directory, are bounded in count and total bytes so a paste loop cannot fill
+    the disk, reject malformed clipboard geometry before allocating, and are
+    deleted when kettle exits — a directory orphaned by a crash is reclaimed on
+    the next launch. Windows uses per-user Local App Data rather than a process
+    temp directory that may grant sandbox principals delete-child access; other
+    platforms use the OS temp directory. Because the files are session-scoped,
+    a path captured in an old transcript will not resolve after kettle closes.
 
   ### Changed
   - `arboard` is now built with its `image-data` feature. The comment that

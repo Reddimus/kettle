@@ -4,7 +4,7 @@
 //! The event-loop thread calls this module, keeping filesystem I/O out of
 //! driver callbacks and keeping terminal contents out of every record.
 
-use std::fs::{File, OpenOptions};
+use std::fs::File;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -147,7 +147,6 @@ impl IncidentLog {
         fault: Option<GpuFault>,
     ) -> io::Result<Self> {
         let dir = diagnostic_dir(cache_dir);
-        std::fs::create_dir_all(&dir)?;
         let (path, file) = create_incident_file(&dir, unix_ms, pid)?;
         prune_incidents(&dir, &path)?;
 
@@ -287,15 +286,8 @@ fn create_incident_file(dir: &Path, unix_ms: u128, pid: u32) -> io::Result<(Path
             format!("-{suffix}")
         };
         let path = dir.join(format!("gpu-{unix_ms}-{pid}{suffix}.jsonl"));
-        match OpenOptions::new().create_new(true).append(true).open(&path) {
-            Ok(file) => {
-                if let Err(error) = kettle_state::restrict_private_file(&file) {
-                    drop(file);
-                    let _ = std::fs::remove_file(&path);
-                    return Err(error);
-                }
-                return Ok((path, file));
-            }
+        match kettle_state::create_private_file_new(&path) {
+            Ok(file) => return Ok((path, file)),
             Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
             Err(error) => return Err(error),
         }
@@ -357,7 +349,7 @@ mod tests {
     impl TestDir {
         fn new(label: &str) -> Self {
             let id = NEXT_DIR.fetch_add(1, Ordering::Relaxed);
-            let path = std::env::temp_dir().join(format!(
+            let path = crate::test_scratch_root().join(format!(
                 "kettle-gpu-diagnostics-{label}-{}-{id}",
                 std::process::id()
             ));

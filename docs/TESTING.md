@@ -93,9 +93,23 @@ discipline here.
   files, preserves an existing destination's permissions, rejects symlink
   destinations, and proves exclusive advisory locks block competing handles
   and release on drop. Native Unix tests assert mode `0600`; native Windows
-  tests inspect the resulting ACL and require exactly one full-access ACE for
-  the current owner SID. Configuration, session, diagnostics, recording, and
-  updater callers fail closed when that shared privacy primitive fails.
+  tests require an effective-user owner and exactly one zero-flag full-access
+  ACE for that user under `SE_DACL_PROTECTED`. Policy tests reject a
+  group-valued or different owner as provenance even when a DACL looks exact.
+  Reparse leaf/parent tests use symbolic links when
+  permitted and an unprivileged directory-junction fallback otherwise. Private
+  replacement publishes the secured staged file itself, leaving no ACL
+  hardening step after private publication. Native tests also prove
+  failed-create cleanup deletes the created object through its handle and that
+  Win32 trailing-dot aliases and NTFS alternate-data-stream leaf names are
+  rejected without changing the intended file.
+  Windows test scratch files live under the current profile rather than the
+  process temp directory because a machine policy may intentionally grant
+  sandbox principals delete-child access there; the production policy rejects
+  such an ancestor instead of weakening its trust requirements.
+  Configuration, session, diagnostics, screenshots, pasted images, recording,
+  remote-command, and updater callers fail closed when the shared primitive
+  fails.
 
 - **kettle-ctl transport**: the split-handle loopback runs on every native CI
   OS. Unix additionally asserts the shared open-file description remains

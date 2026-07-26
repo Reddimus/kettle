@@ -574,7 +574,8 @@ mod tests {
     /// surfaced rather than masked as a blanket `NoServer`.
     #[test]
     fn discover_does_not_prune_live_pid_on_connect_failure() {
-        let dir = std::env::temp_dir().join(format!("kettle-ctl-disc-live-{}", std::process::id()));
+        let dir =
+            crate::test_scratch_root().join(format!("kettle-ctl-disc-live-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let pid = 4242;
         discovery::register(&dir, &reg_entry(&dir, pid, 100)).unwrap();
@@ -605,7 +606,8 @@ mod tests {
     /// (the complementary half of the gate).
     #[test]
     fn discover_prunes_dead_pid_on_connect_failure() {
-        let dir = std::env::temp_dir().join(format!("kettle-ctl-disc-dead-{}", std::process::id()));
+        let dir =
+            crate::test_scratch_root().join(format!("kettle-ctl-disc-dead-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let pid = 4243;
         discovery::register(&dir, &reg_entry(&dir, pid, 100)).unwrap();

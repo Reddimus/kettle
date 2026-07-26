@@ -1184,7 +1184,14 @@ mod tests {
 
     #[test]
     fn cancellable_capture_kills_child_and_finishes_recorder_promptly() {
-        let dir = std::env::temp_dir().join(format!("kettle-exec-cancel-{}", std::process::id()));
+        #[cfg(windows)]
+        let scratch = std::env::var_os("LOCALAPPDATA")
+            .or_else(|| std::env::var_os("USERPROFILE"))
+            .map(std::path::PathBuf::from)
+            .expect("Windows tests require LOCALAPPDATA or USERPROFILE");
+        #[cfg(not(windows))]
+        let scratch = std::env::temp_dir();
+        let dir = scratch.join(format!("kettle-exec-cancel-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let record = dir.join("cancel.cast");

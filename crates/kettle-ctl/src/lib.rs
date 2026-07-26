@@ -23,3 +23,18 @@ pub mod transport;
 pub use client::{Client, CtlError};
 pub use discovery::{RegistryEntry, registry_dir};
 pub use protocol::{Event, Request, Response, RpcError, error_codes};
+
+#[cfg(test)]
+pub(crate) fn test_scratch_root() -> std::path::PathBuf {
+    #[cfg(windows)]
+    {
+        std::env::var_os("LOCALAPPDATA")
+            .or_else(|| std::env::var_os("USERPROFILE"))
+            .map(std::path::PathBuf::from)
+            .expect("Windows tests require LOCALAPPDATA or USERPROFILE")
+    }
+    #[cfg(not(windows))]
+    {
+        std::env::temp_dir()
+    }
+}

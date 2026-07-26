@@ -568,7 +568,7 @@ mod tests {
 
     #[test]
     fn register_list_unregister_round_trip() {
-        let dir = std::env::temp_dir().join(format!("kettle-ctl-reg-{}", std::process::id()));
+        let dir = crate::test_scratch_root().join(format!("kettle-ctl-reg-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let e1 = RegistryEntry {
             v: 1,
@@ -598,7 +598,8 @@ mod tests {
 
     #[test]
     fn list_live_excludes_dead_pids_and_prunes_them() {
-        let dir = std::env::temp_dir().join(format!("kettle-ctl-live-{}", std::process::id()));
+        let dir =
+            crate::test_scratch_root().join(format!("kettle-ctl-live-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         // A live entry (our own pid) and a dead one (u32::MAX-1 is far past any
         // real pid table on Windows and Linux alike — same convention as the
@@ -638,7 +639,8 @@ mod tests {
 
     #[test]
     fn list_skips_garbage_files() {
-        let dir = std::env::temp_dir().join(format!("kettle-ctl-garbage-{}", std::process::id()));
+        let dir =
+            crate::test_scratch_root().join(format!("kettle-ctl-garbage-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("bad.json"), "not json").unwrap();
@@ -652,7 +654,8 @@ mod tests {
     fn registry_entry_is_private_regular_and_exact_version() {
         use std::os::unix::fs::PermissionsExt as _;
 
-        let dir = std::env::temp_dir().join(format!("kettle-ctl-private-{}", std::process::id()));
+        let dir =
+            crate::test_scratch_root().join(format!("kettle-ctl-private-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let entry = RegistryEntry {
             v: 1,
@@ -682,8 +685,8 @@ mod tests {
     fn registry_rejects_symlink_leaf_and_untrusted_records() {
         use std::os::unix::fs::{PermissionsExt as _, symlink};
 
-        let root =
-            std::env::temp_dir().join(format!("kettle-ctl-registry-guards-{}", std::process::id()));
+        let root = crate::test_scratch_root()
+            .join(format!("kettle-ctl-registry-guards-{}", std::process::id()));
         let dir = root.join("ctl");
         let redirected = root.join("redirected");
         let _ = std::fs::remove_dir_all(&root);
@@ -767,7 +770,8 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn current_process_owns_directories_and_files_it_creates() {
-        let dir = std::env::temp_dir().join(format!("kettle-ctl-owner-{}", std::process::id()));
+        let dir =
+            crate::test_scratch_root().join(format!("kettle-ctl-owner-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         assert!(
