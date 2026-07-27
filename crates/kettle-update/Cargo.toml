@@ -12,7 +12,7 @@ description = "Signed release-feed verification and transactional self-update su
 workspace = true
 
 [dependencies]
-base64 = "0.22"
+base64 = "0.23"
 ed25519-dalek = { version = "3", default-features = false, features = ["fast"] }
 flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
 fs4 = "1.1"
