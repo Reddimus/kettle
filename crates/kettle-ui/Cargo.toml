@@ -117,7 +117,7 @@ libc = "0.2"
 # only while torn-drag tracking is active, never on Wayland (connect fails or
 # the call sites are gated off there).
 [target.'cfg(all(unix, not(target_os = "macos")))'.dependencies]
-x11rb = "0.13"
+x11rb = "0.14"
 
 # ITaskbarList3 for OSC 9;4 taskbar progress (PowerShell 7 /
 # Windows Terminal parity — `Write-Progress` + `winget` drive the taskbar
