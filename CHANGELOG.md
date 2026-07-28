@@ -4,7 +4,7 @@ All notable changes to kettle. Format roughly follows
 [Keep a Changelog](https://keepachangelog.com/); the project moves in small,
 durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
-## [Unreleased]
+## [2.43.0] — 2026-07-28
 
   ### Fixed
   - Updated Wayland protocol code generation to `wayland-scanner` 0.31.11 and
