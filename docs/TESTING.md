@@ -1056,8 +1056,13 @@ These need a real display and are run by hand (or on real hardware):
     anonymous pipe to zero progress without a blocking call and proves progress
     resumes when the reader drains. Its vendored `portable-pty` mirror pins the
     backend-local helper. The native `kettle exec` regression waits for a real
-    ConPTY child, saturates forwarded input, emits a terminal query, and still
-    requires timeout code 124 and prompt process closure. PTY teardown has
+    ConPTY child, loads forwarded input with a fixed 64 KiB, emits a terminal
+    query, and still requires timeout code 124 and prompt process closure. That
+    load is deliberately a fixed volume rather than a full input queue: ConPTY
+    buffers input without a bound a test can exhaust, so "the pipe stays full"
+    is not an achievable Windows precondition, and because ConPTY echoes the
+    input back, a variable volume makes the child's query marker race the
+    caller's bounded wait for it. Do not reintroduce either. PTY teardown has
     three complementary guards: portable close-order and full-queue models
     prove the pump stays live and can bypass parser backpressure through
     platform close, a deterministic source check rejects UI-thread joins and

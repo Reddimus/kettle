@@ -145,58 +145,47 @@ fn set_pipe_nowait(handle: &impl std::os::windows::io::AsRawHandle) -> std::io::
     }
 }
 
+/// Load the nonblocking writer with a fixed `LOAD_BYTES` of stdin, so Kettle's
+/// forwarding path is carrying real input when the child emits its query.
+///
+/// Two properties matter here, and both were learned the hard way.
+///
+/// First, this must not require the pipe to *remain* full. ConPTY buffers input
+/// without a bound a test can drive to exhaustion; an earlier revision demanded
+/// 200 ms of uninterrupted zero progress and instead failed after admitting
+/// 1.6 MiB, because every accepted byte restarted its timer.
+///
+/// Second, the volume must be fixed rather than "as much as fits in a window".
+/// ConPTY echoes this input back, so a variable volume produces a variable
+/// output backlog that competes with the caller's bounded wait for the child's
+/// query marker — reintroducing, in a new place, exactly the nondeterminism the
+/// first property removes. `LOAD_BYTES` fills the default 64 KiB Windows
+/// anonymous pipe buffer once, which is enough to prove the writer path was
+/// loaded without delaying the observation the test actually asserts on.
+///
+/// Zero progress before that point is stronger evidence of the same thing, so it
+/// returns early and the caller's floor check still holds.
 #[cfg(windows)]
-fn saturate_nonblocking_pipe(writer: &mut impl Write, deadline: Instant) -> Result<usize, String> {
-    const MIN_ACCEPTED: usize = 64 * 1024;
-    const MAX_ACCEPTED: usize = 16 * 1024 * 1024;
-    const STABLY_FULL_FOR: Duration = Duration::from_millis(200);
+fn saturate_nonblocking_pipe(writer: &mut impl Write) -> Result<usize, String> {
+    const LOAD_BYTES: usize = 64 * 1024;
 
     let chunk = [b'x'; 4096];
     let mut accepted = 0usize;
-    let mut full_since = None;
-    loop {
-        let now = Instant::now();
-        if now >= deadline {
-            return Err(format!(
-                "stdin pipe did not remain full before its deadline \
-                 ({accepted} bytes accepted)"
-            ));
-        }
-        if accepted >= MAX_ACCEPTED {
-            return Err(format!(
-                "stdin accepted the {MAX_ACCEPTED}-byte fixture cap without \
-                 stable downstream backpressure"
-            ));
-        }
-
-        // Once a full write is observed, probe one byte at a time. Sustained
-        // zero progress at that quantum proves the pending DSR reply cannot
-        // slip through spare capacity.
-        let bytes = if full_since.is_some() {
-            &chunk[..1]
-        } else {
-            &chunk[..]
-        };
-        match writer.write(bytes) {
-            Ok(0) => {
-                let full_since = *full_since.get_or_insert(now);
-                if accepted >= MIN_ACCEPTED && now.duration_since(full_since) >= STABLY_FULL_FOR {
-                    return Ok(accepted);
-                }
-                std::thread::yield_now();
-            }
+    while accepted < LOAD_BYTES {
+        match writer.write(&chunk) {
+            Ok(0) => return Ok(accepted),
             Ok(written) => {
                 accepted += written;
-                full_since = None;
             }
             Err(error) => {
                 return Err(format!(
-                    "stdin pipe failed before stable saturation after \
+                    "stdin pipe failed while loading the writer path after \
                      {accepted} bytes: {error}"
                 ));
             }
         }
     }
+    Ok(accepted)
 }
 
 #[cfg(windows)]
@@ -507,7 +496,7 @@ fn exec_timeout_closes_a_saturated_conpty_after_a_query() {
     }
 
     set_pipe_nowait(&stdin).expect("make kettle stdin pipe nonblocking");
-    let saturation = saturate_nonblocking_pipe(&mut stdin, Instant::now() + Duration::from_secs(3));
+    let saturation = saturate_nonblocking_pipe(&mut stdin);
     // SAFETY: release_event exclusively owns a valid event handle for the
     // duration of this call.
     let event_signaled = unsafe { SetEvent(release_event.0) };

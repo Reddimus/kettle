@@ -448,10 +448,8 @@ fn run_exec_with_cancellation(
         }
         // Service the child's terminal queries + lifecycle events.
         let mut pty_writer_error: Option<String> = None;
-        let mut handled_event = false;
         let mut queue_reply = |bytes: &[u8]| {
             let reply = bytes.to_vec();
-            log::debug!("kettle exec publishing {}-byte PTY reply", reply.len());
             // Serialize reply publication with the arbiter's final EOF
             // recheck. Without this gate, the worker can observe an empty
             // channel, lose its timeslice, then inject VEOF after a reply was
@@ -461,10 +459,8 @@ fn run_exec_with_cancellation(
                 let _gate = pty_reply_gate
                     .lock()
                     .unwrap_or_else(PoisonError::into_inner);
-                log::debug!("kettle exec acquired PTY reply publication gate");
                 pty_reply_tx.try_send(reply)
             };
-            log::debug!("kettle exec completed PTY reply publication attempt");
             match send_result {
                 Ok(()) => {}
                 Err(crossbeam_channel::TrySendError::Full(_)) => {
@@ -479,28 +475,16 @@ fn run_exec_with_cancellation(
             }
         };
         let event_backlog = drain_event_slice(&rx, |ev| {
-            handled_event = true;
             match ev {
-                TermEvent::PtyWrite(s) => {
-                    log::debug!("kettle exec handling PtyWrite event");
-                    queue_reply(s.as_bytes());
-                    log::debug!("kettle exec finished PtyWrite event");
-                }
-                TermEvent::Title(t) => {
-                    log::debug!("kettle exec handling Title event");
-                    out.title(sink, &t);
-                    log::debug!("kettle exec finished Title event");
-                }
+                TermEvent::PtyWrite(s) => queue_reply(s.as_bytes()),
+                TermEvent::Title(t) => out.title(sink, &t),
                 TermEvent::TextAreaSizeRequest(fmt) => {
-                    log::debug!("kettle exec handling TextAreaSizeRequest event");
                     let (pixel_width, pixel_height) = term.pty_pixel_size();
                     let reply =
                         kettle_render::reply_for_text_area_size(pixel_width, pixel_height, &*fmt);
                     queue_reply(reply.as_bytes());
-                    log::debug!("kettle exec finished TextAreaSizeRequest event");
                 }
                 TermEvent::ColorRequest(idx, fmt) => {
-                    log::debug!("kettle exec handling ColorRequest event");
                     if let Some(s) = term.term.lock().ok().and_then(|t| {
                         kettle_render::reply_for_query(
                             idx,
@@ -511,34 +495,22 @@ fn run_exec_with_cancellation(
                     }) {
                         queue_reply(s.as_bytes());
                     }
-                    log::debug!("kettle exec finished ColorRequest event");
                 }
                 // Headless exec has no clipboard sink and advertises no DA1
                 // extension 52. Discard writes explicitly at this boundary.
-                TermEvent::ClipboardStore(_, _) => {
-                    log::debug!("kettle exec discarded ClipboardStore event");
-                }
+                TermEvent::ClipboardStore(_, _) => {}
                 // OSC 52 read: deny (reply empty so the protocol stays
                 // well-formed without leaking a clipboard to a headless child).
-                TermEvent::ClipboardLoad(_, fmt) => {
-                    log::debug!("kettle exec handling ClipboardLoad event");
-                    queue_reply(fmt("").as_bytes());
-                    log::debug!("kettle exec finished ClipboardLoad event");
-                }
+                TermEvent::ClipboardLoad(_, fmt) => queue_reply(fmt("").as_bytes()),
                 TermEvent::Exit | TermEvent::ChildExit(_) => {
                     log::debug!("kettle exec handling child-exit event");
                     child_gone_at.get_or_insert_with(Instant::now);
                 }
-                _ => {
-                    log::debug!("kettle exec discarded non-headless semantic event");
-                }
+                _ => {}
             }
         });
         if trace_lifecycle {
             log::debug!("kettle exec lifecycle event slice returned: backlog={event_backlog}");
-        }
-        if handled_event {
-            log::debug!("kettle exec finished semantic-event slice");
         }
         if term.event_queue_overflowed() {
             pty_writer_error.get_or_insert_with(|| {
@@ -546,9 +518,6 @@ fn run_exec_with_cancellation(
                     "PTY semantic event queue exceeded its {PTY_EVENT_QUEUE_DEPTH}-message bound"
                 )
             });
-        }
-        if handled_event {
-            log::debug!("kettle exec checked semantic-event overflow");
         }
         let fatal_pty_error = pty_writer_error;
         let mut stdin_forwarding_error = None;
@@ -585,9 +554,6 @@ fn run_exec_with_cancellation(
                 },
             }
         }
-        if handled_event {
-            log::debug!("kettle exec finished stdin-result slice");
-        }
         if trace_lifecycle {
             log::debug!(
                 "kettle exec lifecycle stdin results returned: fatal={}, forwarding={}",
@@ -615,7 +581,6 @@ fn run_exec_with_cancellation(
             if child_gone_at.is_none() && term.child_exited() {
                 child_gone_at = Some(Instant::now());
             }
-            log::debug!("kettle exec finished child check after PTY forwarding error");
             if child_gone_at.is_none() {
                 let _ = writeln!(
                     std::io::stderr(),
@@ -639,13 +604,7 @@ fn run_exec_with_cancellation(
 
         // Exit detection: poll the real child status (authoritative), then
         // settle-drain so trailing/late output (ConPTY repaint) is captured.
-        if handled_event {
-            log::debug!("kettle exec polling child status after semantic event");
-        }
         let child_exited = child_gone_at.is_none() && term.child_exited();
-        if handled_event {
-            log::debug!("kettle exec finished child-status poll after semantic event");
-        }
         if trace_lifecycle {
             log::debug!("kettle exec lifecycle child-status poll returned: exited={child_exited}");
         }
