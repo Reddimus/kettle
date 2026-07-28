@@ -65,12 +65,13 @@ Legend: ✅ implemented · 🟡 partial · ⛔ not yet · — n/a.
 | **Shell integration (OSC 133)** | ✅ bundled `kettle --shell-integration <shell>` + `Ctrl+Up/Down` jump | ✅ | ✅ | ✅ | ⛔ | 🟡 |
 | **Kitty keyboard protocol** | ✅ progressive CSI-u negotiation + press/repeat/release encoder | ✅ | ✅ (origin) | ✅ | 🟡 (version/config dependent) | 🟡 |
 | **SSH launcher** | ✅ `Ctrl+Shift+S` fuzzy, configured + freeform | ⛔ | ⛔ | ⛔ | 🟡 (`ssh-host` plugin) | ⛔ |
-| **Vi-mode for scrollback** | ✅ `Ctrl+Shift+Space` | ⛔ | ⛔ | ⛔ | ⛔ | ✅ origin |
-| **Remote-control IPC** | ✅ `kettle --remote-send TEXT` | ⛔ | ✅ `kitty @` origin | 🟡 (Lua API) | ⛔ | ⛔ |
+| **Vi-mode for scrollback** | ✅ `Ctrl+Shift+Space`; native Alacritty cursor/selection/viewport state | ⛔ | ⛔ | ⛔ | ⛔ | ✅ origin |
+| **Remote-control IPC** | ✅ acknowledged `kettle ctl`; legacy bounded at-most-once `--remote-send` spool | ⛔ | ✅ `kitty @` origin | 🟡 (Lua API) | ⛔ | ⛔ |
+| **Lua scripting** | ✅ sandboxed `init.lua`, nine event hooks, ordered bounded side effects, menu + URL extensions | 🟡 | ✅ kittens | ✅ origin | ✅ Python plugins | ⛔ |
 | **Quake / dropdown toggle** | ✅ `kettle --toggle` | ✅ quick-terminal origin | ⛔ | ⛔ | ⛔ | ⛔ |
 | **Triggers (regex → urgency)** | ✅ `trigger = REGEX` | ⛔ | ⛔ | 🟡 (Lua) | ⛔ | ⛔ (iTerm2 origin) |
 | **Named layout / profile** | ✅ `--layout NAME` + `--profile NAME` | 🟡 | 🟡 | 🟡 (workspace via Lua) | ✅ (origin) | ⛔ |
-| **Session restore (multi-window)** | ✅ opt-in; every window's tabs + outer geometry, clamped to the live monitor layout (v2.18.0) | 🟡 | 🟡 (`--session` startup file) | 🟡 (Lua/plugin) | ✅ (layouts origin) | ⛔ |
+| **Session restore (multi-window)** | ✅ opt-in; preflight-bounded windows/panes/surface pixels, geometry clamped before native creation | 🟡 | 🟡 (`--session` startup file) | 🟡 (Lua/plugin) | ✅ (layouts origin) | ⛔ |
 | **Peacock accent-color** | ✅ per-window auto hue, on by default (v2.18.0); pin with `accent-color`/`--accent`, opt out via `accent-color = theme` | ⛔ | ⛔ | ⛔ | ⛔ | ⛔ (Peacock-for-VSC origin) |
 | **Annotated screenshots** | ✅ `--annotate TEXT` (caption variant) | ⛔ | ⛔ | ⛔ | ⛔ | ⛔ |
 | **Status bar widget** | ✅ `status-bar = top\|bottom` | ⛔ | ✅ origin | ✅ Lua | ⛔ | ⛔ |
@@ -84,7 +85,7 @@ Legend: ✅ implemented · 🟡 partial · ⛔ not yet · — n/a.
 | Scrollbar indicator | ✅ `scrollbar=never\|auto\|always` | 🟡 | ⛔ | ✅ `enable_scroll_bar` | ✅ `scrollbar_position` | ⛔ |
 | **GPU rendering** | ✅ wgpu | ✅ (custom) | ✅ (OpenGL) | ✅ (wgpu) | ⛔ (GTK/VTE) | ✅ (OpenGL) |
 | Ligatures | ✅ toggle | ✅ | ✅ | ✅ | 🟡 | ⛔ |
-| Inline images | ✅ sixel+kitty+iTerm2 | ✅ | ✅ (origin kitty) | ✅ | ⛔ | ⛔ |
+| Inline images | ✅ sixel+kitty+iTerm2; buffer-local, margin-scrolled, pane/grid-clipped | ✅ | ✅ (origin kitty) | ✅ | ⛔ | ⛔ |
 | Hyperlinks (OSC 8) | ✅ + URL and cwd-aware file-path autodetect | ✅ | ✅ | ✅ | ✅ | ✅ |
 
 ### Citations (upstream source we verified / borrowed from)
@@ -118,7 +119,7 @@ Legend: ✅ implemented · 🟡 partial · ⛔ not yet · — n/a.
 - **Broadcast / group input** — Terminator `terminatorlib/terminator.py`
   `broadcast_all` group action (origin of the "send keystrokes to every
   pane in this tab" affordance); kitty `multi-input.py` extension. kettle's
-  variant: `Mux::broadcast_write` + `broadcast_paste` + `broadcast_scroll_to_bottom`
+  variant: `Mux::broadcast_write_with_scroll` + `broadcast_paste`
   scope to the active tab's leaves only (per-window-per-tab, not every
   pane in every tab — matches Terminator's intent). Visual indicator
   uses theme `palette[3]` (yellow) on both the active tab segment's
@@ -245,9 +246,14 @@ Future → Done since the v1.0 cut of this matrix"):
   theme · pane title.
 - **Vi-mode for the scrollback** (Alacritty parity) —
   `Ctrl+Shift+Space` enters; h/j/k/l/0/$/g/G/H/M/L +
-  arrows; `v` visual selection; `y` yank; Esc exit.
+  arrows; `v` visual selection; `y` yank; Esc exit. Motion, cursor,
+  selection, viewport following, reflow, and history eviction are the native
+  Alacritty terminal state rather than a parallel UI model.
 - **Remote-control IPC** (kitty `@` parity) —
-  `kettle --remote-send TEXT` via notify-watched command file.
+  acknowledged `kettle ctl` plus a compatibility
+  `kettle --remote-send TEXT` path whose locked 1 MiB file spool is explicitly
+  at-most-once after claim and rejects claimed batches over 1,024 operations
+  before dispatch.
 - **Quake dropdown** (Yakuake / Tilda / Ghostty quick-terminal
   parity) — `kettle --toggle` flips window visibility
   via the remote-control IPC; users bind their OS / DE / compositor
@@ -297,9 +303,6 @@ Future → Done since the v1.0 cut of this matrix"):
   protocol, and the auth surface.
 - **tmux `-CC` passthrough** (iTerm2 parity). Large; embeds the
   tmux control protocol inside kettle. XL effort.
-- **Lua scripting** (WezTerm parity). Embed `mlua`, expose a
-  `kettle` API table (`send_text`, `set_tab_title`, event hooks).
-  XL effort.
 - **Persistent in-terminal annotations** (iTerm2 — distinct from
   the v1.4.0 screenshot caption). Scrollback-position metadata +
   sticky-note overlay + search-jump-to. L effort.
@@ -407,7 +410,7 @@ are marked, so the 11 shipped features occupy 13 "now" rows.
 | Kitty keyboard protocol (CSI-u progressive enhancement) | Ghostty | ⛔ at v2.20 | high | M | → backlog at the v2.20.0 decision gate; shipped later | At this historical gate the engine flag existed but the encoder did not. Current Kettle answers capability queries and emits negotiated CSI-u events. |
 | Kitty graphics query replies (`a=q` OK/error + quiet flags) | Ghostty | ⛔ | high | S | → backlog (capped by the v2.20.0 decision gate) | kitten-icat-style probing cannot see kettle's shipped graphics; the PtyWrite reply channel already exists. |
 | XTGETTCAP (DCS `+q`) capability queries | Ghostty | ⛔ | medium | M | → backlog (capped by the v2.20.0 decision gate) | TUIs probe capabilities via DCS; a small static cap table on the existing pre-engine interception. |
-| DA1 feature advertisement (sixel=4, clipboard=52) | Ghostty | ✅ | medium | S | ✅ shipped v2.25.1 | Primary DA now reports `CSI ? 6 ; 4 ; 52 c`, so capability probers can discover Kettle's shipped sixel decoder and OSC 52 clipboard support. |
+| DA1 feature advertisement (sixel=4, clipboard=52) | Ghostty | ✅ | medium | S | ✅ shipped v2.25.1; policy truthfulness hardened next release | Primary DA reports `CSI ? 6 ; 4 ; 52 c` when OSC 52 writes are actually available and `CSI ? 6 ; 4 c` otherwise, so capability probers discover the sixel decoder without being misled about clipboard policy. |
 | Protocol desktop notifications (OSC 9 / OSC 777) | Ghostty | ✅ | medium | S | ✅ shipped v2.25.1 | `OSC 9 ; message` and `OSC 777 ; notify ; title ; body` now parse into bounded desktop notifications through the existing notification dispatcher; `OSC 9;4` remains taskbar progress. |
 | Hardened shell-integration scripts (robust OSC 133 marking) | Ghostty | 🟡 | high | M | → backlog (capped by the v2.20.0 decision gate) | Pure script work improving shipped jump-to-prompt; re-implement from spec — Ghostty's scripts are GPLv3. |
 | OSC 7 cwd emission in kettle snippets (incl. PowerShell) | Ghostty | ⛔ | high | S | ✅ shipped v2.20.0 | One emission per prompt activates the cwd-inherit pipeline kettle already built; best cost/value in the inventory. |
@@ -577,9 +580,10 @@ stealing (or explicitly avoiding) independent of any single feature pick:
   generating the struct, reset logic, and DECRQM/DECRPM reporting. If kettle
   intercepts engine-unknown modes (2048, 2031), a small table-driven
   registry in kettle-vt prevents drift.
-- **Device attributes as data** — DA1 now advertises Kettle's shipped sixel
-  and OSC 52 support; a future DA2/DA3 table should still model identity and
-  feature bits as data rather than scattered hardcoded strings.
+- **Device attributes as data** — DA1 advertises Kettle's shipped sixel
+  support and conditionally includes OSC 52 according to live policy/platform
+  availability; a future DA2/DA3 table should still model identity and feature
+  bits as data rather than scattered hardcoded strings.
 - **One pre-engine reply layer** — kettle-vt's extractor is the proven
   interception point and the PtyWrite reply channel already exists; the
   protocol cluster (XTGETTCAP, DECRQSS, DA1, graphics `a=q`, OSC 9 notify)

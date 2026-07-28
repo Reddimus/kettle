@@ -31,7 +31,7 @@ arch=('x86_64')
 url="https://github.com/Reddimus/kettle"
 license=('MIT')
 # Runtime deps mirror the dynamic linkage of the release binary
-# (built on ubuntu-latest in release.yml). These are the libraries
+# (built on ubuntu-22.04 in release.yml). These are the libraries
 # kettle's wgpu / winit / glyphon / portable-pty / fontconfig stacks
 # need at runtime. `pkg-config` etc. are *build* deps and not needed
 # here.

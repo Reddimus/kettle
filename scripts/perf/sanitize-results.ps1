@@ -1249,17 +1249,24 @@ function Get-KettlePerfRedactionToken {
         [Parameter(Mandatory)]
         [string]$Value,
         [Parameter(Mandatory)]
-        [string]$Salt,
+        [ValidateCount(32, 32)]
+        [byte[]]$Secret,
         [string]$Kind = 'value'
     )
 
-    $sha = [Security.Cryptography.SHA256]::Create()
+    $hmac = [Security.Cryptography.HMACSHA256]::new($Secret)
+    $bytes = $null
     try {
-        $bytes = [Text.Encoding]::UTF8.GetBytes("$Salt`0$Value")
-        $digest = $sha.ComputeHash($bytes)
+        $bytes = [Text.UTF8Encoding]::new($false, $true).GetBytes(
+            "$Kind`0$Value"
+        )
+        $digest = $hmac.ComputeHash($bytes)
         $hex = -join @($digest | ForEach-Object { $_.ToString('x2') })
     } finally {
-        $sha.Dispose()
+        if ($null -ne $bytes) {
+            [Array]::Clear($bytes, 0, $bytes.Length)
+        }
+        $hmac.Dispose()
     }
     return "<redacted-$Kind`:$($hex.Substring(0, 16))>"
 }
@@ -1270,12 +1277,33 @@ function Test-KettlePerfSensitiveProperty {
     if (-not $Name) {
         return $false
     }
+    # Credential keys are normalized to one ASCII comparison domain so
+    # snake_case, kebab-case, camelCase, PascalCase, and upper-case spellings
+    # cannot bypass redaction. This check deliberately precedes the generic
+    # hash allowlist: password_hash and api_key_sha256 are still credentials.
+    $credentialName = [regex]::Replace(
+        $Name,
+        '[^A-Za-z0-9]',
+        ''
+    ).ToLowerInvariant()
+    if (
+        $credentialName -match (
+            'password|passwd|passphrase|secret|credential|' +
+            'authorization|bearer|cookie|token|privatekey|signingkey|' +
+            'apikey|accesskey|accountkey|subscriptionkey|' +
+            'connectionstring'
+        )
+    ) {
+        return $true
+    }
     if (
         $Name -match (
             '(?i)(^|_)(' +
             'computer_name|computername|computer|machine_name|host_name|' +
             'hostname|host|fqdn|user_name|username|userid|user_id|user|' +
-            'login_name|account_name|owner_name' +
+            'login_name|account_name|owner_name|adapter_luid|source_id|' +
+            'target_id|connector_instance|hardware_id|' +
+            'registry_edid_sha256' +
             ')$'
         )
     ) {
@@ -1295,19 +1323,100 @@ function Test-KettlePerfSensitiveProperty {
     )
 }
 
+function Test-KettlePerfPublicEvidenceSourceLeafName {
+    param([string]$Name)
+
+    switch -CaseSensitive ($Name) {
+        'benchmark-manifest.json' { return $true }
+        'startup-idle.json' { return $true }
+        'latency.json' { return $true }
+        'vtebench-summary.json' { return $true }
+        'menu-hover.json' { return $true }
+        'native-display-menu-hover.json' { return $true }
+        'monitor-transition.json' { return $true }
+        'score.json' { return $true }
+    }
+    return $Name -cmatch (
+        '^throughput-(?:kettle|wt|alacritty|wezterm|rio|tabby)\.json$'
+    )
+}
+
+function ConvertTo-KettlePerfRedactionMaterial {
+    param(
+        [Parameter(Mandatory)]
+        [AllowEmptyString()]
+        [AllowEmptyCollection()]
+        $Value
+    )
+
+    $separator = [char]0
+    $invariant = [Globalization.CultureInfo]::InvariantCulture
+    if ($Value -is [string]) {
+        return 'string' + $separator + $Value
+    }
+    if ($Value -is [bool]) {
+        $text = if ([bool]$Value) { 'true' } else { 'false' }
+        return 'boolean' + $separator + $text
+    }
+    if (
+        $Value -is [sbyte] -or
+        $Value -is [byte] -or
+        $Value -is [int16] -or
+        $Value -is [uint16] -or
+        $Value -is [int32] -or
+        $Value -is [uint32] -or
+        $Value -is [int64] -or
+        $Value -is [uint64]
+    ) {
+        return (
+            'integer' + $separator +
+            ([IFormattable]$Value).ToString($null, $invariant)
+        )
+    }
+    if ($Value -is [single]) {
+        return (
+            'number' + $separator +
+            ([single]$Value).ToString('R', $invariant)
+        )
+    }
+    if ($Value -is [double]) {
+        return (
+            'number' + $separator +
+            ([double]$Value).ToString('R', $invariant)
+        )
+    }
+    if ($Value -is [decimal]) {
+        return (
+            'number' + $separator +
+            ([decimal]$Value).ToString('G29', $invariant)
+        )
+    }
+    if ($Value -is [datetime]) {
+        return (
+            'datetime' + $separator +
+            ([datetime]$Value).ToUniversalTime().ToString('o', $invariant)
+        )
+    }
+
+    $json = ConvertTo-Json -InputObject $Value -Compress `
+        -Depth $script:SanitizeMaximumDepth
+    return 'json' + $separator + $json
+}
+
 function Protect-KettlePerfPublicString {
     param(
         [Parameter(Mandatory)]
         [AllowEmptyString()]
         [string]$Value,
         [Parameter(Mandatory)]
-        [string]$Salt,
+        [ValidateCount(32, 32)]
+        [byte[]]$Secret,
         [string]$PropertyName = ''
     )
 
     if (Test-KettlePerfSensitiveProperty $PropertyName) {
         return Get-KettlePerfRedactionToken `
-            -Value $Value -Salt $Salt -Kind 'field'
+            -Value $Value -Secret $Secret -Kind 'field'
     }
     $protected = $Value
     $patterns = @(
@@ -1327,7 +1436,7 @@ function Protect-KettlePerfPublicString {
                     return $match.Value
                 }
                 return Get-KettlePerfRedactionToken `
-                    -Value $match.Value -Salt $Salt -Kind 'path'
+                    -Value $match.Value -Secret $Secret -Kind 'path'
             }
         )
     }
@@ -1338,7 +1447,8 @@ function ConvertTo-KettlePerfPublicValue {
     param(
         $Value,
         [Parameter(Mandatory)]
-        [string]$Salt,
+        [ValidateCount(32, 32)]
+        [byte[]]$Secret,
         [string]$PropertyName = '',
         [int]$Depth = 0
     )
@@ -1353,9 +1463,14 @@ function ConvertTo-KettlePerfPublicValue {
     if ($null -eq $Value) {
         return $null
     }
+    if (Test-KettlePerfSensitiveProperty $PropertyName) {
+        $material = ConvertTo-KettlePerfRedactionMaterial -Value $Value
+        return Get-KettlePerfRedactionToken `
+            -Value $material -Secret $Secret -Kind 'field'
+    }
     if ($Value -is [string]) {
         return Protect-KettlePerfPublicString `
-            -Value $Value -Salt $Salt -PropertyName $PropertyName
+            -Value $Value -Secret $Secret -PropertyName $PropertyName
     }
     if (
         $Value -is [bool] -or
@@ -1378,7 +1493,7 @@ function ConvertTo-KettlePerfPublicValue {
         foreach ($entry in $Value.GetEnumerator()) {
             $name = [string]$entry.Key
             $result[$name] = ConvertTo-KettlePerfPublicValue `
-                -Value $entry.Value -Salt $Salt -PropertyName $name `
+                -Value $entry.Value -Secret $Secret -PropertyName $name `
                 -Depth ($Depth + 1)
         }
         return $result
@@ -1390,7 +1505,7 @@ function ConvertTo-KettlePerfPublicValue {
         return [object[]]@(
             foreach ($item in $Value) {
                 ConvertTo-KettlePerfPublicValue `
-                    -Value $item -Salt $Salt -PropertyName $PropertyName `
+                    -Value $item -Secret $Secret -PropertyName $PropertyName `
                     -Depth ($Depth + 1)
             }
         )
@@ -1398,7 +1513,7 @@ function ConvertTo-KettlePerfPublicValue {
     $objectResult = [ordered]@{}
     foreach ($property in $Value.PSObject.Properties) {
         $objectResult[$property.Name] = ConvertTo-KettlePerfPublicValue `
-            -Value $property.Value -Salt $Salt `
+            -Value $property.Value -Secret $Secret `
             -PropertyName $property.Name -Depth ($Depth + 1)
     }
     return $objectResult
@@ -1717,6 +1832,7 @@ $stage = Join-Path $outputParent $stageLeaf
 $publishedStage = $false
 $stageLease = $null
 $sourceSnapshot = $null
+$redactionSecret = [byte[]]::new(32)
 $stageExpectedNames = [Collections.Generic.List[string]]::new()
 $stageExpectedHashes = @{}
 $heldStageFiles = [Collections.Generic.List[IDisposable]]::new()
@@ -1791,6 +1907,14 @@ try {
     }
     if ($sourceNames -contains 'public-evidence.json') {
         throw 'Private results cannot contain the reserved public evidence name'
+    }
+    if (@($sourceNames | Where-Object {
+        -not (Test-KettlePerfPublicEvidenceSourceLeafName $_)
+    }).Count -ne 0) {
+        throw (
+            'Private results contain a JSON file outside the reviewed ' +
+            'public evidence filename contract'
+        )
     }
 
     if ($null -ne $sourceSnapshot) {
@@ -1878,13 +2002,19 @@ try {
     if (-not [Guid]::TryParseExact($runId, 'D', [ref]$parsedRunId)) {
         throw 'Private benchmark manifest has no valid run id'
     }
+    $random = [Security.Cryptography.RandomNumberGenerator]::Create()
+    try {
+        $random.GetBytes($redactionSecret)
+    } finally {
+        $random.Dispose()
+    }
 
     $published = [Collections.Generic.List[object]]::new()
     $totalPublishedBytes = [long]0
     $script:SanitizeNodeCount = 0
     foreach ($fileName in $sourceNames) {
         $publicValue = ConvertTo-KettlePerfPublicValue `
-            -Value $sourceDocuments[$fileName] -Salt $runId
+            -Value $sourceDocuments[$fileName] -Secret $redactionSecret
         if ($null -ne $stageLease) {
             $stageLease.VerifyCurrentPath()
         }
@@ -1907,7 +2037,7 @@ try {
     }
 
     $publicManifest = [ordered]@{
-        schema_version = 1
+        schema_version = 2
         run_id = $runId
         generated_at = (Get-Date).ToString('o')
         source = 'sanitized-json-only'
@@ -1917,6 +2047,7 @@ try {
             'commands and executable locations',
             'machine and user identities',
             'monitor serials and device instance identifiers',
+            'display hardware, EDID fingerprints, and connector routing',
             'artifact and configuration directories'
         )
         files = [object[]]$published.ToArray()
@@ -2023,7 +2154,15 @@ try {
                 $stageLease.Dispose()
             }
         } finally {
-            Close-KettlePerfEvidenceSnapshot $sourceSnapshot
+            try {
+                Close-KettlePerfEvidenceSnapshot $sourceSnapshot
+            } finally {
+                [Array]::Clear(
+                    $redactionSecret,
+                    0,
+                    $redactionSecret.Length
+                )
+            }
         }
     }
 }

@@ -109,6 +109,8 @@ jobs:
         with:
           key: release-pretest
       - run: cargo test --locked --workspace
+      - name: Test patched vendor crates directly
+        run: cargo test --locked --manifest-path vendor/Cargo.toml --workspace
 
   package:
     name: package (${{ matrix.os }})
@@ -130,7 +132,10 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: ubuntu-24.04
+          # Keep the prebuilt GNU/Linux ABI at the documented glibc 2.35
+          # floor. Building on ubuntu-24.04 would silently require glibc 2.39
+          # and strand Ubuntu 22.04 users of the one-line installer.
+          - os: ubuntu-22.04
             artifact: kettle-linux-x86_64.tar.gz
           - os: macos-15
             artifact: kettle-macos-universal.zip
@@ -140,7 +145,7 @@ jobs:
           # laptops on Linux). Cross-compiled on the x86_64 ubuntu runner — the
           # ci.yml early-warning job proves this target builds. Windowing deps
           # load via dlopen, so only the GNU cross-linker is needed.
-          - os: ubuntu-24.04
+          - os: ubuntu-22.04
             artifact: kettle-linux-aarch64.tar.gz
             rust_target: aarch64-unknown-linux-gnu
     steps:
@@ -162,11 +167,18 @@ jobs:
           sudo apt-get install -y pkg-config libfontconfig1-dev libfreetype6-dev \
             libx11-dev libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libxcb1-dev
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
-        # Key the cache per artifact so the two ubuntu-latest
+        # Key the cache per artifact so the two ubuntu-22.04
         # legs (x86_64 + aarch64) don't share one cache and thrash each other's
         # target dir — mirrors how ci.yml keys its msrv/nightly/aarch64 legs.
         with:
           shared-key: ${{ matrix.artifact }}
+      # The root workspace excludes patched upstream crates. Exercise their
+      # package-owned tests on every native release OS so a directly tagged
+      # hotfix cannot bypass the platform-specific vendor gates in ci.yml.
+      # The aarch64 cross leg is covered by the Linux-native pretest above.
+      - name: Test patched vendor crates on native release runner
+        if: matrix.rust_target == ''
+        run: cargo test --locked --manifest-path vendor/Cargo.toml --workspace
       # Build: macOS gets a real universal2 binary — the
       # artifact has been named `kettle-macos-universal.zip` since the
       # project's earliest releases, but the underlying binary was
@@ -203,6 +215,29 @@ jobs:
           cargo build --locked --release --target aarch64-unknown-linux-gnu -p kettle
           mkdir -p target/release
           cp target/aarch64-unknown-linux-gnu/release/kettle target/release/kettle
+
+      - name: Verify Linux glibc ABI floor
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          mapfile -t glibc_versions < <(
+            readelf --version-info target/release/kettle \
+              | grep -oE 'GLIBC_[0-9]+(\.[0-9]+)+' \
+              | sort -Vu
+          )
+          if [[ ${#glibc_versions[@]} -eq 0 ]]; then
+            echo "release binary exposes no inspectable GLIBC version requirements" >&2
+            exit 1
+          fi
+          newest=${glibc_versions[${#glibc_versions[@]}-1]}
+          allowed=GLIBC_2.35
+          if [[ $(printf '%s\n' "$newest" "$allowed" | sort -V | tail -n1) != "$allowed" ]]; then
+            echo "release binary requires $newest, newer than the $allowed floor" >&2
+            exit 1
+          fi
+          printf 'verified glibc ABI floor: newest requirement %s <= %s\n' \
+            "$newest" "$allowed"
 
       - name: Package (Linux)
         if: runner.os == 'Linux'

@@ -3,11 +3,13 @@
 # Usage:
 #   pwsh -File scripts/perf/score.ps1 -ResultsDir target/perf-results/after
 #   pwsh -File scripts/perf/score.ps1 -ResultsDir target/perf-results/after `
-#     -BaselineResultsDir target/perf-results/before -MaxRegressionPct 7.5
+#     -BaselineResultsDir target/perf-results/before -Mode release
 param(
     [Parameter(Mandatory = $true)]
     [string]$ResultsDir,
     [string]$BaselineResultsDir = '',
+    [ValidateSet('release', 'smoke')]
+    [string]$Mode = 'smoke',
     [ValidateRange(0.0, 1000.0)]
     [double]$MaxRegressionPct = 7.5,
     [ValidateRange(1, 100)]
@@ -61,12 +63,12 @@ param(
     [string]$OutJson = ''
 )
 $ErrorActionPreference = 'Stop'
-if ($MaxMonitorTransitionMaxMs -lt $MaxMonitorTransitionP95Ms) {
-    throw (
-        'MaxMonitorTransitionMaxMs must be greater than or equal to ' +
-        'MaxMonitorTransitionP95Ms'
-    )
-}
+$Mode = $Mode.ToLowerInvariant()
+$script:KettlePerfRequireExactJsonNumbers = $Mode -ceq 'release'
+$scoreBoundParameters = [Collections.Generic.HashSet[string]]::new(
+    [string[]]@($PSBoundParameters.Keys),
+    [StringComparer]::OrdinalIgnoreCase
+)
 . "$PSScriptRoot\payload-contract.ps1"
 . "$PSScriptRoot\json-io.ps1"
 . "$PSScriptRoot\statistics.ps1"
@@ -77,10 +79,101 @@ if ($MaxMonitorTransitionMaxMs -lt $MaxMonitorTransitionP95Ms) {
 . "$PSScriptRoot\schedule.ps1"
 . "$PSScriptRoot\harness-provenance.ps1"
 . "$PSScriptRoot\evidence-snapshot.ps1"
+. "$PSScriptRoot\display-identity-contract.ps1"
+. "$PSScriptRoot\release-contract.ps1"
+. "$PSScriptRoot\comparator-campaign.ps1"
 
 $script:KettlePerfScoreEvidenceSnapshots = $null
-$script:KettlePerfReleaseVtebenchRevision =
-    'ead80032e57dee2e75f0b51f2ea67528647d9944'
+$script:KettlePerfReleaseAcquisitionContract =
+    Get-KettlePerfReleaseAcquisitionContract
+$script:KettlePerfReleaseScoreContract =
+    Get-KettlePerfReleaseScoreContract
+$script:KettlePerfReleaseVtebenchRevision = (
+    $script:KettlePerfReleaseAcquisitionContract.vtebench_revision
+)
+$script:KettlePerfComparatorCampaignContract = (
+    $script:KettlePerfReleaseAcquisitionContract.comparator_campaign
+)
+$script:KettlePerfComparatorCampaignRoot = Join-Path `
+    $PSScriptRoot 'campaigns'
+$script:KettlePerfComparatorCampaignPath = Join-Path `
+    $script:KettlePerfComparatorCampaignRoot `
+    $script:KettlePerfComparatorCampaignContract.relative_path
+$script:KettlePerfComparatorCampaign = (
+    Read-KettlePerfComparatorCampaign `
+        -Path $script:KettlePerfComparatorCampaignPath `
+        -ExpectedCampaignRoot $script:KettlePerfComparatorCampaignRoot
+)
+if (
+    $script:KettlePerfComparatorCampaign.campaign_id -cne
+        $script:KettlePerfComparatorCampaignContract.campaign_id -or
+    [long]$script:KettlePerfComparatorCampaign.campaign_file.bytes -ne
+        [long]$script:KettlePerfComparatorCampaignContract.bytes -or
+    -not [StringComparer]::OrdinalIgnoreCase.Equals(
+        [string]$script:KettlePerfComparatorCampaign.campaign_file.sha256,
+        [string]$script:KettlePerfComparatorCampaignContract.sha256
+    )
+) {
+    throw 'The tracked comparator campaign differs from the release contract'
+}
+
+if ($Mode -ceq 'release') {
+    if (-not $scoreBoundParameters.Contains('RequiredTerminals')) {
+        $RequiredTerminals = [string[]]@(
+            $script:KettlePerfReleaseAcquisitionContract.terminals
+        )
+    }
+    $releasePolicyParameters = [ordered]@{
+        MaxRegressionPct = 'max_regression_pct'
+        MaxKettleRank = 'max_kettle_rank'
+        MinimumPeersBeaten = 'minimum_peers_beaten'
+        MinimumMetricsPerTerminal = 'minimum_metrics_per_terminal'
+        MinimumThroughputPeersMeasured = 'minimum_throughput_peers_measured'
+        MaxKettleThroughputRank = 'max_kettle_throughput_rank'
+        MinimumThroughputPeersBeaten = 'minimum_throughput_peers_beaten'
+        MinimumStartupSamples = 'minimum_startup_samples'
+        MinimumThroughputRuns = 'minimum_throughput_runs'
+        RequireLatency = 'require_latency'
+        MinimumLatencyPeersBeaten = 'minimum_latency_peers_beaten'
+        MinimumLatencySamples = 'minimum_latency_samples'
+        MaxLatencyMissRate = 'max_latency_miss_rate'
+        RequireMenuHover = 'require_menu_hover'
+        RequireVtebench = 'require_vtebench'
+        RequireMonitorTransition = 'require_monitor_transition'
+        MinimumMonitorTransitionSamplesPerState = (
+            'minimum_monitor_transition_samples_per_state'
+        )
+        MaxMonitorTransitionP95Ms = 'max_monitor_transition_p95_ms'
+        MaxMonitorTransitionMaxMs = 'max_monitor_transition_max_ms'
+        MonitorTransitionBaselineAbsoluteMarginMs = (
+            'monitor_transition_baseline_absolute_margin_ms'
+        )
+        MonitorTransitionBaselineRelativeMarginPct = (
+            'monitor_transition_baseline_relative_margin_pct'
+        )
+        MinimumMenuHoverSamples = 'minimum_menu_hover_samples'
+        MaxMenuHoverP95Ms = 'max_menu_hover_p95_ms'
+        MaxMenuHoverP99Ms = 'max_menu_hover_p99_ms'
+        MenuHoverLongFrameMs = 'menu_hover_long_frame_ms'
+        MaxMenuHoverLongFrames = 'max_menu_hover_long_frames'
+        AllowDirtyManifest = 'allow_dirty_manifest'
+    }
+    foreach ($binding in $releasePolicyParameters.GetEnumerator()) {
+        if (-not $scoreBoundParameters.Contains([string]$binding.Key)) {
+            Set-Variable -Scope Script -Name ([string]$binding.Key) -Value (
+                $script:KettlePerfReleaseScoreContract.(
+                    [string]$binding.Value
+                )
+            )
+        }
+    }
+}
+if ($MaxMonitorTransitionMaxMs -lt $MaxMonitorTransitionP95Ms) {
+    throw (
+        'MaxMonitorTransitionMaxMs must be greater than or equal to ' +
+        'MaxMonitorTransitionP95Ms'
+    )
+}
 
 function Get-KettlePerfScoreEvidenceSnapshot([string]$Directory) {
     if ($null -eq $script:KettlePerfScoreEvidenceSnapshots) {
@@ -130,8 +223,25 @@ function Get-PropertyValue($Object, [string]$Name) {
     return $null
 }
 
+function Test-KettlePerfJsonNumber {
+    param($Value)
+
+    return (
+        (Test-KettlePerfJsonInteger $Value) -or
+        $Value -is [single] -or
+        $Value -is [double] -or
+        $Value -is [decimal]
+    )
+}
+
 function As-Double($Value, [switch]$AllowZero) {
     if ($null -eq $Value) { return $null }
+    if (
+        $script:KettlePerfRequireExactJsonNumbers -and
+        -not (Test-KettlePerfJsonNumber $Value)
+    ) {
+        return $null
+    }
     try {
         $d = [double]$Value
         if (
@@ -178,21 +288,65 @@ function As-NonnegativeInt($Value) {
     if ($null -eq $Value) {
         return $null
     }
+    if (
+        $script:KettlePerfRequireExactJsonNumbers -and
+        -not (Test-KettlePerfJsonInteger $Value)
+    ) {
+        return $null
+    }
     try {
-        $double = [double]$Value
+        $number = [decimal]$Value
         if (
-            [double]::IsNaN($double) -or
-            [double]::IsInfinity($double) -or
-            $double -lt 0.0 -or
-            [Math]::Floor($double) -ne $double -or
-            $double -gt [int]::MaxValue
+            $number -lt 0.0 -or
+            [decimal]::Truncate($number) -ne $number -or
+            $number -gt [int]::MaxValue
         ) {
             return $null
         }
-        return [int]$double
+        return [int]$number
     } catch {
         return $null
     }
+}
+
+function Test-KettlePerfJsonInteger {
+    param($Value)
+
+    return (
+        $Value -is [sbyte] -or
+        $Value -is [byte] -or
+        $Value -is [int16] -or
+        $Value -is [uint16] -or
+        $Value -is [int32] -or
+        $Value -is [uint32] -or
+        $Value -is [int64] -or
+        $Value -is [uint64]
+    )
+}
+
+function Test-KettlePerfJsonIntegerEqual {
+    param(
+        $Value,
+        [int]$Expected
+    )
+
+    if (-not (Test-KettlePerfJsonInteger $Value)) {
+        return $false
+    }
+    try {
+        return [decimal]$Value -eq [decimal]$Expected
+    } catch {
+        return $false
+    }
+}
+
+function Test-KettlePerfJsonBooleanEqual {
+    param(
+        $Value,
+        [bool]$Expected
+    )
+
+    return $Value -is [bool] -and [bool]$Value -eq $Expected
 }
 
 function Test-StartupCoverage($Row, [int]$MinimumSamples) {
@@ -277,7 +431,10 @@ function Test-ThroughputCoverage($Row, [int]$MinimumRuns) {
     ) {
         return $false
     }
-    if ($Row.throughput_drain_required -ne $true) {
+    if (
+        -not (Test-KettlePerfJsonBooleanEqual `
+            -Value $Row.throughput_drain_required -Expected $true)
+    ) {
         return $false
     }
     $workloadPid = As-NonnegativeInt $Row.throughput_workload_pid
@@ -401,7 +558,9 @@ function Test-MenuHoverCoverage(
     [double]$MaxP99,
     [double]$LongFrameMs,
     [int]$MaxLongFrames,
-    [switch]$RequireObservations
+    [switch]$RequireObservations,
+    [int]$ExpectedSamples = 0,
+    [int]$ExpectedBlockSize = 0
 ) {
     if ($null -eq $Menu) {
         return $false
@@ -413,6 +572,16 @@ function Test-MenuHoverCoverage(
     $p95 = As-Double (Get-PropertyValue $Menu 'latency_ms_p95')
     $p99 = As-Double (Get-PropertyValue $Menu 'latency_ms_p99')
     $recordedLongFrameMs = As-Double (Get-PropertyValue $Menu 'long_frame_ms')
+    $recordedGates = Get-PropertyValue $Menu 'gates'
+    $recordedMaxP95 = As-Double (
+        Get-PropertyValue $recordedGates 'max_p95_ms'
+    )
+    $recordedMaxP99 = As-Double (
+        Get-PropertyValue $recordedGates 'max_p99_ms'
+    )
+    $recordedMaxLongFrames = As-NonnegativeInt (
+        Get-PropertyValue $recordedGates 'max_long_frames'
+    )
     $raw = @(Get-PropertyValue $Menu 'latency_ms_all')
     $validRaw = @($raw | Where-Object { $null -ne (As-Double $_) })
     $sorted = @($validRaw | Sort-Object)
@@ -463,6 +632,10 @@ function Test-MenuHoverCoverage(
         $observationsValid = (
             $null -ne $blockSize -and
             $blockSize -gt 0 -and
+            (
+                $ExpectedBlockSize -le 0 -or
+                $blockSize -eq $ExpectedBlockSize
+            ) -and
             $null -ne $blockCount -and
             $blockCount * $blockSize -eq $requested -and
             $observations.Count -eq $requested -and
@@ -535,8 +708,18 @@ function Test-MenuHoverCoverage(
         $null -ne $p95 -and
         $null -ne $p99 -and
         $null -ne $recordedLongFrameMs -and
+        $null -ne $recordedMaxP95 -and
+        $null -ne $recordedMaxP99 -and
+        $null -ne $recordedMaxLongFrames -and
         $samples -ge $MinimumSamples -and
         $requested -ge $MinimumSamples -and
+        (
+            $ExpectedSamples -le 0 -or
+            (
+                $samples -eq $ExpectedSamples -and
+                $requested -eq $ExpectedSamples
+            )
+        ) -and
         $samples + $misses -eq $requested -and
         $raw.Count -eq $samples -and
         $validRaw.Count -eq $samples -and
@@ -546,10 +729,14 @@ function Test-MenuHoverCoverage(
         $p95 -le $MaxP95 -and
         $p99 -le $MaxP99 -and
         [Math]::Abs($recordedLongFrameMs - $LongFrameMs) -le 0.001 -and
+        [Math]::Abs($recordedMaxP95 - $MaxP95) -le 0.001 -and
+        [Math]::Abs($recordedMaxP99 - $MaxP99) -le 0.001 -and
+        $recordedMaxLongFrames -eq $MaxLongFrames -and
         $longFrames -eq $calculatedLongFrames -and
         $longFrames -le $MaxLongFrames -and
         $observationsValid -and
-        (Get-PropertyValue $Menu 'passed') -eq $true
+        (Test-KettlePerfJsonBooleanEqual `
+            -Value (Get-PropertyValue $Menu 'passed') -Expected $true)
     )
 }
 
@@ -568,12 +755,16 @@ function ConvertTo-KettlePerfMonitorTransitionInt {
     if ($null -eq $Value) {
         return $null
     }
+    if (
+        $script:KettlePerfRequireExactJsonNumbers -and
+        -not (Test-KettlePerfJsonInteger $Value)
+    ) {
+        return $null
+    }
     try {
-        $number = [double]$Value
+        $number = [decimal]$Value
         if (
-            [double]::IsNaN($number) -or
-            [double]::IsInfinity($number) -or
-            [Math]::Truncate($number) -ne $number -or
+            [decimal]::Truncate($number) -ne $number -or
             $number -lt [int]::MinValue -or
             $number -gt [int]::MaxValue
         ) {
@@ -638,9 +829,9 @@ function Get-KettlePerfDisplayIdentityEvidenceIssue {
     if (
         $null -eq $acquisition -or
         (Get-PropertyValue $acquisition 'schema') -cne
-            'kettle-display-identity-acquisition-v1' -or
+            'kettle-display-identity-acquisition-v2' -or
         (Get-PropertyValue $acquisition 'resolver') -cne
-            'wmi-monitor-id-with-ccd-registry-fallback-v1' -or
+            'wmi-monitor-id-with-ccd-registry-fallback-v2' -or
         (
             $ccdStatus -cne 'available' -and
             $ccdStatus -cne 'unavailable'
@@ -651,7 +842,6 @@ function Get-KettlePerfDisplayIdentityEvidenceIssue {
         $null -eq $ccdPathCount -or
         ($ccdStatus -ceq 'unavailable' -and $ccdPathCount -ne 0) -or
         $null -eq $resolvedCount -or $resolvedCount -ne $monitors.Count -or
-        $connections.Count -gt $resolvedCount -or
         $reportedIssues.Count -ne 0
     ) {
         $issues.Add("${Prefix}display identity acquisition contract is invalid")
@@ -756,6 +946,173 @@ function Get-KettlePerfDisplayIdentityEvidenceIssue {
         $issues.Add("${Prefix}display identity monitor evidence is invalid")
     }
 
+    $connectionInstances = [Collections.Generic.HashSet[string]]::new(
+        [StringComparer]::OrdinalIgnoreCase
+    )
+    $wmiResolvedConnectionCount = 0
+    $ccdResolvedConnectionCount = 0
+    $connectionEvidenceValid = $connections.Count -eq $resolvedCount
+    foreach ($connection in $connections) {
+        $connectionSource = [string](
+            Get-PropertyValue $connection 'identity_source'
+        )
+        $connectionInstance = [string](
+            Get-PropertyValue $connection 'instance_name'
+        )
+        $connectionHardware = [string](
+            Get-PropertyValue $connection 'hardware_id'
+        )
+        $connectionTechnology = Get-PropertyValue `
+            $connection 'video_output_technology'
+        $matchingMonitors = @(
+            $monitors | Where-Object {
+                [StringComparer]::OrdinalIgnoreCase.Equals(
+                    [string](Get-PropertyValue $_ 'instance_name'),
+                    $connectionInstance
+                )
+            }
+        )
+        if (
+            [string]::IsNullOrWhiteSpace($connectionInstance) -or
+            [string]::IsNullOrWhiteSpace($connectionHardware) -or
+            -not $connectionInstances.Add($connectionInstance) -or
+            -not [StringComparer]::OrdinalIgnoreCase.Equals(
+                (
+                    Get-KettlePerfMonitorTransitionHardwareId `
+                        $connectionInstance
+                ),
+                $connectionHardware
+            ) -or
+            (
+                $script:KettlePerfRequireExactJsonNumbers -and
+                -not (Test-KettlePerfJsonInteger $connectionTechnology)
+            ) -or
+            -not (Test-KettlePerfPhysicalOutputTechnology (
+                $connectionTechnology
+            )) -or
+            $matchingMonitors.Count -ne 1
+        ) {
+            $connectionEvidenceValid = $false
+            continue
+        }
+
+        $matchingMonitor = $matchingMonitors[0]
+        $monitorSource = [string](
+            Get-PropertyValue $matchingMonitor 'identity_source'
+        )
+        if (
+            -not [StringComparer]::OrdinalIgnoreCase.Equals(
+                [string](Get-PropertyValue $matchingMonitor 'hardware_id'),
+                $connectionHardware
+            )
+        ) {
+            $connectionEvidenceValid = $false
+        }
+        if (
+            $monitorSource -ceq 'wmi-monitor-id-v1' -and
+            $connectionSource -ceq 'wmi-monitor-connection-v1'
+        ) {
+            $wmiResolvedConnectionCount++
+            foreach (
+                $routingField in @(
+                    'adapter_luid',
+                    'source_id',
+                    'target_id',
+                    'connector_instance'
+                )
+            ) {
+                if ($null -ne (
+                    Get-PropertyValue $connection $routingField
+                )) {
+                    $connectionEvidenceValid = $false
+                }
+            }
+        } elseif (
+            $monitorSource -ceq
+                'display-config-ccd-registry-edid-v1' -and
+            $connectionSource -ceq
+                'display-config-ccd-registry-edid-v1'
+        ) {
+            $ccdResolvedConnectionCount++
+            if (
+                [string]::IsNullOrWhiteSpace([string](
+                    Get-PropertyValue $connection 'adapter_luid'
+                )) -or
+                $null -eq (As-NonnegativeInt (
+                    Get-PropertyValue $connection 'source_id'
+                )) -or
+                $null -eq (As-NonnegativeInt (
+                    Get-PropertyValue $connection 'target_id'
+                )) -or
+                $null -eq (As-NonnegativeInt (
+                    Get-PropertyValue $connection 'connector_instance'
+                ))
+            ) {
+                $connectionEvidenceValid = $false
+            }
+            foreach (
+                $routingField in @(
+                    'adapter_luid',
+                    'source_id',
+                    'target_id',
+                    'connector_instance'
+                )
+            ) {
+                if (
+                    -not [StringComparer]::OrdinalIgnoreCase.Equals(
+                        [string](
+                            Get-PropertyValue $matchingMonitor $routingField
+                        ),
+                        [string](
+                            Get-PropertyValue $connection $routingField
+                        )
+                    )
+                ) {
+                    $connectionEvidenceValid = $false
+                }
+            }
+        } else {
+            $connectionEvidenceValid = $false
+        }
+
+        $monitorTechnology = Get-PropertyValue `
+            $matchingMonitor 'output_technology'
+        if ($null -ne $monitorTechnology) {
+            if (
+                $script:KettlePerfRequireExactJsonNumbers -and (
+                    -not (Test-KettlePerfJsonInteger $monitorTechnology) -or
+                    -not (Test-KettlePerfJsonInteger $connectionTechnology)
+                )
+            ) {
+                $connectionEvidenceValid = $false
+                continue
+            }
+            $canonicalMonitorTechnology =
+                ConvertTo-KettlePerfCanonicalOutputTechnology `
+                    -Value $monitorTechnology
+            $canonicalConnectionTechnology =
+                ConvertTo-KettlePerfCanonicalOutputTechnology `
+                    -Value $connectionTechnology
+            if (
+                $null -eq $canonicalMonitorTechnology -or
+                $null -eq $canonicalConnectionTechnology -or
+                [uint64]$canonicalMonitorTechnology -ne
+                    [uint64]$canonicalConnectionTechnology
+            ) {
+                $connectionEvidenceValid = $false
+            }
+        }
+    }
+    if (
+        $wmiResolvedConnectionCount -gt $wmiConnectionCount -or
+        $ccdResolvedConnectionCount -gt $ccdPathCount
+    ) {
+        $connectionEvidenceValid = $false
+    }
+    if (-not $connectionEvidenceValid) {
+        $issues.Add("${Prefix}display identity connection evidence is invalid")
+    }
+
     $resolvedScreenCount = 0
     $screenNames = [Collections.Generic.HashSet[string]]::new(
         [StringComparer]::OrdinalIgnoreCase
@@ -768,13 +1125,17 @@ function Get-KettlePerfDisplayIdentityEvidenceIssue {
             Get-PropertyValue $screen 'edid_match_count'
         )
         $edid = Get-PropertyValue $screen 'edid_monitor'
+        $screenConnection = Get-PropertyValue $screen 'connection'
         if (
             [string]::IsNullOrWhiteSpace($deviceName) -or
             -not $screenNames.Add($deviceName)
         ) {
             $screenEvidenceValid = $false
         }
-        if ($edidBacked -eq $true) {
+        if (
+            Test-KettlePerfJsonBooleanEqual `
+                -Value $edidBacked -Expected $true
+        ) {
             $resolvedScreenCount++
             $edidInstance = [string](
                 Get-PropertyValue $edid 'instance_name'
@@ -782,11 +1143,38 @@ function Get-KettlePerfDisplayIdentityEvidenceIssue {
             if (
                 $matchCount -ne 1 -or
                 $null -eq $edid -or
-                -not $monitorInstances.Contains($edidInstance)
+                -not $monitorInstances.Contains($edidInstance) -or
+                $null -eq $screenConnection
             ) {
                 $screenEvidenceValid = $false
+            } else {
+                $matchingConnections = @(
+                    $connections | Where-Object {
+                        [StringComparer]::OrdinalIgnoreCase.Equals(
+                            [string](
+                                Get-PropertyValue $_ 'instance_name'
+                            ),
+                            $edidInstance
+                        )
+                    }
+                )
+                if (
+                    $matchingConnections.Count -ne 1 -or
+                    (ConvertTo-KettlePerfMonitorTransitionJson (
+                        $screenConnection
+                    )) -cne
+                        (ConvertTo-KettlePerfMonitorTransitionJson (
+                            $matchingConnections[0]
+                        ))
+                ) {
+                    $screenEvidenceValid = $false
+                }
             }
-        } elseif ($matchCount -ne 0 -or $null -ne $edid) {
+        } elseif (
+            $matchCount -ne 0 -or
+            $null -ne $edid -or
+            $null -ne $screenConnection
+        ) {
             $screenEvidenceValid = $false
         }
     }
@@ -856,9 +1244,8 @@ function Get-KettlePerfMonitorTransitionEndpoint {
         refresh_hz = Get-PropertyValue $Screen 'refresh_hz'
         bounds = Get-PropertyValue $Screen 'bounds'
         working_area = Get-PropertyValue $Screen 'working_area'
-        requested_client_fits = [bool](
-            Get-PropertyValue $Screen 'requested_client_fits'
-        )
+        requested_client_fits = Get-PropertyValue `
+            $Screen 'requested_client_fits'
     }
 }
 
@@ -944,8 +1331,8 @@ function Test-KettlePerfMonitorTransitionScreenEligible {
         Get-PropertyValue $Topology 'active_physical_monitors' |
             Where-Object {
                 [StringComparer]::OrdinalIgnoreCase.Equals(
-                    [string](Get-PropertyValue $_ 'hardware_id'),
-                    $hardwareId
+                    [string](Get-PropertyValue $_ 'instance_name'),
+                    $edidInstance
                 )
             }
     )
@@ -965,7 +1352,9 @@ function Test-KettlePerfMonitorTransitionScreenEligible {
             $deviceHardwareId,
             $hardwareId
         ) -and
-        (Get-PropertyValue $Screen 'edid_backed') -eq $true -and
+        (Test-KettlePerfJsonBooleanEqual `
+            -Value (Get-PropertyValue $Screen 'edid_backed') `
+            -Expected $true) -and
         (As-NonnegativeInt (
             Get-PropertyValue $Screen 'edid_match_count'
         )) -eq 1 -and
@@ -1005,7 +1394,9 @@ function Test-KettlePerfMonitorTransitionScreenEligible {
         $null -ne $allowanceHeight -and $allowanceHeight -ge 0 -and
         $workingWidth -ge ($requestedWidth + $allowanceWidth) -and
         $workingHeight -ge ($requestedHeight + $allowanceHeight) -and
-        (Get-PropertyValue $Screen 'requested_client_fits') -eq $true -and
+        (Test-KettlePerfJsonBooleanEqual `
+            -Value (Get-PropertyValue $Screen 'requested_client_fits') `
+            -Expected $true) -and
         $null -ne $scale -and
         [Math]::Abs($scale - $expectedScale) -le 0.00001
     )
@@ -1369,7 +1760,7 @@ function Get-KettlePerfMonitorTransitionExactIssues {
                 $expectedDevice = [string](
                     $expectedPolicy.selected_device_names[$index]
                 )
-                $matches = @(
+                $matchingScreens = @(
                     $eligibleScreens | Where-Object {
                         [StringComparer]::OrdinalIgnoreCase.Equals(
                             [string](
@@ -1380,19 +1771,19 @@ function Get-KettlePerfMonitorTransitionExactIssues {
                     }
                 )
                 if (
-                    $matches.Count -ne 1 -or
+                    $matchingScreens.Count -ne 1 -or
                     (ConvertTo-KettlePerfMonitorTransitionJson `
                         $selectedScreens[$index]) -cne (
                             ConvertTo-KettlePerfMonitorTransitionJson (
                                 Get-KettlePerfMonitorTransitionEndpoint `
-                                    $matches[0]
+                                    $matchingScreens[0]
                             )
                         )
                 ) {
                     $selectedTopologyScreens.Clear()
                     break
                 }
-                $selectedTopologyScreens.Add($matches[0])
+                $selectedTopologyScreens.Add($matchingScreens[0])
             }
         }
         if ($selectedTopologyScreens.Count -ne 2) {
@@ -1523,11 +1914,15 @@ function Get-KettlePerfMonitorTransitionExactIssues {
             )
             $menuRect = Get-PropertyValue $contextMenu 'rect'
             $menuValid = if ($state -ceq 'menu_closed') {
-                (Get-PropertyValue $contextMenu 'open') -eq $false -and
+                (Test-KettlePerfJsonBooleanEqual `
+                    -Value (Get-PropertyValue $contextMenu 'open') `
+                    -Expected $false) -and
                 $null -eq $menuRect -and
                 $menuRows -eq 0
             } else {
-                (Get-PropertyValue $contextMenu 'open') -eq $true -and
+                (Test-KettlePerfJsonBooleanEqual `
+                    -Value (Get-PropertyValue $contextMenu 'open') `
+                    -Expected $true) -and
                 $null -ne $menuRect -and
                 $null -ne $menuRows -and
                 $menuRows -gt 0 -and
@@ -1540,6 +1935,7 @@ function Get-KettlePerfMonitorTransitionExactIssues {
             }
             $expectedBytes = [int64]$windowWidth *
                 [int64]$windowHeight * 4
+            $captureBytes = Get-PropertyValue $capture 'bytes'
             if (
                 (Get-PropertyValue $observation 'status') -cne 'ok' -or
                 $null -ne (Get-PropertyValue `
@@ -1581,8 +1977,8 @@ function Get-KettlePerfMonitorTransitionExactIssues {
                 (As-NonnegativeInt (
                     Get-PropertyValue $capture 'height'
                 )) -ne $windowHeight -or
-                [int64](Get-PropertyValue $capture 'bytes') -ne
-                    $expectedBytes -or
+                -not (Test-KettlePerfJsonInteger $captureBytes) -or
+                [decimal]$captureBytes -ne [decimal]$expectedBytes -or
                 (As-NonnegativeInt (
                     Get-PropertyValue $surface 'width'
                 )) -ne $windowWidth -or
@@ -1984,8 +2380,12 @@ function Get-MonitorTransitionIssues {
             Get-PropertyValue $Transition 'schema_version'
         )) -ne 2 -or
         (Get-PropertyValue $Transition 'status') -ne 'passed' -or
-        (Get-PropertyValue $Transition 'release_evidence_valid') -ne $true -or
-        (Get-PropertyValue $Transition 'topology_stable') -ne $true -or
+        -not (Test-KettlePerfJsonBooleanEqual `
+            -Value (Get-PropertyValue $Transition 'release_evidence_valid') `
+            -Expected $true) -or
+        -not (Test-KettlePerfJsonBooleanEqual `
+            -Value (Get-PropertyValue $Transition 'topology_stable') `
+            -Expected $true) -or
         (Get-PropertyValue $Transition 'metric_name') -ne
             'recovery_to_capturable_client_ms'
     ) {
@@ -2610,9 +3010,20 @@ function Get-ManifestEnvironmentSignature($BenchmarkManifest) {
             ForEach-Object {
                 [ordered]@{
                     name = Get-PropertyValue $_ 'name'
+                    launcher = Get-PropertyValue $_ 'launcher'
+                    launch_mode = Get-PropertyValue $_ 'launch_mode'
                     executable = Get-PropertyValue $_ 'executable'
+                    executable_bytes = Get-PropertyValue $_ 'executable_bytes'
                     executable_sha256 = Get-PropertyValue $_ 'executable_sha256'
                     version = Get-PropertyValue $_ 'version'
+                    authenticode_status = Get-PropertyValue `
+                        $_ 'authenticode_status'
+                    signer_cert_sha256 = Get-PropertyValue `
+                        $_ 'signer_cert_sha256'
+                    comparator_role = Get-PropertyValue $_ 'comparator_role'
+                    source = Get-PropertyValue $_ 'source'
+                    installed_package = Get-PropertyValue `
+                        $_ 'installed_package'
                     command_workloads = Get-PropertyValue $_ 'command_workloads'
                     command_confirmation = Get-PropertyValue $_ 'command_confirmation'
                     helper_binaries = Get-PropertyValue $_ 'helper_binaries'
@@ -2639,6 +3050,8 @@ function Get-ManifestEnvironmentSignature($BenchmarkManifest) {
         latency_timeout_ms = Get-PropertyValue `
             $settings 'latency_timeout_ms'
         menu_hover_samples = Get-PropertyValue $settings 'menu_hover_samples'
+        menu_hover_block_size = Get-PropertyValue `
+            $settings 'menu_hover_block_size'
         native_display_enabled = Get-PropertyValue `
             $settings 'native_display_enabled'
         monitor_transition_samples_per_state = Get-PropertyValue `
@@ -2703,6 +3116,9 @@ function Get-ManifestEnvironmentSignature($BenchmarkManifest) {
         harness_aggregate = [string](Get-PropertyValue (
             Get-PropertyValue $BenchmarkManifest 'harness_provenance'
         ) 'aggregate_sha256')
+        comparator_campaign = Get-JsonCollectionSignature @(
+            Get-PropertyValue $BenchmarkManifest 'comparator_campaign'
+        )
         measurement_settings = Get-JsonCollectionSignature @($measurementSettings)
         peer_terminals = Get-JsonCollectionSignature $peerTerminals
     }
@@ -2861,7 +3277,9 @@ function Get-KettlePerfCandidateManifestIssues {
             $abbreviation,
             [StringComparison]::Ordinal
         ) -and
-        (Get-PropertyValue $source 'embedded_dirty') -eq $false
+        (Test-KettlePerfJsonBooleanEqual `
+            -Value (Get-PropertyValue $source 'embedded_dirty') `
+            -Expected $false)
     )
     if (
         $candidate -cne $ExpectedCandidate -or
@@ -2878,8 +3296,12 @@ function Get-KettlePerfCandidateManifestIssues {
             $actualSha,
             $recordSha
         ) -or
-        (Get-PropertyValue $source 'commit_object_verified') -ne $true -or
-        (Get-PropertyValue $source 'commit_is_ancestor') -ne $true
+        -not (Test-KettlePerfJsonBooleanEqual `
+            -Value (Get-PropertyValue $source 'commit_object_verified') `
+            -Expected $true) -or
+        -not (Test-KettlePerfJsonBooleanEqual `
+            -Value (Get-PropertyValue $source 'commit_is_ancestor') `
+            -Expected $true)
     ) {
         $issues.Add("${Prefix}Kettle candidate source identity is invalid")
     }
@@ -2900,15 +3322,27 @@ function Get-KettlePerfCandidateManifestIssues {
         if (
             (Get-PropertyValue $source 'acquisition') -cne 'repository' -or
             $embeddedCommit -cne $repositoryCommit.ToLowerInvariant() -or
-            (Get-PropertyValue $source 'build_performed') -ne $true -or
-            (Get-PropertyValue $source 'release_build_performed') -ne $true -or
-            (Get-PropertyValue $source 'skip_build') -ne $false -or
-            (Get-PropertyValue $source 'external_executable') -ne $false -or
+            -not (Test-KettlePerfJsonBooleanEqual `
+                -Value (Get-PropertyValue $source 'build_performed') `
+                -Expected $true) -or
+            -not (Test-KettlePerfJsonBooleanEqual `
+                -Value (
+                    Get-PropertyValue $source 'release_build_performed'
+                ) -Expected $true) -or
+            -not (Test-KettlePerfJsonBooleanEqual `
+                -Value (Get-PropertyValue $source 'skip_build') `
+                -Expected $false) -or
+            -not (Test-KettlePerfJsonBooleanEqual `
+                -Value (Get-PropertyValue $source 'external_executable') `
+                -Expected $false) -or
             $expectedCommit -or
             $expectedSha -or
             $settingsCommit -or
             $settingsSha -or
-            (Get-PropertyValue $settings 'kettle_build_skipped') -ne $false
+            -not (Test-KettlePerfJsonBooleanEqual `
+                -Value (
+                    Get-PropertyValue $settings 'kettle_build_skipped'
+                ) -Expected $false)
         ) {
             $issues.Add(
                 "${Prefix}current Kettle candidate was not built from repository HEAD"
@@ -2916,11 +3350,21 @@ function Get-KettlePerfCandidateManifestIssues {
         }
     } elseif (
         (Get-PropertyValue $source 'acquisition') -cne 'pinned-external' -or
-        (Get-PropertyValue $source 'build_performed') -ne $false -or
-        (Get-PropertyValue $source 'release_build_performed') -ne $false -or
-        (Get-PropertyValue $source 'skip_build') -ne $true -or
-        (Get-PropertyValue $source 'external_executable') -ne $true -or
-        (Get-PropertyValue $settings 'kettle_build_skipped') -ne $true -or
+        -not (Test-KettlePerfJsonBooleanEqual `
+            -Value (Get-PropertyValue $source 'build_performed') `
+            -Expected $false) -or
+        -not (Test-KettlePerfJsonBooleanEqual `
+            -Value (Get-PropertyValue $source 'release_build_performed') `
+            -Expected $false) -or
+        -not (Test-KettlePerfJsonBooleanEqual `
+            -Value (Get-PropertyValue $source 'skip_build') `
+            -Expected $true) -or
+        -not (Test-KettlePerfJsonBooleanEqual `
+            -Value (Get-PropertyValue $source 'external_executable') `
+            -Expected $true) -or
+        -not (Test-KettlePerfJsonBooleanEqual `
+            -Value (Get-PropertyValue $settings 'kettle_build_skipped') `
+            -Expected $true) -or
         $expectedCommit -cnotmatch '^[0-9a-f]{40}$' -or
         $expectedSha -cnotmatch '^[0-9a-f]{64}$' -or
         $embeddedCommit -cne $expectedCommit -or
@@ -2977,7 +3421,9 @@ function Get-KettlePerfProbeConfigurationIssues {
                 $mode -cne 'benchmark-isolated' -or
                 (Get-PropertyValue $configuration 'mode') -cne
                     'benchmark-isolated' -or
-                (Get-PropertyValue $configuration 'claim_eligible') -ne $true -or
+                -not (Test-KettlePerfJsonBooleanEqual `
+                    -Value (Get-PropertyValue $configuration 'claim_eligible') `
+                    -Expected $true) -or
                 (Get-JsonCollectionSignature $evidence) -cne
                     (Get-JsonCollectionSignature $manifestFiles)
             ) {
@@ -3051,6 +3497,131 @@ function Get-KettlePerfExpectedReleaseSchedules {
             -Cycles ([int]($throughputIterations / $terminalCount)) `
             -Namespace 'throughput'
     }
+}
+
+function Get-KettlePerfReleaseManifestProfileIssues {
+    param(
+        $BenchmarkManifest,
+        [string]$Prefix = ''
+    )
+
+    $issues = [Collections.Generic.List[string]]::new()
+    $settings = Get-PropertyValue $BenchmarkManifest 'settings'
+    $contract = $script:KettlePerfReleaseAcquisitionContract
+    if (
+        $null -eq $settings -or
+        (Get-PropertyValue $settings 'mode') -cne 'release'
+    ) {
+        $issues.Add("${Prefix}release benchmark settings are missing")
+        return $issues
+    }
+    if (
+        -not (Test-KettlePerfOrdinalSequenceEqual `
+            -Actual @(
+                Get-PropertyValue $settings 'terminals'
+            ) -Expected $contract.terminals)
+    ) {
+        $issues.Add(
+            "${Prefix}release terminal sequence differs from the contract"
+        )
+    }
+    $numericSettings = [ordered]@{
+        startup_runs = $contract.startup_runs
+        idle_samples = $contract.idle_samples
+        idle_seconds = $contract.idle_seconds
+        latency_samples = $contract.latency_samples
+        latency_block_size = $contract.latency_block_size
+        max_latency_censored = $contract.max_latency_censored
+        latency_timeout_ms = $contract.latency_timeout_ms
+        menu_hover_samples = $contract.menu_hover_samples
+        menu_hover_block_size = $contract.menu_hover_block_size
+        monitor_transition_samples_per_state = (
+            $contract.monitor_transition_samples_per_state
+        )
+        throughput_iterations = $contract.throughput_iterations
+        minimum_throughput_iterations = (
+            $contract.minimum_throughput_iterations
+        )
+        terminal_order_offset = $contract.terminal_order_offset
+        probe_cooldown_seconds = $contract.probe_cooldown_seconds
+    }
+    foreach ($setting in $numericSettings.GetEnumerator()) {
+        $actualValue = Get-PropertyValue `
+            $settings ([string]$setting.Key)
+        if (
+            -not (Test-KettlePerfJsonIntegerEqual `
+                -Value $actualValue -Expected ([int]$setting.Value))
+        ) {
+            $issues.Add(
+                "${Prefix}release benchmark setting differs: " +
+                [string]$setting.Key
+            )
+        }
+    }
+    if (
+        [string](Get-PropertyValue $settings 'benchmark_seed') -cne
+            [string]$contract.benchmark_seed
+    ) {
+        $issues.Add("${Prefix}release benchmark seed differs from the contract")
+    }
+    if (
+        [string](Get-PropertyValue $settings 'vtebench_revision') -cne
+            [string]$contract.vtebench_revision
+    ) {
+        $issues.Add(
+            "${Prefix}release vtebench revision differs from the contract"
+        )
+    }
+    $window = Get-PropertyValue $settings 'window_pixels'
+    if (
+        -not (Test-KettlePerfJsonIntegerEqual `
+            -Value (Get-PropertyValue $window 'width') `
+            -Expected ([int]$contract.window_pixels.width)) -or
+        -not (Test-KettlePerfJsonIntegerEqual `
+            -Value (Get-PropertyValue $window 'height') `
+            -Expected ([int]$contract.window_pixels.height))
+    ) {
+        $issues.Add(
+            "${Prefix}release benchmark window differs from the contract"
+        )
+    }
+    if (
+        -not (Test-KettlePerfOrdinalSequenceEqual `
+            -Actual @(
+                Get-PropertyValue $settings 'vtebench_terminal_order'
+            ) -Expected $contract.terminals)
+    ) {
+        $issues.Add(
+            "${Prefix}release vtebench order differs from the contract"
+        )
+    }
+    foreach ($requiredTrue in @(
+        'native_display_enabled',
+        'vtebench_enabled',
+        'monitor_transition_enabled'
+    )) {
+        if (
+            -not (Test-KettlePerfJsonBooleanEqual `
+                -Value (Get-PropertyValue $settings $requiredTrue) `
+                -Expected $true)
+        ) {
+            $issues.Add(
+                "${Prefix}release benchmark setting differs: $requiredTrue"
+            )
+        }
+    }
+    if (
+        -not (Test-KettlePerfJsonBooleanEqual `
+            -Value (
+                Get-PropertyValue $settings 'unidentified_display_allowed'
+            ) -Expected $false)
+    ) {
+        $issues.Add(
+            "${Prefix}release benchmark setting differs: " +
+            'unidentified_display_allowed'
+        )
+    }
+    return $issues
 }
 
 function Get-KettlePerfVtebenchOrderIssues {
@@ -3751,6 +4322,142 @@ function Get-KettlePerfDisplayTopologyAcquisitionIssues {
         )
         return $issues
     }
+    $stability = Get-PropertyValue $display 'stability_monitoring'
+    $eventsProperty = if ($null -ne $stability) {
+        $stability.PSObject.Properties['display_change_events']
+    } else {
+        $null
+    }
+    $checkpointsProperty = if ($null -ne $stability) {
+        $stability.PSObject.Properties['checkpoints']
+    } else {
+        $null
+    }
+    $invalidPhasesProperty = if ($null -ne $stability) {
+        $stability.PSObject.Properties['invalid_checkpoint_phases']
+    } else {
+        $null
+    }
+    $eventsValue = $null
+    if ($null -ne $eventsProperty) {
+        $eventsValue = $eventsProperty.Value
+    }
+    $checkpointsValue = $null
+    if ($null -ne $checkpointsProperty) {
+        $checkpointsValue = $checkpointsProperty.Value
+    }
+    $invalidPhasesValue = $null
+    if ($null -ne $invalidPhasesProperty) {
+        $invalidPhasesValue = $invalidPhasesProperty.Value
+    }
+    if (
+        (Get-PropertyValue $stability 'schema') -cne
+            'kettle-display-stability-evidence-v1' -or
+        (Get-PropertyValue $stability 'provider') -cne
+            'Microsoft.Win32.SystemEvents.DisplaySettingsChanged' -or
+        -not (Test-KettlePerfJsonBooleanEqual `
+            -Value (
+                Get-PropertyValue $stability 'monitoring_active_for_run'
+            ) -Expected $true) -or
+        $null -ne (Get-PropertyValue $stability 'registration_error_type') -or
+        $eventsValue -isnot [Array] -or
+        $checkpointsValue -isnot [Array] -or
+        $invalidPhasesValue -isnot [Array] -or
+        -not (Test-KettlePerfJsonBooleanEqual `
+            -Value (Get-PropertyValue $stability 'stable') -Expected $true)
+    ) {
+        $issues.Add(
+            "${Prefix}continuous display stability contract is invalid"
+        )
+        return $issues
+    }
+    $events = @($eventsValue)
+    $checkpoints = @($checkpointsValue)
+    $invalidPhases = @($invalidPhasesValue)
+    if ($events.Count -ne 0) {
+        $issues.Add(
+            "${Prefix}display-change events occurred during benchmarking"
+        )
+    }
+    if ($invalidPhases.Count -ne 0) {
+        $issues.Add(
+            "${Prefix}display stability reports invalid checkpoint phases"
+        )
+    }
+    if ($checkpoints.Count -lt 2 -or $checkpoints.Count -gt 32) {
+        $issues.Add(
+            "${Prefix}display stability checkpoint coverage is invalid"
+        )
+    } else {
+        $phaseSet = [Collections.Generic.HashSet[string]]::new(
+            [StringComparer]::Ordinal
+        )
+        for ($checkpointIndex = 0; $checkpointIndex -lt $checkpoints.Count;
+            $checkpointIndex++
+        ) {
+            $checkpoint = $checkpoints[$checkpointIndex]
+            $phaseValue = Get-PropertyValue $checkpoint 'phase'
+            $phase = [string]$phaseValue
+            $snapshot = Get-PropertyValue $checkpoint 'snapshot'
+            $checkpointSignature = [string](
+                Get-PropertyValue $snapshot 'signature_sha256'
+            )
+            $calculatedCheckpoint = (
+                Get-KettlePerfDisplayTopologySnapshotSignature $snapshot
+            )
+            if (
+                $phaseValue -isnot [string] -or
+                $phase -cnotmatch '^[a-z0-9][a-z0-9-]{0,63}$' -or
+                -not $phaseSet.Add($phase) -or
+                (Get-PropertyValue $snapshot 'schema') -cne
+                    'kettle-display-topology-snapshot-v2' -or
+                $checkpointSignature -cnotmatch '^[0-9a-f]{64}$' -or
+                -not [StringComparer]::Ordinal.Equals(
+                    $checkpointSignature,
+                    [string]$calculatedCheckpoint
+                ) -or
+                -not [StringComparer]::Ordinal.Equals(
+                    $checkpointSignature,
+                    $startSignature
+                )
+            ) {
+                $issues.Add(
+                    "${Prefix}display stability checkpoint is invalid: $phase"
+                )
+                continue
+            }
+            foreach (
+                $identityIssue in Get-KettlePerfDisplayIdentityEvidenceIssue `
+                    -Topology $snapshot `
+                    -Prefix "${Prefix}checkpoint $phase "
+            ) {
+                $issues.Add($identityIssue)
+            }
+        }
+        if (
+            [string](Get-PropertyValue $checkpoints[0] 'phase') -cne
+                'start' -or
+            [string](Get-PropertyValue `
+                $checkpoints[$checkpoints.Count - 1] 'phase') -cne 'end'
+        ) {
+            $issues.Add(
+                "${Prefix}display stability checkpoints lack start/end bounds"
+            )
+        }
+        if (
+            (Get-JsonCollectionSignature @(
+                Get-PropertyValue $checkpoints[0] 'snapshot'
+            )) -cne (Get-JsonCollectionSignature @($start)) -or
+            (Get-JsonCollectionSignature @(
+                Get-PropertyValue $checkpoints[$checkpoints.Count - 1] `
+                    'snapshot'
+            )) -cne (Get-JsonCollectionSignature @($end))
+        ) {
+            $issues.Add(
+                "${Prefix}display stability bounds differ from acquisition snapshots"
+            )
+        }
+    }
     foreach (
         $identityIssue in Get-KettlePerfDisplayIdentityEvidenceIssue `
             -Topology $start -Prefix "${Prefix}start "
@@ -3792,7 +4499,9 @@ function Get-KettlePerfDisplayTopologyAcquisitionIssues {
             $startSignature,
             $endSignature
         ) -or
-        (Get-PropertyValue $display 'topology_stable') -ne $true
+        -not (Test-KettlePerfJsonBooleanEqual `
+            -Value (Get-PropertyValue $display 'topology_stable') `
+            -Expected $true)
     ) {
         $issues.Add(
             "${Prefix}display topology acquisition signatures do not match"
@@ -3843,7 +4552,9 @@ function Get-KettlePerfDisplayTopologyAcquisitionIssues {
     if (
         -not $targetDevice -or
         $startTargetScreens.Count -ne 1 -or
-        (Get-PropertyValue $startTargetScreens[0] 'primary') -ne $true -or
+        -not (Test-KettlePerfJsonBooleanEqual `
+            -Value (Get-PropertyValue $startTargetScreens[0] 'primary') `
+            -Expected $true) -or
         -not [StringComparer]::OrdinalIgnoreCase.Equals(
             [string](Get-PropertyValue $start 'primary_screen_device'),
             $targetDevice
@@ -3853,6 +4564,147 @@ function Get-KettlePerfDisplayTopologyAcquisitionIssues {
     ) {
         $issues.Add(
             "${Prefix}display topology target monitor identity is invalid"
+        )
+    }
+    return $issues
+}
+
+function Get-KettlePerfComparatorCampaignManifestIssues {
+    param(
+        $BenchmarkManifest,
+        [string]$Prefix = ''
+    )
+
+    $issues = [Collections.Generic.List[string]]::new()
+    $campaignEvidence = Get-PropertyValue `
+        $BenchmarkManifest 'comparator_campaign'
+    if (-not (Test-KettlePerfComparatorCampaignEvidence `
+        -Campaign $script:KettlePerfComparatorCampaign `
+        -Evidence $campaignEvidence)) {
+        $issues.Add(
+            "${Prefix}comparator campaign evidence differs from the release pin"
+        )
+        return $issues
+    }
+    $settings = Get-PropertyValue $BenchmarkManifest 'settings'
+    if (
+        (Get-PropertyValue $settings 'comparator_campaign_id') -cne
+            $script:KettlePerfComparatorCampaign.campaign_id
+    ) {
+        $issues.Add(
+            "${Prefix}comparator campaign setting differs from the release pin"
+        )
+    }
+
+    $records = @(Get-PropertyValue $BenchmarkManifest 'terminals')
+    foreach ($entry in $script:KettlePerfComparatorCampaign.terminals) {
+        $matchingRecords = @($records | Where-Object {
+            (Get-PropertyValue $_ 'name') -ceq $entry.name
+        })
+        $matchingRecord = if ($matchingRecords.Count -eq 1) {
+            $matchingRecords[0]
+        } else {
+            $null
+        }
+        if (
+            $matchingRecords.Count -ne 1 -or
+            -not (Test-KettlePerfComparatorCampaignTerminalIdentity `
+                -Entry $entry -TerminalRecord $matchingRecord)
+        ) {
+            $issues.Add(
+                "${Prefix}$($entry.name) identity differs from comparator campaign"
+            )
+        }
+    }
+
+    $wtMatches = @($records | Where-Object {
+        (Get-PropertyValue $_ 'name') -ceq 'wt'
+    })
+    if ($wtMatches.Count -ne 1) {
+        return $issues
+    }
+    $wt = $wtMatches[0]
+    $package = Get-PropertyValue $wt 'installed_package'
+    $packageVersion = Get-PropertyValue $package 'version'
+    $installLocation = Get-PropertyValue $package 'install_location'
+    $launcher = Get-PropertyValue $wt 'launcher'
+    $executable = Get-PropertyValue $wt 'executable'
+    $expectedWtEntry = Get-KettlePerfComparatorCampaignEntry `
+        -Campaign $script:KettlePerfComparatorCampaign -Name wt
+    $expectedFullName = (
+        'Microsoft.WindowsTerminal_' +
+        $expectedWtEntry.version +
+        '_x64__8wekyb3d8bbwe'
+    )
+    $pathMatches = $false
+    $launcherMatches = $false
+    if (
+        $installLocation -is [string] -and
+        $executable -is [string] -and
+        [IO.Path]::IsPathRooted($installLocation) -and
+        [IO.Path]::IsPathRooted($executable)
+    ) {
+        try {
+            $pathMatches = [StringComparer]::OrdinalIgnoreCase.Equals(
+                [IO.Path]::GetFullPath(
+                    (Join-Path $installLocation 'WindowsTerminal.exe')
+                ),
+                [IO.Path]::GetFullPath($executable)
+            )
+        } catch {
+            $pathMatches = $false
+        }
+    }
+    if (
+        $launcher -is [string] -and
+        $executable -is [string] -and
+        [IO.Path]::IsPathRooted($launcher) -and
+        [IO.Path]::IsPathRooted($executable)
+    ) {
+        try {
+            $launcherMatches = [StringComparer]::OrdinalIgnoreCase.Equals(
+                [IO.Path]::GetFullPath($launcher),
+                [IO.Path]::GetFullPath($executable)
+            )
+        } catch {
+            $launcherMatches = $false
+        }
+    }
+    if (
+        (Get-PropertyValue $package 'schema') -cne
+            'kettle-windows-terminal-appx-v1' -or
+        (Get-PropertyValue $package 'name') -cne
+            'Microsoft.WindowsTerminal' -or
+        (Get-PropertyValue $package 'publisher_id') -cne
+            '8wekyb3d8bbwe' -or
+        (Get-PropertyValue $package 'package_family_name') -cne
+            'Microsoft.WindowsTerminal_8wekyb3d8bbwe' -or
+        (Get-PropertyValue $package 'package_full_name') -cne
+            $expectedFullName -or
+        $packageVersion -isnot [string] -or
+        $packageVersion -cne $expectedWtEntry.version -or
+        (Get-PropertyValue $package 'architecture') -cne 'X64' -or
+        (Get-PropertyValue $package 'status') -cne 'Ok' -or
+        (Get-PropertyValue $package 'signature_kind') -cne 'Store' -or
+        -not (Test-KettlePerfJsonBooleanEqual `
+            -Value (Get-PropertyValue $package 'is_framework') `
+            -Expected $false) -or
+        -not (Test-KettlePerfJsonBooleanEqual `
+            -Value (Get-PropertyValue $package 'non_removable') `
+            -Expected $false) -or
+        -not $pathMatches
+    ) {
+        $issues.Add(
+            "${Prefix}Windows Terminal installed Appx identity is invalid"
+        )
+    }
+    if (
+        (Get-PropertyValue $wt 'launch_mode') -cne
+            'installed-appx-direct-host' -or
+        -not $launcherMatches
+    ) {
+        $issues.Add(
+            "${Prefix}Windows Terminal release launcher is not the installed Appx host"
         )
     }
     return $issues
@@ -4330,7 +5182,7 @@ function Get-ResultProvenanceIssues {
                 )
             }
             if (
-                $manifestSchema -eq 3 -and
+                $manifestSchema -in @(3, 4) -and
                 $LatencyRequired -and
                 $source -eq 'latency' -and
                 (
@@ -4430,7 +5282,7 @@ function Get-MenuProvenanceIssues {
     $manifestSchema = As-NonnegativeInt (
         Get-PropertyValue $BenchmarkManifest 'schema_version'
     )
-    if ($manifestSchema -in @(2, 3)) {
+    if ($manifestSchema -in @(2, 3, 4)) {
         $manifestConfigHash = [string](
             Get-PropertyValue $BenchmarkManifest 'kettle_config_sha256'
         )
@@ -4492,7 +5344,11 @@ function Get-VtebenchIssues {
 
     $issues = [Collections.Generic.List[string]]::new()
     $settings = Get-PropertyValue $BenchmarkManifest 'settings'
-    if ((Get-PropertyValue $settings 'vtebench_enabled') -ne $true) {
+    if (
+        -not (Test-KettlePerfJsonBooleanEqual `
+            -Value (Get-PropertyValue $settings 'vtebench_enabled') `
+            -Expected $true)
+    ) {
         return $issues
     }
     $summary = Read-JsonFile (
@@ -4622,7 +5478,7 @@ function Get-VtebenchIssues {
         Get-PropertyValue $BenchmarkManifest 'schema_version'
     )
     if (
-        $manifestSchema -eq 3 -and
+        $manifestSchema -in @(3, 4) -and
         $expectedRevision -cne
             $script:KettlePerfReleaseVtebenchRevision
     ) {
@@ -4679,7 +5535,7 @@ function Get-VtebenchIssues {
             '^[0-9a-fA-F]{64}$' -or
         -not (Get-PropertyValue $source 'cargo_version') -or
         (
-            $manifestSchema -eq 3 -and
+            $manifestSchema -in @(3, 4) -and
             (
                 -not (
                     [string](
@@ -4696,7 +5552,7 @@ function Get-VtebenchIssues {
             )
         ) -or
         (
-            $manifestSchema -eq 3 -and
+            $manifestSchema -in @(3, 4) -and
             (
                 [string](
                     Get-PropertyValue $source 'timeout_sha256'
@@ -4787,7 +5643,7 @@ function Get-VtebenchIssues {
             )
         }
         if (
-            $manifestSchema -eq 3 -and
+            $manifestSchema -in @(3, 4) -and
             (
             [string](
                 Get-PropertyValue $result 'source_state_before_sha256'
@@ -4999,10 +5855,9 @@ $settings = $null
 if ($null -eq $manifest) {
     $manifestIssues.Add('benchmark-manifest.json is missing or invalid')
 } else {
-    $manifestSchema = As-NonnegativeInt (
-        Get-PropertyValue $manifest 'schema_version'
-    )
-    if ($manifestSchema -notin @(1, 2, 3)) {
+    $manifestSchemaValue = Get-PropertyValue $manifest 'schema_version'
+    $manifestSchema = As-NonnegativeInt $manifestSchemaValue
+    if ($manifestSchema -notin @(1, 2, 3, 4)) {
         $manifestIssues.Add('benchmark manifest schema_version is unsupported')
     }
     $manifestRunId = [string](Get-PropertyValue $manifest 'run_id')
@@ -5043,7 +5898,7 @@ if ($null -eq $manifest) {
         if (
             -not $powerShellPath -or
             (
-                $manifestSchema -eq 3 -and
+                $manifestSchema -in @(3, 4) -and
                 $powerShellHash -notmatch '^[0-9a-fA-F]{64}$'
             ) -or
             $powerShellEdition -ne 'Core' -or
@@ -5055,7 +5910,7 @@ if ($null -eq $manifest) {
         }
     }
     if (
-        $manifestSchema -eq 3 -and
+        $manifestSchema -in @(3, 4) -and
         -not (
             Test-KettlePerfWslLauncherIdentity `
                 -Launcher (Get-PropertyValue $toolchain 'vtebench_wsl') `
@@ -5067,18 +5922,29 @@ if ($null -eq $manifest) {
         )
     }
     $dirty = Get-PropertyValue $manifest 'repository_dirty'
-    if (-not $AllowDirtyManifest -and $dirty -ne $false) {
+    if (
+        -not $AllowDirtyManifest -and
+        -not (Test-KettlePerfJsonBooleanEqual $dirty $false)
+    ) {
         $manifestIssues.Add('benchmark manifest does not identify a clean repository commit')
     }
     $machine = Get-PropertyValue $manifest 'machine'
     $displayTopology = Get-PropertyValue $machine 'display_topology'
-    if ((Get-PropertyValue $displayTopology 'release_evidence_valid') -ne $true) {
+    if (
+        -not (Test-KettlePerfJsonBooleanEqual `
+            -Value (Get-PropertyValue $displayTopology 'release_evidence_valid') `
+            -Expected $true)
+    ) {
         $manifestIssues.Add('benchmark display topology is not valid release evidence')
     }
-    if ((Get-PropertyValue $displayTopology 'topology_stable') -ne $true) {
+    if (
+        -not (Test-KettlePerfJsonBooleanEqual `
+            -Value (Get-PropertyValue $displayTopology 'topology_stable') `
+            -Expected $true)
+    ) {
         $manifestIssues.Add('benchmark display topology was not stable for the full run')
     }
-    if ($manifestSchema -eq 3) {
+    if ($manifestSchema -in @(3, 4)) {
         foreach (
             $issue in Get-KettlePerfDisplayTopologyAcquisitionIssues `
                 -BenchmarkManifest $manifest
@@ -5088,24 +5954,43 @@ if ($null -eq $manifest) {
     }
     $settings = Get-PropertyValue $manifest 'settings'
     $benchmarkMode = [string](Get-PropertyValue $settings 'mode')
-    if ($benchmarkMode -eq 'release' -and $manifestSchema -ne 3) {
-        $manifestIssues.Add('release scoring requires benchmark manifest schema 3')
+    $expectedManifestSchema = if ($Mode -ceq 'release') { 4 } else { 2 }
+    if (
+        -not (Test-KettlePerfJsonIntegerEqual `
+            -Value $manifestSchemaValue -Expected $expectedManifestSchema)
+    ) {
+        $manifestIssues.Add(
+            "trusted $Mode scoring requires benchmark manifest schema " +
+            $expectedManifestSchema
+        )
     }
-    if ($benchmarkMode -eq 'release') {
-        $releaseTerminals = [string[]]@(
-            'kettle', 'wt', 'alacritty', 'wezterm', 'rio', 'tabby'
+    if ($benchmarkMode -cne $Mode) {
+        $manifestIssues.Add(
+            'trusted scoring mode differs from benchmark manifest mode'
+        )
+    }
+    if ($Mode -ceq 'release') {
+        foreach (
+            $profileIssue in Get-KettlePerfReleaseManifestProfileIssues `
+                -BenchmarkManifest $manifest
+        ) {
+            $manifestIssues.Add($profileIssue)
+        }
+        foreach (
+            $campaignIssue in Get-KettlePerfComparatorCampaignManifestIssues `
+                -BenchmarkManifest $manifest
+        ) {
+            $manifestIssues.Add($campaignIssue)
+        }
+        $releaseTerminals = (
+            $script:KettlePerfReleaseAcquisitionContract.terminals
         )
         if (
-            $RequiredTerminals.Count -ne $releaseTerminals.Count -or
-            @(
-                $RequiredTerminals |
-                    Where-Object { $_ -notin $releaseTerminals }
-            ).Count -gt 0 -or
-            @($RequiredTerminals | Select-Object -Unique).Count -ne
-                $RequiredTerminals.Count
+            -not (Test-KettlePerfOrdinalSequenceEqual `
+                -Actual $RequiredTerminals -Expected $releaseTerminals)
         ) {
             $manifestIssues.Add(
-                'release scoring requires the complete six-terminal set'
+                'release scoring requires the canonical terminal sequence'
             )
         }
         if (
@@ -5118,38 +6003,66 @@ if ($null -eq $manifest) {
                 'release scoring requires latency, menu, vtebench, and monitor gates'
             )
         }
-        $releaseSettings = [ordered]@{
-            startup_runs = 12
-            idle_samples = 6
-            idle_seconds = 10
-            latency_samples = 60
-            latency_block_size = 10
-            max_latency_censored = 3
-            latency_timeout_ms = 800
-            menu_hover_samples = 200
-            throughput_iterations = 6
-            minimum_throughput_iterations = 6
+        $scorePolicy = $script:KettlePerfReleaseScoreContract
+        $scorePolicyValues = [ordered]@{
+            max_regression_pct = $MaxRegressionPct
+            max_kettle_rank = $MaxKettleRank
+            minimum_peers_beaten = $MinimumPeersBeaten
+            minimum_metrics_per_terminal = $MinimumMetricsPerTerminal
+            minimum_throughput_peers_measured = (
+                $MinimumThroughputPeersMeasured
+            )
+            max_kettle_throughput_rank = $MaxKettleThroughputRank
+            minimum_throughput_peers_beaten = (
+                $MinimumThroughputPeersBeaten
+            )
+            minimum_startup_samples = $MinimumStartupSamples
+            minimum_throughput_runs = $MinimumThroughputRuns
+            require_latency = [bool]$RequireLatency
+            minimum_latency_peers_beaten = $MinimumLatencyPeersBeaten
+            minimum_latency_samples = $MinimumLatencySamples
+            max_latency_miss_rate = $MaxLatencyMissRate
+            require_menu_hover = [bool]$RequireMenuHover
+            require_vtebench = [bool]$RequireVtebench
+            require_monitor_transition = [bool]$RequireMonitorTransition
+            minimum_monitor_transition_samples_per_state = (
+                $MinimumMonitorTransitionSamplesPerState
+            )
+            max_monitor_transition_p95_ms = $MaxMonitorTransitionP95Ms
+            max_monitor_transition_max_ms = $MaxMonitorTransitionMaxMs
+            monitor_transition_baseline_absolute_margin_ms = (
+                $MonitorTransitionBaselineAbsoluteMarginMs
+            )
+            monitor_transition_baseline_relative_margin_pct = (
+                $MonitorTransitionBaselineRelativeMarginPct
+            )
+            minimum_menu_hover_samples = $MinimumMenuHoverSamples
+            max_menu_hover_p95_ms = $MaxMenuHoverP95Ms
+            max_menu_hover_p99_ms = $MaxMenuHoverP99Ms
+            menu_hover_long_frame_ms = $MenuHoverLongFrameMs
+            max_menu_hover_long_frames = $MaxMenuHoverLongFrames
+            allow_dirty_manifest = [bool]$AllowDirtyManifest
         }
-        foreach ($setting in $releaseSettings.GetEnumerator()) {
-            if (
-                (As-NonnegativeInt (
-                    Get-PropertyValue $settings ([string]$setting.Key)
-                )) -ne [int]$setting.Value
-            ) {
+        foreach ($policyField in $scorePolicyValues.GetEnumerator()) {
+            if ($policyField.Value -ne (
+                Get-PropertyValue $scorePolicy ([string]$policyField.Key)
+            )) {
                 $manifestIssues.Add(
-                    "release benchmark setting differs: $($setting.Key)"
+                    'release scoring policy differs: ' +
+                    [string]$policyField.Key
                 )
             }
         }
-        if (
-            (Get-PropertyValue $settings 'native_display_enabled') -ne $true
-        ) {
+        if (-not (Test-KettlePerfJsonBooleanEqual $dirty $false)) {
             $manifestIssues.Add(
-                'release scoring requires native-display Kettle evidence'
+                'release scoring requires a clean repository manifest'
             )
         }
         if (
-            (Get-PropertyValue $settings 'kettle_build_skipped') -ne $false
+            -not (Test-KettlePerfJsonBooleanEqual `
+                -Value (
+                    Get-PropertyValue $settings 'kettle_build_skipped'
+                ) -Expected $false)
         ) {
             $manifestIssues.Add(
                 'release scoring requires a Kettle build from this checkout'
@@ -5158,19 +6071,27 @@ if ($null -eq $manifest) {
     }
     if (
         $RequireVtebench -and
-        (Get-PropertyValue $settings 'vtebench_enabled') -ne $true
+        -not (Test-KettlePerfJsonBooleanEqual `
+            -Value (Get-PropertyValue $settings 'vtebench_enabled') `
+            -Expected $true)
     ) {
         $manifestIssues.Add('release scoring requires vtebench evidence')
     }
     if (
         $RequireMonitorTransition -and
-        (Get-PropertyValue $settings 'monitor_transition_enabled') -ne $true
+        -not (Test-KettlePerfJsonBooleanEqual `
+            -Value (Get-PropertyValue $settings 'monitor_transition_enabled') `
+            -Expected $true)
     ) {
         $manifestIssues.Add(
             'release scoring requires monitor-transition evidence'
         )
     }
-    if ((Get-PropertyValue $settings 'unidentified_display_allowed') -eq $true) {
+    if (
+        -not (Test-KettlePerfJsonBooleanEqual `
+            -Value (Get-PropertyValue $settings 'unidentified_display_allowed') `
+            -Expected $false)
+    ) {
         $manifestIssues.Add('benchmark allowed an unidentified display')
     }
     $manifestTerminals = @(Get-PropertyValue $manifest 'terminals')
@@ -5188,7 +6109,12 @@ if ($null -eq $manifest) {
             Get-PropertyValue $record 'executable_sha256'
         )
         $manifestVersion = [string](Get-PropertyValue $record 'version')
-        if ((Get-PropertyValue $record 'available') -ne $true -or -not $manifestExe) {
+        if (
+            -not (Test-KettlePerfJsonBooleanEqual `
+                -Value (Get-PropertyValue $record 'available') `
+                -Expected $true) -or
+            -not $manifestExe
+        ) {
             $manifestIssues.Add("manifest marks $terminal unavailable")
         }
         if (-not $manifestVersion) {
@@ -5211,8 +6137,10 @@ if ($null -eq $manifest) {
                     $embeddedCommit,
                     $repositoryCommit
                 ) -or
-                $embeddedDirty -ne $false -or
-                $releaseBuildPerformed -ne $true
+                -not (Test-KettlePerfJsonBooleanEqual `
+                    -Value $embeddedDirty -Expected $false) -or
+                -not (Test-KettlePerfJsonBooleanEqual `
+                    -Value $releaseBuildPerformed -Expected $true)
             ) {
                 $manifestIssues.Add(
                     'Kettle binary source identity differs from the repository commit'
@@ -5253,7 +6181,7 @@ if ($null -eq $manifest) {
         $configurationMode = [string](
             Get-PropertyValue $configuration 'mode'
         )
-        $allowedConfigurationModes = if ($manifestSchema -in @(2, 3)) {
+        $allowedConfigurationModes = if ($manifestSchema -in @(2, 3, 4)) {
             if ($terminal -eq 'wt') {
                 @('advisory-user-config', 'advisory-built-in-default')
             } else {
@@ -5271,15 +6199,17 @@ if ($null -eq $manifest) {
         }
         $claimEligible = Get-PropertyValue $configuration 'claim_eligible'
         if (
-            $benchmarkMode -eq 'release' -and (
+            $Mode -ceq 'release' -and (
                 (
                     $terminal -eq 'wt' -and
-                    $claimEligible -ne $false
+                    -not (Test-KettlePerfJsonBooleanEqual `
+                        -Value $claimEligible -Expected $false)
                 ) -or
                 (
                     $terminal -ne 'wt' -and (
                         $configurationMode -ne 'benchmark-isolated' -or
-                        $claimEligible -ne $true
+                        -not (Test-KettlePerfJsonBooleanEqual `
+                            -Value $claimEligible -Expected $true)
                     )
                 )
             )
@@ -5344,7 +6274,7 @@ if ($null -eq $manifest) {
     ) {
         $manifestIssues.Add($issue)
     }
-    if ($manifestSchema -eq 3) {
+    if ($manifestSchema -in @(3, 4)) {
         foreach (
             $issue in Get-KettlePerfCandidateManifestIssues `
                 -BenchmarkManifest $manifest -ExpectedCandidate current
@@ -5477,14 +6407,26 @@ $latencyPassed = (
     )
 )
 $menuHover = Read-JsonFile (Join-Path $ResultsDir 'menu-hover.json')
-$requireMenuObservations = $manifestSchema -in @(2, 3)
+$requireMenuObservations = $manifestSchema -in @(2, 3, 4)
+$expectedMenuSamples = if ($Mode -ceq 'release') {
+    [int]$script:KettlePerfReleaseAcquisitionContract.menu_hover_samples
+} else {
+    0
+}
+$expectedMenuBlockSize = if ($Mode -ceq 'release') {
+    [int]$script:KettlePerfReleaseAcquisitionContract.menu_hover_block_size
+} else {
+    0
+}
 $menuHoverDataValid = Test-MenuHoverCoverage `
     $menuHover $MinimumMenuHoverSamples `
     $MaxMenuHoverP95Ms $MaxMenuHoverP99Ms `
     $MenuHoverLongFrameMs $MaxMenuHoverLongFrames `
-    -RequireObservations:$requireMenuObservations
+    -RequireObservations:$requireMenuObservations `
+    -ExpectedSamples $expectedMenuSamples `
+    -ExpectedBlockSize $expectedMenuBlockSize
 if (
-    $manifestSchema -in @(2, 3) -and
+    $manifestSchema -in @(2, 3, 4) -and
     (Get-PropertyValue $menuHover 'variant') -ne 'fixed-comparator'
 ) {
     $menuHoverDataValid = $false
@@ -5499,7 +6441,7 @@ if ($RequireMenuHover -and $manifest) {
 $nativeMenuHover = Read-JsonFile (
     Join-Path $ResultsDir 'native-display-menu-hover.json'
 )
-$nativeMenuHoverRequired = $benchmarkMode -eq 'release'
+$nativeMenuHoverRequired = $Mode -ceq 'release'
 $nativeMenuHoverIssues = [Collections.Generic.List[string]]::new()
 $nativeMenuHoverDataValid = $false
 if ($nativeMenuHoverRequired) {
@@ -5507,7 +6449,9 @@ if ($nativeMenuHoverRequired) {
         $nativeMenuHover $MinimumMenuHoverSamples `
         $MaxMenuHoverP95Ms $MaxMenuHoverP99Ms `
         $MenuHoverLongFrameMs $MaxMenuHoverLongFrames `
-        -RequireObservations
+        -RequireObservations `
+        -ExpectedSamples $expectedMenuSamples `
+        -ExpectedBlockSize $expectedMenuBlockSize
     if (
         (Get-PropertyValue $nativeMenuHover 'variant') -ne 'native-display'
     ) {
@@ -5695,7 +6639,7 @@ $throughputPassed = (
     $kettleThroughputRank -le $MaxKettleThroughputRank -and
     $throughputBeaten -ge $MinimumThroughputPeersBeaten
 )
-$releaseStatisticsRequired = $benchmarkMode -eq 'release'
+$releaseStatisticsRequired = $Mode -ceq 'release'
 $releaseStatistics = $null
 $releaseStatisticsPassed = -not $releaseStatisticsRequired
 if ($releaseStatisticsRequired) {
@@ -5706,26 +6650,37 @@ if ($releaseStatisticsRequired) {
         if (-not $benchmarkSeed) {
             throw 'manifest has no benchmark seed'
         }
-        $releaseWindow = Get-PropertyValue $settings 'window_pixels'
-        $releaseWindowWidth = As-NonnegativeInt (
-            Get-PropertyValue $releaseWindow 'width'
+        $releaseWindowWidth = [int](
+            $script:KettlePerfReleaseAcquisitionContract.window_pixels.width
         )
-        $releaseWindowHeight = As-NonnegativeInt (
-            Get-PropertyValue $releaseWindow 'height'
+        $releaseWindowHeight = [int](
+            $script:KettlePerfReleaseAcquisitionContract.window_pixels.height
         )
-        if (
-            $null -eq $releaseWindowWidth -or
-            $null -eq $releaseWindowHeight
-        ) {
-            throw 'manifest has no valid release window geometry'
-        }
         $releaseStatistics = Get-KettlePerfReleaseStatisticalGate `
             -Rows $rows `
             -Seed "run:$manifestRunId|benchmark:$benchmarkSeed" `
-            -StartupSamples 12 -IdleSamples 6 `
-            -LatencySamples 60 -LatencyBlockSize 10 `
-            -MaximumLatencyCensored 3 -LatencyTimeoutMs 800 `
-            -ThroughputRounds 6 `
+            -StartupSamples (
+                $script:KettlePerfReleaseAcquisitionContract.startup_runs
+            ) -IdleSamples (
+                $script:KettlePerfReleaseAcquisitionContract.idle_samples
+            ) `
+            -LatencySamples (
+                $script:KettlePerfReleaseAcquisitionContract.latency_samples
+            ) -LatencyBlockSize (
+                $script:KettlePerfReleaseAcquisitionContract.
+                    latency_block_size
+            ) `
+            -MaximumLatencyCensored (
+                $script:KettlePerfReleaseAcquisitionContract.
+                    max_latency_censored
+            ) -LatencyTimeoutMs (
+                $script:KettlePerfReleaseAcquisitionContract.
+                    latency_timeout_ms
+            ) `
+            -ThroughputRounds (
+                $script:KettlePerfReleaseAcquisitionContract.
+                    throughput_iterations
+            ) `
             -ExpectedWindowWidth $releaseWindowWidth `
             -ExpectedWindowHeight $releaseWindowHeight
         $releaseStatisticsPassed = [bool]$releaseStatistics.passed
@@ -5757,7 +6712,7 @@ $monitorTransitionBaselineApplied = (
     [bool]$BaselineResultsDir -and [bool]$RequireMonitorTransition
 )
 $monitorTransitionBaselineRequired = (
-    $benchmarkMode -eq 'release' -and [bool]$RequireMonitorTransition
+    $Mode -ceq 'release' -and [bool]$RequireMonitorTransition
 )
 $monitorTransitionBaselineNonInferiority = $null
 $monitorTransitionBaselineNonInferiorityPassed = -not (
@@ -5816,12 +6771,33 @@ if ($BaselineResultsDir) {
     if ($null -eq $baselineManifest) {
         $baselineIssues.Add('baseline benchmark-manifest.json is missing or invalid')
     } else {
-        $baselineManifestSchema = As-NonnegativeInt (
-            Get-PropertyValue $baselineManifest 'schema_version'
-        )
-        if ($baselineManifestSchema -notin @(1, 2, 3)) {
+        $baselineManifestSchemaValue = Get-PropertyValue `
+            $baselineManifest 'schema_version'
+        $baselineManifestSchema = As-NonnegativeInt `
+            $baselineManifestSchemaValue
+        if ($baselineManifestSchema -notin @(1, 2, 3, 4)) {
             $baselineIssues.Add(
                 'baseline manifest schema_version is unsupported'
+            )
+        }
+        $baselineSettings = Get-PropertyValue $baselineManifest 'settings'
+        $baselineMode = [string](
+            Get-PropertyValue $baselineSettings 'mode'
+        )
+        $expectedBaselineSchema = if ($Mode -ceq 'release') { 4 } else { 2 }
+        if (
+            -not (Test-KettlePerfJsonIntegerEqual `
+                -Value $baselineManifestSchemaValue `
+                -Expected $expectedBaselineSchema)
+        ) {
+            $baselineIssues.Add(
+                "trusted $Mode scoring requires baseline manifest schema " +
+                $expectedBaselineSchema
+            )
+        }
+        if ($baselineMode -cne $Mode) {
+            $baselineIssues.Add(
+                'trusted scoring mode differs from baseline manifest mode'
             )
         }
         $baselineCommit = [string](
@@ -5832,25 +6808,45 @@ if ($BaselineResultsDir) {
         }
         if (
             -not $AllowDirtyManifest -and
-            (Get-PropertyValue $baselineManifest 'repository_dirty') -ne $false
+            -not (Test-KettlePerfJsonBooleanEqual `
+                -Value (Get-PropertyValue `
+                    $baselineManifest 'repository_dirty') `
+                -Expected $false)
         ) {
             $baselineIssues.Add('baseline does not identify a clean repository commit')
+        }
+        if (
+            $Mode -ceq 'release' -and
+            -not (Test-KettlePerfJsonBooleanEqual `
+                -Value (
+                    Get-PropertyValue $baselineManifest 'repository_dirty'
+                ) -Expected $false)
+        ) {
+            $baselineIssues.Add(
+                'release baseline requires a clean repository manifest'
+            )
         }
         $baselineMachine = Get-PropertyValue $baselineManifest 'machine'
         $baselineDisplay = Get-PropertyValue `
             $baselineMachine 'display_topology'
         if (
-            (Get-PropertyValue $baselineDisplay 'release_evidence_valid') -ne
-                $true
+            -not (Test-KettlePerfJsonBooleanEqual `
+                -Value (Get-PropertyValue `
+                    $baselineDisplay 'release_evidence_valid') `
+                -Expected $true)
         ) {
             $baselineIssues.Add('baseline display topology is not valid release evidence')
         }
-        if ((Get-PropertyValue $baselineDisplay 'topology_stable') -ne $true) {
+        if (
+            -not (Test-KettlePerfJsonBooleanEqual `
+                -Value (Get-PropertyValue $baselineDisplay 'topology_stable') `
+                -Expected $true)
+        ) {
             $baselineIssues.Add(
                 'baseline display topology was not stable for the full run'
             )
         }
-        if ($baselineManifestSchema -eq 3) {
+        if ($baselineManifestSchema -in @(3, 4)) {
             foreach (
                 $issue in Get-KettlePerfDisplayTopologyAcquisitionIssues `
                     -BenchmarkManifest $baselineManifest -Prefix 'baseline '
@@ -5858,67 +6854,47 @@ if ($BaselineResultsDir) {
                 $baselineIssues.Add($issue)
             }
         }
-        $baselineSettings = Get-PropertyValue $baselineManifest 'settings'
-        if ($benchmarkMode -eq 'release') {
-            if (
-                $baselineManifestSchema -ne 3 -or
-                (Get-PropertyValue $baselineSettings 'mode') -ne 'release'
+        if ($Mode -ceq 'release') {
+            foreach (
+                $profileIssue in Get-KettlePerfReleaseManifestProfileIssues `
+                    -BenchmarkManifest $baselineManifest -Prefix 'baseline '
             ) {
-                $baselineIssues.Add(
-                    'release baseline must use a schema 3 release manifest'
-                )
+                $baselineIssues.Add($profileIssue)
             }
-            $baselineReleaseSettings = [ordered]@{
-                startup_runs = 12
-                idle_samples = 6
-                idle_seconds = 10
-                latency_samples = 60
-                latency_block_size = 10
-                max_latency_censored = 3
-                latency_timeout_ms = 800
-                menu_hover_samples = 200
-                throughput_iterations = 6
-                minimum_throughput_iterations = 6
-            }
-            foreach ($setting in $baselineReleaseSettings.GetEnumerator()) {
-                if (
-                    (As-NonnegativeInt (
-                        Get-PropertyValue `
-                            $baselineSettings ([string]$setting.Key)
-                    )) -ne [int]$setting.Value
-                ) {
-                    $baselineIssues.Add(
-                        "release baseline setting differs: $($setting.Key)"
-                    )
-                }
-            }
-            if (
-                (Get-PropertyValue `
-                    $baselineSettings 'native_display_enabled') -ne $true
+            foreach (
+                $campaignIssue in `
+                    Get-KettlePerfComparatorCampaignManifestIssues `
+                        -BenchmarkManifest $baselineManifest `
+                        -Prefix 'baseline '
             ) {
-                $baselineIssues.Add(
-                    'release baseline lacks native-display Kettle evidence'
-                )
+                $baselineIssues.Add($campaignIssue)
             }
         }
         if (
             $RequireVtebench -and
-            (Get-PropertyValue $baselineSettings 'vtebench_enabled') -ne $true
+            -not (Test-KettlePerfJsonBooleanEqual `
+                -Value (Get-PropertyValue `
+                    $baselineSettings 'vtebench_enabled') `
+                -Expected $true)
         ) {
             $baselineIssues.Add('baseline has no required vtebench evidence')
         }
         if (
             $RequireMonitorTransition -and
-            (Get-PropertyValue `
-                $baselineSettings 'monitor_transition_enabled') -ne $true
+            -not (Test-KettlePerfJsonBooleanEqual `
+                -Value (Get-PropertyValue `
+                    $baselineSettings 'monitor_transition_enabled') `
+                -Expected $true)
         ) {
             $baselineIssues.Add(
                 'baseline has no required monitor-transition evidence'
             )
         }
         if (
-            (Get-PropertyValue `
-                $baselineSettings 'unidentified_display_allowed') -eq $true
+            -not (Test-KettlePerfJsonBooleanEqual `
+                -Value (Get-PropertyValue `
+                    $baselineSettings 'unidentified_display_allowed') `
+                -Expected $false)
         ) {
             $baselineIssues.Add('baseline allowed an unidentified display')
         }
@@ -5942,7 +6918,7 @@ if ($BaselineResultsDir) {
         ) {
             $baselineIssues.Add($issue)
         }
-        if ($baselineManifestSchema -eq 3) {
+        if ($baselineManifestSchema -in @(3, 4)) {
             foreach (
                 $issue in Get-KettlePerfCandidateManifestIssues `
                     -BenchmarkManifest $baselineManifest `
@@ -6002,8 +6978,10 @@ if ($BaselineResultsDir) {
                 $baselineIssues.Add($issue)
             }
             if (
-                (Get-PropertyValue $baselineSettings 'vtebench_enabled') -eq
-                    $true -and
+                (Test-KettlePerfJsonBooleanEqual `
+                    -Value (Get-PropertyValue `
+                        $baselineSettings 'vtebench_enabled') `
+                    -Expected $true) -and
                 (Get-VtebenchSourceSignature $ResultsDir) -ne
                     (Get-VtebenchSourceSignature $BaselineResultsDir)
             ) {
@@ -6026,13 +7004,17 @@ if ($BaselineResultsDir) {
                     $MaxMenuHoverP99Ms `
                     $MenuHoverLongFrameMs `
                     $MaxMenuHoverLongFrames `
-                    -RequireObservations:($baselineManifestSchema -in @(2, 3))
+                    -RequireObservations:(
+                        $baselineManifestSchema -in @(2, 3, 4)
+                    ) `
+                    -ExpectedSamples $expectedMenuSamples `
+                    -ExpectedBlockSize $expectedMenuBlockSize
             )
         ) {
             $baselineIssues.Add('baseline menu-hover samples are invalid')
         }
         if (
-            $baselineManifestSchema -in @(2, 3) -and
+            $baselineManifestSchema -in @(2, 3, 4) -and
             (Get-PropertyValue $baselineMenu 'variant') -ne 'fixed-comparator'
         ) {
             $baselineIssues.Add('baseline fixed-size menu-hover variant is invalid')
@@ -6046,7 +7028,7 @@ if ($BaselineResultsDir) {
             }
         }
     }
-    if ($benchmarkMode -eq 'release') {
+    if ($Mode -ceq 'release') {
         $baselineNativeMenu = Read-JsonFile (
             Join-Path $BaselineResultsDir 'native-display-menu-hover.json'
         )
@@ -6059,7 +7041,9 @@ if ($BaselineResultsDir) {
                     $MaxMenuHoverP99Ms `
                     $MenuHoverLongFrameMs `
                     $MaxMenuHoverLongFrames `
-                    -RequireObservations
+                    -RequireObservations `
+                    -ExpectedSamples $expectedMenuSamples `
+                    -ExpectedBlockSize $expectedMenuBlockSize
             ) -or
             (Get-PropertyValue $baselineNativeMenu 'variant') -ne
                 'native-display'
@@ -6164,7 +7148,7 @@ if (
     $baselineIssues.Add($monitorTransitionBaselineIssue)
 }
 $baselineStatisticsRequired = (
-    $benchmarkMode -eq 'release'
+    $Mode -ceq 'release'
 )
 $baselineStatistics = $null
 $baselineStatisticsPassed = -not $baselineStatisticsRequired
@@ -6185,10 +7169,29 @@ if ($baselineStatisticsRequired) {
             $baselineStatistics = Get-KettlePerfBaselineStatisticalGate `
                 -CurrentRows $rows -BaselineRows $baselineRows `
                 -Seed "current:$manifestRunId|baseline:$baselineRunId" `
-                -StartupSamples 12 -IdleSamples 6 `
-                -LatencySamples 60 -LatencyBlockSize 10 `
-                -MaximumLatencyCensored 3 -LatencyTimeoutMs 800 `
-                -ThroughputRounds 6 `
+                -StartupSamples (
+                    $script:KettlePerfReleaseAcquisitionContract.startup_runs
+                ) -IdleSamples (
+                    $script:KettlePerfReleaseAcquisitionContract.idle_samples
+                ) `
+                -LatencySamples (
+                    $script:KettlePerfReleaseAcquisitionContract.
+                        latency_samples
+                ) -LatencyBlockSize (
+                    $script:KettlePerfReleaseAcquisitionContract.
+                        latency_block_size
+                ) `
+                -MaximumLatencyCensored (
+                    $script:KettlePerfReleaseAcquisitionContract.
+                        max_latency_censored
+                ) -LatencyTimeoutMs (
+                    $script:KettlePerfReleaseAcquisitionContract.
+                        latency_timeout_ms
+                ) `
+                -ThroughputRounds (
+                    $script:KettlePerfReleaseAcquisitionContract.
+                        throughput_iterations
+                ) `
                 -ExpectedWindowWidth $releaseWindowWidth `
                 -ExpectedWindowHeight $releaseWindowHeight
             $baselineStatisticsPassed = [bool]$baselineStatistics.passed
@@ -6206,7 +7209,7 @@ if ($baselineStatisticsRequired) {
     }
 }
 $regressions = @(Regression-Report $rows $baselineRows $MaxRegressionPct)
-$legacyPointGatesApplied = $benchmarkMode -ne 'release'
+$legacyPointGatesApplied = $Mode -cne 'release'
 $legacyPointGatesPassed = (
     $kettleRank -le $MaxKettleRank -and
     $beaten -ge $MinimumPeersBeaten -and
@@ -6214,14 +7217,14 @@ $legacyPointGatesPassed = (
     $latencyPassed
 )
 $legacyRegressionGateApplied = (
-    $benchmarkMode -ne 'release' -and
+    $Mode -cne 'release' -and
     [bool]$BaselineResultsDir
 )
 $legacyRegressionGatePassed = (
     -not $legacyRegressionGateApplied -or
     @($regressions).Count -eq 0
 )
-$overallPassed = if ($benchmarkMode -eq 'release') {
+$overallPassed = if ($Mode -ceq 'release') {
     (
         $coveragePassed -and
         $releaseStatisticsPassed -and
@@ -6243,7 +7246,7 @@ $overallPassed = if ($benchmarkMode -eq 'release') {
 }
 
 $result = [ordered]@{
-    schema_version = 3
+    schema_version = 4
     timestamp = (Get-Date).ToString('o')
     results_dir = (Resolve-Path $ResultsDir).Path
     baseline_results_dir = if ($BaselineResultsDir) { (Resolve-Path $BaselineResultsDir).Path } else { $null }
@@ -6258,8 +7261,19 @@ $result = [ordered]@{
     minimum_metrics_per_terminal = $MinimumMetricsPerTerminal
     minimum_startup_samples = $MinimumStartupSamples
     dirty_manifest_allowed = [bool]$AllowDirtyManifest
+    scoring_mode = $Mode
     benchmark_mode = $benchmarkMode
-    point_rank_is_advisory = $benchmarkMode -eq 'release'
+    release_acquisition_contract = if ($Mode -ceq 'release') {
+        [string]$script:KettlePerfReleaseAcquisitionContract.schema
+    } else {
+        $null
+    }
+    release_score_contract = if ($Mode -ceq 'release') {
+        [string]$script:KettlePerfReleaseScoreContract.schema
+    } else {
+        $null
+    }
+    point_rank_is_advisory = $Mode -ceq 'release'
     legacy_point_gates_applied = $legacyPointGatesApplied
     legacy_point_gates_passed = $legacyPointGatesPassed
     baseline_compatible = (

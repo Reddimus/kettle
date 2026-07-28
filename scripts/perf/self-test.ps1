@@ -6,9 +6,61 @@ param()
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 
+# A Windows PowerShell child inherits PSModulePath from its parent. When that
+# parent is pwsh, the PowerShell 7 module directory can precede the Desktop
+# edition's built-ins and make commands such as Get-FileHash undiscoverable.
+# Rebuild the no-profile test environment from native machine roots and load
+# Utility by its engine-owned manifest before spawning the isolated tests.
+if ($PSVersionTable.PSEdition -eq 'Desktop') {
+    $psHomeModules = Join-Path $PSHOME 'Modules'
+    $machineModulePath = [Environment]::GetEnvironmentVariable(
+        'PSModulePath',
+        'Machine'
+    )
+    if ([string]::IsNullOrWhiteSpace($machineModulePath)) {
+        throw 'Windows PowerShell machine PSModulePath is unavailable.'
+    }
+
+    $nativeModulePaths = @($psHomeModules)
+    foreach ($path in @(
+        $machineModulePath -split [regex]::Escape(
+            [string][IO.Path]::PathSeparator
+        )
+    )) {
+        $expanded = [Environment]::ExpandEnvironmentVariables($path).Trim()
+        if (
+            $expanded -and
+            -not @(
+                $nativeModulePaths |
+                    Where-Object {
+                        [StringComparer]::OrdinalIgnoreCase.Equals(
+                            $_,
+                            $expanded
+                        )
+                    }
+            ).Count
+        ) {
+            $nativeModulePaths += $expanded
+        }
+    }
+    $env:PSModulePath = $nativeModulePaths -join [IO.Path]::PathSeparator
+
+    $utilityManifest = Join-Path $psHomeModules (
+        'Microsoft.PowerShell.Utility\Microsoft.PowerShell.Utility.psd1'
+    )
+    if (-not [IO.File]::Exists($utilityManifest)) {
+        throw "Windows PowerShell Utility manifest is missing: $utilityManifest"
+    }
+    Import-Module -Name $utilityManifest -Force -ErrorAction Stop
+}
+
 $requiredTests = [string[]]@(
     'statistics-self-test.ps1',
+    'comparator-campaign-self-test.ps1',
+    'setup-comparator-campaign-self-test.ps1',
     'display-identity-self-test.ps1',
+    'display-stability-self-test.ps1',
+    'documentation-contract-self-test.ps1',
     'terminal-specs-self-test.ps1',
     'evidence-snapshot-self-test.ps1',
     'harness-provenance-self-test.ps1',
@@ -18,6 +70,7 @@ $requiredTests = [string[]]@(
     'process-capture-self-test.ps1',
     'startup-ready-self-test.ps1',
     'go-signal-self-test.ps1',
+    'release-contract-self-test.ps1',
     'release-statistics-self-test.ps1',
     'baseline-statistics-self-test.ps1',
     'score-statistics-self-test.ps1',

@@ -3,6 +3,9 @@
 
 $script:KettlePerfHarnessFiles = [string[]]@(
     'baseline-statistics.ps1',
+    'comparator-campaign.ps1',
+    'display-identity-contract.ps1',
+    'display-stability.ps1',
     'evidence-snapshot.ps1',
     'gen-payloads.ps1',
     'go-signal.ps1',
@@ -16,12 +19,14 @@ $script:KettlePerfHarnessFiles = [string[]]@(
     'payload-contract.ps1',
     'perf-all.ps1',
     'process-capture.ps1',
+    'release-contract.ps1',
     'release-statistics.ps1',
     'run-inside.ps1',
     'sanitize-results.ps1',
     'schedule.ps1',
     'score-statistics.ps1',
     'score.ps1',
+    'setup-comparator-campaign.ps1',
     'startup-idle.ps1',
     'startup-ready.ps1',
     'statistics.ps1',
@@ -136,11 +141,11 @@ function Get-KettlePerfHarnessProvenance {
 
     $records = [System.Collections.Generic.List[object]]::new()
     foreach ($name in $script:KettlePerfHarnessFiles) {
-        $matches = @($Locks | Where-Object { $_.name -ceq $name })
-        if ($matches.Count -ne 1) {
+        $matchingLocks = @($Locks | Where-Object { $_.name -ceq $name })
+        if ($matchingLocks.Count -ne 1) {
             throw "Harness lock coverage is not unique for $name"
         }
-        $stream = $matches[0].stream
+        $stream = $matchingLocks[0].stream
         if ($null -eq $stream -or -not $stream.CanRead) {
             throw "Harness source lock is no longer readable: $name"
         }

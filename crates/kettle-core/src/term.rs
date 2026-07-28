@@ -1,29 +1,809 @@
 //! A single terminal instance: PTY + `alacritty_terminal` grid + VT parser,
 //! driven by a dedicated reader thread.
 
-use std::io::{Read, Write};
+use std::collections::VecDeque;
+use std::io::{self, Read, Write};
+#[cfg(unix)]
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 
 use alacritty_terminal::Term;
 use alacritty_terminal::grid::Dimensions;
-use alacritty_terminal::term::Config as TermConfig;
 use alacritty_terminal::term::cell::Cell;
-use alacritty_terminal::vte::ansi::{Color as AnsiColor, CursorShape, NamedColor, Processor};
-use anyhow::Result;
+use alacritty_terminal::term::{
+    Config as TermConfig, GraphicsEvent, GraphicsEventBatch, GraphicsScrollDirection,
+};
+use alacritty_terminal::vte::ansi::{
+    Color as AnsiColor, CursorShape, Handler, NamedColor, Processor, SYNC_MARKER_CAPACITY,
+};
+use anyhow::{Context, Result};
+use kettle_vt::kitty::{Delete as KittyDelete, DeleteTarget as KittyDeleteTarget, PlacementKey};
 use kettle_vt::placeholder::{self, CellDiacritics, RawCell};
-use kettle_vt::{Chunk, Extractor, Progress, PromptKind};
+use kettle_vt::{Chunk, DeferredGraphics, Extractor, Progress, PromptKind};
 use portable_pty::{CommandBuilder, PtySize};
 
-use crate::event::{EventProxy, TermEvent, Waker};
+use crate::event::{EventProxy, OutputWakeGate, TermEvent, Waker};
 use crate::images::{
-    AnimEntry, Animations, ImageSourceRect, Images, Placement, RelEntry, Relatives, VirtualEntry,
-    Virtuals, relative_origin, resolve_chain,
+    AnimEntry, Animations, ImageSourceCrop, ImageSourceRect, Images, Placement, PlacementParams,
+    RelEntry, Relatives, VirtualEntry, Virtuals, prune, relative_origin, resolve_chain,
 };
 
 const PTY_READ_BUFFER_BYTES: usize = 64 * 1024;
 const PTY_PUMP_QUEUE_DEPTH: usize = 4;
+#[cfg(windows)]
+const CONPTY_NONBLOCKING_WRITE_BYTES: usize = 1024;
+/// Bound consecutive full-pipe waits in legacy complete-message writer APIs.
+///
+/// The production UI and `kettle exec` use [`PtyStdin::try_write`] and retain
+/// their own pending messages. These compatibility APIs cannot return partial
+/// progress without breaking their contract, so they retry for at most two
+/// seconds (at one millisecond per wait) before returning/logging `WouldBlock`.
+const PTY_COMPLETE_WRITE_MAX_BACKPRESSURE_RETRIES: usize = 2_000;
+
+/// Incremental, bounded state for a fail-closed Unix canonical-EOF decision.
+///
+/// The stdin forwarding loop updates this state under the termios snapshot
+/// used for each PTY write. Completed records release their retained memory, so
+/// an arbitrarily large line-delimited stream stays bounded. Only the current
+/// edited record is retained because VERASE, VWERASE, VKILL, VLNEXT, and IUTF8
+/// can change whether one final VEOF or two are required. An oversized current
+/// record is conservatively treated as nonempty, so it receives two VEOF
+/// characters; a termios race remains ambiguous and refuses EOF injection.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct PtyInputTail {
+    record: Vec<u8>,
+    overflowed: bool,
+    literal_next: bool,
+    ambiguous_termios: bool,
+    last_rules: Option<CanonicalEofRules>,
+}
+
+#[cfg(any(unix, test))]
+const PTY_STDIN_EOF_TRACK_BYTES: usize = 64 * 1024;
+
+#[cfg(any(unix, test))]
+impl PtyInputTail {
+    fn has_pending_state(&self) -> bool {
+        self.overflowed || self.literal_next || !self.record.is_empty()
+    }
+
+    fn reset_record(&mut self) {
+        self.record.clear();
+        self.overflowed = false;
+        self.literal_next = false;
+        // A delimiter, flushing control, or transition out of canonical mode
+        // proves that no earlier edited record remains. A prior termios race
+        // must not poison all later, independently bounded stdin forever.
+        self.ambiguous_termios = false;
+    }
+
+    fn push(&mut self, byte: u8) {
+        if self.overflowed {
+            return;
+        }
+        if self.record.len() >= PTY_STDIN_EOF_TRACK_BYTES {
+            self.overflowed = true;
+            self.record.clear();
+            return;
+        }
+        self.record.push(byte);
+    }
+
+    fn erase_one(&mut self, iutf8: bool) -> Option<u8> {
+        if self.overflowed {
+            return None;
+        }
+        let mut erased = self.record.pop()?;
+        if iutf8 && erased & 0xc0 == 0x80 {
+            while let Some(byte) = self.record.pop() {
+                erased = byte;
+                if erased & 0xc0 != 0x80 {
+                    break;
+                }
+            }
+        }
+        Some(erased)
+    }
+
+    fn trailing_character(&self, iutf8: bool) -> Option<u8> {
+        let mut index = self.record.len().checked_sub(1)?;
+        if iutf8 && self.record[index] & 0xc0 == 0x80 {
+            while index > 0 && self.record[index] & 0xc0 == 0x80 {
+                index -= 1;
+            }
+        }
+        Some(self.record[index])
+    }
+
+    fn erase_word(&mut self, rules: CanonicalEofRules) {
+        if self.overflowed {
+            // Once the record exceeded the tracking bound, erasing any finite
+            // suffix cannot prove that the kernel-side record became empty.
+            return;
+        }
+        match rules.word_erase {
+            WordEraseMode::Linux => {
+                // Linux's N_TTY eraser consumes trailing punctuation/space,
+                // then one ASCII-alphanumeric-or-underscore run. This differs
+                // from both POSIX's whitespace word and BSD ALTWERASE.
+                let mut saw_word = false;
+                while let Some(byte) = self.trailing_character(rules.iutf8) {
+                    let word = byte.is_ascii_alphanumeric() || byte == b'_';
+                    if saw_word && !word {
+                        break;
+                    }
+                    saw_word |= word;
+                    let _ = self.erase_one(rules.iutf8);
+                }
+            }
+            WordEraseMode::BsdSimple | WordEraseMode::BsdAlt => {
+                while self
+                    .record
+                    .last()
+                    .is_some_and(|byte| matches!(*byte, b' ' | b'\t'))
+                {
+                    let _ = self.erase_one(rules.iutf8);
+                }
+                let Some(first) = self.erase_one(rules.iutf8) else {
+                    return;
+                };
+                let first_is_word = first.is_ascii_alphanumeric() || first == b'_' || first >= 0x80;
+                while let Some(byte) = self.trailing_character(rules.iutf8) {
+                    if matches!(byte, b' ' | b'\t') {
+                        break;
+                    }
+                    if rules.word_erase == WordEraseMode::BsdAlt {
+                        let is_word = byte.is_ascii_alphanumeric() || byte == b'_' || byte >= 0x80;
+                        if is_word != first_is_word {
+                            break;
+                        }
+                    }
+                    let _ = self.erase_one(rules.iutf8);
+                }
+            }
+        }
+    }
+
+    fn note_rules(&mut self, rules: CanonicalEofRules) {
+        if self.last_rules.is_some_and(|previous| previous != rules) && self.has_pending_state() {
+            // tcsetattr(TCSAFLUSH) and tcsetattr(TCSANOW) have the same final
+            // snapshot but different effects on an existing canonical record.
+            // No portable API exposes which action the child used.
+            self.ambiguous_termios = true;
+        }
+        self.last_rules = Some(rules);
+    }
+
+    fn observe(&mut self, bytes: &[u8], rules: CanonicalEofRules) {
+        self.note_rules(rules);
+        if !rules.canonical {
+            self.reset_record();
+            return;
+        }
+        if rules.extproc {
+            // EXTPROC bypasses the line discipline's normal canonical edit
+            // and delimiter processing (and Linux publishes the bytes through
+            // its noncanonical read path). Remember that forwarded data became
+            // untrackable so a later EXTPROC-off transition cannot guess EOF.
+            let untrackable = self.has_pending_state() || !bytes.is_empty();
+            self.record.clear();
+            self.overflowed = false;
+            self.literal_next = false;
+            self.ambiguous_termios |= untrackable;
+            return;
+        }
+
+        for &raw_byte in bytes {
+            let mut byte = if rules.istrip {
+                raw_byte & 0x7f
+            } else {
+                raw_byte
+            };
+            if rules.iuclc && rules.iexten && byte.is_ascii_uppercase() {
+                byte = byte.to_ascii_lowercase();
+            }
+            if byte == b'\r' {
+                if rules.igncr {
+                    continue;
+                }
+                if rules.icrnl {
+                    byte = b'\n';
+                }
+            } else if byte == b'\n' && rules.inlcr {
+                byte = b'\r';
+            }
+
+            if self.literal_next {
+                self.push(byte);
+                self.literal_next = false;
+                continue;
+            }
+            if rules.iexten && rules.vlnext == Some(byte) {
+                self.literal_next = true;
+                continue;
+            }
+            if rules.ixon && (rules.vstart == Some(byte) || rules.vstop == Some(byte)) {
+                continue;
+            }
+            if rules.isig
+                && (rules.vintr == Some(byte)
+                    || rules.vquit == Some(byte)
+                    || rules.vsusp == Some(byte))
+            {
+                if !rules.noflsh {
+                    self.reset_record();
+                }
+                continue;
+            }
+            if rules.verase == Some(byte) {
+                let _ = self.erase_one(rules.iutf8);
+                continue;
+            }
+            if rules.vkill == Some(byte) {
+                self.reset_record();
+                continue;
+            }
+            if rules.iexten && rules.vwerase == Some(byte) {
+                self.erase_word(rules);
+                continue;
+            }
+            if rules.iexten && (rules.vreprint == Some(byte) || rules.vdiscard == Some(byte)) {
+                continue;
+            }
+            if byte == b'\n'
+                || rules.veof == Some(byte)
+                || rules.veol == Some(byte)
+                || (rules.iexten && rules.veol2 == Some(byte))
+            {
+                self.reset_record();
+                continue;
+            }
+            self.push(byte);
+        }
+    }
+
+    fn record_unterminated(
+        &mut self,
+        live_rules: CanonicalEofRules,
+    ) -> std::result::Result<bool, &'static str> {
+        self.note_rules(live_rules);
+        if self.ambiguous_termios {
+            return Err("the child changed canonical termios while stdin had a pending record");
+        }
+        if self.overflowed {
+            // The exact edited contents are no longer known, but the record
+            // was definitely nonempty when it crossed the bound. Explicit
+            // record delimiters, VKILL, and flushing signals reset overflow
+            // while later erase controls conservatively leave it nonempty.
+            return Ok(true);
+        }
+        if self.literal_next {
+            return Err("forwarded stdin ended after the canonical VLNEXT character");
+        }
+        Ok(!self.record.is_empty())
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct CanonicalEofRules {
+    canonical: bool,
+    extproc: bool,
+    igncr: bool,
+    icrnl: bool,
+    inlcr: bool,
+    istrip: bool,
+    iuclc: bool,
+    iexten: bool,
+    iutf8: bool,
+    isig: bool,
+    noflsh: bool,
+    ixon: bool,
+    veof: Option<u8>,
+    veol: Option<u8>,
+    veol2: Option<u8>,
+    verase: Option<u8>,
+    vkill: Option<u8>,
+    vlnext: Option<u8>,
+    vwerase: Option<u8>,
+    vreprint: Option<u8>,
+    vdiscard: Option<u8>,
+    vintr: Option<u8>,
+    vquit: Option<u8>,
+    vsusp: Option<u8>,
+    vstart: Option<u8>,
+    vstop: Option<u8>,
+    word_erase: WordEraseMode,
+}
+
+impl CanonicalEofRules {
+    #[cfg(any(unix, test))]
+    fn supports_eof(self) -> bool {
+        self.canonical && !self.extproc
+    }
+}
+
+// Each host constructs only its own line-discipline mode; portable tests
+// exercise every variant.
+#[cfg_attr(not(test), allow(dead_code))]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum WordEraseMode {
+    Linux,
+    BsdSimple,
+    BsdAlt,
+}
+
+#[cfg(unix)]
+fn live_canonical_eof_rules(fd: RawFd) -> Result<(CanonicalEofRules, u8, u8)> {
+    let mut attrs = unsafe { std::mem::zeroed::<libc::termios>() };
+    if unsafe { libc::tcgetattr(fd, &mut attrs) } != 0 {
+        return Err(std::io::Error::last_os_error())
+            .context("cannot read live PTY termios for stdin forwarding");
+    }
+    let disabled = unsafe { libc::fpathconf(fd, libc::_PC_VDISABLE) };
+    if !(0..=u8::MAX as libc::c_long).contains(&disabled) {
+        anyhow::bail!("cannot determine the PTY's disabled control-character value");
+    }
+    let disabled = disabled as u8;
+    let enabled_cc = |index: usize| {
+        let byte = attrs.c_cc[index] as u8;
+        (byte != disabled).then_some(byte)
+    };
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    let iuclc = attrs.c_iflag & libc::IUCLC != 0;
+    #[cfg(not(any(target_os = "linux", target_os = "android")))]
+    let iuclc = false;
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    let iutf8 = attrs.c_iflag & libc::IUTF8 != 0;
+    #[cfg(not(any(target_os = "linux", target_os = "android")))]
+    let iutf8 = false;
+    #[cfg(any(
+        target_os = "linux",
+        target_os = "android",
+        target_os = "macos",
+        target_os = "ios",
+        target_os = "freebsd",
+        target_os = "openbsd",
+        target_os = "netbsd",
+        target_os = "dragonfly"
+    ))]
+    let extproc = attrs.c_lflag & libc::EXTPROC != 0;
+    #[cfg(not(any(
+        target_os = "linux",
+        target_os = "android",
+        target_os = "macos",
+        target_os = "ios",
+        target_os = "freebsd",
+        target_os = "openbsd",
+        target_os = "netbsd",
+        target_os = "dragonfly"
+    )))]
+    let extproc = false;
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    let word_erase = WordEraseMode::Linux;
+    #[cfg(any(
+        target_os = "macos",
+        target_os = "ios",
+        target_os = "freebsd",
+        target_os = "openbsd",
+        target_os = "netbsd",
+        target_os = "dragonfly"
+    ))]
+    let word_erase = if attrs.c_lflag & libc::ALTWERASE != 0 {
+        WordEraseMode::BsdAlt
+    } else {
+        WordEraseMode::BsdSimple
+    };
+    #[cfg(not(any(
+        target_os = "linux",
+        target_os = "android",
+        target_os = "macos",
+        target_os = "ios",
+        target_os = "freebsd",
+        target_os = "openbsd",
+        target_os = "netbsd",
+        target_os = "dragonfly"
+    )))]
+    let word_erase = WordEraseMode::BsdSimple;
+    let configured_veof = attrs.c_cc[libc::VEOF] as u8;
+    Ok((
+        CanonicalEofRules {
+            canonical: attrs.c_lflag & libc::ICANON != 0,
+            extproc,
+            igncr: attrs.c_iflag & libc::IGNCR != 0,
+            icrnl: attrs.c_iflag & libc::ICRNL != 0,
+            inlcr: attrs.c_iflag & libc::INLCR != 0,
+            istrip: attrs.c_iflag & libc::ISTRIP != 0,
+            iuclc,
+            iexten: attrs.c_lflag & libc::IEXTEN != 0,
+            iutf8,
+            isig: attrs.c_lflag & libc::ISIG != 0,
+            noflsh: attrs.c_lflag & libc::NOFLSH != 0,
+            ixon: attrs.c_iflag & libc::IXON != 0,
+            veof: enabled_cc(libc::VEOF),
+            veol: enabled_cc(libc::VEOL),
+            veol2: enabled_cc(libc::VEOL2),
+            verase: enabled_cc(libc::VERASE),
+            vkill: enabled_cc(libc::VKILL),
+            vlnext: enabled_cc(libc::VLNEXT),
+            vwerase: enabled_cc(libc::VWERASE),
+            vreprint: enabled_cc(libc::VREPRINT),
+            vdiscard: enabled_cc(libc::VDISCARD),
+            vintr: enabled_cc(libc::VINTR),
+            vquit: enabled_cc(libc::VQUIT),
+            vsusp: enabled_cc(libc::VSUSP),
+            vstart: enabled_cc(libc::VSTART),
+            vstop: enabled_cc(libc::VSTOP),
+            word_erase,
+        },
+        configured_veof,
+        disabled,
+    ))
+}
+
+#[cfg(any(unix, test))]
+fn pty_eof_sequence(
+    canonical: bool,
+    configured_veof: u8,
+    disabled_value: u8,
+    unterminated_record: bool,
+) -> std::result::Result<Option<([u8; 2], usize)>, &'static str> {
+    if !canonical {
+        return Ok(None);
+    }
+    if configured_veof == disabled_value {
+        return Err("the PTY has VEOF disabled");
+    }
+    let count = if unterminated_record { 2 } else { 1 };
+    Ok(Some(([configured_veof; 2], count)))
+}
+
+#[cfg(test)]
+mod pty_eof_tests {
+    use super::{
+        CanonicalEofRules, PTY_STDIN_EOF_TRACK_BYTES, PtyInputTail, WordEraseMode, pty_eof_sequence,
+    };
+
+    fn rules() -> CanonicalEofRules {
+        CanonicalEofRules {
+            canonical: true,
+            extproc: false,
+            igncr: false,
+            icrnl: true,
+            inlcr: false,
+            istrip: false,
+            iuclc: false,
+            iexten: true,
+            iutf8: true,
+            isig: true,
+            noflsh: false,
+            ixon: true,
+            veof: Some(0x04),
+            veol: None,
+            veol2: None,
+            verase: Some(0x7f),
+            vkill: Some(0x15),
+            vlnext: Some(0x16),
+            vwerase: Some(0x17),
+            vreprint: Some(0x12),
+            vdiscard: Some(0x0f),
+            vintr: Some(0x03),
+            vquit: Some(0x1c),
+            vsusp: Some(0x1a),
+            vstart: Some(0x11),
+            vstop: Some(0x13),
+            word_erase: WordEraseMode::Linux,
+        }
+    }
+
+    fn unterminated(
+        bytes: &[u8],
+        rules: CanonicalEofRules,
+    ) -> std::result::Result<bool, &'static str> {
+        let mut input = PtyInputTail::default();
+        input.observe(bytes, rules);
+        input.record_unterminated(rules)
+    }
+
+    #[test]
+    fn unterminated_canonical_record_uses_configured_veof_twice() {
+        assert_eq!(
+            pty_eof_sequence(true, 0x1a, 0xff, true),
+            Ok(Some(([0x1a; 2], 2)))
+        );
+    }
+
+    #[test]
+    fn empty_or_terminated_canonical_input_uses_one_veof() {
+        assert_eq!(
+            pty_eof_sequence(true, 0x04, 0xff, false),
+            Ok(Some(([0x04; 2], 1)))
+        );
+    }
+
+    #[test]
+    fn noncanonical_input_never_injects_an_eof_character() {
+        assert_eq!(pty_eof_sequence(false, 0x04, 0xff, true), Ok(None));
+    }
+
+    #[test]
+    fn disabled_canonical_veof_fails_explicitly() {
+        assert_eq!(
+            pty_eof_sequence(true, 0xff, 0xff, true),
+            Err("the PTY has VEOF disabled")
+        );
+    }
+
+    #[test]
+    fn live_cr_nl_mappings_select_the_canonical_boundary() {
+        assert_eq!(unterminated(b"", rules()), Ok(false));
+        assert_eq!(unterminated(b"x\n", rules()), Ok(false));
+        assert_eq!(unterminated(b"x\r", rules()), Ok(false));
+        assert_eq!(unterminated(b"x", rules()), Ok(true));
+
+        let inlcr = CanonicalEofRules {
+            inlcr: true,
+            icrnl: false,
+            ..rules()
+        };
+        assert_eq!(unterminated(b"x\n", inlcr), Ok(true));
+        assert_eq!(
+            unterminated(
+                b"x\n",
+                CanonicalEofRules {
+                    veol: Some(b'\r'),
+                    ..inlcr
+                }
+            ),
+            Ok(false)
+        );
+    }
+
+    #[test]
+    fn igncr_discards_cr_before_replaying_the_record() {
+        let igncr = CanonicalEofRules {
+            igncr: true,
+            icrnl: true,
+            ..rules()
+        };
+        assert_eq!(unterminated(b"\r\r", igncr), Ok(false));
+        assert_eq!(unterminated(b"x\n\r\r", igncr), Ok(false));
+        assert_eq!(unterminated(b"x\r\r", igncr), Ok(true));
+    }
+
+    #[test]
+    fn live_veof_veol_and_veol2_end_a_canonical_record() {
+        assert_eq!(unterminated(b"x\x04", rules()), Ok(false));
+        assert_eq!(
+            unterminated(
+                b"x;",
+                CanonicalEofRules {
+                    veol: Some(b';'),
+                    ..rules()
+                }
+            ),
+            Ok(false)
+        );
+        assert_eq!(
+            unterminated(
+                b"x:",
+                CanonicalEofRules {
+                    veol2: Some(b':'),
+                    ..rules()
+                }
+            ),
+            Ok(false)
+        );
+    }
+
+    #[test]
+    fn vlnext_quotes_delimiters_and_i_exten_controls_it() {
+        assert_eq!(unterminated(b"abc\x16\n", rules()), Ok(true));
+        assert_eq!(
+            unterminated(
+                b"abc\x16\n",
+                CanonicalEofRules {
+                    iexten: false,
+                    ..rules()
+                }
+            ),
+            Ok(false)
+        );
+        assert_eq!(
+            unterminated(b"abc\x16", rules()),
+            Err("forwarded stdin ended after the canonical VLNEXT character"),
+            "injecting VEOF into a pending literal-next state would corrupt input"
+        );
+    }
+
+    #[test]
+    fn erase_kill_and_word_erase_update_the_pending_record() {
+        assert_eq!(unterminated(b"x\x7f", rules()), Ok(false));
+        assert_eq!(unterminated(b"abc\x15", rules()), Ok(false));
+        assert_eq!(
+            unterminated(b"abc def\x17", rules()),
+            Ok(true),
+            "word erase leaves the preceding record"
+        );
+        assert_eq!(unterminated(b"abc\x17", rules()), Ok(false));
+        assert_eq!(
+            unterminated("é\u{7f}".as_bytes(), rules()),
+            Ok(false),
+            "IUTF8 VERASE removes one complete UTF-8 character"
+        );
+        assert_eq!(
+            unterminated(
+                "é\u{7f}".as_bytes(),
+                CanonicalEofRules {
+                    iutf8: false,
+                    ..rules()
+                }
+            ),
+            Ok(true),
+            "without IUTF8, VERASE removes only the trailing byte"
+        );
+    }
+
+    #[test]
+    fn word_erase_follows_linux_and_bsd_line_disciplines() {
+        assert_eq!(
+            unterminated(b"abc-def\x17", rules()),
+            Ok(true),
+            "Linux stops after the trailing alphanumeric run at punctuation"
+        );
+        assert_eq!(
+            unterminated(b"abc---\x17", rules()),
+            Ok(false),
+            "Linux consumes trailing punctuation before the preceding word"
+        );
+
+        let bsd_simple = CanonicalEofRules {
+            word_erase: WordEraseMode::BsdSimple,
+            ..rules()
+        };
+        assert_eq!(
+            unterminated(b"abc-def\x17", bsd_simple),
+            Ok(false),
+            "BSD without ALTWERASE consumes through non-space input"
+        );
+
+        let bsd_alt = CanonicalEofRules {
+            word_erase: WordEraseMode::BsdAlt,
+            ..rules()
+        };
+        assert_eq!(
+            unterminated(b"abc-def\x17", bsd_alt),
+            Ok(true),
+            "BSD ALTWERASE stops when the ASCII word class changes"
+        );
+        assert_eq!(
+            unterminated(b"abc---\x17", bsd_alt),
+            Ok(true),
+            "BSD ALTWERASE erases only the trailing punctuation class"
+        );
+    }
+
+    #[test]
+    fn extproc_never_uses_canonical_eof_injection() {
+        let extproc = CanonicalEofRules {
+            extproc: true,
+            ..rules()
+        };
+        assert!(!extproc.supports_eof());
+
+        let mut input = PtyInputTail::default();
+        input.observe(b"untracked", extproc);
+        assert_eq!(
+            input.record_unterminated(rules()),
+            Err("the child changed canonical termios while stdin had a pending record"),
+            "turning EXTPROC off cannot reinterpret externally processed bytes"
+        );
+        input.observe(b"\n", rules());
+        assert_eq!(
+            input.record_unterminated(rules()),
+            Ok(false),
+            "a later canonical delimiter establishes a new safe boundary"
+        );
+    }
+
+    #[test]
+    fn istrip_and_iuclc_apply_before_control_character_matching() {
+        assert_eq!(
+            unterminated(
+                &[b'x', 0x84],
+                CanonicalEofRules {
+                    istrip: true,
+                    ..rules()
+                }
+            ),
+            Ok(false),
+            "0x84 strips to VEOF"
+        );
+        assert_eq!(
+            unterminated(
+                b"xQ",
+                CanonicalEofRules {
+                    iuclc: true,
+                    veol: Some(b'q'),
+                    ..rules()
+                }
+            ),
+            Ok(false),
+            "IUCLC maps Q to the q VEOL"
+        );
+    }
+
+    #[test]
+    fn isig_and_ixon_controls_do_not_create_pending_input() {
+        assert_eq!(unterminated(b"x\x03", rules()), Ok(false));
+        assert_eq!(
+            unterminated(
+                b"x\x03",
+                CanonicalEofRules {
+                    noflsh: true,
+                    ..rules()
+                }
+            ),
+            Ok(true),
+            "NOFLSH preserves the record while VINTR itself is consumed"
+        );
+        assert_eq!(unterminated(b"\x13", rules()), Ok(false));
+        assert_eq!(unterminated(b"x\x13", rules()), Ok(true));
+    }
+
+    #[test]
+    fn oversized_record_is_nonempty_without_unbounded_retention() {
+        let mut input = PtyInputTail::default();
+        input.observe(&vec![b'x'; PTY_STDIN_EOF_TRACK_BYTES + 1], rules());
+        assert_eq!(
+            input.record_unterminated(rules()),
+            Ok(true),
+            "an oversized unterminated record conservatively requires two VEOF characters"
+        );
+
+        let mut line_delimited = vec![b'x'; PTY_STDIN_EOF_TRACK_BYTES + 1];
+        line_delimited.push(b'\n');
+        input = PtyInputTail::default();
+        input.observe(&line_delimited, rules());
+        input.observe(&line_delimited, rules());
+        assert_eq!(
+            input.record_unterminated(rules()),
+            Ok(false),
+            "completed records release overflow state and retained memory"
+        );
+    }
+
+    #[test]
+    fn relevant_termios_change_with_pending_input_fails_closed() {
+        let mut input = PtyInputTail::default();
+        input.observe(b"x", rules());
+        let changed = CanonicalEofRules {
+            verase: Some(b'~'),
+            ..rules()
+        };
+        assert_eq!(
+            input.record_unterminated(changed),
+            Err("the child changed canonical termios while stdin had a pending record")
+        );
+        input.observe(b"\n", changed);
+        assert_eq!(
+            input.record_unterminated(changed),
+            Ok(false),
+            "a stable record boundary clears earlier termios ambiguity"
+        );
+        input.observe(b"new-record", changed);
+        assert_eq!(
+            input.record_unterminated(changed),
+            Ok(true),
+            "tracking resumes under the stable rules after the boundary"
+        );
+
+        let mut terminated = PtyInputTail::default();
+        terminated.observe(b"x\n", rules());
+        assert_eq!(terminated.record_unterminated(changed), Ok(false));
+    }
+}
 
 /// Delivery policy for the optional raw PTY-output side channel.
 ///
@@ -57,13 +837,278 @@ impl PtyOutputSender {
     }
 }
 
-fn terminal_resize_changes(
-    current_grid: (usize, usize),
-    current_cell: (u16, u16),
-    next_grid: (usize, usize),
-    next_cell: (u16, u16),
-) -> (bool, bool) {
-    (current_grid != next_grid, current_cell != next_cell)
+/// Exact PTY grid and text-area pixel geometry.
+///
+/// Keeping total pixels instead of a rounded integer cell size matters at
+/// fractional display scales: 100 columns at 9.6 px are 960 px, not 1000 px.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PtyGeometry {
+    pub columns: usize,
+    pub rows: usize,
+    pub pixel_width: u16,
+    pub pixel_height: u16,
+}
+
+/// Runtime capabilities that influence terminal protocol replies.
+///
+/// These are separate from the parser's compiled feature set: a capability
+/// such as OSC 52 can be present in the binary but unavailable under the
+/// active security policy or on a headless platform.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct TerminalCapabilities {
+    pub osc52_copy: bool,
+}
+
+impl Default for TerminalCapabilities {
+    fn default() -> Self {
+        Self { osc52_copy: true }
+    }
+}
+
+impl PtyGeometry {
+    pub fn new(columns: usize, rows: usize, pixel_width: u16, pixel_height: u16) -> Self {
+        Self {
+            columns: columns.max(1),
+            rows: rows.max(1),
+            pixel_width: pixel_width.max(1),
+            pixel_height: pixel_height.max(1),
+        }
+    }
+
+    pub fn from_cell_size(columns: usize, rows: usize, cell_width: u16, cell_height: u16) -> Self {
+        Self::new(
+            columns,
+            rows,
+            clamp_pty_dim(cell_width.max(1), columns),
+            clamp_pty_dim(cell_height.max(1), rows),
+        )
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct VersionedPtyGeometry {
+    geometry: PtyGeometry,
+    generation: u64,
+}
+
+/// Convert a pixel extent to the number of cells it occupies using the exact
+/// total PTY geometry. Multiplying before dividing preserves fractional cell
+/// widths (for example, 960 px / 100 columns = 9.6 px per cell) without using
+/// floating-point arithmetic on the PTY reader thread.
+fn image_cells_for_pixels(pixels: u32, cells: usize, total_pixels: u16) -> usize {
+    if pixels == 0 || cells == 0 {
+        return 0;
+    }
+    let numerator = u64::from(pixels).saturating_mul(cells.min(u64::MAX as usize) as u64);
+    let occupied = numerator.div_ceil(u64::from(total_pixels.max(1)));
+    usize::try_from(occupied).unwrap_or(usize::MAX)
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct ResolvedKittyPlacement {
+    source_rect: Option<ImageSourceRect>,
+    cell_cols: usize,
+    cell_rows: usize,
+    x_offset_cells: f32,
+    y_offset_cells: f32,
+    display_cols: f32,
+    display_rows: f32,
+}
+
+/// Resolve Kitty's raw placement rectangle against the current cell geometry.
+///
+/// `effective_num_{cols,rows}` (used for cursor movement and deletion bounds)
+/// intentionally differs from the exact rendered rectangle when `X`/`Y` is
+/// non-zero. This mirrors Kitty's `update_dest_rect` and layer construction:
+/// offsets count toward auto-sized occupied cells, while an explicitly sized
+/// destination ends at the requested cell boundary.
+fn resolve_kitty_placement(
+    image: &crate::ImageData,
+    params: PlacementParams,
+    geometry: PtyGeometry,
+) -> Option<ResolvedKittyPlacement> {
+    let source_x = params.source_x.min(image.width);
+    let source_y = params.source_y.min(image.height);
+    let available_width = image.width.saturating_sub(source_x);
+    let available_height = image.height.saturating_sub(source_y);
+    let source_width = if params.source_width == 0 {
+        available_width
+    } else {
+        params.source_width.min(available_width)
+    };
+    let source_height = if params.source_height == 0 {
+        available_height
+    } else {
+        params.source_height.min(available_height)
+    };
+    if source_width == 0 || source_height == 0 {
+        return None;
+    }
+
+    let cell_width = f64::from(geometry.pixel_width) / geometry.columns.max(1) as f64;
+    let cell_height = f64::from(geometry.pixel_height) / geometry.rows.max(1) as f64;
+    if !cell_width.is_finite()
+        || !cell_height.is_finite()
+        || cell_width <= 0.0
+        || cell_height <= 0.0
+    {
+        return None;
+    }
+
+    // Protocol offsets are integral pixels and must be smaller than a cell.
+    // `ceil(cell)-1` is the largest integral offset below a fractional cell
+    // extent (for example, 9 for a 9.6 px cell).
+    let max_x_offset = (cell_width.ceil() - 1.0).max(0.0);
+    let max_y_offset = (cell_height.ceil() - 1.0).max(0.0);
+    let x_offset = f64::from(params.cell_x_offset).min(max_x_offset);
+    let y_offset = f64::from(params.cell_y_offset).min(max_y_offset);
+    let x_offset_cells = x_offset / cell_width;
+    let y_offset_cells = y_offset / cell_height;
+    let source_width_px = f64::from(source_width);
+    let source_height_px = f64::from(source_height);
+
+    let auto_cols = params.columns == 0;
+    let auto_rows = params.rows == 0;
+    let cell_cols = if auto_cols {
+        let width_px = if auto_rows {
+            source_width_px + x_offset
+        } else {
+            let height_px = cell_height * f64::from(params.rows) + y_offset;
+            height_px * source_width_px / source_height_px
+        };
+        ceil_f64_to_usize(width_px / cell_width)
+    } else {
+        usize::try_from(params.columns).unwrap_or(usize::MAX)
+    };
+    let cell_rows = if auto_rows {
+        let height_px = if auto_cols {
+            source_height_px + y_offset
+        } else {
+            let width_px = cell_width * f64::from(params.columns) + x_offset;
+            width_px * source_height_px / source_width_px
+        };
+        ceil_f64_to_usize(height_px / cell_height)
+    } else {
+        usize::try_from(params.rows).unwrap_or(usize::MAX)
+    };
+    if cell_cols == 0 || cell_rows == 0 {
+        return None;
+    }
+
+    let display_cols = if auto_cols {
+        if auto_rows {
+            source_width_px / cell_width
+        } else {
+            let display_height = f64::from(params.rows) - y_offset_cells;
+            display_height * cell_height * source_width_px / source_height_px / cell_width
+        }
+    } else {
+        f64::from(params.columns) - x_offset_cells
+    };
+    let display_rows = if auto_rows {
+        let display_width = if auto_cols {
+            source_width_px / cell_width
+        } else {
+            f64::from(params.columns) - x_offset_cells
+        };
+        display_width * cell_width * source_height_px / source_width_px / cell_height
+    } else {
+        f64::from(params.rows) - y_offset_cells
+    };
+    if !display_cols.is_finite()
+        || !display_rows.is_finite()
+        || display_cols <= 0.0
+        || display_rows <= 0.0
+    {
+        return None;
+    }
+
+    let source_rect = (source_x != 0
+        || source_y != 0
+        || source_width != image.width
+        || source_height != image.height)
+        .then_some(ImageSourceRect {
+            x: source_x,
+            y: source_y,
+            width: source_width,
+            height: source_height,
+        });
+    Some(ResolvedKittyPlacement {
+        source_rect,
+        cell_cols,
+        cell_rows,
+        x_offset_cells: x_offset_cells as f32,
+        y_offset_cells: y_offset_cells as f32,
+        display_cols: display_cols as f32,
+        display_rows: display_rows as f32,
+    })
+}
+
+fn ceil_f64_to_usize(value: f64) -> usize {
+    if !value.is_finite() || value <= 0.0 {
+        0
+    } else if value >= usize::MAX as f64 {
+        usize::MAX
+    } else {
+        value.ceil() as usize
+    }
+}
+
+fn kitty_cursor_movement(
+    params: PlacementParams,
+    cell_cols: usize,
+    cell_rows: usize,
+) -> Option<String> {
+    if params.suppress_cursor_movement {
+        return None;
+    }
+    let down = cell_rows.saturating_sub(1);
+    if down == 0 {
+        Some(format!("\x1b[{cell_cols}C"))
+    } else {
+        Some(format!("\x1b[{cell_cols}C\x1b[{down}B"))
+    }
+}
+
+fn recompute_kitty_placements(placements: &mut Vec<Placement>, geometry: PtyGeometry) {
+    placements.retain_mut(|placement| {
+        let Some(params) = placement.kitty_params else {
+            return true;
+        };
+        let Some(resolved) = resolve_kitty_placement(&placement.img, params, geometry) else {
+            return false;
+        };
+        placement.cell_cols = resolved.cell_cols;
+        placement.x_offset_cells = resolved.x_offset_cells;
+        placement.display_cols = resolved.display_cols;
+        placement.source_rect = resolved.source_rect;
+
+        if let Some(crop) = placement.source_crop {
+            if !crop.top.is_finite()
+                || !crop.bottom.is_finite()
+                || crop.top < 0.0
+                || crop.top >= crop.bottom
+                || crop.bottom > 1.0
+            {
+                return false;
+            }
+
+            // `source_crop` is already composed in the original source
+            // rectangle's normalized coordinates. Re-resolve the raw Kitty
+            // request for the new cell geometry, then retain only that
+            // permanent fragment. Its post-scroll document anchor and
+            // fractional y offset are intentionally preserved; resetting the
+            // offset from `params.cell_y_offset` would visibly jump it.
+            let retained_fraction = crop.bottom - crop.top;
+            placement.display_rows = resolved.display_rows * retained_fraction;
+            refresh_placement_cell_rows(placement)
+        } else {
+            placement.cell_rows = resolved.cell_rows;
+            placement.y_offset_cells = resolved.y_offset_cells;
+            placement.display_rows = resolved.display_rows;
+            true
+        }
+    });
 }
 
 /// A `Write` sink that discards everything. On `Terminal`
@@ -82,36 +1127,747 @@ impl std::io::Write for NullWrite {
     }
 }
 
-/// Force-apply a pending DEC 2026 update, then publish exactly one redraw.
-fn force_sync_update_flush(
+/// Avoid rescanning the bounded placement registry while the retained-history
+/// origin is unchanged.
+#[derive(Default)]
+struct ImageHistoryPruner {
+    /// Primary and alternate grids advance independent origins which can have
+    /// the same numeric value. Include the active-buffer identity so restoring
+    /// a resized primary registry can never inherit the alternate cache hit.
+    last_key: Option<(bool, u64)>,
+}
+
+impl ImageHistoryPruner {
+    fn prune_if_changed(&mut self, term: &SharedTerm, images: &Images) {
+        let key = {
+            let term = term.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            (
+                term.mode()
+                    .contains(alacritty_terminal::term::TermMode::ALT_SCREEN),
+                term.grid().history_origin(),
+            )
+        };
+        if self.last_key == Some(key) {
+            return;
+        }
+        prune(images, key.1);
+        self.last_key = Some(key);
+    }
+}
+
+#[derive(Default)]
+struct BufferGraphicsState {
+    placements: Vec<Placement>,
+    virtuals: std::collections::HashMap<(u32, u32), VirtualEntry>,
+    animations: std::collections::HashMap<u32, AnimEntry>,
+    relatives: std::collections::HashMap<(u32, u32), RelEntry>,
+}
+
+type InactiveGraphics = Arc<Mutex<BufferGraphicsState>>;
+
+impl BufferGraphicsState {
+    fn take_from(
+        images: &Images,
+        virtuals: &Virtuals,
+        anims: &Animations,
+        relatives: &Relatives,
+    ) -> Self {
+        Self {
+            placements: std::mem::take(
+                &mut *images
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner()),
+            ),
+            virtuals: std::mem::take(
+                &mut *virtuals
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner()),
+            ),
+            animations: std::mem::take(
+                &mut *anims
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner()),
+            ),
+            relatives: std::mem::take(
+                &mut *relatives
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner()),
+            ),
+        }
+    }
+
+    fn install_into(
+        self,
+        images: &Images,
+        virtuals: &Virtuals,
+        anims: &Animations,
+        relatives: &Relatives,
+    ) {
+        *images
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = self.placements;
+        *virtuals
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = self.virtuals;
+        *anims
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = self.animations;
+        *relatives
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = self.relatives;
+    }
+
+    fn clear_regular_placements(&mut self) {
+        self.placements.clear();
+        self.relatives.clear();
+    }
+}
+
+fn clear_active_graphics(
+    images: &Images,
+    virtuals: &Virtuals,
+    anims: &Animations,
+    relatives: &Relatives,
+) {
+    BufferGraphicsState::default().install_into(images, virtuals, anims, relatives);
+}
+
+fn clear_reflowed_regular_placements(
+    images: &Images,
+    relatives: &Relatives,
+    inactive: &InactiveGraphics,
+) {
+    images
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .clear();
+    relatives
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .clear();
+    inactive
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .clear_regular_placements();
+}
+
+#[derive(Clone, Copy)]
+struct GraphicsRegistries<'a> {
+    inactive: &'a InactiveGraphics,
+    images: &'a Images,
+    virtuals: &'a Virtuals,
+    anims: &'a Animations,
+    relatives: &'a Relatives,
+}
+
+fn placement_viewport_start(placement: &Placement, screen_top: u64) -> f64 {
+    let line = if placement.abs_line >= screen_top {
+        placement.abs_line.saturating_sub(screen_top) as f64
+    } else {
+        -(screen_top.saturating_sub(placement.abs_line) as f64)
+    };
+    line + f64::from(placement.y_offset_cells)
+}
+
+fn set_placement_viewport_start(
+    placement: &mut Placement,
+    screen_top: u64,
+    viewport_start: f64,
+) -> bool {
+    if !viewport_start.is_finite()
+        || viewport_start < i64::MIN as f64
+        || viewport_start > i64::MAX as f64
+    {
+        return false;
+    }
+
+    let row = viewport_start.floor() as i128;
+    let fraction = viewport_start - row as f64;
+    let absolute = i128::from(screen_top).saturating_add(row);
+    if absolute < 0 {
+        placement.abs_line = 0;
+        placement.y_offset_cells = (absolute as f64 + fraction) as f32;
+    } else {
+        placement.abs_line = u64::try_from(absolute).unwrap_or(u64::MAX);
+        placement.y_offset_cells = fraction as f32;
+    }
+
+    refresh_placement_cell_rows(placement)
+}
+
+fn refresh_placement_cell_rows(placement: &mut Placement) -> bool {
+    let occupied_rows =
+        (f64::from(placement.y_offset_cells) + f64::from(placement.display_rows)).ceil();
+    if !occupied_rows.is_finite() || occupied_rows <= 0.0 {
+        return false;
+    }
+    placement.cell_rows = if occupied_rows >= usize::MAX as f64 {
+        usize::MAX
+    } else {
+        occupied_rows as usize
+    };
+    true
+}
+
+fn retain_source_vertical_range(
+    placement: &mut Placement,
+    retained_top: f64,
+    retained_bottom: f64,
+) -> bool {
+    if !retained_top.is_finite()
+        || !retained_bottom.is_finite()
+        || retained_top < 0.0
+        || retained_top >= retained_bottom
+        || retained_bottom > 1.0
+    {
+        return false;
+    }
+    if retained_top == 0.0 && retained_bottom == 1.0 {
+        return true;
+    }
+
+    let existing = placement.source_crop.unwrap_or(ImageSourceCrop {
+        top: 0.0,
+        bottom: 1.0,
+    });
+    if !existing.top.is_finite()
+        || !existing.bottom.is_finite()
+        || existing.top < 0.0
+        || existing.top >= existing.bottom
+        || existing.bottom > 1.0
+    {
+        return false;
+    }
+    let span = f64::from(existing.bottom - existing.top);
+    let top = f64::from(existing.top) + span * retained_top;
+    let bottom = f64::from(existing.top) + span * retained_bottom;
+    if top >= bottom {
+        return false;
+    }
+    placement.source_crop = Some(ImageSourceCrop {
+        top: top as f32,
+        bottom: bottom as f32,
+    });
+    true
+}
+
+#[derive(Clone, Copy)]
+struct GraphicsScroll {
+    direction: GraphicsScrollDirection,
+    top: usize,
+    bottom: usize,
+    lines: usize,
+    old_screen_top: u64,
+    new_screen_top: u64,
+    screen_lines: usize,
+}
+
+fn scroll_regular_placements(images: &Images, scroll: GraphicsScroll) -> bool {
+    let GraphicsScroll {
+        direction,
+        top,
+        bottom,
+        lines,
+        old_screen_top,
+        new_screen_top,
+        screen_lines,
+    } = scroll;
+    if top >= bottom || bottom > screen_lines || lines == 0 || lines > bottom - top {
+        return false;
+    }
+
+    let region_top = top as f64;
+    let region_bottom = bottom as f64;
+    let viewport_bottom = screen_lines as f64;
+    let scrolls_into_history =
+        direction == GraphicsScrollDirection::Up && top == 0 && new_screen_top > old_screen_top;
+    let displacement = match direction {
+        GraphicsScrollDirection::Up if scrolls_into_history => {
+            -(new_screen_top.saturating_sub(old_screen_top) as f64)
+        }
+        GraphicsScrollDirection::Up => -(lines as f64),
+        GraphicsScrollDirection::Down => lines as f64,
+    };
+    let mut placements = images
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    placements.retain_mut(|placement| {
+        let start = placement_viewport_start(placement, old_screen_top);
+        let height = f64::from(placement.display_rows);
+        let end = start + height;
+        if !start.is_finite() || !height.is_finite() || height <= 0.0 || !end.is_finite() {
+            return false;
+        }
+
+        // Placements wholly outside the active viewport remain history-owned.
+        if end <= 0.0 || start >= viewport_bottom {
+            return true;
+        }
+
+        // Kitty scrolls only images entirely contained by the page margins.
+        // Everything else remains at the same visual row; re-anchoring is
+        // still required when a top-anchored region advances stable row ids.
+        if start < region_top || end > region_bottom {
+            return set_placement_viewport_start(placement, new_screen_top, start);
+        }
+
+        let moved_start = start + displacement;
+        let moved_end = end + displacement;
+        let retained_start = if scrolls_into_history {
+            moved_start
+        } else {
+            moved_start.max(region_top)
+        };
+        let retained_end = moved_end.min(region_bottom);
+        if retained_start >= retained_end {
+            return false;
+        }
+
+        let retained_top = (retained_start - moved_start) / height;
+        let retained_bottom = (retained_end - moved_start) / height;
+        if !retain_source_vertical_range(placement, retained_top, retained_bottom) {
+            return false;
+        }
+        placement.display_rows = (retained_end - retained_start) as f32;
+        set_placement_viewport_start(placement, new_screen_top, retained_start)
+    });
+    true
+}
+
+fn reset_all_graphics_to_screen(
+    active_alternate: &mut bool,
+    registries: GraphicsRegistries<'_>,
+    extractor: &mut Extractor,
+) {
+    let GraphicsRegistries {
+        inactive,
+        images,
+        virtuals,
+        anims,
+        relatives,
+    } = registries;
+    clear_active_graphics(images, virtuals, anims, relatives);
+    *inactive
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = BufferGraphicsState::default();
+    extractor.reset_all_graphics();
+    if *active_alternate {
+        extractor.enter_alternate_screen(false);
+    }
+}
+
+fn apply_graphics_event(
+    event: GraphicsEvent,
+    active_alternate: &mut bool,
+    registries: GraphicsRegistries<'_>,
+    extractor: &mut Extractor,
+) -> bool {
+    let GraphicsRegistries {
+        inactive,
+        images,
+        virtuals,
+        anims,
+        relatives,
+    } = registries;
+    match event {
+        GraphicsEvent::EraseDisplay => {
+            clear_active_graphics(images, virtuals, anims, relatives);
+            extractor.clear_active_graphics();
+            true
+        }
+        GraphicsEvent::EnterAlternate { clear, .. } if !*active_alternate => {
+            let active = BufferGraphicsState::take_from(images, virtuals, anims, relatives);
+            let alternate = {
+                let mut inactive = inactive
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                if clear {
+                    *inactive = BufferGraphicsState::default();
+                }
+                std::mem::replace(&mut *inactive, active)
+            };
+            alternate.install_into(images, virtuals, anims, relatives);
+            extractor.enter_alternate_screen(clear);
+            *active_alternate = true;
+            true
+        }
+        GraphicsEvent::LeaveAlternate { clear, .. } if *active_alternate => {
+            if clear {
+                clear_active_graphics(images, virtuals, anims, relatives);
+            }
+            let active = BufferGraphicsState::take_from(images, virtuals, anims, relatives);
+            let primary = {
+                let mut inactive = inactive
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                std::mem::replace(&mut *inactive, active)
+            };
+            primary.install_into(images, virtuals, anims, relatives);
+            extractor.leave_alternate_screen(clear);
+            *active_alternate = false;
+            true
+        }
+        GraphicsEvent::Reset => {
+            clear_active_graphics(images, virtuals, anims, relatives);
+            *inactive
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()) = BufferGraphicsState::default();
+            extractor.reset_all_graphics();
+            *active_alternate = false;
+            true
+        }
+        GraphicsEvent::Scroll {
+            direction,
+            top,
+            bottom,
+            lines,
+            old_screen_top,
+            new_screen_top,
+            screen_lines,
+        } => scroll_regular_placements(
+            images,
+            GraphicsScroll {
+                direction,
+                top,
+                bottom,
+                lines,
+                old_screen_top,
+                new_screen_top,
+                screen_lines,
+            },
+        ),
+        GraphicsEvent::SyncMarker { .. }
+        | GraphicsEvent::EnterAlternate { .. }
+        | GraphicsEvent::LeaveAlternate { .. } => false,
+    }
+}
+
+fn apply_graphics_batch(
+    batch: GraphicsEventBatch,
+    active_alternate: &mut bool,
+    registries: GraphicsRegistries<'_>,
+    extractor: &mut Extractor,
+) -> bool {
+    if batch.overflowed {
+        *active_alternate = batch.alternate_screen;
+        reset_all_graphics_to_screen(active_alternate, registries, extractor);
+        return false;
+    }
+
+    let mut consistent = true;
+    for event in batch.events {
+        consistent &= apply_graphics_event(event, active_alternate, registries, extractor);
+        if !consistent {
+            break;
+        }
+    }
+    if !consistent || *active_alternate != batch.alternate_screen {
+        *active_alternate = batch.alternate_screen;
+        reset_all_graphics_to_screen(active_alternate, registries, extractor);
+        false
+    } else {
+        true
+    }
+}
+
+struct DeferredGraphicsJournal {
+    entries: VecDeque<(u64, DeferredGraphics)>,
+    next_id: u64,
+    overflowed: bool,
+}
+
+impl DeferredGraphicsJournal {
+    fn new() -> Self {
+        Self {
+            entries: VecDeque::with_capacity(SYNC_MARKER_CAPACITY),
+            next_id: 0,
+            overflowed: false,
+        }
+    }
+
+    fn defer(&mut self, processor: &mut Processor, graphics: DeferredGraphics) {
+        if self.overflowed {
+            return;
+        }
+        let Some(next_id) = self.next_id.checked_add(1) else {
+            self.fail_closed();
+            return;
+        };
+        if self.entries.len() == SYNC_MARKER_CAPACITY || !processor.push_sync_marker(self.next_id) {
+            self.fail_closed();
+            return;
+        }
+        self.entries.push_back((self.next_id, graphics));
+        self.next_id = next_id;
+    }
+
+    fn take(&mut self, id: u64) -> Option<DeferredGraphics> {
+        if self.overflowed {
+            return None;
+        }
+        match self.entries.pop_front() {
+            Some((queued_id, graphics)) if queued_id == id => Some(graphics),
+            _ => {
+                self.fail_closed();
+                None
+            }
+        }
+    }
+
+    fn fail_closed(&mut self) {
+        self.entries.clear();
+        self.overflowed = true;
+    }
+
+    fn finish_sync(&mut self) -> bool {
+        let consistent = !self.overflowed && self.entries.is_empty();
+        self.entries.clear();
+        self.overflowed = false;
+        consistent
+    }
+}
+
+fn reset_deferred_graphics(
+    active_alternate: &mut bool,
+    deferred: &mut DeferredGraphicsJournal,
+    registries: GraphicsRegistries<'_>,
+    extractor: &mut Extractor,
+) {
+    deferred.fail_closed();
+    reset_all_graphics_to_screen(active_alternate, registries, extractor);
+}
+
+fn apply_sync_marker(
+    term: &mut Term<EventProxy>,
+    id: u64,
+    active_alternate: &mut bool,
+    deferred: &mut DeferredGraphicsJournal,
+    registries: GraphicsRegistries<'_>,
+    actions: GraphicsActionContext<'_>,
+    extractor: &mut Extractor,
+) {
+    let mut batch = term.take_graphics_events();
+    let marker_matches = matches!(batch.events.pop(), Some(GraphicsEvent::SyncMarker { id: marker_id }) if marker_id == id);
+    if deferred.overflowed || batch.overflowed || !marker_matches {
+        *active_alternate = batch.alternate_screen;
+        reset_deferred_graphics(active_alternate, deferred, registries, extractor);
+        return;
+    }
+    if !apply_graphics_batch(batch, active_alternate, registries, extractor) {
+        deferred.fail_closed();
+        return;
+    }
+    let Some(graphics) = deferred.take(id) else {
+        reset_deferred_graphics(active_alternate, deferred, registries, extractor);
+        return;
+    };
+
+    extractor.set_graphics_deferred(false);
+    let mut replayed = Vec::new();
+    extractor.feed_with(graphics.as_bytes(), |_, chunk| replayed.push(chunk));
+    extractor.set_graphics_deferred(true);
+    for chunk in replayed {
+        match chunk {
+            Chunk::Pass(_) => {
+                // The downstream text engine intentionally ignores malformed
+                // or incomplete graphics controls. The extractor still had to
+                // replay them to update bounded partial-upload state.
+            }
+            chunk => {
+                if !apply_graphics_chunk_at(term, chunk, actions, extractor) {
+                    reset_deferred_graphics(active_alternate, deferred, registries, extractor);
+                    return;
+                }
+            }
+        }
+    }
+}
+
+enum SyncGraphicsDispatch<'a> {
+    Marker(&'a mut Term<EventProxy>, u64),
+    Batch(GraphicsEventBatch),
+}
+
+struct SyncGraphicsContext<'a> {
+    active_alternate: &'a mut bool,
+    deferred: &'a mut DeferredGraphicsJournal,
+    registries: GraphicsRegistries<'a>,
+    actions: GraphicsActionContext<'a>,
+    extractor: &'a mut Extractor,
+}
+
+fn apply_sync_dispatch(dispatch: SyncGraphicsDispatch<'_>, context: &mut SyncGraphicsContext<'_>) {
+    match dispatch {
+        SyncGraphicsDispatch::Marker(term, id) => apply_sync_marker(
+            term,
+            id,
+            context.active_alternate,
+            context.deferred,
+            context.registries,
+            context.actions,
+            context.extractor,
+        ),
+        SyncGraphicsDispatch::Batch(batch) => {
+            if (batch.overflowed
+                || !batch.events.is_empty()
+                || batch.alternate_screen != *context.active_alternate)
+                && !apply_graphics_batch(
+                    batch,
+                    context.active_alternate,
+                    context.registries,
+                    context.extractor,
+                )
+            {
+                context.deferred.fail_closed();
+            }
+        }
+    }
+}
+
+fn finish_deferred_sync(context: &mut SyncGraphicsContext<'_>) {
+    context.extractor.set_graphics_deferred(false);
+    if !context.deferred.finish_sync() {
+        reset_all_graphics_to_screen(
+            context.active_alternate,
+            context.registries,
+            context.extractor,
+        );
+    }
+}
+
+/// Advance terminal bytes and replay deferred graphics at their exact
+/// synchronized-output byte offsets.
+fn advance_terminal_bytes(
     processor: &mut Processor,
     term: &SharedTerm,
-    out_gen: &std::sync::atomic::AtomicU64,
-    waker: &Waker,
+    bytes: &[u8],
+    context: &mut SyncGraphicsContext<'_>,
 ) {
-    {
+    let batch = {
         let mut term = term.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-        processor.stop_sync(&mut *term);
+        processor.advance_with_sync_markers(&mut *term, bytes, &mut |term, id| {
+            apply_sync_marker(
+                term,
+                id,
+                context.active_alternate,
+                context.deferred,
+                context.registries,
+                context.actions,
+                context.extractor,
+            );
+        });
+        term.take_graphics_events()
+    };
+    let sync_pending = processor.sync_timeout().sync_timeout().is_some();
+    apply_sync_dispatch(SyncGraphicsDispatch::Batch(batch), context);
+    if sync_pending {
+        context.extractor.set_graphics_deferred(true);
+    } else {
+        finish_deferred_sync(context);
+    }
+}
+
+/// Force-apply a pending DEC 2026 update, prune image rows evicted by the
+/// buffered mutation, then publish exactly one redraw.
+struct SyncFlushContext<'a> {
+    term: &'a SharedTerm,
+    images: &'a Images,
+    graphics_gate: &'a Mutex<()>,
+    image_pruner: &'a mut ImageHistoryPruner,
+    on_graphics: &'a mut dyn for<'term> FnMut(SyncGraphicsDispatch<'term>),
+    out_gen: &'a std::sync::atomic::AtomicU64,
+    output_wake: &'a OutputWakeGate,
+}
+
+fn force_sync_update_flush(processor: &mut Processor, context: &mut SyncFlushContext<'_>) {
+    let _graphics_guard = context
+        .graphics_gate
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let batch = {
+        let mut term = context
+            .term
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        processor.stop_sync_with_markers(&mut *term, &mut |term, id| {
+            (context.on_graphics)(SyncGraphicsDispatch::Marker(term, id));
+        });
+        term.take_graphics_events()
+    };
+    (context.on_graphics)(SyncGraphicsDispatch::Batch(batch));
+    context
+        .image_pruner
+        .prune_if_changed(context.term, context.images);
+    context
+        .out_gen
+        .fetch_add(1, std::sync::atomic::Ordering::Release);
+    context.output_wake.request();
+}
+
+fn publish_output_if_ready(
+    processor: &Processor,
+    out_gen: &std::sync::atomic::AtomicU64,
+    output_wake: &OutputWakeGate,
+) -> bool {
+    if processor.sync_timeout().sync_timeout().is_some() {
+        return false;
     }
     out_gen.fetch_add(1, std::sync::atomic::Ordering::Release);
-    (waker)();
+    output_wake.request();
+    true
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum PtyPumpSend {
+    Forwarded,
+    Drain(Vec<u8>),
+    Disconnected,
+}
+
+/// Forward one bounded PTY chunk, but yield immediately to teardown draining.
+///
+/// A plain blocking send can strand the pump behind a full parser queue just
+/// when legacy `ClosePseudoConsole` needs that pump to consume conout. The
+/// short timed wait preserves bounded backpressure during normal operation
+/// while making teardown observation independent of parser progress.
+fn forward_pty_buffer_or_drain(
+    raw_tx: &crossbeam_channel::Sender<Option<Vec<u8>>>,
+    drain_output: &AtomicBool,
+    mut buffer: Vec<u8>,
+) -> PtyPumpSend {
+    loop {
+        if drain_output.load(Ordering::Acquire) {
+            return PtyPumpSend::Drain(buffer);
+        }
+
+        match raw_tx.send_timeout(Some(buffer), std::time::Duration::from_millis(10)) {
+            Ok(()) => return PtyPumpSend::Forwarded,
+            Err(crossbeam_channel::SendTimeoutError::Timeout(Some(returned))) => {
+                buffer = returned;
+            }
+            Err(crossbeam_channel::SendTimeoutError::Timeout(None)) => {
+                unreachable!("PTY pump only forwards populated chunks");
+            }
+            Err(crossbeam_channel::SendTimeoutError::Disconnected(_)) => {
+                return PtyPumpSend::Disconnected;
+            }
+        }
+    }
 }
 
 /// Receive one bounded pump chunk while enforcing the DEC 2026 deadline ahead
 /// of ready data, and flushing immediately when EOF makes a terminator impossible.
 fn receive_pty_chunk(
     processor: &mut Processor,
-    term: &SharedTerm,
-    raw_rx: &std::sync::mpsc::Receiver<Option<Vec<u8>>>,
-    out_gen: &std::sync::atomic::AtomicU64,
-    waker: &Waker,
+    raw_rx: &crossbeam_channel::Receiver<Option<Vec<u8>>>,
+    context: &mut SyncFlushContext<'_>,
 ) -> Option<Vec<u8>> {
     loop {
         match processor.sync_timeout().sync_timeout() {
             Some(deadline) => {
                 let now = std::time::Instant::now();
                 if now >= deadline {
-                    force_sync_update_flush(processor, term, out_gen, waker);
+                    force_sync_update_flush(processor, context);
                     continue;
                 }
 
@@ -123,15 +1879,15 @@ fn receive_pty_chunk(
                         // priority so sustained output cannot starve its flush.
                         // EOF also proves no closing sequence can still arrive.
                         if chunk.is_none() || std::time::Instant::now() >= deadline {
-                            force_sync_update_flush(processor, term, out_gen, waker);
+                            force_sync_update_flush(processor, context);
                         }
                         return chunk;
                     }
-                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
-                        force_sync_update_flush(processor, term, out_gen, waker);
+                    Err(crossbeam_channel::RecvTimeoutError::Timeout) => {
+                        force_sync_update_flush(processor, context);
                     }
-                    Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
-                        force_sync_update_flush(processor, term, out_gen, waker);
+                    Err(crossbeam_channel::RecvTimeoutError::Disconnected) => {
+                        force_sync_update_flush(processor, context);
                         return None;
                     }
                 }
@@ -158,6 +1914,46 @@ impl Dimensions for TermSize {
     fn columns(&self) -> usize {
         self.columns
     }
+}
+
+fn commit_local_geometry(
+    term: &SharedTerm,
+    geometry: &Arc<Mutex<VersionedPtyGeometry>>,
+    desired: PtyGeometry,
+    grid_options: Option<TermConfig>,
+) {
+    // This lock order is an invariant shared with image placement and geometry
+    // snapshots: Term first, geometry second.
+    let mut term = term.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let mut geometry = geometry
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if let Some(options) = grid_options {
+        term.resize(TermSize {
+            columns: desired.columns,
+            screen_lines: desired.rows,
+        });
+        term.set_options(options);
+    }
+    geometry.geometry = desired;
+    geometry.generation = geometry.generation.wrapping_add(1);
+}
+
+#[cfg(test)]
+fn local_geometry_snapshot(
+    term: &SharedTerm,
+    geometry: &Arc<Mutex<VersionedPtyGeometry>>,
+) -> (usize, usize, PtyGeometry, u64) {
+    let term = term.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let geometry = geometry
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    (
+        term.columns(),
+        term.screen_lines(),
+        geometry.geometry,
+        geometry.generation,
+    )
 }
 
 pub type SharedTerm = Arc<Mutex<Term<EventProxy>>>;
@@ -228,12 +2024,23 @@ pub struct Terminal {
     // normal operation; only `None` transiently inside `Drop`.
     master: Option<Box<dyn portable_pty::MasterPty + Send>>,
     writer: Arc<Mutex<Box<dyn Write + Send>>>,
+    /// Unix `O_NONBLOCK` is status on the shared PTY master open-file
+    /// description, not on one duplicated descriptor. Permit exactly one
+    /// `PtyStdin` lease so an older handle can never restore blocking mode
+    /// underneath a newer live handle.
+    #[cfg(unix)]
+    stdin_lease_phase: Arc<Mutex<PtyStdinLeasePhase>>,
     child: Arc<Mutex<Box<dyn portable_pty::Child + Send + Sync>>>,
     reader_thread: Option<JoinHandle<()>>,
-    // Cooperative stop flag for the reader thread. `Drop` sets it
-    // so the reader exits promptly during teardown instead of looping back
-    // into another blocking PTY read once the pseudoconsole closes.
+    // Cooperative stop flag for the reader thread. The detached teardown
+    // worker sets it only after closing the PTY master. Keeping it false while
+    // `ClosePseudoConsole` runs is required on Windows before 11 24H2, where
+    // that call can wait for the output pipe to be drained.
     stop: Arc<AtomicBool>,
+    // Set by `Drop` before the detached close starts. It interrupts a pump
+    // blocked on the bounded parser queue and switches that pump to direct
+    // discard/drain mode until the platform close returns.
+    drain_output: Arc<AtomicBool>,
     pub cols: usize,
     pub rows: usize,
     pub images: Images,
@@ -243,11 +2050,24 @@ pub struct Terminal {
     pub anims: Animations,
     /// kitty relative placements, keyed by `(child img, child placement)`.
     pub relatives: Relatives,
-    /// Absolute lines (history-aware) where OSC 133 prompts started.
+    /// The primary screen's graphics while the alternate screen is active.
+    /// Active registries above are swapped as a unit at buffer transitions.
+    inactive_graphics: InactiveGraphics,
+    /// Serializes screen-buffer swaps and column-reflow invalidation against
+    /// graphics chunks decoded by the PTY reader.
+    graphics_gate: Arc<Mutex<()>>,
+    /// Resize-side publication that tells the reader's Kitty decoder to drop
+    /// regular/relative placement anchors after a column reflow.
+    graphics_reflow_generation: Arc<std::sync::atomic::AtomicU64>,
+    /// Monotonic document-row ids where OSC 133 prompts started.
+    ///
+    /// These combine alacritty's grid `history_origin` with its current
+    /// history-relative cursor line. Unlike plain `history_size + line`, they
+    /// are never reused when a full scrollback ring evicts its oldest row.
     /// A `VecDeque` so the ring-buffer trim is an O(1)
     /// `pop_front`, not a `Vec::drain(0..1)` that shifts all ~2048 elements on
     /// every prompt once full — this is the hot reader-thread path.
-    pub prompts: Arc<Mutex<std::collections::VecDeque<i64>>>,
+    prompts: Arc<Mutex<std::collections::VecDeque<u64>>>,
     /// Terminator parity (`command_notify.py` plugin):
     /// OSC 133 OutputStart timestamp — set when `OutputStart` fires,
     /// cleared when the matching `CommandEnd` fires. The reader
@@ -316,7 +2136,28 @@ pub struct Terminal {
     /// per 64KiB read). Toggled ONLY through [`Terminal::set_log_file`],
     /// which keeps the pair in sync.
     log_active: Arc<std::sync::atomic::AtomicBool>,
-    cell_px: Arc<Mutex<(u16, u16)>>,
+    /// Exact grid + pixel geometry shared with the PTY reader's image parser.
+    /// Image-to-cell conversion divides by the effective fractional cell size
+    /// derived from these totals, so it agrees with both `PtySize` and CSI 14t.
+    geometry: Arc<Mutex<VersionedPtyGeometry>>,
+    /// Last geometry successfully published to the native PTY. This is kept
+    /// separate from the desired/local geometry: if `MasterPty::resize` fails,
+    /// the next identical UI resize still retries instead of being suppressed
+    /// by the already-updated terminal grid.
+    applied_pty_geometry: PtyGeometry,
+    /// Per-pane output wake publication gate. Paint scheduling stays quiescent
+    /// while a window is hidden/minimized, but the UI deliberately leaves this
+    /// transport wake enabled when a recorder or Lua output sidechannel must
+    /// drain its bounded queue. A hidden pane without either consumer
+    /// coalesces output into one dirty bit and publishes one wake when enabled.
+    output_wake: Arc<OutputWakeGate>,
+    /// A bounded semantic-event queue overflow cannot block the parser while it
+    /// holds the terminal lock. It instead marks the pane failed so the UI can
+    /// tear it down explicitly without unbounded memory or silent reply loss.
+    event_overflowed: Arc<AtomicBool>,
+    /// Live OSC 52 write policy shared with the terminal event proxy. DA1
+    /// extension 52 is emitted only while this is true.
+    osc52_copy_allowed: Arc<AtomicBool>,
     /// C4 (multi-window): bumped by the reader thread once per PTY read it
     /// processed (right before the wakeup fires). Lets a UI hosting several
     /// windows answer "did THIS pane produce output since I last painted?"
@@ -933,6 +2774,45 @@ fn clamp_pty_dim(cell: u16, count: usize) -> u16 {
     (cell as u32 * count).min(u16::MAX as u32) as u16
 }
 
+// portable-pty's ConPTY backend converts rows/columns to a signed `COORD`.
+// Clamp before crossing that boundary so a grid above 32767 cannot wrap
+// negative. Unix winsize fields are unsigned 16-bit.
+#[cfg(windows)]
+const NATIVE_PTY_GRID_MAX: usize = i16::MAX as usize;
+#[cfg(not(windows))]
+const NATIVE_PTY_GRID_MAX: usize = u16::MAX as usize;
+
+fn clamp_native_pty_grid(count: usize) -> u16 {
+    count.min(NATIVE_PTY_GRID_MAX) as u16
+}
+
+fn native_pty_size(geometry: PtyGeometry) -> PtySize {
+    PtySize {
+        rows: clamp_native_pty_grid(geometry.rows),
+        cols: clamp_native_pty_grid(geometry.columns),
+        pixel_width: geometry.pixel_width,
+        pixel_height: geometry.pixel_height,
+    }
+}
+
+fn native_resize_required(applied: PtyGeometry, desired: PtyGeometry) -> bool {
+    let applied_size = native_pty_size(applied);
+    let desired_size = native_pty_size(desired);
+    #[cfg(windows)]
+    {
+        // ConPTY ignores the pixel fields and ResizePseudoConsole is a
+        // synchronous call. Avoid it for fractional-DPI pixel-only changes.
+        applied_size.rows != desired_size.rows || applied_size.cols != desired_size.cols
+    }
+    #[cfg(not(windows))]
+    {
+        applied_size.rows != desired_size.rows
+            || applied_size.cols != desired_size.cols
+            || applied_size.pixel_width != desired_size.pixel_width
+            || applied_size.pixel_height != desired_size.pixel_height
+    }
+}
+
 /// The default shell `CommandBuilder` when no `command` is
 /// configured. Windows prefers pwsh 7 → Windows PowerShell → `%ComSpec%`;
 /// every other platform defers to portable_pty (which honors `$SHELL`).
@@ -1045,18 +2925,389 @@ fn base64_standard(data: &[u8]) -> String {
 /// session emits one mark per prompt; without a cap the Vec grew unbounded.
 const MAX_PROMPT_MARKS: usize = 2048;
 
-/// Push an absolute prompt-start line into the bounded ring.
+/// Convert a grid-relative line to a monotonic document-row id.
+fn stable_grid_line_id(history_origin: u64, history_size: usize, line: i32) -> u64 {
+    let screen_top = history_origin.saturating_add(history_size as u64);
+    if line < 0 {
+        screen_top.saturating_sub(line.unsigned_abs() as u64)
+    } else {
+        screen_top.saturating_add(line as u64)
+    }
+}
+
+/// Push a stable prompt-start row id into the bounded ring.
 /// Dedups against the most-recent mark (some shells emit OSC 133 `A` twice for a
 /// single prompt) and trims oldest-first with O(1) `pop_front` — the previous
 /// `Vec::drain(0..d)` shifted all ~2048 elements on every prompt once full, on
 /// the hot reader-thread path. Pure, so the ring discipline is unit-tested.
-fn push_prompt_mark(ring: &mut std::collections::VecDeque<i64>, abs: i64) {
-    if ring.back() == Some(&abs) {
+fn push_prompt_mark(ring: &mut std::collections::VecDeque<u64>, row_id: u64) {
+    if ring.back() == Some(&row_id) {
         return;
     }
-    ring.push_back(abs);
+    ring.push_back(row_id);
     while ring.len() > MAX_PROMPT_MARKS {
         ring.pop_front();
+    }
+}
+
+fn prompt_navigation_offset(
+    ring: &mut std::collections::VecDeque<u64>,
+    history_origin: u64,
+    history_size: usize,
+    screen_lines: usize,
+    display_offset: usize,
+    previous: bool,
+) -> Option<usize> {
+    let screen_top = history_origin.saturating_add(history_size as u64);
+    let retained_end = screen_top.saturating_add(screen_lines as u64);
+    ring.retain(|mark| *mark >= history_origin && *mark < retained_end);
+
+    let current_top = screen_top.saturating_sub(display_offset.min(history_size) as u64);
+    let target = if previous {
+        ring.iter()
+            .copied()
+            .filter(|mark| *mark < current_top)
+            .max()
+    } else {
+        ring.iter()
+            .copied()
+            .filter(|mark| *mark > current_top)
+            .min()
+    }?;
+
+    let offset = screen_top.saturating_sub(target).min(history_size as u64);
+    Some(usize::try_from(offset).unwrap_or(history_size))
+}
+
+#[derive(Clone, Copy)]
+struct KittyDeleteGeometry {
+    screen_top: u64,
+    screen_lines: usize,
+    cursor_abs_line: u64,
+    cursor_col: usize,
+}
+
+fn row_span_contains(start: u64, rows: usize, row: u64) -> bool {
+    rows != 0
+        && u128::from(start) <= u128::from(row)
+        && u128::from(row) < u128::from(start) + rows as u128
+}
+
+fn row_spans_intersect(
+    first_start: u64,
+    first_rows: usize,
+    second_start: u64,
+    second_rows: usize,
+) -> bool {
+    if first_rows == 0 || second_rows == 0 {
+        return false;
+    }
+    let first_start = u128::from(first_start);
+    let second_start = u128::from(second_start);
+    let first_end = first_start + first_rows as u128;
+    let second_end = second_start + second_rows as u128;
+    first_start < second_end && second_start < first_end
+}
+
+fn placement_intersects_cell(placement: &Placement, abs_line: u64, col: usize) -> bool {
+    placement.cell_cols != 0
+        && row_span_contains(placement.abs_line, placement.cell_rows, abs_line)
+        && placement.col <= col
+        && col < placement.col.saturating_add(placement.cell_cols)
+}
+
+fn kitty_delete_matches_placement(
+    delete: &KittyDelete,
+    placement: &Placement,
+    geometry: KittyDeleteGeometry,
+) -> bool {
+    let Some(id) = placement.id else {
+        // A kitty command must never delete Sixel or iTerm2 placements.
+        return false;
+    };
+    match delete.target {
+        KittyDeleteTarget::Visible => row_spans_intersect(
+            placement.abs_line,
+            placement.cell_rows,
+            geometry.screen_top,
+            geometry.screen_lines,
+        ),
+        KittyDeleteTarget::Image {
+            id: wanted,
+            placement_id,
+        } => id == wanted && placement_id.is_none_or(|wanted| wanted == placement.placement_id),
+        KittyDeleteTarget::Cursor => {
+            placement_intersects_cell(placement, geometry.cursor_abs_line, geometry.cursor_col)
+        }
+        KittyDeleteTarget::Cell { x, y } => {
+            x.checked_sub(1)
+                .zip(y.checked_sub(1))
+                .is_some_and(|(col, row)| {
+                    placement_intersects_cell(
+                        placement,
+                        geometry.screen_top.saturating_add(row as u64),
+                        col as usize,
+                    )
+                })
+        }
+        KittyDeleteTarget::CellAtZ { x, y, z } => {
+            placement.z == z
+                && x.checked_sub(1)
+                    .zip(y.checked_sub(1))
+                    .is_some_and(|(col, row)| {
+                        placement_intersects_cell(
+                            placement,
+                            geometry.screen_top.saturating_add(row as u64),
+                            col as usize,
+                        )
+                    })
+        }
+        KittyDeleteTarget::IdRange { first, last } => first <= id && id <= last,
+        KittyDeleteTarget::Column { x } => x.checked_sub(1).is_some_and(|col| {
+            placement.cell_cols != 0
+                && placement.col <= col as usize
+                && (col as usize) < placement.col.saturating_add(placement.cell_cols)
+        }),
+        KittyDeleteTarget::Row { y } => y.checked_sub(1).is_some_and(|row| {
+            let abs_line = geometry.screen_top.saturating_add(row as u64);
+            row_span_contains(placement.abs_line, placement.cell_rows, abs_line)
+        }),
+        KittyDeleteTarget::ZIndex { z } => placement.z == z,
+    }
+}
+
+fn kitty_delete_matches_virtual(delete: &KittyDelete, image_id: u32, placement_id: u32) -> bool {
+    match delete.target {
+        KittyDeleteTarget::Image {
+            id,
+            placement_id: wanted,
+        } => id == image_id && wanted.is_none_or(|wanted| wanted == placement_id),
+        KittyDeleteTarget::IdRange { first, last } => first <= image_id && image_id <= last,
+        // The kitty spec explicitly excludes virtual placements from every
+        // spatial selector, including visible-all and z-index deletion.
+        _ => false,
+    }
+}
+
+fn kitty_delete_freed_ids(
+    delete: &KittyDelete,
+    candidates: &std::collections::HashSet<u32>,
+    referenced: &std::collections::HashSet<u32>,
+) -> Vec<u32> {
+    if !delete.free_data {
+        return Vec::new();
+    }
+    let mut freed = candidates
+        .iter()
+        .copied()
+        .filter(|id| !referenced.contains(id))
+        .collect::<Vec<_>>();
+    freed.sort_unstable();
+    freed
+}
+
+#[cfg(test)]
+mod kitty_delete_tests {
+    use std::collections::HashSet;
+
+    use kettle_vt::kitty::{Delete, DeleteTarget};
+
+    use super::{
+        KittyDeleteGeometry, Placement, kitty_delete_freed_ids, kitty_delete_matches_placement,
+        kitty_delete_matches_virtual,
+    };
+    use crate::ImageData;
+
+    fn delete(target: DeleteTarget, free_data: bool) -> Delete {
+        Delete {
+            target,
+            free_data,
+            free_candidates: Vec::new(),
+        }
+    }
+
+    fn placement() -> Placement {
+        Placement {
+            abs_line: 101,
+            col: 3,
+            cell_cols: 4,
+            cell_rows: 3,
+            x_offset_cells: 0.0,
+            y_offset_cells: 0.0,
+            display_cols: 4.0,
+            display_rows: 3.0,
+            img: ImageData::new(1, 1, vec![1, 2, 3, 255]).expect("pixel"),
+            source_rect: None,
+            source_crop: None,
+            id: Some(10),
+            placement_id: 7,
+            kitty_params: None,
+            z: -2,
+        }
+    }
+
+    fn geometry() -> KittyDeleteGeometry {
+        KittyDeleteGeometry {
+            screen_top: 100,
+            screen_lines: 4,
+            cursor_abs_line: 102,
+            cursor_col: 4,
+        }
+    }
+
+    #[test]
+    fn all_kitty_delete_selectors_match_exact_placement_geometry() {
+        let placement = placement();
+        let geometry = geometry();
+        let matching = [
+            DeleteTarget::Visible,
+            DeleteTarget::Image {
+                id: 10,
+                placement_id: None,
+            },
+            DeleteTarget::Image {
+                id: 10,
+                placement_id: Some(7),
+            },
+            DeleteTarget::Cursor,
+            DeleteTarget::Cell { x: 4, y: 2 },
+            DeleteTarget::CellAtZ { x: 4, y: 2, z: -2 },
+            DeleteTarget::IdRange { first: 9, last: 11 },
+            DeleteTarget::Column { x: 7 },
+            DeleteTarget::Row { y: 3 },
+            DeleteTarget::ZIndex { z: -2 },
+        ];
+        for target in matching {
+            assert!(
+                kitty_delete_matches_placement(
+                    &delete(target.clone(), false),
+                    &placement,
+                    geometry
+                ),
+                "{target:?} should match"
+            );
+        }
+
+        let nonmatching = [
+            DeleteTarget::Image {
+                id: 11,
+                placement_id: None,
+            },
+            DeleteTarget::Image {
+                id: 10,
+                placement_id: Some(8),
+            },
+            DeleteTarget::Cell { x: 2, y: 2 },
+            DeleteTarget::Cell { x: 4, y: 0 },
+            DeleteTarget::CellAtZ { x: 4, y: 2, z: 0 },
+            DeleteTarget::IdRange {
+                first: 11,
+                last: 20,
+            },
+            DeleteTarget::Column { x: 8 },
+            DeleteTarget::Row { y: 5 },
+            DeleteTarget::ZIndex { z: 2 },
+        ];
+        for target in nonmatching {
+            assert!(
+                !kitty_delete_matches_placement(
+                    &delete(target.clone(), false),
+                    &placement,
+                    geometry
+                ),
+                "{target:?} should not match"
+            );
+        }
+    }
+
+    #[test]
+    fn visible_delete_keeps_scrollback_and_kitty_never_deletes_other_protocols() {
+        let mut above = placement();
+        above.abs_line = 96;
+        above.cell_rows = 4; // bottom is exactly the active-screen origin.
+        assert!(!kitty_delete_matches_placement(
+            &delete(DeleteTarget::Visible, false),
+            &above,
+            geometry()
+        ));
+
+        let mut below = placement();
+        below.abs_line = 104; // starts exactly below the active screen.
+        assert!(!kitty_delete_matches_placement(
+            &delete(DeleteTarget::Visible, false),
+            &below,
+            geometry()
+        ));
+        below.abs_line = 103; // one visible row, remainder below the screen.
+        assert!(kitty_delete_matches_placement(
+            &delete(DeleteTarget::Visible, false),
+            &below,
+            geometry()
+        ));
+
+        let mut sixel = placement();
+        sixel.id = None;
+        assert!(!kitty_delete_matches_placement(
+            &delete(DeleteTarget::ZIndex { z: -2 }, false),
+            &sixel,
+            geometry()
+        ));
+    }
+
+    #[test]
+    fn virtual_placements_only_match_id_and_range_selectors() {
+        assert!(kitty_delete_matches_virtual(
+            &delete(
+                DeleteTarget::Image {
+                    id: 10,
+                    placement_id: Some(7)
+                },
+                false
+            ),
+            10,
+            7
+        ));
+        assert!(kitty_delete_matches_virtual(
+            &delete(DeleteTarget::IdRange { first: 9, last: 11 }, false),
+            10,
+            7
+        ));
+        for target in [
+            DeleteTarget::Visible,
+            DeleteTarget::Cursor,
+            DeleteTarget::Cell { x: 1, y: 1 },
+            DeleteTarget::CellAtZ { x: 1, y: 1, z: 0 },
+            DeleteTarget::Column { x: 1 },
+            DeleteTarget::Row { y: 1 },
+            DeleteTarget::ZIndex { z: 0 },
+        ] {
+            assert!(
+                !kitty_delete_matches_virtual(&delete(target, false), 10, 7),
+                "spatial selectors must not delete virtual prototypes"
+            );
+        }
+    }
+
+    #[test]
+    fn uppercase_frees_only_unreferenced_candidates() {
+        let candidates = HashSet::from([1, 2]);
+        let referenced = HashSet::from([2]);
+        assert!(
+            kitty_delete_freed_ids(
+                &delete(DeleteTarget::Visible, false),
+                &candidates,
+                &referenced
+            )
+            .is_empty()
+        );
+        assert_eq!(
+            kitty_delete_freed_ids(
+                &delete(DeleteTarget::Visible, true),
+                &candidates,
+                &referenced
+            ),
+            vec![1]
+        );
     }
 }
 
@@ -1082,6 +3333,10 @@ fn effective_scrollback_lines(
     let visible_bytes = line_bytes.saturating_mul(screen_lines.max(1));
     let byte_lines = configured_bytes.saturating_sub(visible_bytes) / line_bytes;
     configured_lines.min(byte_lines)
+}
+
+fn reported_current_dir(osc_cwd_seen: bool, cwd: Option<String>) -> Option<String> {
+    osc_cwd_seen.then_some(cwd).flatten()
 }
 
 impl Terminal {
@@ -1200,18 +3455,102 @@ impl Terminal {
         waker: Waker,
         output_tx: Option<PtyOutputSender>,
     ) -> Result<Terminal> {
+        Self::new_with_env_and_output_geometry(
+            argv,
+            cwd,
+            scrollback,
+            scrollback_bytes,
+            PtyGeometry::from_cell_size(cols, rows, cell_w, cell_h),
+            cursor_blink,
+            cursor_shape,
+            word_delimiters,
+            term_env,
+            colorterm_env,
+            extra_env,
+            login_shell,
+            shell_integration,
+            event_tx,
+            waker,
+            output_tx,
+        )
+    }
+
+    /// Spawn with exact initial grid and text-area pixel geometry.
+    ///
+    /// Live UI callers use this entry point so the first ConPTY/openpty size
+    /// already reflects fractional DPI. The compatibility constructor above
+    /// derives totals from integer cell metrics for headless/legacy callers.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_env_and_output_geometry(
+        argv: &[String],
+        cwd: Option<&str>,
+        scrollback: usize,
+        scrollback_bytes: usize,
+        geometry: PtyGeometry,
+        cursor_blink: bool,
+        cursor_shape: CursorShape,
+        word_delimiters: Option<&str>,
+        term_env: &str,
+        colorterm_env: &str,
+        extra_env: &[(String, String)],
+        login_shell: bool,
+        shell_integration: bool,
+        event_tx: crossbeam_channel::Sender<TermEvent>,
+        waker: Waker,
+        output_tx: Option<PtyOutputSender>,
+    ) -> Result<Terminal> {
+        Self::new_with_env_and_output_geometry_and_capabilities(
+            argv,
+            cwd,
+            scrollback,
+            scrollback_bytes,
+            geometry,
+            cursor_blink,
+            cursor_shape,
+            word_delimiters,
+            term_env,
+            colorterm_env,
+            extra_env,
+            login_shell,
+            shell_integration,
+            TerminalCapabilities::default(),
+            event_tx,
+            waker,
+            output_tx,
+        )
+    }
+
+    /// Spawn with exact geometry and explicit runtime protocol capabilities.
+    ///
+    /// The capability object lets a UI report policy-dependent features
+    /// truthfully without changing the compatibility constructors above.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_env_and_output_geometry_and_capabilities(
+        argv: &[String],
+        cwd: Option<&str>,
+        scrollback: usize,
+        scrollback_bytes: usize,
+        geometry: PtyGeometry,
+        cursor_blink: bool,
+        cursor_shape: CursorShape,
+        word_delimiters: Option<&str>,
+        term_env: &str,
+        colorterm_env: &str,
+        extra_env: &[(String, String)],
+        login_shell: bool,
+        shell_integration: bool,
+        capabilities: TerminalCapabilities,
+        event_tx: crossbeam_channel::Sender<TermEvent>,
+        waker: Waker,
+        output_tx: Option<PtyOutputSender>,
+    ) -> Result<Terminal> {
+        let cols = geometry.columns;
+        let rows = geometry.rows;
         let pty = portable_pty::native_pty_system();
-        // Clamp the same way `resize()` does. The raw casts
-        // (`cols as u16`, `cell_w * cols as u16`) truncate a large grid and can
-        // overflow the u16 multiply on a wide / HiDPI layout (e.g. cell_w=20 ×
-        // cols=5000 = 100000, wraps); `clamp_pty_dim` saturates to u16::MAX so
-        // the ConPTY/openpty always gets sane dimensions.
-        let pair = pty.openpty(PtySize {
-            rows: clamp_pty_dim(1, rows),
-            cols: clamp_pty_dim(1, cols),
-            pixel_width: clamp_pty_dim(cell_w, cols),
-            pixel_height: clamp_pty_dim(cell_h, rows),
-        })?;
+        // ConPTY's signed COORD and Unix's unsigned winsize have different grid
+        // bounds; `native_pty_size` applies the platform contract before the
+        // backend sees it. Exact total pixels are preserved on Unix.
+        let pair = pty.openpty(native_pty_size(geometry))?;
 
         let mut cmd = match argv.split_first() {
             Some((prog, rest)) => {
@@ -1333,10 +3672,28 @@ impl Terminal {
         let child = pair.slave.spawn_command(cmd)?;
         drop(pair.slave);
 
-        let writer = pair.master.take_writer()?;
+        #[cfg(unix)]
+        let reader_poll_fd = pair
+            .master
+            .as_raw_fd()
+            .context("PTY master has no Unix descriptor for reader polling")?;
+        // Kettle serializes all input/replies through bounded priority
+        // workers. On ConPTY this opts our side of the synchronous byte pipe
+        // into PIPE_NOWAIT, so a child that stops reading cannot monopolize a
+        // worker; other backends retain their native writer here.
+        let writer = pair.master.take_nonblocking_writer()?;
         let mut reader = pair.master.try_clone_reader()?;
 
-        let proxy = EventProxy::new(event_tx, waker.clone());
+        let output_wake = Arc::new(OutputWakeGate::new(waker.clone()));
+        let osc52_copy_allowed = Arc::new(AtomicBool::new(capabilities.osc52_copy));
+        let event_overflowed = Arc::new(AtomicBool::new(false));
+        let proxy = EventProxy::with_output_wake_osc52_and_overflow(
+            event_tx,
+            waker.clone(),
+            output_wake.clone(),
+            osc52_copy_allowed.clone(),
+            event_overflowed.clone(),
+        );
         // Seed the engine's *default* cursor style from the user config; the
         // engine seeds `cursor_style` lazily from this, and programs can flip
         // both fields at runtime — `?12 h/l` for blinking (honored live via
@@ -1381,7 +3738,11 @@ impl Terminal {
         let virtuals: Virtuals = Arc::new(Mutex::new(std::collections::HashMap::new()));
         let anims: Animations = Arc::new(Mutex::new(std::collections::HashMap::new()));
         let relatives: Relatives = Arc::new(Mutex::new(std::collections::HashMap::new()));
-        let prompts: Arc<Mutex<std::collections::VecDeque<i64>>> =
+        let inactive_graphics: InactiveGraphics =
+            Arc::new(Mutex::new(BufferGraphicsState::default()));
+        let graphics_gate = Arc::new(Mutex::new(()));
+        let graphics_reflow_generation = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let prompts: Arc<Mutex<std::collections::VecDeque<u64>>> =
             Arc::new(Mutex::new(std::collections::VecDeque::new()));
         // Terminator parity (`command_notify.py`):
         // per-pane OSC 133 OutputStart timestamp + completed-command
@@ -1410,7 +3771,10 @@ impl Terminal {
         // The reader thread writes it; the App polls the focused pane's value
         // each frame and drives the OS taskbar indicator (pwsh 7 parity).
         let progress_cell: Arc<Mutex<Option<Progress>>> = Arc::new(Mutex::new(None));
-        let cell_px = Arc::new(Mutex::new((cell_w.max(1), cell_h.max(1))));
+        let shared_geometry = Arc::new(Mutex::new(VersionedPtyGeometry {
+            geometry,
+            generation: 0,
+        }));
         // Terminator parity (`plugins/logger.py`): per-pane
         // session log. Default None; `Action::ToggleSessionLog`
         // opens/closes it at runtime. The reader thread holds a
@@ -1428,6 +3792,8 @@ impl Terminal {
         let log_strip_ansi_for_struct = log_strip_ansi.clone();
         // Teardown stop flag (see the `stop` struct field).
         let stop = Arc::new(AtomicBool::new(false));
+        // Teardown drain flag (see the `drain_output` struct field).
+        let drain_output = Arc::new(AtomicBool::new(false));
         // C4 (multi-window): per-pane output-generation counter (see the
         // `out_gen` struct field).
         let out_gen = Arc::new(std::sync::atomic::AtomicU64::new(0));
@@ -1439,6 +3805,9 @@ impl Terminal {
             let virtuals = virtuals.clone();
             let anims = anims.clone();
             let relatives = relatives.clone();
+            let inactive_graphics = inactive_graphics.clone();
+            let graphics_gate = graphics_gate.clone();
+            let graphics_reflow_generation = graphics_reflow_generation.clone();
             let prompts = prompts.clone();
             let output_started_at = output_started_at.clone();
             let output_start_seen = output_start_seen.clone();
@@ -1447,16 +3816,20 @@ impl Terminal {
             let cwd_cell = cwd_cell.clone();
             let osc_cwd_seen = osc_cwd_seen.clone();
             let progress_cell = progress_cell.clone();
-            let cell_px = cell_px.clone();
+            let shared_geometry = shared_geometry.clone();
+            let output_wake = output_wake.clone();
             let log_file = log_file.clone();
             let log_strip_ansi = log_strip_ansi.clone();
             let log_active = log_active.clone();
             let stop = stop.clone();
+            let drain_output = drain_output.clone();
             std::thread::Builder::new()
                 .name("kettle-pty-reader".into())
                 .spawn(move || {
                     let mut processor: Processor = Processor::new();
                     let mut extractor = Extractor::new();
+                    let mut active_alternate = false;
+                    let mut observed_reflow_generation = 0;
                     // Persistent across every PTY-read chunk for this pane's
                     // lifetime (see `AnsiStripper` docs): a CSI/OSC sequence
                     // whose terminator lands in the next 64 KiB read is still
@@ -1469,49 +3842,149 @@ impl Terminal {
                     // applies backpressure instead of retaining an unbounded
                     // queue of fresh 64 KiB allocations.
                     let (raw_tx, raw_rx) =
-                        std::sync::mpsc::sync_channel::<Option<Vec<u8>>>(PTY_PUMP_QUEUE_DEPTH);
+                        crossbeam_channel::bounded::<Option<Vec<u8>>>(PTY_PUMP_QUEUE_DEPTH);
                     let (recycle_tx, recycle_rx) =
                         std::sync::mpsc::sync_channel::<Vec<u8>>(PTY_PUMP_QUEUE_DEPTH + 1);
                     {
                         let pump_stop = stop.clone();
-                        let _ = std::thread::Builder::new()
+                        let pump_drain_output = drain_output.clone();
+                        let pump_recycle_tx = recycle_tx.clone();
+                        if let Err(error) = std::thread::Builder::new()
                             .name("kettle-pty-pump".into())
                             .spawn(move || {
+                                let mut drain_buffer = None;
                                 loop {
                                     if pump_stop.load(Ordering::Relaxed) {
                                         break;
                                     }
-                                    let mut buffer = recycle_rx
-                                        .try_recv()
-                                        .unwrap_or_else(|_| vec![0; PTY_READ_BUFFER_BYTES]);
+                                    let mut buffer = drain_buffer
+                                        .take()
+                                        .or_else(|| recycle_rx.try_recv().ok())
+                                        .unwrap_or_else(|| vec![0; PTY_READ_BUFFER_BYTES]);
                                     buffer.resize(PTY_READ_BUFFER_BYTES, 0);
                                     match reader.read(&mut buffer) {
+                                        Err(error)
+                                            if error.kind() == std::io::ErrorKind::WouldBlock =>
+                                        {
+                                            #[cfg(unix)]
+                                            {
+                                                let mut poll_fd = libc::pollfd {
+                                                    fd: reader_poll_fd,
+                                                    events: libc::POLLIN,
+                                                    revents: 0,
+                                                };
+                                                // Bound teardown observation
+                                                // without spinning while the
+                                                // exec writer arbiter has the
+                                                // shared master description in
+                                                // nonblocking mode.
+                                                let _ = unsafe { libc::poll(&mut poll_fd, 1, 250) };
+                                            }
+                                            #[cfg(not(unix))]
+                                            std::thread::sleep(std::time::Duration::from_millis(1));
+                                            let _ = pump_recycle_tx.try_send(buffer);
+                                            continue;
+                                        }
+                                        Err(error)
+                                            if error.kind() == std::io::ErrorKind::Interrupted =>
+                                        {
+                                            let _ = pump_recycle_tx.try_send(buffer);
+                                            continue;
+                                        }
                                         Ok(0) | Err(_) => {
-                                            let _ = raw_tx.send(None);
+                                            if !pump_drain_output.load(Ordering::Acquire) {
+                                                let _ = raw_tx.send(None);
+                                            }
                                             break;
                                         }
                                         Ok(n) => {
                                             buffer.truncate(n);
-                                            if raw_tx.send(Some(buffer)).is_err() {
-                                                break;
+                                            match forward_pty_buffer_or_drain(
+                                                &raw_tx,
+                                                &pump_drain_output,
+                                                buffer,
+                                            ) {
+                                                PtyPumpSend::Forwarded => {}
+                                                PtyPumpSend::Drain(buffer) => {
+                                                    drain_buffer = Some(buffer);
+                                                }
+                                                PtyPumpSend::Disconnected => break,
                                             }
                                         }
                                     }
                                 }
-                            });
+                            })
+                        {
+                            // Thread exhaustion must be observable. The
+                            // reader cannot make progress without this blocking
+                            // pump, so report the cause and close the pane
+                            // through the normal exit event instead of silently
+                            // waiting on a channel with no sender.
+                            log::error!("failed to spawn PTY pump thread: {error}");
+                            proxy.send_event_exit();
+                            return;
+                        }
                     }
+                    let mut image_pruner = ImageHistoryPruner::default();
+                    let mut deferred_graphics = DeferredGraphicsJournal::new();
                     loop {
-                        // Bail out during teardown (Drop sets `stop`).
+                        // Bail out after the detached reaper completes the
+                        // platform close and publishes `stop`.
                         if stop.load(Ordering::Relaxed) {
                             break;
                         }
-                        match receive_pty_chunk(
-                            &mut processor,
-                            &term,
-                            &raw_rx,
-                            &out_gen_reader,
-                            &waker,
-                        ) {
+                        let received = {
+                            let mut apply_sync_graphics =
+                                |dispatch: SyncGraphicsDispatch<'_>| {
+                                let finishes_sync =
+                                    matches!(&dispatch, SyncGraphicsDispatch::Batch(_));
+                                let generation = graphics_reflow_generation
+                                    .load(std::sync::atomic::Ordering::Acquire);
+                                if generation != observed_reflow_generation {
+                                    clear_reflowed_regular_placements(
+                                        &images,
+                                        &relatives,
+                                        &inactive_graphics,
+                                    );
+                                    extractor.clear_reflowed_regular_placements();
+                                    observed_reflow_generation = generation;
+                                }
+                                let mut sync_graphics = SyncGraphicsContext {
+                                    active_alternate: &mut active_alternate,
+                                    deferred: &mut deferred_graphics,
+                                    registries: GraphicsRegistries {
+                                        inactive: &inactive_graphics,
+                                        images: &images,
+                                        virtuals: &virtuals,
+                                        anims: &anims,
+                                        relatives: &relatives,
+                                    },
+                                    actions: GraphicsActionContext {
+                                        images: &images,
+                                        virtuals: &virtuals,
+                                        anims: &anims,
+                                        relatives: &relatives,
+                                        geometry: &shared_geometry,
+                                    },
+                                    extractor: &mut extractor,
+                                };
+                                apply_sync_dispatch(dispatch, &mut sync_graphics);
+                                if finishes_sync {
+                                    finish_deferred_sync(&mut sync_graphics);
+                                }
+                            };
+                            let mut sync_flush = SyncFlushContext {
+                                term: &term,
+                                images: &images,
+                                graphics_gate: &graphics_gate,
+                                image_pruner: &mut image_pruner,
+                                on_graphics: &mut apply_sync_graphics,
+                                out_gen: &out_gen_reader,
+                                output_wake: &output_wake,
+                            };
+                            receive_pty_chunk(&mut processor, &raw_rx, &mut sync_flush)
+                        };
+                        match received {
                             None => {
                                 proxy.send_event_exit();
                                 break;
@@ -1550,64 +4023,388 @@ impl Terminal {
                                 if let Some(tx) = &output_tx {
                                     tx.send(buffer.clone());
                                 }
-                                for chunk in extractor.feed(&buffer) {
+                                extractor.feed_with(&buffer, |extractor, chunk| {
+                                    let graphics_related = matches!(
+                                        &chunk,
+                                        Chunk::Image(_)
+                                            | Chunk::DeleteImages(_)
+                                            | Chunk::VirtualImage { .. }
+                                            | Chunk::RelativePlacement { .. }
+                                            | Chunk::Animation { .. }
+                                            | Chunk::DeferredGraphics(_)
+                                    ) || matches!(&chunk, Chunk::Pass(_))
+                                        && (!deferred_graphics.entries.is_empty()
+                                            || deferred_graphics.overflowed);
+                                    let _graphics_guard = graphics_related.then(|| {
+                                        graphics_gate
+                                            .lock()
+                                            .unwrap_or_else(|poisoned| poisoned.into_inner())
+                                    });
+                                    if graphics_related {
+                                        let generation = graphics_reflow_generation
+                                            .load(std::sync::atomic::Ordering::Acquire);
+                                        if generation != observed_reflow_generation {
+                                            clear_reflowed_regular_placements(
+                                                &images,
+                                                &relatives,
+                                                &inactive_graphics,
+                                            );
+                                            extractor.clear_reflowed_regular_placements();
+                                            observed_reflow_generation = generation;
+                                        }
+                                    }
                                     match chunk {
                                         Chunk::Pass(bytes) => {
-                                            if let Ok(mut t) = term.lock() {
-                                                processor.advance(&mut *t, &bytes);
-                                            }
-                                        }
-                                        Chunk::Image(placed) => {
-                                            place_image(
-                                                &term,
-                                                &images,
-                                                &cell_px,
+                                            let mut sync_graphics = SyncGraphicsContext {
+                                                active_alternate: &mut active_alternate,
+                                                deferred: &mut deferred_graphics,
+                                                registries: GraphicsRegistries {
+                                                    inactive: &inactive_graphics,
+                                                    images: &images,
+                                                    virtuals: &virtuals,
+                                                    anims: &anims,
+                                                    relatives: &relatives,
+                                                },
+                                                actions: GraphicsActionContext {
+                                                    images: &images,
+                                                    virtuals: &virtuals,
+                                                    anims: &anims,
+                                                    relatives: &relatives,
+                                                    geometry: &shared_geometry,
+                                                },
+                                                extractor,
+                                            };
+                                            advance_terminal_bytes(
                                                 &mut processor,
-                                                placed,
+                                                &term,
+                                                &bytes,
+                                                &mut sync_graphics,
                                             );
                                         }
-                                        Chunk::DeleteImages { all, id } => {
-                                            if let Ok(mut v) = images.lock() {
-                                                if all {
-                                                    v.clear();
-                                                } else {
-                                                    v.retain(|p| {
-                                                        id.is_none_or(|x| p.id != Some(x))
+                                        Chunk::DeferredGraphics(graphics) => {
+                                            deferred_graphics.defer(&mut processor, graphics);
+                                        }
+                                        Chunk::Image(placed) => {
+                                            if let Some(batch) = place_image(
+                                                &term,
+                                                &images,
+                                                &shared_geometry,
+                                                &mut processor,
+                                                placed,
+                                            ) {
+                                                apply_graphics_batch(
+                                                    batch,
+                                                    &mut active_alternate,
+                                                    GraphicsRegistries {
+                                                        inactive: &inactive_graphics,
+                                                        images: &images,
+                                                        virtuals: &virtuals,
+                                                        anims: &anims,
+                                                        relatives: &relatives,
+                                                    },
+                                                    extractor,
+                                                );
+                                            }
+                                        }
+                                        Chunk::DeleteImages(delete) => {
+                                            let (
+                                                delete_geometry,
+                                                placeholder_cells,
+                                                render_geometry,
+                                            ) = {
+                                                let (
+                                                    screen_top,
+                                                    screen_lines,
+                                                    cursor_abs_line,
+                                                    cursor_col,
+                                                    cells,
+                                                ) = term.lock().map_or(
+                                                        (0, 1, 0, 0, Vec::new()),
+                                                        |t| {
+                                                            let grid = t.grid();
+                                                            let screen_top = stable_grid_line_id(
+                                                                grid.history_origin(),
+                                                                grid.history_size(),
+                                                                0,
+                                                            );
+                                                            let cursor = grid.cursor.point;
+                                                            (
+                                                                screen_top,
+                                                                grid.screen_lines(),
+                                                                stable_grid_line_id(
+                                                                    grid.history_origin(),
+                                                                    grid.history_size(),
+                                                                    cursor.line.0,
+                                                                ),
+                                                                cursor.column.0,
+                                                                Terminal::placeholder_cells_from_term(
+                                                                    &t,
+                                                                ),
+                                                            )
+                                                        },
+                                                    );
+                                                let render_geometry = shared_geometry
+                                                    .lock()
+                                                    .map(|geometry| geometry.geometry)
+                                                    .unwrap_or_else(|_| {
+                                                        PtyGeometry::new(1, 1, 1, 1)
                                                     });
-                                                }
-                                            }
-                                            if let Ok(mut vm) = virtuals.lock() {
-                                                match (all, id) {
-                                                    (true, _) => vm.clear(),
-                                                    (false, Some(x)) => {
-                                                        vm.remove(&x);
-                                                    }
-                                                    (false, None) => {}
-                                                }
-                                            }
-                                            if let Ok(mut am) = anims.lock() {
-                                                match (all, id) {
-                                                    (true, _) => am.clear(),
-                                                    (false, Some(x)) => {
-                                                        am.remove(&x);
-                                                    }
-                                                    (false, None) => {}
-                                                }
-                                            }
-                                            if let Ok(mut rm) = relatives.lock() {
-                                                match (all, id) {
-                                                    (true, _) => rm.clear(),
-                                                    // Group dies with parent:
-                                                    // drop the child and any
-                                                    // child parented to it.
-                                                    (false, Some(x)) => {
-                                                        rm.retain(|&(cimg, _), e| {
-                                                            cimg != x && e.parent_img != x
+                                                (
+                                                    KittyDeleteGeometry {
+                                                        screen_top,
+                                                        screen_lines,
+                                                        cursor_abs_line,
+                                                        cursor_col,
+                                                    },
+                                                    cells,
+                                                    render_geometry,
+                                                )
+                                            };
+
+                                            // Resolve relative-placement origins before mutating
+                                            // any registry. Physical selectors use the same
+                                            // render-time parent chain as Terminal::relative_tiles.
+                                            let image_snapshot =
+                                                images.lock().map(|v| v.clone()).unwrap_or_default();
+                                            let relative_snapshot = relatives
+                                                .lock()
+                                                .map(|v| v.clone())
+                                                .unwrap_or_default();
+                                            let mut origins =
+                                                std::collections::HashMap::<u32, (u64, usize)>::new();
+                                            let mut note_origin =
+                                                |id: u32, abs: u64, col: usize| {
+                                                    origins
+                                                        .entry(id)
+                                                        .and_modify(|origin| {
+                                                            origin.0 = origin.0.min(abs);
+                                                            origin.1 = origin.1.min(col);
                                                         })
-                                                    }
-                                                    (false, None) => {}
+                                                        .or_insert((abs, col));
+                                                };
+                                            for placement in &image_snapshot {
+                                                if let Some(id) = placement.id {
+                                                    note_origin(
+                                                        id,
+                                                        placement.abs_line,
+                                                        placement.col,
+                                                    );
                                                 }
                                             }
+                                            for (abs, col, resolved) in &placeholder_cells {
+                                                note_origin(resolved.image_id, *abs, *col);
+                                            }
+                                            let relative_chains = relative_snapshot
+                                                .iter()
+                                                .map(|(&(id, _), entry)| {
+                                                    (id, (entry.parent_img, entry.h, entry.v))
+                                                })
+                                                .collect::<std::collections::HashMap<_, _>>();
+                                            let relative_positions = relative_snapshot
+                                                .iter()
+                                                .filter_map(|(&(id, placement_id), entry)| {
+                                                    let (parent_abs, parent_col) = resolve_chain(
+                                                        entry.parent_img,
+                                                        &relative_chains,
+                                                        &origins,
+                                                        8,
+                                                    )?;
+                                                    let (abs_line, col) = relative_origin(
+                                                        parent_abs,
+                                                        parent_col,
+                                                        entry.h,
+                                                        entry.v,
+                                                    );
+                                                    let resolved = resolve_kitty_placement(
+                                                        &entry.img,
+                                                        entry.params,
+                                                        render_geometry,
+                                                    )?;
+                                                    Some((
+                                                        (id, placement_id),
+                                                        Placement {
+                                                            abs_line,
+                                                            col,
+                                                            cell_cols: resolved.cell_cols,
+                                                            cell_rows: resolved.cell_rows,
+                                                            x_offset_cells: resolved.x_offset_cells,
+                                                            y_offset_cells: resolved.y_offset_cells,
+                                                            display_cols: resolved.display_cols,
+                                                            display_rows: resolved.display_rows,
+                                                            img: entry.img.clone(),
+                                                            source_rect: resolved.source_rect,
+                                                            source_crop: None,
+                                                            id: Some(id),
+                                                            placement_id,
+                                                            kitty_params: Some(entry.params),
+                                                            z: entry.z,
+                                                        },
+                                                    ))
+                                                })
+                                                .collect::<std::collections::HashMap<_, _>>();
+
+                                            let mut removed_keys =
+                                                std::collections::HashSet::<PlacementKey>::new();
+                                            let mut removed_ids =
+                                                std::collections::HashSet::<u32>::new();
+                                            if let Ok(mut placements) = images.lock() {
+                                                placements.retain(|placement| {
+                                                    if kitty_delete_matches_placement(
+                                                        &delete,
+                                                        placement,
+                                                        delete_geometry,
+                                                    ) {
+                                                        if let Some(image_id) = placement.id {
+                                                            removed_ids.insert(image_id);
+                                                            removed_keys.insert(PlacementKey {
+                                                                image_id,
+                                                                placement_id: placement
+                                                                    .placement_id,
+                                                            });
+                                                        }
+                                                        false
+                                                    } else {
+                                                        true
+                                                    }
+                                                });
+                                            }
+                                            if let Ok(mut virtual_placements) = virtuals.lock() {
+                                                virtual_placements.retain(
+                                                    |&(image_id, placement_id), _| {
+                                                        if kitty_delete_matches_virtual(
+                                                            &delete,
+                                                            image_id,
+                                                            placement_id,
+                                                        ) {
+                                                            removed_ids.insert(image_id);
+                                                            removed_keys.insert(PlacementKey {
+                                                                image_id,
+                                                                placement_id,
+                                                            });
+                                                            false
+                                                        } else {
+                                                            true
+                                                        }
+                                                    },
+                                                );
+                                            }
+                                            if let Ok(mut relative_placements) = relatives.lock() {
+                                                relative_placements.retain(
+                                                    |&(image_id, placement_id), _| {
+                                                        let matched = relative_positions
+                                                            .get(&(image_id, placement_id))
+                                                            .is_some_and(|placement| {
+                                                                kitty_delete_matches_placement(
+                                                                    &delete,
+                                                                    placement,
+                                                                    delete_geometry,
+                                                                )
+                                                            })
+                                                            || kitty_delete_matches_virtual(
+                                                                &delete,
+                                                                image_id,
+                                                                placement_id,
+                                                            );
+                                                        if matched {
+                                                            removed_ids.insert(image_id);
+                                                            removed_keys.insert(PlacementKey {
+                                                                image_id,
+                                                                placement_id,
+                                                            });
+                                                            false
+                                                        } else {
+                                                            true
+                                                        }
+                                                    },
+                                                );
+
+                                                // A relative placement cannot survive deletion of
+                                                // its concrete parent. Repeat to cover chains.
+                                                loop {
+                                                    let before = relative_placements.len();
+                                                    relative_placements.retain(
+                                                        |&(image_id, placement_id), entry| {
+                                                            let parent_removed = removed_keys
+                                                                .iter()
+                                                                .any(|key| {
+                                                                    key.image_id
+                                                                        == entry.parent_img
+                                                                        && (entry
+                                                                            .parent_placement
+                                                                            == 0
+                                                                            || key.placement_id
+                                                                                == entry
+                                                                                    .parent_placement)
+                                                                });
+                                                            if parent_removed {
+                                                                removed_ids.insert(image_id);
+                                                                removed_keys.insert(PlacementKey {
+                                                                    image_id,
+                                                                    placement_id,
+                                                                });
+                                                                false
+                                                            } else {
+                                                                true
+                                                            }
+                                                        },
+                                                    );
+                                                    if relative_placements.len() == before {
+                                                        break;
+                                                    }
+                                                }
+                                            }
+
+                                            let mut freed_ids = Vec::new();
+                                            if delete.free_data {
+                                                removed_ids.extend(
+                                                    delete.free_candidates.iter().copied(),
+                                                );
+                                                let referenced = {
+                                                    let mut ids =
+                                                        std::collections::HashSet::<u32>::new();
+                                                    if let Ok(placements) = images.lock() {
+                                                        ids.extend(
+                                                            placements
+                                                                .iter()
+                                                                .filter_map(|placement| {
+                                                                    placement.id
+                                                                }),
+                                                        );
+                                                    }
+                                                    if let Ok(virtual_placements) = virtuals.lock() {
+                                                        ids.extend(
+                                                            virtual_placements
+                                                                .keys()
+                                                                .map(|&(id, _)| id),
+                                                        );
+                                                    }
+                                                    if let Ok(relative_placements) = relatives.lock()
+                                                    {
+                                                        ids.extend(
+                                                            relative_placements
+                                                                .keys()
+                                                                .map(|&(id, _)| id),
+                                                        );
+                                                    }
+                                                    ids
+                                                };
+                                                freed_ids = kitty_delete_freed_ids(
+                                                    &delete,
+                                                    &removed_ids,
+                                                    &referenced,
+                                                );
+                                                if let Ok(mut animations) = anims.lock() {
+                                                    for id in &freed_ids {
+                                                        animations.remove(id);
+                                                    }
+                                                }
+                                            }
+                                            let removed_keys =
+                                                removed_keys.into_iter().collect::<Vec<_>>();
+                                            extractor.apply_kitty_delete_result(
+                                                &removed_keys,
+                                                &freed_ids,
+                                            );
                                         }
                                         Chunk::RelativePlacement {
                                             id,
@@ -1617,6 +4414,8 @@ impl Terminal {
                                             parent_placement,
                                             h,
                                             v,
+                                            z,
+                                            params,
                                         } => {
                                             if let Ok(mut rm) = relatives.lock() {
                                                 let key = (id, placement);
@@ -1631,14 +4430,16 @@ impl Terminal {
                                                             parent_placement,
                                                             h,
                                                             v,
+                                                            z,
+                                                            params,
                                                         },
                                                     );
                                                 }
                                             }
-                                            (waker)();
                                         }
                                         Chunk::VirtualImage {
                                             id,
+                                            placement,
                                             img,
                                             cols,
                                             rows,
@@ -1647,14 +4448,20 @@ impl Terminal {
                                             if let Ok(mut vm) = virtuals.lock() {
                                                 let limit =
                                                     kettle_vt::GraphicsLimits::default().placements;
-                                                if vm.contains_key(&id) || vm.len() < limit {
+                                                let key = (id, placement);
+                                                if vm.contains_key(&key) || vm.len() < limit {
                                                     vm.insert(
-                                                        id,
-                                                        VirtualEntry { img, cols, rows, z },
+                                                        key,
+                                                        VirtualEntry {
+                                                            img,
+                                                            placement_id: placement,
+                                                            cols,
+                                                            rows,
+                                                            z,
+                                                        },
                                                     );
                                                 }
                                             }
-                                            (waker)();
                                         }
                                         Chunk::Animation {
                                             id,
@@ -1708,20 +4515,36 @@ impl Terminal {
                                                     }
                                                 }
                                             }
-                                            (waker)();
                                         }
                                         Chunk::Prompt(PromptKind::PromptStart) => {
-                                            if let Ok(t) = term.lock() {
-                                                let rc = t.renderable_content();
-                                                let line = rc.cursor.point.line.0 as i64;
-                                                let abs = t.grid().history_size() as i64 + line;
-                                                if let Ok(mut m) = prompts.lock() {
-                                                    // O(1)
-                                                    // bounded ring push (dedup +
-                                                    // pop_front trim) — see
-                                                    // push_prompt_mark.
-                                                    push_prompt_mark(&mut m, abs);
-                                                }
+                                            if let Ok(t) = term.lock()
+                                                && !t.mode().contains(
+                                                    alacritty_terminal::term::TermMode::ALT_SCREEN,
+                                                )
+                                            {
+                                                    // Use the application's writing cursor, not
+                                                    // RenderableContent's cursor (which becomes the
+                                                    // user-controlled vi cursor while vi mode is
+                                                    // active). `history_origin` keeps this identity
+                                                    // stable after a bounded history ring wraps.
+                                                    let grid = t.grid();
+                                                    let row_id = stable_grid_line_id(
+                                                        grid.history_origin(),
+                                                        grid.history_size(),
+                                                        grid.cursor.point.line.0,
+                                                    );
+                                                    if let Ok(mut m) = prompts.lock() {
+                                                        // Retire marks whose rows were irreversibly
+                                                        // evicted or reset before appending.
+                                                        m.retain(|mark| {
+                                                            *mark >= grid.history_origin()
+                                                        });
+                                                        // O(1)
+                                                        // bounded ring push (dedup +
+                                                        // pop_front trim) — see
+                                                        // push_prompt_mark.
+                                                        push_prompt_mark(&mut m, row_id);
+                                                    }
                                             }
                                         }
                                         // Terminator parity (command_notify.py):
@@ -1800,7 +4623,6 @@ impl Terminal {
                                             if let Ok(mut g) = progress_cell.lock() {
                                                 *g = Some(p);
                                             }
-                                            (waker)();
                                         }
                                         Chunk::Notification { title, body } => {
                                             if let Ok(mut q) = protocol_notifications.lock() {
@@ -1810,16 +4632,23 @@ impl Terminal {
                                                 }
                                                 q.push(ProtocolNotification { title, body });
                                             }
-                                            (waker)();
                                         }
                                     }
-                                }
+                                });
+                                image_pruner.prune_if_changed(&term, &images);
                                 let _ = recycle_tx.try_send(buffer);
-                                // C4: bump BEFORE the wakeup so the UI's
-                                // generation check (Acquire) observes this
-                                // read's output when the wakeup lands.
-                                out_gen_reader.fetch_add(1, std::sync::atomic::Ordering::Release);
-                                (waker)();
+                                // Publish every grid and parser-sidechannel
+                                // mutation through one generation-ordered,
+                                // per-pane-gated wake. Graphics, progress, and
+                                // protocol notifications are polled during the
+                                // resulting redraw; waking them independently
+                                // here would bypass hidden-window quiescence
+                                // and visible flood coalescing.
+                                publish_output_if_ready(
+                                    &processor,
+                                    &out_gen_reader,
+                                    &output_wake,
+                                );
                             }
                         }
                     }
@@ -1833,15 +4662,21 @@ impl Terminal {
             scrollback_byte_limit: scrollback_bytes,
             master: Some(pair.master),
             writer: Arc::new(Mutex::new(writer)),
+            #[cfg(unix)]
+            stdin_lease_phase: Arc::new(Mutex::new(PtyStdinLeasePhase::Available)),
             child: Arc::new(Mutex::new(child)),
             reader_thread: Some(reader_thread),
             stop,
+            drain_output,
             cols,
             rows,
             images,
             virtuals,
             anims,
             relatives,
+            inactive_graphics,
+            graphics_gate,
+            graphics_reflow_generation,
             prompts,
             output_started_at,
             command_finished,
@@ -1855,7 +4690,11 @@ impl Terminal {
             log_strip_ansi: log_strip_ansi_for_struct,
             log_active: log_active_for_struct,
             output_start_seen: output_start_seen_for_struct,
-            cell_px,
+            geometry: shared_geometry,
+            applied_pty_geometry: geometry,
+            output_wake,
+            event_overflowed,
+            osc52_copy_allowed,
             out_gen,
         })
     }
@@ -1867,6 +4706,14 @@ impl Terminal {
     /// wakeup fires; read with `Acquire`.
     pub fn output_generation(&self) -> u64 {
         self.out_gen.load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    /// Update whether DA1 may advertise OSC 52 clipboard writes.
+    ///
+    /// The event proxy reads this atomically while parsing a DA request, so a
+    /// live config reload takes effect without restarting the pane.
+    pub fn set_osc52_copy_allowed(&self, allowed: bool) {
+        self.osc52_copy_allowed.store(allowed, Ordering::Release);
     }
 
     /// v2.20.0 (Ghostty `confirm-close-surface` parity): is this pane's
@@ -1920,6 +4767,18 @@ impl Terminal {
     /// OS-derived guess (e.g. WSL split-cloning) use this directly.
     pub fn current_dir(&self) -> Option<String> {
         self.cwd.lock().ok().and_then(|c| c.clone())
+    }
+
+    /// Working directory explicitly reported by the child via OSC 7/9;9.
+    ///
+    /// Unlike [`current_dir`](Self::current_dir), this never exposes the
+    /// launch-directory seed before the first cwd report. Use this when a
+    /// caller must distinguish shell-reported state from a startup fallback.
+    pub fn reported_current_dir(&self) -> Option<String> {
+        reported_current_dir(
+            self.osc_cwd_seen.load(std::sync::atomic::Ordering::Relaxed),
+            self.current_dir(),
+        )
     }
 
     /// v2.29.0: set the OS-derived native cwd fallback (the App's process poll
@@ -2012,14 +4871,81 @@ impl Terminal {
             .unwrap_or(false)
     }
 
-    /// Absolute prompt-start lines recorded via OSC 133.
-    pub fn prompt_marks(&self) -> Vec<i64> {
-        // `prompts` is now a VecDeque — collect to the Vec the
-        // callers (jump-to-prompt nav) expect, preserving oldest→newest order.
+    /// Retained OSC 133 prompt row ids in oldest-to-newest order.
+    ///
+    /// Stale ids are pruned against the terminal grid's monotonic history
+    /// origin before returning, so callers can never treat an evicted row's
+    /// reused grid coordinate as the original prompt.
+    pub fn prompt_marks(&self) -> Vec<u64> {
+        let Ok(term) = self.term.lock() else {
+            return Vec::new();
+        };
+        if term
+            .mode()
+            .contains(alacritty_terminal::term::TermMode::ALT_SCREEN)
+        {
+            // Prompt ids belong to the primary grid. Never prune them against
+            // the alternate grid's independent history origin.
+            return Vec::new();
+        }
+        let grid = term.grid();
+        let origin = grid.history_origin();
+        let retained_end = origin
+            .saturating_add(grid.history_size() as u64)
+            .saturating_add(grid.screen_lines() as u64);
         self.prompts
             .lock()
-            .map(|m| m.iter().copied().collect())
+            .map(|mut marks| {
+                marks.retain(|mark| *mark >= origin && *mark < retained_end);
+                marks.iter().copied().collect()
+            })
             .unwrap_or_default()
+    }
+
+    /// Scroll to the adjacent retained OSC 133 prompt.
+    ///
+    /// The term and prompt ring are locked in the same order as the reader
+    /// thread (`Term` then prompt ring), giving the navigation decision a
+    /// consistent history-origin snapshot without a deadlock inversion.
+    pub fn jump_to_prompt(&self, previous: bool) -> bool {
+        let Ok(mut term) = self.term.lock() else {
+            return false;
+        };
+        if term
+            .mode()
+            .contains(alacritty_terminal::term::TermMode::ALT_SCREEN)
+        {
+            return false;
+        }
+        let grid = term.grid();
+        let history_origin = grid.history_origin();
+        let history_size = grid.history_size();
+        let screen_lines = grid.screen_lines();
+        let display_offset = grid.display_offset();
+        let Ok(mut marks) = self.prompts.lock() else {
+            return false;
+        };
+        let Some(new_offset) = prompt_navigation_offset(
+            &mut marks,
+            history_origin,
+            history_size,
+            screen_lines,
+            display_offset,
+            previous,
+        ) else {
+            return false;
+        };
+        drop(marks);
+
+        let delta = if new_offset >= display_offset {
+            i32::try_from(new_offset - display_offset).unwrap_or(i32::MAX)
+        } else {
+            -i32::try_from(display_offset - new_offset).unwrap_or(i32::MAX)
+        };
+        if delta != 0 {
+            term.scroll_display(alacritty_terminal::grid::Scroll::Delta(delta));
+        }
+        true
     }
 
     /// Image placements for this terminal (cloned cheaply; `ImageData` is
@@ -2071,15 +4997,24 @@ impl Terminal {
     /// Scan the visible grid for `U+10EEEE` placeholder cells and resolve
     /// each one (image id + in-image row/col after diacritic inheritance) to
     /// its absolute line and column. Shared by placeholder + relative tiles.
-    fn placeholder_cells(&self) -> Vec<(i64, usize, placeholder::ResolvedCell)> {
-        let Ok(t) = self.term.lock() else {
-            return Vec::new();
-        };
-        let top = t.grid().history_size() as i64 - t.grid().display_offset() as i64;
+    fn placeholder_cells(&self) -> Vec<(u64, usize, placeholder::ResolvedCell)> {
+        let t = self
+            .term
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        Self::placeholder_cells_from_term(&t)
+    }
+
+    fn placeholder_cells_from_term(
+        t: &Term<EventProxy>,
+    ) -> Vec<(u64, usize, placeholder::ResolvedCell)> {
+        let grid = t.grid();
+        let history_origin = grid.history_origin();
+        let history_size = grid.history_size();
         let content = t.renderable_content();
 
         // Maximal same-row contiguous runs of placeholder cells.
-        let mut runs: Vec<Vec<(RawCell, i64, usize)>> = Vec::new();
+        let mut runs: Vec<Vec<(RawCell, u64, usize)>> = Vec::new();
         let mut last: Option<(i32, i32)> = None;
         for ind in content.display_iter {
             let (cell, p) = (ind.cell, ind.point);
@@ -2106,7 +5041,7 @@ impl Terminal {
                             placement_id: cell.underline_color().map(fg_id_bits).unwrap_or(0),
                             diacritics: CellDiacritics::parse(&marks),
                         },
-                        top + p.line.0 as i64,
+                        stable_grid_line_id(history_origin, history_size, p.line.0),
                         p.column.0,
                     ));
                 }
@@ -2140,7 +5075,19 @@ impl Terminal {
         }
         let mut out = Vec::new();
         for (abs, col, res) in self.placeholder_cells() {
-            let Some(v) = virtuals.get(&res.image_id) else {
+            let selected = if res.placement_id != 0 {
+                virtuals.get(&(res.image_id, res.placement_id))
+            } else {
+                // The protocol allows a zero/omitted underline placement id
+                // to select any virtual placement for the image. Pick the
+                // smallest id for deterministic rendering and tests.
+                virtuals
+                    .iter()
+                    .filter(|((image_id, _), _)| *image_id == res.image_id)
+                    .min_by_key(|((_, placement_id), _)| *placement_id)
+                    .map(|(_, entry)| entry)
+            };
+            let Some(v) = selected else {
                 continue;
             };
             if let Some(placement) = placeholder_tile_placement(abs, col, res, v) {
@@ -2162,32 +5109,50 @@ impl Terminal {
     pub fn relative_tiles(&self) -> Vec<Placement> {
         // Snapshot the relatives, then drop the lock before taking the
         // grid / images locks (keeps a single lock-acquisition order).
-        let entries: Vec<(u32, RelEntry)> = {
+        let entries: Vec<(u32, u32, RelEntry)> = {
             let Ok(rel) = self.relatives.lock() else {
                 return Vec::new();
             };
             if rel.is_empty() {
                 return Vec::new();
             }
-            let mut entries: Vec<_> = rel.iter().map(|(&(c, _), e)| (c, e.clone())).collect();
-            entries.sort_by_key(|(id, _)| *id);
+            let mut entries: Vec<_> = rel
+                .iter()
+                .map(|(&(image_id, placement_id), entry)| (image_id, placement_id, entry.clone()))
+                .collect();
+            entries.sort_by_key(|(image_id, placement_id, _)| (*image_id, *placement_id));
             entries.truncate(kettle_vt::GraphicsLimits::default().placements);
             entries
         };
         // Concrete origins: a parent is either a placeholder/virtual image
         // (top-left of its cells) or a regular placement (its abs_line/col).
-        let mut origins: std::collections::HashMap<u32, (i64, usize)> =
+        let mut origins: std::collections::HashMap<u32, (u64, usize)> =
             std::collections::HashMap::new();
-        let mut note = |id: u32, abs: i64, col: usize| {
+        let mut note = |id: u32, abs: u64, col: usize| {
             origins
                 .entry(id)
-                .and_modify(|o: &mut (i64, usize)| {
+                .and_modify(|o: &mut (u64, usize)| {
                     o.0 = o.0.min(abs);
                     o.1 = o.1.min(col);
                 })
                 .or_insert((abs, col));
         };
-        for (abs, col, res) in self.placeholder_cells() {
+        // Snapshot visible placeholder origins and exact grid/pixel geometry
+        // under the same Term -> geometry order used by resize and insertion.
+        // A concurrent DPI reflow therefore cannot pair pre-resize origins
+        // with post-resize image-cell conversion.
+        let (placeholder_cells, geometry) = {
+            let term = self
+                .term
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let geometry = self
+                .geometry
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            (Self::placeholder_cells_from_term(&term), geometry.geometry)
+        };
+        for (abs, col, res) in placeholder_cells {
             note(res.image_id, abs, col);
         }
         if let Ok(imgs) = self.images.lock() {
@@ -2200,35 +5165,76 @@ impl Terminal {
         // child image id -> (parent image id, h, v), for chain walking.
         let rels: std::collections::HashMap<u32, (u32, i32, i32)> = entries
             .iter()
-            .map(|(c, e)| (*c, (e.parent_img, e.h, e.v)))
+            .map(|(image_id, _, entry)| (*image_id, (entry.parent_img, entry.h, entry.v)))
             .collect();
-        let (cw, chh) = self.cell_px.lock().map(|p| *p).unwrap_or((8, 16));
-        let (cw, chh) = (cw.max(1) as u32, chh.max(1) as u32);
         let mut out = Vec::new();
-        for (cimg, e) in &entries {
+        for (cimg, placement_id, e) in &entries {
             // kitty requires a chain depth of at least 8.
             let Some((pa, pc)) = resolve_chain(e.parent_img, &rels, &origins, 8) else {
                 continue;
             };
             let (abs, col) = relative_origin(pa, pc, e.h, e.v);
+            let Some(resolved) = resolve_kitty_placement(&e.img, e.params, geometry) else {
+                continue;
+            };
             out.push(Placement {
                 abs_line: abs,
                 col,
-                cell_cols: e.img.width.div_ceil(cw) as usize,
-                cell_rows: e.img.height.div_ceil(chh) as usize,
+                cell_cols: resolved.cell_cols,
+                cell_rows: resolved.cell_rows,
+                x_offset_cells: resolved.x_offset_cells,
+                y_offset_cells: resolved.y_offset_cells,
+                display_cols: resolved.display_cols,
+                display_rows: resolved.display_rows,
                 img: e.img.clone(),
-                source_rect: None,
+                source_rect: resolved.source_rect,
+                source_crop: None,
                 id: Some(*cimg),
-                z: 0,
+                placement_id: *placement_id,
+                kitty_params: Some(e.params),
+                z: e.z,
             });
         }
         out
     }
 
     pub fn write(&self, bytes: &[u8]) {
-        if let Ok(mut w) = self.writer.lock() {
-            let _ = w.write_all(bytes);
-            let _ = w.flush();
+        if let Err(error) = PtyWriter(Arc::clone(&self.writer)).write_all_checked(bytes) {
+            log::error!("cannot deliver complete input to child PTY: {error:#}");
+        }
+    }
+
+    /// Create the sole active writer-arbiter handle.
+    ///
+    /// Unix temporarily enables nonblocking status on the shared master
+    /// open-file description and the PTY pump polls through `WouldBlock`.
+    /// Because duplicated descriptors share those status flags, a second live
+    /// handle is rejected instead of letting either drop restore flags beneath
+    /// the other. Output parsing and lifecycle ownership remain with
+    /// `Terminal`.
+    pub fn stdin_handle(&self) -> Result<PtyStdin> {
+        #[cfg(unix)]
+        {
+            let master = self
+                .master
+                .as_ref()
+                .context("PTY master unavailable while creating stdin handle")?;
+            let fd = master
+                .as_raw_fd()
+                .context("PTY master has no Unix file descriptor")?;
+            let lease = UnixPtyStdinLease::acquire(fd, Arc::clone(&self.stdin_lease_phase))?;
+            Ok(PtyStdin {
+                writer: PtyWriter(self.writer.clone()),
+                lease,
+                input_state: PtyInputTail::default(),
+                pending_eof: None,
+            })
+        }
+        #[cfg(not(unix))]
+        {
+            Ok(PtyStdin {
+                writer: PtyWriter(self.writer.clone()),
+            })
         }
     }
 
@@ -2242,47 +5248,154 @@ impl Terminal {
         PtyWriter(self.writer.clone())
     }
 
-    pub fn resize(&mut self, cols: usize, rows: usize, cell_w: u16, cell_h: u16) {
+    pub fn resize(&mut self, cols: usize, rows: usize, cell_w: u16, cell_h: u16) -> Result<()> {
+        self.resize_with_pixels(
+            cols,
+            rows,
+            cell_w,
+            cell_h,
+            clamp_pty_dim(cell_w.max(1), cols),
+            clamp_pty_dim(cell_h.max(1), rows),
+        )
+    }
+
+    /// Resize the terminal while preserving exact total pixel geometry.
+    ///
+    /// The legacy integer `cell_w`/`cell_h` arguments are retained for API
+    /// compatibility; exact total pixel dimensions are authoritative for the
+    /// PTY and image placement. A renderer at a fractional DPI scale must
+    /// round only after multiplying its fractional cell metric by the grid
+    /// size. Multiplying a truncated per-cell value under-reports wide grids
+    /// and can suppress a pixel-only SIGWINCH.
+    pub fn resize_with_pixels(
+        &mut self,
+        cols: usize,
+        rows: usize,
+        _cell_w: u16,
+        _cell_h: u16,
+        pixel_width: u16,
+        pixel_height: u16,
+    ) -> Result<()> {
         if cols == 0 || rows == 0 {
-            return;
+            return Ok(());
         }
-        let next_cell = (cell_w.max(1), cell_h.max(1));
-        let current_cell = self.cell_px.lock().map(|cell| *cell).unwrap_or((0, 0));
-        let (grid_changed, cell_changed) = terminal_resize_changes(
-            (self.cols, self.rows),
-            current_cell,
-            (cols, rows),
-            next_cell,
-        );
-        if !grid_changed && !cell_changed {
-            return;
+        self.try_resize_geometry(PtyGeometry::new(cols, rows, pixel_width, pixel_height))
+    }
+
+    /// Resize to exact geometry, preserving retry state when the native PTY
+    /// rejects the request.
+    pub fn try_resize_geometry(&mut self, desired: PtyGeometry) -> Result<()> {
+        let current = self
+            .geometry
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .geometry;
+        let grid_changed = (current.columns, current.rows) != (desired.columns, desired.rows);
+        let columns_reflowed = current.columns != desired.columns;
+        let local_changed = current != desired;
+        let resize_native = native_resize_required(self.applied_pty_geometry, desired);
+        if !local_changed && !resize_native {
+            return Ok(());
         }
-        self.cols = cols;
-        self.rows = rows;
-        if let Some(master) = self.master.as_ref() {
-            let _ = master.resize(PtySize {
-                rows: clamp_pty_dim(1, rows),
-                cols: clamp_pty_dim(1, cols),
-                pixel_width: clamp_pty_dim(next_cell.0, cols),
-                pixel_height: clamp_pty_dim(next_cell.1, rows),
-            });
+
+        let native_result = if resize_native {
+            self.master
+                .as_ref()
+                .map_or(Ok(()), |master| master.resize(native_pty_size(desired)))
+                .context("native pseudoterminal resize")
+        } else {
+            Ok(())
+        };
+        if native_result.is_ok() {
+            // On Windows a pixel-only update deliberately skips
+            // ResizePseudoConsole; recording the desired pixels here is safe
+            // because future native comparisons ignore them on that platform.
+            self.applied_pty_geometry = desired;
         }
-        if let Ok(mut p) = self.cell_px.lock() {
-            *p = next_cell;
-        }
-        if grid_changed && let Ok(mut t) = self.term.lock() {
-            t.resize(TermSize {
-                columns: cols,
-                screen_lines: rows,
-            });
+
+        // Graphics chunks take this gate before observing Term -> geometry.
+        // Taking it before the local grid commit makes reflow invalidation and
+        // placement insertion a single ordered operation.
+        let _graphics_guard = self
+            .graphics_gate
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let grid_options = if grid_changed {
             self.term_config.scrolling_history = effective_scrollback_lines(
                 self.scrollback_line_limit,
                 self.scrollback_byte_limit,
-                cols,
-                rows,
+                desired.columns,
+                desired.rows,
             );
-            t.set_options(self.term_config.clone());
+            Some(self.term_config.clone())
+        } else {
+            None
+        };
+        commit_local_geometry(&self.term, &self.geometry, desired, grid_options);
+        if grid_changed {
+            let oldest_abs = self
+                .term
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .grid()
+                .history_origin();
+            prune(&self.images, oldest_abs);
         }
+        if columns_reflowed {
+            clear_reflowed_regular_placements(
+                &self.images,
+                &self.relatives,
+                &self.inactive_graphics,
+            );
+            self.graphics_reflow_generation
+                .fetch_add(1, std::sync::atomic::Ordering::Release);
+        } else if local_changed {
+            if let Ok(mut placements) = self.images.lock() {
+                recompute_kitty_placements(&mut placements, desired);
+            }
+            let mut inactive = self
+                .inactive_graphics
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            recompute_kitty_placements(&mut inactive.placements, desired);
+        }
+        if columns_reflowed && let Ok(mut prompts) = self.prompts.lock() {
+            // Reflow can merge or split logical rows. Their previous row ids
+            // are intentionally not guessed across that shape change.
+            prompts.clear();
+        }
+
+        self.cols = desired.columns;
+        self.rows = desired.rows;
+        native_result
+    }
+
+    /// Exact text-area pixel dimensions last published to the PTY.
+    ///
+    /// This is the authoritative CSI 14t response as well as the ConPTY/tmux
+    /// winsize. It may not be evenly divisible by the grid at fractional DPI.
+    pub fn pty_pixel_size(&self) -> (u16, u16) {
+        (
+            self.applied_pty_geometry.pixel_width,
+            self.applied_pty_geometry.pixel_height,
+        )
+    }
+
+    /// Quiesce or re-enable output-driven event-loop wakes for this pane.
+    pub fn set_output_wake_enabled(&self, enabled: bool) {
+        self.output_wake.set_enabled(enabled);
+    }
+
+    /// Re-open this pane's output latch before the UI reads its generation.
+    pub fn acknowledge_output_wake(&self) {
+        self.output_wake.acknowledge();
+    }
+
+    /// Whether this pane's bounded semantic-event queue overflowed. Overflow is
+    /// sticky and is an explicit fail-pane condition; callers must not continue
+    /// as though reply-bearing events were delivered.
+    pub fn event_queue_overflowed(&self) -> bool {
+        self.event_overflowed.load(Ordering::Acquire)
     }
 
     /// Has the child process exited?
@@ -2394,6 +5507,18 @@ pub struct ScreenText {
     pub cursor_visible: bool,
 }
 
+/// Close the PTY while its output reader is still allowed to drain.
+///
+/// Before Windows 11 24H2, `ClosePseudoConsole` can wait for clients to finish
+/// writing their final output. Stopping Kettle's parser/pump first can fill the
+/// bounded handoff and strand that close forever. The stop publication must
+/// therefore happen only after the platform close has returned. Unix uses the
+/// same ordering so teardown has one portable lifetime contract.
+fn close_pty_while_reader_is_live(stop: &AtomicBool, close_pty: impl FnOnce()) {
+    close_pty();
+    stop.store(true, Ordering::Relaxed);
+}
+
 impl Drop for Terminal {
     /// Tear down the PTY WITHOUT ever blocking the calling thread.
     ///
@@ -2411,51 +5536,64 @@ impl Drop for Terminal {
     /// the process alive with `Responding=false` for as long as it was sampled
     /// — a hang, not a panic. See `target/pty-drop-repro.txt`.)
     ///
-    /// The fix mirrors how WezTerm (portable_pty's own author) and Alacritty
-    /// drive teardown: signal stop, kill the child, close the writer (conin)
-    /// and the master (conout / pseudoconsole) so the reader's `read()` reaches
-    /// EOF, then DETACH the reader thread. Every step is non-blocking, so
-    /// `Drop` returns in sub-millisecond time and the UI keeps pumping. The
-    /// reader owns only `Arc` clones (no borrow of `Terminal`), so it is sound
-    /// for it to outlive this `Drop`; it ends the instant conout EOFs and drops
-    /// its clones. On Unix the same ordering applies (master fd close → slave
-    /// EOF), so there is no platform-specific branch.
+    /// Drop closes the writer (conin), then a detached reaper kills the child
+    /// and closes the master (conout / pseudoconsole) while the output reader
+    /// remains live. Only after that close returns does the reaper publish the
+    /// reader stop flag and reap the child. This ordering follows the Win32
+    /// contract for pre-24H2 `ClosePseudoConsole`, which may wait indefinitely
+    /// if conout is neither closed nor drained. `Drop` itself only moves owned
+    /// handles to the reaper and detaches the parser handle, so the UI keeps
+    /// pumping. The reader owns only `Arc` clones (no borrow of `Terminal`), so
+    /// it is sound for it to outlive this `Drop`. Unix uses the same ordering
+    /// (master fd close → reader stop) without a platform-specific branch.
     fn drop(&mut self) {
-        // 1. Tell the reader to stop looping.
-        self.stop.store(true, Ordering::Relaxed);
-        // 2. Kill the child (best-effort; already-exited returns Err), then reap
-        //    it OFF the UI thread. The previous body kill()'d
-        //    but never wait()'d on the close/quit path — `std::process::Child`'s
-        //    Drop doesn't reap, and the only reaping path (`child_exited`
-        //    →`try_wait`) runs from `Mux::reap` for LIVE panes only — so a long
-        //    open/close session accumulated `<defunct>` zombies consuming PID
-        //    slots on Unix/macOS. A short detached thread `wait()`s the already-
-        //    SIGKILL'd child (returns almost immediately) so Drop stays
-        //    non-blocking AND no zombie leaks. The child is a `Send + Sync`
-        //    `Arc<Mutex<…>>`, and the reaper's clone keeps it alive to wait on.
-        //    Windows is unaffected (handle-based) but the same path reaps it.
-        let child = self.child.clone();
-        if let Ok(mut c) = child.lock() {
-            let _ = c.kill();
-        }
-        std::thread::Builder::new()
-            .name("kettle-pty-reaper".into())
-            .spawn(move || {
-                if let Ok(mut c) = child.lock() {
-                    let _ = c.wait();
-                }
-            })
-            .ok();
-        // 3. Close the writer (conin / child stdin) by swapping in a discard
+        // 1. Let the pump bypass a full parser queue and drain/discard conout
+        //    directly for the remainder of teardown.
+        self.drain_output.store(true, Ordering::Release);
+        // 2. Close the writer (conin / child stdin) by swapping in a discard
         //    sink and dropping the real writer — an EOF nudge for shells that
         //    exit on stdin close.
-        if let Ok(mut w) = self.writer.lock() {
+        if let Ok(mut w) = self.writer.try_lock() {
             let _ = std::mem::replace(&mut *w, Box::new(NullWrite));
         }
-        // 4. Close the master / pseudoconsole NOW so the reader's blocked
-        //    read() returns EOF. We hold no lock and do NOT wait on the reader.
-        drop(self.master.take());
-        // 5. DETACH the reader thread — never join() on the UI thread.
+        // 3. Kill/reap the child and close the master on a detached thread.
+        //    `ClosePseudoConsole` itself can wait for the conout drain on
+        //    Windows, so merely avoiding a reader `join()` is insufficient:
+        //    dropping the master on the UI thread can still freeze pane close,
+        //    and stopping the output reader first can deadlock the detached
+        //    close on Windows versions before 11 24H2.
+        //    The indirection keeps the master alive if thread creation fails;
+        //    leaking one failed teardown is preferable to synchronously
+        //    entering a platform close that has no deadline.
+        let teardown = Arc::new(Mutex::new(Some((self.child.clone(), self.master.take()))));
+        let teardown_worker = Arc::clone(&teardown);
+        let reaper_stop = Arc::clone(&self.stop);
+        if let Err(error) = std::thread::Builder::new()
+            .name("kettle-pty-reaper".into())
+            .spawn(move || {
+                let teardown = teardown_worker
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .take();
+                let Some((child, master)) = teardown else {
+                    return;
+                };
+                if let Ok(mut child) = child.lock() {
+                    let _ = child.kill();
+                }
+                close_pty_while_reader_is_live(&reaper_stop, || {
+                    drop(master);
+                });
+                if let Ok(mut child) = child.lock() {
+                    let _ = child.wait();
+                }
+            })
+        {
+            log::error!("failed to spawn PTY teardown worker: {error}");
+            self.stop.store(true, Ordering::Relaxed);
+            std::mem::forget(teardown);
+        }
+        // 4. DETACH the reader thread — never join() on the UI thread.
         drop(self.reader_thread.take());
     }
 }
@@ -2473,27 +5611,650 @@ impl EventProxy {
 #[derive(Clone)]
 pub struct PtyWriter(Arc<Mutex<Box<dyn Write + Send>>>);
 
+/// Write one complete message through a possibly nonblocking PTY writer.
+///
+/// `PIPE_NOWAIT` historically surfaced a full byte pipe as `Ok(0)`, while
+/// conforming wrappers return `WouldBlock`. Treat both as transient
+/// backpressure, preserve partial progress, and bound consecutive stalls. The
+/// callback is separated from the state machine so portable unit tests can
+/// exercise every branch without sleeping.
+fn write_all_with_backpressure<W, F>(
+    writer: &mut W,
+    bytes: &[u8],
+    chunk_limit: usize,
+    max_backpressure_retries: usize,
+    mut wait: F,
+) -> io::Result<()>
+where
+    W: Write + ?Sized,
+    F: FnMut(),
+{
+    let chunk_limit = chunk_limit.max(1);
+    let mut offset = 0usize;
+    let mut consecutive_backpressure = 0usize;
+
+    while offset < bytes.len() {
+        let end = offset.saturating_add(chunk_limit).min(bytes.len());
+        match writer.write(&bytes[offset..end]) {
+            Ok(0) => {
+                consecutive_backpressure = consecutive_backpressure.saturating_add(1);
+            }
+            Ok(written) if written <= end - offset => {
+                offset += written;
+                consecutive_backpressure = 0;
+                continue;
+            }
+            Ok(written) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!(
+                        "PTY writer reported {written} bytes for a {}-byte request",
+                        end - offset
+                    ),
+                ));
+            }
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                consecutive_backpressure = consecutive_backpressure.saturating_add(1);
+            }
+            Err(error) => return Err(error),
+        }
+
+        if consecutive_backpressure > max_backpressure_retries {
+            return Err(io::Error::new(
+                io::ErrorKind::WouldBlock,
+                format!(
+                    "PTY input remained full after {max_backpressure_retries} retries \
+                     ({offset} of {} bytes delivered)",
+                    bytes.len()
+                ),
+            ));
+        }
+        wait();
+    }
+
+    let mut flush_backpressure = 0usize;
+    loop {
+        match writer.flush() {
+            Ok(()) => return Ok(()),
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                flush_backpressure = flush_backpressure.saturating_add(1);
+                if flush_backpressure > max_backpressure_retries {
+                    return Err(io::Error::new(
+                        io::ErrorKind::WouldBlock,
+                        format!(
+                            "PTY input flush remained blocked after \
+                             {max_backpressure_retries} retries"
+                        ),
+                    ));
+                }
+                wait();
+            }
+            Err(error) => return Err(error),
+        }
+    }
+}
+
+fn complete_write_chunk_limit(message_len: usize) -> usize {
+    #[cfg(windows)]
+    {
+        message_len.min(CONPTY_NONBLOCKING_WRITE_BYTES)
+    }
+    #[cfg(not(windows))]
+    {
+        message_len
+    }
+}
+
 impl PtyWriter {
-    /// Write all of `bytes` to the PTY (best-effort; a poisoned lock or a
-    /// closed PTY is silently dropped, same policy as `Terminal::write`).
-    pub fn write(&self, bytes: &[u8]) {
-        if let Ok(mut w) = self.0.lock() {
-            let _ = w.write_all(bytes);
-            let _ = w.flush();
+    /// Write and flush a complete queued input/reply message.
+    ///
+    /// Partial writes are retained and a temporarily full nonblocking PTY is
+    /// retried in bounded increments. If backpressure persists for roughly two
+    /// seconds, the error remains classified as `WouldBlock` and includes the
+    /// delivered byte count; it is never rewritten as a fatal `WriteZero`.
+    /// Latency-sensitive owners should use [`PtyStdin::try_write`] and retain
+    /// the pending suffix in their own bounded queue.
+    pub fn write_all_checked(&self, bytes: &[u8]) -> Result<()> {
+        let mut writer = self
+            .0
+            .lock()
+            .map_err(|_| anyhow::anyhow!("PTY writer lock poisoned"))?;
+        write_all_with_backpressure(
+            &mut **writer,
+            bytes,
+            complete_write_chunk_limit(bytes.len()),
+            PTY_COMPLETE_WRITE_MAX_BACKPRESSURE_RETRIES,
+            || std::thread::sleep(std::time::Duration::from_millis(1)),
+        )
+        .context("cannot write queued input to child PTY")
+    }
+
+    fn write_some_checked(&self, bytes: &[u8]) -> Result<usize> {
+        let mut writer = self
+            .0
+            .lock()
+            .map_err(|_| anyhow::anyhow!("PTY writer lock poisoned while forwarding stdin"))?;
+        match writer.write(bytes) {
+            Ok(written) => Ok(written),
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => Ok(0),
+            Err(error) => Err(error).context("cannot write forwarded stdin to child PTY"),
         }
     }
 
-    /// Agent-first (A1): close the PTY's input side, signalling EOF to
-    /// the child's stdin WITHOUT killing it. Swapping the real writer `Box` for
-    /// a discard sink drops the underlying master-write descriptor (the write
-    /// end of the child's stdin pipe / ConPTY conin), so a read-until-EOF child
-    /// (`cat`, `sort`, `wc`) sees end-of-input and exits. This is the correct
-    /// PTY EOF mechanism — injecting a Ctrl+D/Ctrl+Z byte does NOT work under
-    /// Windows ConPTY. After this, further `write`s are no-ops (the child has
-    /// its full input + EOF). Used by `kettle exec`'s stdin pump on stdin EOF.
+    /// Write all of `bytes` to the PTY using the bounded complete-message
+    /// contract. Failures are logged so a suffix is never silently discarded.
+    pub fn write(&self, bytes: &[u8]) {
+        if let Err(error) = self.write_all_checked(bytes) {
+            log::error!("cannot deliver complete queued input to child PTY: {error:#}");
+        }
+    }
+
+    /// Drop Kettle's PTY input writer and replace it with a discard sink.
+    ///
+    /// A PTY does not provide a portable stdin half-close: closing ConPTY input
+    /// can terminate the attached process, while a Unix PTY master must remain
+    /// open for terminal-query replies. Exec-style forwarding should use
+    /// [`PtyStdin::try_signal_eof`] and handle
+    /// [`PtyEofProgress::Unsupported`] explicitly.
+    #[deprecated(note = "use PtyStdin::try_signal_eof; PTYs have no portable input half-close")]
     pub fn close(&self) {
         if let Ok(mut w) = self.0.lock() {
             let _ = std::mem::replace(&mut *w, Box::new(NullWrite));
+        }
+    }
+}
+
+#[cfg(test)]
+mod complete_pty_write_tests {
+    use super::write_all_with_backpressure;
+    use std::collections::VecDeque;
+    use std::io::{self, Write};
+
+    enum Step {
+        Accept(usize),
+        Zero,
+        WouldBlock,
+        Interrupted,
+    }
+
+    struct ScriptedWriter {
+        steps: VecDeque<Step>,
+        written: Vec<u8>,
+        flush_would_block: usize,
+    }
+
+    impl ScriptedWriter {
+        fn new(steps: impl IntoIterator<Item = Step>) -> Self {
+            Self {
+                steps: steps.into_iter().collect(),
+                written: Vec::new(),
+                flush_would_block: 0,
+            }
+        }
+    }
+
+    impl Write for ScriptedWriter {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            match self.steps.pop_front().unwrap_or(Step::Accept(bytes.len())) {
+                Step::Accept(limit) => {
+                    let accepted = limit.min(bytes.len());
+                    self.written.extend_from_slice(&bytes[..accepted]);
+                    Ok(accepted)
+                }
+                Step::Zero => Ok(0),
+                Step::WouldBlock => Err(io::Error::from(io::ErrorKind::WouldBlock)),
+                Step::Interrupted => Err(io::Error::from(io::ErrorKind::Interrupted)),
+            }
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            if self.flush_would_block == 0 {
+                Ok(())
+            } else {
+                self.flush_would_block -= 1;
+                Err(io::Error::from(io::ErrorKind::WouldBlock))
+            }
+        }
+    }
+
+    #[test]
+    fn retries_zero_would_block_interruption_and_partial_progress_without_loss() {
+        let mut writer = ScriptedWriter::new([
+            Step::Zero,
+            Step::WouldBlock,
+            Step::Interrupted,
+            Step::Accept(2),
+            Step::WouldBlock,
+            Step::Accept(usize::MAX),
+        ]);
+        writer.flush_would_block = 1;
+        let mut waits = 0;
+
+        write_all_with_backpressure(&mut writer, b"abcdef", 4, 3, || waits += 1)
+            .expect("transient backpressure must recover");
+
+        assert_eq!(writer.written, b"abcdef");
+        assert_eq!(
+            waits, 4,
+            "zero, two WouldBlock writes, and one blocked flush wait"
+        );
+    }
+
+    #[test]
+    fn persistent_zero_progress_is_would_block_with_an_actionable_prefix_count() {
+        let mut writer = ScriptedWriter::new([Step::Accept(2), Step::Zero, Step::Zero, Step::Zero]);
+        let error = write_all_with_backpressure(&mut writer, b"abcd", 4, 2, || {})
+            .expect_err("bounded retry exhaustion must be reported");
+
+        assert_eq!(error.kind(), io::ErrorKind::WouldBlock);
+        assert!(
+            error.to_string().contains("2 of 4 bytes delivered"),
+            "partial progress must be explicit: {error}"
+        );
+        assert_eq!(writer.written, b"ab");
+        assert_ne!(error.kind(), io::ErrorKind::WriteZero);
+    }
+
+    #[test]
+    fn successful_progress_resets_the_consecutive_backpressure_bound() {
+        let mut writer = ScriptedWriter::new([
+            Step::Zero,
+            Step::Zero,
+            Step::Accept(1),
+            Step::WouldBlock,
+            Step::WouldBlock,
+            Step::Accept(1),
+        ]);
+
+        write_all_with_backpressure(&mut writer, b"ab", 1, 2, || {})
+            .expect("progress between stalls resets the bound");
+        assert_eq!(writer.written, b"ab");
+    }
+}
+
+/// Shared ownership state for Unix's PTY-master `O_NONBLOCK` lease.
+///
+/// This state machine is portable so its exclusivity and failed-restoration
+/// semantics can be tested on every host. Only Unix stores it in `Terminal`.
+#[cfg(any(unix, test))]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+enum PtyStdinLeasePhase {
+    #[default]
+    Available,
+    Active,
+    RestoreFailed,
+}
+
+#[cfg(any(unix, test))]
+impl PtyStdinLeasePhase {
+    fn try_begin(&mut self) -> std::result::Result<(), &'static str> {
+        match self {
+            Self::Available => {
+                *self = Self::Active;
+                Ok(())
+            }
+            Self::Active => Err("a PTY stdin nonblocking lease is already active"),
+            Self::RestoreFailed => {
+                Err("the previous PTY stdin lease could not restore file status flags")
+            }
+        }
+    }
+
+    fn abort_begin(&mut self) {
+        debug_assert_eq!(*self, Self::Active);
+        *self = Self::Available;
+    }
+
+    fn finish(&mut self, restored: bool) {
+        debug_assert_eq!(*self, Self::Active);
+        *self = if restored {
+            Self::Available
+        } else {
+            Self::RestoreFailed
+        };
+    }
+}
+
+#[cfg(test)]
+mod pty_stdin_lease_phase_tests {
+    use super::PtyStdinLeasePhase;
+
+    #[cfg(unix)]
+    use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+    #[cfg(unix)]
+    use std::sync::{Arc, Mutex};
+
+    #[cfg(unix)]
+    use super::{UnixPtyStdinLease, fcntl_retry};
+
+    #[test]
+    fn lease_is_exclusive_until_restoration_finishes() {
+        let mut phase = PtyStdinLeasePhase::Available;
+
+        phase.try_begin().expect("first lease is available");
+        assert_eq!(
+            phase.try_begin(),
+            Err("a PTY stdin nonblocking lease is already active")
+        );
+
+        phase.finish(true);
+        phase.try_begin().expect("restored lease is reusable");
+    }
+
+    #[test]
+    fn failed_setup_releases_the_reserved_lease() {
+        let mut phase = PtyStdinLeasePhase::Available;
+
+        phase.try_begin().expect("lease reservation succeeds");
+        phase.abort_begin();
+
+        phase
+            .try_begin()
+            .expect("a setup failure must not permanently consume the lease");
+    }
+
+    #[test]
+    fn failed_restoration_latches_the_lease_closed() {
+        let mut phase = PtyStdinLeasePhase::Available;
+
+        phase.try_begin().expect("lease reservation succeeds");
+        phase.finish(false);
+
+        assert_eq!(
+            phase.try_begin(),
+            Err("the previous PTY stdin lease could not restore file status flags")
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unix_lease_sets_exclusive_nonblocking_status_and_restores_it() {
+        let mut descriptors = [-1; 2];
+        assert_eq!(
+            unsafe { libc::pipe(descriptors.as_mut_ptr()) },
+            0,
+            "pipe fixture creation failed: {}",
+            std::io::Error::last_os_error()
+        );
+        let _read_end = unsafe { OwnedFd::from_raw_fd(descriptors[0]) };
+        let write_end = unsafe { OwnedFd::from_raw_fd(descriptors[1]) };
+        let phase = Arc::new(Mutex::new(PtyStdinLeasePhase::Available));
+        let original = fcntl_retry(write_end.as_raw_fd(), libc::F_GETFL, 0)
+            .expect("read original pipe status");
+
+        let lease = UnixPtyStdinLease::acquire(write_end.as_raw_fd(), Arc::clone(&phase))
+            .expect("first lease succeeds");
+        let active =
+            fcntl_retry(write_end.as_raw_fd(), libc::F_GETFL, 0).expect("read active pipe status");
+        assert_ne!(active & libc::O_NONBLOCK, 0);
+        assert!(
+            UnixPtyStdinLease::acquire(write_end.as_raw_fd(), Arc::clone(&phase)).is_err(),
+            "a second live lease must be rejected"
+        );
+
+        drop(lease);
+        assert_eq!(
+            fcntl_retry(write_end.as_raw_fd(), libc::F_GETFL, 0)
+                .expect("read restored pipe status"),
+            original
+        );
+
+        drop(
+            UnixPtyStdinLease::acquire(write_end.as_raw_fd(), phase)
+                .expect("the restored lease is reusable"),
+        );
+    }
+}
+
+#[cfg(unix)]
+fn fcntl_retry(
+    fd: RawFd,
+    command: libc::c_int,
+    argument: libc::c_int,
+) -> std::io::Result<libc::c_int> {
+    loop {
+        let result = unsafe { libc::fcntl(fd, command, argument) };
+        if result >= 0 {
+            return Ok(result);
+        }
+        let error = std::io::Error::last_os_error();
+        if error.kind() != std::io::ErrorKind::Interrupted {
+            return Err(error);
+        }
+    }
+}
+
+/// The unique live owner of Unix PTY-master nonblocking status.
+///
+/// Every master/writer/reader descriptor is a `dup` of the same open-file
+/// description, so `F_SETFL` through any one of them changes all of them.
+/// Exclusivity makes the captured flags and their one Drop-time restoration a
+/// properly nested pair instead of independently scoped, overlapping changes.
+#[cfg(unix)]
+struct UnixPtyStdinLease {
+    termios_fd: OwnedFd,
+    original_status_flags: libc::c_int,
+    phase: Arc<Mutex<PtyStdinLeasePhase>>,
+}
+
+#[cfg(unix)]
+impl UnixPtyStdinLease {
+    fn acquire(master_fd: RawFd, phase: Arc<Mutex<PtyStdinLeasePhase>>) -> Result<Self> {
+        let mut current = phase
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        current.try_begin().map_err(anyhow::Error::msg)?;
+
+        let acquired = (|| {
+            let duplicated = fcntl_retry(master_fd, libc::F_DUPFD_CLOEXEC, 0)
+                .context("cannot duplicate PTY descriptor for stdin termios")?;
+            let termios_fd = unsafe { OwnedFd::from_raw_fd(duplicated) };
+            let original_status_flags = fcntl_retry(termios_fd.as_raw_fd(), libc::F_GETFL, 0)
+                .context("cannot read PTY status flags for stdin arbitration")?;
+            fcntl_retry(
+                termios_fd.as_raw_fd(),
+                libc::F_SETFL,
+                original_status_flags | libc::O_NONBLOCK,
+            )
+            .context("cannot make PTY input nonblocking for stdin arbitration")?;
+            Ok::<_, anyhow::Error>((termios_fd, original_status_flags))
+        })();
+
+        let (termios_fd, original_status_flags) = match acquired {
+            Ok(acquired) => acquired,
+            Err(error) => {
+                current.abort_begin();
+                return Err(error);
+            }
+        };
+        drop(current);
+        Ok(Self {
+            termios_fd,
+            original_status_flags,
+            phase,
+        })
+    }
+
+    fn fd(&self) -> RawFd {
+        self.termios_fd.as_raw_fd()
+    }
+}
+
+#[cfg(unix)]
+impl Drop for UnixPtyStdinLease {
+    fn drop(&mut self) {
+        let restoration = {
+            let mut current = self
+                .phase
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let restoration = fcntl_retry(
+                self.termios_fd.as_raw_fd(),
+                libc::F_SETFL,
+                self.original_status_flags,
+            );
+            current.finish(restoration.is_ok());
+            restoration
+        };
+        if let Err(error) = restoration {
+            // Keep the shared phase failed closed: a later handle must not
+            // capture the still-nonblocking status as its "original" flags.
+            log::error!("cannot restore PTY status flags after stdin arbitration: {error}");
+        }
+    }
+}
+
+/// Writer-arbiter-owned PTY input handle.
+///
+/// Keeping every forwarded byte and terminal reply on one worker prevents
+/// canonical-mode backpressure from stalling the exec owner loop's timeout,
+/// cancellation, query, and child lifecycle handling. Unix uses nonblocking
+/// writes plus checked termios snapshots; Windows preserves ConPTY input after
+/// pipe EOF because closing it terminates the child instead of half-closing it.
+pub struct PtyStdin {
+    writer: PtyWriter,
+    #[cfg(unix)]
+    lease: UnixPtyStdinLease,
+    #[cfg(unix)]
+    input_state: PtyInputTail,
+    #[cfg(unix)]
+    pending_eof: Option<PendingPtyEof>,
+}
+
+/// Result of one nonblocking EOF-injection step.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PtyEofProgress {
+    /// PTY capacity is exhausted or another VEOF byte remains. The caller
+    /// should service higher-priority replies before retrying.
+    Pending,
+    /// The configured canonical VEOF sequence was delivered.
+    Signaled,
+    /// The platform or current terminal mode has no safe EOF signal, including
+    /// Unix noncanonical or `EXTPROC` modes and Windows ConPTY.
+    Unsupported,
+}
+
+#[cfg(unix)]
+struct PendingPtyEof {
+    sequence: [u8; 2],
+    sequence_len: usize,
+    offset: usize,
+    rules: CanonicalEofRules,
+    configured_veof: u8,
+    disabled: u8,
+}
+
+impl PtyStdin {
+    /// Try one exact write without waiting for Unix PTY capacity. `Ok(0)`
+    /// means the nonblocking Unix descriptor would block.
+    pub fn try_write(&mut self, bytes: &[u8]) -> Result<usize> {
+        if bytes.is_empty() {
+            return Ok(0);
+        }
+        #[cfg(unix)]
+        {
+            let fd = self.lease.fd();
+            let (before, _, _) = live_canonical_eof_rules(fd).inspect_err(|_| {
+                self.input_state.ambiguous_termios = true;
+            })?;
+            let written = self.writer.write_some_checked(bytes).inspect_err(|_| {
+                self.input_state.ambiguous_termios = true;
+            })?;
+            self.input_state.observe(&bytes[..written], before);
+            let (after, _, _) = live_canonical_eof_rules(fd).inspect_err(|_| {
+                self.input_state.ambiguous_termios = true;
+            })?;
+            if before != after {
+                self.input_state.ambiguous_termios = true;
+            }
+            Ok(written)
+        }
+        #[cfg(not(unix))]
+        {
+            // PIPE_NOWAIT may return zero rather than a partial write when one
+            // request exceeds the anonymous pipe's currently available quota.
+            // Keep requests below the default ConPTY pipe quantum so forward
+            // progress does not require an entirely empty 8 KiB queue.
+            self.writer
+                .write_some_checked(&bytes[..bytes.len().min(CONPTY_NONBLOCKING_WRITE_BYTES)])
+        }
+    }
+
+    /// Advance canonical EOF injection by at most one VEOF byte.
+    ///
+    /// This is deliberately incremental: a full PTY input buffer must not
+    /// trap the writer worker in an internal retry loop while a later terminal
+    /// query reply waits. Callers retry [`PtyEofProgress::Pending`] only after
+    /// servicing their higher-priority reply queue.
+    pub fn try_signal_eof(&mut self) -> Result<PtyEofProgress> {
+        #[cfg(unix)]
+        {
+            if self.pending_eof.is_none() {
+                let (rules, configured_veof, disabled) = live_canonical_eof_rules(self.lease.fd())?;
+                if !rules.supports_eof() {
+                    return Ok(PtyEofProgress::Unsupported);
+                }
+                let unterminated_record = self
+                    .input_state
+                    .record_unterminated(rules)
+                    .map_err(anyhow::Error::msg)?;
+                let Some((sequence, sequence_len)) = pty_eof_sequence(
+                    rules.canonical,
+                    configured_veof,
+                    disabled,
+                    unterminated_record,
+                )
+                .map_err(anyhow::Error::msg)?
+                else {
+                    return Ok(PtyEofProgress::Unsupported);
+                };
+                self.pending_eof = Some(PendingPtyEof {
+                    sequence,
+                    sequence_len,
+                    offset: 0,
+                    rules,
+                    configured_veof,
+                    disabled,
+                });
+            } else {
+                let (rules, configured_veof, disabled) = live_canonical_eof_rules(self.lease.fd())?;
+                let pending = self.pending_eof.as_ref().expect("checked above");
+                if rules != pending.rules
+                    || configured_veof != pending.configured_veof
+                    || disabled != pending.disabled
+                {
+                    self.pending_eof = None;
+                    self.input_state.ambiguous_termios = true;
+                    anyhow::bail!("the child changed termios during canonical EOF injection");
+                }
+            }
+
+            let pending = self.pending_eof.as_mut().expect("initialized above");
+            let end = pending.offset + 1;
+            let written = self
+                .writer
+                .write_some_checked(&pending.sequence[pending.offset..end])?;
+            if written == 0 {
+                return Ok(PtyEofProgress::Pending);
+            }
+            pending.offset += written;
+            if pending.offset < pending.sequence_len {
+                Ok(PtyEofProgress::Pending)
+            } else {
+                self.pending_eof = None;
+                Ok(PtyEofProgress::Signaled)
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            // Closing ConPTY input terminates the attached process with
+            // STATUS_CONTROL_C_EXIT instead of delivering a Unix-like
+            // half-close. Preserve the child and its terminal-query channel;
+            // line-/protocol-delimited Windows consumers still receive every
+            // forwarded byte and EOF remains an explicit unsupported state.
+            Ok(PtyEofProgress::Unsupported)
         }
     }
 }
@@ -2647,7 +6408,7 @@ fn fg_id_bits(c: AnsiColor) -> u32 {
 }
 
 fn placeholder_tile_placement(
-    abs_line: i64,
+    abs_line: u64,
     col: usize,
     resolved: placeholder::ResolvedCell,
     virtual_image: &VirtualEntry,
@@ -2667,6 +6428,10 @@ fn placeholder_tile_placement(
         col,
         cell_cols: 1,
         cell_rows: 1,
+        x_offset_cells: 0.0,
+        y_offset_cells: 0.0,
+        display_cols: 1.0,
+        display_rows: 1.0,
         // Keep the original allocation shared across every placeholder cell.
         // The renderer samples only `source_rect`, avoiding a crop allocation
         // and a distinct GPU texture for every visible tile on every frame.
@@ -2677,57 +6442,474 @@ fn placeholder_tile_placement(
             width,
             height,
         }),
+        source_crop: None,
         id: Some(resolved.image_id),
+        placement_id: virtual_image.placement_id,
+        kitty_params: None,
         z: virtual_image.z,
     })
 }
 
-/// Anchor a decoded image at the cursor, then push the cursor below it so
-/// subsequent shell output flows after the image (kitty/iTerm2/Sixel all
-/// place at the cursor and advance).
-fn place_image(
-    term: &SharedTerm,
-    images: &Images,
-    cell_px: &Arc<Mutex<(u16, u16)>>,
-    processor: &mut Processor,
-    placed: kettle_vt::Placed,
-) {
-    let kettle_vt::Placed { img: data, id, z } = placed;
-    let (cw, chh) = cell_px.lock().map(|p| *p).unwrap_or((8, 16));
-    let cw = cw.max(1) as u32;
-    let chh = chh.max(1) as u32;
-    let cell_cols = data.width.div_ceil(cw) as usize;
-    let cell_rows = data.height.div_ceil(chh) as usize;
+#[derive(Clone, Copy)]
+struct GraphicsActionContext<'a> {
+    images: &'a Images,
+    virtuals: &'a Virtuals,
+    anims: &'a Animations,
+    relatives: &'a Relatives,
+    geometry: &'a Arc<Mutex<VersionedPtyGeometry>>,
+}
 
-    let Ok(mut t) = term.lock() else {
-        return;
+fn apply_kitty_delete_at(
+    term: &Term<EventProxy>,
+    delete: KittyDelete,
+    context: GraphicsActionContext<'_>,
+    extractor: &mut Extractor,
+) {
+    let grid = term.grid();
+    let delete_geometry = KittyDeleteGeometry {
+        screen_top: stable_grid_line_id(grid.history_origin(), grid.history_size(), 0),
+        screen_lines: grid.screen_lines(),
+        cursor_abs_line: stable_grid_line_id(
+            grid.history_origin(),
+            grid.history_size(),
+            grid.cursor.point.line.0,
+        ),
+        cursor_col: grid.cursor.point.column.0,
     };
-    let (abs_line, col) = {
-        let rc = t.renderable_content();
-        let cur = rc.cursor.point;
-        let hist = t.grid().history_size() as i64;
-        (hist + cur.line.0 as i64, cur.column.0)
+    let placeholder_cells = Terminal::placeholder_cells_from_term(term);
+    let render_geometry = context
+        .geometry
+        .lock()
+        .map(|geometry| geometry.geometry)
+        .unwrap_or_else(|_| PtyGeometry::new(1, 1, 1, 1));
+
+    // Resolve relative-placement origins before mutating any registry.
+    let image_snapshot = context
+        .images
+        .lock()
+        .map(|placements| placements.clone())
+        .unwrap_or_default();
+    let relative_snapshot = context
+        .relatives
+        .lock()
+        .map(|placements| placements.clone())
+        .unwrap_or_default();
+    let mut origins = std::collections::HashMap::<u32, (u64, usize)>::new();
+    let mut note_origin = |id: u32, abs: u64, col: usize| {
+        origins
+            .entry(id)
+            .and_modify(|origin| {
+                origin.0 = origin.0.min(abs);
+                origin.1 = origin.1.min(col);
+            })
+            .or_insert((abs, col));
     };
-    if let Ok(mut v) = images.lock() {
-        v.push(Placement {
-            abs_line,
-            col,
+    for placement in &image_snapshot {
+        if let Some(id) = placement.id {
+            note_origin(id, placement.abs_line, placement.col);
+        }
+    }
+    for (abs, col, resolved) in &placeholder_cells {
+        note_origin(resolved.image_id, *abs, *col);
+    }
+    let relative_chains = relative_snapshot
+        .iter()
+        .map(|(&(id, _), entry)| (id, (entry.parent_img, entry.h, entry.v)))
+        .collect::<std::collections::HashMap<_, _>>();
+    let relative_positions = relative_snapshot
+        .iter()
+        .filter_map(|(&(id, placement_id), entry)| {
+            let (parent_abs, parent_col) =
+                resolve_chain(entry.parent_img, &relative_chains, &origins, 8)?;
+            let (abs_line, col) = relative_origin(parent_abs, parent_col, entry.h, entry.v);
+            let resolved = resolve_kitty_placement(&entry.img, entry.params, render_geometry)?;
+            Some((
+                (id, placement_id),
+                Placement {
+                    abs_line,
+                    col,
+                    cell_cols: resolved.cell_cols,
+                    cell_rows: resolved.cell_rows,
+                    x_offset_cells: resolved.x_offset_cells,
+                    y_offset_cells: resolved.y_offset_cells,
+                    display_cols: resolved.display_cols,
+                    display_rows: resolved.display_rows,
+                    img: entry.img.clone(),
+                    source_rect: resolved.source_rect,
+                    source_crop: None,
+                    id: Some(id),
+                    placement_id,
+                    kitty_params: Some(entry.params),
+                    z: entry.z,
+                },
+            ))
+        })
+        .collect::<std::collections::HashMap<_, _>>();
+
+    let mut removed_keys = std::collections::HashSet::<PlacementKey>::new();
+    let mut removed_ids = std::collections::HashSet::<u32>::new();
+    if let Ok(mut placements) = context.images.lock() {
+        placements.retain(|placement| {
+            if kitty_delete_matches_placement(&delete, placement, delete_geometry) {
+                if let Some(image_id) = placement.id {
+                    removed_ids.insert(image_id);
+                    removed_keys.insert(PlacementKey {
+                        image_id,
+                        placement_id: placement.placement_id,
+                    });
+                }
+                false
+            } else {
+                true
+            }
+        });
+    }
+    if let Ok(mut virtual_placements) = context.virtuals.lock() {
+        virtual_placements.retain(|&(image_id, placement_id), _| {
+            if kitty_delete_matches_virtual(&delete, image_id, placement_id) {
+                removed_ids.insert(image_id);
+                removed_keys.insert(PlacementKey {
+                    image_id,
+                    placement_id,
+                });
+                false
+            } else {
+                true
+            }
+        });
+    }
+    if let Ok(mut relative_placements) = context.relatives.lock() {
+        relative_placements.retain(|&(image_id, placement_id), _| {
+            let matched = relative_positions
+                .get(&(image_id, placement_id))
+                .is_some_and(|placement| {
+                    kitty_delete_matches_placement(&delete, placement, delete_geometry)
+                })
+                || kitty_delete_matches_virtual(&delete, image_id, placement_id);
+            if matched {
+                removed_ids.insert(image_id);
+                removed_keys.insert(PlacementKey {
+                    image_id,
+                    placement_id,
+                });
+                false
+            } else {
+                true
+            }
+        });
+
+        // A relative placement cannot survive deletion of its concrete parent.
+        loop {
+            let before = relative_placements.len();
+            relative_placements.retain(|&(image_id, placement_id), entry| {
+                let parent_removed = removed_keys.iter().any(|key| {
+                    key.image_id == entry.parent_img
+                        && (entry.parent_placement == 0
+                            || key.placement_id == entry.parent_placement)
+                });
+                if parent_removed {
+                    removed_ids.insert(image_id);
+                    removed_keys.insert(PlacementKey {
+                        image_id,
+                        placement_id,
+                    });
+                    false
+                } else {
+                    true
+                }
+            });
+            if relative_placements.len() == before {
+                break;
+            }
+        }
+    }
+
+    let mut freed_ids = Vec::new();
+    if delete.free_data {
+        removed_ids.extend(delete.free_candidates.iter().copied());
+        let referenced = {
+            let mut ids = std::collections::HashSet::<u32>::new();
+            if let Ok(placements) = context.images.lock() {
+                ids.extend(placements.iter().filter_map(|placement| placement.id));
+            }
+            if let Ok(virtual_placements) = context.virtuals.lock() {
+                ids.extend(virtual_placements.keys().map(|&(id, _)| id));
+            }
+            if let Ok(relative_placements) = context.relatives.lock() {
+                ids.extend(relative_placements.keys().map(|&(id, _)| id));
+            }
+            ids
+        };
+        freed_ids = kitty_delete_freed_ids(&delete, &removed_ids, &referenced);
+        if let Ok(mut animations) = context.anims.lock() {
+            for id in &freed_ids {
+                animations.remove(id);
+            }
+        }
+    }
+    extractor.apply_kitty_delete_result(&removed_keys.into_iter().collect::<Vec<_>>(), &freed_ids);
+}
+
+fn apply_graphics_chunk_at(
+    term: &mut Term<EventProxy>,
+    chunk: Chunk,
+    context: GraphicsActionContext<'_>,
+    extractor: &mut Extractor,
+) -> bool {
+    match chunk {
+        Chunk::Image(placed) => {
+            let geometry = context
+                .geometry
+                .lock()
+                .map(|geometry| geometry.geometry)
+                .unwrap_or_else(|_| PtyGeometry::new(1, 1, 1, 1));
+            place_image_during_sync(term, context.images, geometry, placed);
+        }
+        Chunk::DeleteImages(delete) => apply_kitty_delete_at(term, delete, context, extractor),
+        Chunk::RelativePlacement {
+            id,
+            placement,
+            img,
+            parent_img,
+            parent_placement,
+            h,
+            v,
+            z,
+            params,
+        } => {
+            if let Ok(mut relative_placements) = context.relatives.lock() {
+                let key = (id, placement);
+                let limit = kettle_vt::GraphicsLimits::default().placements;
+                if relative_placements.contains_key(&key) || relative_placements.len() < limit {
+                    relative_placements.insert(
+                        key,
+                        RelEntry {
+                            img,
+                            parent_img,
+                            parent_placement,
+                            h,
+                            v,
+                            z,
+                            params,
+                        },
+                    );
+                }
+            }
+        }
+        Chunk::VirtualImage {
+            id,
+            placement,
+            img,
+            cols,
+            rows,
+            z,
+        } => {
+            if let Ok(mut virtual_placements) = context.virtuals.lock() {
+                let limit = kettle_vt::GraphicsLimits::default().placements;
+                let key = (id, placement);
+                if virtual_placements.contains_key(&key) || virtual_placements.len() < limit {
+                    virtual_placements.insert(
+                        key,
+                        VirtualEntry {
+                            img,
+                            placement_id: placement,
+                            cols,
+                            rows,
+                            z,
+                        },
+                    );
+                }
+            }
+        }
+        Chunk::Animation {
+            id,
+            imgs,
+            gaps,
+            state,
+        } => {
+            if let Ok(mut animations) = context.anims.lock() {
+                if imgs.len() <= 1 && !state.running {
+                    animations.remove(&id);
+                } else {
+                    let started = match animations.get(&id) {
+                        Some(previous) if previous.state.running == state.running => {
+                            previous.started
+                        }
+                        _ => std::time::Instant::now(),
+                    };
+                    let limits = kettle_vt::GraphicsLimits::default();
+                    let bytes = imgs
+                        .iter()
+                        .try_fold(0usize, |bytes, image| bytes.checked_add(image.byte_len()));
+                    if (animations.contains_key(&id) || animations.len() < limits.placements)
+                        && imgs.len() <= limits.animation_frames.saturating_add(1)
+                        && limits
+                            .animation_bytes
+                            .checked_add(limits.image_bytes)
+                            .zip(bytes)
+                            .is_some_and(|(cap, bytes)| bytes <= cap)
+                    {
+                        animations.insert(
+                            id,
+                            AnimEntry {
+                                imgs,
+                                gaps,
+                                state,
+                                started,
+                            },
+                        );
+                    }
+                }
+            }
+        }
+        _ => return false,
+    }
+    true
+}
+
+/// Anchor a decoded image at the application cursor. Kitty advances right by
+/// the effective columns and down by rows minus one unless `C=1`; the legacy
+/// iTerm2/Sixel path retains Kettle's line-reservation policy.
+fn insert_image_at_cursor(
+    term: &mut Term<EventProxy>,
+    images: &Images,
+    geometry: PtyGeometry,
+    placed: kettle_vt::Placed,
+) -> Option<(Option<PlacementParams>, usize, usize)> {
+    let kettle_vt::Placed {
+        img: data,
+        id,
+        placement_id,
+        z,
+        params,
+    } = placed;
+    let resolved = if let Some(params) = params {
+        resolve_kitty_placement(&data, params, geometry)?
+    } else {
+        let cell_cols = image_cells_for_pixels(data.width, geometry.columns, geometry.pixel_width);
+        let cell_rows = image_cells_for_pixels(data.height, geometry.rows, geometry.pixel_height);
+        ResolvedKittyPlacement {
+            source_rect: None,
             cell_cols,
             cell_rows,
+            x_offset_cells: 0.0,
+            y_offset_cells: 0.0,
+            display_cols: cell_cols as f32,
+            display_rows: cell_rows as f32,
+        }
+    };
+    let cell_cols = resolved.cell_cols;
+    let cell_rows = resolved.cell_rows;
+    let cursor = term.grid().cursor.point;
+    let abs_line = stable_grid_line_id(
+        term.grid().history_origin(),
+        term.grid().history_size(),
+        cursor.line.0,
+    );
+    if let Ok(mut placements) = images.lock() {
+        if let Some(id) = id
+            && placement_id != 0
+        {
+            placements.retain(|placement| {
+                placement.id != Some(id) || placement.placement_id != placement_id
+            });
+        }
+        placements.push(Placement {
+            abs_line,
+            col: cursor.column.0,
+            cell_cols,
+            cell_rows,
+            x_offset_cells: resolved.x_offset_cells,
+            y_offset_cells: resolved.y_offset_cells,
+            display_cols: resolved.display_cols,
+            display_rows: resolved.display_rows,
             img: data,
-            source_rect: None,
+            source_rect: resolved.source_rect,
+            source_crop: None,
             id,
+            placement_id,
+            kitty_params: params,
             z,
         });
         let limit = kettle_vt::GraphicsLimits::default().placements;
-        if v.len() > limit {
-            let drop = v.len() - limit;
-            v.drain(0..drop);
+        if placements.len() > limit {
+            let drop = placements.len() - limit;
+            placements.drain(0..drop);
         }
     }
-    // Reserve the rows the image occupies.
-    let nl = "\r\n".repeat(cell_rows.clamp(1, 256));
-    processor.advance(&mut *t, nl.as_bytes());
+    Some((params, cell_cols, cell_rows))
+}
+
+fn place_image_during_sync(
+    term: &mut Term<EventProxy>,
+    images: &Images,
+    geometry: PtyGeometry,
+    placed: kettle_vt::Placed,
+) {
+    let Some((params, cell_cols, cell_rows)) =
+        insert_image_at_cursor(term, images, geometry, placed)
+    else {
+        return;
+    };
+    if let Some(params) = params {
+        if !params.suppress_cursor_movement {
+            term.move_forward(cell_cols);
+            term.move_down(cell_rows.saturating_sub(1));
+        }
+    } else {
+        for _ in 0..cell_rows.clamp(1, 256) {
+            term.carriage_return();
+            term.linefeed();
+        }
+    }
+}
+
+fn place_image(
+    term: &SharedTerm,
+    images: &Images,
+    geometry: &Arc<Mutex<VersionedPtyGeometry>>,
+    processor: &mut Processor,
+    placed: kettle_vt::Placed,
+) -> Option<GraphicsEventBatch> {
+    // Match resize's Term -> geometry lock order. Holding both through the
+    // cursor snapshot and row reservation makes the grid/pixel generation one
+    // atomic observation for image placement.
+    let mut t = term.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let geometry = geometry
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let geometry = geometry.geometry;
+    let (params, cell_cols, cell_rows) = insert_image_at_cursor(&mut t, images, geometry, placed)?;
+    let mut advanced = false;
+    if let Some(params) = params {
+        if let Some(movement) = kitty_cursor_movement(params, cell_cols, cell_rows) {
+            processor.advance(&mut *t, movement.as_bytes());
+            advanced = true;
+        }
+    } else {
+        // Legacy iTerm2/Sixel policy: reserve rows by emitting line breaks.
+        let nl = "\r\n".repeat(cell_rows.clamp(1, 256));
+        processor.advance(&mut *t, nl.as_bytes());
+        advanced = true;
+    }
+    advanced.then(|| t.take_graphics_events())
+}
+
+#[cfg(test)]
+mod cwd_reporting_tests {
+    use super::reported_current_dir;
+
+    #[test]
+    fn launch_seed_is_not_reported_until_an_osc_cwd_arrives() {
+        assert_eq!(
+            reported_current_dir(false, Some("C:\\launch-seed".to_owned())),
+            None
+        );
+        assert_eq!(
+            reported_current_dir(true, Some("/shell/reported".to_owned())),
+            Some("/shell/reported".to_owned())
+        );
+    }
 }
 
 #[cfg(test)]
@@ -2741,6 +6923,7 @@ mod placeholder_tile_placement_tests {
         let image = ImageData::new(4, 2, vec![0; 4 * 2 * 4]).expect("test image");
         let virtual_image = VirtualEntry {
             img: image.clone(),
+            placement_id: 0,
             cols: 2,
             rows: 1,
             z: 7,
@@ -3200,9 +7383,11 @@ mod conformance {
     use super::*;
     use alacritty_terminal::Term;
     use alacritty_terminal::grid::Dimensions;
-    use alacritty_terminal::index::{Column, Line, Point};
+    use alacritty_terminal::index::{Column, Line, Point, Side};
+    use alacritty_terminal::selection::{Selection, SelectionType};
     use alacritty_terminal::term::TermMode;
     use alacritty_terminal::term::cell::Flags;
+    use alacritty_terminal::vi_mode::ViMotion;
     use alacritty_terminal::vte::ansi::Processor;
 
     type Rx = crossbeam_channel::Receiver<TermEvent>;
@@ -3225,6 +7410,25 @@ mod conformance {
     fn harness(cols: usize, rows: usize) -> (Term<EventProxy>, Processor) {
         let (t, p, _rx) = harness_rx(cols, rows);
         (t, p)
+    }
+
+    fn history_harness(cols: usize, rows: usize, history: usize) -> (Term<EventProxy>, Processor) {
+        let (tx, _rx) = crossbeam_channel::unbounded();
+        let waker: Waker = std::sync::Arc::new(|| {});
+        let proxy = EventProxy::new(tx, waker);
+        let config = TermConfig {
+            scrolling_history: history,
+            ..TermConfig::default()
+        };
+        let term = Term::new(
+            config,
+            &TermSize {
+                columns: cols,
+                screen_lines: rows,
+            },
+            proxy,
+        );
+        (term, Processor::new())
     }
 
     fn kitty_keyboard_harness(cols: usize, rows: usize) -> (Term<EventProxy>, Processor, Rx) {
@@ -3292,6 +7496,112 @@ mod conformance {
         // CUP: ESC[3;2H then write — 1-based row/col.
         feed(&mut t, &mut p, b"\x1b[3;2HX");
         assert_eq!(row_text(&t, 2), " X");
+    }
+
+    /// Kettle's vi UI is deliberately backed by alacritty_terminal's native
+    /// grid coordinates. Pin the property that motivated that integration:
+    /// output rotation moves the cursor and visual selection with their text,
+    /// then clears the selection instead of silently aliasing it to unrelated
+    /// content once the bounded history evicts the selected row.
+    #[test]
+    fn vi_cursor_and_selection_follow_scrollback_then_clear_on_eviction() {
+        let (mut term, mut processor) = history_harness(24, 3, 4);
+        for index in 0..7 {
+            feed(
+                &mut term,
+                &mut processor,
+                format!("stable-row-{index:02}\r\n").as_bytes(),
+            );
+        }
+        assert_eq!(term.grid().history_size(), 4);
+
+        term.toggle_vi_mode();
+        let start = Point::new(Line(-2), Column(0));
+        let selected_row = row_text(&term, start.line.0);
+        assert!(
+            selected_row.starts_with("stable-row-"),
+            "fixture must select a populated history row: {selected_row:?}"
+        );
+        term.vi_goto_point(start);
+        let mut selection = Selection::new(SelectionType::Simple, start, Side::Left);
+        selection.update(start, Side::Right);
+        term.selection = Some(selection);
+        term.vi_motion(ViMotion::Last);
+        let selected_before = term
+            .selection_to_string()
+            .expect("visual selection is materialized");
+        assert!(selected_before.contains(&selected_row));
+
+        // One output scroll rotates the grid coordinate while preserving the
+        // selected content and keeps the vi cursor in the visible scrollback.
+        feed(&mut term, &mut processor, b"one-more-row\r\n");
+        let selected_after = term
+            .selection_to_string()
+            .expect("surviving visual selection follows output");
+        assert_eq!(selected_after, selected_before);
+        let vi_line = term.vi_mode_cursor.point.line.0;
+        assert!(
+            (-4..=2).contains(&vi_line),
+            "vi cursor must stay inside the bounded grid, got {vi_line}"
+        );
+
+        // Advance beyond the entire history budget. The old custom UI
+        // coordinates could now point at a different row; the engine instead
+        // drops the selection when its anchor rotates out.
+        for index in 0..8 {
+            feed(
+                &mut term,
+                &mut processor,
+                format!("replacement-{index:02}\r\n").as_bytes(),
+            );
+        }
+        assert!(
+            term.selection.is_none(),
+            "evicted vi selection must be cleared instead of aliasing replacement text"
+        );
+        let top = -(term.grid().history_size() as i32);
+        let vi_line = term.vi_mode_cursor.point.line.0;
+        assert!(
+            (top..term.grid().screen_lines() as i32).contains(&vi_line),
+            "vi cursor must remain in the resized/rotated grid: {vi_line}, top={top}"
+        );
+    }
+
+    #[test]
+    fn vi_cursor_stays_bounded_and_selection_is_invalidated_by_reflow() {
+        let (mut term, mut processor) = history_harness(24, 4, 12);
+        for index in 0..10 {
+            feed(
+                &mut term,
+                &mut processor,
+                format!("reflow-row-{index:02}\r\n").as_bytes(),
+            );
+        }
+
+        term.toggle_vi_mode();
+        let point = Point::new(Line(-3), Column(2));
+        term.vi_goto_point(point);
+        let mut selection = Selection::new(SelectionType::Simple, point, Side::Left);
+        selection.update(point, Side::Right);
+        term.selection = Some(selection);
+        term.vi_motion(ViMotion::WordRight);
+        assert!(term.selection.is_some());
+
+        term.resize(TermSize {
+            columns: 13,
+            screen_lines: 6,
+        });
+        assert!(
+            term.selection.is_none(),
+            "column reflow must invalidate a selection whose endpoints changed shape"
+        );
+        let top = -(term.grid().history_size() as i32);
+        let vi_point = term.vi_mode_cursor.point;
+        assert!(
+            (top..term.grid().screen_lines() as i32).contains(&vi_point.line.0)
+                && vi_point.column.0 < term.grid().columns(),
+            "native vi cursor must be clamped after reflow: {vi_point:?}"
+        );
     }
 
     #[test]
@@ -4828,6 +9138,35 @@ mod conformance {
         );
     }
 
+    #[test]
+    fn placeholder_document_row_applies_scrollback_offset_once() {
+        use alacritty_terminal::grid::Scroll;
+
+        let (mut term, mut processor) = history_harness(8, 2, 4);
+        feed(
+            &mut term,
+            &mut processor,
+            b"0\r\n1\r\n2\r\n3\r\n4\r\n5\r\n6",
+        );
+        assert_eq!(term.grid().history_size(), 4);
+        assert!(term.grid().history_origin() > 0);
+
+        term.grid_mut()[Point::new(Line(-2), Column(0))].c = placeholder::PLACEHOLDER;
+        term.scroll_display(Scroll::Delta(2));
+        let expected =
+            stable_grid_line_id(term.grid().history_origin(), term.grid().history_size(), -2);
+        let cells = Terminal::placeholder_cells_from_term(&term);
+
+        assert_eq!(cells.len(), 1);
+        assert_eq!(cells[0].0, expected);
+        assert_eq!(cells[0].1, 0);
+        assert_ne!(
+            cells[0].0,
+            expected.saturating_sub(term.grid().display_offset() as u64),
+            "display_iter already reports a grid-relative negative line"
+        );
+    }
+
     // SS2/SS3 single-shift (ESC N / ESC O), HTS (ESC H, custom tab
     // stops), DECSCA/DECSEL selective-erase and LNM LF→CRLF *output*
     // translation are not applied by alacritty_terminal, so no conformance
@@ -4846,7 +9185,7 @@ mod teardown_tests {
     #[test]
     fn prompt_mark_ring_dedups_and_caps_oldest_first() {
         use std::collections::VecDeque;
-        let mut ring: VecDeque<i64> = VecDeque::new();
+        let mut ring: VecDeque<u64> = VecDeque::new();
 
         // Dedup: pushing the same most-recent mark twice keeps one.
         push_prompt_mark(&mut ring, 10);
@@ -4860,16 +9199,59 @@ mod teardown_tests {
 
         // Cap: push well past the limit; length pins at MAX, oldest dropped,
         // newest retained, order preserved.
-        let mut ring: VecDeque<i64> = VecDeque::new();
-        for i in 0..(MAX_PROMPT_MARKS as i64 + 500) {
+        let mut ring: VecDeque<u64> = VecDeque::new();
+        for i in 0..(MAX_PROMPT_MARKS as u64 + 500) {
             push_prompt_mark(&mut ring, i);
         }
         assert_eq!(ring.len(), MAX_PROMPT_MARKS);
         assert_eq!(*ring.front().unwrap(), 500); // oldest 500 dropped
         assert_eq!(
             *ring.back().unwrap(),
-            MAX_PROMPT_MARKS as i64 + 499 // newest kept
+            MAX_PROMPT_MARKS as u64 + 499 // newest kept
         );
+    }
+
+    #[test]
+    fn prompt_row_ids_survive_growth_and_never_alias_evicted_history() {
+        // Before the ring reaches capacity, increasing history and decreasing
+        // the relative line cancel out, preserving the document row id.
+        assert_eq!(stable_grid_line_id(0, 2, -1), 1);
+        assert_eq!(stable_grid_line_id(0, 3, -2), 1);
+        // Once capacity is full, the origin advances with each eviction and
+        // gives replacement content a new id instead of reusing the old one.
+        assert_eq!(stable_grid_line_id(1, 3, -2), 2);
+    }
+
+    #[test]
+    fn prompt_navigation_prunes_evicted_and_reset_rows() {
+        use std::collections::VecDeque;
+
+        // Retained ids are [100, 108): history [100,104), screen [104,108).
+        // 99 was evicted; 108 is past the active grid and must also fail
+        // closed. The visible top at offset two is row 102.
+        let mut ring = VecDeque::from([99, 100, 102, 104, 107, 108]);
+        assert_eq!(
+            prompt_navigation_offset(&mut ring, 100, 4, 4, 2, true),
+            Some(4)
+        );
+        assert_eq!(
+            ring.iter().copied().collect::<Vec<_>>(),
+            vec![100, 102, 104, 107]
+        );
+
+        // Moving forward from row 102 chooses row 104, which is the active
+        // screen top and therefore maps to display offset zero.
+        assert_eq!(
+            prompt_navigation_offset(&mut ring, 100, 4, 4, 2, false),
+            Some(0)
+        );
+
+        // A reset advances the origin beyond every old mark; none can alias.
+        assert_eq!(
+            prompt_navigation_offset(&mut ring, 110, 0, 4, 0, false),
+            None
+        );
+        assert!(ring.is_empty());
     }
 
     #[test]
@@ -5081,6 +9463,82 @@ mod teardown_tests {
         );
     }
 
+    /// Portable ordering model for legacy ConPTY teardown. Closing a
+    /// pseudoconsole can emit final output and wait for the host to consume
+    /// it, so the cooperative reader stop must remain false until close
+    /// returns.
+    #[test]
+    fn pty_close_keeps_reader_live_until_close_returns() {
+        let stop = std::sync::Arc::new(AtomicBool::new(false));
+        let stop_for_reader = std::sync::Arc::clone(&stop);
+        let (final_output_tx, final_output_rx) = crossbeam_channel::bounded(1);
+        let (drained_tx, drained_rx) = crossbeam_channel::bounded(1);
+
+        let reader = std::thread::spawn(move || {
+            final_output_rx
+                .recv_timeout(Duration::from_secs(1))
+                .expect("close published final PTY output");
+            assert!(
+                !stop_for_reader.load(Ordering::Relaxed),
+                "reader stop was published before PTY close completed"
+            );
+            drained_tx.send(()).expect("acknowledge final PTY output");
+        });
+
+        close_pty_while_reader_is_live(&stop, || {
+            final_output_tx
+                .send(())
+                .expect("simulate final output from PTY close");
+            drained_rx
+                .recv_timeout(Duration::from_secs(1))
+                .expect("reader remained live to drain final PTY output");
+        });
+
+        reader.join().expect("reader model thread");
+        assert!(
+            stop.load(Ordering::Relaxed),
+            "reader stop must publish after PTY close returns"
+        );
+    }
+
+    /// A full parser handoff must not pin the blocking pump during teardown.
+    /// Once drain mode is published, the pump recovers its buffer and can
+    /// continue consuming conout without waiting for parser progress.
+    #[test]
+    fn full_pump_queue_yields_to_teardown_drain() {
+        let (raw_tx, raw_rx) = crossbeam_channel::bounded(1);
+        raw_tx
+            .send(Some(vec![1]))
+            .expect("fill bounded parser handoff");
+
+        let drain_output = std::sync::Arc::new(AtomicBool::new(false));
+        let drain_for_pump = std::sync::Arc::clone(&drain_output);
+        let start = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let pump_start = std::sync::Arc::clone(&start);
+        let (done_tx, done_rx) = crossbeam_channel::bounded(1);
+        let pump = std::thread::spawn(move || {
+            pump_start.wait();
+            let result = forward_pty_buffer_or_drain(&raw_tx, &drain_for_pump, vec![2]);
+            done_tx.send(result).expect("publish pump handoff result");
+        });
+
+        start.wait();
+        // Let the sender observe at least one full-queue timeout before
+        // switching it into teardown drain mode.
+        std::thread::sleep(Duration::from_millis(25));
+        drain_output.store(true, Ordering::Release);
+
+        let drained = done_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("full pump queue must yield to teardown drain");
+        assert_eq!(drained, PtyPumpSend::Drain(vec![2]));
+        assert_eq!(
+            raw_rx.recv().expect("original queued parser chunk"),
+            Some(vec![1])
+        );
+        pump.join().expect("pump handoff model thread");
+    }
+
     /// Regression guard (runtime). Dropping a `Terminal` whose
     /// child is alive and whose PTY reader is parked in a blocking `read()`
     /// must return PROMPTLY. The previous `Drop` `join()`ed the reader while the
@@ -5140,6 +9598,99 @@ mod teardown_tests {
         );
     }
 
+    /// Native Windows regression for the pre-24H2 failure shape: the child is
+    /// producing enough output to keep conout active when the pane is dropped.
+    /// UI-side `Drop` must return promptly, while the detached reaper must also
+    /// finish (which requires the reader to remain live through
+    /// `ClosePseudoConsole` on older Windows).
+    #[test]
+    #[cfg(windows)]
+    fn high_output_drop_returns_promptly_and_reaper_finishes() {
+        let argv = vec![
+            "cmd.exe".to_string(),
+            "/d".to_string(),
+            "/q".to_string(),
+            "/c".to_string(),
+            "for /L %i in (1,1,2147483647) do @echo 0123456789abcdef0123456789abcdef".to_string(),
+        ];
+
+        let (tx, rx) = crossbeam_channel::unbounded();
+        let waker: Waker = std::sync::Arc::new(|| {});
+        let term = match Terminal::new(
+            &argv,
+            None,
+            1000,
+            80,
+            24,
+            8,
+            16,
+            false,
+            CursorShape::Block,
+            None,
+            tx,
+            waker,
+        ) {
+            Ok(term) => term,
+            Err(error) => {
+                eprintln!(
+                    "skipping high_output_drop_returns_promptly_and_reaper_finishes: \
+                     no ConPTY ({error})"
+                );
+                return;
+            }
+        };
+
+        // Answer ConPTY's startup terminal queries until enough output has
+        // crossed the bounded pump to prove this is the high-output path.
+        let output_deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while term.output_generation() < (PTY_PUMP_QUEUE_DEPTH as u64 + 2) {
+            while let Ok(event) = rx.try_recv() {
+                if let TermEvent::PtyWrite(reply) = event {
+                    term.write(reply.as_bytes());
+                }
+            }
+            assert!(
+                std::time::Instant::now() < output_deadline,
+                "high-output ConPTY child produced no sustained output"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+
+        // The reaper owns the only extra child Arc after `Terminal` has
+        // finished dropping, so its disappearance is an observable completion
+        // signal without adding production-only teardown state.
+        let child = std::sync::Arc::clone(&term.child);
+        let stop = std::sync::Arc::clone(&term.stop);
+        assert_eq!(std::sync::Arc::strong_count(&child), 2);
+
+        let (drop_tx, drop_rx) = crossbeam_channel::bounded(1);
+        std::thread::spawn(move || {
+            drop(term);
+            let _ = drop_tx.send(());
+        });
+
+        assert!(
+            drop_rx.recv_timeout(Duration::from_secs(5)).is_ok(),
+            "Terminal::Drop blocked the caller during high-output teardown"
+        );
+
+        let reaper_deadline = std::time::Instant::now() + Duration::from_secs(30);
+        while std::sync::Arc::strong_count(&child) != 1
+            && std::time::Instant::now() < reaper_deadline
+        {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(
+            std::sync::Arc::strong_count(&child),
+            1,
+            "detached PTY reaper did not finish after high-output close"
+        );
+        assert!(
+            stop.load(Ordering::Relaxed),
+            "reader stop was not published after native PTY close"
+        );
+    }
+
     /// Regression guard (source, deterministic / cross-platform).
     /// `Terminal::Drop` must DETACH the reader thread, never `join()` it: a
     /// future refactor that re-adds `.join()` reintroduces the Windows
@@ -5167,12 +9718,32 @@ mod teardown_tests {
             "Terminal::Drop must NOT join the PTY reader — joining on the UI \
              thread deadlocks on a blocked ConPTY read"
         );
-        // Drop must also REAP the killed child off-thread so it
-        // doesn't leak a <defunct> zombie on Unix/macOS — and must do so in a
-        // detached reaper (no blocking wait on the UI thread).
+        let reaper_spawn = body
+            .find(".spawn(move ||")
+            .expect("PTY reaper closure present");
+        let drain_publish = body
+            .find("self.drain_output.store(true")
+            .expect("teardown drain mode publication present");
         assert!(
-            body.contains("kettle-pty-reaper") && body.contains("c.wait()"),
-            "Drop must reap the killed child in a detached reaper thread"
+            drain_publish < reaper_spawn,
+            "Drop must switch the pump to drain mode before detached PTY close"
+        );
+        assert!(
+            !body[..reaper_spawn].contains("stop.store("),
+            "Drop must not stop the reader before the detached PTY close starts"
+        );
+        assert!(
+            body.contains("close_pty_while_reader_is_live"),
+            "PTY reaper must keep the output reader live through master close"
+        );
+        // Drop must also close the possibly-blocking pseudoconsole and reap the
+        // killed child off-thread so neither ConPTY nor a Unix zombie can
+        // block/leak on the UI path.
+        assert!(
+            body.contains("kettle-pty-reaper")
+                && body.contains("drop(master);")
+                && body.contains("child.wait()"),
+            "Drop must close the master and reap the child in a detached worker"
         );
     }
 }
@@ -5386,7 +9957,10 @@ mod wsl_launcher_tests {
 
 #[cfg(test)]
 mod pty_dim_tests {
-    use super::{clamp_pty_dim, terminal_resize_changes};
+    use super::{
+        NATIVE_PTY_GRID_MAX, PtyGeometry, clamp_native_pty_grid, clamp_pty_dim,
+        image_cells_for_pixels, native_pty_size, native_resize_required,
+    };
 
     #[test]
     fn ordinary_sizes_pass_through() {
@@ -5415,18 +9989,487 @@ mod pty_dim_tests {
     }
 
     #[test]
-    fn no_op_and_pixel_only_resizes_do_not_touch_the_grid() {
+    fn native_grid_clamps_before_the_portable_pty_boundary() {
+        assert_eq!(clamp_native_pty_grid(120), 120);
         assert_eq!(
-            terminal_resize_changes((120, 40), (8, 16), (120, 40), (8, 16)),
-            (false, false)
+            clamp_native_pty_grid(usize::MAX),
+            NATIVE_PTY_GRID_MAX as u16
+        );
+        #[cfg(windows)]
+        assert_eq!(
+            clamp_native_pty_grid(i16::MAX as usize + 1),
+            i16::MAX as u16
+        );
+    }
+
+    #[test]
+    fn native_size_preserves_exact_total_pixels() {
+        let size = native_pty_size(PtyGeometry::new(100, 41, 960, 787));
+        assert_eq!((size.cols, size.rows), (100, 41));
+        assert_eq!((size.pixel_width, size.pixel_height), (960, 787));
+    }
+
+    #[test]
+    fn failed_native_resize_remains_retryable() {
+        let applied = PtyGeometry::new(80, 24, 640, 384);
+        let desired = PtyGeometry::new(120, 40, 1152, 768);
+        assert!(native_resize_required(applied, desired));
+        // A failure deliberately leaves `applied` unchanged; asking for the
+        // same desired geometry must therefore still require a native retry.
+        assert!(native_resize_required(applied, desired));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn conpty_skips_pixel_only_resize() {
+        let applied = PtyGeometry::new(120, 40, 1152, 768);
+        let desired = PtyGeometry::new(120, 40, 1153, 768);
+        assert!(!native_resize_required(applied, desired));
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn unix_publishes_pixel_only_resize() {
+        let applied = PtyGeometry::new(120, 40, 1152, 768);
+        let desired = PtyGeometry::new(120, 40, 1153, 768);
+        assert!(native_resize_required(applied, desired));
+    }
+
+    #[test]
+    fn image_placement_uses_exact_fractional_cell_geometry() {
+        // 960 / 100 = 9.6 px per cell. Dividing by the rounded 10 px metric
+        // incorrectly assigned a 960 px image only 96 cells.
+        assert_eq!(image_cells_for_pixels(960, 100, 960), 100);
+        assert_eq!(image_cells_for_pixels(96, 100, 960), 10);
+        assert_eq!(image_cells_for_pixels(97, 100, 960), 11);
+        assert_eq!(image_cells_for_pixels(0, 100, 960), 0);
+        assert_eq!(image_cells_for_pixels(960, 0, 960), 0);
+        assert_eq!(
+            image_cells_for_pixels(u32::MAX, usize::MAX, 1),
+            usize::MAX,
+            "hostile image/grid products must saturate rather than wrap"
+        );
+    }
+}
+
+#[cfg(test)]
+mod kitty_placement_geometry_tests {
+    use super::{
+        ImageSourceCrop, ImageSourceRect, Placement, PlacementParams, PtyGeometry,
+        kitty_cursor_movement, recompute_kitty_placements, resolve_kitty_placement,
+    };
+    use crate::ImageData;
+
+    fn image(width: u32, height: u32) -> ImageData {
+        ImageData::new(width, height, vec![0; width as usize * height as usize * 4])
+            .expect("test image")
+    }
+
+    fn close(actual: f32, expected: f32) {
+        assert!((actual - expected).abs() < 0.0001, "{actual} != {expected}");
+    }
+
+    #[test]
+    fn crop_is_intersected_with_the_source_before_auto_sizing() {
+        let resolved = resolve_kitty_placement(
+            &image(100, 50),
+            PlacementParams {
+                source_x: 80,
+                source_y: 10,
+                source_width: 50,
+                ..PlacementParams::default()
+            },
+            PtyGeometry::new(10, 5, 100, 50),
+        )
+        .expect("visible crop");
+        assert_eq!(
+            resolved.source_rect,
+            Some(ImageSourceRect {
+                x: 80,
+                y: 10,
+                width: 20,
+                height: 40,
+            })
+        );
+        assert_eq!((resolved.cell_cols, resolved.cell_rows), (2, 4));
+        close(resolved.display_cols, 2.0);
+        close(resolved.display_rows, 4.0);
+
+        assert!(
+            resolve_kitty_placement(
+                &image(10, 10),
+                PlacementParams {
+                    source_x: 10,
+                    ..PlacementParams::default()
+                },
+                PtyGeometry::new(10, 10, 100, 100),
+            )
+            .is_none(),
+            "an empty source intersection must not create or move a placement"
+        );
+    }
+
+    #[test]
+    fn explicit_size_ends_at_cell_boundaries_after_offsets() {
+        let resolved = resolve_kitty_placement(
+            &image(20, 10),
+            PlacementParams {
+                columns: 3,
+                rows: 2,
+                cell_x_offset: 3,
+                cell_y_offset: 4,
+                ..PlacementParams::default()
+            },
+            PtyGeometry::new(10, 5, 100, 50),
+        )
+        .expect("placement");
+        assert_eq!((resolved.cell_cols, resolved.cell_rows), (3, 2));
+        close(resolved.x_offset_cells, 0.3);
+        close(resolved.y_offset_cells, 0.4);
+        close(resolved.display_cols, 2.7);
+        close(resolved.display_rows, 1.6);
+    }
+
+    #[test]
+    fn one_axis_auto_uses_aspect_ratio_and_keeps_effective_bounds_distinct() {
+        let rows_only = resolve_kitty_placement(
+            &image(20, 10),
+            PlacementParams {
+                rows: 2,
+                cell_y_offset: 3,
+                ..PlacementParams::default()
+            },
+            PtyGeometry::new(10, 10, 100, 100),
+        )
+        .expect("rows-only placement");
+        assert_eq!((rows_only.cell_cols, rows_only.cell_rows), (5, 2));
+        close(rows_only.display_cols, 3.4);
+        close(rows_only.display_rows, 1.7);
+
+        let columns_only = resolve_kitty_placement(
+            &image(20, 10),
+            PlacementParams {
+                columns: 2,
+                cell_x_offset: 3,
+                ..PlacementParams::default()
+            },
+            PtyGeometry::new(10, 10, 100, 100),
+        )
+        .expect("columns-only placement");
+        assert_eq!((columns_only.cell_cols, columns_only.cell_rows), (2, 2));
+        close(columns_only.display_cols, 1.7);
+        close(columns_only.display_rows, 0.85);
+    }
+
+    #[test]
+    fn natural_size_recomputes_after_a_monitor_pixel_geometry_change() {
+        let img = image(96, 40);
+        let params = PlacementParams::default();
+        let first =
+            resolve_kitty_placement(&img, params, PtyGeometry::new(100, 40, 960, 800)).unwrap();
+        let second =
+            resolve_kitty_placement(&img, params, PtyGeometry::new(100, 40, 1200, 800)).unwrap();
+        assert_eq!((first.cell_cols, first.cell_rows), (10, 2));
+        assert_eq!((second.cell_cols, second.cell_rows), (8, 2));
+        close(first.display_cols, 10.0);
+        close(second.display_cols, 8.0);
+
+        let mut placements = vec![Placement {
+            abs_line: 2,
+            col: 3,
+            cell_cols: first.cell_cols,
+            cell_rows: first.cell_rows,
+            x_offset_cells: first.x_offset_cells,
+            y_offset_cells: first.y_offset_cells,
+            display_cols: first.display_cols,
+            display_rows: first.display_rows,
+            img,
+            source_rect: first.source_rect,
+            source_crop: None,
+            id: Some(7),
+            placement_id: 9,
+            kitty_params: Some(params),
+            z: 0,
+        }];
+        recompute_kitty_placements(&mut placements, PtyGeometry::new(100, 40, 1200, 800));
+        assert_eq!(
+            (placements[0].cell_cols, placements[0].cell_rows),
+            (8, 2),
+            "stored raw Kitty parameters must be re-resolved on a monitor/DPI change"
+        );
+        close(placements[0].display_cols, 8.0);
+    }
+
+    #[test]
+    fn cropped_natural_size_recomputes_without_restoring_discarded_source_rows() {
+        let img = image(96, 40);
+        let params = PlacementParams::default();
+        let initial =
+            resolve_kitty_placement(&img, params, PtyGeometry::new(100, 40, 960, 800)).unwrap();
+        let crop = ImageSourceCrop {
+            top: 0.5,
+            bottom: 1.0,
+        };
+        let mut placements = vec![Placement {
+            abs_line: 77,
+            col: 4,
+            cell_cols: initial.cell_cols,
+            cell_rows: 1,
+            x_offset_cells: initial.x_offset_cells,
+            y_offset_cells: 0.0,
+            display_cols: initial.display_cols,
+            display_rows: initial.display_rows * (crop.bottom - crop.top),
+            img,
+            source_rect: initial.source_rect,
+            source_crop: Some(crop),
+            id: Some(7),
+            placement_id: 9,
+            kitty_params: Some(params),
+            z: 0,
+        }];
+
+        recompute_kitty_placements(&mut placements, PtyGeometry::new(100, 40, 1200, 1000));
+
+        let retained = &placements[0];
+        assert_eq!((retained.abs_line, retained.col), (77, 4));
+        assert_eq!(retained.source_crop, Some(crop));
+        assert_eq!(retained.kitty_params, Some(params));
+        assert_eq!((retained.cell_cols, retained.cell_rows), (8, 1));
+        close(retained.display_cols, 8.0);
+        close(retained.display_rows, 0.8);
+    }
+
+    #[test]
+    fn cropped_one_axis_auto_recomputes_width_but_preserves_scrolled_y_offset() {
+        let img = image(120, 100);
+        let params = PlacementParams {
+            source_x: 10,
+            source_y: 20,
+            source_width: 80,
+            source_height: 60,
+            columns: 4,
+            cell_x_offset: 3,
+            cell_y_offset: 4,
+            ..PlacementParams::default()
+        };
+        let initial =
+            resolve_kitty_placement(&img, params, PtyGeometry::new(100, 40, 1000, 800)).unwrap();
+        let crop = ImageSourceCrop {
+            top: 0.2,
+            bottom: 0.6,
+        };
+        let preserved_y_offset = 0.125;
+        let mut placements = vec![Placement {
+            abs_line: 121,
+            col: 6,
+            cell_cols: initial.cell_cols,
+            cell_rows: 1,
+            x_offset_cells: initial.x_offset_cells,
+            y_offset_cells: preserved_y_offset,
+            display_cols: initial.display_cols,
+            display_rows: initial.display_rows * (crop.bottom - crop.top),
+            img,
+            source_rect: initial.source_rect,
+            source_crop: Some(crop),
+            id: Some(8),
+            placement_id: 10,
+            kitty_params: Some(params),
+            z: 0,
+        }];
+
+        recompute_kitty_placements(&mut placements, PtyGeometry::new(100, 40, 1200, 1000));
+
+        let retained = &placements[0];
+        assert_eq!((retained.abs_line, retained.col), (121, 6));
+        assert_eq!(
+            retained.source_rect,
+            Some(ImageSourceRect {
+                x: 10,
+                y: 20,
+                width: 80,
+                height: 60,
+            })
+        );
+        assert_eq!(retained.source_crop, Some(crop));
+        assert_eq!(retained.kitty_params, Some(params));
+        assert_eq!((retained.cell_cols, retained.cell_rows), (4, 1));
+        close(retained.x_offset_cells, 0.25);
+        close(retained.y_offset_cells, preserved_y_offset);
+        close(retained.display_cols, 3.75);
+        close(retained.display_rows, 0.54);
+    }
+
+    #[test]
+    fn offsets_are_bounded_and_cursor_policy_uses_effective_cells() {
+        let resolved = resolve_kitty_placement(
+            &image(96, 20),
+            PlacementParams {
+                cell_x_offset: u32::MAX,
+                ..PlacementParams::default()
+            },
+            PtyGeometry::new(100, 10, 960, 200),
+        )
+        .expect("bounded placement");
+        // 9.6 px cell: the largest integral in-cell offset is 9 px.
+        close(resolved.x_offset_cells, 9.0 / 9.6);
+        assert_eq!(resolved.cell_cols, 11);
+
+        assert_eq!(
+            kitty_cursor_movement(PlacementParams::default(), 5, 3).as_deref(),
+            Some("\x1b[5C\x1b[2B")
         );
         assert_eq!(
-            terminal_resize_changes((120, 40), (8, 16), (120, 40), (10, 20)),
-            (false, true)
+            kitty_cursor_movement(PlacementParams::default(), 5, 1).as_deref(),
+            Some("\x1b[5C")
         );
         assert_eq!(
-            terminal_resize_changes((120, 40), (8, 16), (121, 40), (8, 16)),
-            (true, false)
+            kitty_cursor_movement(
+                PlacementParams {
+                    suppress_cursor_movement: true,
+                    ..PlacementParams::default()
+                },
+                5,
+                3,
+            ),
+            None
+        );
+    }
+}
+
+#[cfg(test)]
+mod atomic_geometry_tests {
+    use std::sync::{Arc, Barrier, Mutex};
+
+    use alacritty_terminal::Term;
+    use alacritty_terminal::term::Config as TermConfig;
+
+    use super::{
+        EventProxy, PtyGeometry, SharedTerm, TermSize, VersionedPtyGeometry, commit_local_geometry,
+        local_geometry_snapshot,
+    };
+
+    #[test]
+    fn grid_and_pixel_generations_are_atomic_under_concurrent_resize_and_read() {
+        let first = PtyGeometry::new(80, 24, 768, 384);
+        let second = PtyGeometry::new(101, 37, 970, 703);
+        let (tx, _rx) = crossbeam_channel::unbounded();
+        let proxy = EventProxy::new(tx, Arc::new(|| {}));
+        let term: SharedTerm = Arc::new(Mutex::new(Term::new(
+            TermConfig::default(),
+            &TermSize {
+                columns: first.columns,
+                screen_lines: first.rows,
+            },
+            proxy,
+        )));
+        let geometry = Arc::new(Mutex::new(VersionedPtyGeometry {
+            geometry: first,
+            generation: 0,
+        }));
+        let start = Arc::new(Barrier::new(2));
+
+        let writer_term = term.clone();
+        let writer_geometry = geometry.clone();
+        let writer_start = start.clone();
+        let writer = std::thread::spawn(move || {
+            writer_start.wait();
+            for index in 0..4_000 {
+                let desired = if index % 2 == 0 { second } else { first };
+                commit_local_geometry(
+                    &writer_term,
+                    &writer_geometry,
+                    desired,
+                    Some(TermConfig::default()),
+                );
+            }
+        });
+
+        start.wait();
+        let mut last_generation = 0;
+        for _ in 0..4_000 {
+            let (columns, rows, snapshot, generation) = local_geometry_snapshot(&term, &geometry);
+            assert_eq!((columns, rows), (snapshot.columns, snapshot.rows));
+            assert!(
+                snapshot == first || snapshot == second,
+                "snapshot mixed two geometry generations: {snapshot:?}"
+            );
+            assert!(generation >= last_generation);
+            last_generation = generation;
+            std::thread::yield_now();
+        }
+        writer.join().unwrap();
+    }
+}
+
+#[cfg(test)]
+mod output_publish_guard {
+    #[test]
+    fn reader_sidechannels_share_the_generation_ordered_output_gate() {
+        let source = include_str!("term.rs").replace("\r\n", "\n");
+        let reader_start = source
+            .find(".name(\"kettle-pty-reader\"")
+            .expect("PTY reader thread present");
+        let reader_tail = &source[reader_start..];
+        let reader_end = reader_tail
+            .find("\n        Ok(Terminal {")
+            .expect("PTY reader thread end");
+        let reader = &reader_tail[..reader_end];
+
+        assert!(
+            !reader.contains("(waker)();"),
+            "parser sidechannels must not bypass the per-pane output gate"
+        );
+        assert!(
+            reader.contains("publish_output_if_ready("),
+            "PTY reads must publish through the synchronized-output guard"
+        );
+        let helper_start = source
+            .find("fn publish_output_if_ready(")
+            .expect("output publication guard present");
+        let helper_tail = &source[helper_start..];
+        let helper_end = helper_tail
+            .find("\n}\n\n")
+            .map(|offset| offset + 2)
+            .expect("output publication guard end");
+        let helper = &helper_tail[..helper_end];
+        let pending = helper
+            .find("sync_timeout().is_some()")
+            .expect("DEC 2026 pending-state check present");
+        let generation = helper
+            .find("out_gen.fetch_add(")
+            .expect("output generation publication present");
+        let wake = helper
+            .find("output_wake.request();")
+            .expect("gated output wake present");
+        assert!(
+            pending < generation && generation < wake,
+            "pending sync must suppress publication; otherwise Release generation precedes wake"
+        );
+    }
+
+    #[test]
+    fn pty_pump_spawn_failure_is_observable_and_closes_the_pane() {
+        let source = include_str!("term.rs").replace("\r\n", "\n");
+        let name = source
+            .find(".name(\"kettle-pty-pump\"")
+            .expect("PTY pump thread present");
+        let start = source[..name]
+            .rfind("if let Err(error)")
+            .expect("PTY pump spawn error is handled");
+        let end = source[name..]
+            .find("\n                    loop {")
+            .map(|offset| name + offset)
+            .expect("outer reader loop follows pump creation");
+        let spawn = &source[start..end];
+        assert!(
+            spawn.contains("log::error!(\"failed to spawn PTY pump thread: {error}\")")
+                && spawn.contains("proxy.send_event_exit();")
+                && spawn.contains("return;"),
+            "thread exhaustion must leave an actionable diagnostic and a normal pane exit"
+        );
+        assert!(
+            !spawn.contains("let _ = std::thread::Builder"),
+            "pump creation errors must not be discarded"
         );
     }
 }
@@ -5469,8 +10512,8 @@ mod output_sender_tests {
 
 #[cfg(test)]
 mod sync_update_flush_guard {
-    use std::sync::Arc;
     use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex};
 
     use alacritty_terminal::Term;
     use alacritty_terminal::grid::Dimensions;
@@ -5478,7 +10521,11 @@ mod sync_update_flush_guard {
     use alacritty_terminal::term::Config as TermConfig;
     use alacritty_terminal::vte::ansi::Processor;
 
-    use super::{PTY_PUMP_QUEUE_DEPTH, SharedTerm, receive_pty_chunk};
+    use super::{
+        GraphicsEvent, ImageHistoryPruner, PTY_PUMP_QUEUE_DEPTH, SharedTerm, SyncFlushContext,
+        SyncGraphicsDispatch, publish_output_if_ready, receive_pty_chunk,
+    };
+    use crate::event::OutputWakeGate;
     use crate::{EventProxy, Waker};
 
     struct Size;
@@ -5507,6 +10554,45 @@ mod sync_update_flush_guard {
         )))
     }
 
+    fn image_pruning_fixture() -> (crate::Images, ImageHistoryPruner) {
+        (
+            Arc::new(Mutex::new(Vec::new())),
+            ImageHistoryPruner::default(),
+        )
+    }
+
+    fn ignore_sync_graphics(_: SyncGraphicsDispatch<'_>) {}
+
+    #[test]
+    fn pending_sync_suppresses_generation_and_wake_until_close() {
+        let term = shared_term();
+        let mut processor: Processor = Processor::new();
+        let generation = AtomicU64::new(0);
+        let wakes = Arc::new(AtomicUsize::new(0));
+        let wakes_for_callback = wakes.clone();
+        let output_wake = OutputWakeGate::new(Arc::new(move || {
+            wakes_for_callback.fetch_add(1, Ordering::Relaxed);
+        }));
+
+        processor.advance(&mut *term.lock().unwrap(), b"\x1b[?2026hbuffered");
+        assert!(!publish_output_if_ready(
+            &processor,
+            &generation,
+            &output_wake
+        ));
+        assert_eq!(generation.load(Ordering::Acquire), 0);
+        assert_eq!(wakes.load(Ordering::Relaxed), 0);
+
+        processor.advance(&mut *term.lock().unwrap(), b"\x1b[?2026l");
+        assert!(publish_output_if_ready(
+            &processor,
+            &generation,
+            &output_wake
+        ));
+        assert_eq!(generation.load(Ordering::Acquire), 1);
+        assert_eq!(wakes.load(Ordering::Relaxed), 1);
+    }
+
     #[test]
     fn omitted_sync_terminator_flushes_and_wakes_at_deadline() {
         let term = shared_term();
@@ -5520,7 +10606,7 @@ mod sync_update_flush_guard {
             .sync_timeout()
             .expect("DEC 2026 opened a synchronized update");
 
-        let (tx, rx) = std::sync::mpsc::sync_channel(PTY_PUMP_QUEUE_DEPTH);
+        let (tx, rx) = crossbeam_channel::bounded(PTY_PUMP_QUEUE_DEPTH);
         let delay = deadline
             .saturating_duration_since(std::time::Instant::now())
             .saturating_add(std::time::Duration::from_millis(20));
@@ -5534,8 +10620,21 @@ mod sync_update_flush_guard {
         let waker: Waker = Arc::new(move || {
             wakes_for_callback.fetch_add(1, Ordering::Relaxed);
         });
+        let output_wake = OutputWakeGate::new(waker);
+        let (images, mut image_pruner) = image_pruning_fixture();
+        let graphics_gate = Mutex::new(());
+        let mut on_graphics = ignore_sync_graphics;
+        let mut sync_flush = SyncFlushContext {
+            term: &term,
+            images: &images,
+            graphics_gate: &graphics_gate,
+            image_pruner: &mut image_pruner,
+            on_graphics: &mut on_graphics,
+            out_gen: &generation,
+            output_wake: &output_wake,
+        };
 
-        assert!(receive_pty_chunk(&mut processor, &term, &rx, &generation, &waker).is_none());
+        assert!(receive_pty_chunk(&mut processor, &rx, &mut sync_flush).is_none());
         sender.join().unwrap();
         assert!(processor.sync_timeout().sync_timeout().is_none());
         assert_eq!(generation.load(Ordering::Acquire), 1);
@@ -5564,7 +10663,7 @@ mod sync_update_flush_guard {
                 .saturating_add(std::time::Duration::from_millis(20)),
         );
 
-        let (tx, rx) = std::sync::mpsc::sync_channel(PTY_PUMP_QUEUE_DEPTH);
+        let (tx, rx) = crossbeam_channel::bounded(PTY_PUMP_QUEUE_DEPTH);
         tx.send(Some(b"next chunk".to_vec())).unwrap();
         let generation = AtomicU64::new(0);
         let wakes = Arc::new(AtomicUsize::new(0));
@@ -5572,8 +10671,21 @@ mod sync_update_flush_guard {
         let waker: Waker = Arc::new(move || {
             wakes_for_callback.fetch_add(1, Ordering::Relaxed);
         });
+        let output_wake = OutputWakeGate::new(waker);
+        let (images, mut image_pruner) = image_pruning_fixture();
+        let graphics_gate = Mutex::new(());
+        let mut on_graphics = ignore_sync_graphics;
+        let mut sync_flush = SyncFlushContext {
+            term: &term,
+            images: &images,
+            graphics_gate: &graphics_gate,
+            image_pruner: &mut image_pruner,
+            on_graphics: &mut on_graphics,
+            out_gen: &generation,
+            output_wake: &output_wake,
+        };
 
-        let chunk = receive_pty_chunk(&mut processor, &term, &rx, &generation, &waker)
+        let chunk = receive_pty_chunk(&mut processor, &rx, &mut sync_flush)
             .expect("queued chunk is preserved after the flush");
         assert_eq!(chunk, b"next chunk");
         assert!(processor.sync_timeout().sync_timeout().is_none());
@@ -5594,7 +10706,7 @@ mod sync_update_flush_guard {
             processor.advance(&mut *term, b"\x1b[?2026h\x1b[2;3Hfinal text");
         }
 
-        let (tx, rx) = std::sync::mpsc::sync_channel(PTY_PUMP_QUEUE_DEPTH);
+        let (tx, rx) = crossbeam_channel::bounded(PTY_PUMP_QUEUE_DEPTH);
         tx.send(None).unwrap();
         let generation = AtomicU64::new(0);
         let wakes = Arc::new(AtomicUsize::new(0));
@@ -5602,8 +10714,21 @@ mod sync_update_flush_guard {
         let waker: Waker = Arc::new(move || {
             wakes_for_callback.fetch_add(1, Ordering::Relaxed);
         });
+        let output_wake = OutputWakeGate::new(waker);
+        let (images, mut image_pruner) = image_pruning_fixture();
+        let graphics_gate = Mutex::new(());
+        let mut on_graphics = ignore_sync_graphics;
+        let mut sync_flush = SyncFlushContext {
+            term: &term,
+            images: &images,
+            graphics_gate: &graphics_gate,
+            image_pruner: &mut image_pruner,
+            on_graphics: &mut on_graphics,
+            out_gen: &generation,
+            output_wake: &output_wake,
+        };
 
-        assert!(receive_pty_chunk(&mut processor, &term, &rx, &generation, &waker).is_none());
+        assert!(receive_pty_chunk(&mut processor, &rx, &mut sync_flush).is_none());
         assert!(processor.sync_timeout().sync_timeout().is_none());
         assert_eq!(generation.load(Ordering::Acquire), 1);
         assert_eq!(wakes.load(Ordering::Relaxed), 1);
@@ -5614,6 +10739,64 @@ mod sync_update_flush_guard {
     }
 
     #[test]
+    fn sync_eof_applies_buffered_graphics_before_publishing_the_flush() {
+        let term = shared_term();
+        let mut processor: Processor = Processor::new();
+        {
+            let mut term = term.lock().unwrap();
+            processor.advance(&mut *term, b"\x1b[?2026h\x1b[2J");
+            assert!(
+                term.take_graphics_events().events.is_empty(),
+                "ED2 remains buffered until the synchronized update is flushed"
+            );
+        }
+
+        let (tx, rx) = crossbeam_channel::bounded(PTY_PUMP_QUEUE_DEPTH);
+        tx.send(None).unwrap();
+        let generation = AtomicU64::new(0);
+        let wakes = Arc::new(AtomicUsize::new(0));
+        let wakes_for_callback = wakes.clone();
+        let waker: Waker = Arc::new(move || {
+            wakes_for_callback.fetch_add(1, Ordering::Relaxed);
+        });
+        let output_wake = OutputWakeGate::new(waker);
+        let (images, mut image_pruner) = image_pruning_fixture();
+        let graphics_gate = Mutex::new(());
+        let mut observed = Vec::new();
+        let mut on_graphics = |dispatch: SyncGraphicsDispatch<'_>| {
+            let SyncGraphicsDispatch::Batch(batch) = dispatch else {
+                panic!("this fixture does not schedule synchronized graphics markers");
+            };
+            assert_eq!(
+                generation.load(Ordering::Acquire),
+                0,
+                "graphics must apply before the output generation is published"
+            );
+            assert_eq!(
+                wakes.load(Ordering::Relaxed),
+                0,
+                "graphics must apply before the render wake is published"
+            );
+            assert!(!batch.overflowed);
+            observed.extend(batch.events);
+        };
+        let mut sync_flush = SyncFlushContext {
+            term: &term,
+            images: &images,
+            graphics_gate: &graphics_gate,
+            image_pruner: &mut image_pruner,
+            on_graphics: &mut on_graphics,
+            out_gen: &generation,
+            output_wake: &output_wake,
+        };
+
+        assert!(receive_pty_chunk(&mut processor, &rx, &mut sync_flush).is_none());
+        assert_eq!(observed, vec![GraphicsEvent::EraseDisplay]);
+        assert_eq!(generation.load(Ordering::Acquire), 1);
+        assert_eq!(wakes.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
     fn split_sync_terminator_arriving_before_deadline_does_not_force_flush() {
         let term = shared_term();
         let mut processor: Processor = Processor::new();
@@ -5621,12 +10804,25 @@ mod sync_update_flush_guard {
             let mut term = term.lock().unwrap();
             processor.advance(&mut *term, b"\x1b[?2026h\x1b[2;3Hupdated");
         }
-        let (tx, rx) = std::sync::mpsc::sync_channel(PTY_PUMP_QUEUE_DEPTH);
+        let (tx, rx) = crossbeam_channel::bounded(PTY_PUMP_QUEUE_DEPTH);
         tx.send(Some(b"\x1b[?2026l".to_vec())).unwrap();
         let generation = AtomicU64::new(0);
         let waker: Waker = Arc::new(|| panic!("no timeout wake expected"));
+        let output_wake = OutputWakeGate::new(waker);
+        let (images, mut image_pruner) = image_pruning_fixture();
+        let graphics_gate = Mutex::new(());
+        let mut on_graphics = ignore_sync_graphics;
+        let mut sync_flush = SyncFlushContext {
+            term: &term,
+            images: &images,
+            graphics_gate: &graphics_gate,
+            image_pruner: &mut image_pruner,
+            on_graphics: &mut on_graphics,
+            out_gen: &generation,
+            output_wake: &output_wake,
+        };
 
-        let close = receive_pty_chunk(&mut processor, &term, &rx, &generation, &waker)
+        let close = receive_pty_chunk(&mut processor, &rx, &mut sync_flush)
             .expect("close sequence received");
         processor.advance(&mut *term.lock().unwrap(), &close);
 
@@ -5636,13 +10832,975 @@ mod sync_update_flush_guard {
 
     #[test]
     fn pty_pump_queue_has_a_hard_capacity() {
-        let (tx, _rx) = std::sync::mpsc::sync_channel(PTY_PUMP_QUEUE_DEPTH);
+        let (tx, _rx) = crossbeam_channel::bounded(PTY_PUMP_QUEUE_DEPTH);
         for _ in 0..PTY_PUMP_QUEUE_DEPTH {
             tx.try_send(Some(vec![0; 1])).unwrap();
         }
         assert!(matches!(
             tx.try_send(Some(vec![0; 1])),
-            Err(std::sync::mpsc::TrySendError::Full(_))
+            Err(crossbeam_channel::TrySendError::Full(_))
         ));
+    }
+}
+
+#[cfg(test)]
+mod image_lifecycle_tests {
+    use super::{
+        Animations, BufferGraphicsState, DeferredGraphicsJournal, GraphicsActionContext,
+        GraphicsEvent, GraphicsEventBatch, GraphicsRegistries, GraphicsScroll,
+        GraphicsScrollDirection, ImageHistoryPruner, Images, InactiveGraphics,
+        PTY_PUMP_QUEUE_DEPTH, Placement, PtyGeometry, RelEntry, Relatives, SharedTerm,
+        SyncFlushContext, SyncGraphicsContext, SyncGraphicsDispatch, TermSize,
+        VersionedPtyGeometry, VirtualEntry, Virtuals, advance_terminal_bytes, apply_graphics_batch,
+        apply_graphics_chunk_at, apply_graphics_event, apply_sync_dispatch,
+        clear_reflowed_regular_placements, finish_deferred_sync, receive_pty_chunk,
+        scroll_regular_placements,
+    };
+    use crate::event::OutputWakeGate;
+    use crate::{EventProxy, ImageData, Waker};
+    use alacritty_terminal::Term;
+    use alacritty_terminal::index::{Column, Line, Point};
+    use alacritty_terminal::term::Config as TermConfig;
+    use alacritty_terminal::vte::ansi::{Processor, SYNC_MARKER_CAPACITY};
+    use kettle_vt::{Chunk, Extractor, PlacementParams};
+    use std::collections::HashMap;
+    use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex};
+
+    fn image(channel: u8) -> ImageData {
+        ImageData::new(1, 1, vec![channel, 0, 0, 255]).expect("test pixel")
+    }
+
+    fn placement(id: u32) -> Placement {
+        Placement {
+            abs_line: id as u64,
+            col: 0,
+            cell_cols: 1,
+            cell_rows: 1,
+            x_offset_cells: 0.0,
+            y_offset_cells: 0.0,
+            display_cols: 1.0,
+            display_rows: 1.0,
+            img: image(id as u8),
+            source_rect: None,
+            source_crop: None,
+            id: Some(id),
+            placement_id: 1,
+            kitty_params: Some(PlacementParams::default()),
+            z: 0,
+        }
+    }
+
+    fn virtual_entry(id: u32) -> VirtualEntry {
+        VirtualEntry {
+            img: image(id as u8),
+            placement_id: 1,
+            cols: 1,
+            rows: 1,
+            z: 0,
+        }
+    }
+
+    fn relative_entry(id: u32) -> RelEntry {
+        RelEntry {
+            img: image(id as u8),
+            parent_img: 1,
+            parent_placement: 1,
+            h: 0,
+            v: 0,
+            z: 0,
+            params: PlacementParams::default(),
+        }
+    }
+
+    fn registries() -> (Images, Virtuals, Animations, Relatives, InactiveGraphics) {
+        (
+            Arc::new(Mutex::new(Vec::new())),
+            Arc::new(Mutex::new(HashMap::new())),
+            Arc::new(Mutex::new(HashMap::new())),
+            Arc::new(Mutex::new(HashMap::new())),
+            Arc::new(Mutex::new(BufferGraphicsState::default())),
+        )
+    }
+
+    struct SyncGraphicsHarness {
+        term: SharedTerm,
+        processor: Processor,
+        extractor: Extractor,
+        deferred: DeferredGraphicsJournal,
+        active_alternate: bool,
+        images: Images,
+        virtuals: Virtuals,
+        anims: Animations,
+        relatives: Relatives,
+        inactive: InactiveGraphics,
+        geometry: Arc<Mutex<VersionedPtyGeometry>>,
+    }
+
+    impl SyncGraphicsHarness {
+        fn new() -> Self {
+            let (tx, _rx) = crossbeam_channel::unbounded();
+            let proxy = EventProxy::new(tx, Arc::new(|| {}));
+            let term = Arc::new(Mutex::new(Term::new(
+                TermConfig::default(),
+                &TermSize {
+                    columns: 8,
+                    screen_lines: 4,
+                },
+                proxy,
+            )));
+            let (images, virtuals, anims, relatives, inactive) = registries();
+            Self {
+                term,
+                processor: Processor::new(),
+                extractor: Extractor::new(),
+                deferred: DeferredGraphicsJournal::new(),
+                active_alternate: false,
+                images,
+                virtuals,
+                anims,
+                relatives,
+                inactive,
+                geometry: Arc::new(Mutex::new(VersionedPtyGeometry {
+                    geometry: PtyGeometry::new(8, 4, 80, 40),
+                    generation: 0,
+                })),
+            }
+        }
+
+        fn feed(&mut self, bytes: &[u8]) {
+            let Self {
+                term,
+                processor,
+                extractor,
+                deferred,
+                active_alternate,
+                images,
+                virtuals,
+                anims,
+                relatives,
+                inactive,
+                geometry,
+            } = self;
+            extractor.feed_with(bytes, |extractor, chunk| match chunk {
+                Chunk::Pass(bytes) => {
+                    let mut context = SyncGraphicsContext {
+                        active_alternate,
+                        deferred,
+                        registries: GraphicsRegistries {
+                            inactive,
+                            images,
+                            virtuals,
+                            anims,
+                            relatives,
+                        },
+                        actions: GraphicsActionContext {
+                            images,
+                            virtuals,
+                            anims,
+                            relatives,
+                            geometry,
+                        },
+                        extractor,
+                    };
+                    advance_terminal_bytes(processor, term, &bytes, &mut context);
+                }
+                Chunk::DeferredGraphics(graphics) => deferred.defer(processor, graphics),
+                chunk => {
+                    let mut term = term.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+                    assert!(
+                        apply_graphics_chunk_at(
+                            &mut term,
+                            chunk,
+                            GraphicsActionContext {
+                                images,
+                                virtuals,
+                                anims,
+                                relatives,
+                                geometry,
+                            },
+                            extractor,
+                        ),
+                        "unexpected non-graphics extractor chunk"
+                    );
+                }
+            });
+        }
+
+        fn active_ids(&self) -> Vec<u32> {
+            self.images
+                .lock()
+                .unwrap()
+                .iter()
+                .filter_map(|placement| placement.id)
+                .collect()
+        }
+
+        fn inactive_ids(&self) -> Vec<u32> {
+            self.inactive
+                .lock()
+                .unwrap()
+                .placements
+                .iter()
+                .filter_map(|placement| placement.id)
+                .collect()
+        }
+    }
+
+    fn kitty_image(id: u32, placement: u32, columns: u32, rows: u32) -> Vec<u8> {
+        format!("\x1b_Ga=T,i={id},p={placement},f=32,s=1,v=1,c={columns},r={rows};AQIDBA==\x1b\\")
+            .into_bytes()
+    }
+
+    fn placement_at(id: u32, abs_line: u64, rows: usize) -> Placement {
+        let mut placement = placement(id);
+        placement.abs_line = abs_line;
+        placement.cell_rows = rows;
+        placement.display_rows = rows as f32;
+        placement
+    }
+
+    fn close(actual: f32, expected: f32) {
+        assert!((actual - expected).abs() < 1e-6, "{actual} != {expected}");
+    }
+
+    #[test]
+    fn authoritative_journal_preserves_mixed_control_order() {
+        let (tx, _rx) = crossbeam_channel::unbounded();
+        let proxy = EventProxy::new(tx, Arc::new(|| {}));
+        let mut term = Term::new(
+            TermConfig::default(),
+            &TermSize {
+                columns: 4,
+                screen_lines: 4,
+            },
+            proxy,
+        );
+        let mut processor: Processor = Processor::new();
+        processor.advance(
+            &mut term,
+            b"\x1b[2J\x1b[?47h\x1b[?47l\x1b[?1049h\x1b[?1049l\x1bc",
+        );
+        assert_eq!(
+            term.take_graphics_events().events,
+            vec![
+                GraphicsEvent::EraseDisplay,
+                GraphicsEvent::EnterAlternate {
+                    mode: 47,
+                    clear: false,
+                },
+                GraphicsEvent::LeaveAlternate {
+                    mode: 47,
+                    clear: false,
+                },
+                GraphicsEvent::EnterAlternate {
+                    mode: 1049,
+                    clear: true,
+                },
+                GraphicsEvent::LeaveAlternate {
+                    mode: 1049,
+                    clear: false,
+                },
+                GraphicsEvent::Reset,
+            ]
+        );
+    }
+
+    #[test]
+    fn synchronized_images_follow_enter_and_leave_wire_order() {
+        let mut harness = SyncGraphicsHarness::new();
+        let mut first = b"\x1b[?2026h".to_vec();
+        first.extend(kitty_image(1, 1, 1, 1));
+        first.extend_from_slice(b"\x1b[?1049h");
+        first.extend(kitty_image(2, 1, 1, 1));
+        first.extend_from_slice(b"\x1b[?2026l");
+        harness.feed(&first);
+
+        assert!(harness.active_alternate);
+        assert_eq!(harness.active_ids(), vec![2]);
+        assert_eq!(harness.inactive_ids(), vec![1]);
+
+        let mut second = b"\x1b[?2026h".to_vec();
+        second.extend(kitty_image(3, 1, 1, 1));
+        second.extend_from_slice(b"\x1b[?1049l");
+        second.extend(kitty_image(4, 1, 1, 1));
+        second.extend_from_slice(b"\x1b[?2026l");
+        harness.feed(&second);
+
+        assert!(!harness.active_alternate);
+        assert_eq!(harness.active_ids(), vec![1, 4]);
+        assert_eq!(harness.inactive_ids(), vec![2, 3]);
+    }
+
+    #[test]
+    fn synchronized_image_cursor_movement_precedes_later_text_and_stays_invisible_mid_update() {
+        let mut harness = SyncGraphicsHarness::new();
+        let mut update = b"\x1b[?2026h\x1b[2;2H".to_vec();
+        update.extend(kitty_image(9, 1, 2, 2));
+        update.extend_from_slice(b"X");
+        harness.feed(&update);
+
+        assert!(
+            harness.images.lock().unwrap().is_empty(),
+            "graphics must remain invisible until the synchronized update commits"
+        );
+        assert_eq!(
+            harness.term.lock().unwrap().grid()[Point::new(Line(2), Column(3))].c,
+            ' ',
+            "text must remain buffered with the image"
+        );
+
+        harness.feed(b"\x1b[?2026l");
+        let placements = harness.images.lock().unwrap();
+        assert_eq!(placements.len(), 1);
+        assert_eq!(
+            (
+                placements[0].col,
+                placements[0].cell_cols,
+                placements[0].cell_rows
+            ),
+            (1, 2, 2)
+        );
+        drop(placements);
+        let term = harness.term.lock().unwrap();
+        assert_eq!(term.grid()[Point::new(Line(2), Column(3))].c, 'X');
+        assert_eq!(term.grid().cursor.point, Point::new(Line(2), Column(4)));
+    }
+
+    #[test]
+    fn synchronized_graphics_replay_before_forced_eof_publication() {
+        let mut harness = SyncGraphicsHarness::new();
+        let mut update = b"\x1b[?2026h\x1b[2;2H".to_vec();
+        update.extend(kitty_image(10, 1, 2, 1));
+        harness.feed(&update);
+        assert!(harness.images.lock().unwrap().is_empty());
+
+        let (tx, rx) = crossbeam_channel::bounded(PTY_PUMP_QUEUE_DEPTH);
+        tx.send(None).unwrap();
+        let generation = AtomicU64::new(0);
+        let wakes = Arc::new(AtomicUsize::new(0));
+        let wakes_for_callback = wakes.clone();
+        let waker: Waker = Arc::new(move || {
+            wakes_for_callback.fetch_add(1, Ordering::Relaxed);
+        });
+        let output_wake = OutputWakeGate::new(waker);
+        let graphics_gate = Mutex::new(());
+        let mut image_pruner = ImageHistoryPruner::default();
+
+        let SyncGraphicsHarness {
+            term,
+            processor,
+            extractor,
+            deferred,
+            active_alternate,
+            images,
+            virtuals,
+            anims,
+            relatives,
+            inactive,
+            geometry,
+        } = &mut harness;
+        let mut on_graphics = |dispatch: SyncGraphicsDispatch<'_>| {
+            assert_eq!(
+                generation.load(Ordering::Acquire),
+                0,
+                "deferred graphics must replay before output publication"
+            );
+            assert_eq!(
+                wakes.load(Ordering::Relaxed),
+                0,
+                "deferred graphics must replay before the redraw wake"
+            );
+            let finishes_sync = matches!(&dispatch, SyncGraphicsDispatch::Batch(_));
+            let mut context = SyncGraphicsContext {
+                active_alternate,
+                deferred,
+                registries: GraphicsRegistries {
+                    inactive,
+                    images,
+                    virtuals,
+                    anims,
+                    relatives,
+                },
+                actions: GraphicsActionContext {
+                    images,
+                    virtuals,
+                    anims,
+                    relatives,
+                    geometry,
+                },
+                extractor,
+            };
+            apply_sync_dispatch(dispatch, &mut context);
+            if finishes_sync {
+                finish_deferred_sync(&mut context);
+            }
+        };
+        let mut sync_flush = SyncFlushContext {
+            term,
+            images,
+            graphics_gate: &graphics_gate,
+            image_pruner: &mut image_pruner,
+            on_graphics: &mut on_graphics,
+            out_gen: &generation,
+            output_wake: &output_wake,
+        };
+
+        assert!(receive_pty_chunk(processor, &rx, &mut sync_flush).is_none());
+        assert_eq!(generation.load(Ordering::Acquire), 1);
+        assert_eq!(wakes.load(Ordering::Relaxed), 1);
+        let placements = images.lock().unwrap();
+        assert_eq!(placements.len(), 1);
+        assert_eq!((placements[0].id, placements[0].col), (Some(10), 1));
+    }
+
+    #[test]
+    fn synchronized_graphics_overflow_fails_closed_and_resets_decoder_state() {
+        let mut harness = SyncGraphicsHarness::new();
+        harness.feed(b"\x1b[?2026h");
+        let mut images = Vec::new();
+        for id in 1..=SYNC_MARKER_CAPACITY as u32 + 1 {
+            images.extend(kitty_image(id, 1, 1, 1));
+        }
+        harness.feed(&images);
+
+        assert!(harness.deferred.overflowed);
+        assert!(harness.deferred.entries.is_empty());
+        assert!(harness.images.lock().unwrap().is_empty());
+
+        harness.feed(b"\x1b[?2026l");
+        assert!(!harness.deferred.overflowed);
+        assert!(harness.deferred.entries.is_empty());
+        assert!(harness.images.lock().unwrap().is_empty());
+
+        harness.feed(b"\x1b_Ga=p,i=1,p=2\x1b\\");
+        assert!(
+            harness.images.lock().unwrap().is_empty(),
+            "overflow recovery must clear deferred kitty image data"
+        );
+    }
+
+    #[test]
+    fn mode_47_preserves_primary_and_alternate_graphics() {
+        let (images, virtuals, anims, relatives, inactive) = registries();
+        images.lock().unwrap().push(placement(1));
+        virtuals.lock().unwrap().insert((1, 1), virtual_entry(1));
+        relatives.lock().unwrap().insert((2, 1), relative_entry(2));
+        let mut extractor = Extractor::new();
+        let mut alternate = false;
+
+        apply_graphics_event(
+            GraphicsEvent::EnterAlternate {
+                mode: 47,
+                clear: false,
+            },
+            &mut alternate,
+            GraphicsRegistries {
+                inactive: &inactive,
+                images: &images,
+                virtuals: &virtuals,
+                anims: &anims,
+                relatives: &relatives,
+            },
+            &mut extractor,
+        );
+        assert!(alternate);
+        assert!(images.lock().unwrap().is_empty());
+        assert!(virtuals.lock().unwrap().is_empty());
+        assert_eq!(inactive.lock().unwrap().placements.len(), 1);
+
+        images.lock().unwrap().push(placement(9));
+        virtuals.lock().unwrap().insert((9, 1), virtual_entry(9));
+        apply_graphics_event(
+            GraphicsEvent::LeaveAlternate {
+                mode: 47,
+                clear: false,
+            },
+            &mut alternate,
+            GraphicsRegistries {
+                inactive: &inactive,
+                images: &images,
+                virtuals: &virtuals,
+                anims: &anims,
+                relatives: &relatives,
+            },
+            &mut extractor,
+        );
+        assert!(!alternate);
+        assert_eq!(images.lock().unwrap()[0].id, Some(1));
+        assert!(virtuals.lock().unwrap().contains_key(&(1, 1)));
+        assert!(!virtuals.lock().unwrap().contains_key(&(9, 1)));
+        assert_eq!(inactive.lock().unwrap().placements[0].id, Some(9));
+
+        apply_graphics_event(
+            GraphicsEvent::EnterAlternate {
+                mode: 47,
+                clear: false,
+            },
+            &mut alternate,
+            GraphicsRegistries {
+                inactive: &inactive,
+                images: &images,
+                virtuals: &virtuals,
+                anims: &anims,
+                relatives: &relatives,
+            },
+            &mut extractor,
+        );
+        assert_eq!(images.lock().unwrap()[0].id, Some(9));
+        assert!(virtuals.lock().unwrap().contains_key(&(9, 1)));
+        assert_eq!(inactive.lock().unwrap().placements[0].id, Some(1));
+    }
+
+    #[test]
+    fn mode_1047_clears_on_exit_and_1049_clears_on_entry() {
+        let (images, virtuals, anims, relatives, inactive) = registries();
+        let mut extractor = Extractor::new();
+        let mut alternate = false;
+
+        // Seed a persistent alternate buffer through mode 47.
+        apply_graphics_event(
+            GraphicsEvent::EnterAlternate {
+                mode: 47,
+                clear: false,
+            },
+            &mut alternate,
+            GraphicsRegistries {
+                inactive: &inactive,
+                images: &images,
+                virtuals: &virtuals,
+                anims: &anims,
+                relatives: &relatives,
+            },
+            &mut extractor,
+        );
+        images.lock().unwrap().push(placement(7));
+        apply_graphics_event(
+            GraphicsEvent::LeaveAlternate {
+                mode: 47,
+                clear: false,
+            },
+            &mut alternate,
+            GraphicsRegistries {
+                inactive: &inactive,
+                images: &images,
+                virtuals: &virtuals,
+                anims: &anims,
+                relatives: &relatives,
+            },
+            &mut extractor,
+        );
+
+        // Mode 1047 preserves alternate contents on entry, then clears them
+        // before returning to the primary buffer.
+        apply_graphics_event(
+            GraphicsEvent::EnterAlternate {
+                mode: 1047,
+                clear: false,
+            },
+            &mut alternate,
+            GraphicsRegistries {
+                inactive: &inactive,
+                images: &images,
+                virtuals: &virtuals,
+                anims: &anims,
+                relatives: &relatives,
+            },
+            &mut extractor,
+        );
+        assert_eq!(images.lock().unwrap()[0].id, Some(7));
+        apply_graphics_event(
+            GraphicsEvent::LeaveAlternate {
+                mode: 1047,
+                clear: true,
+            },
+            &mut alternate,
+            GraphicsRegistries {
+                inactive: &inactive,
+                images: &images,
+                virtuals: &virtuals,
+                anims: &anims,
+                relatives: &relatives,
+            },
+            &mut extractor,
+        );
+        assert!(inactive.lock().unwrap().placements.is_empty());
+
+        // Re-seed the parked alternate buffer. Mode 1049 clears it before
+        // entry, but preserves new contents when returning to primary.
+        inactive.lock().unwrap().placements.push(placement(8));
+        apply_graphics_event(
+            GraphicsEvent::EnterAlternate {
+                mode: 1049,
+                clear: true,
+            },
+            &mut alternate,
+            GraphicsRegistries {
+                inactive: &inactive,
+                images: &images,
+                virtuals: &virtuals,
+                anims: &anims,
+                relatives: &relatives,
+            },
+            &mut extractor,
+        );
+        assert!(images.lock().unwrap().is_empty());
+        images.lock().unwrap().push(placement(9));
+        apply_graphics_event(
+            GraphicsEvent::LeaveAlternate {
+                mode: 1049,
+                clear: false,
+            },
+            &mut alternate,
+            GraphicsRegistries {
+                inactive: &inactive,
+                images: &images,
+                virtuals: &virtuals,
+                anims: &anims,
+                relatives: &relatives,
+            },
+            &mut extractor,
+        );
+        assert_eq!(inactive.lock().unwrap().placements[0].id, Some(9));
+    }
+
+    #[test]
+    fn ed2_is_buffer_local_and_ris_clears_both_graphics_buffers() {
+        let (images, virtuals, anims, relatives, inactive) = registries();
+        images.lock().unwrap().push(placement(1));
+        let mut extractor = Extractor::new();
+        let mut alternate = false;
+        apply_graphics_event(
+            GraphicsEvent::EnterAlternate {
+                mode: 47,
+                clear: false,
+            },
+            &mut alternate,
+            GraphicsRegistries {
+                inactive: &inactive,
+                images: &images,
+                virtuals: &virtuals,
+                anims: &anims,
+                relatives: &relatives,
+            },
+            &mut extractor,
+        );
+        images.lock().unwrap().push(placement(9));
+        apply_graphics_event(
+            GraphicsEvent::EraseDisplay,
+            &mut alternate,
+            GraphicsRegistries {
+                inactive: &inactive,
+                images: &images,
+                virtuals: &virtuals,
+                anims: &anims,
+                relatives: &relatives,
+            },
+            &mut extractor,
+        );
+        assert!(images.lock().unwrap().is_empty());
+        assert_eq!(inactive.lock().unwrap().placements[0].id, Some(1));
+
+        apply_graphics_event(
+            GraphicsEvent::Reset,
+            &mut alternate,
+            GraphicsRegistries {
+                inactive: &inactive,
+                images: &images,
+                virtuals: &virtuals,
+                anims: &anims,
+                relatives: &relatives,
+            },
+            &mut extractor,
+        );
+        assert!(!alternate);
+        assert!(images.lock().unwrap().is_empty());
+        assert!(inactive.lock().unwrap().placements.is_empty());
+    }
+
+    #[test]
+    fn partial_scroll_up_moves_wholly_contained_images_and_crops_at_top_margin() {
+        let images: Images = Arc::new(Mutex::new(vec![
+            placement_at(1, 103, 2),
+            placement_at(2, 100, 1),
+            placement_at(3, 101, 2),
+            placement_at(4, 104, 1),
+            placement_at(5, 102, 1),
+        ]));
+
+        assert!(scroll_regular_placements(
+            &images,
+            GraphicsScroll {
+                direction: GraphicsScrollDirection::Up,
+                top: 2,
+                bottom: 6,
+                lines: 2,
+                old_screen_top: 100,
+                new_screen_top: 100,
+                screen_lines: 8,
+            },
+        ));
+
+        let images = images.lock().unwrap();
+        let find = |id| {
+            images
+                .iter()
+                .find(|placement| placement.id == Some(id))
+                .unwrap()
+        };
+        let clipped = find(1);
+        assert_eq!(clipped.abs_line, 102);
+        close(clipped.display_rows, 1.0);
+        let crop = clipped.source_crop.expect("top crop");
+        close(crop.top, 0.5);
+        close(crop.bottom, 1.0);
+        assert_eq!(
+            clipped.kitty_params,
+            Some(PlacementParams::default()),
+            "partial scrolling must retain Kitty intent for a later DPI recompute"
+        );
+        assert_eq!(find(2).abs_line, 100, "image above the page stays fixed");
+        assert_eq!(
+            find(3).abs_line,
+            101,
+            "image crossing a margin must not scroll"
+        );
+        assert_eq!(find(4).abs_line, 102);
+        assert!(
+            images.iter().all(|placement| placement.id != Some(5)),
+            "an image moved entirely above the margin is discarded"
+        );
+    }
+
+    #[test]
+    fn partial_scroll_down_crops_at_bottom_margin_and_composes_source_ranges() {
+        let mut first = placement_at(1, 103, 2);
+        first.source_crop = Some(crate::ImageSourceCrop {
+            top: 0.2,
+            bottom: 1.0,
+        });
+        let images: Images = Arc::new(Mutex::new(vec![first, placement_at(2, 104, 1)]));
+
+        assert!(scroll_regular_placements(
+            &images,
+            GraphicsScroll {
+                direction: GraphicsScrollDirection::Down,
+                top: 2,
+                bottom: 6,
+                lines: 2,
+                old_screen_top: 100,
+                new_screen_top: 100,
+                screen_lines: 8,
+            },
+        ));
+
+        let images = images.lock().unwrap();
+        assert_eq!(images.len(), 1);
+        let clipped = &images[0];
+        assert_eq!(clipped.abs_line, 105);
+        close(clipped.display_rows, 1.0);
+        let crop = clipped.source_crop.expect("bottom crop");
+        close(crop.top, 0.2);
+        close(crop.bottom, 0.6);
+    }
+
+    #[test]
+    fn top_anchored_scroll_preserves_history_and_reanchors_fixed_rows() {
+        let images: Images = Arc::new(Mutex::new(vec![
+            placement_at(1, 10, 1),
+            placement_at(2, 11, 1),
+            placement_at(3, 15, 1),
+        ]));
+
+        assert!(scroll_regular_placements(
+            &images,
+            GraphicsScroll {
+                direction: GraphicsScrollDirection::Up,
+                top: 0,
+                bottom: 4,
+                lines: 1,
+                old_screen_top: 10,
+                new_screen_top: 11,
+                screen_lines: 6,
+            },
+        ));
+
+        let images = images.lock().unwrap();
+        let find = |id| {
+            images
+                .iter()
+                .find(|placement| placement.id == Some(id))
+                .unwrap()
+        };
+        assert_eq!(
+            find(1).abs_line,
+            10,
+            "top-row image follows text into retained history"
+        );
+        assert_eq!(find(2).abs_line, 11, "scrolled image keeps its document id");
+        assert_eq!(
+            find(3).abs_line,
+            16,
+            "row below the partial region stays at the same viewport position"
+        );
+    }
+
+    #[test]
+    fn coalesced_top_scroll_uses_full_screen_delta_for_graphics_anchors() {
+        let (tx, _rx) = crossbeam_channel::unbounded();
+        let proxy = EventProxy::new(tx, Arc::new(|| {}));
+        let mut term = Term::new(
+            TermConfig::default(),
+            &TermSize {
+                columns: 4,
+                screen_lines: 4,
+            },
+            proxy,
+        );
+        let mut processor: Processor = Processor::new();
+        processor.advance(&mut term, b"\x1b[1;2r\x1b[2H\n\n\n\n\n\n\n\n\n\n");
+        let batch = term.take_graphics_events();
+        assert_eq!(
+            batch.events,
+            vec![GraphicsEvent::Scroll {
+                direction: GraphicsScrollDirection::Up,
+                top: 0,
+                bottom: 2,
+                lines: 2,
+                old_screen_top: 0,
+                new_screen_top: 10,
+                screen_lines: 4,
+            }]
+        );
+
+        let (images, virtuals, anims, relatives, inactive) = registries();
+        images.lock().unwrap().extend([
+            placement_at(1, 0, 1),
+            placement_at(2, 1, 1),
+            placement_at(3, 3, 1),
+        ]);
+        let mut extractor = Extractor::new();
+        let mut alternate = false;
+        apply_graphics_batch(
+            batch,
+            &mut alternate,
+            GraphicsRegistries {
+                inactive: &inactive,
+                images: &images,
+                virtuals: &virtuals,
+                anims: &anims,
+                relatives: &relatives,
+            },
+            &mut extractor,
+        );
+
+        let images = images.lock().unwrap();
+        let find = |id| {
+            images
+                .iter()
+                .find(|placement| placement.id == Some(id))
+                .unwrap()
+        };
+        assert_eq!(
+            find(1).abs_line,
+            0,
+            "first scrolled row retains its document id in history"
+        );
+        assert_eq!(
+            find(2).abs_line,
+            1,
+            "second scrolled row retains its document id in history"
+        );
+        assert_eq!(
+            find(3).abs_line,
+            13,
+            "fixed row below the region stays at the same viewport position"
+        );
+    }
+
+    #[test]
+    fn journal_overflow_clears_both_buffers_and_resynchronizes_active_screen() {
+        let (images, virtuals, anims, relatives, inactive) = registries();
+        images.lock().unwrap().push(placement(1));
+        inactive.lock().unwrap().placements.push(placement(2));
+        let mut extractor = Extractor::new();
+        let mut alternate = false;
+
+        apply_graphics_batch(
+            GraphicsEventBatch {
+                events: Vec::new(),
+                overflowed: true,
+                alternate_screen: true,
+            },
+            &mut alternate,
+            GraphicsRegistries {
+                inactive: &inactive,
+                images: &images,
+                virtuals: &virtuals,
+                anims: &anims,
+                relatives: &relatives,
+            },
+            &mut extractor,
+        );
+
+        assert!(alternate);
+        assert!(images.lock().unwrap().is_empty());
+        assert!(inactive.lock().unwrap().placements.is_empty());
+    }
+
+    #[test]
+    fn column_reflow_clears_regular_anchors_but_preserves_virtual_data() {
+        let (images, virtuals, _anims, relatives, inactive) = registries();
+        images.lock().unwrap().push(placement(1));
+        virtuals.lock().unwrap().insert((1, 1), virtual_entry(1));
+        relatives.lock().unwrap().insert((2, 1), relative_entry(2));
+        {
+            let mut saved = inactive.lock().unwrap();
+            saved.placements.push(placement(3));
+            saved.virtuals.insert((3, 1), virtual_entry(3));
+            saved.relatives.insert((4, 1), relative_entry(4));
+        }
+
+        clear_reflowed_regular_placements(&images, &relatives, &inactive);
+
+        assert!(images.lock().unwrap().is_empty());
+        assert!(relatives.lock().unwrap().is_empty());
+        assert!(virtuals.lock().unwrap().contains_key(&(1, 1)));
+        let saved = inactive.lock().unwrap();
+        assert!(saved.placements.is_empty());
+        assert!(saved.relatives.is_empty());
+        assert!(saved.virtuals.contains_key(&(3, 1)));
+    }
+
+    #[test]
+    fn history_pruning_cache_distinguishes_equal_origins_in_each_buffer() {
+        let (tx, _rx) = crossbeam_channel::unbounded();
+        let proxy = EventProxy::new(tx, Arc::new(|| {}));
+        let term: SharedTerm = Arc::new(Mutex::new(Term::new(
+            TermConfig::default(),
+            &TermSize {
+                columns: 4,
+                screen_lines: 2,
+            },
+            proxy,
+        )));
+        let mut processor: Processor = Processor::new();
+        {
+            let mut term = term.lock().unwrap();
+            processor.advance(&mut *term, b"\x1b[?1049h0\r\n1\r\n2\r\n3");
+        }
+        let origin = term.lock().unwrap().grid().history_origin();
+        assert!(origin > 0, "alternate grid discarded at least one row");
+
+        let images: Images = Arc::new(Mutex::new(vec![placement(0)]));
+        let mut pruner = ImageHistoryPruner {
+            // Simulate the numerically-equal primary cache entry that used to
+            // suppress pruning after a screen transition.
+            last_key: Some((false, origin)),
+        };
+        pruner.prune_if_changed(&term, &images);
+
+        assert!(images.lock().unwrap().is_empty());
+        assert_eq!(pruner.last_key, Some((true, origin)));
     }
 }

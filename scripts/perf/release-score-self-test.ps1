@@ -1,4 +1,4 @@
-# Deterministic, GUI-free integration coverage for schema-3 release scoring.
+# Deterministic, GUI-free integration coverage for schema-4 release scoring.
 #
 # The positive case invokes score.ps1 with its production 10,000-iteration
 # bootstrap defaults. Negative cases clone and mutate complete result trees so
@@ -12,6 +12,8 @@ Set-StrictMode -Version Latest
 . "$PSScriptRoot\payload-contract.ps1"
 . "$PSScriptRoot\schedule.ps1"
 . "$PSScriptRoot\harness-provenance.ps1"
+. "$PSScriptRoot\release-contract.ps1"
+. "$PSScriptRoot\comparator-campaign.ps1"
 
 $script:scoreScript = Join-Path $PSScriptRoot 'score.ps1'
 $script:shell = (Get-Process -Id $PID).Path
@@ -39,8 +41,17 @@ $script:terminalHash = (
 $script:latencyWorkload = Join-Path $env:SystemRoot 'System32\cmd.exe'
 $script:latencyWorkloadHash = $script:terminalHash
 $script:configurationEvidence = [ordered]@{}
-$script:benchmarkSeed = 'release-score-self-test-v1'
+$script:benchmarkSeed = 'kettle-windows-release-v1'
 $script:timings = [Collections.Generic.List[object]]::new()
+$script:releaseContract = Get-KettlePerfReleaseAcquisitionContract
+$script:campaignRoot = Join-Path $PSScriptRoot 'campaigns'
+$script:campaignPath = Join-Path `
+    $script:campaignRoot `
+    $script:releaseContract.comparator_campaign.relative_path
+$script:campaign = Read-KettlePerfComparatorCampaign `
+    -Path $script:campaignPath -ExpectedCampaignRoot $script:campaignRoot
+$script:campaignEvidence = Get-KettlePerfComparatorCampaignEvidence `
+    -Campaign $script:campaign
 
 $tempRoot = [IO.Path]::GetFullPath([IO.Path]::GetTempPath())
 $testRoot = Join-Path $tempRoot (
@@ -58,6 +69,54 @@ function Assert-ReleaseScore {
     if (-not $Condition) {
         throw $Message
     }
+}
+
+function Get-FixtureComparatorEntry {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Terminal
+    )
+
+    if ($Terminal -ceq 'kettle') {
+        return $null
+    }
+    return Get-KettlePerfComparatorCampaignEntry `
+        -Campaign $script:campaign -Name $Terminal
+}
+
+function Get-FixtureTerminalPath {
+    param([Parameter(Mandatory = $true)][string]$Terminal)
+
+    if ($Terminal -ceq 'kettle') {
+        return $script:shell
+    }
+    $entry = Get-FixtureComparatorEntry $Terminal
+    if ($Terminal -ceq 'wt') {
+        return Join-Path (
+            'C:\Program Files\WindowsApps\' +
+            "Microsoft.WindowsTerminal_$($entry.version)_x64__8wekyb3d8bbwe"
+        ) $entry.executable.leaf
+    }
+    return Join-Path 'C:\KettleFixture\comparators' `
+        $entry.executable.leaf
+}
+
+function Get-FixtureTerminalHash {
+    param([Parameter(Mandatory = $true)][string]$Terminal)
+
+    if ($Terminal -ceq 'kettle') {
+        return $script:terminalHash
+    }
+    return [string](Get-FixtureComparatorEntry $Terminal).executable.sha256
+}
+
+function Get-FixtureTerminalVersion {
+    param([Parameter(Mandatory = $true)][string]$Terminal)
+
+    if ($Terminal -ceq 'kettle') {
+        return 'fixture-kettle-1.0'
+    }
+    return [string](Get-FixtureComparatorEntry $Terminal).version
 }
 
 function Get-FixtureUtf8Sha256 {
@@ -206,12 +265,30 @@ function New-FixtureDisplaySnapshot {
         manufacture_week = 1
         manufacture_year = 2026
     }
+    $targetConnection = [pscustomobject][ordered]@{
+        identity_source = 'wmi-monitor-connection-v1'
+        instance_name = 'DISPLAY\FIXTURE1\1'
+        hardware_id = 'FIXTURE1'
+        video_output_technology = 10
+    }
+    $secondConnection = [pscustomobject][ordered]@{
+        identity_source = 'wmi-monitor-connection-v1'
+        instance_name = 'DISPLAY\FIXTURE2\2'
+        hardware_id = 'FIXTURE2'
+        video_output_technology = 0
+    }
+    $thirdConnection = [pscustomobject][ordered]@{
+        identity_source = 'wmi-monitor-connection-v1'
+        instance_name = 'DISPLAY\FIXTURE3\3'
+        hardware_id = 'FIXTURE3'
+        video_output_technology = 5
+    }
     $snapshot = [pscustomobject][ordered]@{
         schema = 'kettle-display-topology-snapshot-v2'
         captured_at = '2026-07-26T12:00:00.0000000-07:00'
         identity_acquisition = [pscustomobject][ordered]@{
-            schema = 'kettle-display-identity-acquisition-v1'
-            resolver = 'wmi-monitor-id-with-ccd-registry-fallback-v1'
+            schema = 'kettle-display-identity-acquisition-v2'
+            resolver = 'wmi-monitor-id-with-ccd-registry-fallback-v2'
             method = 'wmi-monitor-id-v1'
             ccd_status = 'unavailable'
             desktop_screen_count = 3
@@ -232,7 +309,7 @@ function New-FixtureDisplaySnapshot {
                 edid_backed = $true
                 edid_match_count = 1
                 edid_monitor = $targetMonitor
-                connection = $null
+                connection = $targetConnection
                 effective_dpi = [pscustomobject][ordered]@{
                     x = 192
                     y = 192
@@ -261,7 +338,7 @@ function New-FixtureDisplaySnapshot {
                 edid_backed = $true
                 edid_match_count = 1
                 edid_monitor = $secondMonitor
-                connection = $null
+                connection = $secondConnection
                 effective_dpi = [pscustomobject][ordered]@{
                     x = 144
                     y = 144
@@ -290,7 +367,7 @@ function New-FixtureDisplaySnapshot {
                 edid_backed = $true
                 edid_match_count = 1
                 edid_monitor = $thirdMonitor
-                connection = $null
+                connection = $thirdConnection
                 effective_dpi = [pscustomobject][ordered]@{
                     x = 96
                     y = 96
@@ -318,24 +395,9 @@ function New-FixtureDisplaySnapshot {
             $thirdMonitor
         )
         active_connections = [object[]]@(
-            [pscustomobject][ordered]@{
-                identity_source = 'wmi-monitor-connection-v1'
-                instance_name = 'DISPLAY\FIXTURE1\1'
-                hardware_id = 'FIXTURE1'
-                video_output_technology = 10
-            },
-            [pscustomobject][ordered]@{
-                identity_source = 'wmi-monitor-connection-v1'
-                instance_name = 'DISPLAY\FIXTURE2\2'
-                hardware_id = 'FIXTURE2'
-                video_output_technology = 0
-            },
-            [pscustomobject][ordered]@{
-                identity_source = 'wmi-monitor-connection-v1'
-                instance_name = 'DISPLAY\FIXTURE3\3'
-                hardware_id = 'FIXTURE3'
-                video_output_technology = 5
-            }
+            $targetConnection,
+            $secondConnection,
+            $thirdConnection
         )
         target_edid_monitors = [object[]]@($targetMonitor)
         identity_issues = [object[]]@()
@@ -351,6 +413,25 @@ function New-FixtureDisplayTopology {
     $start = New-FixtureDisplaySnapshot
     $end = New-FixtureDisplaySnapshot
     $end.captured_at = '2026-07-26T12:30:00.0000000-07:00'
+    $stabilityMonitoring = [pscustomobject][ordered]@{
+        schema = 'kettle-display-stability-evidence-v1'
+        provider = 'Microsoft.Win32.SystemEvents.DisplaySettingsChanged'
+        monitoring_active_for_run = $true
+        registration_error_type = $null
+        display_change_events = [object[]]@()
+        checkpoints = [object[]]@(
+            [pscustomobject][ordered]@{
+                phase = 'start'
+                snapshot = $start
+            },
+            [pscustomobject][ordered]@{
+                phase = 'end'
+                snapshot = $end
+            }
+        )
+        invalid_checkpoint_phases = [string[]]@()
+        stable = $true
+    }
     return [pscustomobject][ordered]@{
         acquisition_schema = 'kettle-display-topology-acquisition-v2'
         acquisition_start = $start
@@ -373,7 +454,57 @@ function New-FixtureDisplayTopology {
         }
         start_evidence_valid = $true
         release_evidence_valid = $true
+        stability_monitoring = $stabilityMonitoring
         issues = [object[]]@()
+    }
+}
+
+function Set-FixtureNonPhysicalConnectionEvidence {
+    param(
+        [Parameter(Mandatory = $true)]
+        $Topology
+    )
+
+    $technologies = @(15, 16, 17)
+    for ($index = 0; $index -lt $technologies.Count; $index++) {
+        $technology = $technologies[$index]
+        $connection = $Topology.active_connections[$index]
+        $connection.video_output_technology = $technology
+        $screen = $Topology.desktop_screens[$index]
+        $screen.connection.video_output_technology = $technology
+        foreach ($monitor in @(
+            $Topology.active_physical_monitors[$index],
+            $screen.edid_monitor
+        )) {
+            if ($monitor.PSObject.Properties['output_technology']) {
+                $monitor.output_technology = $technology
+            } else {
+                Add-Member -InputObject $monitor `
+                    -NotePropertyName output_technology `
+                    -NotePropertyValue $technology
+            }
+        }
+        $targetMonitors = if (
+            $Topology.PSObject.Properties['target_edid_monitors']
+        ) {
+            @($Topology.target_edid_monitors)
+        } else {
+            @()
+        }
+        foreach (
+            $targetMonitor in $targetMonitors | Where-Object {
+                [string]$_.instance_name -ceq
+                    [string]$screen.edid_monitor.instance_name
+            }
+        ) {
+            if ($targetMonitor.PSObject.Properties['output_technology']) {
+                $targetMonitor.output_technology = $technology
+            } else {
+                Add-Member -InputObject $targetMonitor `
+                    -NotePropertyName output_technology `
+                    -NotePropertyValue $technology
+            }
+        }
     }
 }
 
@@ -832,7 +963,9 @@ function Write-StartupLatencyThroughputEvidence {
     }
     for ($terminalIndex = 0; $terminalIndex -lt $script:terminals.Count; $terminalIndex++) {
         $terminal = $script:terminals[$terminalIndex]
-        $version = "fixture-$terminal-1.0"
+        $terminalPath = Get-FixtureTerminalPath $terminal
+        $terminalHash = Get-FixtureTerminalHash $terminal
+        $version = Get-FixtureTerminalVersion $terminal
         $helpers = [object[]]@(New-FixtureHelpers -Terminal $terminal)
         $performance = Get-FixturePerformance `
             -Terminal $terminal -KettlePerformance $KettlePerformance
@@ -861,8 +994,8 @@ function Write-StartupLatencyThroughputEvidence {
         }
         $startup[$terminal] = [pscustomobject][ordered]@{
             run_id = $RunId
-            executable = $script:shell
-            executable_sha256 = $script:terminalHash
+            executable = $terminalPath
+            executable_sha256 = $terminalHash
             product_version = $version
             configuration_mode = if ($terminal -ceq 'wt') {
                 'uncontrolled'
@@ -926,8 +1059,8 @@ function Write-StartupLatencyThroughputEvidence {
         }
         $latency[$terminal] = [pscustomobject][ordered]@{
             run_id = $RunId
-            executable = $script:shell
-            executable_sha256 = $script:terminalHash
+            executable = $terminalPath
+            executable_sha256 = $terminalHash
             workload_executable = $script:latencyWorkload
             workload_executable_sha256 = $script:latencyWorkloadHash
             product_version = $version
@@ -1002,8 +1135,8 @@ function Write-StartupLatencyThroughputEvidence {
         $workloadPid = 30000 + $terminalIndex
         $throughput = [pscustomobject][ordered]@{
             run_id = $RunId
-            executable = $script:shell
-            executable_sha256 = $script:terminalHash
+            executable = $terminalPath
+            executable_sha256 = $terminalHash
             product_version = $version
             output_encoding = 'utf-8'
             drain_probe_required = $true
@@ -1105,6 +1238,11 @@ function New-MenuEvidence {
         latency_ms_p99 = 10.0
         long_frame_ms = 100.0
         long_frames = 0
+        gates = [pscustomobject][ordered]@{
+            max_p95_ms = 33.0
+            max_p99_ms = 50.0
+            max_long_frames = 1
+        }
         observations = [object[]]$observations
     }
 }
@@ -1552,9 +1690,9 @@ function Write-VtebenchEvidence {
         )
         $terminalResults[$terminal] = [pscustomobject][ordered]@{
             run_id = $RunId
-            executable = $script:shell
-            executable_sha256 = $script:terminalHash
-            product_version = "fixture-$terminal-1.0"
+            executable = Get-FixtureTerminalPath $terminal
+            executable_sha256 = Get-FixtureTerminalHash $terminal
+            product_version = Get-FixtureTerminalVersion $terminal
             source_state_before_sha256 = $source.source_state_sha256
             source_state_after_sha256 = $source.source_state_sha256
             dat_path = $datPath
@@ -1620,12 +1758,14 @@ function New-TerminalManifestRecord {
 
     $configuration = $script:configurationEvidence[$Terminal]
     $isWindowsTerminal = $Terminal -ceq 'wt'
-    return [pscustomobject][ordered]@{
+    $entry = Get-FixtureComparatorEntry $Terminal
+    $record = [ordered]@{
         name = $Terminal
         available = $true
-        executable = $script:shell
-        executable_sha256 = $script:terminalHash
-        version = "fixture-$Terminal-1.0"
+        launcher = Get-FixtureTerminalPath $Terminal
+        executable = Get-FixtureTerminalPath $Terminal
+        executable_sha256 = Get-FixtureTerminalHash $Terminal
+        version = Get-FixtureTerminalVersion $Terminal
         command_workloads = $true
         command_confirmation = if ($Terminal -ceq 'tabby') {
             'tabby-run'
@@ -1670,7 +1810,7 @@ function New-TerminalManifestRecord {
                 release_build_performed = $Candidate -ceq 'current'
             }
         } else {
-            $null
+            New-KettlePerfComparatorTerminalSource -Entry $entry
         }
         configuration = [pscustomobject][ordered]@{
             mode = if ($isWindowsTerminal) {
@@ -1682,6 +1822,45 @@ function New-TerminalManifestRecord {
             files = [object[]]@($configuration)
         }
     }
+    if ($Terminal -cne 'kettle') {
+        $record['executable_bytes'] = [long]$entry.executable.bytes
+        $record['authenticode_status'] = (
+            [string]$entry.executable.authenticode_status
+        )
+        $record['signer_cert_sha256'] = if (
+            $null -eq $entry.executable.signer_cert_sha256
+        ) {
+            $null
+        } else {
+            [string]$entry.executable.signer_cert_sha256
+        }
+        $record['comparator_role'] = [string]$entry.role
+    }
+    if ($isWindowsTerminal) {
+        $record['launch_mode'] = 'installed-appx-direct-host'
+        $installLocation = [IO.Path]::GetDirectoryName(
+            [string]$record.executable
+        )
+        $record['installed_package'] = [pscustomobject][ordered]@{
+            schema = 'kettle-windows-terminal-appx-v1'
+            name = 'Microsoft.WindowsTerminal'
+            publisher_id = '8wekyb3d8bbwe'
+            package_family_name = 'Microsoft.WindowsTerminal_8wekyb3d8bbwe'
+            package_full_name = (
+                'Microsoft.WindowsTerminal_' +
+                [string]$entry.version +
+                '_x64__8wekyb3d8bbwe'
+            )
+            version = [string]$entry.version
+            architecture = 'X64'
+            status = 'Ok'
+            signature_kind = 'Store'
+            is_framework = $false
+            non_removable = $false
+            install_location = $installLocation
+        }
+    }
+    return [pscustomobject]$record
 }
 
 function Write-Manifest {
@@ -1704,7 +1883,7 @@ function Write-Manifest {
         )
     }
     $manifest = [pscustomobject][ordered]@{
-        schema_version = 3
+        schema_version = 4
         run_id = $RunId
         repository_commit = $script:repositoryCommit
         repository_dirty = $false
@@ -1712,6 +1891,7 @@ function Write-Manifest {
             [string]$script:configurationEvidence.kettle.sha256
         )
         harness_provenance = New-FixtureHarnessProvenance
+        comparator_campaign = $script:campaignEvidence
         os = [pscustomobject][ordered]@{
             description = 'Windows 11 fixture'
             version = '10.0.26200'
@@ -1760,6 +1940,7 @@ function Write-Manifest {
             mode = 'release'
             terminals = $script:terminals
             benchmark_seed = $script:benchmarkSeed
+            comparator_campaign_id = $script:campaign.campaign_id
             kettle_candidate = $Candidate
             expected_kettle_commit = if ($Candidate -ceq 'baseline') {
                 $script:baselineCommit
@@ -1787,6 +1968,7 @@ function Write-Manifest {
             max_latency_censored = 3
             latency_timeout_ms = 800
             menu_hover_samples = 200
+            menu_hover_block_size = 20
             throughput_iterations = 6
             minimum_throughput_iterations = 6
             native_display_enabled = $true
@@ -1795,16 +1977,9 @@ function Write-Manifest {
             vtebench_revision = $script:vtebenchRevision
             monitor_transition_enabled = $true
             monitor_transition_samples_per_state = 10
-            probe_cooldown_seconds = 0
-            terminal_order_offset = 0
-            vtebench_terminal_order = [string[]]@(
-                'wezterm',
-                'rio',
-                'tabby',
-                'kettle',
-                'wt',
-                'alacritty'
-            )
+            probe_cooldown_seconds = 15
+            terminal_order_offset = 3
+            vtebench_terminal_order = [string[]]$script:terminals.Clone()
             schedules = $schedules
             kettle_build_skipped = $Candidate -ceq 'baseline'
         }
@@ -1875,7 +2050,8 @@ function Invoke-ReleaseScore {
         [string]$BaselineDirectory = '',
         [Parameter(Mandatory = $true)]
         [string]$Label,
-        [string]$ScoreScript = $script:scoreScript
+        [string]$ScoreScript = $script:scoreScript,
+        [string[]]$AdditionalArguments = @()
     )
 
     $scorePath = Join-Path $CurrentDirectory "$Label-score.json"
@@ -1887,23 +2063,16 @@ function Invoke-ReleaseScore {
         $ScoreScript,
         '-ResultsDir',
         $CurrentDirectory,
+        '-Mode',
+        'release',
         '-RequireLatency',
-        '-MinimumLatencySamples',
-        '60',
         '-RequireMenuHover',
-        '-MinimumMenuHoverSamples',
-        '200',
         '-RequireVtebench',
         '-RequireMonitorTransition',
-        '-MinimumMonitorTransitionSamplesPerState',
-        '10',
-        '-MinimumStartupSamples',
-        '12',
-        '-MinimumThroughputRuns',
-        '6',
         '-OutJson',
         $scorePath
     )
+    $arguments += $AdditionalArguments
     if ($BaselineDirectory) {
         $arguments += @('-BaselineResultsDir', $BaselineDirectory)
     }
@@ -1983,7 +2152,7 @@ try {
             'score log missing'
         }
         throw (
-            'complete schema-3 release fixture did not pass; manifest: ' +
+            'complete schema-4 release fixture did not pass; manifest: ' +
             "$manifestIssues; baseline: $baselineIssues; scorer output: " +
             $scoreLog
         )
@@ -1996,6 +2165,14 @@ try {
         [bool]$positiveScore.coverage_passed -and
         @($positiveScore.manifest_issues).Count -eq 0
     ) 'positive score did not pass complete provenance and coverage'
+    Assert-ReleaseScore (
+        $positiveScore.scoring_mode -ceq 'release' -and
+        $positiveScore.benchmark_mode -ceq 'release' -and
+        $positiveScore.release_acquisition_contract -ceq
+            'kettle-release-acquisition-contract-v2' -and
+        $positiveScore.release_score_contract -ceq
+            'kettle-release-score-contract-v1'
+    ) 'positive score did not bind the immutable release contracts'
     Assert-ReleaseScore (
         [bool]$positiveScore.release_statistics_required -and
         [bool]$positiveScore.release_statistics_passed -and
@@ -2127,11 +2304,11 @@ try {
             Where-Object { $_.name -ceq 'kettle' }
     )[0]
     Assert-ReleaseScore (
-        $positiveManifest.schema_version -eq 3 -and
+        $positiveManifest.schema_version -eq 4 -and
         $positiveManifest.settings.kettle_candidate -ceq 'current' -and
         $currentKettleRecord.source.acquisition -ceq 'repository' -and
         [bool]$currentKettleRecord.source.build_performed -and
-        $positiveBaselineManifest.schema_version -eq 3 -and
+        $positiveBaselineManifest.schema_version -eq 4 -and
         $positiveBaselineManifest.settings.kettle_candidate -ceq 'baseline' -and
         $baselineKettleRecord.source.acquisition -ceq 'pinned-external' -and
         -not [bool]$baselineKettleRecord.source.build_performed
@@ -2172,6 +2349,9 @@ try {
             -Destination (Join-Path `
                 $negativeScorerDirectory $sourceScript.Name)
     }
+    Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'campaigns') `
+        -Destination (Join-Path $negativeScorerDirectory 'campaigns') `
+        -Recurse
     $negativeStatisticsPath = Join-Path `
         $negativeScorerDirectory 'score-statistics.ps1'
     $negativeStatisticsText = [IO.File]::ReadAllText(
@@ -2202,6 +2382,594 @@ try {
                 Get-FileHash -LiteralPath $script:scoreScript -Algorithm SHA256
             ).Hash
     ) 'negative score.ps1 copy differs from the production scorer'
+
+    $policyOverride = Invoke-ReleaseScore `
+        -CurrentDirectory $currentDirectory `
+        -BaselineDirectory $baselineDirectory `
+        -Label 'negative-release-policy-overrides' `
+        -ScoreScript $negativeScoreScript `
+        -AdditionalArguments @(
+            '-MaxRegressionPct', '8.0',
+            '-MaxKettleRank', '3',
+            '-MinimumPeersBeaten', '2',
+            '-MinimumMetricsPerTerminal', '8',
+            '-MinimumThroughputPeersMeasured', '3',
+            '-MaxKettleThroughputRank', '3',
+            '-MinimumThroughputPeersBeaten', '2',
+            '-MinimumStartupSamples', '11',
+            '-MinimumThroughputRuns', '5',
+            '-MinimumLatencyPeersBeaten', '2',
+            '-MinimumLatencySamples', '59',
+            '-MaxLatencyMissRate', '0.06',
+            '-MinimumMonitorTransitionSamplesPerState', '9',
+            '-MaxMonitorTransitionP95Ms', '1001',
+            '-MaxMonitorTransitionMaxMs', '2001',
+            '-MonitorTransitionBaselineAbsoluteMarginMs', '101',
+            '-MonitorTransitionBaselineRelativeMarginPct', '26',
+            '-MinimumMenuHoverSamples', '199',
+            '-MaxMenuHoverP95Ms', '34',
+            '-MaxMenuHoverP99Ms', '51',
+            '-MenuHoverLongFrameMs', '101',
+            '-MaxMenuHoverLongFrames', '2',
+            '-AllowDirtyManifest'
+        )
+    Assert-ExpectedScoreFailure `
+        -Invocation $policyOverride `
+        -Message 'noncanonical release scorer policy'
+    foreach ($policyName in @(
+        'max_regression_pct',
+        'max_kettle_rank',
+        'minimum_peers_beaten',
+        'minimum_metrics_per_terminal',
+        'minimum_throughput_peers_measured',
+        'max_kettle_throughput_rank',
+        'minimum_throughput_peers_beaten',
+        'minimum_startup_samples',
+        'minimum_throughput_runs',
+        'minimum_latency_peers_beaten',
+        'minimum_latency_samples',
+        'max_latency_miss_rate',
+        'minimum_monitor_transition_samples_per_state',
+        'max_monitor_transition_p95_ms',
+        'max_monitor_transition_max_ms',
+        'monitor_transition_baseline_absolute_margin_ms',
+        'monitor_transition_baseline_relative_margin_pct',
+        'minimum_menu_hover_samples',
+        'max_menu_hover_p95_ms',
+        'max_menu_hover_p99_ms',
+        'menu_hover_long_frame_ms',
+        'max_menu_hover_long_frames',
+        'allow_dirty_manifest'
+    )) {
+        Assert-ReleaseScore (
+            @($policyOverride.score.manifest_issues) -contains
+                "release scoring policy differs: $policyName"
+        ) "release scorer accepted policy override: $policyName"
+    }
+
+    $modeSchemaDirectory = Join-Path `
+        $testRoot 'negative-trusted-mode-schema-downgrade'
+    Copy-ReleaseFixture `
+        -Source $currentDirectory -Destination $modeSchemaDirectory
+    $modeSchemaPath = Join-Path `
+        $modeSchemaDirectory 'benchmark-manifest.json'
+    $modeSchemaManifest = Read-FixtureJson -Path $modeSchemaPath
+    $modeSchemaManifest.schema_version = 2
+    $modeSchemaManifest.settings.mode = 'smoke'
+    Write-FixtureJson `
+        -Path $modeSchemaPath -Value $modeSchemaManifest
+    $modeSchemaTamper = Invoke-ReleaseScore `
+        -CurrentDirectory $modeSchemaDirectory `
+        -BaselineDirectory $baselineDirectory `
+        -Label 'negative-trusted-mode-schema-downgrade' `
+        -ScoreScript $negativeScoreScript
+    Assert-ExpectedScoreFailure `
+        -Invocation $modeSchemaTamper `
+        -Message 'release manifest mode/schema downgrade'
+    Assert-ReleaseScore (
+        @($modeSchemaTamper.score.manifest_issues) -contains
+            'trusted release scoring requires benchmark manifest schema 4' -and
+        @($modeSchemaTamper.score.manifest_issues) -contains
+            'trusted scoring mode differs from benchmark manifest mode' -and
+        [bool]$modeSchemaTamper.score.release_statistics_required -and
+        $modeSchemaTamper.score.scoring_mode -ceq 'release'
+    ) 'release manifest controlled its own scoring policy'
+
+    $typedCurrentDirectory = Join-Path `
+        $testRoot 'negative-release-json-types-current'
+    $typedBaselineDirectory = Join-Path `
+        $testRoot 'negative-release-json-types-baseline'
+    Copy-ReleaseFixture `
+        -Source $currentDirectory -Destination $typedCurrentDirectory
+    Copy-ReleaseFixture `
+        -Source $baselineDirectory -Destination $typedBaselineDirectory
+    $typedCurrentPath = Join-Path `
+        $typedCurrentDirectory 'benchmark-manifest.json'
+    $typedCurrentManifest = Read-FixtureJson -Path $typedCurrentPath
+    $typedCurrentManifest.schema_version = '4'
+    $typedCurrentManifest.repository_dirty = 'false'
+    $typedCurrentManifest.settings.startup_runs = '12'
+    $typedCurrentManifest.settings.window_pixels.width = [double]1280.5
+    $typedCurrentManifest.settings.native_display_enabled = 'true'
+    $typedCurrentManifest.settings.unidentified_display_allowed = 'false'
+    $typedCurrentManifest.settings.kettle_build_skipped = 'false'
+    Write-FixtureJson `
+        -Path $typedCurrentPath -Value $typedCurrentManifest
+    $typedBaselinePath = Join-Path `
+        $typedBaselineDirectory 'benchmark-manifest.json'
+    $typedBaselineManifest = Read-FixtureJson -Path $typedBaselinePath
+    $typedBaselineManifest.schema_version = '4'
+    $typedBaselineManifest.repository_dirty = 'false'
+    $typedBaselineManifest.settings.idle_samples = '6'
+    $typedBaselineManifest.settings.vtebench_enabled = 'true'
+    Write-FixtureJson `
+        -Path $typedBaselinePath -Value $typedBaselineManifest
+    $typedManifestTamper = Invoke-ReleaseScore `
+        -CurrentDirectory $typedCurrentDirectory `
+        -BaselineDirectory $typedBaselineDirectory `
+        -Label 'negative-release-json-types' `
+        -ScoreScript $negativeScoreScript
+    Assert-ExpectedScoreFailure `
+        -Invocation $typedManifestTamper `
+        -Message 'release manifest scalar type substitutions'
+    foreach ($expectedIssue in @(
+        'trusted release scoring requires benchmark manifest schema 4',
+        'release benchmark setting differs: startup_runs',
+        'release benchmark setting differs: native_display_enabled',
+        'release benchmark setting differs: unidentified_display_allowed',
+        'release benchmark window differs from the contract',
+        'release scoring requires a clean repository manifest',
+        'release scoring requires a Kettle build from this checkout'
+    )) {
+        Assert-ReleaseScore (
+            @($typedManifestTamper.score.manifest_issues) -contains
+                $expectedIssue
+        ) "release scorer accepted typed current value: $expectedIssue"
+    }
+    foreach ($expectedIssue in @(
+        'trusted release scoring requires baseline manifest schema 4',
+        'baseline release benchmark setting differs: idle_samples',
+        'baseline release benchmark setting differs: vtebench_enabled',
+        'release baseline requires a clean repository manifest'
+    )) {
+        Assert-ReleaseScore (
+            @($typedManifestTamper.score.baseline_issues) -contains
+                $expectedIssue
+        ) "release scorer accepted typed baseline value: $expectedIssue"
+    }
+
+    # Release evidence is a typed JSON contract. PowerShell's ordinary casts
+    # accept "12" as 12 and $true as 1, so exercise aggregate and raw-record
+    # fields independently to prove the trusted scorer rejects both coercions.
+    $evidenceTypeCases = [object[]]@(
+        [pscustomobject][ordered]@{
+            label = 'aggregate-integer-string'
+            file = 'startup-idle.json'
+            mutate = {
+                param($Evidence)
+                $Evidence.kettle.startup_samples = '12'
+            }
+            expected_manifest_issue = $null
+        },
+        [pscustomobject][ordered]@{
+            label = 'aggregate-integer-boolean'
+            file = 'startup-idle.json'
+            mutate = {
+                param($Evidence)
+                $Evidence.kettle.startup_misses = $false
+            }
+            expected_manifest_issue = $null
+        },
+        [pscustomobject][ordered]@{
+            label = 'raw-integer-string'
+            file = 'throughput-kettle.json'
+            mutate = {
+                param($Evidence)
+                $Evidence.observations[0].cycle = '1'
+            }
+            expected_manifest_issue = (
+                'throughput kettle observation cycle differs from schedule'
+            )
+        },
+        [pscustomobject][ordered]@{
+            label = 'raw-integer-boolean'
+            file = 'throughput-kettle.json'
+            mutate = {
+                param($Evidence)
+                $Evidence.observations[0].round = $true
+            }
+            expected_manifest_issue = (
+                'throughput kettle observation round differs from schedule'
+            )
+        },
+        [pscustomobject][ordered]@{
+            label = 'monitor-topology-integer-string'
+            file = 'monitor-transition.json'
+            mutate = {
+                param($Evidence)
+                $dpi = $Evidence.topology_start.desktop_screens[0].effective_dpi
+                $dpi.x = '192'
+            }
+            expected_manifest_issue = (
+                'monitor-transition topology evidence is inconsistent'
+            )
+        },
+        [pscustomobject][ordered]@{
+            label = 'monitor-capture-bytes-boolean'
+            file = 'monitor-transition.json'
+            mutate = {
+                param($Evidence)
+                $Evidence.observations[0].capture.bytes = $true
+            }
+            expected_manifest_issue = (
+                'monitor-transition capture or surface geometry is invalid'
+            )
+        }
+    )
+    foreach ($typeCase in $evidenceTypeCases) {
+        $typedEvidenceDirectory = Join-Path (
+            $testRoot
+        ) "negative-release-evidence-type-$($typeCase.label)"
+        Copy-ReleaseFixture `
+            -Source $currentDirectory -Destination $typedEvidenceDirectory
+        $typedEvidencePath = Join-Path `
+            $typedEvidenceDirectory ([string]$typeCase.file)
+        $typedEvidence = Read-FixtureJson -Path $typedEvidencePath
+        $mutation = [scriptblock]$typeCase.mutate
+        & $mutation $typedEvidence
+        Write-FixtureJson `
+            -Path $typedEvidencePath -Value $typedEvidence
+        $typedEvidenceTamper = Invoke-ReleaseScore `
+            -CurrentDirectory $typedEvidenceDirectory `
+            -BaselineDirectory $baselineDirectory `
+            -Label "negative-release-evidence-type-$($typeCase.label)" `
+            -ScoreScript $negativeScoreScript
+        Assert-ExpectedScoreFailure `
+            -Invocation $typedEvidenceTamper `
+            -Message "release evidence type substitution $($typeCase.label)"
+        if ($null -eq $typeCase.expected_manifest_issue) {
+            $kettleCoverageFailure = @(
+                $typedEvidenceTamper.score.coverage_failures |
+                    Where-Object { $_.terminal -ceq 'kettle' }
+            )
+            Assert-ReleaseScore (
+                -not [bool]$typedEvidenceTamper.score.coverage_passed -and
+                $kettleCoverageFailure.Count -eq 1 -and
+                -not [bool]$kettleCoverageFailure[0].startup_samples_valid
+            ) (
+                'typed aggregate evidence failed outside exact startup ' +
+                "coverage validation: $($typeCase.label)"
+            )
+        } else {
+            Assert-ReleaseScore (
+                @($typedEvidenceTamper.score.manifest_issues) -contains
+                    [string]$typeCase.expected_manifest_issue
+            ) (
+                'typed raw evidence failed outside exact schedule ' +
+                "validation: $($typeCase.label)"
+            )
+        }
+    }
+
+    # Keep schema 4 intact while substituting strings and 0/1 for JSON
+    # booleans at independent evidence boundaries. Also rebuild an otherwise
+    # internally consistent display snapshot around a 10.0 connector token so
+    # the failure proves the release scorer rejects an integral JSON float,
+    # rather than merely detecting a stale topology signature.
+    $booleanTypeDirectory = Join-Path `
+        $testRoot 'negative-release-boolean-and-output-types'
+    Copy-ReleaseFixture `
+        -Source $currentDirectory -Destination $booleanTypeDirectory
+    $booleanTypeManifestPath = Join-Path `
+        $booleanTypeDirectory 'benchmark-manifest.json'
+    $booleanTypeManifest = Read-FixtureJson -Path $booleanTypeManifestPath
+    $booleanTopology = $booleanTypeManifest.machine.display_topology
+    $integralJsonFloat = (
+        ConvertFrom-Json -InputObject '{"value":10.0}'
+    ).value
+    $booleanTopology.release_evidence_valid = 'true'
+    $booleanTopology.topology_stable = 1
+    $booleanTypeManifest.settings.vtebench_enabled = 1
+    $booleanTypeManifest.settings.monitor_transition_enabled = 'true'
+    $booleanTypeManifest.settings.unidentified_display_allowed = 0
+    $booleanKettleRecord = @(
+        $booleanTypeManifest.terminals |
+            Where-Object { $_.name -ceq 'kettle' }
+    )[0]
+    $booleanKettleRecord.available = 'true'
+    $booleanKettleRecord.configuration.claim_eligible = 1
+    foreach ($snapshot in @(
+        $booleanTopology.acquisition_start,
+        $booleanTopology.acquisition_end
+    )) {
+        $snapshot.active_connections[0].video_output_technology =
+            $integralJsonFloat
+        $snapshot.desktop_screens[0].connection.video_output_technology =
+            $integralJsonFloat
+        $snapshot.signature_sha256 = (
+            Get-FixtureDisplaySnapshotSignature -Snapshot $snapshot
+        )
+    }
+    $booleanTopology.start_signature_sha256 = (
+        $booleanTopology.acquisition_start.signature_sha256
+    )
+    $booleanTopology.end_signature_sha256 = (
+        $booleanTopology.acquisition_end.signature_sha256
+    )
+    $booleanTopology.desktop_screens = [object[]](
+        $booleanTopology.acquisition_start.desktop_screens
+    )
+    $booleanTopology.active_connections = [object[]](
+        $booleanTopology.acquisition_start.active_connections
+    )
+    $booleanTopology.active_physical_monitors = [object[]](
+        $booleanTopology.acquisition_start.active_physical_monitors
+    )
+    $booleanTopology.target_edid_monitors = [object[]](
+        $booleanTopology.acquisition_start.target_edid_monitors
+    )
+    $booleanTopology.stability_monitoring.checkpoints[0].snapshot = (
+        $booleanTopology.acquisition_start
+    )
+    $booleanTopology.stability_monitoring.checkpoints[1].snapshot = (
+        $booleanTopology.acquisition_end
+    )
+    Write-FixtureJson `
+        -Path $booleanTypeManifestPath -Value $booleanTypeManifest
+
+    $booleanThroughputPath = Join-Path `
+        $booleanTypeDirectory 'throughput-kettle.json'
+    $booleanThroughput = Read-FixtureJson -Path $booleanThroughputPath
+    $booleanThroughput.drain_probe_required = 'true'
+    Write-FixtureJson `
+        -Path $booleanThroughputPath -Value $booleanThroughput
+
+    $booleanMenuPath = Join-Path $booleanTypeDirectory 'menu-hover.json'
+    $booleanMenu = Read-FixtureJson -Path $booleanMenuPath
+    $booleanMenu.passed = 1
+    Write-FixtureJson -Path $booleanMenuPath -Value $booleanMenu
+
+    $booleanTransitionPath = Join-Path `
+        $booleanTypeDirectory 'monitor-transition.json'
+    $booleanTransition = Read-FixtureJson -Path $booleanTransitionPath
+    $booleanTransition.release_evidence_valid = 'true'
+    $booleanTransition.topology_stable = 1
+    Write-FixtureJson `
+        -Path $booleanTransitionPath -Value $booleanTransition
+
+    $booleanTypeTamper = Invoke-ReleaseScore `
+        -CurrentDirectory $booleanTypeDirectory `
+        -BaselineDirectory $baselineDirectory `
+        -Label 'negative-release-boolean-and-output-types' `
+        -ScoreScript $negativeScoreScript
+    Assert-ExpectedScoreFailure `
+        -Invocation $booleanTypeTamper `
+        -Message 'release boolean and output-technology type substitutions'
+    foreach ($expectedIssue in @(
+        'benchmark display topology is not valid release evidence',
+        'benchmark display topology was not stable for the full run',
+        'checkpoint start display identity connection evidence is invalid',
+        'checkpoint end display identity connection evidence is invalid',
+        'start display identity connection evidence is invalid',
+        'end display identity connection evidence is invalid',
+        'release benchmark setting differs: vtebench_enabled',
+        'release benchmark setting differs: monitor_transition_enabled',
+        'release benchmark setting differs: unidentified_display_allowed',
+        'manifest marks kettle unavailable',
+        'release configuration eligibility is invalid for kettle'
+    )) {
+        Assert-ReleaseScore (
+            @($booleanTypeTamper.score.manifest_issues) -contains
+                $expectedIssue
+        ) "release scorer accepted a typed boolean/output value: $expectedIssue"
+    }
+    Assert-ReleaseScore (
+        -not [bool]$booleanTypeTamper.score.throughput_passed -and
+        -not [bool]$booleanTypeTamper.score.menu_hover_data_valid -and
+        @($booleanTypeTamper.score.monitor_transition_issues) -contains
+            'monitor-transition did not pass its evidence contract'
+    ) 'release scorer accepted typed raw boolean evidence'
+
+    $displayMonitorDirectory = Join-Path `
+        $testRoot 'negative-display-continuous-monitor-contract'
+    Copy-ReleaseFixture `
+        -Source $currentDirectory -Destination $displayMonitorDirectory
+    $displayMonitorPath = Join-Path `
+        $displayMonitorDirectory 'benchmark-manifest.json'
+    $displayMonitorManifest = Read-FixtureJson -Path $displayMonitorPath
+    $displayMonitorManifest.machine.display_topology.stability_monitoring.
+        monitoring_active_for_run = $false
+    Write-FixtureJson `
+        -Path $displayMonitorPath -Value $displayMonitorManifest
+    $displayMonitorTamper = Invoke-ReleaseScore `
+        -CurrentDirectory $displayMonitorDirectory `
+        -BaselineDirectory $baselineDirectory `
+        -Label 'negative-display-continuous-monitor-contract' `
+        -ScoreScript $negativeScoreScript
+    Assert-ExpectedScoreFailure `
+        -Invocation $displayMonitorTamper `
+        -Message 'inactive continuous display monitor'
+    Assert-ReleaseScore (
+        @($displayMonitorTamper.score.manifest_issues) -contains
+            'continuous display stability contract is invalid'
+    ) 'inactive continuous display monitoring was accepted'
+
+    $displayCheckpointDirectory = Join-Path `
+        $testRoot 'negative-display-event-and-middle-checkpoint'
+    Copy-ReleaseFixture `
+        -Source $currentDirectory -Destination $displayCheckpointDirectory
+    $displayCheckpointPath = Join-Path `
+        $displayCheckpointDirectory 'benchmark-manifest.json'
+    $displayCheckpointManifest = Read-FixtureJson -Path $displayCheckpointPath
+    $displayCheckpointTopology = (
+        $displayCheckpointManifest.machine.display_topology
+    )
+    $displayCheckpointStability = (
+        $displayCheckpointTopology.stability_monitoring
+    )
+    $middleSnapshot = (
+        $displayCheckpointTopology.acquisition_start |
+            ConvertTo-Json -Depth 16 |
+            ConvertFrom-Json
+    )
+    $middleSnapshot.captured_at = '2026-07-26T12:15:00.0000000-07:00'
+    $middleSnapshot.desktop_screens[0].refresh_hz = 120
+    $middleSnapshot.signature_sha256 = (
+        Get-FixtureDisplaySnapshotSignature -Snapshot $middleSnapshot
+    )
+    $tamperedSignatureSnapshot = (
+        $displayCheckpointTopology.acquisition_start |
+            ConvertTo-Json -Depth 16 |
+            ConvertFrom-Json
+    )
+    $tamperedSignatureSnapshot.signature_sha256 = ('dd' * 32)
+    $displayCheckpointStability.display_change_events = [object[]]@(
+        [pscustomobject][ordered]@{
+            sequence = 1
+            observed_at = '2026-07-26T12:15:00.0000000-07:00'
+        }
+    )
+    $displayCheckpointStability.checkpoints = [object[]]@(
+        $displayCheckpointStability.checkpoints[0],
+        [pscustomobject][ordered]@{
+            phase = 'throughput'
+            snapshot = $middleSnapshot
+        },
+        [pscustomobject][ordered]@{
+            phase = 'latency'
+            snapshot = $tamperedSignatureSnapshot
+        },
+        $displayCheckpointStability.checkpoints[1]
+    )
+    Write-FixtureJson `
+        -Path $displayCheckpointPath -Value $displayCheckpointManifest
+    $displayCheckpointTamper = Invoke-ReleaseScore `
+        -CurrentDirectory $displayCheckpointDirectory `
+        -BaselineDirectory $baselineDirectory `
+        -Label 'negative-display-event-and-middle-checkpoint' `
+        -ScoreScript $negativeScoreScript
+    Assert-ExpectedScoreFailure `
+        -Invocation $displayCheckpointTamper `
+        -Message 'display event and changed intermediate topology'
+    foreach ($expectedIssue in @(
+        'display-change events occurred during benchmarking',
+        'display stability checkpoint is invalid: throughput'
+    )) {
+        Assert-ReleaseScore (
+            @($displayCheckpointTamper.score.manifest_issues) -contains
+                $expectedIssue
+        ) "continuous display evidence accepted: $expectedIssue"
+    }
+
+    $campaignPinDirectory = Join-Path `
+        $testRoot 'negative-comparator-campaign-pin-current'
+    $baselineCampaignPinDirectory = Join-Path `
+        $testRoot 'negative-comparator-campaign-pin-baseline'
+    Copy-ReleaseFixture `
+        -Source $currentDirectory -Destination $campaignPinDirectory
+    Copy-ReleaseFixture `
+        -Source $baselineDirectory -Destination $baselineCampaignPinDirectory
+    $campaignPinPath = Join-Path `
+        $campaignPinDirectory 'benchmark-manifest.json'
+    $campaignPinManifest = Read-FixtureJson -Path $campaignPinPath
+    $campaignPinManifest.comparator_campaign.campaign_file.sha256 = ('ff' * 32)
+    Write-FixtureJson -Path $campaignPinPath -Value $campaignPinManifest
+    $baselineCampaignPinPath = Join-Path `
+        $baselineCampaignPinDirectory 'benchmark-manifest.json'
+    $baselineCampaignPinManifest = Read-FixtureJson `
+        -Path $baselineCampaignPinPath
+    $baselineCampaignPinManifest.comparator_campaign.campaign_id = (
+        'kettle-windows-2026-07-26-tampered'
+    )
+    Write-FixtureJson `
+        -Path $baselineCampaignPinPath -Value $baselineCampaignPinManifest
+    $campaignPinTamper = Invoke-ReleaseScore `
+        -CurrentDirectory $campaignPinDirectory `
+        -BaselineDirectory $baselineCampaignPinDirectory `
+        -Label 'negative-comparator-campaign-pins' `
+        -ScoreScript $negativeScoreScript
+    Assert-ExpectedScoreFailure `
+        -Invocation $campaignPinTamper `
+        -Message 'current and baseline comparator campaign pin tampering'
+    Assert-ReleaseScore (
+        @($campaignPinTamper.score.manifest_issues) -contains
+            'comparator campaign evidence differs from the release pin' -and
+        @($campaignPinTamper.score.baseline_issues) -contains
+            'baseline comparator campaign evidence differs from the release pin'
+    ) 'tampered current or baseline comparator campaign evidence was accepted'
+
+    $peerIdentityDirectory = Join-Path `
+        $testRoot 'negative-comparator-peer-identities'
+    Copy-ReleaseFixture `
+        -Source $currentDirectory -Destination $peerIdentityDirectory
+    $peerIdentityPath = Join-Path `
+        $peerIdentityDirectory 'benchmark-manifest.json'
+    $peerIdentityManifest = Read-FixtureJson -Path $peerIdentityPath
+    $peerRecords = [ordered]@{}
+    foreach ($record in $peerIdentityManifest.terminals) {
+        $peerRecords[[string]$record.name] = $record
+    }
+    $peerRecords.alacritty.executable_sha256 = ('ee' * 32)
+    $peerRecords.wezterm.executable_bytes++
+    $peerRecords.rio.version = '0.0.0-tampered'
+    $peerRecords.tabby.source.runtime_kind = 'unverified-path'
+    $peerRecords.wt.comparator_role = 'isolated-confirmed'
+    $peerRecords.wt.installed_package.package_full_name = (
+        'Microsoft.WindowsTerminal_tampered_x64__8wekyb3d8bbwe'
+    )
+    Write-FixtureJson `
+        -Path $peerIdentityPath -Value $peerIdentityManifest
+    $peerIdentityTamper = Invoke-ReleaseScore `
+        -CurrentDirectory $peerIdentityDirectory `
+        -BaselineDirectory $baselineDirectory `
+        -Label 'negative-comparator-peer-identities' `
+        -ScoreScript $negativeScoreScript
+    Assert-ExpectedScoreFailure `
+        -Invocation $peerIdentityTamper `
+        -Message 'comparator executable and package identity tampering'
+    foreach ($terminal in @('alacritty', 'wezterm', 'rio', 'tabby', 'wt')) {
+        $expectedIssue = "$terminal identity differs from comparator campaign"
+        Assert-ReleaseScore (
+            @($peerIdentityTamper.score.manifest_issues) -contains
+                $expectedIssue
+        ) "tampered comparator identity was accepted: $terminal"
+    }
+    Assert-ReleaseScore (
+        @($peerIdentityTamper.score.manifest_issues) -contains
+            'Windows Terminal installed Appx identity is invalid'
+    ) 'tampered Windows Terminal Appx identity was accepted'
+
+    $windowsTerminalLauncherDirectory = Join-Path `
+        $testRoot 'negative-windows-terminal-launcher'
+    Copy-ReleaseFixture `
+        -Source $currentDirectory `
+        -Destination $windowsTerminalLauncherDirectory
+    $windowsTerminalLauncherPath = Join-Path `
+        $windowsTerminalLauncherDirectory 'benchmark-manifest.json'
+    $windowsTerminalLauncherManifest = Read-FixtureJson `
+        -Path $windowsTerminalLauncherPath
+    $windowsTerminalLauncherRecord = @(
+        $windowsTerminalLauncherManifest.terminals |
+            Where-Object { $_.name -ceq 'wt' }
+    )[0]
+    $windowsTerminalLauncherRecord.launcher = 'C:\shadow\wt.exe'
+    Write-FixtureJson `
+        -Path $windowsTerminalLauncherPath `
+        -Value $windowsTerminalLauncherManifest
+    $windowsTerminalLauncherTamper = Invoke-ReleaseScore `
+        -CurrentDirectory $windowsTerminalLauncherDirectory `
+        -BaselineDirectory $baselineDirectory `
+        -Label 'negative-windows-terminal-launcher' `
+        -ScoreScript $negativeScoreScript
+    Assert-ExpectedScoreFailure `
+        -Invocation $windowsTerminalLauncherTamper `
+        -Message 'Windows Terminal PATH-shadow launcher'
+    Assert-ReleaseScore (
+        @($windowsTerminalLauncherTamper.score.manifest_issues) -contains
+            'wt identity differs from comparator campaign' -and
+        @($windowsTerminalLauncherTamper.score.manifest_issues) -contains
+            'Windows Terminal release launcher is not the installed Appx host'
+    ) 'a Windows Terminal PATH-shadow launcher was accepted'
 
     $monitorContractDirectory = Join-Path `
         $testRoot 'negative-monitor-transition-contract'
@@ -2788,6 +3556,75 @@ try {
             'baseline environment differs: measurement_settings'
     ) 'vtebench order tamper failed outside exact environment provenance'
 
+    $methodologyDirectory = Join-Path `
+        $testRoot 'negative-release-methodology-profile'
+    Copy-ReleaseFixture `
+        -Source $currentDirectory -Destination $methodologyDirectory
+    $methodologyPath = Join-Path `
+        $methodologyDirectory 'benchmark-manifest.json'
+    $methodologyManifest = Read-FixtureJson -Path $methodologyPath
+    $methodologySettings = $methodologyManifest.settings
+    $methodologySettings.terminals[0] = 'wt'
+    $methodologySettings.terminals[1] = 'kettle'
+    $methodologySettings.benchmark_seed = 'alternate-release-seed'
+    $methodologySettings.startup_runs = 18
+    $methodologySettings.idle_samples = 12
+    $methodologySettings.idle_seconds = 11
+    $methodologySettings.latency_samples = 120
+    $methodologySettings.latency_block_size = 20
+    $methodologySettings.max_latency_censored = 4
+    $methodologySettings.latency_timeout_ms = 801
+    $methodologySettings.menu_hover_samples = 201
+    $methodologySettings.menu_hover_block_size = 19
+    $methodologySettings.monitor_transition_samples_per_state = 11
+    $methodologySettings.throughput_iterations = 12
+    $methodologySettings.minimum_throughput_iterations = 12
+    $methodologySettings.terminal_order_offset = 4
+    $methodologySettings.probe_cooldown_seconds = 14
+    $methodologySettings.window_pixels.width = 1281
+    $methodologySettings.window_pixels.height = 801
+    Write-FixtureJson `
+        -Path $methodologyPath -Value $methodologyManifest
+    $methodologyTamper = Invoke-ReleaseScore `
+        -CurrentDirectory $methodologyDirectory `
+        -BaselineDirectory $baselineDirectory `
+        -Label 'negative-release-methodology-profile' `
+        -ScoreScript $negativeScoreScript
+    Assert-ExpectedScoreFailure `
+        -Invocation $methodologyTamper `
+        -Message 'noncanonical release acquisition methodology'
+    foreach ($settingName in @(
+        'startup_runs',
+        'idle_samples',
+        'idle_seconds',
+        'latency_samples',
+        'latency_block_size',
+        'max_latency_censored',
+        'latency_timeout_ms',
+        'menu_hover_samples',
+        'menu_hover_block_size',
+        'monitor_transition_samples_per_state',
+        'throughput_iterations',
+        'minimum_throughput_iterations',
+        'terminal_order_offset',
+        'probe_cooldown_seconds'
+    )) {
+        Assert-ReleaseScore (
+            @($methodologyTamper.score.manifest_issues) -contains
+                "release benchmark setting differs: $settingName"
+        ) "release scorer accepted methodology override: $settingName"
+    }
+    foreach ($expectedIssue in @(
+        'release terminal sequence differs from the contract',
+        'release benchmark seed differs from the contract',
+        'release benchmark window differs from the contract'
+    )) {
+        Assert-ReleaseScore (
+            @($methodologyTamper.score.manifest_issues) -contains
+                $expectedIssue
+        ) "release scorer missed methodology issue: $expectedIssue"
+    }
+
     $visitDirectory = Join-Path $testRoot 'negative-williams-visits'
     Copy-ReleaseFixture `
         -Source $currentDirectory -Destination $visitDirectory
@@ -3087,6 +3924,157 @@ try {
         @($displayMethodTamper.score.manifest_issues) -contains
             'start display identity acquisition method is invalid'
     ) 'unsupported display identity method was not rejected semantically'
+
+    $connectionTypeDirectory = Join-Path `
+        $testRoot 'negative-nonphysical-display-connections'
+    Copy-ReleaseFixture `
+        -Source $currentDirectory -Destination $connectionTypeDirectory
+    $connectionTypeManifestPath = Join-Path `
+        $connectionTypeDirectory 'benchmark-manifest.json'
+    $connectionTypeManifest = Read-FixtureJson `
+        -Path $connectionTypeManifestPath
+    $connectionTypeDisplay = (
+        $connectionTypeManifest.machine.display_topology
+    )
+    foreach ($snapshot in @(
+        $connectionTypeDisplay.acquisition_start,
+        $connectionTypeDisplay.acquisition_end
+    )) {
+        Set-FixtureNonPhysicalConnectionEvidence -Topology $snapshot
+        $snapshot.signature_sha256 = (
+            Get-FixtureDisplaySnapshotSignature -Snapshot $snapshot
+        )
+    }
+    Set-FixtureNonPhysicalConnectionEvidence `
+        -Topology $connectionTypeDisplay
+    $connectionTypeDisplay.start_signature_sha256 = (
+        $connectionTypeDisplay.acquisition_start.signature_sha256
+    )
+    $connectionTypeDisplay.end_signature_sha256 = (
+        $connectionTypeDisplay.acquisition_end.signature_sha256
+    )
+    Write-FixtureJson `
+        -Path $connectionTypeManifestPath -Value $connectionTypeManifest
+
+    $connectionTypeTransitionPath = Join-Path `
+        $connectionTypeDirectory 'monitor-transition.json'
+    $connectionTypeTransition = Read-FixtureJson `
+        -Path $connectionTypeTransitionPath
+    Set-FixtureNonPhysicalConnectionEvidence `
+        -Topology $connectionTypeTransition.topology_start
+    Set-FixtureNonPhysicalConnectionEvidence `
+        -Topology $connectionTypeTransition.topology_end
+    Write-FixtureJson `
+        -Path $connectionTypeTransitionPath `
+        -Value $connectionTypeTransition
+
+    $connectionTypeTamper = Invoke-ReleaseScore `
+        -CurrentDirectory $connectionTypeDirectory `
+        -BaselineDirectory $baselineDirectory `
+        -Label 'negative-nonphysical-display-connections' `
+        -ScoreScript $negativeScoreScript
+    Assert-ExpectedScoreFailure `
+        -Invocation $connectionTypeTamper `
+        -Message 'signed Miracast and indirect display connections'
+    Assert-ReleaseScore (
+        @($connectionTypeTamper.score.manifest_issues) -contains
+            'start display identity connection evidence is invalid' -and
+        @($connectionTypeTamper.score.manifest_issues) -contains
+            'end display identity connection evidence is invalid' -and
+        @($connectionTypeTamper.score.monitor_transition_issues) -contains
+            (
+                'monitor-transition start display identity connection ' +
+                'evidence is invalid'
+            ) -and
+        @($connectionTypeTamper.score.monitor_transition_issues) -contains
+            (
+                'monitor-transition end display identity connection ' +
+                'evidence is invalid'
+            )
+    ) 'nonphysical display connections were not rejected semantically'
+
+    $missingConnectionDirectory = Join-Path `
+        $testRoot 'negative-missing-display-connection'
+    Copy-ReleaseFixture `
+        -Source $currentDirectory -Destination $missingConnectionDirectory
+    $missingConnectionManifestPath = Join-Path `
+        $missingConnectionDirectory 'benchmark-manifest.json'
+    $missingConnectionManifest = Read-FixtureJson `
+        -Path $missingConnectionManifestPath
+    $missingConnectionDisplay = (
+        $missingConnectionManifest.machine.display_topology
+    )
+    foreach ($snapshot in @(
+        $missingConnectionDisplay.acquisition_start,
+        $missingConnectionDisplay.acquisition_end
+    )) {
+        $snapshot.active_connections = [object[]]@(
+            $snapshot.active_connections | Select-Object -Skip 1
+        )
+        $snapshot.desktop_screens[0].connection = $null
+        $snapshot.signature_sha256 = (
+            Get-FixtureDisplaySnapshotSignature -Snapshot $snapshot
+        )
+    }
+    $missingConnectionDisplay.desktop_screens = [object[]](
+        $missingConnectionDisplay.acquisition_start.desktop_screens
+    )
+    $missingConnectionDisplay.active_connections = [object[]](
+        $missingConnectionDisplay.acquisition_start.active_connections
+    )
+    $missingConnectionDisplay.start_signature_sha256 = (
+        $missingConnectionDisplay.acquisition_start.signature_sha256
+    )
+    $missingConnectionDisplay.end_signature_sha256 = (
+        $missingConnectionDisplay.acquisition_end.signature_sha256
+    )
+    Write-FixtureJson `
+        -Path $missingConnectionManifestPath `
+        -Value $missingConnectionManifest
+
+    $missingConnectionTransitionPath = Join-Path `
+        $missingConnectionDirectory 'monitor-transition.json'
+    $missingConnectionTransition = Read-FixtureJson `
+        -Path $missingConnectionTransitionPath
+    foreach ($topology in @(
+        $missingConnectionTransition.topology_start,
+        $missingConnectionTransition.topology_end
+    )) {
+        $topology.active_connections[0].instance_name = (
+            $topology.active_connections[1].instance_name
+        )
+        $topology.desktop_screens[0].connection.instance_name = (
+            $topology.active_connections[1].instance_name
+        )
+    }
+    Write-FixtureJson `
+        -Path $missingConnectionTransitionPath `
+        -Value $missingConnectionTransition
+
+    $missingConnectionTamper = Invoke-ReleaseScore `
+        -CurrentDirectory $missingConnectionDirectory `
+        -BaselineDirectory $baselineDirectory `
+        -Label 'negative-missing-display-connection' `
+        -ScoreScript $negativeScoreScript
+    Assert-ExpectedScoreFailure `
+        -Invocation $missingConnectionTamper `
+        -Message 'signed missing and mismatched display connections'
+    Assert-ReleaseScore (
+        @($missingConnectionTamper.score.manifest_issues) -contains
+            'start display identity connection evidence is invalid' -and
+        @($missingConnectionTamper.score.manifest_issues) -contains
+            'end display identity connection evidence is invalid' -and
+        @($missingConnectionTamper.score.monitor_transition_issues) -contains
+            (
+                'monitor-transition start display identity connection ' +
+                'evidence is invalid'
+            ) -and
+        @($missingConnectionTamper.score.monitor_transition_issues) -contains
+            (
+                'monitor-transition end display identity connection ' +
+                'evidence is invalid'
+            )
+    ) 'missing or mismatched display connections were not rejected'
 
     $latencyWorkloadDirectory = Join-Path `
         $testRoot 'negative-latency-workload'

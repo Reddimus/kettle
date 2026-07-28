@@ -103,14 +103,60 @@ printf 'hello\n' | kettle exec --strip-ansi -- sh -c 'read x; echo "got:$x"'
 ```
 
 Interactive terminal stdin is not stolen from the user, and `/dev/null` stays
-closed rather than being treated as useful input. EOF on the input pipe closes
-the PTY input side.
+closed rather than being treated as useful input. On pipe EOF, Kettle reads the
+child PTY's live Unix `termios` state. In canonical mode it sends that PTY's
+configured VEOF character once for empty or line-terminated input, or twice
+when the forwarded stream ends with an unterminated record (the first completes
+that record; the second returns zero from the next read), while retaining the
+bidirectional master used for DA, DSR, Kitty, and other terminal replies.
+Each VEOF byte is a separate nonblocking, lowest-priority writer step, so a
+full canonical buffer cannot trap the arbiter ahead of a later terminal reply.
+Boundary detection applies the live `IGNCR`, `ICRNL`, and `INLCR` mappings and
+the enabled VEOL/VEOL2 characters rather than assuming default CR/LF settings.
+It also models the host line discipline's VWERASE behavior: Linux N_TTY word
+classes differ from BSD simple and `ALTWERASE` modes. `EXTPROC` bypasses normal
+canonical editing, so Kettle never injects VEOF while it is active and treats
+pending input across an `EXTPROC` transition as ambiguous.
+The incremental canonical-record tracker retains at most 64 KiB. An oversized
+unterminated record is conservatively treated as nonempty (two VEOF
+characters), while an ambiguous live `termios` transition or trailing VLNEXT
+fails explicitly instead of guessing.
 
-Native Windows ConPTY stdin forwarding remains disabled: closing or otherwise
-driving conin from a non-interactive parent currently makes console children
-exit with `STATUS_CONTROL_C_EXIT` on the Windows CI runner. WSL uses the Unix
-path above. The MCP `kettle_run` tool still gives the child no stdin by design;
-use `kettle exec` directly for Unix/WSL stdin-driven one-shot commands.
+A Unix PTY has no independently closable input half. If the child has selected
+noncanonical/raw or `EXTPROC` input, or its VEOF is disabled or cannot be
+inspected, Kettle
+therefore keeps the PTY open and prints an explicit diagnostic instead of
+closing the shared master or guessing an input byte. Raw-mode applications
+must use their own protocol delimiter or `--timeout`.
+
+Headless `kettle exec` has no clipboard sink, so its DA1 reply omits extension
+`52` and OSC 52 writes are not advertised. OSC 52 reads receive an empty reply
+rather than exposing the host clipboard. All protocol replies use a dedicated
+writer arbiter with a bounded 64-message priority queue, even when stdin is not
+forwarded. A child that floods queries without reading replies therefore fails
+closed with exit 125 instead of blocking timeout or cancellation. The semantic
+VT-event queue is independently bounded at 1024 events; overflow also fails the
+command explicitly instead of dropping reply-bearing events. Reply admission
+and each incremental Unix VEOF attempt are ordered by a short nonblocking gate,
+so an admitted terminal reply cannot be overtaken by a stale EOF decision. A
+query generated only after the kernel accepted a VEOF cannot retroactively
+overtake that byte.
+
+Native Windows ConPTY forwards piped bytes too, so delimiter-driven commands
+(`read`, a line-oriented parser, a known byte count) work normally. ConPTY has
+no safe portable input half-close, however: when the parent pipe reaches EOF,
+Kettle keeps conin alive to preserve the child and terminal-reply channel
+instead of forcing `STATUS_CONTROL_C_EXIT`. A Windows child that waits for EOF
+must use its own delimiter or `--timeout`. WSL uses the Unix canonical-EOF path
+above. The MCP `kettle_run` tool still gives the child no stdin by design; use
+`kettle exec` directly for stdin-driven one-shot commands.
+
+Kettle configures only its own ConPTY input-pipe writer for `PIPE_NOWAIT` and
+advances it in at most 1 KiB steps. The separate synchronous handle passed to
+`CreatePseudoConsole` remains unchanged. A child that stops reading input can
+therefore return zero progress to the bounded priority writer instead of
+parking it inside a kernel write; protocol replies, timeout, cancellation, and
+pane shutdown remain observable under backpressure.
 
 ## Control server + `kettle ctl`
 
@@ -309,14 +355,22 @@ the developer's machine, so they are intentionally not CI gates:
 
 ```sh
 scripts/check-agent-cli-smoke.sh
+# Resolver/quoting regression fixtures only (no installed agents required):
+scripts/check-agent-cli-smoke.sh --self-test
 ```
 
 Always verifies Kettle's own non-interactive agent path first: `kettle exec`
 PTY environment (`TERM=xterm-256color`, `COLORTERM=truecolor`), `kettle exec
 --json` output events, and `kettle mcp --self-test`. Then it runs Codex CLI,
-Claude Code CLI, clean Neovim, and configured Neovim/AstroNvim through
-`kettle exec` when those commands are present on `PATH`; missing optional tools
-are reported as skips.
+Claude Code CLI, clean Neovim, and configured Neovim/AstroNvim version, help,
+or command-path probes through `kettle exec` when those commands are present on
+`PATH`; missing optional tools are reported as skips. The Codex help probe also
+pins the `--image <FILE>` initial-attachment option. This smoke does not drive
+either client's interactive composer, populate a clipboard, inject a paste key,
+or assert an attachment UI state. On Windows under Git Bash, extensionless npm
+POSIX shims are never passed directly to `CreateProcessW`; the smoke resolves
+the adjacent `.cmd` launcher through `cmd.exe /d /s /c`. Its self-test pins
+that choice with deliberately unusable extensionless shadow files.
 
 ```sh
 just live-render-smoke
@@ -343,7 +397,8 @@ CLI and Claude Code CLI `--version` probes plus `codex exec --help` /
 `claude --print --help` output captures, a prompt-shaped `➜  ~` marker, a
 deterministic Windows Codex active-placeholder and queued-input cursor fixtures,
 tmux attach/send/capture
-when `tmux` is installed, and clean/configured
+when `tmux` is installed, including a build-capability-gated SIXEL render on
+tmux 3.4 or newer built with `--enable-sixel`, and clean/configured
 Neovim/AstroNvim marker buffers plus clean and configured Neovim vertical-split
 workflow states through `kettle ctl`. The awaited editor text is assembled from
 separate halves inside Vimscript and never appears literally in the typed shell
@@ -356,11 +411,19 @@ exact response inside its generated output frame, so command echo and a stale
 `KETTLE_AGENT_AUTH_SMOKE=strict` when missing or expired external credentials
 should fail the run. It saves PNG screenshots,
 `read_screen`, `read_cells`, and
-`analysis.json` under
-`target/diagnostics/agent-tui-*`, and fails if a captured state is blank or
-lacks visible terminal cells. Missing optional CLIs/tools are reported as skips;
-the shell and prompt-shaped states always run. When tmux is available, the run
-also writes `tmux.png`, `tmux.screen.json`, and `tmux.cells.json`.
+`analysis.json` under `target/diagnostics/agent-tui-*` on Unix. On Windows, the
+default is an unpredictable protected-DACL directory at
+`%LOCALAPPDATA%\kettle\kettle-live-ui-diagnostics-*\agent-tui-*`; explicit
+`--out-dir` still overrides it. The harness fails if a captured state is blank
+or lacks visible terminal cells. Missing optional CLIs/tools are reported as skips;
+the shell and prompt-shaped states always run. The Codex/Claude legs remain
+version/help captures or opt-in noninteractive authenticated prompts; they do
+not test interactive image-paste shortcuts. When tmux is available, the run
+also writes `tmux.png`, `tmux.screen.json`, and `tmux.cells.json`. A
+compile-capable tmux with nonzero cell-pixel geometry additionally produces
+`tmux-sixel.png` and pixel evidence. Zero geometry produces a captured
+`tmux-sixel-fallback` state but remains an explicit render skip; an older,
+disabled, or unverified tmux build is skipped before the fixture.
 
 On Windows, use the separate cross-boundary mode to keep the shipped
 `kettle.exe`/ConPTY/window path while running the shell and tools inside WSL:
@@ -445,11 +508,16 @@ under `target/diagnostics/tab-title-*`.
 just split-titlebar-smoke
 ```
 
-Starts a real Kettle window with pane titlebars enabled, emits OSC 7 plus a
-truncated shell title, creates a split, and asserts `ui_geometry.pane_titlebars`
-recovers the full cwd path for the rendered titlebar labels while `list_panes`
-still preserves the raw shell title. Artifacts are saved under
-`target/diagnostics/split-titlebar-*`.
+Starts real Kettle windows with top- and bottom-positioned pane titlebars,
+emits authoritative cwd metadata plus a truncated shell title, and creates a
+split in each. The smoke checks `list_panes`/`ui_geometry.pane_titlebars`, the
+title-position-aware PTY grid edge, full-path-or-leaf fitting, and exact
+configured focused/transmit, receiving, and inactive colors in captured PNGs.
+Sampling stays in the title label's leading blank cell and the adjacent
+grid-side padding, avoiding text, icon, and border/accent pixels. Per-position
+screenshots/geometry and aggregate `analysis.json` are saved under the private
+Windows diagnostic root (or the selected platform diagnostic root) in a
+`split-titlebar-*` directory.
 
 ```sh
 just zoom-keybind-smoke

@@ -10,14 +10,17 @@ suite remains a separate Terminator/Ghostty smoke gate.
 `perf-all.ps1` defaults to `-Mode release`.
 
 - `release` is the publication gate. It requires PowerShell 7, all six
-  terminals, every probe, the pinned sample counts, isolated comparator
-  configurations, stable display provenance, and no skipped or censored
-  evidence beyond the stated latency allowance. A `current` candidate is built
-  from the clean checkout. A `baseline` candidate must be the exact GUI binary
-  extracted from a previously verified signed release archive and is pinned by
-  its full source commit and SHA-256. The scorer requires both compatible
-  release-mode runs. Release mode does not accept `-KettleConfig`,
-  `-AllowUnidentifiedDisplay`, or probe-skipping switches.
+  terminals in the canonical order, every probe, the pinned seed, sample
+  counts, 15-second cooldown, 1280×800 comparator client, isolated comparator
+  configurations, one reviewed comparator campaign, stable display provenance,
+  and no skipped or censored evidence beyond the stated latency allowance. A
+  `current` candidate is built from the clean checkout. A `baseline` candidate
+  must be the exact GUI binary extracted from a previously verified signed
+  release archive and is pinned by its full source commit and SHA-256. The
+  scorer requires both compatible release-mode runs and rejects noncanonical
+  caller thresholds independently of the manifest. Release mode does not
+  accept `-ManifestOnly`, `-KettleConfig`, comparator executable/environment
+  overrides, `-AllowUnidentifiedDisplay`, or probe-skipping switches.
 - `smoke` is for discovery, parser checks, and short local experiments. It
   permits custom counts, explicit Kettle configuration, skipped probes, and
   `-AllowUnidentifiedDisplay`. Smoke output is never release evidence.
@@ -52,6 +55,7 @@ pwsh -NoLogo -NoProfile -File scripts/perf/perf-all.ps1 `
   -Mode release -KettleCandidate current -Label release-candidate
 
 pwsh -NoLogo -NoProfile -File scripts/perf/score.ps1 `
+  -Mode release `
   -ResultsDir target/perf-results/release-candidate `
   -BaselineResultsDir $baselineDir `
   -RequireLatency -RequireMenuHover -RequireVtebench `
@@ -70,9 +74,14 @@ build.
 
 | Script | Responsibility |
 | --- | --- |
-| `perf-all.ps1` | Creates one new retained-handle result directory, builds the release candidate, records machine/GPU/display/power/git/toolchain provenance, locks run-local configs, runs all probes, and invalidates the evidence if display topology changes |
+| `perf-all.ps1` | Creates one new retained-handle result directory, builds the release candidate, records machine/GPU/display/power/git/toolchain provenance, locks run-local configs, runs all probes, and invalidates the evidence on any continuous display-change event or probe-boundary topology mismatch |
+| `display-stability.ps1` | Subscribes to Windows display-setting changes and publishes ordered change events; `perf-all.ps1` captures and signs the full topology snapshots at probe boundaries, including switch-away-and-back cases |
+| `comparator-campaign.ps1` | Strictly parses the reviewed campaign, validates exact peer source/version/tree/executable/signature identities, and retains a read lease for every staged file during measurement |
+| `setup-comparator-campaign.ps1` | Downloads only the campaign's HTTPS allowlist before measurement, safely expands bounded archives into a new append-only local campaign, and fully revalidates offline reuse |
 | `isolated-configs.ps1` | Creates validated, run-local Kettle, Alacritty, WezTerm, Rio, and Tabby configs |
 | `schedule.ps1` | Produces deterministic seeded Williams-balanced orders for startup, idle, latency blocks, and throughput rounds |
+| `release-contract.ps1` | Defines the immutable release acquisition and scoring profiles, including terminal order, seed, sample counts, geometry, and absolute gates |
+| `display-identity-contract.ps1` | Normalizes signed/unsigned Windows output technologies and applies the explicit physical-connector allowlist |
 | `startup-ready.ps1` | Implements the bounded parent/child GO, paint, DSR, and READY protocol used by startup and idle measurements |
 | `startup-idle.ps1` | Measures controlled startup, fresh terminal-tree working set, and attributable idle CPU |
 | `go-signal.ps1` | Publishes the locked, unpredictable GO capability used to start throughput only after exact window placement |
@@ -103,10 +112,20 @@ Those results do not substitute for the Windows release suite.
 ## Prerequisites
 
 - Windows release: PowerShell 7, the Rust toolchain, an interactive foreground
-  desktop, Kettle from this checkout, Windows Terminal, Alacritty, WezTerm,
-  Rio, and Tabby. Discovery searches normal per-user/system install locations
-  and `%LOCALAPPDATA%\KettleBench\comparators`; explicit executable parameters
-  and `KETTLE_PERF_*_EXE` overrides are also supported.
+  desktop, Kettle from this checkout, the campaign's exact installed Windows
+  Terminal Appx version, and a fully staged reviewed comparator campaign under
+  `%LOCALAPPDATA%\KettleBench\campaigns`. Acquire or revalidate the pinned
+  assets before the run with:
+
+  ```pwsh
+  pwsh -NoLogo -NoProfile -File `
+    scripts/perf/setup-comparator-campaign.ps1
+  ```
+
+  Release acquisition immediately re-enters that setup in offline mode and
+  rejects ambient discovery plus explicit `KETTLE_PERF_*_EXE`/parameter
+  overrides. Smoke mode may still use normal installed discovery and explicit
+  executable overrides.
 - WSL vtebench: one explicitly selected WSL distribution with Rustup/Cargo,
   GNU `timeout`, and util-linux `setsid` and `script`, plus a clone of
   `alacritty/vtebench`. The harness verifies and builds the pinned
@@ -138,6 +157,24 @@ scrolling does not move the viewport, but its timings remain Kettle-only
 advisory evidence until equivalent peer automation exists.
 
 ## Comparator isolation
+
+Release schema 4 binds both candidates to the campaign named by
+`release-contract.ps1`. The tracked campaign file records each official
+release URL, asset bytes/hash, expanded file count/bytes/tree hash, terminal
+version and role, executable bytes/hash, and Authenticode status/certificate.
+Setup publishes a campaign only by an atomic append-only directory move.
+During a run, Kettle opens every file in each confirmed peer's staged tree and
+keeps those handles readable; the scorer requires the same complete campaign
+projection and terminal identities in current and baseline evidence. Windows
+Terminal remains an installed Appx because its supported launch/configuration
+boundary differs from the portable peers; its exact package family, full name,
+version, architecture, store signature, install location, executable, and
+campaign hash are rechecked at both ends of acquisition. Release acquisition
+executes the exact installed `WindowsTerminal.exe` Appx host directly and keeps
+that hash-validated file under a read lease for the entire run. It never
+launches Windows Terminal through `PATH`, `KETTLE_PERF_WT_EXE`, or the mutable
+App Execution Alias. Standalone/smoke probes may still use ambient `wt.exe`
+discovery, and their manifest labels that launch mode as advisory.
 
 The generated benchmark profile gives Kettle, Alacritty, WezTerm, Rio, and
 Tabby the same Cascadia Mono 13 pt font, opaque background, fixed palette,
@@ -175,15 +212,27 @@ pinned screens. Outside that probe, changing, disconnecting, or switching
 monitors invalidates all release evidence. A virtual/default 1024×768 fallback
 display is suitable only for manifest/synthetic smoke checks.
 
-The versioned identity resolver prefers a unique active `WmiMonitorID` mapping.
-When WMI is empty or ambiguous, it accepts only one active physical CCD path
-for that desktop source. The CCD monitor device-interface name must have the
-strict expected shape and exact `GUID_DEVINTERFACE_MONITOR` class; the harness
-derives one `HKLM\SYSTEM\CurrentControlSet\Enum\DISPLAY\...\Device Parameters`
-key from it and validates the binary EDID's header, declared blocks, checksums,
+The versioned identity resolver accepts a WMI monitor only with exactly one
+same-instance physical `WmiMonitorConnectionParams` record. Miracast (15),
+indirect wired (16), indirect virtual (17), undefined, and unknown output
+technologies are not physical release evidence. If the same-instance WMI
+connection is absent, the resolver may instead accept exactly one active
+physical CCD path for that desktop source; monitor and connection then both
+come from CCD rather than forming a mixed-source identity. The CCD monitor
+device-interface name must have the strict expected shape and exact
+`GUID_DEVINTERFACE_MONITOR` class; the harness derives one
+`HKLM\SYSTEM\CurrentControlSet\Enum\DISPLAY\...\Device Parameters` key from it
+and validates the binary EDID's header, declared blocks, checksums,
 manufacturer, and product against CCD. It never scans registry instances for a
-matching model. Missing, duplicate, malformed, or inconsistent evidence leaves
-the screen unidentified and fails closed in release mode.
+matching model. The scorer reconstructs the one-monitor/one-connection mapping
+from serialized evidence and re-applies the same physical allowlist. Missing,
+duplicate, malformed, synthetic, or inconsistent evidence leaves the screen
+unidentified and fails closed in release mode.
+
+Schema-4 scoring also enforces the JSON token type at these trust boundaries.
+Flags must be literal JSON booleans, and Windows output-technology values must
+be literal JSON integers. PowerShell-coercible substitutes such as `"true"`,
+`1`, `0`, or `10.0` fail even when their apparent value matches.
 
 The fixed Kettle hover leg uses the common 1280×800 client. A second
 `native-display` leg sizes Kettle to a large client derived from the
@@ -324,7 +373,7 @@ non-inferior after its practical margin; drift failure, missing data, or an
 uncertain interval fails the baseline gate.
 
 The fixed and native-display menu-hover files, vtebench evidence, stable
-monitor-transition evidence (at least 10 moves with the menu closed and 10
+monitor-transition evidence (exactly 10 moves with the menu closed and 10
 open), exact sample counts, executable/config hashes, clean source/build
 identity, and unchanged start/end display topology are also mandatory in
 release mode. With more than two eligible displays, the transition pair is
@@ -362,14 +411,25 @@ pwsh -NoLogo -NoProfile -File scripts/perf/sanitize-results.ps1 `
 ```
 
 The sanitizer refuses an existing destination, copies a bounded flat set of
-JSON files only, replaces local paths/commands/serials/device identifiers with
-run-salted tokens, retains safe metrics and hashes, and writes
-`public-evidence.json`. It retains exact directory and child handles, rejects
-reparse points and alternate path syntaxes, checks the exact flat set,
-alternate data streams, and file hashes again after the handle-relative stage
-rename, and rolls the same object back on any publication failure. It never
-recursively cleans an untrusted path and never copies raw `.dat`, logs,
-screenshots, or artifact directories.
+JSON files only, replaces local paths, commands, serials, device identifiers,
+hardware IDs, EDID fingerprints, adapter LUIDs, source/target IDs, and connector
+instances with type-separated bundle-secret HMAC tokens. Credential-like keys
+are normalized across snake, kebab, camel, Pascal, and upper-case spellings
+before nested scalar, object, or array values are tokenized. The public bundle
+accepts only the reviewed harness filenames (`benchmark-manifest.json`, the
+fixed probe/score names, and the six fixed `throughput-*.json` names); custom
+JSON evidence must first receive an explicit contract and sanitizer review.
+This strict allowlist prevents a secret or user identity in a source filename
+from becoming public metadata.
+
+The sanitizer retains safe metrics and non-device hashes and writes schema-2
+`public-evidence.json`. Numeric and boolean identifiers are tokenized before
+scalar passthrough, so routing data cannot bypass string redaction. It retains
+exact directory and child handles, rejects reparse points and alternate path
+syntaxes, checks the exact flat set, alternate data streams, and file hashes
+again after the handle-relative stage rename, and rolls the same object back on
+any publication failure. It never recursively cleans an untrusted path and
+never copies raw `.dat`, logs, screenshots, or artifact directories.
 
 ## Validation
 
@@ -380,6 +440,11 @@ and Windows PowerShell 5.1:
 pwsh.exe -NoLogo -NoProfile -File scripts/perf/self-test.ps1
 powershell.exe -NoLogo -NoProfile -File scripts/perf/self-test.ps1
 ```
+
+The Windows PowerShell 5.1 entry point reconstructs `PSModulePath` from that
+engine's native machine roots and imports its engine-owned Utility manifest.
+This keeps the documented command deterministic even when it is launched from
+PowerShell 7 and would otherwise inherit incompatible PowerShell 7 modules.
 
 Run the repository gates before release:
 

@@ -4,13 +4,15 @@
 
 | Platform | Arch | Support |
 |---|---|---|
-| Linux | x86_64 | **Tier 1** — prebuilt binary + one-line installer |
-| Linux | aarch64 | **Tier 1** — prebuilt binary + one-line installer |
+| Linux | x86_64 | **Tier 1** — glibc 2.35+, prebuilt binary + one-line installer |
+| Linux | aarch64 | **Tier 1 distribution** — glibc 2.35+, cross-built prebuilt binary + one-line installer; native ARM UI/runtime CI is not yet available |
 | macOS | universal (Intel + Apple Silicon) | **Tier 1** — `.app` bundle (unsigned) |
 | Windows 11 | x86_64 | **Tier 1** — `.zip` + `install.ps1` |
 | Linux/other | armv7l, i686, riscv64, … | **Tier 2** — source build only, *experimental* (wgpu/glyphon have no tier-1 GPU support on these targets) |
 
-Tier-1 targets are required before a release can publish. Every archive has a
+Tier-1 targets are required before a release can publish. Linux aarch64 is
+cross-built and package/ABI validated on x86_64 CI; do not interpret that gate
+as a native ARM GPU/runtime pass. Every archive has a
 SHA-256 sidecar; Windows and Linux update metadata is additionally signed by a
 dedicated Ed25519 release key. Tier-2 targets have no prebuilt binary;
 `scripts/install-online.sh` points you at a source build (or `nix run
@@ -41,6 +43,10 @@ remains authoritative. See [UPDATES.md](UPDATES.md) for policy and recovery.
 
 ## Linux — easy desktop install (Ubuntu / Fedora / Arch / GNOME / KDE)
 
+The prebuilt GNU/Linux archives require glibc 2.35 or newer. That includes
+Ubuntu 22.04, Debian 12, and current Fedora/Arch releases. On an older
+distribution, build from source or use the Nix package instead.
+
 ### One-line installer (recommended)
 
 Downloads the latest prebuilt binary + XDG launcher + icons and drops
@@ -68,8 +74,10 @@ curl -fsSL https://raw.githubusercontent.com/Reddimus/kettle/main/scripts/instal
 
 `KETTLE_VERSION` and `KETTLE_PREFIX` compose — pin both at once. The installer
 requires a current `curl` with `--max-filesize`, GNU `tar`, and OpenSSL 3.0+
-with Ed25519 support. On Alpine, install the GNU `tar` package rather than
-using BusyBox tar.
+with Ed25519 support. The published archives are glibc binaries and do not run
+on stock musl-based Alpine; installing GNU tar alone does not make them
+compatible. Alpine users must build for their environment or run Kettle in a
+supported glibc environment.
 
 The script accepts only an exact `vMAJOR.MINOR.PATCH`, caps the archive at
 256 MiB, and caps the signed manifest/signature separately. HTTPS-only
@@ -210,11 +218,73 @@ GitHub runners for every platform:
   run `.\kettle.exe` from the extracted folder. Pass `-Prefix
   "D:\PortableApps\kettle"` to `install.ps1` for a portable install
   to a custom location (skips PATH + registry + Start menu — pure
-  copy). Its saved uninstaller removes only that custom prefix and leaves any
-  normal Kettle installation untouched.
+  copy). The prefix must be a dedicated directory named `kettle` and must be
+  new/empty or an existing Kettle-managed install; shared or broad directories
+  are rejected. The path must remain on one local fixed physical volume;
+  network/UNC, removable, `SUBST`, and other non-volume DOS-device mappings are
+  rejected. Prefix components also reject Win32 device names, alternate
+  streams, invalid/control characters, traversal spellings, trailing dot/space
+  aliases, and reparse points.
+
+  An extracted release is accepted as the stable channel only when its bounded
+  package manifest has the exact target/version, sorted file set, sizes,
+  SHA-256 digests, and modes. A rerun through the saved helper preserves the
+  existing `stable` or `local-dev` channel instead of silently changing update
+  ownership. Installation preflights the complete package and the aggregate
+  existing backup size (each capped at 512 MiB) before publishing any payload.
+  It stages and backs up at most 127 managed files in a sibling transaction
+  directory, durably records rollback coverage before every publication, and
+  rolls the whole package back on failure. Both ownership markers and creation
+  of the `shell-integration` directory participate in that same write-ahead
+  transaction, so a stopped first install cannot leave an unowned payload and a
+  stopped upgrade restores the complete prior package. A later invocation
+  validates and recovers an interrupted transaction before deciding whether the
+  prefix is a new or existing install. The transaction directory is created
+  with a protected ACL limited to its initiating Windows identity, SYSTEM, and
+  Administrators; recovery rejects a different owner, inherited or extra
+  access, and reparse points before reading the journal. Resume an interrupted
+  machine-wide install as the same Windows identity that started it.
+
+  Abrupt termination can leave an unpublished staging leaf. Recovery removes
+  only the exact installer grammar `.kettle-install-tmp-<32 lowercase hex>`
+  after validating the containing directory and confirming by handle that the
+  leaf is current-user-owned, ordinary, non-reparse, single-link, and bounded.
+  The same checks apply to Rust persistence leftovers named
+  `.<destination>.tmp.<pid>.<epoch-nanoseconds>.<sequence>`; the destination
+  must be one of Kettle's known managed leaves, the numeric fields must fit
+  Rust's `u32`/`u128`/`u64` types with canonical decimal spelling, and the PID
+  must be provably dead. Live, inaccessible, malformed, linked, or reparse
+  lookalikes fail closed.
+
+  The saved uninstaller validates strict product/target JSON and the exact
+  bounded managed tree, rejects reparse points, and removes only known leaf
+  files and now-empty managed directories. It never recursively follows the
+  prefix, leaving unrelated files and any normal Kettle installation untouched.
+  Interrupted authenticated-update stage/backup/quarantine artifacts are
+  accepted only under their exact bounded transaction grammar. The narrow
+  binary-backup names left by older Kettle installers are retained during
+  upgrade and removed as ordinary leaves during uninstall; arbitrary `.bak-*`
+  files are not adopted. A current schema-2 pending-update record must have the
+  exact typed product, target, version, helper, digest, counter, and bounded
+  file fields written by the Rust updater. During uninstall, those identities
+  remain valid if a named helper or stage has already disappeared in an earlier
+  removal step or after a crash; every object that still exists is validated
+  independently before deletion.
 
   Uninstall later via Add/Remove Programs (`appwiz.cpl`), or
   `.\install.ps1 -Uninstall` from the install dir.
+
+  `-WithShellIntegration` edits the PowerShell profile only when its managed
+  BEGIN/END markers are absent or form one unique balanced standalone block.
+  Ambiguous or broken markers fail before install/uninstall mutation. Profile
+  files are capped at 4 MiB and must be ordinary, single-link, non-reparse
+  files without alternate streams, EFS encryption, compression, sparse/offline
+  storage, or other special attributes. A retained handle blocks concurrent
+  replacement while UTF-8/UTF-16 encoding, BOM, newline spelling, protected
+  DACL/ACEs, timestamps, supported attributes, and all text outside the block
+  are preserved through one atomic same-volume rename over the retained
+  destination. The installer never first moves the original profile to a
+  retired name, so interruption cannot leave the profile pathname absent.
 
   > **No `winget` / `scoop` recipe yet.** `winget install kettle` and
   > `scoop install kettle` don't resolve — kettle isn't in the winget-pkgs
@@ -263,11 +333,21 @@ palette (`Ctrl+Shift+K`, type "Next theme"); jump between prompts with
 `Ctrl+Up` / `Ctrl+Down` after enabling [shell integration](SHELL-INTEGRATION.md)
 (bash / zsh / fish / **PowerShell**).
 
-For clipboard screenshots and images, use the client-owned chord: `Ctrl+V` in
-native Codex CLI and in Claude Code on Linux/WSL, `Ctrl+Alt+V` in Codex under
-WSL, or `Alt+V` in native-Windows Claude Code. Kettle forwards those chords to
-the PTY; `Ctrl+Shift+V` remains Kettle's text paste. See
-[TERMINAL-CLIENT-COMPATIBILITY.md](TERMINAL-CLIENT-COMPATIBILITY.md).
+For a clipboard screenshot, press `Ctrl+Shift+V`. With `paste-images` enabled
+(the default), Kettle writes a bounded private temporary PNG and pastes its
+quoted path into the focused pane. Client-native attachment shortcuts vary by
+version and platform and are outside Kettle's compatibility contract. To attach
+an image to a new Codex session directly, use the option exposed by
+`codex --help`:
+
+```sh
+codex --image ./screenshot.png "Inspect this image"
+# equivalent short option:
+codex -i ./screenshot.png "Inspect this image"
+```
+
+See [TERMINAL-CLIENT-COMPATIBILITY.md](TERMINAL-CLIENT-COMPATIBILITY.md) for
+the exact transport and smoke-test boundaries.
 
 ### AI agents / MCP
 

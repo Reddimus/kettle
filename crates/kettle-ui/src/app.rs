@@ -1,6 +1,7 @@
 //! winit application: window lifecycle, input routing, the tiled multiplexer,
 //! the search overlay, clipboard, and live config reload.
 
+use std::collections::VecDeque;
 use std::sync::Arc;
 
 use accesskit::{
@@ -9,9 +10,10 @@ use accesskit::{
 };
 use anyhow::Result;
 use kettle_config::{
-    Action, Bindings, Config, Key as KKey, Mods, StatusBarMode, TabBarMode, TabBarPos, Trigger,
+    Action, Bindings, Config, Key as KKey, Mods, Osc52, StatusBarMode, TabBarMode, TabBarPos,
+    Trigger,
 };
-use kettle_core::{Scroll, TermEvent};
+use kettle_core::{ClipboardType, PtyGeometry, Scroll, TermEvent};
 use kettle_render::{
     ContextMenu, ContextMenuRow, FrameOutcome, HighlightRect, HintLabel, ImePreedit, Overlay,
     PaneSnapshot, PaneView, Renderer, TabActivity as RenderTabActivity, TabBar, TabSeg,
@@ -27,9 +29,10 @@ use winit::window::{
 
 use crate::gpu_diagnostics::{IncidentLog, RecoveryAction, RecoveryState};
 use crate::input;
-use crate::mux::{Dir, Mux, Rect};
+use crate::mux::{Dir, Mux, PaneInputResult, PaneTitleOrigin, Rect};
 use crate::window_state::{
-    FrameRecoveryAction, FrameRecoveryPoll, WindowState, track_consumed_key_release,
+    DpiResizeAction, DpiResizeEvent, FrameRecoveryAction, FrameRecoveryPoll, WindowState,
+    track_consumed_key_release,
 };
 
 const ACCESSIBILITY_ROOT_ID: NodeId = NodeId(0);
@@ -40,6 +43,62 @@ const ACCESSIBILITY_SEARCH_CONTAINER_ID: NodeId = NodeId(ACCESSIBILITY_SEARCH_ID
 const ACCESSIBILITY_SEARCH_TEXT_ID: NodeId = NodeId(ACCESSIBILITY_SEARCH_ID_MASK | 16);
 const ACCESSIBILITY_SEARCH_STATUS_ID: NodeId = NodeId(ACCESSIBILITY_SEARCH_ID_MASK | 17);
 const ACCESSIBILITY_UPDATE_INTERVAL: std::time::Duration = std::time::Duration::from_millis(100);
+
+fn osc52_copy_is_available(policy: Osc52, clipboard_available: bool) -> bool {
+    policy.can_copy() && clipboard_available
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Osc52ClipboardChannel {
+    Clipboard,
+    #[cfg(target_os = "linux")]
+    Primary,
+}
+
+fn osc52_clipboard_channel(target: ClipboardType) -> Osc52ClipboardChannel {
+    #[cfg(target_os = "linux")]
+    if target == ClipboardType::Selection {
+        return Osc52ClipboardChannel::Primary;
+    }
+
+    let _ = target;
+    Osc52ClipboardChannel::Clipboard
+}
+
+fn set_osc52_clipboard(
+    clipboard: &mut arboard::Clipboard,
+    target: ClipboardType,
+    text: String,
+) -> Result<(), arboard::Error> {
+    match osc52_clipboard_channel(target) {
+        Osc52ClipboardChannel::Clipboard => clipboard.set_text(text),
+        #[cfg(target_os = "linux")]
+        Osc52ClipboardChannel::Primary => {
+            use arboard::{LinuxClipboardKind, SetExtLinux};
+            clipboard
+                .set()
+                .clipboard(LinuxClipboardKind::Primary)
+                .text(text)
+        }
+    }
+}
+
+fn get_osc52_clipboard(
+    clipboard: &mut arboard::Clipboard,
+    target: ClipboardType,
+) -> Result<String, arboard::Error> {
+    match osc52_clipboard_channel(target) {
+        Osc52ClipboardChannel::Clipboard => clipboard.get_text(),
+        #[cfg(target_os = "linux")]
+        Osc52ClipboardChannel::Primary => {
+            use arboard::{GetExtLinux, LinuxClipboardKind};
+            clipboard
+                .get()
+                .clipboard(LinuxClipboardKind::Primary)
+                .text()
+        }
+    }
+}
 
 fn apply_output_generation_outcome(
     outcome: FrameOutcome,
@@ -76,12 +135,65 @@ fn stage_output_generations_for_frame(
     }
 }
 
+/// Decide whether an output wake still represents unpainted damage.
+///
+/// A wake queued by output racing a frame can become stale when that same
+/// frame presents the new generation before the event is dispatched. Rearm
+/// the per-pane latch only in that no-damage case, then sample again: output
+/// racing between the first sample and rearm is handled by this event, while
+/// output arriving after rearm owns a fresh wake. A wake that is still dirty
+/// deliberately leaves the latch closed across the deferred paint budget.
+fn output_wakeup_needs_paint(
+    mut has_new_output: impl FnMut() -> bool,
+    rearm_stale_wakeup: impl FnOnce(),
+) -> bool {
+    if has_new_output() {
+        return true;
+    }
+    rearm_stale_wakeup();
+    has_new_output()
+}
+
+fn render_hidden_from_observations(
+    occluded: bool,
+    minimized: bool,
+    window_shown: bool,
+    visible: bool,
+) -> bool {
+    occluded || minimized || (window_shown && !visible)
+}
+
 fn window_is_render_hidden(ws: &WindowState) -> bool {
-    ws.window_occluded
-        || ws.window.as_ref().is_some_and(|window| {
-            window.is_minimized().unwrap_or(false)
-                || (ws.window_shown && !window.is_visible().unwrap_or(true))
-        })
+    ws.window.as_ref().is_some_and(|window| {
+        render_hidden_from_observations(
+            ws.window_occluded,
+            window.is_minimized().unwrap_or(false),
+            ws.window_shown,
+            window.is_visible().unwrap_or(true),
+        )
+    }) || ws.window_occluded
+}
+
+fn output_wakeup_must_quiesce(
+    render_hidden: bool,
+    renderer_repair_pending: bool,
+    renderer_unavailable: bool,
+) -> bool {
+    render_hidden || renderer_repair_pending || renderer_unavailable
+}
+
+fn output_wake_transport_enabled(render_quiesced: bool, output_sidechannel: bool) -> bool {
+    !render_quiesced || output_sidechannel
+}
+
+fn output_generation_advanced(previous: Option<u64>, current: u64) -> bool {
+    previous.is_some_and(|previous| previous != current)
+}
+
+fn retain_renderer_recovery_snapshot<T>(retained: &mut Option<T>, live: Option<T>) {
+    if retained.is_none() {
+        *retained = live;
+    }
 }
 
 fn accessibility_pane_id(pane_id: u64) -> NodeId {
@@ -398,6 +510,10 @@ fn ctl_page_values(
 #[derive(Debug, Clone)]
 pub enum UserEvent {
     Wakeup,
+    /// The coalescing process-tree worker published a new remote/cwd snapshot.
+    /// Kept distinct from PTY output wakeups so an idle window consumes the
+    /// result even when no output generation advanced.
+    RemoteScanReady,
     ReloadConfig,
     /// An assistive-technology action addressed to a specific OS window.
     /// AccessKit can invoke this callback off the winit dispatch path, so it is
@@ -1440,15 +1556,20 @@ fn clamp_osc52(s: &str, max: usize) -> &str {
 /// 1 MiB — generous for real copies, bounded against abuse.
 const OSC52_MAX: usize = 1 << 20;
 
-/// 4 MiB cap on a *local* clipboard paste. The OSC 52 cap above guards
+/// 4 MiB limit on a *local* clipboard paste. The OSC 52 cap above guards
 /// against a hostile remote program pushing an unbounded payload into
 /// the system clipboard; this guards the reverse direction — a user
 /// accidentally pastes a multi-GB file and kettle would otherwise feed
 /// every byte into the PTY in one shot, freezing the terminal until
 /// the program at the other end (cat? vim?) drained the pipe. 4 MiB
-/// fits any realistic code-review / log-snippet paste with room to
-/// spare; bigger pastes are almost certainly a fat-finger.
+/// fits any realistic code-review / log-snippet paste with room to spare.
+/// Larger payloads are rejected with visible feedback rather than truncated,
+/// since silently shortening a command, patch, or encoded file is unsafe.
 const LOCAL_PASTE_MAX: usize = 4 << 20;
+
+fn local_paste_within_limit(text: &str) -> bool {
+    text.len() <= LOCAL_PASTE_MAX
+}
 
 fn text_contains_line_break(text: &str) -> bool {
     text.as_bytes().iter().any(|b| matches!(*b, b'\n' | b'\r'))
@@ -1679,14 +1800,12 @@ fn cwd_is_local(cwd: &str) -> bool {
 /// Pure pointer → (col, line) math for a pane, shared by `px_to_point` so the
 /// per-pane-titlebar inset is drift-tested.
 ///
-/// The renderer draws a multi-pane tab's cell content at
-/// `oy = ry + padding_y + titlebar_h` (the per-pane titlebar reserves
-/// `titlebar_h` at the top), but the hit-test used to map from `ry + padding_y`
-/// — so in the DEFAULT config the moment you split a pane, every pointer landed
-/// ~1 row too high: selection, link targeting, and the mouse-tracking row
-/// reported to vim/tmux/htop were all off by one. Subtracting the same
-/// `titlebar_h` here realigns the hit-test with what's drawn. Col/line clamp
-/// to ≥ 0 so a click in the chrome/padding doesn't underflow.
+/// The renderer and hit testing both use
+/// [`kettle_render::pane_grid_origin`]. A top titlebar moves row zero down while
+/// a bottom titlebar leaves row zero at the pane padding; keeping that invariant
+/// shared prevents selection, link targeting, mouse reporting, and IME
+/// projection from drifting by roughly one row. Col/line clamp to ≥ 0 so a
+/// click in the chrome/padding doesn't underflow.
 /// Record a keystroke into the dev recorder as a privacy-preserving
 /// token. Named keys and modified chords (`Enter`, `Ctrl+c`, `ArrowUp`) are
 /// recorded by name — they aren't secret. A bare printable character is recorded
@@ -1808,18 +1927,18 @@ fn px_to_cell(
     cell: (f32, f32),
     pad: (f32, f32),
     titlebar_h: f32,
+    title_at_bottom: bool,
 ) -> (usize, i32, kettle_core::Side) {
-    let (rx, ry, _, _) = rect;
     let (cw, ch) = cell;
-    let (pad_x, pad_y) = pad;
+    let (ox, oy) = kettle_render::pane_grid_origin(rect, pad, titlebar_h, title_at_bottom);
     // Derive BOTH col and side from the same non-negative offset so they agree at
     // the left clamp: a pointer in the left padding (offset < 0) maps to
     // (col 0, Side::Left) — the first cell is included, not trimmed. Computing the
     // side from the raw (negative) offset via `rem_euclid` would wrap it into the
     // cell's right half and wrongly drop column 0 from a drag (audit, v2.25.0).
-    let offx = (px - rx - pad_x).max(0.0);
+    let offx = (px - ox).max(0.0);
     let col = (offx / cw).floor() as usize;
-    let line = ((py - ry - pad_y - titlebar_h) / ch).floor().max(0.0) as i32;
+    let line = ((py - oy) / ch).floor().max(0.0) as i32;
     let side = if offx.rem_euclid(cw) < cw / 2.0 {
         kettle_core::Side::Left
     } else {
@@ -1872,13 +1991,56 @@ fn selection_buffer_bounds(
     (top, bottom)
 }
 
-/// R2: minimum wall-clock between output-driven frames — a 60 fps
-/// paint cap (the standard terminal/display refresh target; Alacritty/WezTerm do
-/// the same). Imperceptible for keystroke echo / streaming output, large enough
-/// to collapse a multi-read repaint burst into one settled frame, and — vs an
-/// uncapped or 125 fps repaint — it roughly halves the paint-side CPU a chatty
-/// re-rendering TUI (Claude Code's spinner, a progress bar) would otherwise burn.
-const OUTPUT_FRAME_BUDGET: std::time::Duration = std::time::Duration::from_millis(16);
+/// Fallback output frame budget when the platform cannot identify the current
+/// monitor's refresh rate. This is the ceiling-rounded period of a 60 Hz
+/// display, rather than the old 16 ms approximation that schedules slightly
+/// faster than a 60 Hz compositor can present.
+const OUTPUT_FRAME_BUDGET: std::time::Duration = std::time::Duration::from_nanos(16_666_667);
+const MIN_OUTPUT_FRAME_BUDGET: std::time::Duration = std::time::Duration::from_millis(4);
+const MAX_OUTPUT_FRAME_BUDGET: std::time::Duration = std::time::Duration::from_nanos(33_333_334);
+/// Small dispatch/preparation lead so a deadline does not first become runnable
+/// exactly at vblank and miss the compositor's next present opportunity.
+/// Deliberately sub-millisecond; comparative live validation still decides
+/// whether a backend/display needs a different policy.
+const OUTPUT_PRESENT_HEADROOM: std::time::Duration = std::time::Duration::from_micros(250);
+const MONITOR_REFRESH_PROBE_INTERVAL: std::time::Duration = std::time::Duration::from_millis(250);
+const MID_FLOOD_MIN_BUDGET: std::time::Duration = std::time::Duration::from_nanos(16_666_667);
+const MID_FLOOD_MAX_BUDGET: std::time::Duration = std::time::Duration::from_nanos(33_333_334);
+const DEEP_FLOOD_MIN_BUDGET: std::time::Duration = std::time::Duration::from_nanos(33_333_334);
+const DEEP_FLOOD_MAX_BUDGET: std::time::Duration = std::time::Duration::from_millis(50);
+
+/// Convert winit's monitor refresh rate (millihertz) into a per-window output
+/// deadline one small dispatch lead before the frame period. The 4–33.33 ms
+/// bounds cover 30–250 Hz displays while
+/// preventing an implausible/driver-corrupt mode from creating a busy loop or
+/// making output feel stalled. A window updates this whenever it is created,
+/// moved, resized, or changes DPI, so two Kettle windows on different monitors
+/// can pace independently.
+fn output_frame_budget_for_refresh(refresh_millihertz: Option<u32>) -> std::time::Duration {
+    let Some(refresh_millihertz) = refresh_millihertz.filter(|rate| *rate > 0) else {
+        return OUTPUT_FRAME_BUDGET;
+    };
+    const NANOS_PER_MILLIHERTZ_PERIOD: u64 = 1_000_000_000_000;
+    let nanos = NANOS_PER_MILLIHERTZ_PERIOD.div_ceil(u64::from(refresh_millihertz));
+    std::time::Duration::from_nanos(nanos)
+        .saturating_sub(OUTPUT_PRESENT_HEADROOM)
+        .clamp(MIN_OUTPUT_FRAME_BUDGET, MAX_OUTPUT_FRAME_BUDGET)
+}
+
+fn monitor_refresh_probe_wait(
+    last_probe: Option<std::time::Instant>,
+    now: std::time::Instant,
+    force: bool,
+) -> Option<std::time::Duration> {
+    if force {
+        return None;
+    }
+    last_probe
+        .map(|last| {
+            MONITOR_REFRESH_PROBE_INTERVAL.saturating_sub(now.saturating_duration_since(last))
+        })
+        .filter(|remaining| !remaining.is_zero())
+}
 
 /// R2: whether an output-driven repaint should be DEFERRED
 /// (coalesced) rather than painted now — true when the previous frame painted
@@ -1900,24 +2062,29 @@ fn should_defer_output_paint(
 
 /// v2.21.1 (throughput): the output-paint budget GROWS under a sustained flood.
 /// Each output-driven frame that had to be coalesced — i.e. output arriving
-/// faster than the base 60 fps budget — bumps the window's `flood_paints`
-/// counter; once a flood is sustained kettle paints less often (30 fps, then
-/// 20 fps). On-screen content during a flood is unreadable scrolling anyway,
+/// faster than the monitor-derived base budget — bumps the window's
+/// `flood_paints` counter. A high-refresh window steps down no further than
+/// 60 fps and then 30 fps; a 60 Hz window retains the established 30/20 fps
+/// backoff. On-screen content during a flood is unreadable scrolling anyway,
 /// and every frame NOT painted is one fewer O(cells) `PaneSnapshot::capture`
 /// taken under the pane's `Term` mutex — the SAME mutex the PTY reader thread
 /// must hold to run `Processor::advance`. At 60 fps the main thread grabs that
 /// lock ~60×/s under flood, throttling the parser on a CPU-contended box;
 /// stretching the budget hands the lock (and the cores) back to the reader, so
-/// flood throughput rises. A brief burst (< 4 coalesced frames ≈ 64 ms) never
-/// throttles, so keystroke echo and short bursts stay at full 60 fps, and the
+/// flood throughput rises. A brief burst (< 4 coalesced frames) never
+/// throttles, so keystroke echo and short bursts stay at the monitor rate, and the
 /// counter resets the instant output drops below the budget (see `redraw`), so
 /// the settled post-flood frame paints within one budget. Pure; drift-tested in
 /// `effective_output_budget_grows_under_sustained_flood`.
-fn effective_output_budget(flood_paints: u32) -> std::time::Duration {
+fn effective_output_budget(base: std::time::Duration, flood_paints: u32) -> std::time::Duration {
     match flood_paints {
-        0..=3 => OUTPUT_FRAME_BUDGET, // 16 ms / 60 fps — responsive default
-        4..=15 => std::time::Duration::from_millis(33), // ~30 fps
-        _ => std::time::Duration::from_millis(50), // ~20 fps — sustained flood
+        0..=3 => base,
+        4..=15 => base
+            .saturating_mul(2)
+            .clamp(MID_FLOOD_MIN_BUDGET, MID_FLOOD_MAX_BUDGET),
+        _ => base
+            .saturating_mul(3)
+            .clamp(DEEP_FLOOD_MIN_BUDGET, DEEP_FLOOD_MAX_BUDGET),
     }
 }
 
@@ -2018,6 +2185,27 @@ fn grid_dims_px(
     let cols = ((w - pad_x * 2.0) / cw).floor().max(1.0) as usize;
     let rows = ((h - pad_y * 2.0 - titlebar_h) / ch).floor().max(1.0) as usize;
     (cols, rows)
+}
+
+/// Round a fractional renderer cell metric only after multiplying by the
+/// complete grid dimension. ConPTY and Unix `winsize` pixel fields are `u16`,
+/// but truncating each cell first compounds the error across every row/column
+/// (9.6 px × 100 columns must report 960 px, not 900 px).
+fn pty_pixel_extent(cell: f32, count: usize) -> u16 {
+    let cell = if cell.is_finite() {
+        f64::from(cell.max(1.0))
+    } else {
+        1.0
+    };
+    let count = count.min(u16::MAX as usize) as f64;
+    (cell * count).round().clamp(1.0, f64::from(u16::MAX)) as u16
+}
+
+fn pty_pixel_size(cell: (f32, f32), grid: (usize, usize)) -> (u16, u16) {
+    (
+        pty_pixel_extent(cell.0, grid.0),
+        pty_pixel_extent(cell.1, grid.1),
+    )
 }
 
 const STARTUP_GEOMETRY_CELL_W: f64 = 8.0;
@@ -2270,48 +2458,14 @@ fn window_title_with_home(
     )
 }
 
-/// Vi-mode (Alacritty parity). Carries the vi cursor's
-/// position + the visual-selection anchor when vi-mode is active.
+/// Vi-mode UI ownership. Cursor, viewport following, and selection coordinates
+/// live in alacritty_terminal's `Term`; that engine rotates them with output,
+/// history eviction, and reflow. Keeping only the owning pane id and visual
+/// state here prevents a second coordinate model from drifting.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct ViState {
-    /// Vi cursor row in the focused pane's grid coordinates (0 = top
-    /// of viewport).
-    row: usize,
-    /// Vi cursor column.
-    col: usize,
-    /// `Some((row, col))` after the user
-    /// presses `v` to start a visual selection. The selection spans
-    /// from this anchor to the current (row, col). `y` yanks the
-    /// selection to the clipboard and exits vi-mode.
-    visual_anchor: Option<(usize, usize)>,
-}
-
-/// Read a pane's live grid dimensions `(cols, rows)`. Used by `resize_all`
-/// to detect whether a given resize pass actually changed the focused
-/// pane's grid — the signal that stale vi-mode state (`ViState`) can no
-/// longer be trusted (audit v2.38.2). `None` if the pane is gone or its
-/// terminal lock can't be acquired (treated as "can't prove it's
-/// unchanged", which the caller folds into "changed").
-fn pane_grid_dims(mux: &Mux, id: u64) -> Option<(usize, usize)> {
-    use kettle_core::Dimensions;
-    let pane = mux.panes.get(&id)?;
-    let t = pane.term.term.lock().ok()?;
-    Some((t.columns(), t.screen_lines()))
-}
-
-/// Pure decision backing the `resize_all` vi-mode guard above: has a
-/// resize pass invalidated the vi-mode cursor/visual-selection anchor
-/// (raw grid indices with no built-in notion of "the grid under me just
-/// reflowed")? `None` on either side (pane gone / terminal lock
-/// contention) can't be proven unchanged, so it folds into "yes, exit
-/// vi-mode" via `!=` — fail toward dropping the risky derived state
-/// rather than trusting it, the same direction used elsewhere in this
-/// file (e.g. `native_theme_hint`, `motion_should_report`).
-fn vi_mode_invalidated_by_resize(
-    dims_before: Option<(usize, usize)>,
-    dims_after: Option<(usize, usize)>,
-) -> bool {
-    dims_before != dims_after
+    pane_id: u64,
+    visual: bool,
 }
 
 /// Pure-helper char-boundary truncation for status-bar
@@ -2490,6 +2644,116 @@ fn argv_is_ssh(argv: &[String]) -> bool {
             last.eq_ignore_ascii_case("ssh") || last.eq_ignore_ascii_case("ssh.exe")
         })
         .unwrap_or(false)
+}
+
+fn update_window_remote_contexts(
+    snapshot: &kettle_remote::RemoteProbeSnapshot,
+    applied: &mut std::collections::HashMap<(u64, u32), kettle_remote::RemoteProbe>,
+    ws: &mut WindowState,
+) -> bool {
+    let mut changed = false;
+    for (&pane_id, pane) in &mut ws.mux.panes {
+        let Some(pid) = pane.term.child_pid() else {
+            continue;
+        };
+        let Some(probe) = snapshot.probes.get(&pid) else {
+            continue;
+        };
+        let probe_changed = stage_applied_remote_probe(applied, pane_id, pid, probe);
+        if probe_changed {
+            pane.term.set_native_cwd(probe.native_cwd.clone());
+        }
+        if probe.remote != pane.remote_context {
+            apply_remote_title_transition(
+                &mut pane.title,
+                &mut pane.title_is_placeholder,
+                &mut pane.title_origin,
+                &mut pane.title_before_remote,
+                probe.remote.as_ref(),
+            );
+            pane.remote_context = probe.remote.clone();
+            changed = true;
+        }
+        changed |= probe_changed;
+    }
+    changed
+}
+
+fn apply_remote_title_transition(
+    title: &mut String,
+    title_is_placeholder: &mut bool,
+    origin: &mut PaneTitleOrigin,
+    title_before_remote: &mut Option<(String, PaneTitleOrigin)>,
+    remote: Option<&kettle_remote::RemoteContext>,
+) {
+    if let Some(context) = remote {
+        if *origin != PaneTitleOrigin::Remote {
+            *title_before_remote = Some((title.clone(), *origin));
+        }
+        *title = sanitize_title(&kettle_remote::format_remote_title(context));
+        *title_is_placeholder = false;
+        *origin = PaneTitleOrigin::Remote;
+        return;
+    }
+
+    if *origin == PaneTitleOrigin::Remote {
+        let (restored_title, restored_origin) = title_before_remote
+            .take()
+            .unwrap_or_else(|| ("kettle".to_string(), PaneTitleOrigin::Placeholder));
+        *title = restored_title;
+        *title_is_placeholder = restored_origin == PaneTitleOrigin::Placeholder;
+        *origin = restored_origin;
+    } else {
+        *title_before_remote = None;
+    }
+}
+
+fn stage_applied_remote_probe(
+    applied: &mut std::collections::HashMap<(u64, u32), kettle_remote::RemoteProbe>,
+    pane_id: u64,
+    pid: u32,
+    probe: &kettle_remote::RemoteProbe,
+) -> bool {
+    let key = (pane_id, pid);
+    if applied.get(&key) == Some(probe) {
+        false
+    } else {
+        applied.insert(key, probe.clone());
+        true
+    }
+}
+
+fn argv_is_nonlocal_client(argv: &[String]) -> bool {
+    if crate::mux::argv_is_wsl(argv) || argv_is_ssh(argv) {
+        return true;
+    }
+    let Some(argv0) = argv.first() else {
+        return false;
+    };
+    let basename = argv0
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or(argv0)
+        .to_ascii_lowercase();
+    let basename = basename.strip_suffix(".exe").unwrap_or(&basename);
+    matches!(basename, "docker" | "podman" | "kubectl" | "lxc-attach")
+}
+
+fn remote_probe_target(pane: &crate::mux::Pane) -> Option<kettle_remote::RemoteProbeTarget> {
+    Some(kettle_remote::RemoteProbeTarget {
+        pid: pane.term.child_pid()?,
+        allow_native_cwd: !argv_is_nonlocal_client(&pane.argv),
+    })
+}
+
+fn stage_remote_targets(
+    scratch: &mut Vec<kettle_remote::RemoteProbeTarget>,
+    checked_out: impl IntoIterator<Item = Option<kettle_remote::RemoteProbeTarget>>,
+    stored_windows: impl IntoIterator<Item = Option<kettle_remote::RemoteProbeTarget>>,
+) {
+    scratch.clear();
+    scratch.extend(checked_out.into_iter().flatten());
+    scratch.extend(stored_windows.into_iter().flatten());
 }
 
 /// Map a click count + the Alt modifier to a selection type: double =
@@ -2942,6 +3206,10 @@ pub struct ConfirmDialogState {
 
 pub(crate) struct ContextMenuState {
     anchor: (f32, f32),
+    /// DPI scale at which `anchor` was captured. Anchors are physical pixels;
+    /// rescale them across monitor transitions before clamping so the menu
+    /// keeps the same logical relationship to the pointer.
+    anchor_scale: f64,
     items: Vec<ContextMenuItem>,
     /// Index of the currently highlighted item — always points at an
     /// enabled `Item`, never a `Separator` or disabled row. Updated by
@@ -3131,6 +3399,33 @@ fn new_tab_dropdown_visible() -> bool {
 /// one would silently lose its hotkey.
 const VIM_NAV_RESERVED: &[char] = &['g', 'h', 'j', 'k', 'l'];
 
+/// Display-column budget for one context-menu item, kept in lockstep with the
+/// row constructed by `context_menu_overlay` and the renderer's
+/// `menu_row_chars`. Centralizing this prevents the initial anchor clamp,
+/// resize/DPI reclamp, hit testing, ellipsis, and draw width from disagreeing.
+fn context_menu_item_columns(item: &ContextMenuItem, hint: &str) -> usize {
+    let (label, suffix, shows_hint): (&str, &str, bool) = match item {
+        ContextMenuItem::Item { label, .. } => (label, "", true),
+        ContextMenuItem::DynamicItem { label, .. } => (label, "", true),
+        ContextMenuItem::LuaItem { label, .. } => (label, "", false),
+        ContextMenuItem::ConfigItem { label, .. } => (label, "", false),
+        ContextMenuItem::Submenu { label, .. } => (label, " ▸", false),
+        ContextMenuItem::ThemeChoice { label, .. } => (label, "", false),
+        ContextMenuItem::ProfileChoice { label, .. } => (label, "", false),
+        ContextMenuItem::NewTabShell { label, .. } => (label, "", true),
+        ContextMenuItem::UrlItem { label, .. } => (label, "", false),
+        ContextMenuItem::Info { label } => (label, "", false),
+        ContextMenuItem::Separator => return 0,
+    };
+    label.width()
+        + suffix.width()
+        + if shows_hint && !hint.is_empty() {
+            hint.width() + 2
+        } else {
+            0
+        }
+}
+
 fn assign_mnemonics(items: &[ContextMenuItem], reserved: &[char]) -> Vec<Option<(usize, char)>> {
     let labels: Vec<&str> = items
         .iter()
@@ -3237,11 +3532,7 @@ fn count_rows_fitting(
     let mut used = 0.0_f32;
     let mut count = 0;
     for it in items.iter().skip(start) {
-        let h = if matches!(it, ContextMenuItem::Separator) {
-            sep_h
-        } else {
-            row_h
-        };
+        let h = context_menu_item_height(it, row_h, sep_h);
         if used + h > panel_h {
             break;
         }
@@ -3249,6 +3540,100 @@ fn count_rows_fitting(
         count += 1;
     }
     count
+}
+
+fn context_menu_item_height(item: &ContextMenuItem, row_h: f32, sep_h: f32) -> f32 {
+    if matches!(item, ContextMenuItem::Separator) {
+        sep_h
+    } else {
+        row_h
+    }
+}
+
+/// Earliest suffix that fits through the final row. Scrolling past it would
+/// leave avoidable blank space below the menu. This is O(items) even for the
+/// 512-entry theme submenu.
+fn context_menu_max_scroll_offset(
+    items: &[ContextMenuItem],
+    panel_h: f32,
+    row_h: f32,
+    sep_h: f32,
+) -> usize {
+    if items.is_empty() {
+        return 0;
+    }
+    let mut suffix_height = 0.0;
+    let mut max_offset = items.len() - 1;
+    for candidate in (0..items.len()).rev() {
+        let next = suffix_height + context_menu_item_height(&items[candidate], row_h, sep_h);
+        if next > panel_h {
+            break;
+        }
+        suffix_height = next;
+        max_offset = candidate;
+    }
+    max_offset
+}
+
+fn context_menu_scroll_for_highlight(
+    items: &[ContextMenuItem],
+    current_offset: usize,
+    highlight: usize,
+    panel_h: f32,
+    row_h: f32,
+    sep_h: f32,
+) -> usize {
+    if items.is_empty() {
+        return 0;
+    }
+    let highlight = highlight.min(items.len() - 1);
+    let max_offset = context_menu_max_scroll_offset(items, panel_h, row_h, sep_h);
+    let mut offset = current_offset.min(max_offset);
+    let visible = count_rows_fitting(items, offset, panel_h, row_h, sep_h);
+    if highlight < offset {
+        offset = highlight;
+    } else if highlight >= offset.saturating_add(visible) {
+        // Pull back until the highlight is the last fully visible row. This
+        // keeps Enter bound to a visible choice after a window/DPI shrink.
+        let mut used = 0.0;
+        offset = highlight;
+        for candidate in (0..=highlight).rev() {
+            let next = used + context_menu_item_height(&items[candidate], row_h, sep_h);
+            if next > panel_h {
+                break;
+            }
+            used = next;
+            offset = candidate;
+        }
+    }
+    offset.min(max_offset)
+}
+
+fn ellipsize_menu_label(label: &str, max_columns: usize) -> String {
+    use unicode_segmentation::UnicodeSegmentation as _;
+
+    if label.width() <= max_columns {
+        return label.to_string();
+    }
+    if max_columns == 0 {
+        return String::new();
+    }
+    if max_columns == 1 {
+        return "…".to_string();
+    }
+    let content_columns = max_columns - 1;
+    let mut used: usize = 0;
+    let mut output = String::new();
+    for grapheme in label.graphemes(true) {
+        let width = grapheme.width();
+        if used.saturating_add(width) > content_columns {
+            break;
+        }
+        output.push_str(grapheme);
+        used += width;
+    }
+    output.push('…');
+    output
 }
 
 /// Terminator menu UX, C4. Drop disabled `Item`s from
@@ -3300,18 +3685,27 @@ fn filter_disabled(items: Vec<ContextMenuItem>) -> Vec<ContextMenuItem> {
 /// row index containing `cursor_y`, or `None` if the cursor landed
 /// on a separator (visual gap) or beyond the last row. Pure so the
 /// arithmetic + the separator-skip contract is unit-tested without
-/// standing up an App + a winit window. `kinds[i] = true` flags row
-/// `i` as a separator (uses `sep_h` instead of `row_h`).
+/// standing up an App + a winit window. A `true` item flags a separator (uses
+/// `sep_h` instead of `row_h`). Accepting an iterator lets the live pointer path
+/// project item kinds without allocating a temporary vector.
 pub(crate) fn find_menu_row_y(
     cursor_y: f32,
     anchor_y: f32,
+    panel_h: f32,
     row_h: f32,
     sep_h: f32,
-    kinds: &[bool],
+    kinds: impl IntoIterator<Item = bool>,
 ) -> Option<usize> {
     let mut row_y = anchor_y;
-    for (idx, &is_sep) in kinds.iter().enumerate() {
+    let panel_bottom = anchor_y + panel_h.max(0.0);
+    for (idx, is_sep) in kinds.into_iter().enumerate() {
         let h = if is_sep { sep_h } else { row_h };
+        // The renderer draws only complete rows. A clamped panel can leave a
+        // short blank strip at the bottom; never dispatch the next invisible
+        // row through that strip.
+        if row_y + h > panel_bottom {
+            break;
+        }
         if cursor_y >= row_y && cursor_y < row_y + h {
             return if is_sep { None } else { Some(idx) };
         }
@@ -3484,6 +3878,61 @@ fn clamp_context_menu_anchor(
     (x, y)
 }
 
+fn clamp_context_menu_panel(
+    (panel_w, panel_h): (f32, f32),
+    (surface_w, surface_h): (f32, f32),
+) -> (f32, f32) {
+    let available_w = (surface_w - 8.0).max(1.0);
+    let available_h = (surface_h - 8.0).max(1.0);
+    (panel_w.min(available_w), panel_h.min(available_h))
+}
+
+fn context_menu_surface_can_fit_row(
+    (surface_w, surface_h): (f32, f32),
+    (cell_w, cell_h): (f32, f32),
+) -> bool {
+    surface_w.is_finite()
+        && surface_h.is_finite()
+        && cell_w.is_finite()
+        && cell_h.is_finite()
+        && surface_w >= 8.0 + kettle_render::menu::H_PAD + cell_w.max(1.0)
+        && surface_h >= 8.0 + cell_h.max(1.0) + kettle_render::menu::ROW_PAD
+}
+
+fn fit_context_menu_row(row: &mut ContextMenuRow, max_columns: usize) {
+    if row.separator {
+        return;
+    }
+    let hint_columns = if row.hint.is_empty() {
+        0
+    } else {
+        row.hint.width().saturating_add(2)
+    };
+    let hint_columns = if hint_columns >= max_columns {
+        row.hint.clear();
+        0
+    } else {
+        hint_columns
+    };
+    row.label = ellipsize_menu_label(&row.label, max_columns.saturating_sub(hint_columns));
+}
+
+fn scale_context_menu_anchor(
+    (x, y): (f32, f32),
+    previous_scale: f64,
+    current_scale: f64,
+) -> (f32, f32) {
+    if !previous_scale.is_finite()
+        || previous_scale <= 0.0
+        || !current_scale.is_finite()
+        || current_scale <= 0.0
+    {
+        return (x, y);
+    }
+    let ratio = (current_scale / previous_scale) as f32;
+    (x * ratio, y * ratio)
+}
+
 /// `(active-tab-index, focused-leaf-id)` — the value `App::focus_key` returns.
 pub(crate) type FocusKey = (usize, Option<u64>);
 /// Cache key for the viewport link re-scan: `(focus, tab last-output,
@@ -3500,6 +3949,364 @@ pub(crate) type LinksScanKey = (FocusKey, Option<u64>, Option<usize>, Option<Str
 /// `resize-overlay-duration` default).
 pub(crate) const RESIZE_OVERLAY_DURATION: std::time::Duration =
     std::time::Duration::from_millis(750);
+const INPUT_REJECTION_NOTICE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(3);
+const MAX_PENDING_LUA_COMMANDS: usize = 1024;
+const MAX_PENDING_LUA_SEND_BYTES: usize = 8 << 20;
+const MAX_LUA_SEND_TEXT_BYTES: usize = 1 << 20;
+const AUTOMATION_WORK_ITEMS_PER_TURN: usize = 16;
+const AUTOMATION_WORK_BYTES_PER_TURN: usize = 1 << 20;
+const AUTOMATION_RETRY_MIN: std::time::Duration = std::time::Duration::from_millis(10);
+const AUTOMATION_RETRY_MAX: std::time::Duration = std::time::Duration::from_millis(250);
+const AUTOMATION_YIELD: std::time::Duration = std::time::Duration::from_millis(1);
+const MAX_REMOTE_COMMANDS_PER_BATCH: usize = 1024;
+
+#[derive(Debug)]
+enum PendingLuaCommand {
+    SendText {
+        origin_window: u64,
+        target_pane: Option<u64>,
+        bytes: Arc<[u8]>,
+    },
+    ExecAction {
+        origin_window: u64,
+        action: Action,
+    },
+    Notify {
+        origin_window: u64,
+        title: String,
+        body: String,
+    },
+    SetTheme {
+        origin_window: u64,
+        name: String,
+    },
+}
+
+impl PendingLuaCommand {
+    fn origin_window(&self) -> u64 {
+        match self {
+            Self::SendText { origin_window, .. }
+            | Self::ExecAction { origin_window, .. }
+            | Self::Notify { origin_window, .. }
+            | Self::SetTheme { origin_window, .. } => *origin_window,
+        }
+    }
+
+    fn send_len(&self) -> usize {
+        match self {
+            Self::SendText { bytes, .. } => bytes.len(),
+            _ => 0,
+        }
+    }
+}
+
+#[derive(Debug, Default)]
+struct PendingLuaCommands {
+    commands: VecDeque<PendingLuaCommand>,
+    send_bytes: usize,
+}
+
+#[derive(Debug)]
+enum PendingRemoteCommand {
+    SendText {
+        origin_window: u64,
+        target_pane: Option<u64>,
+        bytes: Arc<[u8]>,
+    },
+    ToggleWindow {
+        origin_window: u64,
+    },
+    NewTab {
+        origin_window: u64,
+    },
+}
+
+impl PendingRemoteCommand {
+    fn origin_window(&self) -> u64 {
+        match self {
+            Self::SendText { origin_window, .. }
+            | Self::ToggleWindow { origin_window }
+            | Self::NewTab { origin_window } => *origin_window,
+        }
+    }
+}
+
+#[derive(Debug)]
+enum ParsedRemoteCommandBatch {
+    Accepted {
+        commands: VecDeque<PendingRemoteCommand>,
+        unknown_lines: usize,
+    },
+    RejectedTooMany {
+        operation_count: usize,
+        unknown_lines: usize,
+    },
+}
+
+/// Parse one already byte-bounded spool claim without allowing short control
+/// lines to amplify into an unbounded operation queue. The parser scans the
+/// full batch to produce one coalesced unknown-line count, but retains at most
+/// `MAX_REMOTE_COMMANDS_PER_BATCH` operations. Exceeding that count rejects the
+/// whole batch before any retained prefix can be dispatched.
+fn parse_remote_command_batch(text: &str, origin_window: u64) -> ParsedRemoteCommandBatch {
+    let mut commands = VecDeque::new();
+    let mut operation_count = 0usize;
+    let mut unknown_lines = 0usize;
+    for line in text.lines() {
+        let line = line.trim_end_matches('\r');
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        if let Some(payload) = line.strip_prefix("send-text-json ") {
+            match serde_json::from_str::<String>(payload) {
+                Ok(payload) => {
+                    operation_count = operation_count.saturating_add(1);
+                    if operation_count <= MAX_REMOTE_COMMANDS_PER_BATCH {
+                        commands.push_back(PendingRemoteCommand::SendText {
+                            origin_window,
+                            target_pane: None,
+                            bytes: Arc::from(payload.into_bytes()),
+                        });
+                    }
+                }
+                Err(_) => {
+                    unknown_lines = unknown_lines.saturating_add(1);
+                }
+            }
+        } else if let Some(payload) = line.strip_prefix("send-text ") {
+            operation_count = operation_count.saturating_add(1);
+            if operation_count <= MAX_REMOTE_COMMANDS_PER_BATCH {
+                commands.push_back(PendingRemoteCommand::SendText {
+                    origin_window,
+                    target_pane: None,
+                    bytes: Arc::from(payload.replace("\\n", "\n").into_bytes()),
+                });
+            }
+        } else if line == "toggle-window" {
+            operation_count = operation_count.saturating_add(1);
+            if operation_count <= MAX_REMOTE_COMMANDS_PER_BATCH {
+                commands.push_back(PendingRemoteCommand::ToggleWindow { origin_window });
+            }
+        } else if line == "new-tab" {
+            operation_count = operation_count.saturating_add(1);
+            if operation_count <= MAX_REMOTE_COMMANDS_PER_BATCH {
+                commands.push_back(PendingRemoteCommand::NewTab { origin_window });
+            }
+        } else {
+            unknown_lines = unknown_lines.saturating_add(1);
+        }
+    }
+    if operation_count > MAX_REMOTE_COMMANDS_PER_BATCH {
+        ParsedRemoteCommandBatch::RejectedTooMany {
+            operation_count,
+            unknown_lines,
+        }
+    } else {
+        ParsedRemoteCommandBatch::Accepted {
+            commands,
+            unknown_lines,
+        }
+    }
+}
+
+#[derive(Debug, Eq, PartialEq)]
+enum RemoteBatchClaim {
+    Empty,
+    Busy,
+    Claimed(String),
+    RejectedMalformed,
+    RejectedOversize,
+}
+
+fn claim_remote_command_file(path: &std::path::Path) -> std::io::Result<RemoteBatchClaim> {
+    use std::io::{Read as _, Seek as _};
+
+    let lock_path = kettle_state::remote_command_lock_path(path);
+    let Some(_lock) = kettle_state::ExclusiveFileLock::try_acquire(&lock_path)? else {
+        return Ok(RemoteBatchClaim::Busy);
+    };
+    let mut file = kettle_state::open_existing_private_file(path)?;
+    let size = file.metadata()?.len();
+    if size > kettle_state::MAX_REMOTE_COMMAND_BYTES {
+        file.set_len(0)?;
+        return Ok(RemoteBatchClaim::RejectedOversize);
+    }
+    let mut bytes = Vec::with_capacity(usize::try_from(size).unwrap_or(0));
+    file.seek(std::io::SeekFrom::Start(0))?;
+    file.by_ref()
+        .take(kettle_state::MAX_REMOTE_COMMAND_BYTES + 1)
+        .read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > kettle_state::MAX_REMOTE_COMMAND_BYTES {
+        file.set_len(0)?;
+        return Ok(RemoteBatchClaim::RejectedOversize);
+    }
+    if bytes.is_empty() {
+        return Ok(RemoteBatchClaim::Empty);
+    }
+    let text = match String::from_utf8(bytes) {
+        Ok(text) => text,
+        Err(_) => {
+            file.set_len(0)?;
+            return Ok(RemoteBatchClaim::RejectedMalformed);
+        }
+    };
+    file.set_len(0)?;
+    Ok(RemoteBatchClaim::Claimed(text))
+}
+
+fn should_poll_remote_window(
+    has_claimed_fifo: bool,
+    claim_pending: bool,
+    retry_pending: bool,
+    window_seq: u64,
+    focused_seq: u64,
+) -> bool {
+    has_claimed_fifo || ((claim_pending || retry_pending) && window_seq == focused_seq)
+}
+
+impl PendingLuaCommands {
+    fn push(&mut self, command: PendingLuaCommand) -> PaneInputResult {
+        let send_len = command.send_len();
+        if send_len > MAX_LUA_SEND_TEXT_BYTES {
+            return PaneInputResult::Oversize;
+        }
+        if self.commands.len() >= MAX_PENDING_LUA_COMMANDS
+            || self
+                .send_bytes
+                .checked_add(send_len)
+                .is_none_or(|next| next > MAX_PENDING_LUA_SEND_BYTES)
+        {
+            return PaneInputResult::Backpressured;
+        }
+        self.send_bytes += send_len;
+        self.commands.push_back(command);
+        PaneInputResult::Queued
+    }
+
+    fn front(&self) -> Option<&PendingLuaCommand> {
+        self.commands.front()
+    }
+
+    fn front_mut(&mut self) -> Option<&mut PendingLuaCommand> {
+        self.commands.front_mut()
+    }
+
+    fn pop_front(&mut self) -> Option<PendingLuaCommand> {
+        let command = self.commands.pop_front()?;
+        self.send_bytes = self.send_bytes.saturating_sub(command.send_len());
+        Some(command)
+    }
+
+    fn is_empty(&self) -> bool {
+        self.commands.is_empty()
+    }
+
+    #[cfg(test)]
+    fn len(&self) -> usize {
+        self.commands.len()
+    }
+}
+
+#[derive(Debug)]
+struct AutomationRetry {
+    next_at: Option<std::time::Instant>,
+    backoff: std::time::Duration,
+}
+
+impl Default for AutomationRetry {
+    fn default() -> Self {
+        Self {
+            next_at: None,
+            backoff: AUTOMATION_RETRY_MIN,
+        }
+    }
+}
+
+impl AutomationRetry {
+    fn is_ready(&self, now: std::time::Instant) -> bool {
+        self.next_at.is_none_or(|deadline| now >= deadline)
+    }
+
+    fn backpressured(&mut self, now: std::time::Instant) {
+        self.next_at = Some(now + self.backoff);
+        self.backoff = self.backoff.saturating_mul(2).min(AUTOMATION_RETRY_MAX);
+    }
+
+    fn progressed(&mut self) {
+        self.next_at = None;
+        self.backoff = AUTOMATION_RETRY_MIN;
+    }
+
+    fn yield_soon(&mut self, now: std::time::Instant) {
+        let deadline = now + AUTOMATION_YIELD;
+        if self.next_at.is_none_or(|current| deadline < current) {
+            self.next_at = Some(deadline);
+        }
+    }
+
+    fn expedite_if_idle(&mut self, now: std::time::Instant) {
+        if self.next_at.is_none() {
+            self.next_at = Some(now);
+        }
+    }
+
+    fn remaining(&self, now: std::time::Instant) -> Option<std::time::Duration> {
+        self.next_at.map(|deadline| {
+            deadline
+                .saturating_duration_since(now)
+                .max(std::time::Duration::from_nanos(1))
+        })
+    }
+}
+
+fn input_rejection_message(result: PaneInputResult) -> Option<&'static str> {
+    match result {
+        PaneInputResult::Queued | PaneInputResult::ReadOnly => None,
+        PaneInputResult::Backpressured => Some(
+            "Input could not be delivered because a child is not accepting it fast enough. If broadcast mode is active, some panes may already have received it; verify before retrying.",
+        ),
+        PaneInputResult::Oversize => Some(
+            "Input exceeded Kettle's per-message safety limit and was not delivered. If broadcast mode is active, verify the other panes before retrying.",
+        ),
+        PaneInputResult::Failed => {
+            Some("The pane's input transport failed. Kettle will close the failed pane.")
+        }
+    }
+}
+
+fn should_notify_input_rejection(
+    last: Option<(PaneInputResult, std::time::Instant)>,
+    result: PaneInputResult,
+    now: std::time::Instant,
+) -> bool {
+    input_rejection_message(result).is_some()
+        && last.is_none_or(|(prior, at)| {
+            prior != result || now.saturating_duration_since(at) >= INPUT_REJECTION_NOTICE_INTERVAL
+        })
+}
+
+fn ctl_input_error(result: PaneInputResult) -> Option<(&'static str, &'static str)> {
+    use kettle_ctl::protocol::error_codes as ec;
+    match result {
+        PaneInputResult::Queued => None,
+        PaneInputResult::ReadOnly => Some((
+            ec::READ_ONLY,
+            "pane is read-only (user toggled 'Read only')",
+        )),
+        PaneInputResult::Backpressured => Some((
+            ec::BUSY,
+            "pane input is backpressured; no bytes were sent (retry later)",
+        )),
+        PaneInputResult::Oversize => Some((
+            ec::BAD_PARAMS,
+            "input exceeds the per-message safety limit; no bytes were sent",
+        )),
+        PaneInputResult::Failed => Some((
+            ec::INTERNAL,
+            "pane input transport failed; the pane is being closed",
+        )),
+    }
+}
 
 pub struct App {
     cfg: Config,
@@ -3562,6 +4369,10 @@ pub struct App {
     /// Desktop notifications are edge-triggered so a stopped recorder does
     /// not emit one notification per redraw or stale-flush timer tick.
     recording_error_reported: bool,
+    /// Throttles visible PTY input rejection feedback. A child which has
+    /// stopped reading can reject a burst of key-repeat events; the user needs
+    /// one explicit notice, not a desktop-toast storm.
+    last_input_rejection_notice: Option<(PaneInputResult, std::time::Instant)>,
     proxy: EventLoopProxy<UserEvent>,
     /// Private, bounded bare-launch activation inbox. The IPC thread waits for
     /// this event-loop thread to confirm window creation before telling the
@@ -3587,6 +4398,16 @@ pub struct App {
     /// Remote-file counterpart to `config_reload_pending`. Commands accumulate
     /// in the bounded file, so one drain notification is sufficient.
     remote_command_pending: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// Claimed remote-file operations awaiting ordered dispatch. The receiver
+    /// never claims another bounded batch while this FIFO has a retained suffix.
+    pending_remote_commands: VecDeque<PendingRemoteCommand>,
+    /// A watcher event (or startup lock timeout) promised that the spool still
+    /// needs a claim. This remains true while an older in-memory suffix is
+    /// backpressured, so consuming the one watcher event cannot strand a later
+    /// batch in the file.
+    remote_spool_claim_pending: bool,
+    /// Deadline/backoff for a busy spool lock or backpressured target pane.
+    remote_command_retry: AutomationRetry,
     /// Agent-first A2: the in-process control server, present when
     /// `agent-server` is enabled (config or `--agent-server`). `None` keeps the
     /// zero-cost default path. Started in `resumed`, dropped on exit (which
@@ -3608,10 +4429,16 @@ pub struct App {
     /// config reload. Dedupes a fast-arriving match flood without fabricating
     /// an `Instant` before the OS monotonic clock's origin.
     last_trigger_fire: Option<std::time::Instant>,
-    /// Shared snapshot scanner — refreshes the OS process list
-    /// and parent→children index once per poll tick, then answers every pane
-    /// from it. Used by the per-pane remote-session detector.
-    remote_scanner: kettle_remote::RemoteScanner,
+    /// Coalescing worker for periodic remote/cwd detection. Process enumeration
+    /// and procfs reads never block the window event loop.
+    remote_scan_worker: Option<kettle_remote::RemoteScanWorker>,
+    /// Last snapshot values actually applied to panes. This is the redraw and
+    /// stale-result baseline; worker results may overwrite each other before
+    /// the event loop consumes them.
+    remote_applied: std::collections::HashMap<(u64, u32), kettle_remote::RemoteProbe>,
+    remote_live_panes_scratch: std::collections::HashSet<u64>,
+    /// Reused target collection for the cross-window remote poll.
+    remote_targets_scratch: Vec<kettle_remote::RemoteProbeTarget>,
     /// Throttle the remote-detect poll to ~5 Hz. `None` makes the
     /// first poll immediately eligible, including during the first minute
     /// after Windows boots.
@@ -3631,12 +4458,13 @@ pub struct App {
     _watcher: Option<notify::RecommendedWatcher>,
     /// Drop guard for the remote-control watcher.
     _remote_watcher: Option<notify::RecommendedWatcher>,
-    /// Lua scripting: bytes the user's `--lua-script` queued via
-    /// `kettle.send_text(s)` before the first pane existed.
-    pending_lua_send: Vec<u8>,
-    /// Lua scripting: Actions queued via `kettle.exec_action(name)`,
-    /// drained after the first pane spawns.
-    pending_lua_actions: Vec<kettle_config::Action>,
+    /// Ordered, bounded Lua side effects. Each send remains a distinct shared
+    /// message so retry cannot merge calls into an oversize allocation, while
+    /// actions/notifications/theme changes retain script order.
+    pending_lua_commands: PendingLuaCommands,
+    /// Retry state for a child that temporarily stops accepting Lua-generated
+    /// input. Capacity release has no event-loop wake of its own.
+    lua_command_retry: AutomationRetry,
     /// The live LuaEngine persisted across the App's lifetime so
     /// `kettle.on(event, callback)` registrations stay in scope. All event
     /// hooks share `drain_lua_hook_commands` for the LuaCommand dispatch.
@@ -3914,6 +4742,7 @@ impl App {
         // itself, send UserEvent::RemoteCommand so the main thread
         // reads + dispatches lines.
         let mut remote_watcher = None;
+        let mut remote_startup_retry = false;
         let remote_command_pending = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         if let Some(path) = startup.remote_file.clone()
             && let Some(dir) = path.parent().map(|p| p.to_path_buf())
@@ -3937,13 +4766,52 @@ impl App {
                 // watcher, and truncate through that verified handle so a
                 // reparse/path swap cannot redirect startup cleanup. Commands
                 // left after a previous crash must not replay into this run.
-                match kettle_state::open_private_file(&path)
-                    .and_then(|file| file.set_len(0))
-                    .and_then(|()| {
-                        w.watch(&dir, notify::RecursiveMode::NonRecursive)
+                let lock_path = kettle_state::remote_command_lock_path(&path);
+                match kettle_state::ExclusiveFileLock::try_acquire(&lock_path) {
+                    Ok(Some(_lock)) => {
+                        // Keep the sender/receiver lock through watcher
+                        // registration. Once it is released, every later
+                        // append is observed; there is no truncate→watch gap
+                        // in which a valid command can be stranded.
+                        let initialized = kettle_state::open_private_file(&path)
+                            .and_then(|file| file.set_len(0))
+                            .and_then(|()| {
+                                w.watch(&dir, notify::RecursiveMode::NonRecursive)
+                                    .map_err(std::io::Error::other)
+                            });
+                        match initialized {
+                            Ok(()) => remote_watcher = Some(w),
+                            Err(error) => log::warn!(
+                                "remote-command watcher disabled for {}: {error}",
+                                path.display()
+                            ),
+                        }
+                    }
+                    Ok(None) => {
+                        // A live sender owns the spool. Register the watcher
+                        // immediately and claim asynchronously once it releases
+                        // the lock; waiting and then truncating would erase the
+                        // command that sender just finished appending.
+                        match w
+                            .watch(&dir, notify::RecursiveMode::NonRecursive)
                             .map_err(std::io::Error::other)
-                    }) {
-                    Ok(()) => remote_watcher = Some(w),
+                        {
+                            Ok(()) => {
+                                log::warn!(
+                                    "remote-command startup lock at {} is busy; \
+                                     watcher is active and the spool will be claimed asynchronously",
+                                    lock_path.display()
+                                );
+                                remote_startup_retry = true;
+                                remote_watcher = Some(w);
+                            }
+                            Err(watch_error) => log::warn!(
+                                "remote-command watcher disabled for {} while its startup lock \
+                                 was busy: {watch_error}",
+                                path.display()
+                            ),
+                        }
+                    }
                     Err(error) => log::warn!(
                         "remote-command watcher disabled for {}: {error}",
                         path.display()
@@ -4015,8 +4883,8 @@ impl App {
         // by Lua and stash them on App so the first focused pane
         // gets them written to its PTY once it's ready (the pane
         // doesn't exist yet at this point in App::new).
-        let mut pending_lua_send: Vec<u8> = Vec::new();
-        let mut pending_lua_actions: Vec<kettle_config::Action> = Vec::new();
+        let mut pending_lua_commands = PendingLuaCommands::default();
+        let mut initial_lua_queue_rejection_reported = false;
         // Keep the LuaEngine alive on App so kettle.on(...)
         // registrations survive past App::new + can be fire_event'd
         // from emission sites. If no --lua-script was passed AND no
@@ -4045,33 +4913,48 @@ impl App {
                         log::info!("lua script {}: executed", script.display());
                     }
                     for cmd in eng.drain_commands() {
-                        match cmd {
+                        let result = match cmd {
                             crate::LuaCommand::SendText(s) => {
-                                pending_lua_send.extend_from_slice(s.as_bytes());
+                                pending_lua_commands.push(PendingLuaCommand::SendText {
+                                    origin_window: 1,
+                                    target_pane: None,
+                                    bytes: Arc::from(s.into_bytes()),
+                                })
                             }
                             crate::LuaCommand::ExecAction(name) => {
                                 if let Some(a) = kettle_config::Action::from_name(&name) {
-                                    pending_lua_actions.push(a);
+                                    pending_lua_commands.push(PendingLuaCommand::ExecAction {
+                                        origin_window: 1,
+                                        action: a,
+                                    })
                                 } else {
                                     log::warn!(
                                         "lua kettle.exec_action: unknown action name {name:?}"
                                     );
+                                    PaneInputResult::Queued
                                 }
                             }
                             crate::LuaCommand::Notify { title, body } => {
-                                fire_notify(&title, &body);
+                                pending_lua_commands.push(PendingLuaCommand::Notify {
+                                    origin_window: 1,
+                                    title,
+                                    body,
+                                })
                             }
                             crate::LuaCommand::SetTheme(name) => {
-                                // In App::new, mutate
-                                // initial_cfg directly because
-                                // self.cfg doesn't exist yet.
-                                if let Some(canonical) = kettle_config::Theme::find_name(&name) {
-                                    initial_cfg.theme_name = canonical.to_string();
-                                    initial_cfg.theme = kettle_config::Theme::by_name(canonical);
-                                } else {
-                                    log::warn!("lua kettle.set_theme: unknown theme {name:?}");
-                                }
+                                pending_lua_commands.push(PendingLuaCommand::SetTheme {
+                                    origin_window: 1,
+                                    name,
+                                })
                             }
+                        };
+                        if result != PaneInputResult::Queued
+                            && !initial_lua_queue_rejection_reported
+                            && let Some(message) = input_rejection_message(result)
+                        {
+                            log::warn!("lua startup command rejected ({result:?}): {message}");
+                            fire_notify("kettle: Lua command not queued", message);
+                            initial_lua_queue_rejection_reported = true;
                         }
                     }
                     lua_engine = Some(eng);
@@ -4118,6 +5001,22 @@ impl App {
         // setting `broadcast-default = all` in a config has no
         // visible effect; broadcast scope defaults to `BroadcastScope::Tab`,
         // the active tab's panes.
+        // Resolve clipboard availability before constructing the first Mux:
+        // DA1 extension 52 is a runtime capability, not merely compiled code,
+        // and must not be advertised when policy or the platform denies writes.
+        let clipboard = match arboard::Clipboard::new() {
+            Ok(cb) => Some(cb),
+            Err(e) => {
+                log::warn!(
+                    "clipboard unavailable ({e}); copy/paste and OSC 52 \
+                     will no-op — no DISPLAY/Wayland, headless SSH, or a \
+                     sandbox without clipboard-portal access?"
+                );
+                None
+            }
+        };
+        let osc52_copy_allowed = osc52_copy_is_available(initial_cfg.osc52, clipboard.is_some());
+
         // C1 (multi-window foundation): per-window state lives in a
         // WindowState; the first window is seq 1. The Mux is built here
         // because its construction flags (`lua_output_subscribed`,
@@ -4131,10 +5030,24 @@ impl App {
             {
                 m.record_lossless = recording_requested;
             }
+            m.osc52_copy_allowed = osc52_copy_allowed;
             m
         };
         let mut windows = std::collections::BTreeMap::new();
         windows.insert(1, WindowState::new(1, start_fullscreen, mux));
+        let remote_proxy = proxy.clone();
+        let remote_scan_worker =
+            match kettle_remote::RemoteScanWorker::spawn_with_notifier(move || {
+                let _ = remote_proxy.send_event(UserEvent::RemoteScanReady);
+            }) {
+                Ok(worker) => Some(worker),
+                Err(error) => {
+                    log::warn!(
+                        "remote-context detection disabled: cannot start scanner worker: {error}"
+                    );
+                    None
+                }
+            };
         let mut app = App {
             cfg: initial_cfg,
             windows,
@@ -4152,6 +5065,7 @@ impl App {
             recorder: None,
             recording_start_failed: false,
             recording_error_reported: false,
+            last_input_rejection_notice: None,
             proxy,
             activation,
             runtime_tracker,
@@ -4159,31 +5073,27 @@ impl App {
             config_reload_pending,
             config_reload_deadline: None,
             remote_command_pending,
+            pending_remote_commands: VecDeque::new(),
+            remote_spool_claim_pending: remote_startup_retry,
+            remote_command_retry: {
+                let mut retry = AutomationRetry::default();
+                if remote_startup_retry {
+                    retry.expedite_if_idle(std::time::Instant::now());
+                }
+                retry
+            },
             // Server is started later in `resumed`
             // (needs the pid + a live event-loop proxy for the waker).
             ctl: None,
             pending_runs: std::collections::HashMap::new(),
-            // Surface why the clipboard is unavailable instead of a
-            // silent `None`. On headless/SSH-without-X11-forwarding/sandboxed
-            // Linux, arboard can't connect to a display server, and copy/paste
-            // + OSC 52 then silently no-op.
-            clipboard: {
-                match arboard::Clipboard::new() {
-                    Ok(cb) => Some(cb),
-                    Err(e) => {
-                        log::warn!(
-                            "clipboard unavailable ({e}); copy/paste and OSC 52 \
-                             will no-op — no DISPLAY/Wayland, headless SSH, or a \
-                             sandbox without clipboard-portal access?"
-                        );
-                        None
-                    }
-                }
-            },
+            clipboard,
             pasted_images: crate::paste_image::PastedImages::new(),
             compiled_triggers: initial_triggers,
             last_trigger_fire: None,
-            remote_scanner: kettle_remote::RemoteScanner::new(),
+            remote_scan_worker,
+            remote_applied: std::collections::HashMap::new(),
+            remote_live_panes_scratch: std::collections::HashSet::new(),
+            remote_targets_scratch: Vec::new(),
             last_remote_poll: None,
             last_schedule_decision: None,
             config_path: startup.config.clone(),
@@ -4191,8 +5101,8 @@ impl App {
             startup,
             _watcher: watcher,
             _remote_watcher: remote_watcher,
-            pending_lua_send,
-            pending_lua_actions,
+            pending_lua_commands,
+            lua_command_retry: AutomationRetry::default(),
             lua_engine,
             lua_startup_fired: false,
             update_available: None,
@@ -4231,36 +5141,221 @@ impl App {
     ///
     /// `hook_name` is the hook label used in unknown-action warn
     /// messages (e.g. "tab_add hook", "lua menu-item").
-    fn drain_lua_hook_commands(&mut self, hook_name: &str) {
-        if let Some(eng) = &self.lua_engine {
-            for cmd in eng.drain_commands() {
-                match cmd {
-                    crate::LuaCommand::SendText(s) => {
-                        self.pending_lua_send.extend_from_slice(s.as_bytes());
-                    }
-                    crate::LuaCommand::ExecAction(name) => {
-                        if let Some(a) = kettle_config::Action::from_name(&name) {
-                            self.pending_lua_actions.push(a);
-                        } else {
-                            log::warn!(
-                                "lua kettle.exec_action ({hook_name}): \
-                                 unknown action {name:?}"
-                            );
-                        }
-                    }
-                    crate::LuaCommand::Notify { title, body } => {
-                        fire_notify(&title, &body);
-                    }
-                    crate::LuaCommand::SetTheme(name) => {
-                        if let Some(canonical) = kettle_config::Theme::find_name(&name) {
-                            self.cfg.theme_name = canonical.to_string();
-                            self.cfg.theme = kettle_config::Theme::by_name(canonical);
-                        } else {
-                            log::warn!("lua kettle.set_theme: unknown theme {name:?}");
-                        }
+    fn drain_lua_hook_commands(&mut self, ws: &WindowState, hook_name: &str) {
+        let commands = self
+            .lua_engine
+            .as_ref()
+            .map(crate::LuaEngine::drain_commands)
+            .unwrap_or_default();
+        let mut admitted = false;
+        for command in commands {
+            let pending = match command {
+                crate::LuaCommand::SendText(text) => PendingLuaCommand::SendText {
+                    origin_window: ws.seq,
+                    // Resolve only when this FIFO entry reaches the head: an
+                    // earlier Lua action may intentionally change focus first.
+                    // The first attempt latches the id so a retry cannot type
+                    // into a different pane after a focus change.
+                    target_pane: None,
+                    bytes: Arc::from(text.into_bytes()),
+                },
+                crate::LuaCommand::ExecAction(name) => {
+                    let Some(action) = kettle_config::Action::from_name(&name) else {
+                        log::warn!("lua kettle.exec_action ({hook_name}): unknown action {name:?}");
+                        continue;
+                    };
+                    PendingLuaCommand::ExecAction {
+                        origin_window: ws.seq,
+                        action,
                     }
                 }
+                crate::LuaCommand::Notify { title, body } => PendingLuaCommand::Notify {
+                    origin_window: ws.seq,
+                    title,
+                    body,
+                },
+                crate::LuaCommand::SetTheme(name) => PendingLuaCommand::SetTheme {
+                    origin_window: ws.seq,
+                    name,
+                },
+            };
+            let result = self.pending_lua_commands.push(pending);
+            admitted |= result == PaneInputResult::Queued;
+            self.report_input_result(result);
+        }
+        if admitted {
+            self.lua_command_retry
+                .expedite_if_idle(std::time::Instant::now());
+        }
+    }
+
+    /// Fire one Lua event and immediately transfer every side effect it queued
+    /// into App's bounded FIFO. Keeping the pair inseparable prevents a callback
+    /// from accumulating commands until an unrelated event happens to drain it.
+    fn fire_lua_event(&mut self, ws: &WindowState, event: crate::LuaEvent, hook_name: &str) {
+        if let Some(engine) = &self.lua_engine {
+            engine.fire_event(&event);
+        }
+        self.drain_lua_hook_commands(ws, hook_name);
+    }
+
+    fn report_lua_target_gone(&mut self, pane_id: u64) {
+        let now = std::time::Instant::now();
+        if should_notify_input_rejection(
+            self.last_input_rejection_notice,
+            PaneInputResult::Failed,
+            now,
+        ) {
+            let message = format!(
+                "A queued Lua send_text target pane ({pane_id}) closed before the command could be delivered. The command was dropped and was not rerouted."
+            );
+            log::warn!("{message}");
+            fire_notify("kettle: Lua command not delivered", &message);
+            self.last_input_rejection_notice = Some((PaneInputResult::Failed, now));
+        }
+    }
+
+    /// Run a bounded slice of the process-global Lua side-effect FIFO for this
+    /// window. A stalled PTY retains the head message byte-for-byte and arms an
+    /// exponential retry; later commands cannot overtake it.
+    fn poll_pending_lua_commands(
+        &mut self,
+        ws: &mut WindowState,
+        event_loop: &ActiveEventLoop,
+        now: std::time::Instant,
+    ) -> Option<std::time::Duration> {
+        if self.pending_lua_commands.is_empty() {
+            self.lua_command_retry.progressed();
+            return None;
+        }
+        if !self.lua_command_retry.is_ready(now) {
+            return self.lua_command_retry.remaining(now);
+        }
+
+        let mut processed = 0usize;
+        let mut processed_send_bytes = 0usize;
+        while processed < AUTOMATION_WORK_ITEMS_PER_TURN
+            && processed_send_bytes < AUTOMATION_WORK_BYTES_PER_TURN
+        {
+            let Some(origin_window) = self
+                .pending_lua_commands
+                .front()
+                .map(PendingLuaCommand::origin_window)
+            else {
+                break;
+            };
+            if origin_window != ws.seq {
+                if !self.windows.contains_key(&origin_window) {
+                    log::warn!(
+                        "dropping queued Lua command because its originating window \
+                         {origin_window} no longer exists"
+                    );
+                    self.pending_lua_commands.pop_front();
+                    self.lua_command_retry.progressed();
+                    processed += 1;
+                    continue;
+                }
+                // The outer multi-window pass will dispatch this FIFO head when
+                // it reaches the owning window. A 1 ms deadline covers the case
+                // where that window was already visited in this pass.
+                return Some(AUTOMATION_YIELD);
             }
+
+            if matches!(
+                self.pending_lua_commands.front(),
+                Some(PendingLuaCommand::SendText { .. })
+            ) {
+                let fallback = ws.mux.active_focus();
+                let target_pane = match self.pending_lua_commands.front_mut() {
+                    Some(PendingLuaCommand::SendText { target_pane, .. }) => {
+                        if target_pane.is_none() {
+                            *target_pane = fallback;
+                        }
+                        *target_pane
+                    }
+                    _ => unreachable!("front was checked as SendText"),
+                };
+                let Some(target_pane) = target_pane else {
+                    self.lua_command_retry.backpressured(now);
+                    return self.lua_command_retry.remaining(now);
+                };
+                let bytes = match self.pending_lua_commands.front() {
+                    Some(PendingLuaCommand::SendText { bytes, .. }) => bytes.clone(),
+                    _ => unreachable!("front was checked as SendText"),
+                };
+                let result = if let Some(pane) = ws.mux.panes.get(&target_pane) {
+                    Some(pane.feed_input_shared(bytes.clone()))
+                } else {
+                    self.windows
+                        .values()
+                        .find_map(|window| window.mux.panes.get(&target_pane))
+                        .map(|pane| pane.feed_input_shared(bytes.clone()))
+                };
+                let Some(result) = result else {
+                    self.pending_lua_commands.pop_front();
+                    self.lua_command_retry.progressed();
+                    self.report_lua_target_gone(target_pane);
+                    processed += 1;
+                    processed_send_bytes += bytes.len();
+                    continue;
+                };
+                match result {
+                    PaneInputResult::Queued | PaneInputResult::ReadOnly => {
+                        self.pending_lua_commands.pop_front();
+                        self.lua_command_retry.progressed();
+                        processed += 1;
+                        processed_send_bytes += bytes.len();
+                    }
+                    PaneInputResult::Backpressured => {
+                        self.report_input_result(result);
+                        self.lua_command_retry.backpressured(now);
+                        return self.lua_command_retry.remaining(now);
+                    }
+                    PaneInputResult::Oversize | PaneInputResult::Failed => {
+                        self.pending_lua_commands.pop_front();
+                        self.lua_command_retry.progressed();
+                        self.report_input_result(result);
+                        processed += 1;
+                        processed_send_bytes += bytes.len();
+                    }
+                }
+                continue;
+            }
+
+            let Some(command) = self.pending_lua_commands.pop_front() else {
+                break;
+            };
+            self.lua_command_retry.progressed();
+            processed += 1;
+            match command {
+                PendingLuaCommand::ExecAction { action, .. } => {
+                    self.handle_action(ws, action, event_loop);
+                    if self.pending_window_close || self.quit_requested {
+                        break;
+                    }
+                }
+                PendingLuaCommand::Notify { title, body, .. } => {
+                    fire_notify(&title, &body);
+                }
+                PendingLuaCommand::SetTheme { name, .. } => {
+                    if let Some(canonical) = kettle_config::Theme::find_name(&name) {
+                        self.set_runtime_theme_name(ws, canonical);
+                    } else {
+                        log::warn!("lua kettle.set_theme: unknown theme {name:?}");
+                    }
+                }
+                PendingLuaCommand::SendText { .. } => {
+                    unreachable!("SendText is handled without removing a retryable head")
+                }
+            }
+        }
+
+        if self.pending_lua_commands.is_empty() {
+            self.lua_command_retry.progressed();
+            None
+        } else {
+            self.lua_command_retry.yield_soon(now);
+            self.lua_command_retry.remaining(now)
         }
     }
 
@@ -4273,42 +5368,45 @@ impl App {
         if let Some(rec) = self.recorder.as_mut() {
             rec.record_marker("kettle:tab_add");
         }
-        if let Some(eng) = &self.lua_engine {
-            eng.fire_event(&crate::LuaEvent::TabAdd(ws.mux.active));
-        }
-        self.drain_lua_hook_commands("tab_add hook");
+        self.fire_lua_event(ws, crate::LuaEvent::TabAdd(ws.mux.active), "tab_add hook");
     }
 
     /// Fire LuaEvent::TabClose + drain commands.
     /// Every close_tab call site should call this so plugins
     /// listening for tab_close see every close regardless of
     /// trigger source.
-    fn fire_tab_close_event(&mut self, closing_idx: usize) {
+    fn fire_tab_close_event(&mut self, ws: &WindowState, closing_idx: usize) {
         if let Some(rec) = self.recorder.as_mut() {
             rec.record_marker("kettle:tab_close");
         }
-        if let Some(eng) = &self.lua_engine {
-            eng.fire_event(&crate::LuaEvent::TabClose(closing_idx));
-        }
-        self.drain_lua_hook_commands("tab_close hook");
+        self.fire_lua_event(ws, crate::LuaEvent::TabClose(closing_idx), "tab_close hook");
     }
 
     /// The shell the focused pane has effectively entered (e.g. the
     /// user opened pwsh then typed `wsl`) — its argv + cwd, so a split can clone
-    /// it in the same directory instead of a fresh default shell. Walks the
-    /// focused pane's process tree via the remote scanner (one refresh on the
-    /// split keystroke — not per frame). `None` for a plain pane, in which case
-    /// the split falls back to cloning the pane's own launch command.
+    /// it in the same directory instead of a fresh default shell. Reads the
+    /// latest background process snapshot, so a split keystroke never performs
+    /// process enumeration on the event-loop thread. `None` before the first
+    /// snapshot or for a plain pane; the split then clones the pane's launch
+    /// command.
     fn focused_foreground_shell(
         &mut self,
         ws: &mut WindowState,
     ) -> Option<kettle_remote::ShellLaunch> {
-        let (pid, pane_cwd) = {
-            let pane = ws.mux.focused()?;
-            (pane.term.child_pid()?, pane.term.current_dir())
+        let (pane_id, pid, pane_cwd) = {
+            let pane_id = ws.mux.active_focus()?;
+            let pane = ws.mux.panes.get(&pane_id)?;
+            (
+                pane_id,
+                pane.term.child_pid()?,
+                pane.term.reported_current_dir(),
+            )
         };
-        self.remote_scanner.refresh_roots(&[pid]);
-        let mut shell = self.remote_scanner.foreground_shell(pid)?;
+        let mut shell = self
+            .remote_applied
+            .get(&(pane_id, pid))?
+            .foreground_shell
+            .clone()?;
         // Assert the interactive-shell contract at the boundary.
         // The detector already rejects one-shot helpers, but re-checking here
         // means a split can never clone a non-interactive argv into a dead pane —
@@ -4333,11 +5431,8 @@ impl App {
     /// the id captured *before* `Mux::close_focused` removes the pane, so
     /// plugins listening for `pane_close` see the right id regardless of
     /// trigger source (keybind, confirm dialog, menu).
-    fn fire_pane_close_event(&mut self, pane_id: u64) {
-        if let Some(eng) = &self.lua_engine {
-            eng.fire_event(&crate::LuaEvent::PaneClose(pane_id));
-        }
-        self.drain_lua_hook_commands("pane_close hook");
+    fn fire_pane_close_event(&mut self, ws: &WindowState, pane_id: u64) {
+        self.fire_lua_event(ws, crate::LuaEvent::PaneClose(pane_id), "pane_close hook");
     }
 
     fn waker(&self) -> kettle_core::Waker {
@@ -4359,10 +5454,56 @@ impl App {
         })
     }
 
+    fn sync_output_frame_budget(&self, ws: &mut WindowState, force: bool) {
+        let Some(window) = ws.window.clone() else {
+            ws.output_monitor = None;
+            ws.output_frame_budget = OUTPUT_FRAME_BUDGET;
+            return;
+        };
+        // `current_monitor()` is the cheap identity probe. Querying the mode's
+        // refresh rate is the expensive part on Windows, so same-monitor move
+        // and resize storms share the rate limiter while a true same-DPI
+        // monitor transition refreshes immediately.
+        let monitor = window.current_monitor();
+        let monitor_changed = monitor != ws.output_monitor;
+        if monitor_changed {
+            ws.output_monitor = monitor.clone();
+        }
+        let force = force || monitor_changed;
+        let now = std::time::Instant::now();
+        if monitor_refresh_probe_wait(ws.output_refresh_probe_at, now, force).is_some() {
+            // Preserve one trailing probe so a quick same-DPI move from a
+            // 60 Hz to a 165 Hz monitor cannot be lost to the rate limiter.
+            ws.output_refresh_probe_pending = true;
+            return;
+        }
+        ws.output_refresh_probe_at = Some(now);
+        ws.output_refresh_probe_pending = false;
+        let refresh_millihertz = monitor.and_then(|monitor| monitor.refresh_rate_millihertz());
+        let next = output_frame_budget_for_refresh(refresh_millihertz);
+        if next != ws.output_frame_budget {
+            log::debug!(
+                "window {} output pacing changed: refresh={refresh_millihertz:?} mHz, \
+                 budget={next:?}",
+                ws.seq
+            );
+            ws.output_frame_budget = next;
+            // A monitor move begins a new pacing regime. Do not carry the old
+            // monitor's sustained-flood tier into the first frame on the new
+            // display.
+            ws.flood_paints = 0;
+        }
+    }
+
     fn cell_px(&self, ws: &WindowState) -> (u16, u16) {
         ws.renderer
             .as_ref()
-            .map(|r| (r.cell_w.max(1.0) as u16, r.cell_h.max(1.0) as u16))
+            .map(|r| {
+                (
+                    r.cell_w.round().clamp(1.0, u16::MAX as f32) as u16,
+                    r.cell_h.round().clamp(1.0, u16::MAX as f32) as u16,
+                )
+            })
             .unwrap_or((8, 16))
     }
 
@@ -4632,6 +5773,18 @@ impl App {
         }
     }
 
+    fn report_input_result(&mut self, result: PaneInputResult) {
+        let Some(message) = input_rejection_message(result) else {
+            return;
+        };
+        let now = std::time::Instant::now();
+        if should_notify_input_rejection(self.last_input_rejection_notice, result, now) {
+            log::warn!("terminal input rejected ({result:?}): {message}");
+            fire_notify("kettle: input not delivered", message);
+            self.last_input_rejection_notice = Some((result, now));
+        }
+    }
+
     /// Deliver user-authored bytes with the same selection, cursor, broadcast,
     /// read-only, and scroll behavior for keyboard and IME commit paths.
     fn write_terminal_input(&mut self, ws: &mut WindowState, bytes: &[u8]) {
@@ -4642,18 +5795,25 @@ impl App {
         self.reset_blink_phase(ws);
         self.hide_mouse_cursor(ws);
         ws.last_typed = Some(std::time::Instant::now());
-        if ws.mux.is_broadcast_on() {
-            ws.mux.broadcast_write(bytes);
+        let result = if ws.mux.is_broadcast_on() {
             if self.cfg.scroll_on_keystroke {
-                ws.mux.broadcast_scroll_to_bottom();
+                ws.mux.broadcast_write_with_scroll(bytes)
+            } else {
+                ws.mux.broadcast_write(bytes)
             }
-        } else if let Some(pane) = ws.mux.focused()
-            && pane.feed_input(bytes)
-            && self.cfg.scroll_on_keystroke
-            && let Ok(mut term) = pane.term.term.lock()
-        {
-            term.scroll_display(Scroll::Bottom);
-        }
+        } else if let Some(pane) = ws.mux.focused() {
+            let result = pane.feed_input(bytes);
+            if result.is_queued()
+                && self.cfg.scroll_on_keystroke
+                && let Ok(mut term) = pane.term.term.lock()
+            {
+                term.scroll_display(Scroll::Bottom);
+            }
+            result
+        } else {
+            PaneInputResult::Queued
+        };
+        self.report_input_result(result);
     }
 
     fn commit_ime_text(&mut self, ws: &mut WindowState, text: &str, event_loop: &ActiveEventLoop) {
@@ -5169,7 +6329,7 @@ impl App {
         }
     }
 
-    /// Height the per-pane titlebar reserves at the top of each pane in a tab
+    /// Height the per-pane titlebar reserves on its configured edge in a tab
     /// with `pane_count` panes, matching the renderer's `pane_titlebar_h`
     /// (`cfg.show_titlebar && panes > 1 → cell_h + 6`) and the
     /// `pane_at_titlebar_click` hit-test. `0.0` (no inset) for a single-pane
@@ -5201,6 +6361,57 @@ impl App {
             (self.cfg.padding_x, self.cfg.padding_y),
             titlebar_h,
         )
+    }
+
+    fn pty_geometry_for_grid(&self, ws: &WindowState, columns: usize, rows: usize) -> PtyGeometry {
+        let fractional_cell = ws
+            .renderer
+            .as_ref()
+            .map(|renderer| (renderer.cell_w, renderer.cell_h))
+            .unwrap_or((8.0, 16.0));
+        let (pixel_width, pixel_height) = pty_pixel_size(fractional_cell, (columns, rows));
+        PtyGeometry::new(columns, rows, pixel_width, pixel_height)
+    }
+
+    fn pty_geometry_for_rect(&self, ws: &WindowState, rect: Rect, titlebar_h: f32) -> PtyGeometry {
+        let (columns, rows) = self.grid_of_inset(ws, rect, titlebar_h);
+        self.pty_geometry_for_grid(ws, columns, rows)
+    }
+
+    fn prospective_split_geometry(&self, ws: &WindowState, dir: Dir) -> PtyGeometry {
+        let area = self.area(ws);
+        let rect = ws.mux.prospective_split_rect(dir, area).unwrap_or(area);
+        let titlebar_h = self.pane_titlebar_inset(ws, ws.mux.active_pane_count().saturating_add(1));
+        self.pty_geometry_for_rect(ws, rect, titlebar_h)
+    }
+
+    fn restore_geometries(
+        &self,
+        ws: &WindowState,
+        session: &crate::session::Session,
+    ) -> Vec<Vec<PtyGeometry>> {
+        let area = self.area(ws);
+        session
+            .tabs
+            .iter()
+            .map(|tab| {
+                let rectangles = tab.root.leaf_rects(area);
+                let pane_count = rectangles.len();
+                let titlebar_inset = self.pane_titlebar_inset(ws, pane_count);
+                let mut geometries: Vec<_> = rectangles
+                    .into_iter()
+                    .map(|rect| self.pty_geometry_for_rect(ws, rect, titlebar_inset))
+                    .collect();
+                if tab.zoomed
+                    && let Some(focused_index) =
+                        (!geometries.is_empty()).then(|| tab.focus.min(geometries.len() - 1))
+                    && let Some(focused) = geometries.get_mut(focused_index)
+                {
+                    *focused = self.pty_geometry_for_rect(ws, area, 0.0);
+                }
+                geometries
+            })
+            .collect()
     }
 
     fn pane_snapshots_match_current_layout(&self, ws: &WindowState) -> bool {
@@ -5345,8 +6556,9 @@ impl App {
             .as_ref()
             .map(|r| (r.cell_w, r.cell_h))
             .unwrap_or((8.0, 16.0));
-        // Apply the same per-pane-titlebar inset the renderer
-        // draws content with, or a split pane's pointer maps ~1 row too high.
+        // Apply the same title-position-aware grid origin the renderer draws
+        // content with, or a split pane's pointer maps roughly one row away
+        // from the visible cell grid.
         // The focused pane lives in the active tab, so its inset depends on the
         // active tab's pane count.
         let titlebar_h =
@@ -5358,72 +6570,12 @@ impl App {
             (cw, ch),
             (self.cfg.padding_x, self.cfg.padding_y),
             titlebar_h,
+            self.cfg.title_at_bottom,
         );
         (
             kettle_core::Point::new(kettle_core::Line(line), kettle_core::Column(col)),
             side,
         )
-    }
-
-    /// Pull the on-screen text of `row` (viewport-relative)
-    /// from the focused pane's grid so `smart_selection_at` can run its
-    /// regex against the actual cells the user clicked on. Returns
-    /// `None` if there's no focused pane, the lock can't be acquired,
-    /// or the row is out of range.
-    /// Extract the text of the vi visual
-    /// selection from the focused pane's grid. Inclusive on both
-    /// ends. Joins rows with `\n`. Returns "" on no focus / lock
-    /// failure. Same row→column iteration shape as
-    /// `line_text_for_smart_select` to keep grid-read paths
-    /// consistent.
-    fn yank_vi_selection(
-        &mut self,
-        ws: &mut WindowState,
-        start: (usize, usize),
-        end: (usize, usize),
-    ) -> String {
-        let Some(pane) = ws.mux.focused() else {
-            return String::new();
-        };
-        let Ok(t) = pane.term.term.lock() else {
-            return String::new();
-        };
-        use kettle_core::Dimensions;
-        let cols = t.columns();
-        let rows = t.screen_lines();
-        let (sr, sc) = start;
-        let (er, ec) = end;
-        if sr >= rows {
-            return String::new();
-        }
-        // R1 completion: the vi rows are viewport-relative (clamped
-        // to 0..screen_lines, rendered at `oy + row*ch`), so convert each to a
-        // grid-absolute line — a visual-yank made while scrolled back then reads
-        // the VISIBLE rows, consistent with where the vi highlight is drawn,
-        // instead of the active screen. No-op at the bottom (display_offset == 0).
-        let off = t.grid().display_offset();
-        let mut out = String::new();
-        for r in sr..=er.min(rows.saturating_sub(1)) {
-            let base = viewport_point_to_grid(
-                kettle_core::Point::new(kettle_core::Line(r as i32), kettle_core::Column(0)),
-                off,
-            );
-            let first = if r == sr { sc } else { 0 };
-            let last = if r == er { ec.min(cols - 1) } else { cols - 1 };
-            for c in first..=last {
-                let p = kettle_core::Point::new(base.line, kettle_core::Column(c));
-                out.push(t.grid()[p].c);
-            }
-            if r != er {
-                out.push('\n');
-            }
-        }
-        // Trim trailing whitespace from each line so blank cells at
-        // the end of a yanked range don't pollute the clipboard.
-        out.lines()
-            .map(|l| l.trim_end())
-            .collect::<Vec<_>>()
-            .join("\n")
     }
 
     fn line_text_for_smart_select(&mut self, ws: &mut WindowState, row: usize) -> Option<String> {
@@ -5556,7 +6708,7 @@ impl App {
     ///   <custom_url_handler> <uri>
     /// detached, so kettle doesn't block on the handler exiting.
     /// Errors log::warn.
-    fn open_url(&self, uri: &str) {
+    fn open_url(&mut self, ws: &WindowState, uri: &str) {
         if !kettle_core::links::is_safe_url(uri) {
             log::warn!("refused to open unsafe URL: {uri}");
             return;
@@ -5568,17 +6720,24 @@ impl App {
         // handler eventually opens them. The
         // `try_url_handler` chain below still owns the "actually
         // launch" decision; this event is observation-only.
-        if let Some(eng) = &self.lua_engine {
-            eng.fire_event(&crate::LuaEvent::UrlClicked(uri.to_string()));
-        }
+        self.fire_lua_event(
+            ws,
+            crate::LuaEvent::UrlClicked(uri.to_string()),
+            "url_clicked hook",
+        );
         // Terminator plugin parity:
         // Lua URL handlers get first dispatch. If a handler claims
         // the URL (its pattern matches), kettle does NOT fall
         // through to the cfg.custom_url_handler or system-open
         // paths — the handler decides what (if anything) to launch.
-        if let Some(eng) = &self.lua_engine
-            && eng.try_url_handler(uri)
-        {
+        let handled_by_lua = self
+            .lua_engine
+            .as_ref()
+            .is_some_and(|engine| engine.try_url_handler(uri));
+        // URL-handler callbacks are distinct from UrlClicked observers and can
+        // queue the same side effects. Drain before any claimed-handler return.
+        self.drain_lua_hook_commands(ws, "URL handler");
+        if handled_by_lua {
             return;
         }
         if self.cfg.use_custom_url_handler && !self.cfg.custom_url_handler.is_empty() {
@@ -5714,7 +6873,7 @@ impl App {
         self.paste_text(ws, text);
     }
 
-    /// Shared paste path — clamp, broadcast scoping, bracketed-paste
+    /// Shared paste path — size validation, broadcast scoping, bracketed-paste
     /// wrap, write to the focused PTY. Extracted so `paste_clipboard` and
     /// `paste_primary` (and any future paste channel) can't drift on the
     /// safety/scoping rules.
@@ -5722,12 +6881,14 @@ impl App {
         if text.is_empty() {
             return;
         }
-        // Cap a runaway paste at 4 MiB on a UTF-8 char boundary so an
-        // accidental "paste this 1 GB log" doesn't shove every byte into
-        // the PTY in one go. `clamp_osc52` is named for OSC 52 but it's a
-        // generic byte-clamper that preserves char boundaries — exactly
-        // what we want for any paste channel.
-        let text = clamp_osc52(&text, LOCAL_PASTE_MAX);
+        // Reject rather than silently truncate. A truncated shell command,
+        // patch, or encoded file can be more dangerous than no paste, and the
+        // explicit notice tells the user to pass the data by file instead.
+        if !local_paste_within_limit(&text) {
+            self.report_input_result(PaneInputResult::Oversize);
+            return;
+        }
+        let text = text.as_str();
         let raw_target = if ws.mux.is_broadcast_on() {
             ws.mux.broadcast_paste_has_raw_writable_target()
         } else {
@@ -5771,7 +6932,8 @@ impl App {
         // different mode state), so the wrap is per-pane, not a
         // single shared payload.
         if ws.mux.is_broadcast_on() {
-            ws.mux.broadcast_paste(text);
+            let result = ws.mux.broadcast_paste(text);
+            self.report_input_result(result);
             return;
         }
         let bracketed = self
@@ -5780,7 +6942,8 @@ impl App {
         let bytes = input::paste_payload(text, bracketed);
         if let Some(p) = ws.mux.focused() {
             // Paste is user input — a read-only pane drops it.
-            p.feed_input(&bytes);
+            let result = p.feed_input(&bytes);
+            self.report_input_result(result);
         }
     }
 
@@ -5908,9 +7071,21 @@ impl App {
 
     /// Resize every pane's PTY to match its tile in the layout.
     fn resize_all(&mut self, ws: &mut WindowState) {
+        // Never synthesize a layout from the helper fallbacks while the
+        // renderer is temporarily absent during GPU recovery. Existing PTYs
+        // retain their last good geometry; the atomic renderer rebuild calls
+        // this once with the real surface and fractional cell metrics.
+        if ws.renderer.is_none() {
+            return;
+        }
         let (cw, ch) = self.cell_px(ws);
+        let fractional_cell = ws
+            .renderer
+            .as_ref()
+            .map(|r| (r.cell_w, r.cell_h))
+            .unwrap_or((f32::from(cw), f32::from(ch)));
         let area = self.area(ws);
-        let mut plan: Vec<(u64, usize, usize)> = Vec::new();
+        let mut plan: Vec<(u64, usize, usize, u16, u16)> = Vec::new();
         for ti in 0..ws.mux.tabs.len() {
             // A split tab's panes each lose `titlebar_h` of
             // height to their per-pane titlebar, so size each PTY for the rows
@@ -5920,38 +7095,28 @@ impl App {
             let titlebar_h = self.pane_titlebar_inset(ws, panes.len());
             for (id, r) in panes {
                 let (cols, rows) = self.grid_of_inset(ws, r, titlebar_h);
-                plan.push((id, cols, rows));
+                let (pixel_width, pixel_height) = pty_pixel_size(fractional_cell, (cols, rows));
+                plan.push((id, cols, rows, pixel_width, pixel_height));
             }
         }
-        // Vi-mode's cursor + visual-selection anchor (`ViState`) are raw grid
-        // indices captured at movement/`v`-press time; NOTHING revisits them
-        // after a resize/reflow (audit v2.38.2 — before this fix, resizing the
-        // window mid-selection left a stale (row, col) that `y` would happily
-        // yank text from, silently copying whatever now occupies that cell in
-        // the reflowed grid instead of what the user actually highlighted).
-        // Snapshot the focused pane's pre-resize grid dims so we can tell
-        // whether THIS call actually changed them — a resize_all triggered by
-        // an unrelated split's ratio drag, for instance, shouldn't needlessly
-        // kick the user out of vi-mode.
-        let focused_id = ws.mux.active_focus();
-        let focused_dims_before = focused_id.and_then(|id| pane_grid_dims(&ws.mux, id));
-        for (id, cols, rows) in plan {
-            if let Some(p) = ws.mux.panes.get_mut(&id) {
-                p.term.resize(cols, rows, cw, ch);
+        let mut native_resize_failed = false;
+        for (id, cols, rows, pixel_width, pixel_height) in plan {
+            if let Some(p) = ws.mux.panes.get_mut(&id)
+                && let Err(error) = p.term.try_resize_geometry(PtyGeometry::new(
+                    cols,
+                    rows,
+                    pixel_width,
+                    pixel_height,
+                ))
+            {
+                native_resize_failed = true;
+                log::warn!(
+                    "pane {id} PTY resize failed; a bounded deadline retry is scheduled: {error:#}"
+                );
             }
         }
-        if ws.vi_mode.is_some() {
-            let focused_dims_after = focused_id.and_then(|id| pane_grid_dims(&ws.mux, id));
-            if vi_mode_invalidated_by_resize(focused_dims_before, focused_dims_after) {
-                // Same "transient overlay drops out from under a state
-                // change it can't safely reconcile" pattern used elsewhere
-                // (e.g. focus loss disarming latched drag flags) — exiting
-                // is simpler and strictly safer than reclamping row/col/
-                // anchor to the new bounds, which would keep the indices
-                // in-range but still pointing at unrelated post-reflow text.
-                ws.vi_mode = None;
-            }
-        }
+        ws.pty_resize_retry
+            .record_result(std::time::Instant::now(), native_resize_failed);
     }
 
     /// Shared zoom transition for `Action::ToggleZoom` and
@@ -5972,7 +7137,6 @@ impl App {
     /// left desynced no matter which action toggled the flag.
     fn toggle_zoom_with_scale(&mut self, ws: &mut WindowState, scale: Option<f32>) {
         ws.mux.toggle_zoom();
-        self.resize_all(ws);
         let now_zoomed = ws.mux.is_zoomed();
         if let Some(r) = ws.renderer.as_mut() {
             if now_zoomed {
@@ -5994,6 +7158,11 @@ impl App {
                 r.set_font_size(prev);
             }
         }
+        // Grid and pixel geometry must be derived after any scaled-zoom font
+        // change. Resizing first left the PTY at the previous cell metrics
+        // until an unrelated resize event, so TUIs and CSI 14 t disagreed with
+        // the pixels that were actually rendered.
+        self.resize_all(ws);
     }
 
     fn apply_window_resize(&mut self, ws: &mut WindowState, width: u32, height: u32) {
@@ -6008,6 +7177,7 @@ impl App {
         {
             r.resize(width, height);
         }
+        self.reclamp_context_menu(ws, (width as f32, height as f32));
         self.resize_all(ws);
         let show_chip = match self.cfg.resize_overlay {
             kettle_config::ResizeOverlayMode::Never => false,
@@ -6024,6 +7194,27 @@ impl App {
         }
     }
 
+    fn commit_window_resize(&mut self, ws: &mut WindowState, width: u32, height: u32) {
+        ws.frame_recovery.expedite(std::time::Instant::now());
+        self.apply_window_resize(ws, width, height);
+        // Record the new grid size into the asciicast trace.
+        if self.recorder.is_some() {
+            let (cols, rows) = self.grid_of(ws, self.area(ws));
+            if let Some(rec) = self.recorder.as_mut() {
+                rec.record_resize(cols as u16, rows as u16);
+            }
+        }
+        if let Some(window) = &ws.window {
+            window.request_redraw();
+        }
+    }
+
+    fn dpi_resize_renderer_ready(&self, ws: &WindowState) -> bool {
+        ws.renderer.is_some()
+            && !self.gpu.as_ref().is_some_and(|gpu| gpu.is_lost())
+            && !ws.frame_recovery.renderer_rebuild_pending()
+    }
+
     /// Fan one destructive drain of the shared PTY-output sidechannel out to
     /// every enabled consumer. Both redraw-time and close-time drains must use
     /// this path; otherwise whichever path receives a chunk first can starve
@@ -6037,10 +7228,7 @@ impl App {
             if let Some(rec) = self.recorder.as_mut() {
                 rec.record_output(&bytes);
             }
-            if let Some(eng) = &self.lua_engine {
-                eng.fire_event(&crate::LuaEvent::Output(pane_id, bytes));
-            }
-            self.drain_lua_hook_commands("output hook");
+            self.fire_lua_event(_ws, crate::LuaEvent::Output(pane_id, bytes), "output hook");
         }
         self.sync_recording_state(
             _ws,
@@ -6072,11 +7260,15 @@ impl App {
         // ws.pending_pane_restarts after the iteration so the
         // post-drain handler can process them with a fresh borrow.
         let mut pending_restarts_local: Vec<u64> = Vec::new();
-        // Cell size is renderer-owned and uniform across panes, so resolve it
-        // once per drain rather than per event (a sixel/kitty app polling CSI
-        // 14 t doesn't need a renderer lookup per CSI).
-        let (cell_w, cell_h) = self.cell_px(ws);
         for (&pane_id, pane) in ws.mux.panes.iter_mut() {
+            if pane.term.event_queue_overflowed() || pane.pty_input_failed() {
+                log::error!(
+                    "closing pane {pane_id}: bounded terminal event/input transport failed"
+                );
+                pane.closed = true;
+                while pane.rx.try_recv().is_ok() {}
+                continue;
+            }
             // Drain the optional output sidechannel before regular events.
             if let Some(out_rx) = &pane.output_rx {
                 while let Ok(chunk) = out_rx.try_recv() {
@@ -6103,32 +7295,53 @@ impl App {
                             // status bar.
                             pane.title = sanitize_title(&t);
                             pane.title_is_placeholder = false;
+                            pane.title_origin = PaneTitleOrigin::Osc;
+                            pane.title_before_remote = None;
                         }
                     }
                     TermEvent::ResetTitle => {
                         pane.title = "kettle".into();
                         pane.title_is_placeholder = true;
+                        pane.title_origin = PaneTitleOrigin::Placeholder;
+                        pane.title_before_remote = None;
                     }
-                    TermEvent::PtyWrite(s) => pane.term.write(s.as_bytes()),
-                    TermEvent::ClipboardStore(_, s) => {
+                    TermEvent::PtyWrite(s) => {
+                        if !pane.queue_protocol_reply(s.as_bytes()).is_queued() {
+                            log::error!("closing pane {pane_id}: bounded PTY input queue failed");
+                            pane.closed = true;
+                            break;
+                        }
+                    }
+                    TermEvent::ClipboardStore(target, s) => {
                         // OSC 52 write — gated by policy (default: allowed).
                         if self.cfg.osc52.can_copy()
                             && let Some(cb) = &mut self.clipboard
+                            && let Err(e) = set_osc52_clipboard(
+                                cb,
+                                target,
+                                clamp_osc52(&s, OSC52_MAX).to_string(),
+                            )
                         {
-                            // Log instead of silently swallowing.
-                            if let Err(e) = cb.set_text(clamp_osc52(&s, OSC52_MAX).to_string()) {
-                                log::warn!("clipboard set_text failed (OSC 52 write): {e}");
-                            }
+                            log::warn!("clipboard write failed (OSC 52 {target:?} target): {e}");
                         }
                     }
-                    TermEvent::ClipboardLoad(_, fmt) => {
+                    TermEvent::ClipboardLoad(target, fmt) => {
                         // OSC 52 read lets a (remote) program exfiltrate the
                         // clipboard; denied by default — reply empty so the
                         // protocol stays well-formed without leaking.
                         let text = if self.cfg.osc52.can_paste() {
                             self.clipboard
                                 .as_mut()
-                                .and_then(|c| c.get_text().ok())
+                                .and_then(|c| match get_osc52_clipboard(c, target) {
+                                    Ok(text) => Some(text),
+                                    Err(error) => {
+                                        log::warn!(
+                                            "clipboard read failed (OSC 52 {target:?} target): \
+                                             {error}"
+                                        );
+                                        None
+                                    }
+                                })
                                 .unwrap_or_default()
                         } else {
                             String::new()
@@ -6141,29 +7354,31 @@ impl App {
                         // unbounded base64 encode + single PTY write either
                         // way).
                         let text = clamp_osc52(&text, OSC52_MAX);
-                        pane.term.write(fmt(text).as_bytes());
+                        let reply = fmt(text);
+                        if !pane.queue_protocol_reply(reply.as_bytes()).is_queued() {
+                            log::error!("closing pane {pane_id}: bounded PTY input queue failed");
+                            pane.closed = true;
+                            break;
+                        }
                     }
                     TermEvent::TextAreaSizeRequest(fmt) => {
                         // CSI 14 t — text-area size in pixels. Sixel / kitty
                         // graphics / iTerm2-OSC-1337 apps probe this to do
-                        // pixel-perfect image placements; the engine raises
-                        // the event but expects us to fill in the cell + grid
-                        // dimensions before the formatter produces the reply
-                        // (CSI 4 ; <height> ; <width> t).
-                        let (cols, rows) = pane
-                            .term
-                            .term
-                            .lock()
-                            .ok()
-                            .map(|t| {
-                                use kettle_core::Dimensions;
-                                (t.columns() as u16, t.screen_lines() as u16)
-                            })
-                            .unwrap_or((0, 0));
+                        // pixel-perfect image placements. Use the exact totals
+                        // already published through PtySize: at fractional DPI
+                        // a 9.6 px cell across 100 columns is 960 px, not the
+                        // 1000 px produced by multiplying a rounded 10 px cell.
+                        let (pixel_width, pixel_height) = pane.term.pty_pixel_size();
                         let reply = kettle_render::reply_for_text_area_size(
-                            cols, rows, cell_w, cell_h, &*fmt,
+                            pixel_width,
+                            pixel_height,
+                            &*fmt,
                         );
-                        pane.term.write(reply.as_bytes());
+                        if !pane.queue_protocol_reply(reply.as_bytes()).is_queued() {
+                            log::error!("closing pane {pane_id}: bounded PTY input queue failed");
+                            pane.closed = true;
+                            break;
+                        }
                     }
                     TermEvent::ColorRequest(idx, fmt) => {
                         // OSC 4 ; n ; ? / OSC 10 / 11 / 12 — resolve against
@@ -6176,8 +7391,12 @@ impl App {
                         let reply = pane.term.term.lock().ok().and_then(|t| {
                             kettle_render::reply_for_query(idx, &self.cfg.theme, t.colors(), &*fmt)
                         });
-                        if let Some(s) = reply {
-                            pane.term.write(s.as_bytes());
+                        if let Some(s) = reply
+                            && !pane.queue_protocol_reply(s.as_bytes()).is_queued()
+                        {
+                            log::error!("closing pane {pane_id}: bounded PTY input queue failed");
+                            pane.closed = true;
+                            break;
                         }
                     }
                     TermEvent::CursorBlinkingChange => {
@@ -6261,6 +7480,13 @@ impl App {
                     _ => {}
                 }
             }
+            if pane.term.event_queue_overflowed() || pane.pty_input_failed() {
+                log::error!(
+                    "closing pane {pane_id}: bounded terminal event/input transport failed"
+                );
+                pane.closed = true;
+                while pane.rx.try_recv().is_ok() {}
+            }
             // Drain OSC 133 D (CommandEnd) events ONCE here and
             // defer processing to after the pane loop, where the App can fan a
             // single drain out to the command-notify, the run_command
@@ -6298,18 +7524,15 @@ impl App {
         // fire LuaEvent::Bell(pane_id) for every belled pane after
         // the kettle-side bell handling is done. Callbacks may queue
         // LuaCommands (kettle.notify, kettle.send_text); they get
-        // drained at the next App tick — same as the
-        // pending_lua_send/pending_lua_actions drain in `resumed_inner`.
+        // transferred immediately into the bounded App FIFO by
+        // `fire_lua_event`, then dispatched in order on the event loop.
         // Route Bell + Output event drains through the
         // `drain_lua_hook_commands` helper so all 4 hook
         // event drains (TabAdd, TabClose, Bell, Output) share the
         // same canonical LuaCommand-match path.
         for id in bell_panes {
             ws.mux.touch_tab_bell(id);
-            if let Some(eng) = &self.lua_engine {
-                eng.fire_event(&crate::LuaEvent::Bell(id));
-            }
-            self.drain_lua_hook_commands("bell hook");
+            self.fire_lua_event(ws, crate::LuaEvent::Bell(id), "bell hook");
         }
         // A single destructive drain fans out to Lua and the
         // optional recorder so neither consumer can steal bytes from the other.
@@ -6518,6 +7741,44 @@ impl App {
         }
     }
 
+    fn stash_renderer_for_gpu_recovery(ws: &mut WindowState) {
+        let live = ws.renderer.as_ref().map(Renderer::recovery_state);
+        retain_renderer_recovery_snapshot(&mut ws.renderer_recovery, live);
+        ws.renderer = None;
+    }
+
+    fn finish_gpu_renderer_recovery(&mut self, ws: &mut WindowState) {
+        ws.renderer_recovery = None;
+        ws.frame_recovery.clear();
+        ws.pending_output_gen.clear();
+        ws.pane_snapshots.clear();
+        ws.pane_snapshot_keys.clear();
+        ws.reuse_pane_snapshots_once = false;
+        ws.output_pacer.reset();
+        ws.flood_paints = 0;
+        ws.last_paint = None;
+
+        // Recompute every pane grid from the replacement renderer's restored
+        // live font/cell metrics. The constructor already configured the
+        // surface at the current window size and scale; RendererRebuilt also
+        // resolves any DPI transition that arrived while the device was lost.
+        let Some(window) = ws.window.as_ref() else {
+            return;
+        };
+        let size = window.inner_size();
+        self.reclamp_context_menu(ws, (size.width as f32, size.height as f32));
+        if ws.dpi_resize_surface_suspended {
+            return;
+        }
+        if ws.dpi_resize.on_event(DpiResizeEvent::RendererRebuilt {
+            width: size.width,
+            height: size.height,
+        }) == DpiResizeAction::ApplyLayout
+        {
+            self.resize_all(ws);
+        }
+    }
+
     /// Recreate one window's surface and retained renderer resources while
     /// keeping the healthy process-wide adapter/device/queue. wgpu 30 requires
     /// this for `CurrentSurfaceTexture::Lost`; it is also the bounded repair
@@ -6537,9 +7798,7 @@ impl App {
             return Err("window renderer is unavailable".to_string());
         };
 
-        let font_size = old_renderer.font_size();
-        let cell_scale = (old_renderer.cell_scale_w, old_renderer.cell_scale_h);
-        let pending_screenshot = old_renderer.pending_screenshot.clone();
+        let recovery_state = old_renderer.recovery_state();
         let size = window.inner_size();
         let scale = window.scale_factor() as f32;
         let mut replacement = Renderer::new_with_gpu(
@@ -6552,26 +7811,26 @@ impl App {
         )
         .map_err(|error| error.to_string())?;
 
-        // These values can diverge from Config at runtime (font zoom and live
-        // reload), so rebuilding from Config alone would visibly reset the
-        // affected window after recovery.
-        replacement.set_font_size(font_size);
-        replacement.set_cell_scale(cell_scale.0, cell_scale.1);
-        replacement.set_accent_override(ws.accent.as_ref().map(|accent| accent.color));
-        if let Some(request) = pending_screenshot
-            && replacement.set_pending_screenshot(request).is_err()
-        {
-            // A fresh renderer has neither a queued nor in-flight screenshot;
-            // keep this defensive branch explicit so a future constructor
-            // change cannot silently discard a ctl completion request.
-            return Err("replacement renderer rejected the queued screenshot".to_string());
-        }
+        // These values can diverge from Config at runtime (font zoom, cell
+        // scaling, and the resolved per-window accent). A queued screenshot
+        // also owns a ctl completion sender that must survive the rebuild.
+        replacement.restore_recovery_state(&recovery_state);
 
         // Commit only after the replacement is fully initialized. A failed
         // candidate leaves the old renderer in place while the state machine
         // backs off and tries again.
         ws.renderer = Some(replacement);
-        self.resize_all(ws);
+        self.reclamp_context_menu(ws, (size.width as f32, size.height as f32));
+        if ws.dpi_resize_surface_suspended {
+            return Ok(());
+        }
+        if ws.dpi_resize.on_event(DpiResizeEvent::RendererRebuilt {
+            width: size.width,
+            height: size.height,
+        }) == DpiResizeAction::ApplyLayout
+        {
+            self.resize_all(ws);
+        }
         Ok(())
     }
 
@@ -6588,15 +7847,15 @@ impl App {
         let avoid = self.gpu.as_ref().map(|gpu| gpu.adapter_key());
         log::warn!("GPU recovery attempt {attempt} ({escalation:?})");
 
-        ws.renderer = None;
+        Self::stash_renderer_for_gpu_recovery(ws);
         for other in self.windows.values_mut() {
-            other.renderer = None;
+            Self::stash_renderer_for_gpu_recovery(other);
         }
 
         let cfg = self.cfg.clone();
         let size = window.inner_size();
         let scale = window.scale_factor() as f32;
-        let new_renderer = match pollster::block_on(
+        let mut new_renderer = match pollster::block_on(
             kettle_render::Renderer::new_with_escalation_and_display_handle(
                 window.clone(),
                 event_loop.owned_display_handle(),
@@ -6613,15 +7872,21 @@ impl App {
                 return Err(err.to_string());
             }
         };
+        if let Some(snapshot) = ws.renderer_recovery.as_ref() {
+            new_renderer.restore_recovery_state(snapshot);
+        }
         let new_gpu = new_renderer.gpu().clone();
         let targets = self.windows.values().filter_map(|other| {
             let window = other.window.clone()?;
             let size = window.inner_size();
             let scale = window.scale_factor() as f32;
-            Some((other.seq, (window, size, scale)))
+            Some((
+                other.seq,
+                (window, size, scale, other.renderer_recovery.clone()),
+            ))
         });
-        let secondary_renderers = build_recovery_set(targets, |(window, size, scale)| {
-            kettle_render::Renderer::new_with_gpu(
+        let secondary_renderers = build_recovery_set(targets, |(window, size, scale, snapshot)| {
+            let mut renderer = kettle_render::Renderer::new_with_gpu(
                 &new_gpu,
                 window,
                 size.width.max(1),
@@ -6629,6 +7894,11 @@ impl App {
                 scale,
                 &cfg,
             )
+            .map_err(|error| error.to_string())?;
+            if let Some(snapshot) = snapshot.as_ref() {
+                renderer.restore_recovery_state(snapshot);
+            }
+            Ok::<_, String>(renderer)
         })
         .map_err(|errors| {
             for (seq, error) in &errors {
@@ -6651,27 +7921,41 @@ impl App {
         // the candidate adapter. A partial commit would leave some windows
         // permanently blank and stop the escalation loop on a "success".
         ws.renderer = Some(new_renderer);
-        ws.frame_recovery.clear();
+        let secondary_seqs: Vec<u64> = secondary_renderers.iter().map(|(seq, _)| *seq).collect();
         for (seq, renderer) in secondary_renderers {
             if let Some(other) = self.windows.get_mut(&seq) {
                 other.renderer = Some(renderer);
-                other.frame_recovery.clear();
             }
         }
         self.gpu_software_fallback = new_gpu.is_software();
-        log::info!(
-            "GPU recovery succeeded on {} (software={})",
-            new_gpu.adapter_name(),
-            self.gpu_software_fallback
-        );
         let adapter = new_gpu.adapter_info();
+        let adapter_name = new_gpu.adapter_name();
         self.gpu = Some(new_gpu);
 
-        if let Some(window) = &ws.window {
+        self.finish_gpu_renderer_recovery(ws);
+        for seq in secondary_seqs {
+            let Some(mut other) = self.windows.remove(&seq) else {
+                continue;
+            };
+            self.finish_gpu_renderer_recovery(&mut other);
+            self.windows.insert(seq, other);
+        }
+
+        log::info!(
+            "GPU recovery succeeded on {} (software={})",
+            adapter_name,
+            self.gpu_software_fallback
+        );
+
+        if !window_is_render_hidden(ws)
+            && let Some(window) = &ws.window
+        {
             window.request_redraw();
         }
         for other in self.windows.values() {
-            if let Some(window) = &other.window {
+            if !window_is_render_hidden(other)
+                && let Some(window) = &other.window
+            {
                 window.request_redraw();
             }
         }
@@ -7498,14 +8782,20 @@ impl App {
             let Some((row, col)) = self.terminal_cursor_cell(ws) else {
                 return;
             };
-            let Some((rx, ry, _rw, _rh)) = self.focused_rect(ws, self.area(ws)) else {
+            let Some(rect) = self.focused_rect(ws, self.area(ws)) else {
                 return;
             };
             let titlebar =
                 self.pane_titlebar_inset(ws, ws.mux.layout(ws.mux.active, self.area(ws)).len());
+            let grid_origin = kettle_render::pane_grid_origin(
+                rect,
+                (self.cfg.padding_x, self.cfg.padding_y),
+                titlebar,
+                self.cfg.title_at_bottom,
+            );
             (
-                rx + self.cfg.padding_x + col as f32 * cw,
-                ry + self.cfg.padding_y + titlebar + row as f32 * ch,
+                grid_origin.0 + col as f32 * cw,
+                grid_origin.1 + row as f32 * ch,
             )
         };
         let size = window.inner_size();
@@ -7658,8 +8948,11 @@ impl App {
             return true;
         }
         let seq = input::mouse_encode(sgr, btn, pressed, motion, col, row, ws.mods);
-        if let Some(p) = ws.mux.focused() {
-            p.term.write(&seq);
+        if let Some(p) = ws.mux.focused()
+            && !p.queue_protocol_reply(&seq).is_queued()
+        {
+            log::error!("closing pane: mouse protocol reply transport failed");
+            p.closed = true;
         }
         ws.last_mouse_cell = Some((row, col));
         true
@@ -7893,14 +9186,6 @@ impl App {
         // the confirm dialog). Values are read from the live Config so the
         // panel reflects the current state (incl. external reloads).
         let settings_overlay = self.settings_overlay_projection(ws);
-        // Audit v2.32.0: compute the vi-mode cursor + visual anchor BEFORE the
-        // search split so the search-CLOSED early-return (the normal case)
-        // carries them too. Previously they were only set on the search-open
-        // literal and the early-return fell back to `..Overlay::default()`
-        // (None) — so the magenta vi cursor + visual selection never rendered
-        // unless the search bar happened to be open.
-        let vi_cursor = ws.vi_mode.map(|v| (v.row, v.col));
-        let vi_visual_anchor = ws.vi_mode.and_then(|v| v.visual_anchor);
         let s = &ws.search;
         if !s.open {
             return Overlay {
@@ -7920,8 +9205,6 @@ impl App {
                 bell,
                 resize_overlay,
                 context_menu,
-                vi_cursor,
-                vi_visual_anchor,
                 confirm_dialog: confirm_dialog_early,
                 settings: settings_overlay,
                 update_available: self.update_available.clone(),
@@ -8034,8 +9317,6 @@ impl App {
             bell,
             resize_overlay,
             context_menu,
-            vi_cursor,
-            vi_visual_anchor,
             confirm_dialog,
             settings: settings_overlay,
             update_available: self.update_available.clone(),
@@ -8113,18 +9394,13 @@ impl App {
             // battery. Cleared here, the loop quiesces to ControlFlow::Wait
             // between output bursts. (`about_to_wait_inner` also short-circuits
             // animation wakes while lost.)
-            ws.coalescing_paint = false;
+            ws.output_pacer.reset();
             ws.seen_output_gen.clear();
             for (id, p) in &ws.mux.panes {
                 ws.seen_output_gen.insert(*id, p.term.output_generation());
             }
             return;
         }
-        // v2.21.1 (throughput): is THIS paint flushing coalesced PTY output?
-        // Captured before the clear below so the flood detector can count
-        // consecutive output-coalesced frames and stretch the paint budget
-        // under a sustained flood (see `effective_output_budget`).
-        let was_coalescing_paint = ws.coalescing_paint;
         // Scheduled theme transitions are time-driven rather than terminal
         // output. Keep this lock-free maintenance outside the snapshot-reuse
         // branch so a stream of menu-hover frames cannot defer a boundary
@@ -8160,7 +9436,6 @@ impl App {
             // kept in the signature for symmetry with other dispatchers.
             if !ws.pending_pane_restarts.is_empty() {
                 let pane_ids: Vec<u64> = std::mem::take(&mut ws.pending_pane_restarts);
-                let (cw, ch) = self.cell_px(ws);
                 let waker = self.waker();
                 // Use the live grid (matches the existing surface)
                 // for the new tab. An earlier version hardcoded 80×24 which mismatched
@@ -8169,6 +9444,7 @@ impl App {
                 // from the current area means the restart shell starts at
                 // the size the user is actually using.
                 let (cols, rows) = self.grid_of(ws, self.area(ws));
+                let geometry = self.pty_geometry_for_grid(ws, cols, rows);
                 for pane_id in pane_ids {
                     let restart_info: Option<(Vec<String>, Option<String>)> = ws
                         .mux
@@ -8176,12 +9452,9 @@ impl App {
                         .get(&pane_id)
                         .map(|p| (p.argv.clone(), p.term.current_dir()));
                     if let Some((argv, cwd)) = restart_info {
-                        if let Err(e) = ws.mux.new_tab_with(
+                        if let Err(e) = ws.mux.new_tab_with_geometry(
                             &self.cfg,
-                            cols,
-                            rows,
-                            cw,
-                            ch,
+                            geometry,
                             waker.clone(),
                             &argv,
                             cwd.as_deref(),
@@ -8207,12 +9480,12 @@ impl App {
             }
             ws.search_queries
                 .retain(|pane_id, _| ws.mux.panes.contains_key(pane_id));
-            // scroll-on-output: if new output landed in any pane since the
-            // previous frame, optionally yank that pane back to the bottom.
-            // Tracking is per-pane (each one drifts independently when only
-            // its background process emits) and uses the pure
-            // `should_scroll_on_output` rule so the "what counts as new
-            // output" decision lives outside the render path.
+            // Track output without locking every terminal on every blink or
+            // UI-only frame. The reader publishes `output_generation` after
+            // its terminal mutation, so a changed generation is both cheaper
+            // and more complete than the old `history_size()` proxy (which
+            // missed in-place and alternate-screen output). Only the opt-in
+            // scroll action itself needs the focused grid lock.
             let want_sob = self.cfg.scroll_on_output;
             // Track which panes produced output this frame so
             // we can latch their tab's `last_output_at`. Collected here
@@ -8220,29 +9493,18 @@ impl App {
             // `bell_panes` collection in `drain_events`.
             let mut output_panes: Vec<u64> = Vec::new();
             for (&pane_id, pane) in ws.mux.panes.iter_mut() {
-                let now = pane
-                    .term
-                    .term
-                    .lock()
-                    .ok()
-                    .map(|t| {
-                        use kettle_core::Dimensions;
-                        t.grid().history_size()
-                    })
-                    .unwrap_or(0);
-                let advanced = match pane.last_history {
-                    Some(prev) => now > prev,
-                    None => false,
-                };
+                let generation = pane.term.output_generation();
+                let advanced = output_generation_advanced(pane.last_output_generation, generation);
                 if advanced {
                     output_panes.push(pane_id);
                 }
-                if kettle_core::scrollbar::should_scroll_on_output(want_sob, pane.last_history, now)
+                if want_sob
+                    && advanced
                     && let Ok(mut t) = pane.term.term.lock()
                 {
                     t.scroll_display(Scroll::Bottom);
                 }
-                pane.last_history = Some(now);
+                pane.last_output_generation = Some(generation);
             }
             for id in output_panes {
                 ws.mux.touch_tab_output(id);
@@ -8302,13 +9564,29 @@ impl App {
         // cursor/input/output redraw requests from bypassing the backoff. Do
         // the non-GPU state maintenance above, but neither snapshot terminal
         // contents nor touch an invisible surface.
-        if ws.frame_recovery.has_pending() || window_is_render_hidden(ws) {
+        if !ws.dpi_resize.render_allowed()
+            || ws.frame_recovery.has_pending()
+            || window_is_render_hidden(ws)
+        {
             return;
         }
 
         if ws.renderer.is_none() {
             return;
         }
+
+        // Re-open each pane's output latch only when this window is about to
+        // sample generations for a real frame. Keeping the latch closed across
+        // the entire deferred frame budget collapses a fast reader's many
+        // chunks into one event-loop wake without losing output that races the
+        // snapshot below. This must follow every early-return guard: entering
+        // Presenting without attempting a frame would strand the pacer and
+        // schedule a near-zero recovery loop.
+        self.acknowledge_output_wakes(ws);
+        // v2.21.1 (throughput): is THIS paint flushing coalesced PTY output?
+        // Retained until the frame outcome so the flood detector advances only
+        // after presentation (see `effective_output_budget`).
+        let was_coalescing_paint = ws.output_pacer.begin_frame();
 
         // Capture the output generations represented by this candidate frame
         // before taking any new pane snapshots. A hover-only frame reuses the
@@ -8443,6 +9721,7 @@ impl App {
             drop(panes);
             ws.pane_snapshots = snaps;
             ws.pane_snapshot_keys = snapshot_keys;
+            ws.output_pacer.presentation_failed();
             return;
         };
         let frame_result = renderer.render_frame_with_status_and_pre_present(
@@ -8490,7 +9769,7 @@ impl App {
                             ws.window_shown = true;
                         }
                         ws.last_paint = Some(std::time::Instant::now());
-                        ws.coalescing_paint = false;
+                        ws.output_pacer.presented();
                         // v2.21.1 (throughput): track sustained-flood depth. A
                         // frame that flushed coalesced output bumps the
                         // counter; any other paint resets it. Failed
@@ -8504,6 +9783,7 @@ impl App {
                     }
                     FrameOutcome::RetryLater => {
                         debug_assert!(!presented);
+                        ws.output_pacer.presentation_failed();
                         // A backend acquire timeout may already have blocked
                         // for close to a second; Outdated has just
                         // reconfigured the existing surface. In either case,
@@ -8514,6 +9794,7 @@ impl App {
                     }
                     FrameOutcome::Occluded => {
                         debug_assert!(!presented);
+                        ws.output_pacer.presentation_failed();
                         // The wgpu result can precede winit's OS occlusion
                         // event. Keep a slow self-healing deadline for a
                         // spurious/transient result, while the state machine
@@ -8524,6 +9805,7 @@ impl App {
                     }
                     FrameOutcome::SurfaceLost => {
                         debug_assert!(!presented);
+                        ws.output_pacer.presentation_failed();
                         // wgpu 30 requires Instance::create_surface here.
                         // Rebuild only this renderer on the healthy shared
                         // device; genuine device loss is handled separately by
@@ -8534,6 +9816,7 @@ impl App {
                 }
             }
             Err(e) => {
+                ws.output_pacer.presentation_failed();
                 log::warn!("render error: {e}");
                 // Fallible glyph preparation can advance retained renderer
                 // damage keys before returning (for example AtlasFull). A
@@ -8619,6 +9902,10 @@ impl App {
     /// cursor visible on the new pane right away.
     fn note_focus_change(&mut self, ws: &mut WindowState, pre: (usize, Option<u64>)) {
         if self.focus_key(ws) != pre {
+            // Vi mode belongs to the pane that owns alacritty_terminal's
+            // engine cursor. A focus change must not leave that old pane in
+            // TermMode::VI while the UI routes keys to a different pane.
+            self.exit_vi_mode(ws);
             self.reset_blink_phase(ws);
             // Repaint immediately so the focused-pane
             // border and the cursor's solid/hollow state track the new pane.
@@ -8629,6 +9916,47 @@ impl App {
                 w.request_redraw();
             }
         }
+    }
+
+    fn exit_vi_mode(&mut self, ws: &mut WindowState) {
+        let Some(state) = ws.vi_mode.take() else {
+            return;
+        };
+        if let Some(pane) = ws.mux.panes.get(&state.pane_id) {
+            let mut term = pane
+                .term
+                .term
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            term.selection = None;
+            if term.mode().contains(kettle_core::TermMode::VI) {
+                term.toggle_vi_mode();
+            }
+        }
+    }
+
+    fn enter_vi_mode(&mut self, ws: &mut WindowState) {
+        self.close_all_modals(ws);
+        let Some(pane_id) = ws.mux.active_focus() else {
+            return;
+        };
+        let Some(pane) = ws.mux.panes.get(&pane_id) else {
+            return;
+        };
+        let mut term = pane
+            .term
+            .term
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        term.selection = None;
+        if !term.mode().contains(kettle_core::TermMode::VI) {
+            term.toggle_vi_mode();
+        }
+        drop(term);
+        ws.vi_mode = Some(ViState {
+            pane_id,
+            visual: false,
+        });
     }
 
     /// Close every modal overlay (search bar, command palette, hint
@@ -8654,9 +9982,9 @@ impl App {
         ws.ssh_input = None;
         ws.context_menu = None;
         ws.editing_title = None;
-        // vi-mode behaves like a modal — Esc exits it,
-        // close_all_modals exits it.
-        ws.vi_mode = None;
+        // Vi mode is backed by per-terminal engine state, so closing the modal
+        // must clear both the UI owner and TermMode::VI.
+        self.exit_vi_mode(ws);
         // The confirm dialog ("Close this pane?", "Quit?") is a
         // modal too, but was omitted here — so opening search / palette / a
         // menu while a confirm prompt was up rendered BOTH overlays at once
@@ -9365,43 +10693,14 @@ impl App {
         // right-aligned shortcut hint (+2 spacer columns) — the same formula
         // the renderer's `menu_row_chars` uses, kept in lockstep.
         let hints = self.menu_item_hints(&items);
-        let max_chars = items
+        let max_columns = items
             .iter()
             .zip(hints.iter())
-            .filter_map(|(it, hint)| {
-                let hint_chars = if hint.is_empty() {
-                    0
-                } else {
-                    hint.chars().count() + 2
-                };
-                match it {
-                    ContextMenuItem::Item { label, .. } => Some(label.chars().count() + hint_chars),
-                    // Count DynamicItem labels too — the hit-test twin
-                    // (`context_menu_geometry`) already did, so the anchor clamp
-                    // here used to underestimate the panel the renderer draws.
-                    ContextMenuItem::DynamicItem { label, .. } => {
-                        Some(label.chars().count() + hint_chars)
-                    }
-                    ContextMenuItem::LuaItem { label, .. } => Some(label.chars().count()),
-                    ContextMenuItem::ConfigItem { label, .. } => Some(label.chars().count()),
-                    ContextMenuItem::NewTabShell { label, .. } => {
-                        Some(label.chars().count() + hint_chars)
-                    }
-                    ContextMenuItem::UrlItem { label, .. } => Some(label.chars().count()),
-                    ContextMenuItem::Info { label } => Some(label.chars().count()),
-                    // Submenu rows show "label ▸" so the
-                    // max-width budget needs +2 for the suffix.
-                    ContextMenuItem::Submenu { label, .. } => Some(label.chars().count() + 2),
-                    // Theme/Profile choices surface only inside an
-                    // open flyout; the parent menu's width budget shouldn't grow.
-                    ContextMenuItem::ThemeChoice { .. } => None,
-                    ContextMenuItem::ProfileChoice { .. } => None,
-                    _ => None,
-                }
-            })
+            .map(|(item, hint)| context_menu_item_columns(item, hint))
             .max()
             .unwrap_or(0) as f32;
-        let panel_w = (max_chars * cw + kettle_render::menu::H_PAD).max(kettle_render::menu::MIN_W);
+        let panel_w =
+            (max_columns * cw + kettle_render::menu::H_PAD).max(kettle_render::menu::MIN_W);
         let (sw, sh) = ws
             .renderer
             .as_ref()
@@ -9410,9 +10709,23 @@ impl App {
                 (w as f32, h as f32)
             })
             .unwrap_or((800.0, 600.0));
-        let anchor = clamp_context_menu_anchor((px, py), (panel_w, panel_h), (sw, sh));
+        if !context_menu_surface_can_fit_row((sw, sh), (cw, ch)) {
+            ws.context_menu = None;
+            if let Some(window) = &ws.window {
+                window.request_redraw();
+            }
+            return;
+        }
+        let panel = clamp_context_menu_panel((panel_w, panel_h), (sw, sh));
+        let anchor = clamp_context_menu_anchor((px, py), panel, (sw, sh));
+        let anchor_scale = ws
+            .window
+            .as_ref()
+            .map(|window| window.scale_factor())
+            .unwrap_or(1.0);
         ws.context_menu = Some(ContextMenuState {
             anchor,
+            anchor_scale,
             items,
             highlight,
             drill_stack: Vec::new(),
@@ -9457,11 +10770,7 @@ impl App {
                     ws.theme_preview = Some((self.cfg.theme_name.clone(), self.cfg.theme.clone()));
                 }
                 if self.cfg.theme_name != name {
-                    self.cfg.theme_name = name.clone();
-                    self.cfg.theme = kettle_config::Theme::by_name(&name);
-                    if let Some(w) = &ws.window {
-                        w.request_redraw();
-                    }
+                    self.set_runtime_theme_name(ws, &name);
                 }
             }
             None => self.revert_theme_preview(ws),
@@ -9472,11 +10781,7 @@ impl App {
     /// snapshot. No-op when no preview is active (the common case).
     fn revert_theme_preview(&mut self, ws: &mut WindowState) {
         if let Some((name, theme)) = ws.theme_preview.take() {
-            self.cfg.theme_name = name;
-            self.cfg.theme = theme;
-            if let Some(w) = &ws.window {
-                w.request_redraw();
-            }
+            self.set_runtime_theme_state(ws, name, theme);
         }
     }
 
@@ -9768,7 +11073,7 @@ impl App {
     fn open_tab_with_argv(&mut self, ws: &mut WindowState, argv: &[String]) {
         let area = self.area(ws);
         let (cols, rows) = self.grid_of(ws, area);
-        let (cw, ch) = self.cell_px(ws);
+        let geometry = self.pty_geometry_for_grid(ws, cols, rows);
         let waker = self.waker();
         let cwd = ws.mux.focused().and_then(|p| p.term.current_dir());
         // Route through new_tab_with_launch so a WSL ▾-dropdown
@@ -9776,7 +11081,7 @@ impl App {
         // (a Windows spawn can't `cd` into a Linux path, so it fell back home).
         match ws
             .mux
-            .new_tab_with_launch(&self.cfg, cols, rows, cw, ch, waker, argv.to_vec(), cwd)
+            .new_tab_with_launch_geometry(&self.cfg, geometry, waker, argv.to_vec(), cwd)
         {
             Ok(()) => self.fire_tab_add_event(ws),
             Err(e) => log::warn!("could not open shell tab ({argv:?}): {e}"),
@@ -9814,29 +11119,14 @@ impl App {
             return;
         };
         menu.highlight = next;
-        // If the new highlight is outside the visible
-        // window, advance scroll_offset to bring it into view.
-        let visible = count_rows_fitting(&menu.items, menu.scroll_offset, panel_h, row_h, sep_h);
-        if next < menu.scroll_offset {
-            menu.scroll_offset = next;
-        } else if next >= menu.scroll_offset + visible {
-            // Pull scroll_offset back until `next` is the LAST fully visible
-            // row. v2.20.0 (review fix): probe the candidate one above the
-            // current offset — the old form checked the current offset, so a
-            // far jump (`G` into a 500-row theme list) stopped immediately at
-            // `off = next` and rendered the highlight as the panel's only
-            // row with an empty page below it.
-            let mut off = next;
-            while off > 0 {
-                let fit = count_rows_fitting(&menu.items, off - 1, panel_h, row_h, sep_h);
-                if off - 1 + fit > next {
-                    off -= 1;
-                } else {
-                    break;
-                }
-            }
-            menu.scroll_offset = off;
-        }
+        menu.scroll_offset = context_menu_scroll_for_highlight(
+            &menu.items,
+            menu.scroll_offset,
+            next,
+            panel_h,
+            row_h,
+            sep_h,
+        );
         ws.reuse_pane_snapshots_once = true;
         if let Some(w) = &ws.window {
             w.request_redraw();
@@ -9856,19 +11146,10 @@ impl App {
         let Some(menu) = ws.context_menu.as_mut() else {
             return;
         };
-        let n = menu.items.len();
         let new_off = (menu.scroll_offset as isize + delta).max(0) as usize;
         // Clamp: never scroll past the point where the last visible
         // row is the final item.
-        let mut max_off = 0usize;
-        for cand in 0..n {
-            let fit = count_rows_fitting(&menu.items, cand, panel_h, row_h, sep_h);
-            if cand + fit >= n {
-                max_off = cand;
-                break;
-            }
-            max_off = cand;
-        }
+        let max_off = context_menu_max_scroll_offset(&menu.items, panel_h, row_h, sep_h);
         let clamped = new_off.min(max_off);
         if clamped != menu.scroll_offset {
             menu.scroll_offset = clamped;
@@ -9907,11 +11188,10 @@ impl App {
         // visible slice is hit-tested. Off-by-one is handled by
         // find_menu_row_y's half-open interval [y, y+h).
         let start = menu.scroll_offset.min(menu.items.len());
-        let kinds: Vec<bool> = menu.items[start..]
+        let kinds = menu.items[start..]
             .iter()
-            .map(|it| matches!(it, ContextMenuItem::Separator))
-            .collect();
-        find_menu_row_y(py, ay, row_h, sep_h, &kinds).map(|i| i + start)
+            .map(|it| matches!(it, ContextMenuItem::Separator));
+        find_menu_row_y(py, ay, panel_h, row_h, sep_h, kinds).map(|i| i + start)
     }
 
     /// Set `menu.highlight` to whichever row the cursor is
@@ -9999,7 +11279,7 @@ impl App {
                 if let Some(eng) = &self.lua_engine {
                     eng.invoke_menu_item(idx);
                 }
-                self.drain_lua_hook_commands("lua menu-item");
+                self.drain_lua_hook_commands(ws, "lua menu-item");
             }
             ContextMenuClick::ConfigCommand(command) => {
                 ws.context_menu = None;
@@ -10008,7 +11288,8 @@ impl App {
                 if let Some(p) = ws.mux.focused() {
                     let mut bytes = command.into_bytes();
                     bytes.push(b'\n');
-                    p.feed_input(&bytes);
+                    let result = p.feed_input(&bytes);
+                    self.report_input_result(result);
                 }
             }
             ContextMenuClick::SetTheme(name) => {
@@ -10017,8 +11298,7 @@ impl App {
                 // post-event `sync_theme_preview` keeps this pick instead of
                 // restoring the pre-hover theme.
                 ws.theme_preview = None;
-                self.cfg.theme_name = name.clone();
-                self.cfg.theme = kettle_config::Theme::by_name(&name);
+                self.set_runtime_theme_name(ws, &name);
                 // Theme is config-governed — persist to the config
                 // file (not the session). A session-pinned theme used to OVERRIDE
                 // the config/compile-time default on restore, so a default change
@@ -10030,9 +11310,6 @@ impl App {
                         "kettle: theme not saved",
                         "Applied for this session — couldn't write it to your config file.",
                     );
-                }
-                if let Some(w) = &ws.window {
-                    w.request_redraw();
                 }
             }
             ContextMenuClick::SetProfile(name) => {
@@ -10059,7 +11336,7 @@ impl App {
                         log::warn!("clipboard set_text failed (link address copy): {e}");
                     }
                 } else {
-                    self.open_url(&url);
+                    self.open_url(ws, &url);
                 }
             }
         }
@@ -10069,43 +11346,17 @@ impl App {
         if bcode != 0 {
             return None;
         }
+        // Hover and click must resolve through the same clipped-row geometry.
+        // Keeping a second row walk here once allowed the blank partial strip
+        // below the final fully drawn row to dispatch an invisible item.
+        let idx = self.menu_row_at_cursor(ws)?;
         let menu = ws.context_menu.as_ref()?;
-        let ((ax, ay), (panel_w, panel_h)) = self.context_menu_geometry(ws)?;
-        let (px, py) = (ws.cursor.x as f32, ws.cursor.y as f32);
-        if px < ax || px >= ax + panel_w || py < ay || py >= ay + panel_h {
-            return None;
-        }
-        let (_, ch) = self.menu_cell(ws);
-        let row_h = ch + kettle_render::menu::ROW_PAD;
-        let sep_h = kettle_render::menu::SEP_H;
-        // Skip the scrolled-off rows above scroll_offset
-        // before walking. `row_y` starts at the panel top; iteration
-        // begins at item `scroll_offset`.
-        let start = menu.scroll_offset.min(menu.items.len());
-        let mut row_y = ay;
-        for (idx, item) in menu.items.iter().enumerate().skip(start) {
-            let h = match item {
-                ContextMenuItem::Separator => sep_h,
-                ContextMenuItem::Item { .. }
-                | ContextMenuItem::DynamicItem { .. }
-                | ContextMenuItem::LuaItem { .. }
-                | ContextMenuItem::ConfigItem { .. }
-                | ContextMenuItem::Submenu { .. }
-                | ContextMenuItem::ThemeChoice { .. }
-                | ContextMenuItem::ProfileChoice { .. }
-                | ContextMenuItem::NewTabShell { .. }
-                | ContextMenuItem::UrlItem { .. }
-                | ContextMenuItem::Info { .. } => row_h,
-            };
-            if py >= row_y && py < row_y + h {
-                // Shared mapper — the same row→click table the
-                // keyboard Enter / Space + mnemonic paths use, so mouse and
-                // keyboard dispatch can never diverge again.
-                return item_to_click(item, idx);
-            }
-            row_y += h;
-        }
-        None
+        // Shared mapper — the same row-to-click table the keyboard Enter /
+        // Space and mnemonic paths use, so mouse and keyboard dispatch cannot
+        // diverge.
+        menu.items
+            .get(idx)
+            .and_then(|item| item_to_click(item, idx))
     }
 
     /// `(items, anchor, panel_w, panel_h)` snapshot for the click /
@@ -10130,7 +11381,7 @@ impl App {
         // can't grow off-screen. We reserve 80px of vertical
         // breathing room (40px top + 40px bottom) so the menu
         // doesn't bump into the window edge.
-        let (_, surface_h) = ws
+        let (surface_w, surface_h) = ws
             .renderer
             .as_ref()
             .map(|r| {
@@ -10138,44 +11389,67 @@ impl App {
                 (w as f32, h as f32)
             })
             .unwrap_or((800.0, 600.0));
-        let max_h = (surface_h - kettle_render::menu::PANEL_BREATHING).max(row_h);
+        if !context_menu_surface_can_fit_row((surface_w, surface_h), (cw, ch)) {
+            return None;
+        }
+        let max_h = (surface_h - kettle_render::menu::PANEL_BREATHING)
+            .max(1.0)
+            .min((surface_h - 8.0).max(1.0));
         let panel_h = natural_h.min(max_h);
         // Dropdown parity: include the right-aligned hint budget —
         // kept in lockstep with `show_context_menu` and the renderer's
         // `menu_row_chars`.
         let hints = self.menu_item_hints(&menu.items);
-        let max_chars = menu
+        let max_columns = menu
             .items
             .iter()
             .zip(hints.iter())
-            .filter_map(|(it, hint)| {
-                let hint_chars = if hint.is_empty() {
-                    0
-                } else {
-                    hint.chars().count() + 2
-                };
-                match it {
-                    ContextMenuItem::Item { label, .. } => Some(label.chars().count() + hint_chars),
-                    ContextMenuItem::DynamicItem { label, .. } => {
-                        Some(label.chars().count() + hint_chars)
-                    }
-                    ContextMenuItem::LuaItem { label, .. } => Some(label.chars().count()),
-                    ContextMenuItem::ConfigItem { label, .. } => Some(label.chars().count()),
-                    // Count shell-dropdown labels so this hit-test width
-                    // matches the panel `show_context_menu` actually rendered.
-                    ContextMenuItem::NewTabShell { label, .. } => {
-                        Some(label.chars().count() + hint_chars)
-                    }
-                    // Same for the URL-aware leading rows.
-                    ContextMenuItem::UrlItem { label, .. } => Some(label.chars().count()),
-                    ContextMenuItem::Info { label } => Some(label.chars().count()),
-                    _ => None,
-                }
-            })
+            .map(|(item, hint)| context_menu_item_columns(item, hint))
             .max()
             .unwrap_or(0) as f32;
-        let panel_w = (max_chars * cw + kettle_render::menu::H_PAD).max(kettle_render::menu::MIN_W);
+        let natural_w =
+            (max_columns * cw + kettle_render::menu::H_PAD).max(kettle_render::menu::MIN_W);
+        let (panel_w, panel_h) =
+            clamp_context_menu_panel((natural_w, panel_h), (surface_w, surface_h));
         Some((menu.anchor, (panel_w, panel_h)))
+    }
+
+    /// Keep an already-open menu reachable when a resize or DPI transition
+    /// makes its old bottom/right anchor invalid. The menu's natural geometry
+    /// is recomputed from the live fractional font metrics before clamping, so
+    /// drawing and hit-testing continue to share one anchor.
+    fn reclamp_context_menu(&self, ws: &mut WindowState, surface: (f32, f32)) {
+        let current_scale = ws
+            .window
+            .as_ref()
+            .map(|window| window.scale_factor())
+            .unwrap_or(1.0);
+        let previous_scale = ws
+            .context_menu
+            .as_ref()
+            .map(|menu| menu.anchor_scale)
+            .unwrap_or(current_scale);
+        let Some((anchor, panel)) = self.context_menu_geometry(ws) else {
+            ws.context_menu = None;
+            return;
+        };
+        let anchor = scale_context_menu_anchor(anchor, previous_scale, current_scale);
+        let anchor = clamp_context_menu_anchor(anchor, panel, surface);
+        let (_, cell_h) = self.menu_cell(ws);
+        let row_h = cell_h + kettle_render::menu::ROW_PAD;
+        let sep_h = kettle_render::menu::SEP_H;
+        if let Some(menu) = ws.context_menu.as_mut() {
+            menu.anchor = anchor;
+            menu.anchor_scale = current_scale;
+            menu.scroll_offset = context_menu_scroll_for_highlight(
+                &menu.items,
+                menu.scroll_offset,
+                menu.highlight,
+                panel.1,
+                row_h,
+                sep_h,
+            );
+        }
     }
 
     /// Build the renderer-side `ContextMenu` slice from the App-side
@@ -10186,7 +11460,7 @@ impl App {
         // Dropdown parity: per-row shortcut hints from the LIVE keybind
         // map (computed per frame; the map only changes on reload).
         let hints = self.menu_item_hints(&menu.items);
-        let rows = menu
+        let mut rows: Vec<ContextMenuRow> = menu
             .items
             .iter()
             .zip(hints)
@@ -10278,17 +11552,24 @@ impl App {
             })
             .collect();
         // Terminator menu UX, C5: pass through the
-        // scroll state + clamped panel height the renderer needs to
+        // scroll state + clamped panel geometry the renderer needs to
         // draw only the visible slice.
-        let panel_h_clamped = self
+        let (panel_w_clamped, panel_h_clamped) = self
             .context_menu_geometry(ws)
-            .map(|(_, (_, h))| h)
-            .unwrap_or(0.0);
+            .map(|(_, panel)| panel)
+            .unwrap_or((0.0, 0.0));
+        let (cell_w, _) = self.menu_cell(ws);
+        let max_row_columns =
+            ((panel_w_clamped - kettle_render::menu::H_PAD).max(0.0) / cell_w).floor() as usize;
+        for row in &mut rows {
+            fit_context_menu_row(row, max_row_columns);
+        }
         Some(ContextMenu {
             anchor: menu.anchor,
             rows,
             highlight: menu.highlight,
             scroll_offset: menu.scroll_offset,
+            panel_w_clamped,
             panel_h_clamped,
         })
     }
@@ -10368,7 +11649,7 @@ impl App {
             return false;
         };
         if open {
-            self.open_url(&url);
+            self.open_url(ws, &url);
         }
         crate::update_check::record_dismissed(&tag);
         self.update_available = None;
@@ -10387,7 +11668,9 @@ impl App {
     ) {
         let area = self.area(ws);
         let (cols, rows) = self.grid_of(ws, area);
-        let (cw, ch) = self.cell_px(ws);
+        let tab_geometry = self.pty_geometry_for_grid(ws, cols, rows);
+        let horizontal_split_geometry = self.prospective_split_geometry(ws, Dir::Horizontal);
+        let vertical_split_geometry = self.prospective_split_geometry(ws, Dir::Vertical);
         let waker = self.waker();
         // Snapshot the (tab, pane-leaf) the cursor lives in so we can
         // detect any focus change the action causes. This started as
@@ -10404,7 +11687,7 @@ impl App {
                 // swallowing it with `let _ =` (the `-e` launch path already
                 // logs), and only fire TabAdd when a tab was actually created
                 // — firing it on failure announced a tab that doesn't exist.
-                match ws.mux.new_tab(&self.cfg, cols, rows, cw, ch, waker) {
+                match ws.mux.new_tab_geometry(&self.cfg, tab_geometry, waker) {
                     Ok(()) => self.fire_tab_add_event(ws),
                     Err(e) => log::warn!("could not open a new tab (shell spawn failed?): {e}"),
                 }
@@ -10418,7 +11701,7 @@ impl App {
                 if let Err(_unopened) =
                     self.open_window(event_loop, WindowOpen::Fresh { cwd: None }, None, None)
                 {
-                    match ws.mux.new_tab(&self.cfg, cols, rows, cw, ch, waker) {
+                    match ws.mux.new_tab_geometry(&self.cfg, tab_geometry, waker) {
                         Ok(()) => self.fire_tab_add_event(ws),
                         Err(e) => {
                             log::warn!("new-window fallback: could not open a tab: {e}")
@@ -10433,20 +11716,20 @@ impl App {
                 // a spawn failure instead of swallowing it.
                 let detected = self.focused_foreground_shell(ws);
                 let res = match detected {
-                    Some(s) => ws.mux.split_with(
+                    Some(s) => ws.mux.split_with_geometry(
                         Dir::Horizontal,
                         &self.cfg,
-                        cols,
-                        rows,
-                        cw,
-                        ch,
+                        horizontal_split_geometry,
                         waker,
                         s.argv,
                         s.cwd,
                     ),
-                    None => ws
-                        .mux
-                        .split(Dir::Horizontal, &self.cfg, cols, rows, cw, ch, waker),
+                    None => ws.mux.split_geometry(
+                        Dir::Horizontal,
+                        &self.cfg,
+                        horizontal_split_geometry,
+                        waker,
+                    ),
                 };
                 if let Err(e) = res {
                     log::warn!("could not split pane (right): {e}");
@@ -10455,20 +11738,20 @@ impl App {
             Action::SplitDown | Action::SplitAuto => {
                 let detected = self.focused_foreground_shell(ws);
                 let res = match detected {
-                    Some(s) => ws.mux.split_with(
+                    Some(s) => ws.mux.split_with_geometry(
                         Dir::Vertical,
                         &self.cfg,
-                        cols,
-                        rows,
-                        cw,
-                        ch,
+                        vertical_split_geometry,
                         waker,
                         s.argv,
                         s.cwd,
                     ),
-                    None => ws
-                        .mux
-                        .split(Dir::Vertical, &self.cfg, cols, rows, cw, ch, waker),
+                    None => ws.mux.split_geometry(
+                        Dir::Vertical,
+                        &self.cfg,
+                        vertical_split_geometry,
+                        waker,
+                    ),
                 };
                 if let Err(e) = res {
                     log::warn!("could not split pane (down): {e}");
@@ -10510,10 +11793,10 @@ impl App {
                 // Capture the focused pane id BEFORE the close —
                 // afterward active_focus() returns the promoted sibling.
                 let closing_pane = ws.mux.active_focus();
-                let was_last = ws.mux.close_focused();
                 if let Some(id) = closing_pane {
-                    self.fire_pane_close_event(id);
+                    self.fire_pane_close_event(ws, id);
                 }
+                let was_last = ws.mux.close_focused();
                 if was_last {
                     self.pending_window_close = true;
                 } else {
@@ -10618,7 +11901,7 @@ impl App {
                 if ws.mux.close_tab() {
                     self.pending_window_close = true;
                 }
-                self.fire_tab_close_event(closing_idx);
+                self.fire_tab_close_event(ws, closing_idx);
             }
             Action::CloseWindow => {
                 // Phase 5 of the confirm-dialog design:
@@ -10824,7 +12107,8 @@ impl App {
             Action::SendNewline => {
                 if let Some(p) = ws.mux.focused() {
                     // Typed-input semantics — read-only drops it.
-                    p.feed_input(b"\n");
+                    let result = p.feed_input(b"\n");
+                    self.report_input_result(result);
                 }
             }
             // Terminator parity (`key_preferences` /
@@ -10978,9 +12262,11 @@ impl App {
                 // broadcast branch inherited the gate from broadcast_write;
                 // the focused branch used to bypass it, a split-brain).
                 if ws.mux.is_broadcast_on() {
-                    ws.mux.broadcast_write(b"\x1b[3J");
+                    let result = ws.mux.broadcast_write(b"\x1b[3J");
+                    self.report_input_result(result);
                 } else if let Some(p) = ws.mux.focused() {
-                    p.feed_input(b"\x1b[3J");
+                    let result = p.feed_input(b"\x1b[3J");
+                    self.report_input_result(result);
                 }
                 if let Some(w) = &ws.window {
                     w.request_redraw();
@@ -11003,7 +12289,8 @@ impl App {
                 // read-only pane's child (e.g. a locked agent TUI, where ESC
                 // is the interrupt key) is exactly what the toggle prevents.
                 if let Some(p) = ws.mux.focused() {
-                    p.feed_input(b"\x1bc");
+                    let result = p.feed_input(b"\x1bc");
+                    self.report_input_result(result);
                 }
                 self.clear_selection_on_input(ws);
                 // The modal sweep was later extracted into a helper
@@ -11104,25 +12391,7 @@ impl App {
             Action::JumpPrevPrompt | Action::JumpNextPrompt => {
                 let prev = matches!(action, Action::JumpPrevPrompt);
                 if let Some(p) = ws.mux.focused() {
-                    let marks = p.term.prompt_marks();
-                    if let Ok(mut t) = p.term.term.lock() {
-                        use kettle_core::Dimensions;
-                        let hist = t.grid().history_size() as i64;
-                        let off = t.grid().display_offset() as i64;
-                        let top = hist - off;
-                        let target = if prev {
-                            marks.iter().filter(|&&m| m < top).max().copied()
-                        } else {
-                            marks.iter().filter(|&&m| m > top).min().copied()
-                        };
-                        if let Some(m) = target {
-                            let new_off = (hist - m).clamp(0, hist);
-                            let delta = (new_off - off) as i32;
-                            if delta != 0 {
-                                t.scroll_display(Scroll::Delta(delta));
-                            }
-                        }
-                    }
+                    p.term.jump_to_prompt(prev);
                 }
             }
             Action::OpenSsh => {
@@ -11172,33 +12441,10 @@ impl App {
                 }
             }
             Action::ToggleViMode => {
-                // Vi-mode (Alacritty parity) foundation: toggle entry / exit.
-                // Visible block cursor at the focused pane's current cursor
-                // position; Esc also exits (handled in keyboard
-                // dispatch). h/j/k/l movement + visual selection +
-                // yank come later.
                 if ws.vi_mode.is_some() {
-                    ws.vi_mode = None;
+                    self.exit_vi_mode(ws);
                 } else {
-                    self.close_all_modals(ws);
-                    // Seed cursor at the focused pane's current
-                    // terminal cursor position. h/j/k/l will move
-                    // around this via `vi_mode_key`.
-                    let (row, col) = ws
-                        .mux
-                        .focused()
-                        .and_then(|p| {
-                            p.term.term.lock().ok().map(|t| {
-                                let cursor = t.grid().cursor.point;
-                                (cursor.line.0.max(0) as usize, cursor.column.0)
-                            })
-                        })
-                        .unwrap_or((0, 0));
-                    ws.vi_mode = Some(ViState {
-                        row,
-                        col,
-                        visual_anchor: None,
-                    });
+                    self.enter_vi_mode(ws);
                 }
                 if let Some(w) = &ws.window {
                     w.request_redraw();
@@ -11214,7 +12460,10 @@ impl App {
             }
             Action::UndoCloseTab => {
                 let waker = self.waker();
-                match ws.mux.undo_close_tab(&self.cfg, cols, rows, cw, ch, waker) {
+                match ws
+                    .mux
+                    .undo_close_tab_geometry(&self.cfg, tab_geometry, waker)
+                {
                     Ok(true) => {
                         self.resize_all(ws);
                         self.save_session(ws);
@@ -11227,9 +12476,9 @@ impl App {
             }
             Action::DuplicateTab => {
                 let waker = self.waker();
-                if let Err(e) = ws
-                    .mux
-                    .duplicate_focused_tab(&self.cfg, cols, rows, cw, ch, waker)
+                if let Err(e) =
+                    ws.mux
+                        .duplicate_focused_tab_geometry(&self.cfg, tab_geometry, waker)
                 {
                     log::error!("duplicate_tab failed: {e}");
                 } else {
@@ -11239,13 +12488,10 @@ impl App {
             }
             Action::DuplicatePane => {
                 let waker = self.waker();
-                if let Err(e) = ws.mux.duplicate_focused_pane(
+                if let Err(e) = ws.mux.duplicate_focused_pane_geometry(
                     crate::mux::Dir::Horizontal,
                     &self.cfg,
-                    cols,
-                    rows,
-                    cw,
-                    ch,
+                    horizontal_split_geometry,
                     waker,
                 ) {
                     log::error!("duplicate_pane failed: {e}");
@@ -11256,17 +12502,13 @@ impl App {
             Action::NextTheme | Action::PrevTheme => {
                 let fwd = matches!(action, Action::NextTheme);
                 let name = kettle_config::Theme::cycle(&self.cfg.theme_name, fwd);
-                self.cfg.theme_name = name.to_string();
-                self.cfg.theme = kettle_config::Theme::by_name(name);
+                self.set_runtime_theme_name(ws, name);
                 if !self.persist_pref("theme", name) {
                     // Config-governed; notify on failure.
                     fire_notify(
                         "kettle: theme not saved",
                         "Applied for this session — couldn't write it to your config file.",
                     );
-                }
-                if let Some(w) = &ws.window {
-                    w.request_redraw();
                 }
             }
             Action::ToggleLightDark => {
@@ -11275,17 +12517,13 @@ impl App {
                     &self.cfg.light_theme,
                     &self.cfg.dark_theme,
                 ) {
-                    self.cfg.theme_name = next.clone();
-                    self.cfg.theme = kettle_config::Theme::by_name(&next);
+                    self.set_runtime_theme_name(ws, &next);
                     if !self.persist_pref("theme", &next) {
                         // Config-governed; notify on failure.
                         fire_notify(
                             "kettle: theme not saved",
                             "Applied for this session — couldn't write it to your config file.",
                         );
-                    }
-                    if let Some(w) = &ws.window {
-                        w.request_redraw();
                     }
                 } else {
                     log::warn!(
@@ -11655,7 +12893,8 @@ impl App {
                     .map(|i| i + 1)
                     .unwrap_or(1);
                 if let Some(p) = ws.mux.focused() {
-                    p.feed_input(idx.to_string().as_bytes());
+                    let result = p.feed_input(idx.to_string().as_bytes());
+                    self.report_input_result(result);
                 }
             }
             Action::InsertPanePadded => {
@@ -11665,7 +12904,8 @@ impl App {
                     .map(|i| i + 1)
                     .unwrap_or(1);
                 if let Some(p) = ws.mux.focused() {
-                    p.feed_input(format!("{idx:02}").as_bytes());
+                    let result = p.feed_input(format!("{idx:02}").as_bytes());
+                    self.report_input_result(result);
                 }
             }
             // Terminator parity (`insert_term_name.py`
@@ -11678,7 +12918,8 @@ impl App {
             Action::InsertPaneName => {
                 if let Some(p) = ws.mux.focused() {
                     let title = p.title.clone();
-                    p.feed_input(title.as_bytes());
+                    let result = p.feed_input(title.as_bytes());
+                    self.report_input_result(result);
                 }
             }
             // Terminator parity (`dir_open.py` plugin →
@@ -11697,7 +12938,7 @@ impl App {
                     // building/opening the URL (it's untrusted PTY input — a
                     // UNC path would trigger an SMB/NTLM leak on Windows).
                     Some(cwd) if cwd_is_local(&cwd) => {
-                        self.open_url(&format!("file://{cwd}"));
+                        self.open_url(ws, &format!("file://{cwd}"));
                     }
                     Some(_) => {
                         log::warn!(
@@ -11795,7 +13036,7 @@ impl App {
                     Ok(_) => {
                         // The tab LEFT this window; plugins see the same
                         // close event the process-handoff path fired.
-                        self.fire_tab_close_event(closing_idx);
+                        self.fire_tab_close_event(ws, closing_idx);
                         // C8: agents subscribed to the event feed see moves.
                         self.ctl_broadcast(
                             "tab_moved",
@@ -11831,10 +13072,11 @@ impl App {
                 // ClearHistory actions.
                 // feed_input, same read-only rule as the
                 // separate Reset + ClearHistory arms.
-                if let Some(p) = ws.mux.focused()
-                    && p.feed_input(b"\x1bc")
-                {
-                    p.feed_input(b"\x1b[3J");
+                if let Some(p) = ws.mux.focused() {
+                    // One queue message prevents a saturated channel from
+                    // accepting RIS but rejecting the paired history clear.
+                    let result = p.feed_input(b"\x1bc\x1b[3J");
+                    self.report_input_result(result);
                 }
             }
         }
@@ -11947,9 +13189,11 @@ impl App {
         }
         let prev = ws.last_emitted_focus;
         ws.last_emitted_focus = Some(cur_id);
-        if let Some(eng) = self.lua_engine.as_ref() {
-            eng.fire_event(&crate::LuaEvent::PaneFocus(prev, cur_id));
-        }
+        self.fire_lua_event(
+            ws,
+            crate::LuaEvent::PaneFocus(prev, cur_id),
+            "pane_focus hook",
+        );
         // Agent-first A2: mirror the focus change to ctl subscribers.
         self.ctl_broadcast(
             "pane_focus",
@@ -12002,9 +13246,11 @@ impl App {
         }
         for (id, title) in changes {
             ws.last_emitted_titles.insert(id, title.clone());
-            if let Some(eng) = self.lua_engine.as_ref() {
-                eng.fire_event(&crate::LuaEvent::TitleChanged(id, title.clone()));
-            }
+            self.fire_lua_event(
+                ws,
+                crate::LuaEvent::TitleChanged(id, title.clone()),
+                "title_changed hook",
+            );
             self.ctl_broadcast("title", Some(id), serde_json::json!({"title": title}));
         }
         // Drop title state for panes that have closed so this map
@@ -12083,11 +13329,50 @@ impl App {
 
     fn apply_theme_name(&mut self, ws: &mut WindowState, source: &str, next: String) {
         log::info!("{source}: switching to {next}");
-        self.cfg.theme_name = next.clone();
-        self.cfg.theme = kettle_config::Theme::by_name(&next);
+        self.set_runtime_theme_name(ws, &next);
         self.save_session(ws);
-        if let Some(w) = &ws.window {
-            w.request_redraw();
+    }
+
+    /// Update the rendered palette and Lua's read-only view as one state
+    /// transition. Every runtime theme mutation, including temporary menu
+    /// previews and config reloads, must route through this synchronization
+    /// boundary so `kettle.theme()` cannot describe a stale palette.
+    fn set_runtime_theme_state(
+        &mut self,
+        ws: &WindowState,
+        name: String,
+        theme: kettle_config::Theme,
+    ) {
+        self.cfg.theme_name = name;
+        self.cfg.theme = theme;
+        self.sync_lua_active_theme();
+        self.request_all_window_redraws(ws);
+    }
+
+    fn set_runtime_theme_name(&mut self, ws: &WindowState, name: &str) {
+        self.set_runtime_theme_state(ws, name.to_string(), kettle_config::Theme::by_name(name));
+    }
+
+    fn request_all_window_redraws(&self, ws: &WindowState) {
+        if let Some(window) = &ws.window {
+            window.request_redraw();
+        }
+        for (&seq, window) in &self.windows {
+            if seq != ws.seq
+                && let Some(native) = &window.window
+            {
+                native.request_redraw();
+            }
+        }
+    }
+
+    fn sync_lua_active_theme(&self) {
+        if let Some(engine) = &self.lua_engine
+            && let Err(error) = engine.set_active_theme(&self.cfg.theme_name)
+        {
+            log::warn!(
+                "active theme changed, but kettle.theme() could not be synchronized: {error:#}"
+            );
         }
     }
 
@@ -12108,11 +13393,10 @@ impl App {
         )
     }
 
-    fn apply_initial_os_theme_preference(&mut self, theme: WindowTheme) {
+    fn apply_initial_os_theme_preference(&mut self, ws: &WindowState, theme: WindowTheme) {
         if let Some(next) = self.os_theme_choice(theme) {
             log::info!("theme-mode=auto: initial OS theme selects {next}");
-            self.cfg.theme_name = next.clone();
-            self.cfg.theme = kettle_config::Theme::by_name(&next);
+            self.set_runtime_theme_name(ws, &next);
         }
     }
 
@@ -12174,30 +13458,30 @@ impl App {
                 self.pending_window_close = true;
             }
             ConfirmAction::CloseTab => {
-                // CloseTab dispatch. A follow-up wires
-                // ask-before-closing for CloseTab too; this arm is
-                // the dispatch target for that future wiring.
-                // Honor close_tab()'s return like the
-                // keybind path (app.rs Action::CloseTab) — `true` means that
-                // was the LAST tab, so the window must exit now. Before this fix the
-                // return was dropped, so closing the last tab via the confirm
-                // dialog deferred exit by a tick and painted an empty frame.
-                if ws.mux.close_tab() {
-                    self.save_session(ws);
+                // Capture the payload before mutation and fire the same
+                // recorder/Lua lifecycle boundary as every unconfirmed close.
+                // The hook must run before the last-tab early return too.
+                let closing_idx = ws.mux.active;
+                let tab_was_last = ws.mux.close_tab();
+                self.fire_tab_close_event(ws, closing_idx);
+                self.save_session(ws);
+                if tab_was_last {
                     self.pending_window_close = true;
                     return;
                 }
-                self.save_session(ws);
+                if let Some(window) = &ws.window {
+                    window.request_redraw();
+                }
             }
             ConfirmAction::ClosePane => {
                 // Capture the pane id before the close so the
                 // pane_close hook fires with the right id (mirrors the
                 // keybind path).
                 let closing_pane = ws.mux.active_focus();
-                let was_last = ws.mux.close_focused();
                 if let Some(id) = closing_pane {
-                    self.fire_pane_close_event(id);
+                    self.fire_pane_close_event(ws, id);
                 }
+                let was_last = ws.mux.close_focused();
                 // Honor close_focused()'s return like the
                 // keybind ClosePane path — `true` means the last pane closed,
                 // so exit; otherwise redraw the collapsed layout (the renderer
@@ -12227,9 +13511,9 @@ impl App {
 
     /// Phase 6 of [`TERMINATOR-REMOTE-DESIGN.md`](
     /// ../../../docs/TERMINATOR-REMOTE-DESIGN.md): periodic poll of
-    /// every pane's process tree to detect SSH / Docker / Podman /
-    /// kubectl sessions. Throttled to ~5 Hz so a typical 60 Hz
-    /// redraw doesn't refresh sysinfo every frame.
+    /// every pane's process tree to detect SSH / Docker / Podman / kubectl
+    /// sessions. Throttled to ~5 Hz; submissions overwrite an older queued
+    /// request and the bounded scan runs entirely on its worker.
     ///
     /// On a detection change (was-None now-Some, or shape change),
     /// the pane's title is updated to `format_remote_title(...)`.
@@ -12237,6 +13521,9 @@ impl App {
     /// is left alone (the shell that re-shows after `ssh exit` is
     /// already the right OSC-1/2-set title).
     fn poll_remote_contexts(&mut self, ws: &mut WindowState) {
+        let Some(worker) = self.remote_scan_worker.as_ref() else {
+            return;
+        };
         let now = std::time::Instant::now();
         if !throttle_elapsed(
             self.last_remote_poll,
@@ -12246,54 +13533,62 @@ impl App {
             return;
         }
         self.last_remote_poll = Some(now);
-        let pane_ids: Vec<u64> = ws.mux.panes.keys().copied().collect();
-        let roots: Vec<u32> = pane_ids
-            .iter()
-            .filter_map(|id| ws.mux.panes.get(id)?.term.child_pid())
-            .collect();
-        // Refresh the OS process snapshot + parent→children index
-        // ONCE per tick, then query every pane against the shared index.
-        self.remote_scanner.refresh_roots(&roots);
-        for id in pane_ids {
-            let Some(pane) = ws.mux.panes.get(&id) else {
-                continue;
-            };
-            let Some(pid) = pane.term.child_pid() else {
-                continue;
-            };
-            let detected = self.remote_scanner.detect_root(pid);
-            // v2.29.0: native cwd fallback for shells that emit no OSC 7/9;9 (a
-            // stock Windows pwsh/cmd). Read the foreground process's cwd from the
-            // OS process table (same shared sysinfo snapshot — no extra refresh).
-            // SKIP WSL/SSH launchers: wsl.exe's Windows cwd is its launch dir (not
-            // the in-distro `cd`) and ssh panes have no local cwd, so a native read
-            // there is wrong — those rely on OSC 7. Stored in a SEPARATE cell so it
-            // can never clobber an authoritative OSC 7/9;9 value.
-            let native_cwd = if crate::mux::argv_is_wsl(&pane.argv) || argv_is_ssh(&pane.argv) {
-                None
-            } else {
-                self.remote_scanner.foreground_cwd(pid)
-            };
-            if let Some(pane) = ws.mux.panes.get_mut(&id) {
-                pane.term.set_native_cwd(native_cwd);
-                if detected != pane.remote_context {
-                    if let Some(ctx) = &detected {
-                        // I1 parity (audit v2.38.2): `format_remote_title` just
-                        // interpolates host/user/container strings scanned out of
-                        // a local process's argv — untrusted the same way an OSC 2
-                        // title is untrusted. Route it through the same
-                        // `sanitize_title()` the OSC-2 path uses (see the `Title`
-                        // arm in `drain_events`) so a maliciously-named remote
-                        // host/container can't smuggle control characters or
-                        // Unicode bidi overrides into the OS titlebar / Alt-Tab /
-                        // tab label / accessibility-tree label.
-                        pane.title = sanitize_title(&kettle_remote::format_remote_title(ctx));
-                        pane.title_is_placeholder = false;
-                    }
-                    pane.remote_context = detected;
+        stage_remote_targets(
+            &mut self.remote_targets_scratch,
+            ws.mux.panes.values().map(remote_probe_target),
+            self.windows
+                .values()
+                .flat_map(|window| window.mux.panes.values())
+                .map(remote_probe_target),
+        );
+        worker.submit(self.remote_targets_scratch.clone());
+    }
+
+    fn apply_remote_scan_snapshot(&mut self, ws: &mut WindowState) {
+        let Some(snapshot) = self
+            .remote_scan_worker
+            .as_ref()
+            .and_then(kettle_remote::RemoteScanWorker::take_latest)
+        else {
+            return;
+        };
+        self.remote_live_panes_scratch.clear();
+        self.remote_live_panes_scratch
+            .extend(ws.mux.panes.keys().copied());
+        self.remote_live_panes_scratch.extend(
+            self.windows
+                .values()
+                .flat_map(|window| window.mux.panes.keys())
+                .copied(),
+        );
+        let live_panes = &self.remote_live_panes_scratch;
+        self.remote_applied.retain(|(pane_id, pid), _| {
+            live_panes.contains(pane_id) && snapshot.probes.contains_key(pid)
+        });
+
+        if update_window_remote_contexts(&snapshot, &mut self.remote_applied, ws) {
+            ws.reuse_pane_snapshots_once = false;
+            self.sync_window_title(ws);
+            self.poll_title_event(ws);
+            if let Some(window) = &ws.window {
+                window.request_redraw();
+            }
+        }
+
+        // `ws` is checked out of this map. Temporarily take the remaining map
+        // so title synchronization can borrow the rest of App without aliasing.
+        let mut stored_windows = std::mem::take(&mut self.windows);
+        for window in stored_windows.values_mut() {
+            if update_window_remote_contexts(&snapshot, &mut self.remote_applied, window) {
+                window.reuse_pane_snapshots_once = false;
+                self.sync_window_title(window);
+                self.poll_title_event(window);
+                if let Some(handle) = &window.window {
+                    handle.request_redraw();
                 }
             }
         }
+        self.windows = stored_windows;
     }
 
     /// Read and install the process-wide portion of a live configuration once.
@@ -12358,10 +13653,15 @@ impl App {
         }
         let font_size_changed = (new.font_size - previous_config_font_size).abs() > f32::EPSILON;
         self.cfg = new;
+        self.sync_lua_active_theme();
         font_size_changed
     }
 
     fn apply_reloaded_config(&mut self, ws: &mut WindowState, font_size_changed: bool) {
+        ws.mux.set_osc52_copy_allowed(osc52_copy_is_available(
+            self.cfg.osc52,
+            self.clipboard.is_some(),
+        ));
         let runtime_font_size = ws.renderer.as_ref().map(|r| r.font_size());
         if let Some(r) = ws.renderer.as_mut() {
             // Family first: the font-size setter re-measures cells and must see
@@ -12447,18 +13747,6 @@ impl App {
     /// / WM_HINTS urgency) — but only if the window isn't focused,
     /// AND throttle to one fire per 2 seconds so a build script
     /// printing 100 error lines doesn't pulse the taskbar 100×.
-    /// Drain pending lines from the remote-command file
-    /// and dispatch each. Atomic-truncate after read so a fast-firing
-    /// `kettle --remote-send` storm doesn't re-process the same lines
-    /// every notify event. v1 commands:
-    ///
-    ///   send-text TEXT     write TEXT (with `\n` decoded back to
-    ///                      newline) to the focused pane's PTY.
-    ///
-    /// Unknown commands log a `warn!` and continue. Empty file or
-    /// missing file is a no-op (notify-watcher can fire on the
-    /// initial create event before the writer's content is visible;
-    /// next event will catch it).
     /// Agent-first A2: drain the control-server channel and
     /// dispatch each message on the main thread (the only place `ws.mux` is
     /// touched). Mirrors `drain_remote_commands` but with per-connection
@@ -13055,11 +14343,13 @@ impl App {
             let sep_h = kettle_render::menu::SEP_H;
             let mut row_y = ay;
             let start = menu.scroll_offset.min(menu.items.len());
+            let visible = count_rows_fitting(&menu.items, start, panel_h, row_h, sep_h);
             let rows: Vec<serde_json::Value> = menu
                 .items
                 .iter()
                 .enumerate()
                 .skip(start)
+                .take(visible)
                 .map(|(idx, item)| {
                     let separator = matches!(item, ContextMenuItem::Separator);
                     let h = if separator { sep_h } else { row_h };
@@ -13709,8 +14999,8 @@ impl App {
             } else if bcode == 0 && rect_contains(bar.new_tab, px, py) {
                 let area = self.area(ws);
                 let (cols, rows) = self.grid_of(ws, area);
-                let (cw, ch) = self.cell_px(ws);
-                match ws.mux.new_tab(&self.cfg, cols, rows, cw, ch, self.waker()) {
+                let geometry = self.pty_geometry_for_grid(ws, cols, rows);
+                match ws.mux.new_tab_geometry(&self.cfg, geometry, self.waker()) {
                     // v2.26.0 (audit): fire TabAdd so Lua / dev-record see tabs
                     // opened via the agent `+` click, like every other new-tab path.
                     Ok(()) => self.fire_tab_add_event(ws),
@@ -13736,11 +15026,11 @@ impl App {
                     let pre = self.focus_key(ws);
                     let closing_idx = seg.idx;
                     if ws.mux.close_tab_at(seg.idx) {
-                        self.fire_tab_close_event(closing_idx);
+                        self.fire_tab_close_event(ws, closing_idx);
                         self.save_session(ws);
                         self.pending_window_close = true;
                     } else {
-                        self.fire_tab_close_event(closing_idx);
+                        self.fire_tab_close_event(ws, closing_idx);
                         self.note_focus_change(ws, pre);
                     }
                 } else {
@@ -14016,10 +15306,15 @@ impl App {
             && steps.lines != 0
             && let Some(bytes) = input::alternate_scroll_key(steps.lines, mode)
         {
-            if let Some(pane) = ws.mux.focused() {
-                pane.feed_input(&bytes);
+            let result = ws
+                .mux
+                .focused()
+                .map(|pane| pane.feed_input(&bytes))
+                .unwrap_or(PaneInputResult::Queued);
+            self.report_input_result(result);
+            if result != PaneInputResult::ReadOnly {
+                return true;
             }
-            return true;
         }
         if steps.lines != 0 {
             if let Some(pane) = ws.mux.focused()
@@ -14235,12 +15530,8 @@ impl App {
         // An agent acts as the user — the per-pane read-only
         // toggle (Terminator parity) blocks it like any other input, with an
         // explicit error instead of a silent drop.
-        if !p.feed_input(text.as_bytes()) {
-            return Response::err(
-                req.id,
-                ec::READ_ONLY,
-                "pane is read-only (user toggled 'Read only')",
-            );
+        if let Some((code, message)) = ctl_input_error(p.feed_input(text.as_bytes())) {
+            return Response::err(req.id, code, message);
         }
         log::info!(
             "agent-server: send_text conn={conn_id} pane={pane} ({} bytes)",
@@ -14327,12 +15618,8 @@ impl App {
         }
         // The per-pane read-only toggle blocks agents
         // like any other input, with an explicit error.
-        if !p.feed_input(&bytes) {
-            return Response::err(
-                req.id,
-                ec::READ_ONLY,
-                "pane is read-only (user toggled 'Read only')",
-            );
+        if let Some((code, message)) = ctl_input_error(p.feed_input(&bytes)) {
+            return Response::err(req.id, code, message);
         }
         log::info!(
             "agent-server: send_keys conn={conn_id} pane={pane} ({} keys, {} bytes)",
@@ -14518,12 +15805,8 @@ impl App {
             // An agent acts as the user — the per-pane read-only
             // toggle (Terminator parity) blocks it, with an explicit error
             // (no PendingRun is registered; nothing was written).
-            if !p.feed_input(line.as_bytes()) {
-                let _ = reply.send(Response::err(
-                    req.id,
-                    ec::READ_ONLY,
-                    "pane is read-only (user toggled 'Read only')",
-                ));
+            if let Some((code, message)) = ctl_input_error(p.feed_input(line.as_bytes())) {
+                let _ = reply.send(Response::err(req.id, code, message));
                 return;
             }
         }
@@ -14667,125 +15950,295 @@ impl App {
         lines[start_idx..end_idx].join("\n")
     }
 
-    fn drain_remote_commands(&mut self, ws: &mut WindowState) {
-        use std::io::{Read as _, Seek as _};
-
+    /// Claim one bounded remote-command batch and stage it for ordered
+    /// dispatch. Sender and receiver share a cross-process lock; PTY
+    /// backpressure retains the FIFO head and every suffix for a later retry.
+    ///
+    /// Current senders emit `send-text-json JSON_STRING`, whose decoded string
+    /// is written byte-for-byte to the focused pane's PTY. The legacy
+    /// `send-text TEXT` form remains accepted and decodes each `\n` character
+    /// pair to newline. Unknown or malformed lines contribute only to one
+    /// payload-free warning for the batch and do not count as operations.
+    fn claim_remote_command_batch(&mut self, origin_window: u64, now: std::time::Instant) {
         let Some(path) = self.startup.remote_file.clone() else {
             return;
         };
-        // Cap the read at 1 MB. A legitimate command is
-        // dozens of bytes; even a chatty automation pushing 1000
-        // commands fits in ~64 KB. 1 MB is 10× safety margin. A
-        // larger file likely means a runaway script or an accidental
-        // log redirect (`some-cmd >> remote.cmd` instead of
-        // `kettle --remote-send "$(some-cmd)"`); silently truncate
-        // + warn rather than allocate the whole thing.
-        const MAX_REMOTE_BYTES: u64 = 1 << 20; // 1 MB
-        let mut file = match kettle_state::open_existing_private_file(&path) {
-            Ok(file) => file,
-            Err(error) => {
+        if !self.pending_remote_commands.is_empty() {
+            return;
+        }
+        match claim_remote_command_file(&path) {
+            Ok(RemoteBatchClaim::Empty) => {
+                self.remote_spool_claim_pending = false;
+                self.remote_command_retry.progressed();
+            }
+            Ok(RemoteBatchClaim::Busy) => {
+                self.remote_command_retry.backpressured(now);
+            }
+            Ok(RemoteBatchClaim::RejectedMalformed) => {
+                self.remote_spool_claim_pending = false;
                 log::warn!(
-                    "remote-command file at {} failed private verification: {error}",
+                    "remote-command file at {} was not valid UTF-8 and was cleared without processing",
                     path.display()
                 );
-                return;
+                self.remote_command_retry.progressed();
             }
-        };
-        let size = file.metadata().map(|m| m.len()).unwrap_or(0);
-        if size > MAX_REMOTE_BYTES {
-            log::warn!(
-                "remote-command file at {} is {size} bytes (cap {MAX_REMOTE_BYTES}); \
-                 truncating without processing",
-                path.display()
-            );
-            let _ = file.set_len(0);
-            return;
-        }
-        let mut text = String::with_capacity(usize::try_from(size).unwrap_or(0));
-        if file.seek(std::io::SeekFrom::Start(0)).is_err()
-            || file
-                .by_ref()
-                .take(MAX_REMOTE_BYTES + 1)
-                .read_to_string(&mut text)
-                .is_err()
-            || text.is_empty()
-        {
-            return;
-        }
-        if text.len() as u64 > MAX_REMOTE_BYTES {
-            log::warn!(
-                "remote-command file at {} grew past {MAX_REMOTE_BYTES} bytes while reading; \
-                 truncating without processing",
-                path.display()
-            );
-            let _ = file.set_len(0);
-            return;
-        }
-        let _ = file.set_len(0);
-        for line in text.lines() {
-            let line = line.trim_end_matches('\r');
-            if line.is_empty() || line.starts_with('#') {
-                continue;
+            Ok(RemoteBatchClaim::RejectedOversize) => {
+                self.remote_spool_claim_pending = false;
+                log::warn!(
+                    "remote-command file at {} exceeded the {}-byte \
+                     safety limit and was cleared without processing",
+                    path.display(),
+                    kettle_state::MAX_REMOTE_COMMAND_BYTES
+                );
+                self.remote_command_retry.progressed();
             }
-            if let Some(payload) = line.strip_prefix("send-text ") {
-                let decoded = payload.replace("\\n", "\n");
-                if let Some(p) = ws.mux.focused() {
-                    // remote.cmd acts as the user — read-only drops it.
-                    p.feed_input(decoded.as_bytes());
-                }
-            } else if line == "toggle-window" {
-                // Tri-state Quake dropdown toggle.
-                // The naive binary toggle (hide-when-visible / show-
-                // when-hidden) had a real UX problem: when kettle was
-                // visible but the user had clicked away to another
-                // window, pressing the hotkey HID kettle — but the
-                // user usually wanted to bring it BACK INTO FOCUS.
-                // The Quake / Yakuake / Tilda tradition is tri-state:
-                //
-                //   hidden            → show + raise + focus
-                //   visible + focused → hide
-                //   visible + !focused → raise + focus (don't hide)
-                //
-                // winit's has_focus / is_visible / focus_window /
-                // set_visible all support this.
-                if let Some(w) = &ws.window {
-                    let visible = w.is_visible().unwrap_or(true);
-                    let focused = w.has_focus();
-                    if !visible {
-                        w.set_visible(true);
-                        w.focus_window();
-                    } else if focused {
-                        w.set_visible(false);
-                    } else {
-                        // Visible but unfocused — bring to front +
-                        // focus, don't hide. The common "I clicked
-                        // away" case.
-                        w.focus_window();
+            Ok(RemoteBatchClaim::Claimed(text)) => {
+                self.remote_spool_claim_pending = false;
+                self.remote_command_retry.progressed();
+                match parse_remote_command_batch(&text, origin_window) {
+                    ParsedRemoteCommandBatch::Accepted {
+                        commands,
+                        unknown_lines,
+                    } => {
+                        if unknown_lines != 0 {
+                            log::warn!(
+                                "remote-command batch at {} ignored {unknown_lines} \
+                                 unrecognized line(s)",
+                                path.display()
+                            );
+                        }
+                        self.pending_remote_commands = commands;
+                        if !self.pending_remote_commands.is_empty() {
+                            self.remote_command_retry.expedite_if_idle(now);
+                        }
+                    }
+                    ParsedRemoteCommandBatch::RejectedTooMany {
+                        operation_count,
+                        unknown_lines,
+                    } => {
+                        log::warn!(
+                            "remote-command batch at {} contained {operation_count} operations \
+                             (cap {MAX_REMOTE_COMMANDS_PER_BATCH}) and {unknown_lines} \
+                             unrecognized line(s); the whole batch was rejected before dispatch",
+                            path.display()
+                        );
                     }
                 }
-            } else if line == "new-tab" {
-                // Terminator parity (remote-control verb):
-                // open a new tab via the remote-control IPC channel.
-                // Mirrors the Action::NewTab dispatch and
-                // also fires LuaEvent::TabAdd so plugins
-                // listening for tab_add see remote-triggered tabs
-                // the same as keyboard ones.
-                let (cw, ch) = self.cell_px(ws);
-                let area = self.area(ws);
-                let (cols, rows) = self.grid_of(ws, area);
-                let waker = self.waker();
-                if let Err(e) = ws.mux.new_tab(&self.cfg, cols, rows, cw, ch, waker) {
-                    log::warn!("remote-control: new-tab failed: {e}");
-                } else {
-                    self.fire_tab_add_event(ws);
+            }
+            Err(error) => {
+                log::warn!(
+                    "remote-command file at {} could not be claimed: {error}",
+                    path.display()
+                );
+                // A path/permission/type/read failure is not transient queue
+                // backpressure. Stop polling at 4 Hz; a later watcher event
+                // represents an external repair and will arm a fresh claim.
+                self.remote_spool_claim_pending = false;
+                self.remote_command_retry.progressed();
+            }
+        }
+    }
+
+    fn report_remote_target_gone(&mut self, pane_id: u64) {
+        let now = std::time::Instant::now();
+        if should_notify_input_rejection(
+            self.last_input_rejection_notice,
+            PaneInputResult::Failed,
+            now,
+        ) {
+            let message = format!(
+                "A queued remote-file send target pane ({pane_id}) closed before delivery. The command was dropped and was not rerouted."
+            );
+            log::warn!("{message}");
+            fire_notify("kettle: remote command not delivered", &message);
+            self.last_input_rejection_notice = Some((PaneInputResult::Failed, now));
+        }
+    }
+
+    fn poll_pending_remote_commands(
+        &mut self,
+        ws: &mut WindowState,
+        now: std::time::Instant,
+    ) -> Option<std::time::Duration> {
+        if !self.remote_command_retry.is_ready(now) {
+            return self.remote_command_retry.remaining(now);
+        }
+        if self.pending_remote_commands.is_empty() && self.remote_spool_claim_pending {
+            self.claim_remote_command_batch(ws.seq, now);
+        }
+        if self.pending_remote_commands.is_empty() {
+            return self.remote_command_retry.remaining(now);
+        }
+
+        let mut processed = 0usize;
+        let mut processed_send_bytes = 0usize;
+        while processed < AUTOMATION_WORK_ITEMS_PER_TURN
+            && processed_send_bytes < AUTOMATION_WORK_BYTES_PER_TURN
+        {
+            let Some(origin_window) = self
+                .pending_remote_commands
+                .front()
+                .map(PendingRemoteCommand::origin_window)
+            else {
+                break;
+            };
+            if origin_window != ws.seq {
+                if !self.windows.contains_key(&origin_window) {
+                    log::warn!(
+                        "dropping queued remote command because its originating window \
+                         {origin_window} no longer exists"
+                    );
+                    self.pending_remote_commands.pop_front();
+                    self.remote_command_retry.progressed();
+                    processed += 1;
+                    continue;
                 }
-            } else {
-                log::warn!("remote command not recognized: {line:?}");
+                return Some(AUTOMATION_YIELD);
+            }
+
+            if matches!(
+                self.pending_remote_commands.front(),
+                Some(PendingRemoteCommand::SendText { .. })
+            ) {
+                let fallback = ws.mux.active_focus();
+                let target_pane = match self.pending_remote_commands.front_mut() {
+                    Some(PendingRemoteCommand::SendText { target_pane, .. }) => {
+                        if target_pane.is_none() {
+                            *target_pane = fallback;
+                        }
+                        *target_pane
+                    }
+                    _ => unreachable!("front was checked as SendText"),
+                };
+                let Some(target_pane) = target_pane else {
+                    self.remote_command_retry.backpressured(now);
+                    return self.remote_command_retry.remaining(now);
+                };
+                let bytes = match self.pending_remote_commands.front() {
+                    Some(PendingRemoteCommand::SendText { bytes, .. }) => bytes.clone(),
+                    _ => unreachable!("front was checked as SendText"),
+                };
+                let result = if let Some(pane) = ws.mux.panes.get(&target_pane) {
+                    Some(pane.feed_input_shared(bytes.clone()))
+                } else {
+                    self.windows
+                        .values()
+                        .find_map(|window| window.mux.panes.get(&target_pane))
+                        .map(|pane| pane.feed_input_shared(bytes.clone()))
+                };
+                let Some(result) = result else {
+                    self.pending_remote_commands.pop_front();
+                    self.remote_command_retry.progressed();
+                    self.report_remote_target_gone(target_pane);
+                    processed += 1;
+                    processed_send_bytes += bytes.len();
+                    continue;
+                };
+                match result {
+                    PaneInputResult::Queued | PaneInputResult::ReadOnly => {
+                        self.pending_remote_commands.pop_front();
+                        self.remote_command_retry.progressed();
+                        processed += 1;
+                        processed_send_bytes += bytes.len();
+                    }
+                    PaneInputResult::Backpressured => {
+                        self.report_input_result(result);
+                        self.remote_command_retry.backpressured(now);
+                        return self.remote_command_retry.remaining(now);
+                    }
+                    PaneInputResult::Oversize | PaneInputResult::Failed => {
+                        self.pending_remote_commands.pop_front();
+                        self.remote_command_retry.progressed();
+                        self.report_input_result(result);
+                        processed += 1;
+                        processed_send_bytes += bytes.len();
+                    }
+                }
+                continue;
+            }
+
+            let Some(command) = self.pending_remote_commands.pop_front() else {
+                break;
+            };
+            self.remote_command_retry.progressed();
+            processed += 1;
+            match command {
+                PendingRemoteCommand::ToggleWindow { .. } => {
+                    // Tri-state Quake dropdown toggle.
+                    // The naive binary toggle (hide-when-visible / show-
+                    // when-hidden) had a real UX problem: when kettle was
+                    // visible but the user had clicked away to another
+                    // window, pressing the hotkey HID kettle — but the
+                    // user usually wanted to bring it BACK INTO FOCUS.
+                    // The Quake / Yakuake / Tilda tradition is tri-state:
+                    //
+                    //   hidden            → show + raise + focus
+                    //   visible + focused → hide
+                    //   visible + !focused → raise + focus (don't hide)
+                    //
+                    // winit's has_focus / is_visible / focus_window /
+                    // set_visible all support this.
+                    if let Some(w) = &ws.window {
+                        let visible = w.is_visible().unwrap_or(true);
+                        let focused = w.has_focus();
+                        if !visible {
+                            w.set_visible(true);
+                            w.focus_window();
+                        } else if focused {
+                            w.set_visible(false);
+                        } else {
+                            // Visible but unfocused — bring to front +
+                            // focus, don't hide. The common "I clicked
+                            // away" case.
+                            w.focus_window();
+                        }
+                    }
+                }
+                PendingRemoteCommand::NewTab { .. } => {
+                    // Terminator parity (remote-control verb):
+                    // open a new tab via the remote-control IPC channel.
+                    // Mirrors the Action::NewTab dispatch and
+                    // also fires LuaEvent::TabAdd so plugins
+                    // listening for tab_add see remote-triggered tabs
+                    // the same as keyboard ones.
+                    let area = self.area(ws);
+                    let (cols, rows) = self.grid_of(ws, area);
+                    let geometry = self.pty_geometry_for_grid(ws, cols, rows);
+                    let waker = self.waker();
+                    if let Err(e) = ws.mux.new_tab_geometry(&self.cfg, geometry, waker) {
+                        log::warn!("remote-control: new-tab failed: {e}");
+                    } else {
+                        self.fire_tab_add_event(ws);
+                    }
+                }
+                PendingRemoteCommand::SendText { .. } => {
+                    unreachable!("SendText is handled without removing a retryable head")
+                }
             }
         }
         if let Some(w) = &ws.window {
             w.request_redraw();
         }
+        if self.pending_remote_commands.is_empty() {
+            self.remote_command_retry.progressed();
+            // A watcher event can be consumed while an older suffix is
+            // retained. Probe the spool once after progress so that later batch
+            // cannot be stranded merely because no new filesystem event fires.
+            if self.remote_spool_claim_pending {
+                self.claim_remote_command_batch(ws.seq, now);
+            }
+        }
+        if self.pending_remote_commands.is_empty() {
+            self.remote_command_retry.remaining(now)
+        } else {
+            self.remote_command_retry.yield_soon(now);
+            self.remote_command_retry.remaining(now)
+        }
+    }
+
+    fn drain_remote_commands(&mut self, ws: &mut WindowState) {
+        self.remote_spool_claim_pending = true;
+        let _ = self.poll_pending_remote_commands(ws, std::time::Instant::now());
     }
 
     fn run_triggers(&mut self, ws: &mut WindowState) {
@@ -15340,115 +16793,115 @@ impl App {
     /// to move the selection, `Enter` to run it, `Esc` to cancel.
     /// Quick-select hint key handling: type the label of a target to act on
     /// it (open URLs, copy paths/hashes/IPs); `Esc` cancels.
-    /// Vi-mode key dispatcher. Handles
-    /// h/j/k/l movement, 0/$/g/G/H/M/L jumps, and Esc exit. Other
-    /// keys are absorbed (no PTY write) so a stray press doesn't
-    /// land bytes in the shell while the user thinks they're
-    /// navigating.
-    ///
-    /// Movement clamps to the focused pane's grid (no negative rows
-    /// yet — a follow-up extends into scrollback).
+    /// Vi-mode key dispatcher backed by alacritty_terminal's native vi cursor
+    /// and selection. The engine owns scrollback/reflow coordinates and keeps
+    /// them stable as output rotates or evicts history.
     fn vi_mode_key(&mut self, ws: &mut WindowState, key: &Key, text: Option<&str>) {
-        // Esc exits.
         if matches!(key, Key::Named(NamedKey::Escape)) {
+            self.exit_vi_mode(ws);
+            return;
+        }
+        let Some(owner) = ws.vi_mode else {
+            return;
+        };
+        let Some(pane) = ws.mux.panes.get(&owner.pane_id) else {
+            ws.vi_mode = None;
+            return;
+        };
+        let mut term = pane
+            .term
+            .term
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if !term.mode().contains(kettle_core::TermMode::VI) {
+            drop(term);
             ws.vi_mode = None;
             return;
         }
-        // Grab the focused pane's grid dims to clamp movement.
-        let (max_row, max_col) = ws
-            .mux
-            .focused()
-            .and_then(|p| {
-                p.term.term.lock().ok().map(|t| {
-                    use kettle_core::Dimensions;
-                    (
-                        t.screen_lines().saturating_sub(1),
-                        t.columns().saturating_sub(1),
-                    )
-                })
-            })
-            .unwrap_or((23, 79));
-        let Some(state) = ws.vi_mode.as_mut() else {
-            return;
-        };
-        // Character-based dispatch — works for both `Key::Character`
-        // and `event.text` paths.
+
         let ch = text.and_then(|s| s.chars().next()).unwrap_or('\0');
+        let motion = match (ch, key) {
+            ('h', _) | ('\0', Key::Named(NamedKey::ArrowLeft)) => Some(kettle_core::ViMotion::Left),
+            ('l', _) | ('\0', Key::Named(NamedKey::ArrowRight)) => {
+                Some(kettle_core::ViMotion::Right)
+            }
+            ('k', _) | ('\0', Key::Named(NamedKey::ArrowUp)) => Some(kettle_core::ViMotion::Up),
+            ('j', _) | ('\0', Key::Named(NamedKey::ArrowDown)) => Some(kettle_core::ViMotion::Down),
+            ('0', _) | ('\0', Key::Named(NamedKey::Home)) => Some(kettle_core::ViMotion::First),
+            ('^', _) => Some(kettle_core::ViMotion::FirstOccupied),
+            ('$', _) | ('\0', Key::Named(NamedKey::End)) => Some(kettle_core::ViMotion::Last),
+            ('H', _) => Some(kettle_core::ViMotion::High),
+            ('M', _) => Some(kettle_core::ViMotion::Middle),
+            ('L', _) => Some(kettle_core::ViMotion::Low),
+            ('b', _) => Some(kettle_core::ViMotion::WordLeft),
+            ('w', _) => Some(kettle_core::ViMotion::WordRight),
+            ('e', _) => Some(kettle_core::ViMotion::WordRightEnd),
+            ('B', _) => Some(kettle_core::ViMotion::SemanticLeft),
+            ('W', _) => Some(kettle_core::ViMotion::SemanticRight),
+            ('E', _) => Some(kettle_core::ViMotion::SemanticRightEnd),
+            ('%', _) => Some(kettle_core::ViMotion::Bracket),
+            ('{', _) => Some(kettle_core::ViMotion::ParagraphUp),
+            ('}', _) => Some(kettle_core::ViMotion::ParagraphDown),
+            _ => None,
+        };
+        if let Some(motion) = motion {
+            term.vi_motion(motion);
+            return;
+        }
+
         match ch {
-            'h' => state.col = state.col.saturating_sub(1),
-            'l' => state.col = (state.col + 1).min(max_col),
-            'k' => state.row = state.row.saturating_sub(1),
-            'j' => state.row = (state.row + 1).min(max_row),
-            '0' | '^' => state.col = 0,
-            '$' => state.col = max_col,
-            'g' => state.row = 0,
-            'G' => state.row = max_row,
-            'H' => state.row = 0,
-            'M' => state.row = max_row / 2,
-            'L' => state.row = max_row,
-            // `v` toggles char-visual mode.
-            // Setting the anchor at the current cursor position begins
-            // a selection; pressing `v` again clears it.
+            'g' => {
+                use kettle_core::Dimensions as _;
+                let point = kettle_core::Point::new(term.topmost_line(), kettle_core::Column(0));
+                term.vi_goto_point(point);
+            }
+            'G' => {
+                use kettle_core::Dimensions as _;
+                let point = kettle_core::Point::new(term.bottommost_line(), kettle_core::Column(0));
+                term.vi_goto_point(point);
+            }
             'v' => {
-                state.visual_anchor = match state.visual_anchor {
-                    Some(_) => None,
-                    None => Some((state.row, state.col)),
-                };
+                if owner.visual {
+                    term.selection = None;
+                } else {
+                    let point = term.vi_mode_cursor.point;
+                    let mut selection = kettle_core::Selection::new(
+                        kettle_core::SelectionType::Simple,
+                        point,
+                        kettle_core::Side::Left,
+                    );
+                    selection.update(point, kettle_core::Side::Right);
+                    term.selection = Some(selection);
+                }
+                if let Some(state) = ws.vi_mode.as_mut() {
+                    state.visual = !owner.visual;
+                }
             }
-            // `y` yanks the visual selection to clipboard
-            // (system + selection) and exits vi-mode — same shape as
-            // Alacritty.
             'y' => {
-                if let Some(anchor) = state.visual_anchor {
-                    let cur = (state.row, state.col);
-                    let (start, end) = if anchor <= cur {
-                        (anchor, cur)
-                    } else {
-                        (cur, anchor)
-                    };
-                    let yanked = self.yank_vi_selection(ws, start, end);
-                    if !yanked.is_empty() {
-                        // Log a warn when clipboard is None
-                        // (e.g. SSH without X11 / Wayland forwarding,
-                        // missing DISPLAY, or arboard init failed at
-                        // startup). Before this fix, vi-mode `y` silently
-                        // dropped the selection — the user saw the
-                        // visual-mode highlight clear + vi-mode exit,
-                        // assumed copy worked, then hit paste and
-                        // got their previous clipboard contents.
-                        if let Some(clip) = self.clipboard.as_mut() {
-                            if let Err(e) = clip.set_text(yanked) {
-                                log::warn!("vi-mode yank: clipboard set_text failed: {e}");
-                            }
-                        } else {
-                            log::warn!(
-                                "vi-mode yank: clipboard unavailable (selection of {} bytes \
-                                 not copied — try a kettle window with DISPLAY / Wayland set)",
-                                yanked.len()
-                            );
-                        }
-                    }
-                }
+                let yanked = owner
+                    .visual
+                    .then(|| term.selection_to_string())
+                    .flatten()
+                    .unwrap_or_default();
+                term.selection = None;
+                term.toggle_vi_mode();
+                drop(term);
                 ws.vi_mode = None;
-            }
-            _ => {
-                // Arrow keys also navigate.
-                match key {
-                    Key::Named(NamedKey::ArrowLeft) => {
-                        state.col = state.col.saturating_sub(1);
+                if !yanked.is_empty() {
+                    if let Some(clip) = self.clipboard.as_mut() {
+                        if let Err(error) = clip.set_text(yanked) {
+                            log::warn!("vi-mode yank: clipboard set_text failed: {error}");
+                        }
+                    } else {
+                        log::warn!(
+                            "vi-mode yank: clipboard unavailable (selection of {} bytes not \
+                             copied — try a kettle window with DISPLAY / Wayland set)",
+                            yanked.len()
+                        );
                     }
-                    Key::Named(NamedKey::ArrowRight) => {
-                        state.col = (state.col + 1).min(max_col);
-                    }
-                    Key::Named(NamedKey::ArrowUp) => {
-                        state.row = state.row.saturating_sub(1);
-                    }
-                    Key::Named(NamedKey::ArrowDown) => {
-                        state.row = (state.row + 1).min(max_row);
-                    }
-                    _ => {}
                 }
             }
+            _ => {}
         }
     }
 
@@ -15486,18 +16939,18 @@ impl App {
                 };
                 if let Some(h) = chosen {
                     ws.hint_state = None;
-                    self.act_hint(&h);
+                    self.act_hint(ws, &h);
                 }
             }
         }
     }
 
-    fn act_hint(&mut self, h: &HintTarget) {
+    fn act_hint(&mut self, ws: &WindowState, h: &HintTarget) {
         if h.kind == kettle_core::hints::Kind::Url {
             // Route through open_url helper so the
             // hint-mode URL-open path also honors the custom URL
             // handler config.
-            self.open_url(&h.text);
+            self.open_url(ws, &h.text);
         } else if let Some(cb) = self.clipboard.as_mut() {
             // Log instead of silently swallowing.
             if let Err(e) = cb.set_text(h.text.clone()) {
@@ -16359,10 +17812,10 @@ impl App {
                 if let Some(target) = target {
                     let area = self.area(ws);
                     let (cols, rows) = self.grid_of(ws, area);
-                    let (cw, ch) = self.cell_px(ws);
+                    let geometry = self.pty_geometry_for_grid(ws, cols, rows);
                     if let Err(e) =
                         ws.mux
-                            .new_ssh_tab(&self.cfg, cols, rows, cw, ch, self.waker(), &target)
+                            .new_ssh_tab_geometry(&self.cfg, geometry, self.waker(), &target)
                     {
                         log::error!("ssh launch failed: {e}");
                     }
@@ -16962,6 +18415,7 @@ impl ApplicationHandler<UserEvent> for App {
             return;
         };
         self.resumed_inner(&mut ws, event_loop);
+        self.sync_output_wake_gate(&ws);
         self.finish_window_dispatch(event_loop, seq, ws);
         self.drain_activation_requests(event_loop);
         runtime_tracker.set_window_count(self.windows.len());
@@ -16978,6 +18432,20 @@ impl ApplicationHandler<UserEvent> for App {
             UserEvent::ReloadConfig => {
                 self.config_reload_deadline
                     .get_or_insert_with(|| std::time::Instant::now() + CONFIG_RELOAD_DEBOUNCE);
+            }
+            UserEvent::RemoteScanReady => {
+                let seq = if self.windows.contains_key(&self.focused_seq) {
+                    self.focused_seq
+                } else if let Some(seq) = self.windows.keys().next().copied() {
+                    seq
+                } else {
+                    return;
+                };
+                let Some(mut ws) = self.windows.remove(&seq) else {
+                    return;
+                };
+                self.apply_remote_scan_snapshot(&mut ws);
+                self.finish_window_dispatch(el, seq, ws);
             }
             // PTY wakeups carry no pane id. Fan out, with each window gated on
             // its panes' output generations.
@@ -17060,6 +18528,7 @@ impl ApplicationHandler<UserEvent> for App {
             return;
         };
         self.window_event_inner(&mut ws, event_loop, event);
+        self.sync_output_wake_gate(&ws);
         // v2.24.0: single chokepoint for the live theme preview. After every
         // event, make `cfg.theme` reflect the context-menu highlight — apply the
         // hovered `ThemeChoice` ephemerally, or revert to the baseline once the
@@ -17109,34 +18578,34 @@ impl ApplicationHandler<UserEvent> for App {
         // the per-window wait requests merge to the EARLIEST deadline so one
         // window's animation can't starve another's coalesced output flush.
         let seqs: Vec<u64> = self.windows.keys().copied().collect();
-        let mut min_wait: Option<u64> = None;
+        let mut earliest_deadline: Option<std::time::Instant> = None;
         for seq in seqs {
             let Some(mut ws) = self.windows.remove(&seq) else {
                 continue;
             };
             let wait = self.about_to_wait_inner(&mut ws, event_loop);
             self.finish_window_dispatch(event_loop, seq, ws);
-            if let Some(ms) = wait {
-                min_wait = Some(min_wait.map_or(ms, |w: u64| w.min(ms)));
+            if let Some(deadline) = wait {
+                earliest_deadline =
+                    Some(earliest_deadline.map_or(deadline, |current| current.min(deadline)));
             }
         }
         if let Some(deadline) = self.config_reload_deadline {
-            let ms = (deadline
-                .saturating_duration_since(std::time::Instant::now())
-                .as_millis() as u64)
-                .max(1);
-            min_wait = Some(min_wait.map_or(ms, |wait| wait.min(ms)));
+            let deadline =
+                deadline.max(std::time::Instant::now() + std::time::Duration::from_millis(1));
+            earliest_deadline =
+                Some(earliest_deadline.map_or(deadline, |current| current.min(deadline)));
         }
         if let Some(ms) = torn_tick_wait {
-            min_wait = Some(min_wait.map_or(ms, |wait| wait.min(ms)));
+            let deadline = std::time::Instant::now() + std::time::Duration::from_millis(ms);
+            earliest_deadline =
+                Some(earliest_deadline.map_or(deadline, |current| current.min(deadline)));
         }
         if self.windows.is_empty() {
             return;
         }
-        match min_wait {
-            Some(ms) => event_loop.set_control_flow(ControlFlow::WaitUntil(
-                std::time::Instant::now() + std::time::Duration::from_millis(ms),
-            )),
+        match earliest_deadline {
+            Some(deadline) => event_loop.set_control_flow(ControlFlow::WaitUntil(deadline)),
             None => event_loop.set_control_flow(ControlFlow::Wait),
         }
         runtime_tracker.set_window_count(self.windows.len());
@@ -17927,6 +19396,7 @@ impl App {
         // Same Mux construction flags as run_with — process-global decisions.
         let mut mux = Mux::new();
         mux.lua_output_subscribed = self.lua_engine.is_some();
+        mux.osc52_copy_allowed = osc52_copy_is_available(self.cfg.osc52, self.clipboard.is_some());
         {
             mux.lua_output_subscribed |= self.recorder.is_some();
             mux.record_lossless = self.recorder.is_some();
@@ -17936,23 +19406,15 @@ impl App {
         ws.renderer = Some(renderer);
         ws.accessibility = Some(accessibility);
         ws.window = Some(window);
-        if should_reveal_after_renderer_init(state)
-            && let Some(w) = &ws.window
-        {
-            w.set_visible(true);
-            ws.window_shown = true;
-        }
+        self.sync_output_frame_budget(&mut ws, true);
         let area = self.area(&ws);
         let (cols, rows) = self.grid_of(&ws, area);
-        let (cw, ch) = self.cell_px(&ws);
+        let geometry = self.pty_geometry_for_grid(&ws, cols, rows);
         match open {
             WindowOpen::Fresh { cwd } => {
-                if let Err(e) = ws.mux.new_tab_with(
+                if let Err(e) = ws.mux.new_tab_with_geometry(
                     &self.cfg,
-                    cols,
-                    rows,
-                    cw,
-                    ch,
+                    geometry,
                     self.waker(),
                     &[],
                     cwd.as_deref(),
@@ -17977,7 +19439,8 @@ impl App {
                 // wakeup-dedup latch, so restored panes re-created the
                 // one-wakeup-per-read flood the latch eliminates.
                 let mk = || self.waker();
-                if !ws.mux.restore(&sess, &self.cfg, cw, ch, &mk) {
+                let geometries = self.restore_geometries(&ws, &sess);
+                if !ws.mux.restore_geometry(&sess, &self.cfg, &geometries, &mk) {
                     // `ws` (and its OS window) drop here; nothing restored.
                     log::error!("open_window: saved-window restore failed");
                     return Err(WindowOpen::Restore(sw));
@@ -17985,9 +19448,11 @@ impl App {
             }
         }
         self.resize_all(&mut ws);
+        self.sync_output_wake_gate(&ws);
         self.focused_seq = seq;
-        // First frame painted directly — RedrawRequested is not delivered to
-        // a never-shown window on Windows (the `should_reveal_after_renderer_init` reveal dance).
+        // First frame painted directly. A successful presentation reveals the
+        // native window from `redraw`, so neither an empty renderer nor an
+        // un-restored default-size surface can flash on screen.
         self.redraw(&mut ws);
         if let Some(w) = &ws.window {
             w.request_redraw();
@@ -18172,7 +19637,7 @@ impl App {
         ws.drag_press = None;
         match self.open_window(event_loop, WindowOpen::AdoptTab(dt), pos, Some(size)) {
             Ok(torn_seq) => {
-                self.fire_tab_close_event(closing_idx);
+                self.fire_tab_close_event(ws, closing_idx);
                 self.ctl_broadcast(
                     "tab_moved",
                     None,
@@ -18817,15 +20282,155 @@ impl App {
         })
     }
 
+    fn sync_output_wake_gate(&self, ws: &WindowState) {
+        let render_quiesced = output_wakeup_must_quiesce(
+            window_is_render_hidden(ws),
+            ws.frame_recovery.has_pending(),
+            ws.renderer.is_none() || self.gpu.as_ref().is_some_and(|gpu| gpu.is_lost()),
+        );
+        for pane in ws.mux.panes.values() {
+            // A hidden surface does not need paint wakeups, but an opt-in
+            // recorder/Lua sidechannel still needs event-loop service. Its
+            // bounded lossless queue otherwise fills after eight PTY chunks
+            // and blocks parsing indefinitely while the window is occluded.
+            pane.term
+                .set_output_wake_enabled(output_wake_transport_enabled(
+                    render_quiesced,
+                    pane.output_rx.is_some(),
+                ));
+        }
+    }
+
+    fn acknowledge_output_wakes(&self, ws: &WindowState) {
+        for pane in ws.mux.panes.values() {
+            pane.term.acknowledge_output_wake();
+        }
+    }
+
+    /// Resolve the one startup restore source before window or GPU creation.
+    ///
+    /// Loading and validating here lets `resumed_inner` seed the first native
+    /// window with its final saved geometry. That avoids showing/configuring a
+    /// default-sized swapchain and immediately replacing it after PTYs spawn.
+    fn load_startup_session(&mut self) -> Option<crate::session::Session> {
+        // Terminator parity, detachable-tabs Bucket-D (drop-logic target):
+        // --tab-handoff-fd FD wins over the file handoff, named layout, and
+        // default session. The option is consumed exactly once because
+        // `UnixStream::from_raw_fd` takes ownership of the descriptor.
+        if let Some(fd) = self.startup.tab_handoff_fd.take() {
+            #[cfg(unix)]
+            {
+                use std::os::unix::io::FromRawFd;
+
+                // SAFETY: the source kettle process passed this owned
+                // descriptor through --tab-handoff-fd and surrendered it
+                // across exec. `socket` closes it on every return path.
+                let socket = unsafe { std::os::unix::net::UnixStream::from_raw_fd(fd) };
+                let mut payload = vec![0u8; 1024 * 1024];
+                return match crate::fd_transport::recv_fds(&socket, &mut payload, 64) {
+                    Ok((n, received_fds)) => {
+                        log::info!(
+                            "tab-handoff-fd: received {n} bytes + {} fds",
+                            received_fds.len()
+                        );
+                        // Adopting the received PTYs is a separate feature.
+                        // Until then, explicitly close every owned descriptor.
+                        for received_fd in received_fds {
+                            // SAFETY: recv_fds returned ownership of each fd.
+                            unsafe {
+                                libc::close(received_fd);
+                            }
+                        }
+                        payload.truncate(n);
+                        match serde_json::from_slice(&payload) {
+                            Ok(session) => Some(session),
+                            Err(error) => {
+                                log::warn!("tab-handoff-fd session JSON is invalid: {error}");
+                                None
+                            }
+                        }
+                    }
+                    Err(error) => {
+                        log::warn!("tab-handoff-fd recv_fds: {error}");
+                        None
+                    }
+                };
+            }
+            #[cfg(not(unix))]
+            {
+                let _ = fd;
+                log::warn!("--tab-handoff-fd unsupported on non-Unix");
+                return None;
+            }
+        }
+
+        if let Some(path) = self.startup.tab_handoff.as_deref() {
+            crate::session::Session::load_tab_handoff(path)
+        } else if let Some(name) = self.startup.layout.as_deref() {
+            crate::session::Session::load_layout(name)
+        } else if should_restore_session(self.startup.restore, self.cfg.restore_session) {
+            crate::session::Session::load()
+        } else {
+            None
+        }
+    }
+
     fn resumed_inner(&mut self, ws: &mut WindowState, event_loop: &ActiveEventLoop) {
         if ws.window.is_some() {
             return;
         }
+        // Explicit command/cwd launches never restore a saved workspace.
+        // Preserve the fields until the existing consumed-once spawn path
+        // below, but decide and preflight the restore before native resources
+        // are allocated.
+        let has_launch_override = self.startup.command.is_some() || self.startup.cwd.is_some();
+        let loaded_session = if has_launch_override {
+            None
+        } else {
+            self.load_startup_session()
+        };
+        let live_monitors = monitor_rects(event_loop);
+        let default_surface = startup_inner_size_px(&self.cfg).unwrap_or((800, 600));
+        let restore_plan = loaded_session.as_ref().and_then(|session| {
+            if session.is_empty() {
+                return None;
+            }
+            let windows = match session.validated_restore_windows() {
+                Ok(windows) => windows,
+                Err(error) => {
+                    log::warn!("session restore rejected during preflight: {error}");
+                    return None;
+                }
+            };
+            let geometries = match crate::session::validated_restore_surface_geometries(
+                &windows,
+                &live_monitors,
+                default_surface,
+            ) {
+                Ok(geometries) => geometries,
+                Err(error) => {
+                    log::warn!("session restore rejected during surface preflight: {error}");
+                    return None;
+                }
+            };
+            Some((windows, geometries))
+        });
+
         // Create the window hidden while renderer init runs on the event-loop
-        // thread. Reveal once the wgpu surface is configured, then paint
-        // immediately below; `window_state = hidden` remains hidden.
+        // thread. The first successful paint reveals it; `window_state =
+        // hidden` remains hidden.
         ws.window_shown = !should_reveal_after_renderer_init(self.cfg.window_state);
-        let attrs = self.window_attributes(self.cfg.window_state);
+        let mut attrs = self.window_attributes(self.cfg.window_state);
+        if let Some(geometry) = restore_plan
+            .as_ref()
+            .and_then(|(_, geometries)| geometries.first())
+            .copied()
+            .flatten()
+        {
+            attrs = attrs
+                .with_position(winit::dpi::PhysicalPosition::new(geometry.x, geometry.y))
+                .with_inner_size(winit::dpi::PhysicalSize::new(geometry.w, geometry.h));
+        }
         let window = match event_loop.create_window(attrs) {
             Ok(w) => Arc::new(w),
             Err(e) => {
@@ -18902,19 +20507,14 @@ impl App {
         ws.renderer = Some(renderer);
         ws.accessibility = Some(accessibility);
         ws.window = Some(window);
+        self.sync_output_frame_budget(ws, true);
         if let Some(theme) = ws.window.as_ref().and_then(|w| w.theme()) {
-            self.apply_initial_os_theme_preference(theme);
-        }
-        if should_reveal_after_renderer_init(self.cfg.window_state)
-            && let Some(w) = &ws.window
-        {
-            w.set_visible(true);
-            ws.window_shown = true;
+            self.apply_initial_os_theme_preference(ws, theme);
         }
 
         let area = self.area(ws);
         let (cols, rows) = self.grid_of(ws, area);
-        let (cw, ch) = self.cell_px(ws);
+        let geometry = self.pty_geometry_for_grid(ws, cols, rows);
 
         // CLI `-e cmd` / `-d dir` are consumed ONCE (they seed this window's
         // first tab and must not respawn on restore); take exactly those two
@@ -18963,18 +20563,14 @@ impl App {
         // Agent-first A2: the `--agent-server` override for the
         // control-server start further down (after the first paint).
         let startup_agent_server = self.startup.agent_server;
-        let has_override = cmd_override.is_some() || cwd_override.is_some();
-        let restored = if has_override {
+        let restored = if has_launch_override {
             let argv = cmd_override.unwrap_or_default();
             let cwd = cwd_override
                 .as_ref()
                 .map(|p| p.to_string_lossy().into_owned());
-            if let Err(e) = ws.mux.new_tab_with(
+            if let Err(e) = ws.mux.new_tab_with_geometry(
                 &self.cfg,
-                cols,
-                rows,
-                cw,
-                ch,
+                geometry,
                 self.waker(),
                 &argv,
                 cwd.as_deref(),
@@ -18985,91 +20581,8 @@ impl App {
             }
             true
         } else {
-            // Load the named layout if `--layout NAME` was
-            // passed; otherwise fall through to the default session
-            // (which is the per-install last-state file).
-            //
-            // Terminator parity, detachable-tabs Bucket-D
-            // (new-window-on-drop): --tab-handoff PATH wins over both. Used
-            // by Action::MoveTabToNewWindow when spawning
-            // the target kettle process; passes the source tab's
-            // serialized state via a one-shot JSON file. The handoff
-            // file is deleted after read.
-            // Terminator parity, detachable-tabs Bucket-D
-            // (drop-logic target): --tab-handoff-fd FD wins over
-            // --tab-handoff PATH. Receives a serialized tab + PTY
-            // fds via SCM_RIGHTS over the inherited socket fd. Unix-
-            // only; Windows + Wayland use the file-fallback path.
-            //
-            // This commit ships the recv + deserialize half;
-            // adopting the received fds as live Pane PTYs needs a
-            // Terminal::from_fd constructor — that's the remaining
-            // piece of that phase. For now: the recv runs + the JSON
-            // restores via the existing path; PTY fds get closed on
-            // drop. A follow-up replaces the existing PTY-spawn
-            // with adoption.
-            let loaded = if let Some(fd) = self.startup.tab_handoff_fd {
-                #[cfg(unix)]
-                {
-                    use std::os::unix::io::FromRawFd;
-                    // SAFETY: the fd was passed via --tab-handoff-fd
-                    // by the source kettle process; the parent
-                    // surrendered ownership via fork+exec. Owned
-                    // here for the duration of recv_fds.
-                    let socket = unsafe { std::os::unix::net::UnixStream::from_raw_fd(fd) };
-                    let mut payload = vec![0u8; 1024 * 1024];
-                    match crate::fd_transport::recv_fds(&socket, &mut payload, 64) {
-                        Ok((n, received_fds)) => {
-                            log::info!(
-                                "tab-handoff-fd: received {n} bytes + {} fds",
-                                received_fds.len()
-                            );
-                            // A follow-up adopts received_fds as
-                            // Pane PTYs; for now they leak on drop
-                            // (the source process holds the
-                            // canonical reference + will close them
-                            // when its source tab closes).
-                            for fd in received_fds {
-                                // SAFETY: each fd is owned; close
-                                // via libc::close. Drop-on-leak
-                                // would also work but is less explicit.
-                                unsafe {
-                                    libc::close(fd);
-                                }
-                            }
-                            payload.truncate(n);
-                            serde_json::from_slice::<crate::session::Session>(&payload).ok()
-                        }
-                        Err(e) => {
-                            log::warn!("tab-handoff-fd recv_fds: {e}");
-                            None
-                        }
-                    }
-                }
-                #[cfg(not(unix))]
-                {
-                    let _ = fd;
-                    log::warn!("--tab-handoff-fd unsupported on non-Unix");
-                    None
-                }
-            } else if let Some(path) = self.startup.tab_handoff.as_deref() {
-                crate::session::Session::load_tab_handoff(path)
-            } else if let Some(name) = self.startup.layout.as_deref() {
-                // `--layout NAME` is an explicit named-workspace restore.
-                crate::session::Session::load_layout(name)
-            } else if should_restore_session(self.startup.restore, self.cfg.restore_session) {
-                // The default last-session restore is OPT-IN now —
-                // fresh windows by default, matching every mainstream terminal
-                // (GNOME Terminal, Windows Terminal, kitty, Alacritty, WezTerm,
-                // iTerm2). Enable "continue where I left off" with `--restore`
-                // (one-shot) or `restore-session = true` (config). The session is
-                // still SAVED on exit, so there is state to restore when opted in.
-                crate::session::Session::load()
-            } else {
-                None
-            };
-            match loaded {
-                Some(s) if !s.is_empty() => {
+            match restore_plan.as_ref() {
+                Some((wins, clamped_geometries)) => {
                     // The theme is NO LONGER applied from the session.
                     // It is config-governed (the config `theme =` line, with the
                     // compile-time default as fallback), persisted via
@@ -19082,41 +20595,32 @@ impl App {
                     // v2.20.0 (review fix): the latched waker constructor —
                     // the old hand-rolled closure bypassed the P4 dedup
                     // latch for every session-restored pane.
-                    let mk = || self.waker();
                     // C7 (multi-window): window 1 of the session restores into
                     // THIS window; each additional saved window opens via
                     // open_window(Restore) — possible here because the GPU
                     // context was cached just above. A legacy single-window
                     // file normalizes to one entry.
-                    let wins = s.windows_normalized();
                     if let Some((first, rest)) = wins.split_first() {
                         let first_session = crate::session::Session {
-                            tabs: first.tabs.clone(),
+                            tabs: first.tabs.to_vec(),
                             active: first.active,
                             theme: None,
                             windows: Vec::new(),
                         };
-                        let ok = ws.mux.restore(&first_session, &self.cfg, cw, ch, &mk);
+                        let geometries = self.restore_geometries(ws, &first_session);
+                        let mk = || self.waker();
+                        let ok =
+                            ws.mux
+                                .restore_geometry(&first_session, &self.cfg, &geometries, &mk);
                         if ok {
-                            // Window 1's saved geometry, clamped to the live
-                            // monitor layout (the saved monitor may be gone).
-                            if let (Some(g), Some(win)) = (first.geometry, ws.window.as_ref()) {
-                                let g = crate::session::clamp_geometry_to_monitors(
-                                    g,
-                                    &monitor_rects(event_loop),
-                                );
-                                win.set_outer_position(winit::dpi::PhysicalPosition::new(g.x, g.y));
-                                let _ =
-                                    win.request_inner_size(winit::dpi::PhysicalSize::new(g.w, g.h));
-                            }
-                            for sw in rest {
+                            for (index, sw) in rest.iter().enumerate() {
+                                let sw = crate::session::SWindow {
+                                    tabs: sw.tabs.to_vec(),
+                                    active: sw.active,
+                                    geometry: clamped_geometries.get(index + 1).copied().flatten(),
+                                };
                                 if self
-                                    .open_window(
-                                        event_loop,
-                                        WindowOpen::Restore(sw.clone()),
-                                        None,
-                                        None,
-                                    )
+                                    .open_window(event_loop, WindowOpen::Restore(sw), None, None)
                                     .is_err()
                                 {
                                     log::warn!(
@@ -19136,7 +20640,7 @@ impl App {
                 _ => false,
             }
         };
-        if !restored && let Err(e) = ws.mux.new_tab(&self.cfg, cols, rows, cw, ch, self.waker()) {
+        if !restored && let Err(e) = ws.mux.new_tab_geometry(&self.cfg, geometry, self.waker()) {
             log::error!("failed to spawn shell: {e}");
             event_loop.exit();
             return;
@@ -19170,29 +20674,6 @@ impl App {
                 );
             }
         }
-        // Lua scripting: drain any `kettle.send_text(s)`
-        // bytes the startup script queued, into the now-existing
-        // focused pane's PTY. The pane is fresh; the shell will
-        // see this as the user's first typing.
-        if !self.pending_lua_send.is_empty()
-            && let Some(p) = ws.mux.focused()
-        {
-            let bytes = std::mem::take(&mut self.pending_lua_send);
-            // Lua send_text acts as the user — read-only drops it.
-            p.feed_input(&bytes);
-        }
-        // Lua scripting: drain any `kettle.exec_action(name)`
-        // dispatches the startup script queued. Done after the
-        // send_text drain so scripts that mix both produce a
-        // deterministic order. Actions go through the existing
-        // dispatch helper so they hit every existing hook
-        // (focus tracking, palette/menu closing, blink reset).
-        if !self.pending_lua_actions.is_empty() {
-            let actions = std::mem::take(&mut self.pending_lua_actions);
-            for a in actions {
-                self.handle_action(ws, a, event_loop);
-            }
-        }
         // Terminator plugin parity: fire
         // LuaEvent::Startup the first time we have an alive window
         // + at least one pane. Subsequent resumed() calls (Wayland
@@ -19201,16 +20682,13 @@ impl App {
         // `kettle.on('startup', function() kettle.send_text(...) end)`
         // takes effect immediately.
         if !self.lua_startup_fired && self.lua_engine.is_some() && ws.mux.focused().is_some() {
-            if let Some(eng) = &self.lua_engine {
-                eng.fire_event(&crate::LuaEvent::Startup);
-            }
-            // Route through the same helper as TabAdd /
-            // TabClose / Bell / Output so all 5 event hooks share
-            // one canonical command-drain path. Inherent methods are
-            // callable from a trait impl as long as `self: &mut App`.
-            self.drain_lua_hook_commands("startup hook");
+            self.fire_lua_event(ws, crate::LuaEvent::Startup, "startup hook");
             self.lua_startup_fired = true;
         }
+        // Top-level script commands precede startup-hook commands in the same
+        // FIFO. Run one bounded slice before the first paint; a stalled child
+        // retains the exact head message and about_to_wait drives retries.
+        let _ = self.poll_pending_lua_commands(ws, event_loop, std::time::Instant::now());
         // Paint the first frame *directly* here — not only via
         // `request_redraw` — so visible startup windows receive terminal
         // content immediately after renderer + pane setup. The follow-up
@@ -19338,16 +20816,24 @@ impl App {
         match ev {
             // Consumed by the outer window-less dispatch before a WindowState
             // is checked out.
-            UserEvent::Activation => {}
+            UserEvent::Activation | UserEvent::RemoteScanReady => {}
             UserEvent::AccessibilityAction { request, .. } => {
                 self.handle_accessibility_action(ws, request);
             }
             UserEvent::Wakeup => {
+                // Apply current visibility/recovery policy, but leave enabled
+                // latches closed until redraw is ready to snapshot a frame.
+                // This prevents one queued event from reopening the flood gate
+                // before the deferred paint budget expires.
+                self.sync_output_wake_gate(ws);
                 // C4: wakeups fan out to every window; skip windows whose
                 // panes produced no output since their last paint (plain
                 // text emits no TermEvent — the generation counter is the
                 // only reliable per-window signal).
-                if !self.window_has_new_output(ws) {
+                if !output_wakeup_needs_paint(
+                    || self.window_has_new_output(ws),
+                    || self.acknowledge_output_wakes(ws),
+                ) {
                     return;
                 }
                 // Run output triggers before the redraw —
@@ -19355,11 +20841,25 @@ impl App {
                 // event even if they're focused on another OS window.
                 // Cheap when triggers are empty (which is the default).
                 self.run_triggers(ws);
-                if ws.window_occluded || ws.frame_recovery.has_pending() {
+                if output_wakeup_must_quiesce(
+                    window_is_render_hidden(ws),
+                    ws.frame_recovery.has_pending(),
+                    ws.renderer.is_none() || self.gpu.as_ref().is_some_and(|gpu| gpu.is_lost()),
+                ) {
+                    if ws.mux.panes.values().any(|pane| pane.output_rx.is_some()) {
+                        // Rearm before draining. Output racing after this point
+                        // owns a new wake; output already queued is consumed by
+                        // this nonblocking drain. Reversing the order leaves a
+                        // drain/ack race that can strand the next lossless
+                        // chunk with no event-loop wake.
+                        self.acknowledge_output_wakes(ws);
+                        self.drain_recorder_output_once(ws);
+                    }
                     // Keep terminal damage pending while the surface is
-                    // invisible or its one-shot repair deadline is armed.
+                    // occluded, minimized, explicitly invisible, or while its
+                    // one-shot repair deadline is armed.
                     // Output bursts must not bypass timeout backoff.
-                    ws.coalescing_paint = false;
+                    ws.output_pacer.reset();
                     return;
                 }
                 // R2: coalesce rapid PTY-output paints to ~one per
@@ -19379,17 +20879,18 @@ impl App {
                 // repeat visibly stutter while Terminator's steady GTK
                 // frame clock stayed smooth.
                 if typed_recently(now, ws.last_typed, TYPING_ECHO_WINDOW) {
-                    ws.coalescing_paint = false;
+                    ws.output_pacer.reset();
                     if let Some(w) = &ws.window {
                         w.request_redraw();
                     }
                 } else if should_defer_output_paint(
                     now,
                     ws.last_paint,
-                    effective_output_budget(ws.flood_paints),
+                    effective_output_budget(ws.output_frame_budget, ws.flood_paints),
                 ) {
-                    ws.coalescing_paint = true;
+                    ws.output_pacer.defer();
                 } else if let Some(w) = &ws.window {
+                    ws.output_pacer.queue_deferred_redraw();
                     w.request_redraw();
                 }
             }
@@ -19512,6 +21013,7 @@ impl App {
                 self.pending_window_close = true;
             }
             WindowEvent::Resized(size) => {
+                self.sync_output_frame_budget(ws, false);
                 // Minimizing a window delivers Resized(0, 0)
                 // on Windows. Reconfiguring the surface + `resize_all` to a 0×0
                 // area collapsed every PTY to a 1×1 grid (`grid_of`'s `.max(1)`),
@@ -19521,39 +21023,38 @@ impl App {
                 // hold their real dimensions; the genuine restore carries the
                 // true non-zero size and reflows once.
                 if size.width == 0 || size.height == 0 {
+                    ws.dpi_resize_surface_suspended = true;
                     return;
                 }
-                ws.frame_recovery.expedite(std::time::Instant::now());
-                self.apply_window_resize(ws, size.width, size.height);
-                // Record the new grid size into the asciicast trace.
-                if self.recorder.is_some() {
-                    let (cols, rows) = self.grid_of(ws, self.area(ws));
-                    if let Some(rec) = self.recorder.as_mut() {
-                        rec.record_resize(cols as u16, rows as u16);
-                    }
-                }
-                if let Some(w) = &ws.window {
-                    w.request_redraw();
+                ws.dpi_resize_surface_suspended = false;
+                let renderer_ready = self.dpi_resize_renderer_ready(ws);
+                if ws.dpi_resize.on_event(DpiResizeEvent::Resized {
+                    width: size.width,
+                    height: size.height,
+                    renderer_ready,
+                }) == DpiResizeAction::ApplyLayout
+                {
+                    self.commit_window_resize(ws, size.width, size.height);
                 }
             }
             WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
+                self.sync_output_frame_budget(ws, true);
                 // Actually apply the new DPI scale. Previously this
                 // arm only requested a redraw and dropped the factor, so text
                 // stayed at the launch scale — tiny at >100% Windows scaling,
                 // and never rescaling when dragged to a different-DPI monitor.
-                // set_scale re-derives physical font metrics + cell size; the
-                // surface itself is reconfigured by the Resized event winit
-                // emits alongside this one. Re-grid so panes reflow to the new
-                // cell dimensions.
+                // set_scale re-derives physical font metrics + cell size. Do
+                // not re-grid yet: on Windows this event precedes the
+                // SetWindowPos-driven Resized, so the physical size is still
+                // from the old monitor. The coalescer commits once at the
+                // following usable Resized; about_to_wait is the fallback for
+                // backends that do not emit one.
+                ws.dpi_resize.on_event(DpiResizeEvent::ScaleFactorChanged);
                 ws.frame_recovery.expedite(std::time::Instant::now());
                 if !ws.frame_recovery.renderer_rebuild_pending()
                     && let Some(r) = ws.renderer.as_mut()
                 {
                     r.set_scale(scale_factor as f32);
-                }
-                self.resize_all(ws);
-                if let Some(w) = &ws.window {
-                    w.request_redraw();
                 }
             }
             WindowEvent::ThemeChanged(theme) => {
@@ -19589,6 +21090,7 @@ impl App {
             // grab offset and drive the re-dock hit-test against every
             // sibling window's tab band.
             WindowEvent::Moved(pos) => {
+                self.sync_output_frame_budget(ws, false);
                 let Some(td) = self.torn_drag.as_mut() else {
                     return;
                 };
@@ -20094,12 +21596,12 @@ impl App {
                     } else if bcode == 0 && in_bar(bar.new_tab, px, py) {
                         let area = self.area(ws);
                         let (cols, rows) = self.grid_of(ws, area);
-                        let (cw, ch) = self.cell_px(ws);
+                        let geometry = self.pty_geometry_for_grid(ws, cols, rows);
                         // Log a `+`-button new-tab spawn
                         // failure rather than swallowing it. v2.26.0 (audit):
                         // also fire TabAdd on success (the `+` click previously
                         // skipped it, so Lua `TabAdd` / dev-record missed it).
-                        match ws.mux.new_tab(&self.cfg, cols, rows, cw, ch, self.waker()) {
+                        match ws.mux.new_tab_geometry(&self.cfg, geometry, self.waker()) {
                             Ok(()) => self.fire_tab_add_event(ws),
                             Err(e) => log::warn!("could not open a new tab (+ button): {e}"),
                         }
@@ -20136,12 +21638,12 @@ impl App {
                                 // exit paths (Action::CloseTab on the
                                 // last tab, WindowEvent::CloseRequested)
                                 // already save; this one was missed.
-                                self.fire_tab_close_event(closing_idx);
+                                self.fire_tab_close_event(ws, closing_idx);
                                 self.save_session(ws);
                                 self.pending_window_close = true;
                                 return;
                             }
-                            self.fire_tab_close_event(closing_idx);
+                            self.fire_tab_close_event(ws, closing_idx);
                             self.note_focus_change(ws, pre);
                         } else {
                             let pre = self.focus_key(ws);
@@ -20198,7 +21700,7 @@ impl App {
                 {
                     // Route through helper so custom URL
                     // handler config is honored.
-                    self.open_url(&uri);
+                    self.open_url(ws, &uri);
                     return;
                 }
                 // Terminator parity, titlebar Bucket-D:
@@ -20445,7 +21947,7 @@ impl App {
                             match self.open_window(event_loop, WindowOpen::AdoptTab(dt), pos, None)
                             {
                                 Ok(torn_seq) => {
-                                    self.fire_tab_close_event(closing_idx);
+                                    self.fire_tab_close_event(ws, closing_idx);
                                     // C8: agents see the tear-off too.
                                     self.ctl_broadcast(
                                         "tab_moved",
@@ -20542,7 +22044,8 @@ impl App {
                     crate::mux::format_paths_for_paste(&argv, std::slice::from_ref(&path))
                 );
                 if ws.mux.is_broadcast_on() {
-                    ws.mux.broadcast_paste(&text);
+                    let result = ws.mux.broadcast_paste(&text);
+                    self.report_input_result(result);
                 } else {
                     // Read the focused pane's BRACKETED_PASTE state first
                     // — `focused_mode` and `mux.focused` both want &mut
@@ -20553,7 +22056,8 @@ impl App {
                     let bytes = input::paste_payload(&text, bracketed);
                     if let Some(p) = ws.mux.focused() {
                         // Drag-drop is user input — read-only drops it.
-                        p.feed_input(&bytes);
+                        let result = p.feed_input(&bytes);
+                        self.report_input_result(result);
                     }
                 }
                 if let Some(w) = &ws.window {
@@ -20647,8 +22151,12 @@ impl App {
                     .focused_mode(ws)
                     .contains(kettle_core::TermMode::FOCUS_IN_OUT)
                     && let Some(p) = ws.mux.focused()
+                    && !p
+                        .queue_protocol_reply(if f { b"\x1b[I" } else { b"\x1b[O" })
+                        .is_queued()
                 {
-                    p.term.write(if f { b"\x1b[I" } else { b"\x1b[O" });
+                    log::error!("closing pane: focus protocol reply transport failed");
+                    p.closed = true;
                 }
                 // winit's `request_user_attention(None)` alone does
                 // not reliably stop the Win11 taskbar flash once started, so
@@ -20764,11 +22272,14 @@ impl App {
                         .and_then(|p| p.term.term.lock().ok().map(|t| *t.mode()))
                         .unwrap_or(kettle_core::TermMode::empty());
                     if let Some(bytes) = input::encode_key_event(&event, ws.mods, mode) {
-                        if ws.mux.is_broadcast_on() {
-                            ws.mux.broadcast_write(&bytes);
+                        let result = if ws.mux.is_broadcast_on() {
+                            ws.mux.broadcast_write(&bytes)
                         } else if let Some(p) = ws.mux.focused() {
-                            p.feed_input(&bytes);
-                        }
+                            p.feed_input(&bytes)
+                        } else {
+                            PaneInputResult::Queued
+                        };
+                        self.report_input_result(result);
                     }
                     return;
                 }
@@ -21074,14 +22585,14 @@ impl App {
         }
     }
 
-    /// C4: returns the wake-up this window wants (ms; `None` = wait for
-    /// events). The dispatch wrapper merges every window's request to the
-    /// earliest deadline and sets the control flow once.
+    /// C4: returns the absolute wake-up deadline this window wants
+    /// (`None` = wait for events). The dispatch wrapper merges every window's
+    /// request to the earliest deadline and sets the control flow once.
     fn about_to_wait_inner(
         &mut self,
         ws: &mut WindowState,
         event_loop: &ActiveEventLoop,
-    ) -> Option<u64> {
+    ) -> Option<std::time::Instant> {
         // Drain trailing recorder output before reap removes a
         // just-exited pane (covers the shell-exit → process-exit close path,
         // e.g. a fast `-e cmd` session).
@@ -21093,15 +22604,44 @@ impl App {
         }
         ws.search_queries
             .retain(|pane_id, _| ws.mux.panes.contains_key(pane_id));
+        let now = std::time::Instant::now();
+        let lua_wait = self.poll_pending_lua_commands(ws, event_loop, now);
+        let remote_wait = if should_poll_remote_window(
+            !self.pending_remote_commands.is_empty(),
+            self.remote_spool_claim_pending,
+            self.remote_command_retry.next_at.is_some(),
+            ws.seq,
+            self.focused_seq,
+        ) {
+            // An unclaimed spool belongs to the window focused when it is
+            // finally claimed. Do not let the first BTreeMap window steal the
+            // origin merely because a busy lock deferred the watcher event.
+            self.poll_pending_remote_commands(ws, now)
+        } else {
+            None
+        };
+        let automation_wait = match (lua_wait, remote_wait) {
+            (Some(lua), Some(remote)) => Some(lua.min(remote)),
+            (Some(wait), None) | (None, Some(wait)) => Some(wait),
+            (None, None) => None,
+        };
+        if self.pending_window_close || self.quit_requested {
+            return None;
+        }
         // Once the GPU device is lost we no longer paint (see the redraw guard).
         // Drive renderer recovery from here instead of scheduling animation
         // wakes that would only re-enter the dead-device redraw path.
         if self.gpu.as_ref().is_some_and(|g| g.is_lost()) {
+            // The global device-loss callback can wake the loop without a
+            // window event. Quiesce pane output here before any recovery
+            // backoff returns so a hot PTY cannot spin the dead render path.
+            self.sync_output_wake_gate(ws);
             self.start_gpu_incident_if_needed();
-            let now = std::time::Instant::now();
             match self.gpu_recovery.poll(now, GPU_RECOVERY_SETTLE) {
                 RecoveryAction::Wait(wait) => {
-                    return Some((wait.as_millis() as u64).max(1));
+                    let next = wait.max(std::time::Duration::from_millis(1));
+                    let next = automation_wait.map_or(next, |automation| automation.min(next));
+                    return Some(now + next);
                 }
                 RecoveryAction::Attempt { attempt_index } => {
                     let attempt = attempt_index.saturating_add(1);
@@ -21137,19 +22677,46 @@ impl App {
                             }
                             let backoff = gpu_recovery_backoff(attempt);
                             self.gpu_recovery.failed(now, backoff);
-                            return Some((backoff.as_millis() as u64).max(1));
+                            let next = backoff.max(std::time::Duration::from_millis(1));
+                            let next =
+                                automation_wait.map_or(next, |automation| automation.min(next));
+                            return Some(now + next);
                         }
                     }
                 }
             }
         }
-        let now = std::time::Instant::now();
+        if ws.pty_resize_retry.take_due(now) {
+            if ws.renderer.is_some() {
+                self.resize_all(ws);
+            } else {
+                // Preserve a bounded retry while a renderer rebuild temporarily
+                // makes layout metrics unavailable.
+                ws.pty_resize_retry.record_result(now, true);
+            }
+        }
+        let pty_resize_retry_wait = ws
+            .pty_resize_retry
+            .remaining(now)
+            .map(|wait| wait.max(std::time::Duration::from_millis(1)));
+        let monitor_refresh_wait = if ws.output_refresh_probe_pending {
+            match monitor_refresh_probe_wait(ws.output_refresh_probe_at, now, false) {
+                Some(remaining) => Some(remaining),
+                None => {
+                    self.sync_output_frame_budget(ws, true);
+                    None
+                }
+            }
+        } else {
+            None
+        };
         let render_hidden = window_is_render_hidden(ws);
-        let mut frame_recovery_wait_ms = None;
+        self.sync_output_wake_gate(ws);
+        let mut frame_recovery_wait = None;
         match ws.frame_recovery.poll(now, render_hidden) {
             FrameRecoveryPoll::Idle | FrameRecoveryPoll::Quiescent => {}
             FrameRecoveryPoll::Wait(wait) => {
-                frame_recovery_wait_ms = Some((wait.as_millis() as u64).max(1));
+                frame_recovery_wait = Some(wait.max(std::time::Duration::from_millis(1)));
             }
             FrameRecoveryPoll::Ready(FrameRecoveryAction::Redraw) => {
                 if let Some(window) = &ws.window {
@@ -21173,12 +22740,13 @@ impl App {
                             // The device callback owns escalation. Ensure the
                             // event loop turns once more even if no animation
                             // or PTY event is active.
-                            frame_recovery_wait_ms = Some(1);
+                            frame_recovery_wait = Some(std::time::Duration::from_millis(1));
                         } else {
                             ws.frame_recovery.schedule_renderer_rebuild(now);
                             match ws.frame_recovery.poll(now, render_hidden) {
                                 FrameRecoveryPoll::Wait(wait) => {
-                                    frame_recovery_wait_ms = Some((wait.as_millis() as u64).max(1));
+                                    frame_recovery_wait =
+                                        Some(wait.max(std::time::Duration::from_millis(1)));
                                 }
                                 FrameRecoveryPoll::Quiescent => {}
                                 FrameRecoveryPoll::Idle | FrameRecoveryPoll::Ready(_) => {
@@ -21186,12 +22754,41 @@ impl App {
                                     // immediate attempt always arms a positive
                                     // backoff. Keep a defensive one-turn wake
                                     // if that invariant changes.
-                                    frame_recovery_wait_ms = Some(1);
+                                    frame_recovery_wait = Some(std::time::Duration::from_millis(1));
                                 }
                             }
                         }
                     }
                 }
+            }
+        }
+        // Most backends pair ScaleFactorChanged with Resized. If one does not,
+        // commit the pending DPI layout from the window's final inner size
+        // here. A minimized 0x0 window and any renderer/GPU repair keep the
+        // transition pending until a usable surface exists.
+        let mut dpi_fallback_wait = None;
+        if let Some((width, height)) = ws
+            .window
+            .as_ref()
+            .map(|window| window.inner_size())
+            .map(|size| (size.width, size.height))
+        {
+            let renderer_ready = self.dpi_resize_renderer_ready(ws)
+                && !render_hidden
+                && !ws.dpi_resize_surface_suspended;
+            match ws.dpi_resize.on_event(DpiResizeEvent::AboutToWait {
+                width,
+                height,
+                renderer_ready,
+            }) {
+                DpiResizeAction::ApplyLayout => self.commit_window_resize(ws, width, height),
+                DpiResizeAction::DeferAndWake => {
+                    // Do not render a transient new-scale/old-size frame just
+                    // to turn the loop. A precise short deadline gives the
+                    // backend's paired Resized event one more dispatch turn.
+                    dpi_fallback_wait = Some(std::time::Duration::from_millis(1));
+                }
+                DpiResizeAction::Defer => {}
             }
         }
         // Drive cursor blink + visual-bell decay without busy-looping: only
@@ -21297,55 +22894,71 @@ impl App {
         // A deferred (coalesced) output paint becomes due
         // `OUTPUT_FRAME_BUDGET` after the last frame. Until then it stays
         // pending and we wake at its deadline so the burst paints exactly once.
-        let output_budget = effective_output_budget(ws.flood_paints);
+        let output_budget = effective_output_budget(ws.output_frame_budget, ws.flood_paints);
         let coalesce_due = !render_hidden
             && !ws.frame_recovery.has_pending()
-            && ws.coalescing_paint
+            && ws.output_pacer.is_deferred()
+            && !ws.output_pacer.redraw_queued()
             && ws
                 .last_paint
                 .map(|t| now.saturating_duration_since(t) >= output_budget)
                 .unwrap_or(true);
-        if bell_active
+        if (bell_active
             || blink_due
             || term_anim
             || bg_frame_due
             || autoscroll_active
             || coalesce_due
-            || resize_chip_active
+            || resize_chip_active)
+            && let Some(w) = &ws.window
         {
-            if let Some(w) = &ws.window {
-                w.request_redraw();
-            }
+            w.request_redraw();
             if coalesce_due {
-                ws.coalescing_paint = false;
+                ws.output_pacer.queue_deferred_redraw();
             }
         }
         // Pick the earliest wake we still need: ~30 fps for bell / animation /
         // autoscroll / the resize chip, the cursor-blink half-period deadline,
         // or the pending coalesced output paint's deadline.
-        let mut wait_ms: Option<u64> =
+        let mut wait: Option<std::time::Duration> =
             if bell_active || term_anim || autoscroll_active || resize_chip_active {
-                Some(33)
+                Some(std::time::Duration::from_millis(33))
             } else if let Some(bg_ms) = bg_anim_interval {
                 // Animated bg: wake exactly at its next frame boundary (its own
                 // fps), not 30 fps — this is the fix for the ~55% animated idle.
-                Some(bg_ms.clamp(16, 1000))
+                Some(std::time::Duration::from_millis(bg_ms.clamp(16, 1000)))
             } else if blink_active {
                 let remaining = blink_interval.saturating_sub(blink_elapsed);
-                Some((remaining.as_millis() as u64).max(1))
+                Some(remaining.max(std::time::Duration::from_millis(1)))
             } else {
                 None
             };
-        if let Some(ms) = frame_recovery_wait_ms {
-            wait_ms = Some(wait_ms.map_or(ms, |wait| wait.min(ms)));
+        if let Some(next) = frame_recovery_wait {
+            wait = Some(wait.map_or(next, |current| current.min(next)));
         }
-        if ws.coalescing_paint && !render_hidden && !ws.frame_recovery.has_pending() {
+        if let Some(next) = dpi_fallback_wait {
+            wait = Some(wait.map_or(next, |current| current.min(next)));
+        }
+        if let Some(next) = pty_resize_retry_wait {
+            wait = Some(wait.map_or(next, |current| current.min(next)));
+        }
+        if let Some(next) = monitor_refresh_wait {
+            wait = Some(wait.map_or(next, |current| current.min(next)));
+        }
+        if let Some(next) = automation_wait {
+            wait = Some(wait.map_or(next, |current| current.min(next)));
+        }
+        if ws.output_pacer.is_deferred()
+            && !ws.output_pacer.redraw_queued()
+            && !render_hidden
+            && !ws.frame_recovery.has_pending()
+        {
             let remaining = ws
                 .last_paint
                 .map(|t| output_budget.saturating_sub(now.saturating_duration_since(t)))
                 .unwrap_or_default();
-            let ms = (remaining.as_millis() as u64).max(1);
-            wait_ms = Some(wait_ms.map_or(ms, |w| w.min(ms)));
+            let next = remaining.max(std::time::Duration::from_nanos(1));
+            wait = Some(wait.map_or(next, |current| current.min(next)));
         }
         // Search's deferred unlimited pass is deadline-driven and chunked.
         // Wake exactly when the 500 ms typing debounce expires; while a chunk
@@ -21354,18 +22967,21 @@ impl App {
         if ws.search.open {
             if let Some(deadline) = ws.search.unlimited_retry_at {
                 let due = now >= deadline;
-                let ms = if due {
-                    1
+                let next = if due {
+                    std::time::Duration::from_millis(1)
                 } else {
-                    (deadline.saturating_duration_since(now).as_millis() as u64).max(1)
+                    deadline
+                        .saturating_duration_since(now)
+                        .max(std::time::Duration::from_millis(1))
                 };
-                wait_ms = Some(wait_ms.map_or(ms, |wait| wait.min(ms)));
+                wait = Some(wait.map_or(next, |current| current.min(next)));
                 if due && let Some(window) = &ws.window {
                     window.request_redraw();
                 }
             }
             if ws.search.background.is_some() {
-                wait_ms = Some(wait_ms.map_or(1, |wait| wait.min(1)));
+                let next = std::time::Duration::from_millis(1);
+                wait = Some(wait.map_or(next, |current| current.min(next)));
                 if let Some(window) = &ws.window {
                     window.request_redraw();
                 }
@@ -21379,12 +22995,12 @@ impl App {
                             .saturating_sub(now.saturating_duration_since(updated))
                     });
             let due = remaining.is_zero();
-            let ms = if due {
-                1
+            let next = if due {
+                std::time::Duration::from_millis(1)
             } else {
-                (remaining.as_millis() as u64).max(1)
+                remaining.max(std::time::Duration::from_millis(1))
             };
-            wait_ms = Some(wait_ms.map_or(ms, |wait| wait.min(ms)));
+            wait = Some(wait.map_or(next, |current| current.min(next)));
             if due && let Some(window) = &ws.window {
                 window.request_redraw();
             }
@@ -21395,8 +23011,11 @@ impl App {
         // (no output to wake us) still times out on time.
         self.check_pending_run_deadlines(ws);
         if let Some(soonest) = self.pending_runs.values().map(|p| p.deadline).min() {
-            let ms = (soonest.saturating_duration_since(now).as_millis() as u64).clamp(1, 500);
-            wait_ms = Some(wait_ms.map_or(ms, |w| w.min(ms)));
+            let next = soonest.saturating_duration_since(now).clamp(
+                std::time::Duration::from_millis(1),
+                std::time::Duration::from_millis(500),
+            );
+            wait = Some(wait.map_or(next, |current| current.min(next)));
         }
         // v2.20.0 (review fix): bound the dev-record staleness in WALL time.
         // The recorder's interval flush is event-driven, so a burst followed
@@ -21407,8 +23026,10 @@ impl App {
                 let before = rec.status();
                 rec.flush_if_stale();
                 if let Some(deadline) = rec.flush_deadline() {
-                    let ms = (deadline.saturating_duration_since(now).as_millis() as u64).max(1);
-                    wait_ms = Some(wait_ms.map_or(ms, |w| w.min(ms)));
+                    let next = deadline
+                        .saturating_duration_since(now)
+                        .max(std::time::Duration::from_millis(1));
+                    wait = Some(wait.map_or(next, |current| current.min(next)));
                 }
                 rec.status() != before
             } else {
@@ -21421,7 +23042,7 @@ impl App {
                 );
             }
         }
-        wait_ms
+        wait.map(|remaining| now + remaining)
     }
 }
 
@@ -21471,35 +23092,508 @@ mod modal_discipline_guard {
         let rest = &src[start..];
         let end = rest.find("\n    }").expect("fn end");
         let body = &rest[..end];
+        let tab_close = body
+            .find("let tab_was_last = ws.mux.close_tab();")
+            .expect("CloseTab dispatch must honor the close result");
+        let tab_event = body
+            .find("self.fire_tab_close_event(ws, closing_idx);")
+            .expect("confirmed CloseTab must emit its lifecycle event");
+        let tab_exit = body
+            .find("if tab_was_last {")
+            .expect("CloseTab dispatch must exit on the last tab");
         assert!(
-            body.contains("if ws.mux.close_tab() {")
-                && body.contains("self.pending_window_close = true;"),
-            "CloseTab dispatch must exit when close_tab() reports the last tab"
+            body.contains("let closing_idx = ws.mux.active;")
+                && body.contains("self.pending_window_close = true;")
+                && tab_close < tab_event
+                && tab_event < tab_exit,
+            "confirmed CloseTab must capture the original index, emit the event \
+             on every outcome, then exit when the last tab closes"
         );
         assert!(
-            body.contains("let was_last = ws.mux.close_focused();")
+            body.contains(concat!("let was_last = ws.mux.", "close_focused();"))
                 && body.contains("if was_last {"),
             "ClosePane dispatch must exit when close_focused() reports the last pane"
         );
+    }
+
+    #[test]
+    fn pane_close_lifecycle_events_precede_pty_teardown() {
+        let source = include_str!("app.rs").replace("\r\n", "\n");
+        // Construct these needles so this guard does not count its own source.
+        let close_call = ["ws.mux.", "close_focused();"].concat();
+        let focus_capture = ["let closing_pane = ws.mux.", "active_focus();"].concat();
+        let lifecycle_call = ["self.fire_pane_close_event", "(ws, id);"].concat();
+        let close_positions = source
+            .match_indices(&close_call)
+            .map(|(position, _)| position)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            close_positions.len(),
+            2,
+            "every close_focused call site must be lifecycle-audited"
+        );
+        for close_position in close_positions {
+            let prefix = &source[..close_position];
+            let capture_position = prefix
+                .rfind(&focus_capture)
+                .expect("pane id captured before close");
+            let event_position = prefix
+                .rfind(&lifecycle_call)
+                .expect("pane-close lifecycle event present");
+            assert!(
+                capture_position < event_position && event_position < close_position,
+                "pane-close callbacks must run while the addressed PTY still exists"
+            );
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        App, ContextMenuItem, SplitDrag, apply_output_generation_outcome, assign_mnemonics,
-        cached_pane_cursor_blinking, context_menu_snapshot_reuse_safe, count_rows_fitting,
-        filter_disabled, find_menu_row_y, modal_swallows_pointer, pane_cursor_blinking_with,
-        pane_snapshot_keys_match, rank_layouts, sanitize_native_window_title, sanitize_title,
-        selection_kind, should_restore_session, should_reveal_after_renderer_init,
-        stage_output_generations_for_frame, startup_inner_size_px, typeahead_match,
-        vi_mode_invalidated_by_resize,
+        AUTOMATION_RETRY_MIN, App, AutomationRetry, ContextMenuItem, MAX_REMOTE_COMMANDS_PER_BATCH,
+        Osc52ClipboardChannel, ParsedRemoteCommandBatch, PendingLuaCommand, PendingLuaCommands,
+        PendingRemoteCommand, RemoteBatchClaim, SplitDrag, apply_output_generation_outcome,
+        apply_remote_title_transition, argv_is_nonlocal_client, assign_mnemonics,
+        cached_pane_cursor_blinking, claim_remote_command_file, context_menu_item_columns,
+        context_menu_max_scroll_offset, context_menu_scroll_for_highlight,
+        context_menu_snapshot_reuse_safe, context_menu_surface_can_fit_row, count_rows_fitting,
+        ctl_input_error, filter_disabled, find_menu_row_y, fit_context_menu_row,
+        input_rejection_message, local_paste_within_limit, modal_swallows_pointer,
+        osc52_clipboard_channel, output_generation_advanced, output_wakeup_needs_paint,
+        pane_cursor_blinking_with, pane_snapshot_keys_match, parse_remote_command_batch,
+        rank_layouts, sanitize_native_window_title, sanitize_title, selection_kind,
+        should_notify_input_rejection, should_poll_remote_window, should_restore_session,
+        should_reveal_after_renderer_init, stage_applied_remote_probe,
+        stage_output_generations_for_frame, stage_remote_targets, startup_inner_size_px,
+        typeahead_match,
     };
-    use crate::mux::{Dir, Mux};
+    use crate::mux::{Dir, Mux, PaneInputResult, PaneTitleOrigin};
     use crate::window_state::WindowState;
     use kettle_config::Action;
-    use kettle_core::SelectionType;
-    use kettle_render::{FrameOutcome, PaneSnapshot};
+    use kettle_core::{ClipboardType, SelectionType, event::OutputWakeGate};
+    use kettle_render::{ContextMenuRow, FrameOutcome, PaneSnapshot};
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+
+    #[test]
+    fn input_rejections_have_distinct_rpc_semantics() {
+        use kettle_ctl::protocol::error_codes as ec;
+
+        assert_eq!(ctl_input_error(PaneInputResult::Queued), None);
+        assert_eq!(
+            ctl_input_error(PaneInputResult::ReadOnly).map(|error| error.0),
+            Some(ec::READ_ONLY)
+        );
+        assert_eq!(
+            ctl_input_error(PaneInputResult::Backpressured).map(|error| error.0),
+            Some(ec::BUSY)
+        );
+        assert_eq!(
+            ctl_input_error(PaneInputResult::Oversize).map(|error| error.0),
+            Some(ec::BAD_PARAMS)
+        );
+        assert_eq!(
+            ctl_input_error(PaneInputResult::Failed).map(|error| error.0),
+            Some(ec::INTERNAL)
+        );
+    }
+
+    #[test]
+    fn input_rejection_feedback_is_visible_but_throttled() {
+        let now = std::time::Instant::now();
+        assert!(input_rejection_message(PaneInputResult::Queued).is_none());
+        assert!(input_rejection_message(PaneInputResult::ReadOnly).is_none());
+        assert!(input_rejection_message(PaneInputResult::Backpressured).is_some());
+        assert!(should_notify_input_rejection(
+            None,
+            PaneInputResult::Backpressured,
+            now
+        ));
+        assert!(!should_notify_input_rejection(
+            Some((PaneInputResult::Backpressured, now)),
+            PaneInputResult::Backpressured,
+            now + std::time::Duration::from_secs(1)
+        ));
+        assert!(
+            should_notify_input_rejection(
+                Some((PaneInputResult::Backpressured, now)),
+                PaneInputResult::Oversize,
+                now + std::time::Duration::from_secs(1)
+            ),
+            "a different failure class must be surfaced immediately"
+        );
+        assert!(should_notify_input_rejection(
+            Some((PaneInputResult::Backpressured, now)),
+            PaneInputResult::Backpressured,
+            now + std::time::Duration::from_secs(3)
+        ));
+    }
+
+    #[test]
+    fn local_paste_limit_rejects_instead_of_silently_truncating() {
+        let at_limit = "x".repeat(4 << 20);
+        assert!(local_paste_within_limit(&at_limit));
+        let over_limit = format!("{at_limit}y");
+        assert!(!local_paste_within_limit(&over_limit));
+        assert!(
+            input_rejection_message(PaneInputResult::Oversize).is_some(),
+            "oversized paste rejection must have visible feedback"
+        );
+    }
+
+    #[test]
+    fn pending_lua_fifo_preserves_calls_order_and_exact_byte_accounting() {
+        let mut pending = PendingLuaCommands::default();
+        assert_eq!(
+            pending.push(PendingLuaCommand::SendText {
+                origin_window: 1,
+                target_pane: None,
+                bytes: Arc::from(&b"first"[..]),
+            }),
+            PaneInputResult::Queued
+        );
+        assert_eq!(
+            pending.push(PendingLuaCommand::Notify {
+                origin_window: 1,
+                title: "notice".into(),
+                body: "body".into(),
+            }),
+            PaneInputResult::Queued
+        );
+        assert_eq!(
+            pending.push(PendingLuaCommand::ExecAction {
+                origin_window: 1,
+                action: Action::NewTab,
+            }),
+            PaneInputResult::Queued
+        );
+        assert_eq!(
+            pending.push(PendingLuaCommand::SetTheme {
+                origin_window: 1,
+                name: "Default".into(),
+            }),
+            PaneInputResult::Queued
+        );
+        assert_eq!(
+            pending.push(PendingLuaCommand::SendText {
+                origin_window: 1,
+                target_pane: None,
+                bytes: Arc::from(&b"second"[..]),
+            }),
+            PaneInputResult::Queued
+        );
+        assert_eq!(pending.len(), 5);
+        assert_eq!(pending.send_bytes, 11);
+
+        assert!(matches!(
+            pending.pop_front(),
+            Some(PendingLuaCommand::SendText { bytes, .. }) if bytes.as_ref() == b"first"
+        ));
+        assert_eq!(pending.send_bytes, 6);
+        assert!(matches!(
+            pending.pop_front(),
+            Some(PendingLuaCommand::Notify {
+                title,
+                body,
+                ..
+            }) if title == "notice" && body == "body"
+        ));
+        assert!(matches!(
+            pending.pop_front(),
+            Some(PendingLuaCommand::ExecAction {
+                action: Action::NewTab,
+                ..
+            })
+        ));
+        assert!(matches!(
+            pending.pop_front(),
+            Some(PendingLuaCommand::SetTheme { name, .. }) if name == "Default"
+        ));
+        assert!(matches!(
+            pending.pop_front(),
+            Some(PendingLuaCommand::SendText { bytes, .. }) if bytes.as_ref() == b"second"
+        ));
+        assert_eq!(pending.send_bytes, 0);
+        assert!(pending.is_empty());
+    }
+
+    #[test]
+    fn pending_lua_fifo_keeps_large_sends_separate_and_bounded() {
+        let mut pending = PendingLuaCommands::default();
+        for _ in 0..8 {
+            assert_eq!(
+                pending.push(PendingLuaCommand::SendText {
+                    origin_window: 1,
+                    target_pane: None,
+                    bytes: Arc::from(vec![b'x'; 1 << 20]),
+                }),
+                PaneInputResult::Queued
+            );
+        }
+        assert_eq!(pending.len(), 8);
+        assert_eq!(pending.send_bytes, 8 << 20);
+        assert_eq!(
+            pending.push(PendingLuaCommand::SendText {
+                origin_window: 1,
+                target_pane: None,
+                bytes: Arc::from(vec![b'y'; 1]),
+            }),
+            PaneInputResult::Backpressured
+        );
+        assert_eq!(
+            pending.push(PendingLuaCommand::SendText {
+                origin_window: 1,
+                target_pane: None,
+                bytes: Arc::from(vec![b'z'; (1 << 20) + 1]),
+            }),
+            PaneInputResult::Oversize
+        );
+        assert_eq!(pending.len(), 8);
+        assert_eq!(pending.send_bytes, 8 << 20);
+    }
+
+    #[test]
+    fn automation_retry_is_deadline_driven_and_resets_after_progress() {
+        let now = std::time::Instant::now();
+        let mut retry = AutomationRetry::default();
+        assert!(retry.is_ready(now));
+
+        retry.backpressured(now);
+        assert!(!retry.is_ready(now));
+        assert_eq!(retry.remaining(now), Some(AUTOMATION_RETRY_MIN));
+        assert!(retry.is_ready(now + AUTOMATION_RETRY_MIN));
+
+        retry.backpressured(now + AUTOMATION_RETRY_MIN);
+        assert_eq!(
+            retry.remaining(now + AUTOMATION_RETRY_MIN),
+            Some(AUTOMATION_RETRY_MIN * 2)
+        );
+        retry.progressed();
+        assert!(retry.is_ready(now));
+        retry.backpressured(now);
+        assert_eq!(retry.remaining(now), Some(AUTOMATION_RETRY_MIN));
+    }
+
+    #[test]
+    fn remote_batch_parser_preserves_operation_order_and_payload_boundaries() {
+        let ParsedRemoteCommandBatch::Accepted {
+            mut commands,
+            unknown_lines,
+        } = parse_remote_command_batch("send-text first\\nsecond\r\nnew-tab\ntoggle-window\n", 7)
+        else {
+            panic!("three operations are below the batch cap");
+        };
+        assert_eq!(unknown_lines, 0);
+        assert!(matches!(
+            commands.pop_front(),
+            Some(PendingRemoteCommand::SendText {
+                origin_window: 7,
+                target_pane: None,
+                bytes,
+            }) if bytes.as_ref() == b"first\nsecond"
+        ));
+        assert!(matches!(
+            commands.pop_front(),
+            Some(PendingRemoteCommand::NewTab { origin_window: 7 })
+        ));
+        assert!(matches!(
+            commands.pop_front(),
+            Some(PendingRemoteCommand::ToggleWindow { origin_window: 7 })
+        ));
+        assert!(commands.is_empty());
+    }
+
+    #[test]
+    fn remote_batch_json_send_text_round_trips_adversarial_text_exactly() {
+        let payload = "literal \\n; actual LF follows\nCR follows\rNUL follows\0toggle-window\nnew-tab\n\
+             send-text injected";
+        let batch = format!(
+            "send-text-json {}\nnew-tab\n",
+            serde_json::to_string(payload).unwrap()
+        );
+
+        let ParsedRemoteCommandBatch::Accepted {
+            mut commands,
+            unknown_lines,
+        } = parse_remote_command_batch(&batch, 11)
+        else {
+            panic!("two operations are below the batch cap");
+        };
+        assert_eq!(unknown_lines, 0);
+        assert!(matches!(
+            commands.pop_front(),
+            Some(PendingRemoteCommand::SendText {
+                origin_window: 11,
+                target_pane: None,
+                bytes,
+            }) if bytes.as_ref() == payload.as_bytes()
+        ));
+        assert!(matches!(
+            commands.pop_front(),
+            Some(PendingRemoteCommand::NewTab { origin_window: 11 })
+        ));
+        assert!(
+            commands.is_empty(),
+            "command-looking payload lines must not become spool operations"
+        );
+    }
+
+    #[test]
+    fn remote_batch_parser_coalesces_malformed_json_as_unknown_lines() {
+        let ParsedRemoteCommandBatch::Accepted {
+            mut commands,
+            unknown_lines,
+        } = parse_remote_command_batch(
+            "send-text-json \"unterminated\nsend-text-json 7\nnew-tab\n",
+            12,
+        )
+        else {
+            panic!("one valid operation is below the batch cap");
+        };
+
+        assert_eq!(unknown_lines, 2);
+        assert!(matches!(
+            commands.pop_front(),
+            Some(PendingRemoteCommand::NewTab { origin_window: 12 })
+        ));
+        assert!(commands.is_empty());
+    }
+
+    #[test]
+    fn remote_batch_parser_accepts_exact_operation_cap_and_rejects_all_on_overflow() {
+        let exact = "new-tab\n".repeat(MAX_REMOTE_COMMANDS_PER_BATCH);
+        let ParsedRemoteCommandBatch::Accepted {
+            commands,
+            unknown_lines,
+        } = parse_remote_command_batch(&exact, 7)
+        else {
+            panic!("the exact operation cap must be accepted");
+        };
+        assert_eq!(commands.len(), MAX_REMOTE_COMMANDS_PER_BATCH);
+        assert_eq!(unknown_lines, 0);
+
+        let mut over = String::from("unknown-before\nsend-text must-not-run\n");
+        over.push_str(&exact);
+        over.push_str("unknown-after\n");
+        assert!(matches!(
+            parse_remote_command_batch(&over, 7),
+            ParsedRemoteCommandBatch::RejectedTooMany {
+                operation_count,
+                unknown_lines: 2,
+            } if operation_count == MAX_REMOTE_COMMANDS_PER_BATCH + 1
+        ));
+    }
+
+    #[test]
+    fn remote_batch_parser_coalesces_unknown_line_count() {
+        let ParsedRemoteCommandBatch::Accepted {
+            mut commands,
+            unknown_lines,
+        } = parse_remote_command_batch(
+            "unknown-one\n# comment\nnew-tab\nunknown-two\nunknown-three\n",
+            9,
+        )
+        else {
+            panic!("one recognized operation is below the batch cap");
+        };
+        assert_eq!(unknown_lines, 3);
+        assert!(matches!(
+            commands.pop_front(),
+            Some(PendingRemoteCommand::NewTab { origin_window: 9 })
+        ));
+        assert!(commands.is_empty());
+    }
+
+    #[test]
+    fn delayed_remote_claim_is_owned_by_the_focused_window() {
+        assert!(!should_poll_remote_window(false, true, false, 1, 2));
+        assert!(should_poll_remote_window(false, true, false, 2, 2));
+        assert!(!should_poll_remote_window(false, false, true, 1, 2));
+        assert!(should_poll_remote_window(false, false, true, 2, 2));
+        // Once the claimed FIFO has an origin, every window gets a chance to
+        // reach the matching head regardless of which one is focused now.
+        assert!(should_poll_remote_window(true, false, false, 1, 2));
+    }
+
+    #[test]
+    fn remote_batch_claim_leaves_spool_unchanged_while_sender_lock_is_held() {
+        use std::io::{Read as _, Seek as _, Write as _};
+
+        let dir = crate::test_tempdir();
+        let path = dir.path().join("remote.cmd");
+        let mut file = kettle_state::open_private_file(&path).unwrap();
+        file.write_all(b"send-text exact\n").unwrap();
+        file.flush().unwrap();
+        drop(file);
+
+        let lock_path = kettle_state::remote_command_lock_path(&path);
+        let lock = kettle_state::ExclusiveFileLock::acquire(&lock_path).unwrap();
+        assert_eq!(
+            claim_remote_command_file(&path).unwrap(),
+            RemoteBatchClaim::Busy
+        );
+        let mut preserved = kettle_state::open_existing_private_file(&path).unwrap();
+        let mut bytes = Vec::new();
+        preserved.seek(std::io::SeekFrom::Start(0)).unwrap();
+        preserved.read_to_end(&mut bytes).unwrap();
+        assert_eq!(bytes, b"send-text exact\n");
+        drop(preserved);
+        drop(lock);
+
+        assert_eq!(
+            claim_remote_command_file(&path).unwrap(),
+            RemoteBatchClaim::Claimed("send-text exact\n".to_string())
+        );
+        assert_eq!(std::fs::metadata(path).unwrap().len(), 0);
+    }
+
+    #[test]
+    fn malformed_remote_batch_is_cleared_once_instead_of_polled_forever() {
+        use std::io::Write as _;
+
+        let dir = crate::test_tempdir();
+        let path = dir.path().join("remote.cmd");
+        let mut file = kettle_state::open_private_file(&path).unwrap();
+        file.write_all(&[0xff, 0xfe]).unwrap();
+        file.flush().unwrap();
+        drop(file);
+
+        assert_eq!(
+            claim_remote_command_file(&path).unwrap(),
+            RemoteBatchClaim::RejectedMalformed
+        );
+        assert_eq!(std::fs::metadata(path).unwrap().len(), 0);
+    }
+
+    #[test]
+    fn every_lua_event_and_url_handler_dispatch_drains_commands() {
+        let source = include_str!("app.rs");
+        let raw_fire = [".fire_", "event("].concat();
+        assert_eq!(
+            source.matches(&raw_fire).count(),
+            1,
+            "all raw LuaEngine::fire_event calls must stay inside fire_lua_event"
+        );
+        let open_url = source
+            .split("fn open_url(&mut self, ws: &WindowState, uri: &str) {")
+            .nth(1)
+            .and_then(|rest| rest.split("fn paste_clipboard").next())
+            .expect("open_url helper");
+        let handler = open_url
+            .find("try_url_handler(uri)")
+            .expect("Lua URL handler dispatch");
+        let drain = open_url
+            .find("self.drain_lua_hook_commands(ws, \"URL handler\")")
+            .expect("Lua URL handler drain");
+        let handled_return = open_url
+            .find("if handled_by_lua")
+            .expect("claimed URL early return");
+        assert!(
+            handler < drain && drain < handled_return,
+            "URL-handler callback commands must drain before a claimed handler returns"
+        );
+    }
 
     #[test]
     fn output_generations_commit_only_after_presentation() {
@@ -21542,6 +23636,107 @@ mod tests {
     }
 
     #[test]
+    fn output_activity_uses_the_lock_free_generation_edge() {
+        assert!(!output_generation_advanced(None, 7));
+        assert!(!output_generation_advanced(Some(7), 7));
+        assert!(output_generation_advanced(Some(7), 8));
+        assert!(
+            output_generation_advanced(Some(u64::MAX), 0),
+            "generation wrap is still a change"
+        );
+    }
+
+    #[test]
+    fn remote_poll_stages_checked_out_and_stored_windows_without_stale_roots() {
+        let target = |pid| {
+            Some(kettle_remote::RemoteProbeTarget {
+                pid,
+                allow_native_cwd: true,
+            })
+        };
+        let mut scratch = vec![target(999).unwrap()];
+        stage_remote_targets(
+            &mut scratch,
+            [target(10), None, target(11)],
+            [target(20), target(21), None],
+        );
+        assert_eq!(
+            scratch.iter().map(|target| target.pid).collect::<Vec<_>>(),
+            [10, 11, 20, 21]
+        );
+
+        stage_remote_targets(
+            &mut scratch,
+            [target(30)],
+            std::iter::empty::<Option<kettle_remote::RemoteProbeTarget>>(),
+        );
+        assert_eq!(
+            scratch.iter().map(|target| target.pid).collect::<Vec<_>>(),
+            [30]
+        );
+    }
+
+    #[test]
+    fn remote_snapshot_compares_against_ui_applied_state_not_worker_history() {
+        let old = kettle_remote::RemoteProbe {
+            remote: None,
+            native_cwd: Some("old".into()),
+            foreground_shell: None,
+        };
+        let new = kettle_remote::RemoteProbe {
+            remote: None,
+            native_cwd: Some("new".into()),
+            foreground_shell: None,
+        };
+        let mut applied = std::collections::HashMap::from([((70, 7), old)]);
+
+        assert!(stage_applied_remote_probe(&mut applied, 70, 7, &new));
+        assert!(!stage_applied_remote_probe(&mut applied, 70, 7, &new));
+
+        assert!(
+            stage_applied_remote_probe(&mut applied, 71, 7, &new),
+            "a second pane object sharing/reusing the pid needs its own first install"
+        );
+    }
+
+    #[test]
+    fn native_cwd_is_suppressed_for_nonlocal_launch_clients() {
+        for argv0 in [
+            "wsl.exe",
+            "C:\\Windows\\System32\\OpenSSH\\ssh.exe",
+            "DOCKER.EXE",
+            "/usr/bin/podman",
+            "kubectl",
+            "lxc-attach",
+        ] {
+            assert!(
+                argv_is_nonlocal_client(&[argv0.into()]),
+                "nonlocal client {argv0}"
+            );
+        }
+        assert!(!argv_is_nonlocal_client(&["pwsh.exe".into()]));
+    }
+
+    #[test]
+    fn osc52_selection_uses_the_platform_selection_channel() {
+        assert_eq!(
+            osc52_clipboard_channel(ClipboardType::Clipboard),
+            Osc52ClipboardChannel::Clipboard
+        );
+
+        #[cfg(target_os = "linux")]
+        assert_eq!(
+            osc52_clipboard_channel(ClipboardType::Selection),
+            Osc52ClipboardChannel::Primary
+        );
+        #[cfg(not(target_os = "linux"))]
+        assert_eq!(
+            osc52_clipboard_channel(ClipboardType::Selection),
+            Osc52ClipboardChannel::Clipboard
+        );
+    }
+
+    #[test]
     fn hover_generation_candidate_preserves_racing_output_as_pending() {
         let committed = std::collections::HashMap::from([(1, 10), (2, 20)]);
         let cached = [(1, 10, 120, 40)];
@@ -21558,6 +23753,71 @@ mod tests {
 
         stage_output_generations_for_frame(&mut candidate, &committed, None, live_after_race);
         assert_eq!(candidate, std::collections::HashMap::from(live_after_race));
+    }
+
+    #[test]
+    fn stale_presented_output_wakeup_rearms_without_losing_a_race() {
+        let wakes = Arc::new(AtomicUsize::new(0));
+        let wake_count = wakes.clone();
+        let gate = OutputWakeGate::new(Arc::new(move || {
+            wake_count.fetch_add(1, Ordering::SeqCst);
+        }));
+        let generation = AtomicU64::new(0);
+
+        // The first output schedules the redraw. The frame reopens the latch,
+        // then output racing that frame schedules another wake but is included
+        // in the generation that successfully presents.
+        assert!(gate.request());
+        gate.acknowledge();
+        generation.store(1, Ordering::Release);
+        assert!(gate.request());
+        let seen_generation = 1;
+        assert_eq!(wakes.load(Ordering::SeqCst), 2);
+
+        assert!(
+            !output_wakeup_needs_paint(
+                || generation.load(Ordering::Acquire) != seen_generation,
+                || gate.acknowledge(),
+            ),
+            "the queued event is stale because its generation already presented"
+        );
+
+        generation.store(2, Ordering::Release);
+        assert!(
+            gate.request(),
+            "rearming the stale event must let future output own a wake"
+        );
+        assert_eq!(wakes.load(Ordering::SeqCst), 3);
+
+        // Output between the first no-damage sample and rearm cannot enqueue a
+        // duplicate while the old wake is pending. The post-rearm sample must
+        // therefore retain it for this event instead of returning stale.
+        let raced_generation = AtomicU64::new(2);
+        let raced_seen = 2;
+        assert!(output_wakeup_needs_paint(
+            || raced_generation.load(Ordering::Acquire) != raced_seen,
+            || {
+                raced_generation.store(3, Ordering::Release);
+                assert!(!gate.request());
+                gate.acknowledge();
+            },
+        ));
+    }
+
+    #[test]
+    fn dirty_output_wakeup_keeps_latch_closed_until_frame_snapshot() {
+        let rearms = AtomicUsize::new(0);
+        assert!(output_wakeup_needs_paint(
+            || true,
+            || {
+                rearms.fetch_add(1, Ordering::SeqCst);
+            },
+        ));
+        assert_eq!(
+            rearms.load(Ordering::SeqCst),
+            0,
+            "dirty output must remain latched across the deferred paint budget"
+        );
     }
 
     #[test]
@@ -22025,29 +24285,72 @@ mod tests {
         );
     }
 
-    /// Audit v2.38.2 fix: a resize/reflow that actually changes the focused
-    /// pane's grid dims must be detected so `resize_all` can exit vi-mode
-    /// (its cursor/visual-anchor are raw indices into the OLD grid shape and
-    /// would otherwise silently yank the wrong rows). `None` on either side
-    /// (pane gone / lock contention) can't be proven safe, so it must also
-    /// count as "invalidated" rather than "unchanged".
     #[test]
-    fn vi_mode_invalidated_by_resize_detects_dim_changes() {
-        assert!(!vi_mode_invalidated_by_resize(
-            Some((80, 24)),
-            Some((80, 24))
-        ));
-        assert!(vi_mode_invalidated_by_resize(
-            Some((80, 24)),
-            Some((100, 24))
-        ));
-        assert!(vi_mode_invalidated_by_resize(
-            Some((80, 24)),
-            Some((80, 30))
-        ));
-        assert!(vi_mode_invalidated_by_resize(Some((80, 24)), None));
-        assert!(vi_mode_invalidated_by_resize(None, Some((80, 24))));
-        assert!(!vi_mode_invalidated_by_resize(None, None));
+    fn remote_generated_title_restores_its_prior_origin_on_exit() {
+        let first = kettle_remote::RemoteContext::Ssh {
+            host: "one.example".to_string(),
+            user: Some("dev".to_string()),
+        };
+        let second = kettle_remote::RemoteContext::Ssh {
+            host: "two.example".to_string(),
+            user: None,
+        };
+        let mut title = "kettle".to_string();
+        let mut placeholder = true;
+        let mut origin = PaneTitleOrigin::Placeholder;
+        let mut before_remote = None;
+
+        apply_remote_title_transition(
+            &mut title,
+            &mut placeholder,
+            &mut origin,
+            &mut before_remote,
+            Some(&first),
+        );
+        assert_eq!(origin, PaneTitleOrigin::Remote);
+        assert!(!placeholder);
+        assert_eq!(
+            before_remote,
+            Some(("kettle".to_string(), PaneTitleOrigin::Placeholder))
+        );
+
+        apply_remote_title_transition(
+            &mut title,
+            &mut placeholder,
+            &mut origin,
+            &mut before_remote,
+            Some(&second),
+        );
+        assert_eq!(
+            before_remote,
+            Some(("kettle".to_string(), PaneTitleOrigin::Placeholder)),
+            "remote-to-remote changes must not overwrite the local fallback"
+        );
+
+        apply_remote_title_transition(
+            &mut title,
+            &mut placeholder,
+            &mut origin,
+            &mut before_remote,
+            None,
+        );
+        assert_eq!(title, "kettle");
+        assert!(placeholder);
+        assert_eq!(origin, PaneTitleOrigin::Placeholder);
+        assert!(before_remote.is_none());
+
+        title = "nvim project".to_string();
+        placeholder = false;
+        origin = PaneTitleOrigin::Osc;
+        apply_remote_title_transition(
+            &mut title,
+            &mut placeholder,
+            &mut origin,
+            &mut before_remote,
+            None,
+        );
+        assert_eq!(title, "nvim project", "non-remote OSC titles are retained");
+        assert_eq!(origin, PaneTitleOrigin::Osc);
     }
 
     /// Native OS titlebars do not reliably use kettle's terminal font fallback,
@@ -22094,7 +24397,7 @@ mod tests {
     }
 
     /// Source-drift guard: while the GPU device is lost the redraw guard must
-    /// clear `coalescing_paint` + snapshot `seen_output_gen` so a streaming pane
+    /// reset the output pacer + snapshot `seen_output_gen` so a streaming pane
     /// can't spin the loop. Recovery itself is driven from `about_to_wait_inner`
     /// on a bounded backoff.
     #[test]
@@ -22105,9 +24408,8 @@ mod tests {
             .expect("gpu_lost redraw guard present");
         let body = &src[guard..guard + 1400];
         assert!(
-            body.contains("ws.coalescing_paint = false")
-                && body.contains("ws.seen_output_gen.clear()"),
-            "the gpu_lost redraw guard must clear coalescing + snapshot seen_output_gen"
+            body.contains("ws.output_pacer.reset()") && body.contains("ws.seen_output_gen.clear()"),
+            "the gpu_lost redraw guard must reset pacing + snapshot seen_output_gen"
         );
         let wait = src
             .find("fn about_to_wait_inner(")
@@ -22142,11 +24444,25 @@ mod tests {
         let recovery = src
             .find("fn try_recover_gpu(")
             .expect("try_recover_gpu present");
-        let recovery_body = &src[recovery..recovery + 5000];
+        let recovery_tail = &src[recovery..];
+        let recovery_end = recovery_tail
+            .find("\n    fn update_search(")
+            .expect("try_recover_gpu end");
+        let recovery_body = &recovery_tail[..recovery_end];
         assert!(
             recovery_body.contains("Renderer::new_with_escalation_and_display_handle(")
                 && recovery_body.contains("event_loop.owned_display_handle()"),
             "GPU recovery must rebuild with the event-loop display connection"
+        );
+        assert!(
+            recovery_body.contains("Self::stash_renderer_for_gpu_recovery(ws)")
+                && recovery_body.contains("Self::stash_renderer_for_gpu_recovery(other)")
+                && recovery_body.matches("restore_recovery_state(").count() == 2
+                && recovery_body
+                    .matches("finish_gpu_renderer_recovery(")
+                    .count()
+                    == 2,
+            "GPU recovery must retain, restore, and reflow every window around the atomic rebuild"
         );
     }
 
@@ -22182,6 +24498,81 @@ mod tests {
 
         let rebuilt = super::build_recovery_set([(2, 20), (3, 30)], Ok::<_, ()>).unwrap();
         assert_eq!(rebuilt, [(2, 20), (3, 30)]);
+    }
+
+    #[test]
+    fn gpu_recovery_snapshot_survives_failed_attempts_until_commit() {
+        let mut retained = None;
+        super::retain_renderer_recovery_snapshot(&mut retained, Some("live-font-zoom"));
+        assert_eq!(retained, Some("live-font-zoom"));
+
+        // Failed candidates cannot replace the state captured from the last
+        // live renderer, even after that renderer has been dropped.
+        super::retain_renderer_recovery_snapshot(&mut retained, None);
+        assert_eq!(retained, Some("live-font-zoom"));
+        super::retain_renderer_recovery_snapshot(&mut retained, Some("candidate-defaults"));
+        assert_eq!(retained, Some("live-font-zoom"));
+
+        // Successful commit is the only point that clears the retained state.
+        retained = None;
+        super::retain_renderer_recovery_snapshot(&mut retained, Some("post-recovery-live"));
+        assert_eq!(retained, Some("post-recovery-live"));
+    }
+
+    #[test]
+    fn output_wakeup_quiesces_for_every_render_hidden_state_and_repair() {
+        let hidden = |occluded, minimized, shown, visible| {
+            super::render_hidden_from_observations(occluded, minimized, shown, visible)
+        };
+
+        assert!(!hidden(false, false, true, true));
+        assert!(hidden(true, false, true, true), "occluded");
+        assert!(hidden(false, true, true, true), "minimized");
+        assert!(hidden(false, false, true, false), "explicitly invisible");
+        assert!(
+            !hidden(false, false, false, false),
+            "startup windows intentionally begin invisible before first reveal"
+        );
+
+        for render_hidden in [
+            hidden(true, false, true, true),
+            hidden(false, true, true, true),
+            hidden(false, false, true, false),
+        ] {
+            assert!(super::output_wakeup_must_quiesce(
+                render_hidden,
+                false,
+                false
+            ));
+        }
+        assert!(super::output_wakeup_must_quiesce(false, true, false));
+        assert!(
+            super::output_wakeup_must_quiesce(false, false, true),
+            "renderer/GPU unavailable"
+        );
+        assert!(!super::output_wakeup_must_quiesce(false, false, false));
+    }
+
+    #[test]
+    fn hidden_output_sidechannels_keep_transport_wakes_without_enabling_paints() {
+        assert!(!super::output_wake_transport_enabled(true, false));
+        assert!(super::output_wake_transport_enabled(true, true));
+        assert!(super::output_wake_transport_enabled(false, false));
+        assert!(super::output_wake_transport_enabled(false, true));
+
+        let wakes = Arc::new(AtomicUsize::new(0));
+        let wakes_for_gate = wakes.clone();
+        let gate = OutputWakeGate::new(Arc::new(move || {
+            wakes_for_gate.fetch_add(1, Ordering::SeqCst);
+        }));
+        gate.set_enabled(super::output_wake_transport_enabled(true, true));
+        for expected in 1..=32 {
+            assert!(gate.request());
+            assert_eq!(wakes.load(Ordering::SeqCst), expected);
+            // Model the hidden-window handler's rearm-before-drain order:
+            // every later lossless chunk receives another event-loop wake.
+            gate.acknowledge();
+        }
     }
 
     #[test]
@@ -22675,6 +25066,29 @@ mod tests {
             !code.contains("cfg.font_size"),
             "ScaledZoom must not scale from the (stale) config font size"
         );
+    }
+
+    /// PTY rows, columns, and CSI 14 t pixels must be recomputed from the font
+    /// metrics selected by the zoom transition, not the metrics that preceded
+    /// it. A live renderer is too heavyweight for this unit suite, so pin the
+    /// mutation order at the shared helper boundary.
+    #[test]
+    fn scaled_zoom_resizes_after_changing_font_metrics() {
+        let src = include_str!("app.rs");
+        let helper = src
+            .split("fn toggle_zoom_with_scale(")
+            .nth(1)
+            .and_then(|s| s.split("\n    fn apply_window_resize").next())
+            .expect("toggle_zoom_with_scale body present");
+        let resize = helper
+            .rfind("self.resize_all(ws);")
+            .expect("scaled zoom resizes PTYs");
+        for change in ["r.set_font_size(new_size);", "r.set_font_size(prev);"] {
+            assert!(
+                helper.find(change).is_some_and(|offset| offset < resize),
+                "{change} must precede the PTY geometry refresh"
+            );
+        }
     }
 
     /// Drift guard (audit v2.38.2 fix). `ToggleZoom` and `ScaledZoom` must
@@ -23192,7 +25606,7 @@ mod tests {
         let src = include_str!("app.rs").replace("\r\n", "\n");
         assert!(
             src.contains(
-                "if typed_recently(now, ws.last_typed, TYPING_ECHO_WINDOW) {\n                    ws.coalescing_paint = false;"
+                "if typed_recently(now, ws.last_typed, TYPING_ECHO_WINDOW) {\n                    ws.output_pacer.reset();"
             ),
             "the Wakeup arm must paint echo immediately"
         );
@@ -23272,7 +25686,7 @@ mod tests {
         assert!(
             src.contains(concat!(
                 "self.apply_initial_os_theme_preference",
-                "(theme);"
+                "(ws, theme);"
             )),
             "startup OS theme application must use the pre-session-save path"
         );
@@ -23291,6 +25705,42 @@ mod tests {
                 "() {\n            return None;\n        }"
             )),
             "theme-schedule must not fight OS appearance following"
+        );
+    }
+
+    #[test]
+    fn runtime_theme_changes_synchronize_lua_and_redraw_every_window() {
+        let src = include_str!("app.rs").replace("\r\n", "\n");
+        let state_body = src
+            .split(concat!("fn set_runtime_theme_state", "("))
+            .nth(1)
+            .and_then(|body| body.split(concat!("fn set_runtime_theme_name", "(")).next())
+            .expect("runtime theme state helper exists");
+        assert!(
+            state_body.contains(concat!("self.cfg.", "theme_name = name;"))
+                && state_body.contains(concat!("self.cfg.", "theme = theme;"))
+                && state_body.contains(concat!("self.", "sync_lua_active_theme();"))
+                && state_body.contains(concat!("self.", "request_all_window_redraws(ws);")),
+            "palette, Lua introspection, and redraw invalidation must be one transition"
+        );
+
+        let theme_assignment = concat!("self.cfg.", "theme_name = name;");
+        assert_eq!(
+            src.matches(theme_assignment).count(),
+            1,
+            "runtime code must not bypass the synchronized theme transition"
+        );
+
+        let redraw_body = src
+            .split(concat!("fn request_all_window_redraws", "("))
+            .nth(1)
+            .and_then(|body| body.split(concat!("fn sync_lua_active_theme", "(")).next())
+            .expect("all-window redraw helper exists");
+        assert!(
+            redraw_body.contains(concat!("for (&seq, window) in &self.", "windows"))
+                && redraw_body.contains("seq != ws.seq")
+                && redraw_body.contains(concat!("native.", "request_redraw();")),
+            "a global theme change must invalidate every mapped sibling window"
         );
     }
 
@@ -23679,6 +26129,42 @@ mod tests {
         assert_eq!(count_rows_fitting(&menu, 5, 100.0, row_h, sep_h), 1);
         // Start past the end -> 0.
         assert_eq!(count_rows_fitting(&menu, 99, 1000.0, row_h, sep_h), 0);
+        // The wheel clamp computes the earliest suffix once from the end rather
+        // than rescanning every candidate offset.
+        assert_eq!(context_menu_max_scroll_offset(&menu, 48.0, row_h, sep_h), 4);
+        assert_eq!(context_menu_max_scroll_offset(&menu, 80.0, row_h, sep_h), 2);
+        assert_eq!(
+            context_menu_max_scroll_offset(&menu, 1000.0, row_h, sep_h),
+            0
+        );
+        assert_eq!(
+            context_menu_max_scroll_offset(&menu, 0.0, row_h, sep_h),
+            menu.len() - 1
+        );
+        assert_eq!(context_menu_max_scroll_offset(&[], 48.0, row_h, sep_h), 0);
+    }
+
+    #[test]
+    fn context_menu_shrink_keeps_bottom_highlight_visible() {
+        let menu: Vec<ContextMenuItem> = [
+            "Row 0", "Row 1", "Row 2", "Row 3", "Row 4", "Row 5", "Row 6", "Row 7", "Row 8",
+            "Row 9", "Row 10", "Row 11",
+        ]
+        .into_iter()
+        .map(|label| item(label, true))
+        .collect();
+        let offset = context_menu_scroll_for_highlight(&menu, 0, 11, 72.0, 24.0, 8.0);
+        assert_eq!(offset, 9);
+        let visible = count_rows_fitting(&menu, offset, 72.0, 24.0, 8.0);
+        assert!(
+            (offset..offset + visible).contains(&11),
+            "the row Enter will dispatch must remain in the visible slice"
+        );
+        assert_eq!(
+            context_menu_scroll_for_highlight(&menu, usize::MAX, 0, 72.0, 24.0, 8.0),
+            0,
+            "a stale overscrolled offset is normalized when the top row is highlighted"
+        );
     }
 
     /// Drift guard. With a 512-entry submenu and a real
@@ -23705,6 +26191,12 @@ mod tests {
         );
         // All 512 rows shouldn't possibly fit in 580px.
         assert!(visible < big.len(), "panel must clamp; visible={visible}");
+        let max_offset = context_menu_max_scroll_offset(&big, 580.0, row_h, sep_h);
+        assert_eq!(
+            max_offset,
+            big.len() - visible,
+            "the 512-row wheel clamp should be one reverse pass with no blank suffix"
+        );
     }
 
     /// Drift guard. Hover-to-highlight walks `find_menu_row_y`
@@ -23723,47 +26215,75 @@ mod tests {
         let row_h = 24.0;
         let sep_h = 8.0;
         let kinds = [false, false, true, false];
+        let panel_h = 80.0;
         // Cursor squarely inside row 0.
         assert_eq!(
-            find_menu_row_y(anchor_y + 10.0, anchor_y, row_h, sep_h, &kinds),
+            find_menu_row_y(anchor_y + 10.0, anchor_y, panel_h, row_h, sep_h, kinds,),
             Some(0)
         );
         // Cursor on the edge between row 0 and row 1: lands on row 1
         // (half-open interval [y, y+h)).
         assert_eq!(
-            find_menu_row_y(anchor_y + row_h, anchor_y, row_h, sep_h, &kinds),
+            find_menu_row_y(anchor_y + row_h, anchor_y, panel_h, row_h, sep_h, kinds,),
             Some(1)
         );
         // Cursor inside row 1.
         assert_eq!(
-            find_menu_row_y(anchor_y + 30.0, anchor_y, row_h, sep_h, &kinds),
+            find_menu_row_y(anchor_y + 30.0, anchor_y, panel_h, row_h, sep_h, kinds,),
             Some(1)
         );
         // Cursor inside the separator — None (don't highlight a
         // visual-only gap).
         assert_eq!(
-            find_menu_row_y(anchor_y + 50.0, anchor_y, row_h, sep_h, &kinds),
+            find_menu_row_y(anchor_y + 50.0, anchor_y, panel_h, row_h, sep_h, kinds,),
             None
         );
         // Cursor inside row 3 (after the separator).
         assert_eq!(
-            find_menu_row_y(anchor_y + 60.0, anchor_y, row_h, sep_h, &kinds),
+            find_menu_row_y(anchor_y + 60.0, anchor_y, panel_h, row_h, sep_h, kinds,),
             Some(3)
+        );
+        // A clamped panel that leaves only 14 px after the separator does not
+        // render the 24 px fourth row. That blank strip must remain inert.
+        assert_eq!(
+            find_menu_row_y(anchor_y + 60.0, anchor_y, 70.0, row_h, sep_h, kinds,),
+            None
         );
         // Cursor above the panel.
         assert_eq!(
-            find_menu_row_y(anchor_y - 1.0, anchor_y, row_h, sep_h, &kinds),
+            find_menu_row_y(anchor_y - 1.0, anchor_y, panel_h, row_h, sep_h, kinds,),
             None
         );
         // Cursor below the last row.
         assert_eq!(
-            find_menu_row_y(anchor_y + 1000.0, anchor_y, row_h, sep_h, &kinds),
+            find_menu_row_y(anchor_y + 1000.0, anchor_y, panel_h, row_h, sep_h, kinds,),
             None
         );
         // Empty menu: always None.
         assert_eq!(
-            find_menu_row_y(anchor_y + 10.0, anchor_y, row_h, sep_h, &[]),
+            find_menu_row_y(anchor_y + 10.0, anchor_y, panel_h, row_h, sep_h, []),
             None
+        );
+    }
+
+    #[test]
+    fn clicks_share_the_fully_visible_hover_row_contract() {
+        let src = include_str!("app.rs").replace("\r\n", "\n");
+        let start = src
+            .find("fn context_menu_click_action(")
+            .expect("context-menu click resolver");
+        let end = src[start..]
+            .find("\n    /// `(items, anchor, panel_w, panel_h)`")
+            .map(|offset| start + offset)
+            .expect("end of context-menu click resolver");
+        let resolver = &src[start..end];
+        assert!(
+            resolver.contains("let idx = self.menu_row_at_cursor(ws)?;"),
+            "clicks must use the clipped-row helper exercised above"
+        );
+        assert!(
+            !resolver.contains("for (idx, item)"),
+            "a second row walk can drift from hover/render clipping"
         );
     }
 
@@ -24155,34 +26675,153 @@ mod tests {
     /// budget so keystroke echo and short bursts don't get throttled.
     #[test]
     fn effective_output_budget_grows_under_sustained_flood() {
-        use super::{OUTPUT_FRAME_BUDGET, effective_output_budget};
+        use super::{
+            DEEP_FLOOD_MAX_BUDGET, MID_FLOOD_MAX_BUDGET, OUTPUT_FRAME_BUDGET,
+            effective_output_budget, output_frame_budget_for_refresh,
+        };
         use std::time::Duration;
-        // A brief burst stays at the responsive 60 fps budget.
-        assert_eq!(effective_output_budget(0), OUTPUT_FRAME_BUDGET);
-        assert_eq!(effective_output_budget(3), OUTPUT_FRAME_BUDGET);
-        // A sustained flood steps down to ~30 fps, then ~20 fps.
-        assert_eq!(effective_output_budget(4), Duration::from_millis(33));
-        assert_eq!(effective_output_budget(15), Duration::from_millis(33));
-        assert_eq!(effective_output_budget(16), Duration::from_millis(50));
-        assert_eq!(effective_output_budget(10_000), Duration::from_millis(50));
+        // A brief burst stays at the window's responsive monitor rate.
+        assert_eq!(
+            effective_output_budget(OUTPUT_FRAME_BUDGET, 0),
+            OUTPUT_FRAME_BUDGET
+        );
+        assert_eq!(
+            effective_output_budget(OUTPUT_FRAME_BUDGET, 3),
+            OUTPUT_FRAME_BUDGET
+        );
+        // A 60 Hz window retains the established ~30 fps, then ~20 fps
+        // sustained-flood backoff.
+        assert_eq!(
+            effective_output_budget(OUTPUT_FRAME_BUDGET, 4),
+            MID_FLOOD_MAX_BUDGET
+        );
+        assert_eq!(
+            effective_output_budget(OUTPUT_FRAME_BUDGET, 15),
+            MID_FLOOD_MAX_BUDGET
+        );
+        assert_eq!(
+            effective_output_budget(OUTPUT_FRAME_BUDGET, 16),
+            DEEP_FLOOD_MAX_BUDGET
+        );
+        assert_eq!(
+            effective_output_budget(OUTPUT_FRAME_BUDGET, 10_000),
+            DEEP_FLOOD_MAX_BUDGET
+        );
+        // A 165 Hz window starts one small dispatch lead before its 6.06 ms
+        // period, then stays
+        // bounded at 60/30 fps under sustained output instead of spending
+        // unbounded CPU repainting unreadable flood frames at 82/55 fps.
+        let high_refresh = output_frame_budget_for_refresh(Some(165_000));
+        assert_eq!(high_refresh, Duration::from_nanos(5_810_607));
+        assert_eq!(
+            effective_output_budget(high_refresh, 4),
+            Duration::from_nanos(16_666_667)
+        );
+        assert_eq!(
+            effective_output_budget(high_refresh, 16),
+            Duration::from_nanos(33_333_334)
+        );
         // Monotonic non-decreasing: deeper flood never paints MORE often.
         let mut prev = Duration::ZERO;
         for n in 0..40u32 {
-            let b = effective_output_budget(n);
+            let b = effective_output_budget(high_refresh, n);
             assert!(b >= prev, "budget must not shrink as flood deepens");
             prev = b;
         }
         // The throttle is bounded (never starves the settled frame indefinitely).
-        assert!(effective_output_budget(u32::MAX) <= Duration::from_millis(50));
+        assert!(
+            effective_output_budget(OUTPUT_FRAME_BUDGET, u32::MAX) <= Duration::from_millis(50)
+        );
     }
 
-    /// The `about_to_wait` coalescer must FLUSH a due deferred
-    /// frame (clear `coalescing_paint`) BEFORE it computes the WaitUntil clamp,
-    /// or a still-pending paint could re-schedule a ~1 ms wake every tick
-    /// (busy-spin). A behavioral test needs a live winit event loop; pin the
-    /// ordering at the source level (the `modal_discipline_guard` pattern).
     #[test]
-    fn output_coalescer_flushes_before_the_wait_clamp() {
+    fn output_frame_budget_tracks_monitor_refresh_with_safe_bounds() {
+        use super::{OUTPUT_FRAME_BUDGET, output_frame_budget_for_refresh};
+        use std::time::Duration;
+
+        assert_eq!(output_frame_budget_for_refresh(None), OUTPUT_FRAME_BUDGET);
+        assert_eq!(
+            output_frame_budget_for_refresh(Some(0)),
+            OUTPUT_FRAME_BUDGET
+        );
+        assert_eq!(
+            output_frame_budget_for_refresh(Some(60_000)),
+            Duration::from_nanos(16_416_667)
+        );
+        assert_eq!(
+            output_frame_budget_for_refresh(Some(120_000)),
+            Duration::from_nanos(8_083_334)
+        );
+        assert_eq!(
+            output_frame_budget_for_refresh(Some(165_000)),
+            Duration::from_nanos(5_810_607)
+        );
+        assert_eq!(
+            output_frame_budget_for_refresh(Some(240_000)),
+            Duration::from_millis(4)
+        );
+        // Driver outliers cannot create a busy loop or a sluggish >33 ms
+        // output deadline.
+        assert_eq!(
+            output_frame_budget_for_refresh(Some(500_000)),
+            Duration::from_millis(4)
+        );
+        assert_eq!(
+            output_frame_budget_for_refresh(Some(20_000)),
+            Duration::from_nanos(33_333_334)
+        );
+    }
+
+    #[test]
+    fn monitor_refresh_probe_is_rate_limited_with_a_trailing_deadline() {
+        use super::{MONITOR_REFRESH_PROBE_INTERVAL, monitor_refresh_probe_wait};
+        use std::time::{Duration, Instant};
+
+        let start = Instant::now();
+        assert_eq!(monitor_refresh_probe_wait(None, start, false), None);
+        assert_eq!(
+            monitor_refresh_probe_wait(Some(start), start + Duration::from_millis(1), false),
+            Some(MONITOR_REFRESH_PROBE_INTERVAL - Duration::from_millis(1))
+        );
+        assert_eq!(
+            monitor_refresh_probe_wait(Some(start), start + MONITOR_REFRESH_PROBE_INTERVAL, false),
+            None,
+            "the trailing probe becomes due even if a move storm stopped"
+        );
+        assert_eq!(
+            monitor_refresh_probe_wait(Some(start), start, true),
+            None,
+            "creation and DPI events force an immediate refresh probe"
+        );
+    }
+
+    /// Behavioral pin for the deferred -> queued -> presenting transaction.
+    #[test]
+    fn output_coalescer_retains_flood_signal_without_busy_waiting() {
+        let mut pacer = crate::window_state::OutputPaintPacer::default();
+        pacer.defer();
+        assert!(pacer.is_deferred());
+        assert!(!pacer.redraw_queued());
+        assert!(pacer.queue_deferred_redraw());
+        assert!(pacer.redraw_queued());
+        assert!(
+            !pacer.queue_deferred_redraw(),
+            "one due deadline queues at most one redraw"
+        );
+        assert!(
+            pacer.begin_frame(),
+            "queued output retains the flood signal"
+        );
+        pacer.presentation_failed();
+        assert!(pacer.is_deferred());
+        assert!(!pacer.redraw_queued());
+        assert!(pacer.queue_deferred_redraw());
+        assert!(pacer.begin_frame());
+        pacer.presented();
+        assert!(!pacer.is_deferred());
+
+        // Keep a small source pin only for sub-millisecond deadline precision;
+        // lifecycle behavior above is exercised through the real state machine.
         let src = include_str!("app.rs").replace("\r\n", "\n");
         let start = src
             .find("fn about_to_wait_inner(")
@@ -24192,15 +26831,39 @@ mod tests {
         // in the impl, so the next column-0 `}` closes the impl).
         let end = rest.find("\n}\n").map(|i| i + 2).unwrap_or(rest.len());
         let body = &rest[..end];
-        let flush = body
-            .find("ws.coalescing_paint = false")
-            .expect("the coalesce_due flush must exist in about_to_wait");
-        let clamp = body
-            .find("let ms = (remaining.as_millis() as u64).max(1);")
-            .expect("the coalesced-output wait clamp must exist in about_to_wait");
         assert!(
-            flush < clamp,
-            "coalescing_paint flush must precede the coalesced-output wait clamp"
+            body.contains("remaining.max(std::time::Duration::from_nanos(1))")
+                && !body.contains("remaining.as_millis()"),
+            "fractional monitor deadlines must reach ControlFlow without millisecond truncation"
+        );
+    }
+
+    #[test]
+    fn output_frame_transition_follows_every_renderability_guard() {
+        let source = include_str!("app.rs").replace("\r\n", "\n");
+        let redraw_start = source.find("fn redraw(").expect("redraw present");
+        let redraw_tail = &source[redraw_start..];
+        let redraw_end = redraw_tail
+            .find("\n    /// Compose the status-bar")
+            .expect("redraw end");
+        let redraw = &redraw_tail[..redraw_end];
+        let renderability_guard = redraw
+            .find("if !ws.dpi_resize.render_allowed()")
+            .expect("DPI/recovery/visibility guard present");
+        let renderer_guard = redraw
+            .find("if ws.renderer.is_none()")
+            .expect("renderer-availability guard present");
+        let frame_transition = redraw
+            .find("let was_coalescing_paint = ws.output_pacer.begin_frame();")
+            .expect("output frame transition present");
+        let combined_guard = &redraw[renderability_guard..renderer_guard];
+
+        assert!(
+            combined_guard.contains("ws.frame_recovery.has_pending()")
+                && combined_guard.contains("window_is_render_hidden(ws)")
+                && renderability_guard < frame_transition
+                && renderer_guard < frame_transition,
+            "Deferred/Queued output may enter Presenting only when a real frame will be attempted"
         );
     }
 
@@ -24245,22 +26908,33 @@ mod tests {
         let tb = ch + 6.0; // renderer's pane_titlebar_h
 
         // No titlebar (single-pane tab): content origin = ry + pad = 24.
-        let (_, line0, _) = px_to_cell(100.0, 24.0, rect, (cw, ch), (pad, pad), 0.0);
+        let (_, line0, _) = px_to_cell(100.0, 24.0, rect, (cw, ch), (pad, pad), 0.0, false);
         assert_eq!(line0, 0, "py at content origin → row 0 (no titlebar)");
 
         // With a titlebar: content origin shifts down by `tb` to 24 + 22 = 46.
-        let (_, line_origin, _) = px_to_cell(100.0, 24.0 + tb, rect, (cw, ch), (pad, pad), tb);
+        let (_, line_origin, _) =
+            px_to_cell(100.0, 24.0 + tb, rect, (cw, ch), (pad, pad), tb, false);
         assert_eq!(
             line_origin, 0,
             "py at the titlebar'd content origin → row 0"
         );
         // One cell below the titlebar'd origin → row 1 (was ~row 2 before the
         // fix: that off-by-one is exactly what the audit caught).
-        let (_, line1, _) = px_to_cell(100.0, 24.0 + tb + ch, rect, (cw, ch), (pad, pad), tb);
+        let (_, line1, _) =
+            px_to_cell(100.0, 24.0 + tb + ch, rect, (cw, ch), (pad, pad), tb, false);
         assert_eq!(line1, 1);
         // A click up in the titlebar band clamps to row 0 (never negative).
-        let (_, clamped, _) = px_to_cell(100.0, 24.0, rect, (cw, ch), (pad, pad), tb);
+        let (_, clamped, _) = px_to_cell(100.0, 24.0, rect, (cw, ch), (pad, pad), tb, false);
         assert_eq!(clamped, 0);
+
+        // Moving the title to the bottom moves row zero back to the ordinary
+        // padded pane origin. Pointer projection must follow the rendered grid,
+        // not retain the old top-title inset.
+        let (_, bottom_line0, _) = px_to_cell(100.0, 24.0, rect, (cw, ch), (pad, pad), tb, true);
+        assert_eq!(bottom_line0, 0);
+        let (_, bottom_line1, _) =
+            px_to_cell(100.0, 24.0 + ch, rect, (cw, ch), (pad, pad), tb, true);
+        assert_eq!(bottom_line1, 1);
 
         // grid_of: the titlebar steals height, so fewer rows are reported.
         let (cols_no, rows_no) = grid_dims_px((800.0, 600.0), (cw, ch), (pad, pad), 0.0);
@@ -24270,6 +26944,26 @@ mod tests {
             rows_tb < rows_no,
             "titlebar must reduce reported rows ({rows_tb} < {rows_no})"
         );
+    }
+
+    #[test]
+    fn fractional_cell_geometry_rounds_after_the_full_grid() {
+        use super::{pty_pixel_extent, pty_pixel_size};
+
+        assert_eq!(pty_pixel_extent(9.6, 100), 960);
+        assert_eq!(pty_pixel_extent(19.2, 40), 768);
+        assert_eq!(pty_pixel_size((9.6, 19.2), (100, 40)), (960, 768));
+
+        // Both cell metrics round to the same integer cell width, but their
+        // complete PTY geometry remains distinguishable. This is the
+        // pixel-only resize a fractional monitor transition used to miss.
+        assert_eq!(9.1_f32.round() as u16, 9.4_f32.round() as u16);
+        assert_eq!(pty_pixel_extent(9.1, 100), 910);
+        assert_eq!(pty_pixel_extent(9.4, 100), 940);
+
+        assert_eq!(pty_pixel_extent(f32::NAN, 80), 80);
+        assert_eq!(pty_pixel_extent(f32::INFINITY, 80), 80);
+        assert_eq!(pty_pixel_extent(1000.0, usize::MAX), u16::MAX);
     }
 
     #[test]
@@ -24283,22 +26977,30 @@ mod tests {
         let y = 30.0; // any in-grid row
 
         // Left half of cell 0 → Left.
-        let (c0, _, s0) = px_to_cell(ox + 1.0, y, rect, (cw, ch), (pad, pad), 0.0);
+        let (c0, _, s0) = px_to_cell(ox + 1.0, y, rect, (cw, ch), (pad, pad), 0.0, false);
         assert_eq!(c0, 0);
         assert_eq!(s0, Side::Left, "left half of the cell → Left");
 
         // Right half of cell 0 → Right.
-        let (_, _, s1) = px_to_cell(ox + 6.0, y, rect, (cw, ch), (pad, pad), 0.0);
+        let (_, _, s1) = px_to_cell(ox + 6.0, y, rect, (cw, ch), (pad, pad), 0.0, false);
         assert_eq!(s1, Side::Right, "right half of the cell → Right");
 
         // The exact midpoint counts as the right half (matches alacritty's
         // `< half ⇒ Left` boundary — anything ≥ half is Right).
-        let (_, _, s2) = px_to_cell(ox + cw / 2.0, y, rect, (cw, ch), (pad, pad), 0.0);
+        let (_, _, s2) = px_to_cell(ox + cw / 2.0, y, rect, (cw, ch), (pad, pad), 0.0, false);
         assert_eq!(s2, Side::Right, "exact midpoint → Right");
 
         // The side is a within-cell property: the same sub-cell offset in a later
         // column yields the same side (no drift across the row).
-        let (c3, _, s3) = px_to_cell(ox + cw * 5.0 + 1.0, y, rect, (cw, ch), (pad, pad), 0.0);
+        let (c3, _, s3) = px_to_cell(
+            ox + cw * 5.0 + 1.0,
+            y,
+            rect,
+            (cw, ch),
+            (pad, pad),
+            0.0,
+            false,
+        );
         assert_eq!(c3, 5);
         assert_eq!(s3, Side::Left, "side is independent of the column index");
 
@@ -24306,7 +27008,7 @@ mod tests {
         // Side::Left, so a drag starting there still INCLUDES the first cell.
         // (Audit v2.25.0: deriving the side from the raw negative offset via
         // `rem_euclid` wrapped it into the right half and dropped column 0.)
-        let (c4, _, s4) = px_to_cell(ox - 3.0, y, rect, (cw, ch), (pad, pad), 0.0);
+        let (c4, _, s4) = px_to_cell(ox - 3.0, y, rect, (cw, ch), (pad, pad), 0.0, false);
         assert_eq!(c4, 0, "left of origin clamps to column 0");
         assert_eq!(
             s4,
@@ -25117,6 +27819,156 @@ mod tests {
         // to the 4-px margin without producing a NaN / negative.
         let (x, y) = clamp_context_menu_anchor((100.0, 100.0), (2000.0, 2000.0), (800.0, 600.0));
         assert!(x >= 4.0 && y >= 4.0);
+
+        // An anchor that was valid on the old surface must be re-clamped when
+        // a DPI transition or user resize shrinks the window underneath an
+        // already-open menu.
+        assert_eq!(
+            clamp_context_menu_anchor((596.0, 296.0), (200.0, 300.0), (420.0, 320.0)),
+            (216.0, 16.0)
+        );
+    }
+
+    #[test]
+    fn context_menu_anchor_scales_once_across_dpi_then_reclamps() {
+        use super::{clamp_context_menu_anchor, scale_context_menu_anchor};
+
+        let scaled = scale_context_menu_anchor((100.0, 50.0), 1.0, 1.5);
+        assert_eq!(scaled, (150.0, 75.0));
+        assert_eq!(
+            clamp_context_menu_anchor(scaled, (200.0, 100.0), (320.0, 180.0)),
+            (116.0, 75.0),
+            "the logical anchor should scale before the new physical surface clamps it"
+        );
+        assert_eq!(
+            scale_context_menu_anchor(scaled, 1.5, 1.5),
+            scaled,
+            "recording the new scale must make later same-DPI resizes idempotent"
+        );
+        assert_eq!(
+            scale_context_menu_anchor((12.0, 34.0), 0.0, 2.0),
+            (12.0, 34.0),
+            "invalid prior scale must fail closed"
+        );
+        assert_eq!(
+            scale_context_menu_anchor((12.0, 34.0), 1.0, f64::NAN),
+            (12.0, 34.0),
+            "invalid current scale must fail closed"
+        );
+    }
+
+    #[test]
+    fn context_menu_panel_clamp_makes_oversized_panel_fit_with_margin() {
+        use super::{clamp_context_menu_anchor, clamp_context_menu_panel};
+
+        let surface = (800.0, 600.0);
+        assert_eq!(
+            clamp_context_menu_panel((200.0, 300.0), surface),
+            (200.0, 300.0),
+            "an already-fitting panel must keep its natural size"
+        );
+        let panel = clamp_context_menu_panel((2000.0, 2000.0), surface);
+        assert_eq!(panel, (792.0, 592.0));
+        let anchor = clamp_context_menu_anchor((780.0, 580.0), panel, surface);
+        assert_eq!(anchor, (4.0, 4.0));
+        assert!(anchor.0 + panel.0 <= surface.0 - 4.0);
+        assert!(anchor.1 + panel.1 <= surface.1 - 4.0);
+    }
+
+    #[test]
+    fn context_menu_requires_one_real_row_and_content_column() {
+        let cell = (9.6, 18.25);
+        let threshold = (
+            8.0 + kettle_render::menu::H_PAD + cell.0,
+            8.0 + cell.1 + kettle_render::menu::ROW_PAD,
+        );
+        assert!(context_menu_surface_can_fit_row(threshold, cell));
+        assert!(!context_menu_surface_can_fit_row(
+            (threshold.0 - 0.01, threshold.1),
+            cell
+        ));
+        assert!(!context_menu_surface_can_fit_row(
+            (threshold.0, threshold.1 - 0.01),
+            cell
+        ));
+        assert!(!context_menu_surface_can_fit_row(
+            (f32::NAN, threshold.1),
+            cell
+        ));
+    }
+
+    #[test]
+    fn oversized_menu_hint_is_removed_before_label_ellipsis() {
+        use unicode_width::UnicodeWidthStr as _;
+
+        let mut row = ContextMenuRow {
+            label: "Visible label".to_string(),
+            separator: false,
+            enabled: true,
+            hint: "Ctrl+".repeat(1000),
+        };
+        fit_context_menu_row(&mut row, 5);
+        assert!(row.hint.is_empty());
+        assert!(!row.label.is_empty());
+        assert!(row.label.width() <= 5);
+    }
+
+    #[test]
+    fn context_menu_width_covers_every_rendered_row_shape() {
+        use unicode_width::UnicodeWidthStr as _;
+
+        let submenu = ContextMenuItem::Submenu {
+            label: "主题".into(),
+            items: vec![],
+        };
+        assert_eq!(
+            context_menu_item_columns(&submenu, "ignored"),
+            "主题 ▸".width()
+        );
+
+        let theme = ContextMenuItem::ThemeChoice {
+            label: "長いテーマ".into(),
+            theme: "long-theme".into(),
+        };
+        assert_eq!(
+            context_menu_item_columns(&theme, "ignored"),
+            "長いテーマ".width()
+        );
+
+        let profile = ContextMenuItem::ProfileChoice {
+            label: "👩‍💻 work".into(),
+            profile: "work".into(),
+        };
+        assert_eq!(
+            context_menu_item_columns(&profile, "ignored"),
+            "👩‍💻 work".width()
+        );
+
+        let hinted = ContextMenuItem::Item {
+            label: "Copy",
+            action: Action::Copy,
+            enabled: true,
+        };
+        assert_eq!(
+            context_menu_item_columns(&hinted, "Ctrl+界"),
+            "Copy".width() + "Ctrl+界".width() + 2
+        );
+    }
+
+    #[test]
+    fn context_menu_label_ellipsis_is_bounded_and_utf8_safe() {
+        use super::ellipsize_menu_label;
+        use unicode_width::UnicodeWidthStr as _;
+
+        assert_eq!(ellipsize_menu_label("Short", 10), "Short");
+        assert_eq!(ellipsize_menu_label("abcdef", 5), "abcd…");
+        assert_eq!(ellipsize_menu_label("éclair", 4), "écl…");
+        assert_eq!(ellipsize_menu_label("👩‍💻abc", 3), "👩‍💻…");
+        assert_eq!(ellipsize_menu_label("anything", 1), "…");
+        assert_eq!(ellipsize_menu_label("anything", 0), "");
+        for budget in 0..=8 {
+            assert!(ellipsize_menu_label("multi-byte 中文 label", budget).width() <= budget);
+        }
     }
 
     #[test]
@@ -25170,6 +28022,19 @@ mod tests {
             tab_drag_cursor_icon(&DragState::Idle).or(super::tab_close_hover_icon(true)),
             Some(CursorIcon::Pointer)
         );
+    }
+
+    #[test]
+    fn osc52_da1_copy_capability_combines_policy_and_clipboard_availability() {
+        use kettle_config::Osc52;
+
+        let available = super::osc52_copy_is_available;
+        assert!(!available(Osc52::Off, true));
+        assert!(!available(Osc52::Paste, true));
+        assert!(!available(Osc52::Copy, false));
+        assert!(!available(Osc52::Both, false));
+        assert!(available(Osc52::Copy, true));
+        assert!(available(Osc52::Both, true));
     }
 
     #[test]
@@ -26235,7 +29100,7 @@ mod tests {
     fn custom_url_handler_failure_falls_back_to_system_open() {
         let src = include_str!("app.rs");
         let open_url = src
-            .split("fn open_url(&self, uri: &str) {")
+            .split("fn open_url(&mut self, ws: &WindowState, uri: &str) {")
             .nth(1)
             .and_then(|s| s.split("fn paste_clipboard").next())
             .expect("open_url helper present");

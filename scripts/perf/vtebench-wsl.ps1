@@ -12,10 +12,12 @@ param(
     [string]$VtebenchRevision = 'ead80032e57dee2e75f0b51f2ea67528647d9944',
     [string]$KettleExe = '',
     [string]$KettleConfig = '',
+    [string]$WindowsTerminalExe = '',
     [string]$AlacrittyExe = '',
     [string]$WeztermExe = '',
     [string]$RioExe = '',
     [string]$TabbyExe = '',
+    [hashtable]$TerminalVersions = @{},
     [string]$PowerShellExe = '',
     [string]$WslExe = '',
     [string]$WslDistribution = '',
@@ -780,8 +782,10 @@ try {
     }
     $spec = Resolve-KettlePerfTerminal -Name $terminal `
         -KettleExe $KettleExe -KettleConfig $KettleConfig `
+        -WindowsTerminalExe $WindowsTerminalExe `
         -AlacrittyExe $AlacrittyExe -WeztermExe $WeztermExe `
         -RioExe $RioExe -TabbyExe $TabbyExe `
+        -VersionOverride ([string]$TerminalVersions[$terminal]) `
         -IsolatedConfig $isolatedConfig
     if (-not $spec.Available) {
         Write-Warning "$terminal executable not found - skipping"
@@ -832,9 +836,7 @@ try {
             -Command $inner -BeforeWindows $before `
             -PreexistingPids $prePids `
             -CommandWrapperDirectory $resolvedResults
-        $proc = $launched.Process
         $hwnd = $launched.Hwnd
-        $winPid = $launched.WindowPid
         Start-Sleep -Milliseconds 600
         Set-WindowSize $hwnd $WindowW $WindowH $TargetScreenDevice
         $channelResult = Receive-KettlePerfVtebenchChannelResult `

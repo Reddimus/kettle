@@ -1,4 +1,4 @@
-﻿# Generate deterministic throughput payloads for the cross-terminal benchmark.
+# Generate deterministic throughput payloads for the cross-terminal benchmark.
 # Output: <dir>\ascii.txt (~16 MB plain text), <dir>\sgr.txt (~6 MB color-heavy),
 #         <dir>\unicode.txt (~4 MB CJK/emoji/box-drawing mix).
 # Sizes are chosen so even a slow terminal (sub-1 MB/s) finishes an iteration in
@@ -56,7 +56,12 @@ if (-not (Test-KettlePerfPayloadFile -Path $sgrPath -Name sgr)) {
 
 if (-not (Test-KettlePerfPayloadFile -Path $unicodePath -Name unicode)) {
     $sb = [System.Text.StringBuilder]::new(6MB)
-    $row = '日本語テキスト 中文测试 한국어 ─━│┃┌┐└┘├┤ αβγδε ∑∏∫√ ▲►▼◄ 🚀🔥💧🌍 ABC abc 123 '
+    # Keep this source file ASCII-safe so Windows PowerShell 5.1 and pwsh
+    # decode the script identically without a UTF-8 BOM. This base64 is the
+    # pinned UTF-8 row used by the payload contract.
+    $row = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String(
+        '5pel5pys6Kqe44OG44Kt44K544OIIOS4reaWh+a1i+ivlSDtlZzqta3slrQg4pSA4pSB4pSC4pSD4pSM4pSQ4pSU4pSY4pSc4pSkIM6xzrLOs860zrUg4oiR4oiP4oir4oiaIOKWsuKWuuKWvOKXhCDwn5qA8J+UpfCfkqfwn4yNIEFCQyBhYmMgMTIzIA=='
+    ))
     for ($i = 0; $i -lt 30000; $i++) {
         [void]$sb.Append(('{0:d6} ' -f $i))
         [void]$sb.Append($row)

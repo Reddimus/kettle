@@ -10,10 +10,12 @@ param(
     [string]$ResultsDir = '',
     [string]$KettleExe = '',
     [string]$KettleConfig = '',
+    [string]$WindowsTerminalExe = '',
     [string]$AlacrittyExe = '',
     [string]$WeztermExe = '',
     [string]$RioExe = '',
     [string]$TabbyExe = '',
+    [hashtable]$TerminalVersions = @{},
     $IsolatedProfile = $null,
     [string]$TargetScreenDevice = '',
     [ValidatePattern('^[0-9a-fA-F-]{36}$')]
@@ -151,8 +153,10 @@ foreach ($terminal in $Terminals) {
     }
     $spec = Resolve-KettlePerfTerminal -Name $terminal `
         -KettleExe $KettleExe -KettleConfig $KettleConfig `
+        -WindowsTerminalExe $WindowsTerminalExe `
         -AlacrittyExe $AlacrittyExe -WeztermExe $WeztermExe `
         -RioExe $RioExe -TabbyExe $TabbyExe `
+        -VersionOverride ([string]$TerminalVersions[$terminal]) `
         -IsolatedConfig $isolatedConfig
     if (-not $spec.Available -or -not $spec.SupportsCommand) {
         throw "$terminal does not provide an available command-launch contract"

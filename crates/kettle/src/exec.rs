@@ -33,16 +33,30 @@
 use std::io::Write;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 use crossbeam_channel::{Receiver, Sender};
-use kettle_core::{CursorShape, PtyOutputSender, TermEvent, Terminal, Waker};
+use kettle_core::{
+    CursorShape, PtyEofProgress, PtyGeometry, PtyOutputSender, PtyStdin, TermEvent, Terminal,
+    TerminalCapabilities, Waker,
+};
 
 /// How long to keep draining output after the child exits before we stop and
 /// report the code. Doubles as the ConPTY late-repaint mitigation: ConPTY's
 /// screen-differ can emit a final paint after the child is gone. Same order of
 /// magnitude as the dev-record reap settle.
 const SETTLE: Duration = Duration::from_millis(60);
+/// Semantic events emitted by the VT parser. A full queue is a fail-command
+/// condition because silently dropping a reply request can deadlock the child.
+const PTY_EVENT_QUEUE_DEPTH: usize = 1024;
+/// Bound each owner-loop output slice so a producer that continuously refills
+/// the bounded handoff cannot starve timeout, cancellation, or child reaping.
+const OUTPUT_SLICE_MESSAGES: usize = 16;
+const OUTPUT_SLICE_BYTES: usize = 1024 * 1024;
+/// Apply the same lifecycle fairness to semantic events. The queue remains
+/// substantially deeper so a short burst can be absorbed without loss.
+const EVENT_SLICE_MESSAGES: usize = 256;
 
 /// Exit code for `--timeout` expiry (coreutils `timeout(1)` convention).
 pub const EXIT_TIMEOUT: i32 = 124;
@@ -256,6 +270,43 @@ pub fn run_exec_with(
     run_exec_with_cancellation(opts, _size_probe, sink, None)
 }
 
+/// Drain one bounded output slice and report whether a backlog remains.
+///
+/// A bounded channel alone does not make an unbounded `try_recv` loop fair:
+/// the producer can refill each slot as soon as the owner removes it. Both a
+/// message and byte budget keep lifecycle checks reachable under that race.
+fn drain_output_slice(
+    receiver: &Receiver<Vec<u8>>,
+    recorder: &mut Option<kettle_core::record::Recorder>,
+    output: &mut Outputter,
+    sink: &mut dyn Write,
+) -> bool {
+    let mut bytes_drained = 0usize;
+    for _ in 0..OUTPUT_SLICE_MESSAGES {
+        if bytes_drained >= OUTPUT_SLICE_BYTES {
+            break;
+        }
+        let Ok(bytes) = receiver.try_recv() else {
+            return false;
+        };
+        bytes_drained = bytes_drained.saturating_add(bytes.len());
+        record_chunk(recorder, &bytes);
+        output.output(sink, &bytes);
+    }
+    !receiver.is_empty()
+}
+
+/// Drain one bounded semantic-event slice and report whether work remains.
+fn drain_event_slice<T>(receiver: &Receiver<T>, mut handle: impl FnMut(T)) -> bool {
+    for _ in 0..EVENT_SLICE_MESSAGES {
+        let Ok(event) = receiver.try_recv() else {
+            return false;
+        };
+        handle(event);
+    }
+    !receiver.is_empty()
+}
+
 fn run_exec_with_cancellation(
     mut opts: ExecOpts,
     _size_probe: &dyn Fn() -> Option<(u16, u16)>,
@@ -271,8 +322,13 @@ fn run_exec_with_cancellation(
     opts.cols = opts.cols.clamp(1, u16::MAX);
     opts.rows = opts.rows.clamp(1, u16::MAX);
 
-    let (tx, rx): (Sender<TermEvent>, Receiver<TermEvent>) = crossbeam_channel::unbounded();
+    let (tx, rx): (Sender<TermEvent>, Receiver<TermEvent>) =
+        crossbeam_channel::bounded(PTY_EVENT_QUEUE_DEPTH);
     let (otx, orx): (Sender<Vec<u8>>, Receiver<Vec<u8>>) = crossbeam_channel::bounded(4);
+    let (stdin_tx, stdin_rx) = crossbeam_channel::bounded::<StdinPumpEvent>(4);
+    let (pty_reply_tx, pty_reply_rx) = crossbeam_channel::bounded::<Vec<u8>>(64);
+    let pty_reply_gate = Arc::new(Mutex::new(()));
+    let (stdin_done_tx, stdin_done_rx) = crossbeam_channel::unbounded::<StdinPumpResult>();
     let waker: Waker = std::sync::Arc::new(|| {});
     let cwd = opts.cwd.as_ref().and_then(|p| p.to_str());
 
@@ -294,17 +350,14 @@ fn run_exec_with_cancellation(
         None => None,
     };
 
-    let term = match Terminal::new_with_env_and_output(
+    let term = match Terminal::new_with_env_and_output_geometry_and_capabilities(
         &opts.argv,
         cwd,
         // Modest scrollback — exec output streams out immediately, the grid is
         // only used for VT state + query answers.
         2000,
         0,
-        opts.cols as usize,
-        opts.rows as usize,
-        8,
-        16,
+        PtyGeometry::from_cell_size(opts.cols as usize, opts.rows as usize, 8, 16),
         false,
         CursorShape::Block,
         None,
@@ -315,6 +368,9 @@ fn run_exec_with_cancellation(
         // No shell-integration injection — `kettle exec` runs a one-shot
         // non-interactive command, not an interactive shell.
         false,
+        // Headless exec has no clipboard sink. Do not advertise DA1 extension
+        // 52 when OSC 52 writes would be deliberately ignored.
+        TerminalCapabilities { osc52_copy: false },
         tx,
         waker,
         Some(PtyOutputSender::lossless(otx)),
@@ -327,11 +383,43 @@ fn run_exec_with_cancellation(
     };
     let process_tree = ExecProcessTree::attach(&term);
 
-    // Optional stdin → PTY pump (only for pipe/file/socket stdin).
-    // The pump holds a cloneable `PtyWriter`, so the (non-`Sync`) `Terminal`
-    // stays owned by this loop.
+    // Every PTY write goes through the bounded arbiter, even when this process
+    // is not forwarding stdin. A child can flood terminal queries without ever
+    // reading their replies; writing those replies on the lifecycle thread
+    // would let a full PTY input queue defeat timeout and cancellation.
+    let stdin_handle = match term.stdin_handle() {
+        Ok(handle) => handle,
+        Err(error) => {
+            let _ = writeln!(
+                std::io::stderr(),
+                "kettle exec: cannot prepare PTY writer arbitration: {error}"
+            );
+            return EXIT_INTERNAL;
+        }
+    };
+    if let Err(error) = spawn_pty_writer_arbiter(
+        stdin_handle,
+        pty_reply_rx,
+        Arc::clone(&pty_reply_gate),
+        stdin_rx,
+        stdin_done_tx,
+    ) {
+        let _ = writeln!(
+            std::io::stderr(),
+            "kettle exec: cannot start PTY writer arbiter: {error}"
+        );
+        return EXIT_INTERNAL;
+    }
     if opts.forward_stdin {
-        spawn_stdin_pump(term.writer_handle());
+        if let Err(error) = spawn_stdin_reader(stdin_tx) {
+            let _ = writeln!(
+                std::io::stderr(),
+                "kettle exec: cannot start stdin forwarding thread: {error}"
+            );
+            return EXIT_INTERNAL;
+        }
+    } else {
+        drop(stdin_tx);
     }
 
     let mut out = Outputter::new(opts.mode);
@@ -339,24 +427,80 @@ fn run_exec_with_cancellation(
 
     let started = Instant::now();
     let mut child_gone_at: Option<Instant> = None;
+    let mut last_lifecycle_trace = started;
 
     loop {
-        // Drain output first so we never lose bytes that arrived before exit.
-        while let Ok(bytes) = orx.try_recv() {
-            record_chunk(&mut recorder, &bytes);
-            out.output(sink, &bytes);
+        let trace_lifecycle = started.elapsed() >= Duration::from_secs(4)
+            && last_lifecycle_trace.elapsed() >= Duration::from_millis(250);
+        if trace_lifecycle {
+            last_lifecycle_trace = Instant::now();
+            log::debug!(
+                "kettle exec lifecycle turn start: elapsed={:?}, child_gone={}",
+                started.elapsed(),
+                child_gone_at.is_some()
+            );
+        }
+        // Drain output first, but keep the slice finite. A continuously
+        // refilled queue must not hide timeout/cancellation indefinitely.
+        let output_backlog = drain_output_slice(&orx, &mut recorder, &mut out, sink);
+        if trace_lifecycle {
+            log::debug!("kettle exec lifecycle output slice returned: backlog={output_backlog}");
         }
         // Service the child's terminal queries + lifecycle events.
-        while let Ok(ev) = rx.try_recv() {
+        let mut pty_writer_error: Option<String> = None;
+        let mut handled_event = false;
+        let mut queue_reply = |bytes: &[u8]| {
+            let reply = bytes.to_vec();
+            log::debug!("kettle exec publishing {}-byte PTY reply", reply.len());
+            // Serialize reply publication with the arbiter's final EOF
+            // recheck. Without this gate, the worker can observe an empty
+            // channel, lose its timeslice, then inject VEOF after a reply was
+            // queued. The lock protects ordering only; poisoning cannot make
+            // the unit value inconsistent, so recovery is safe.
+            let send_result = {
+                let _gate = pty_reply_gate
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner);
+                log::debug!("kettle exec acquired PTY reply publication gate");
+                pty_reply_tx.try_send(reply)
+            };
+            log::debug!("kettle exec completed PTY reply publication attempt");
+            match send_result {
+                Ok(()) => {}
+                Err(crossbeam_channel::TrySendError::Full(_)) => {
+                    pty_writer_error.get_or_insert_with(|| {
+                        "PTY reply queue exceeded its 64-message bound".into()
+                    });
+                }
+                Err(crossbeam_channel::TrySendError::Disconnected(_)) => {
+                    pty_writer_error
+                        .get_or_insert_with(|| "PTY writer arbiter stopped unexpectedly".into());
+                }
+            }
+        };
+        let event_backlog = drain_event_slice(&rx, |ev| {
+            handled_event = true;
             match ev {
-                TermEvent::PtyWrite(s) => term.write(s.as_bytes()),
-                TermEvent::Title(t) => out.title(sink, &t),
+                TermEvent::PtyWrite(s) => {
+                    log::debug!("kettle exec handling PtyWrite event");
+                    queue_reply(s.as_bytes());
+                    log::debug!("kettle exec finished PtyWrite event");
+                }
+                TermEvent::Title(t) => {
+                    log::debug!("kettle exec handling Title event");
+                    out.title(sink, &t);
+                    log::debug!("kettle exec finished Title event");
+                }
                 TermEvent::TextAreaSizeRequest(fmt) => {
+                    log::debug!("kettle exec handling TextAreaSizeRequest event");
+                    let (pixel_width, pixel_height) = term.pty_pixel_size();
                     let reply =
-                        kettle_render::reply_for_text_area_size(opts.cols, opts.rows, 8, 16, &*fmt);
-                    term.write(reply.as_bytes());
+                        kettle_render::reply_for_text_area_size(pixel_width, pixel_height, &*fmt);
+                    queue_reply(reply.as_bytes());
+                    log::debug!("kettle exec finished TextAreaSizeRequest event");
                 }
                 TermEvent::ColorRequest(idx, fmt) => {
+                    log::debug!("kettle exec handling ColorRequest event");
                     if let Some(s) = term.term.lock().ok().and_then(|t| {
                         kettle_render::reply_for_query(
                             idx,
@@ -365,22 +509,147 @@ fn run_exec_with_cancellation(
                             &*fmt,
                         )
                     }) {
-                        term.write(s.as_bytes());
+                        queue_reply(s.as_bytes());
                     }
+                    log::debug!("kettle exec finished ColorRequest event");
+                }
+                // Headless exec has no clipboard sink and advertises no DA1
+                // extension 52. Discard writes explicitly at this boundary.
+                TermEvent::ClipboardStore(_, _) => {
+                    log::debug!("kettle exec discarded ClipboardStore event");
                 }
                 // OSC 52 read: deny (reply empty so the protocol stays
                 // well-formed without leaking a clipboard to a headless child).
-                TermEvent::ClipboardLoad(_, fmt) => term.write(fmt("").as_bytes()),
+                TermEvent::ClipboardLoad(_, fmt) => {
+                    log::debug!("kettle exec handling ClipboardLoad event");
+                    queue_reply(fmt("").as_bytes());
+                    log::debug!("kettle exec finished ClipboardLoad event");
+                }
                 TermEvent::Exit | TermEvent::ChildExit(_) => {
+                    log::debug!("kettle exec handling child-exit event");
                     child_gone_at.get_or_insert_with(Instant::now);
                 }
-                _ => {}
+                _ => {
+                    log::debug!("kettle exec discarded non-headless semantic event");
+                }
             }
+        });
+        if trace_lifecycle {
+            log::debug!("kettle exec lifecycle event slice returned: backlog={event_backlog}");
+        }
+        if handled_event {
+            log::debug!("kettle exec finished semantic-event slice");
+        }
+        if term.event_queue_overflowed() {
+            pty_writer_error.get_or_insert_with(|| {
+                format!(
+                    "PTY semantic event queue exceeded its {PTY_EVENT_QUEUE_DEPTH}-message bound"
+                )
+            });
+        }
+        if handled_event {
+            log::debug!("kettle exec checked semantic-event overflow");
+        }
+        let fatal_pty_error = pty_writer_error;
+        let mut stdin_forwarding_error = None;
+        while let Ok(result) = stdin_done_rx.try_recv() {
+            match result {
+                StdinPumpResult::ReadError(error) => {
+                    let _ = writeln!(
+                        std::io::stderr(),
+                        "kettle exec: stdin forwarding ended after a read error: {error}; \
+                         keeping the PTY open"
+                    );
+                }
+                StdinPumpResult::ForwardError(error) => {
+                    stdin_forwarding_error = Some(error);
+                }
+                StdinPumpResult::Eof(result) => match result {
+                    Ok(true) => {}
+                    Ok(false) => {
+                        let _ = writeln!(
+                            std::io::stderr(),
+                            "kettle exec: stdin reached EOF but this PTY has no safe EOF \
+                                 signal (noncanonical Unix input or Windows ConPTY); keeping \
+                                 the PTY open for terminal replies (use an application delimiter \
+                                 or --timeout)"
+                        );
+                    }
+                    Err(error) => {
+                        let _ = writeln!(
+                            std::io::stderr(),
+                            "kettle exec: cannot safely signal child stdin EOF: {error}; \
+                                 keeping the PTY open for terminal replies"
+                        );
+                    }
+                },
+            }
+        }
+        if handled_event {
+            log::debug!("kettle exec finished stdin-result slice");
+        }
+        if trace_lifecycle {
+            log::debug!(
+                "kettle exec lifecycle stdin results returned: fatal={}, forwarding={}",
+                fatal_pty_error.is_some(),
+                stdin_forwarding_error.is_some()
+            );
+        }
+        if let Some(error) = fatal_pty_error {
+            let _ = writeln!(
+                std::io::stderr(),
+                "kettle exec: cannot safely service child PTY events: {error}"
+            );
+            process_tree.terminate(&term);
+            let _ = wait_for_exit_code(&term);
+            std::thread::sleep(SETTLE);
+            let _ = drain_output_slice(&orx, &mut recorder, &mut out, sink);
+            if let Some(mut recorder) = recorder.take() {
+                recorder.finish();
+            }
+            out.finish(sink, EXIT_INTERNAL, started.elapsed());
+            return EXIT_INTERNAL;
+        }
+        if let Some(error) = stdin_forwarding_error {
+            log::debug!("kettle exec checking child after PTY forwarding error");
+            if child_gone_at.is_none() && term.child_exited() {
+                child_gone_at = Some(Instant::now());
+            }
+            log::debug!("kettle exec finished child check after PTY forwarding error");
+            if child_gone_at.is_none() {
+                let _ = writeln!(
+                    std::io::stderr(),
+                    "kettle exec: cannot safely write child PTY input: {error}"
+                );
+                process_tree.terminate(&term);
+                let _ = wait_for_exit_code(&term);
+                std::thread::sleep(SETTLE);
+                let _ = drain_output_slice(&orx, &mut recorder, &mut out, sink);
+                if let Some(mut recorder) = recorder.take() {
+                    recorder.finish();
+                }
+                out.finish(sink, EXIT_INTERNAL, started.elapsed());
+                return EXIT_INTERNAL;
+            }
+            // EIO/BrokenPipe is the normal final write outcome when a
+            // short-lived child exits before consuming all piped input. Its
+            // authoritative process status wins, but lifecycle handling below
+            // must still run this turn.
         }
 
         // Exit detection: poll the real child status (authoritative), then
         // settle-drain so trailing/late output (ConPTY repaint) is captured.
-        if child_gone_at.is_none() && term.child_exited() {
+        if handled_event {
+            log::debug!("kettle exec polling child status after semantic event");
+        }
+        let child_exited = child_gone_at.is_none() && term.child_exited();
+        if handled_event {
+            log::debug!("kettle exec finished child-status poll after semantic event");
+        }
+        if trace_lifecycle {
+            log::debug!("kettle exec lifecycle child-status poll returned: exited={child_exited}");
+        }
+        if child_exited {
             child_gone_at = Some(Instant::now());
         }
         if let Some(gone) = child_gone_at
@@ -388,10 +657,7 @@ fn run_exec_with_cancellation(
             && orx.is_empty()
         {
             // Final drain in case something landed in the settle window.
-            while let Ok(bytes) = orx.try_recv() {
-                record_chunk(&mut recorder, &bytes);
-                out.output(sink, &bytes);
-            }
+            let _ = drain_output_slice(&orx, &mut recorder, &mut out, sink);
             if let Some(mut r) = recorder.take() {
                 r.finish();
             }
@@ -410,6 +676,9 @@ fn run_exec_with_cancellation(
         // MCP cancellation is prompt and follows the same teardown discipline
         // as timeout: kill the PTY child, drain its last repaint, and finish the
         // recorder before releasing the worker slot.
+        if trace_lifecycle {
+            log::debug!("kettle exec lifecycle evaluating cancellation");
+        }
         if cancelled.is_some_and(|flag| flag.load(Ordering::Acquire)) && child_gone_at.is_none() {
             process_tree.terminate(&term);
             // Reap the killed child where the PTY backend exposes its status;
@@ -417,10 +686,7 @@ fn run_exec_with_cancellation(
             // zombie behind while still bounding cancellation latency.
             let _ = wait_for_exit_code(&term);
             std::thread::sleep(SETTLE);
-            while let Ok(bytes) = orx.try_recv() {
-                record_chunk(&mut recorder, &bytes);
-                out.output(sink, &bytes);
-            }
+            let _ = drain_output_slice(&orx, &mut recorder, &mut out, sink);
             if let Some(mut recorder) = recorder.take() {
                 recorder.finish();
             }
@@ -429,23 +695,38 @@ fn run_exec_with_cancellation(
         }
 
         // Timeout: kill the child, settle briefly, report 124.
+        if trace_lifecycle {
+            log::debug!(
+                "kettle exec lifecycle evaluating timeout: configured={:?}, elapsed={:?}, \
+                 child_gone={}",
+                opts.timeout,
+                started.elapsed(),
+                child_gone_at.is_some()
+            );
+        }
         if let Some(limit) = opts.timeout
             && started.elapsed() >= limit
             && child_gone_at.is_none()
         {
+            log::debug!("kettle exec timeout reached; starting bounded teardown");
             process_tree.terminate(&term);
+            log::debug!("kettle exec timeout child termination returned");
             std::thread::sleep(SETTLE);
-            while let Ok(bytes) = orx.try_recv() {
-                record_chunk(&mut recorder, &bytes);
-                out.output(sink, &bytes);
-            }
+            let _ = drain_output_slice(&orx, &mut recorder, &mut out, sink);
             if let Some(mut r) = recorder.take() {
                 r.finish();
             }
             out.finish(sink, EXIT_TIMEOUT, started.elapsed());
+            log::debug!("kettle exec timeout teardown finished");
             return EXIT_TIMEOUT;
         }
 
+        if output_backlog || event_backlog {
+            // Preserve throughput under a real backlog without paying the idle
+            // polling delay, now that lifecycle checks have had a turn.
+            std::thread::yield_now();
+            continue;
+        }
         std::thread::sleep(Duration::from_millis(8));
     }
 }
@@ -535,16 +816,20 @@ impl ExecProcessTree {
         }
 
         #[cfg(windows)]
-        if let Some(job) = &self.job
-            && let Err(error) = job.terminate()
-        {
-            log::warn!("kettle exec could not terminate its Windows Job Object: {error}");
+        if let Some(job) = &self.job {
+            log::debug!("kettle exec terminating Windows Job Object");
+            if let Err(error) = job.terminate() {
+                log::warn!("kettle exec could not terminate its Windows Job Object: {error}");
+            }
+            log::debug!("kettle exec finished Windows Job Object termination");
         }
 
         #[cfg(not(unix))]
         let _ = root;
 
+        log::debug!("kettle exec terminating direct PTY child");
         term.kill();
+        log::debug!("kettle exec finished direct PTY child termination");
     }
 }
 
@@ -827,34 +1112,312 @@ impl Outputter {
     }
 }
 
-/// Spawn a thread that pumps this process's stdin into the PTY in 8 KiB
-/// chunks, stopping on EOF. On EOF it closes the PTY's input side so a
-/// read-until-EOF child (`cat`, `sort`, `wc`) sees end-of-input and exits —
-/// the correct PTY EOF mechanism (an injected Ctrl+D/Ctrl+Z byte does NOT work
-/// under Windows ConPTY). Closing input does not kill the child.
-fn spawn_stdin_pump(writer: kettle_core::PtyWriter) {
-    std::thread::spawn(move || {
+enum StdinPumpEvent {
+    Data(Vec<u8>),
+    Eof,
+    ReadError(String),
+}
+
+enum StdinPumpResult {
+    Eof(Result<bool, String>),
+    ReadError(String),
+    ForwardError(String),
+}
+
+struct PendingWrite {
+    bytes: Vec<u8>,
+    offset: usize,
+}
+
+impl PendingWrite {
+    fn new(bytes: Vec<u8>) -> Option<Self> {
+        (!bytes.is_empty()).then_some(Self { bytes, offset: 0 })
+    }
+
+    fn remaining(&self) -> &[u8] {
+        &self.bytes[self.offset..]
+    }
+
+    fn advance(&mut self, count: usize) -> bool {
+        self.offset += count;
+        self.offset == self.bytes.len()
+    }
+}
+
+fn process_stdin_event(
+    event: StdinPumpEvent,
+    current: &mut Option<PendingWrite>,
+    stdin_open: &mut bool,
+    eof_pending: &mut bool,
+    done: &Sender<StdinPumpResult>,
+) {
+    match event {
+        StdinPumpEvent::Data(bytes) => {
+            debug_assert!(current.is_none());
+            *current = PendingWrite::new(bytes);
+        }
+        StdinPumpEvent::Eof => {
+            *eof_pending = true;
+            *stdin_open = false;
+        }
+        StdinPumpEvent::ReadError(error) => {
+            let _ = done.send(StdinPumpResult::ReadError(error));
+            *stdin_open = false;
+        }
+    }
+}
+
+/// Run at most one low-priority EOF step after a final reply recheck.
+///
+/// The caller's initial empty-channel observation is only a fast path. Reply
+/// publication uses the same gate, so an already-admitted reply is either
+/// loaded into `reply_current` here or was published after the nonblocking EOF
+/// step completed. This cannot give a future child query priority over a VEOF
+/// byte the kernel already accepted.
+fn try_eof_after_reply_recheck<T>(
+    reply_gate: &Mutex<()>,
+    replies: &Receiver<Vec<u8>>,
+    replies_open: &mut bool,
+    reply_current: &mut Option<PendingWrite>,
+    eof_step: impl FnOnce() -> T,
+) -> Option<T> {
+    let _gate = reply_gate.lock().unwrap_or_else(PoisonError::into_inner);
+    if reply_current.is_none() && *replies_open {
+        match replies.try_recv() {
+            Ok(bytes) => *reply_current = PendingWrite::new(bytes),
+            Err(crossbeam_channel::TryRecvError::Empty) => {}
+            Err(crossbeam_channel::TryRecvError::Disconnected) => {
+                *replies_open = false;
+            }
+        }
+    }
+    (reply_current.is_none() && replies.is_empty()).then(eof_step)
+}
+
+fn spawn_pty_writer_arbiter(
+    mut pty_stdin: PtyStdin,
+    replies: Receiver<Vec<u8>>,
+    reply_gate: Arc<Mutex<()>>,
+    stdin_events: Receiver<StdinPumpEvent>,
+    done: Sender<StdinPumpResult>,
+) -> std::io::Result<()> {
+    std::thread::Builder::new()
+        .name("kettle-pty-writer".into())
+        .spawn(move || {
+            let mut reply_current = None;
+            let mut stdin_current = None;
+            let mut replies_open = true;
+            let mut stdin_open = true;
+            let mut eof_pending = false;
+            let never_reply = crossbeam_channel::never::<Vec<u8>>();
+            let never_stdin = crossbeam_channel::never::<StdinPumpEvent>();
+
+            loop {
+                if reply_current.is_none() && replies_open {
+                    match replies.try_recv() {
+                        Ok(bytes) => reply_current = PendingWrite::new(bytes),
+                        Err(crossbeam_channel::TryRecvError::Empty) => {}
+                        Err(crossbeam_channel::TryRecvError::Disconnected) => {
+                            replies_open = false;
+                        }
+                    }
+                }
+                if stdin_current.is_none() && stdin_open {
+                    match stdin_events.try_recv() {
+                        Ok(event) => process_stdin_event(
+                            event,
+                            &mut stdin_current,
+                            &mut stdin_open,
+                            &mut eof_pending,
+                            &done,
+                        ),
+                        Err(crossbeam_channel::TryRecvError::Empty) => {}
+                        Err(crossbeam_channel::TryRecvError::Disconnected) => stdin_open = false,
+                    }
+                }
+
+                if eof_pending
+                    && reply_current.is_none()
+                    && replies.is_empty()
+                    && stdin_current.is_none()
+                {
+                    // Close the check/write race with reply publication. The
+                    // producer holds the same gate only around `try_send`, and
+                    // this worker holds it only through one nonblocking VEOF
+                    // step, so neither PTY capacity nor a slow child can extend
+                    // the critical section.
+                    let mut eof_retry_pending = false;
+                    if let Some(progress) = try_eof_after_reply_recheck(
+                        &reply_gate,
+                        &replies,
+                        &mut replies_open,
+                        &mut reply_current,
+                        || pty_stdin.try_signal_eof(),
+                    ) {
+                        match progress {
+                            Ok(PtyEofProgress::Pending) => eof_retry_pending = true,
+                            Ok(PtyEofProgress::Signaled) => {
+                                let _ = done.send(StdinPumpResult::Eof(Ok(true)));
+                            }
+                            Ok(PtyEofProgress::Unsupported) => {
+                                let _ = done.send(StdinPumpResult::Eof(Ok(false)));
+                            }
+                            Err(error) => {
+                                let _ = done.send(StdinPumpResult::Eof(Err(error.to_string())));
+                            }
+                        }
+                        eof_pending = eof_retry_pending;
+                    }
+                    if eof_retry_pending {
+                        // Retrying immediately would monopolize the worker
+                        // while a later terminal reply waits. Yield outside the
+                        // publication gate, then re-check the priority channel.
+                        std::thread::sleep(Duration::from_millis(1));
+                        continue;
+                    }
+                }
+
+                let writing_reply = reply_current.is_some();
+                let write_result = if let Some(reply) = reply_current.as_ref() {
+                    Some(pty_stdin.try_write(reply.remaining()))
+                } else {
+                    stdin_current
+                        .as_ref()
+                        .map(|stdin| pty_stdin.try_write(stdin.remaining()))
+                };
+                if let Some(result) = write_result {
+                    match result {
+                        Ok(0) => {
+                            // Unix PTY capacity is temporarily exhausted.
+                            // Wait briefly for a newly generated high-priority
+                            // reply before retrying the pending frame.
+                            if replies_open && !writing_reply {
+                                match replies.recv_timeout(Duration::from_millis(1)) {
+                                    Ok(bytes) => {
+                                        reply_current = PendingWrite::new(bytes);
+                                    }
+                                    Err(crossbeam_channel::RecvTimeoutError::Disconnected) => {
+                                        replies_open = false;
+                                    }
+                                    Err(crossbeam_channel::RecvTimeoutError::Timeout) => {}
+                                }
+                            } else {
+                                std::thread::sleep(Duration::from_millis(1));
+                            }
+                        }
+                        Ok(written) if writing_reply => {
+                            if reply_current
+                                .as_mut()
+                                .is_some_and(|reply| reply.advance(written))
+                            {
+                                reply_current = None;
+                            }
+                        }
+                        Ok(written) => {
+                            if stdin_current
+                                .as_mut()
+                                .is_some_and(|stdin| stdin.advance(written))
+                            {
+                                stdin_current = None;
+                            }
+                        }
+                        Err(error) => {
+                            let _ = done.send(StdinPumpResult::ForwardError(error.to_string()));
+                            break;
+                        }
+                    }
+                    continue;
+                }
+
+                if !replies_open && !stdin_open {
+                    break;
+                }
+                let reply_receiver = if replies_open { &replies } else { &never_reply };
+                let stdin_receiver = if stdin_open {
+                    &stdin_events
+                } else {
+                    &never_stdin
+                };
+                crossbeam_channel::select_biased! {
+                    recv(reply_receiver) -> message => match message {
+                        Ok(bytes) => reply_current = PendingWrite::new(bytes),
+                        Err(_) => replies_open = false,
+                    },
+                    recv(stdin_receiver) -> message => match message {
+                        Ok(event) => process_stdin_event(
+                            event,
+                            &mut stdin_current,
+                            &mut stdin_open,
+                            &mut eof_pending,
+                            &done,
+                        ),
+                        Err(_) => stdin_open = false,
+                    },
+                }
+            }
+        })
+        .map(drop)
+}
+
+/// Read this process's stdin into bounded 8 KiB messages for the PTY writer
+/// arbiter. On Windows, normalize LF/CRLF text to ConPTY's VT Enter (CR).
+fn spawn_stdin_reader(events: Sender<StdinPumpEvent>) -> std::io::Result<()> {
+    let task = Box::new(move || {
         use std::io::Read;
         let mut stdin = std::io::stdin().lock();
         let mut buf = [0u8; 8192];
+        #[cfg(windows)]
+        let mut previous_was_cr = false;
         loop {
             match stdin.read(&mut buf) {
-                Ok(0) | Err(_) => break,
-                Ok(n) => writer.write(&buf[..n]),
+                Ok(0) => {
+                    let _ = events.send(StdinPumpEvent::Eof);
+                    break;
+                }
+                Ok(n) => {
+                    #[cfg(windows)]
+                    let bytes = {
+                        let mut translated = Vec::with_capacity(n);
+                        for &byte in &buf[..n] {
+                            if byte == b'\n' {
+                                if !previous_was_cr {
+                                    translated.push(b'\r');
+                                }
+                            } else {
+                                translated.push(byte);
+                            }
+                            previous_was_cr = byte == b'\r';
+                        }
+                        translated
+                    };
+                    #[cfg(not(windows))]
+                    let bytes = buf[..n].to_vec();
+                    if events.send(StdinPumpEvent::Data(bytes)).is_err() {
+                        break;
+                    }
+                }
+                Err(error) => {
+                    let _ = events.send(StdinPumpEvent::ReadError(error.to_string()));
+                    break;
+                }
             }
         }
-        // Unix PTYs deliver EOF to the child when the input side closes.
-        #[cfg(unix)]
-        writer.close();
-        // Windows ConPTY is different: closing conin while a console child is
-        // still alive can make `cmd`/PowerShell exit with STATUS_CONTROL_C_EXIT
-        // even after they read the intended input line. Leave the handle open;
-        // it is closed by Terminal::drop after the child exits or a timeout
-        // kills it. EOF-only Windows console programs should be run with an
-        // explicit timeout or an input protocol that terminates before EOF.
-        #[cfg(windows)]
-        drop(writer);
     });
+    spawn_stdin_pump_task_with(task, |task| {
+        std::thread::Builder::new()
+            .name("kettle-stdin-pump".into())
+            .spawn(task)
+            .map(drop)
+    })
+}
+
+type StdinPumpTask = Box<dyn FnOnce() + Send + 'static>;
+
+fn spawn_stdin_pump_task_with(
+    task: StdinPumpTask,
+    spawn: impl FnOnce(StdinPumpTask) -> std::io::Result<()>,
+) -> std::io::Result<()> {
+    spawn(task)
 }
 
 /// True when stdin is a pipe/file/socket we should forward to the PTY
@@ -875,11 +1438,20 @@ pub fn stdin_is_pipe() -> bool {
     }
     #[cfg(windows)]
     {
-        // Native Windows ConPTY currently exits console children with
-        // STATUS_CONTROL_C_EXIT when we drive stdin this way. Keep stdin
-        // forwarding disabled there until the ConPTY input lifecycle has a
-        // separate, proven implementation. WSL uses the Unix branch.
-        false
+        use windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE;
+        use windows_sys::Win32::Storage::FileSystem::GetFileType;
+        use windows_sys::Win32::System::Console::{GetStdHandle, STD_INPUT_HANDLE};
+
+        const FILE_TYPE_DISK: u32 = 0x0001;
+        const FILE_TYPE_PIPE: u32 = 0x0003;
+        let handle = unsafe { GetStdHandle(STD_INPUT_HANDLE) };
+        if handle.is_null() || handle == INVALID_HANDLE_VALUE {
+            return false;
+        }
+        matches!(
+            unsafe { GetFileType(handle) },
+            FILE_TYPE_DISK | FILE_TYPE_PIPE
+        )
     }
     #[cfg(not(any(unix, windows)))]
     {
@@ -933,6 +1505,88 @@ fn windows_console_size() -> Option<(u16, u16)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn output_slice_bounds_a_continuously_refilled_channel() {
+        let (sender, receiver) = crossbeam_channel::unbounded();
+        for _ in 0..=OUTPUT_SLICE_MESSAGES {
+            sender.send(vec![b'x']).unwrap();
+        }
+        let mut recorder = None;
+        let mut output = Outputter::new(OutputMode::Raw);
+        let mut sink = Vec::new();
+
+        assert!(drain_output_slice(
+            &receiver,
+            &mut recorder,
+            &mut output,
+            &mut sink
+        ));
+        assert_eq!(sink.len(), OUTPUT_SLICE_MESSAGES);
+        assert!(!drain_output_slice(
+            &receiver,
+            &mut recorder,
+            &mut output,
+            &mut sink
+        ));
+        assert_eq!(sink.len(), OUTPUT_SLICE_MESSAGES + 1);
+    }
+
+    #[test]
+    fn output_slice_applies_an_independent_byte_budget() {
+        let (sender, receiver) = crossbeam_channel::unbounded();
+        let chunk_len = OUTPUT_SLICE_BYTES / 2 + 1;
+        for _ in 0..3 {
+            sender.send(vec![b'x'; chunk_len]).unwrap();
+        }
+        let mut recorder = None;
+        let mut output = Outputter::new(OutputMode::Raw);
+        let mut sink = Vec::new();
+
+        assert!(drain_output_slice(
+            &receiver,
+            &mut recorder,
+            &mut output,
+            &mut sink
+        ));
+        assert_eq!(sink.len(), chunk_len * 2);
+        assert_eq!(receiver.len(), 1);
+    }
+
+    #[test]
+    fn semantic_event_slice_bounds_a_continuously_refilled_channel() {
+        let (sender, receiver) = crossbeam_channel::unbounded();
+        for value in 0..=EVENT_SLICE_MESSAGES {
+            sender.send(value).unwrap();
+        }
+        let mut handled = Vec::new();
+
+        assert!(drain_event_slice(&receiver, |event| handled.push(event)));
+        assert_eq!(handled.len(), EVENT_SLICE_MESSAGES);
+        assert!(!drain_event_slice(&receiver, |event| handled.push(event)));
+        assert_eq!(handled.len(), EVENT_SLICE_MESSAGES + 1);
+    }
+
+    #[test]
+    fn empty_stdin_frames_never_enter_the_writer_state_machine() {
+        let (done_tx, done_rx) = crossbeam_channel::bounded(1);
+        let mut current = None;
+        let mut stdin_open = true;
+        let mut eof_pending = false;
+
+        process_stdin_event(
+            StdinPumpEvent::Data(Vec::new()),
+            &mut current,
+            &mut stdin_open,
+            &mut eof_pending,
+            &done_tx,
+        );
+
+        assert!(current.is_none());
+        assert!(stdin_open);
+        assert!(!eof_pending);
+        assert!(done_rx.is_empty());
+    }
 
     #[test]
     fn ansi_stripper_handles_sequence_split_across_chunks() {
@@ -1045,6 +1699,79 @@ mod tests {
         };
         let mut sink = Vec::new();
         assert_eq!(run_exec_with(opts, &|| None, &mut sink), EXIT_INTERNAL);
+    }
+
+    #[test]
+    fn stdin_pump_thread_spawn_failure_is_propagated_without_running_task() {
+        let ran = std::sync::Arc::new(AtomicBool::new(false));
+        let task_ran = ran.clone();
+        let task: StdinPumpTask = Box::new(move || task_ran.store(true, Ordering::Release));
+        let error = spawn_stdin_pump_task_with(task, |_task| {
+            Err(std::io::Error::other("synthetic thread exhaustion"))
+        })
+        .unwrap_err();
+
+        assert_eq!(error.kind(), std::io::ErrorKind::Other);
+        assert!(error.to_string().contains("synthetic thread exhaustion"));
+        assert!(!ran.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn admitted_reply_preempts_a_pending_eof_retry() {
+        let (reply_tx, reply_rx) = crossbeam_channel::bounded(1);
+        let reply_gate = Mutex::new(());
+        let mut replies_open = true;
+        let mut reply_current = None;
+        let mut writes = Vec::new();
+
+        let first = try_eof_after_reply_recheck(
+            &reply_gate,
+            &reply_rx,
+            &mut replies_open,
+            &mut reply_current,
+            || {
+                writes.push(vec![0x04]);
+                PtyEofProgress::Pending
+            },
+        );
+        assert_eq!(first, Some(PtyEofProgress::Pending));
+
+        // Stage the arbiter's stale fast-path observation, then publish a
+        // terminal reply through the same admission gate used in production.
+        assert!(reply_rx.is_empty());
+        {
+            let _gate = reply_gate.lock().unwrap_or_else(PoisonError::into_inner);
+            reply_tx.try_send(b"\x1b[0n".to_vec()).unwrap();
+        }
+
+        let second = try_eof_after_reply_recheck(
+            &reply_gate,
+            &reply_rx,
+            &mut replies_open,
+            &mut reply_current,
+            || {
+                writes.push(vec![0x04]);
+                PtyEofProgress::Signaled
+            },
+        );
+        assert_eq!(second, None);
+        writes.push(reply_current.take().unwrap().bytes);
+
+        let third = try_eof_after_reply_recheck(
+            &reply_gate,
+            &reply_rx,
+            &mut replies_open,
+            &mut reply_current,
+            || {
+                writes.push(vec![0x04]);
+                PtyEofProgress::Signaled
+            },
+        );
+        assert_eq!(third, Some(PtyEofProgress::Signaled));
+        assert_eq!(
+            writes,
+            [b"\x04".to_vec(), b"\x1b[0n".to_vec(), b"\x04".to_vec()]
+        );
     }
 
     #[cfg(unix)]

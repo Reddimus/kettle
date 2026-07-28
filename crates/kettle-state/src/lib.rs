@@ -34,6 +34,23 @@ pub use private::{
     open_private_file_append, remove_open_private_file, restrict_private_file,
 };
 
+/// Maximum on-disk size of the shared remote-command spool.
+///
+/// Sender and receiver both enforce this boundary so an accepted append can
+/// never make the receiver discard an earlier valid command batch.
+pub const MAX_REMOTE_COMMAND_BYTES: u64 = 1 << 20;
+
+/// Return the deterministic sibling lock path for a remote-command spool.
+///
+/// The `.lock` suffix is appended to the file name without converting it to
+/// UTF-8, so sender and receiver agree for every platform-native path. For
+/// example, `remote.cmd` maps to `remote.cmd.lock`.
+pub fn remote_command_lock_path(path: &Path) -> PathBuf {
+    let mut file_name = path.file_name().unwrap_or_default().to_os_string();
+    file_name.push(".lock");
+    path.with_file_name(file_name)
+}
+
 /// Policy for an atomic file replacement.
 #[derive(Clone, Copy, Debug)]
 pub struct AtomicWriteOptions {
@@ -133,6 +150,7 @@ pub fn atomic_replace(
             ),
         )
     })?;
+    schedule_stale_staged_reap(destination);
     let destination_snapshot = if destination_exists {
         Some(private::capture_destination_dacl(
             destination,
@@ -163,15 +181,27 @@ pub fn atomic_replace(
             format!("create staged file for {}: {error}", destination.display()),
         )
     })?;
-    let mut cleanup = TempCleanup(Some(staged_path.clone()));
     let preparation = (|| {
         staged.write_all(bytes)?;
         staged.flush()?;
+        // Publish the replacement only after its final security descriptor
+        // and Unix mode are durable on the staged inode. In particular, an
+        // executable update must never become visible as the private 0600
+        // staging file if power is lost immediately after the rename.
+        if options.preserve_permissions
+            && let Some(snapshot) = destination_snapshot.as_ref()
+        {
+            private::apply_preserved_dacl(snapshot, &staged)?;
+        }
+        if let Some(permissions) = existing_permissions.as_ref() {
+            staged.set_permissions(permissions.clone())?;
+        } else {
+            set_unix_mode(&staged, options.unix_mode)?;
+        }
         staged.sync_all()
     })();
     if let Err(error) = preparation {
         private::discard_created_private_file(staged, &staged_path);
-        cleanup.0 = None;
         return Err(error);
     }
     let publication = (|| {
@@ -180,21 +210,8 @@ pub fn atomic_replace(
     })();
     if let Err(error) = publication {
         private::discard_created_private_file(staged, &staged_path);
-        cleanup.0 = None;
         return Err(error);
     }
-    cleanup.0 = None;
-    if options.preserve_permissions
-        && let Some(snapshot) = destination_snapshot.as_ref()
-    {
-        private::apply_preserved_dacl(snapshot, &staged)?;
-    }
-    if let Some(permissions) = existing_permissions.as_ref() {
-        staged.set_permissions(permissions.clone())?;
-    } else {
-        set_unix_mode(&staged, options.unix_mode)?;
-    }
-    staged.sync_all()?;
     drop(staged);
     private::sync_guarded_parent(&parent_guard)?;
     Ok(())
@@ -244,8 +261,8 @@ pub fn atomic_create_new(
     }
 
     let parent_guard = private::guard_private_parent(destination)?;
+    schedule_stale_staged_reap(destination);
     let (mut staged, staged_path) = create_staged_file(parent, destination)?;
-    let mut cleanup = TempCleanup(Some(staged_path.clone()));
     let preparation = (|| {
         staged.write_all(bytes)?;
         staged.flush()?;
@@ -254,24 +271,20 @@ pub fn atomic_create_new(
     })();
     if let Err(error) = preparation {
         private::discard_created_private_file(staged, &staged_path);
-        cleanup.0 = None;
         return Err(error);
     }
     if let Err(error) = parent_guard.verify() {
         private::discard_created_private_file(staged, &staged_path);
-        cleanup.0 = None;
         return Err(error);
     }
     match private::publish_staged_create(&parent_guard, &staged, &staged_path, destination) {
         Ok(()) => {}
         Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
             private::discard_created_private_file(staged, &staged_path);
-            cleanup.0 = None;
             return Ok(false);
         }
         Err(error) => {
             private::discard_created_private_file(staged, &staged_path);
-            cleanup.0 = None;
             return Err(error);
         }
     }
@@ -279,13 +292,11 @@ pub fn atomic_create_new(
         Ok(same_file) => same_file,
         Err(error) => {
             private::discard_created_private_file(staged, &staged_path);
-            cleanup.0 = None;
             return Err(error);
         }
     };
     if !same_file {
         private::discard_created_private_file(staged, &staged_path);
-        cleanup.0 = None;
         return Err(io::Error::new(
             io::ErrorKind::PermissionDenied,
             "created destination does not refer to the staged private file",
@@ -295,7 +306,6 @@ pub fn atomic_create_new(
     // Remove only the exact still-open staged object; neither platform falls
     // back to deleting a possibly swapped path.
     private::discard_created_private_file(staged, &staged_path);
-    cleanup.0 = None;
     private::sync_guarded_parent(&parent_guard)?;
     Ok(true)
 }
@@ -316,10 +326,7 @@ fn metadata_is_link_like(metadata: &fs::Metadata) -> bool {
 }
 
 fn create_staged_file(parent: &Path, destination: &Path) -> io::Result<(File, PathBuf)> {
-    let stem = destination
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or("state");
+    let stem = staged_file_stem(destination);
     for _ in 0..128 {
         let nonce = TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed);
         let nanos = SystemTime::now()
@@ -346,12 +353,232 @@ fn create_staged_file(parent: &Path, destination: &Path) -> io::Result<(File, Pa
     ))
 }
 
-struct TempCleanup(Option<PathBuf>);
+fn staged_file_stem(destination: &Path) -> &str {
+    destination
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("state")
+}
 
-impl Drop for TempCleanup {
+fn canonical_decimal(value: &str) -> bool {
+    !value.is_empty()
+        && value.bytes().all(|byte| byte.is_ascii_digit())
+        && (value == "0" || !value.starts_with('0'))
+}
+
+fn staged_file_creator_pid(name: &str, destination: &Path) -> Option<u32> {
+    let prefix = format!(".{}.tmp.", staged_file_stem(destination));
+    let suffix = name.strip_prefix(&prefix)?;
+    let mut fields = suffix.split('.');
+    let pid = fields.next()?;
+    let nanos = fields.next()?;
+    let sequence = fields.next()?;
+    if fields.next().is_some()
+        || !canonical_decimal(pid)
+        || !canonical_decimal(nanos)
+        || !canonical_decimal(sequence)
+        || nanos.parse::<u128>().is_err()
+        || sequence.parse::<u64>().is_err()
+    {
+        return None;
+    }
+    pid.parse::<u32>().ok().filter(|pid| *pid != 0)
+}
+
+#[cfg(unix)]
+fn process_is_definitely_dead(pid: u32) -> bool {
+    let Ok(pid) = libc::pid_t::try_from(pid) else {
+        return false;
+    };
+    // SAFETY: signal 0 performs only an existence/permission probe.
+    let result = unsafe { libc::kill(pid, 0) };
+    result == -1 && io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
+}
+
+#[cfg(windows)]
+fn process_is_definitely_dead(pid: u32) -> bool {
+    use windows_sys::Win32::Foundation::{
+        CloseHandle, ERROR_INVALID_PARAMETER, GetLastError, STILL_ACTIVE,
+    };
+    use windows_sys::Win32::System::Threading::{
+        GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+    };
+
+    // SAFETY: the requested access is query-only and every successful handle
+    // is closed below.
+    let process = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
+    if process.is_null() {
+        // Access-denied and transient query failures are not proof of death.
+        return unsafe { GetLastError() } == ERROR_INVALID_PARAMETER;
+    }
+    let mut exit_code = 0_u32;
+    // SAFETY: `process` is live and `exit_code` is writable for the call.
+    let queried = unsafe { GetExitCodeProcess(process, &mut exit_code) } != 0;
+    // SAFETY: OpenProcess transferred this handle to us.
+    unsafe { CloseHandle(process) };
+    queried && exit_code != STILL_ACTIVE as u32
+}
+
+#[cfg(not(any(unix, windows)))]
+fn process_is_definitely_dead(_pid: u32) -> bool {
+    false
+}
+
+fn reap_stale_staged_files(destination: &Path, parent_guard: &private::PrivateParentGuard) {
+    const MAX_SCAN_ATTEMPTS: usize = 512;
+    const MAX_REAP: usize = 64;
+
+    let removed =
+        private::reap_guarded_children(parent_guard, MAX_SCAN_ATTEMPTS, MAX_REAP, |name| {
+            let Some(name) = name.to_str() else {
+                return false;
+            };
+            staged_file_creator_pid(name, destination).is_some_and(process_is_definitely_dead)
+        })
+        .unwrap_or(0);
+    if removed != 0 {
+        // Cleanup is best-effort and must not make the requested atomic write
+        // fail. The subsequent publication sync still persists this directory
+        // mutation on every supported platform.
+        let _ = private::sync_guarded_parent(parent_guard);
+    }
+}
+
+const MAX_TRACKED_REAPER_DESTINATIONS: usize = 256;
+const REAPER_QUEUE_CAPACITY: usize = 32;
+const REAPER_RESCAN_COOLDOWN: Duration = Duration::from_secs(5 * 60);
+
+#[derive(Default)]
+struct ReaperSchedule {
+    in_flight: std::collections::HashSet<PathBuf>,
+    completed: std::collections::VecDeque<(PathBuf, Instant)>,
+}
+
+impl ReaperSchedule {
+    fn reserve(&mut self, destination: &Path, now: Instant) -> bool {
+        while self.completed.front().is_some_and(|(_, completed_at)| {
+            now.saturating_duration_since(*completed_at) >= REAPER_RESCAN_COOLDOWN
+        }) {
+            self.completed.pop_front();
+        }
+        if self.in_flight.contains(destination)
+            || self
+                .completed
+                .iter()
+                .any(|(completed, _)| completed == destination)
+        {
+            return false;
+        }
+        while self.in_flight.len() + self.completed.len() >= MAX_TRACKED_REAPER_DESTINATIONS {
+            if self.completed.pop_front().is_none() {
+                return false;
+            }
+        }
+        self.in_flight.insert(destination.to_path_buf())
+    }
+
+    fn complete(&mut self, destination: &Path, now: Instant) {
+        if !self.in_flight.remove(destination) {
+            return;
+        }
+        self.completed
+            .retain(|(completed, _)| completed != destination);
+        self.completed.push_back((destination.to_path_buf(), now));
+        while self.in_flight.len() + self.completed.len() > MAX_TRACKED_REAPER_DESTINATIONS {
+            self.completed.pop_front();
+        }
+    }
+
+    fn cancel(&mut self, destination: &Path) {
+        self.in_flight.remove(destination);
+    }
+}
+
+struct ReaperCompletion<'a> {
+    schedule: &'a std::sync::Mutex<ReaperSchedule>,
+    destination: PathBuf,
+}
+
+impl Drop for ReaperCompletion<'_> {
     fn drop(&mut self) {
-        if let Some(path) = self.0.take() {
-            let _ = fs::remove_file(path);
+        if let Ok(mut schedule) = self.schedule.lock() {
+            schedule.complete(&self.destination, Instant::now());
+        }
+    }
+}
+
+fn run_stale_staged_reaper(
+    receiver: std::sync::mpsc::Receiver<PathBuf>,
+    schedule: &std::sync::Mutex<ReaperSchedule>,
+) {
+    while let Ok(destination) = receiver.recv() {
+        let _completion = ReaperCompletion {
+            schedule,
+            destination: destination.clone(),
+        };
+        let Ok(parent_guard) = private::guard_private_parent(&destination) else {
+            continue;
+        };
+        reap_stale_staged_files(&destination, &parent_guard);
+    }
+}
+
+fn schedule_stale_staged_reap(destination: &Path) {
+    use std::sync::{Mutex, OnceLock, mpsc};
+
+    static SCHEDULE: OnceLock<Mutex<ReaperSchedule>> = OnceLock::new();
+    static REAPER: OnceLock<Mutex<Option<mpsc::SyncSender<PathBuf>>>> = OnceLock::new();
+
+    let destination =
+        std::path::absolute(destination).unwrap_or_else(|_| destination.to_path_buf());
+    let schedule = SCHEDULE.get_or_init(|| Mutex::new(ReaperSchedule::default()));
+    let Ok(mut state) = schedule.lock() else {
+        return;
+    };
+    if !state.reserve(&destination, Instant::now()) {
+        return;
+    }
+    drop(state);
+
+    let sender_slot = REAPER.get_or_init(|| Mutex::new(None));
+    let Ok(mut sender_slot) = sender_slot.lock() else {
+        if let Ok(mut state) = schedule.lock() {
+            state.cancel(&destination);
+        }
+        return;
+    };
+    if sender_slot.is_none() {
+        let (sender, receiver) = mpsc::sync_channel::<PathBuf>(REAPER_QUEUE_CAPACITY);
+        match std::thread::Builder::new()
+            .name("kettle-state-reaper".into())
+            .spawn(move || run_stale_staged_reaper(receiver, schedule))
+        {
+            Ok(_) => *sender_slot = Some(sender),
+            Err(_) => {
+                if let Ok(mut state) = schedule.lock() {
+                    state.cancel(&destination);
+                }
+                return;
+            }
+        }
+    }
+    let result = sender_slot
+        .as_ref()
+        .expect("reaper sender initialized above")
+        .try_send(destination);
+    if let Err(error) = result {
+        // A saturated/disconnected best-effort worker must never delay the
+        // foreground state write. Permit a later call to retry this key.
+        let disconnected = matches!(&error, mpsc::TrySendError::Disconnected(_));
+        let destination = match error {
+            mpsc::TrySendError::Full(destination)
+            | mpsc::TrySendError::Disconnected(destination) => destination,
+        };
+        if disconnected {
+            *sender_slot = None;
+        }
+        if let Ok(mut state) = schedule.lock() {
+            state.cancel(&destination);
         }
     }
 }
@@ -492,6 +719,226 @@ fn set_unix_mode(_file: &File, _mode: u32) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn remote_command_lock_path_is_a_deterministic_sibling() {
+        assert_eq!(
+            remote_command_lock_path(Path::new("remote.cmd")),
+            PathBuf::from("remote.cmd.lock")
+        );
+        assert_eq!(
+            remote_command_lock_path(Path::new("state/remote")),
+            PathBuf::from("state/remote.lock")
+        );
+        assert_eq!(
+            remote_command_lock_path(Path::new("state/a.b.c")),
+            PathBuf::from("state/a.b.c.lock")
+        );
+    }
+
+    fn exited_child_pid() -> u32 {
+        for _ in 0..16 {
+            #[cfg(windows)]
+            let mut child = std::process::Command::new("cmd.exe")
+                .args(["/d", "/s", "/c", "exit 0"])
+                .spawn()
+                .unwrap();
+            #[cfg(unix)]
+            let mut child = std::process::Command::new("sh")
+                .args(["-c", "exit 0"])
+                .spawn()
+                .unwrap();
+            #[cfg(not(any(unix, windows)))]
+            compile_error!("stale staged-file tests require process liveness support");
+
+            let pid = child.id();
+            child.wait().unwrap();
+            if process_is_definitely_dead(pid) {
+                return pid;
+            }
+        }
+        panic!("could not obtain an exited, non-reused child pid");
+    }
+
+    #[test]
+    fn staged_file_name_parser_is_exact_and_canonical() {
+        let destination = Path::new("state.json");
+        assert_eq!(
+            staged_file_creator_pid(".state.json.tmp.42.123456.7", destination),
+            Some(42)
+        );
+        for invalid in [
+            ".other.tmp.42.123456.7",
+            ".state.json.tmp.0.123456.7",
+            ".state.json.tmp.042.123456.7",
+            ".state.json.tmp.42.0123456.7",
+            ".state.json.tmp.42.123456.07",
+            ".state.json.tmp.42.123456",
+            ".state.json.tmp.42.123456.7.extra",
+            ".state.json.tmp.-1.123456.7",
+            ".state.json.tmp.4294967296.123456.7",
+        ] {
+            assert_eq!(
+                staged_file_creator_pid(invalid, destination),
+                None,
+                "{invalid}"
+            );
+        }
+    }
+
+    #[test]
+    fn reaper_schedule_coalesces_in_flight_and_cools_down_completed_paths() {
+        let now = Instant::now();
+        let destination = Path::new("state/state.json");
+        let mut schedule = ReaperSchedule::default();
+
+        assert!(schedule.reserve(destination, now));
+        assert!(!schedule.reserve(destination, now));
+        schedule.complete(destination, now);
+        assert!(!schedule.reserve(
+            destination,
+            now + REAPER_RESCAN_COOLDOWN - Duration::from_millis(1)
+        ));
+        assert!(schedule.reserve(destination, now + REAPER_RESCAN_COOLDOWN));
+        schedule.cancel(destination);
+        assert!(schedule.reserve(destination, now + REAPER_RESCAN_COOLDOWN));
+    }
+
+    #[test]
+    fn reaper_schedule_evicts_old_completions_instead_of_saturating_forever() {
+        let now = Instant::now();
+        let mut schedule = ReaperSchedule::default();
+        for index in 0..(MAX_TRACKED_REAPER_DESTINATIONS + 32) {
+            let destination = PathBuf::from(format!("state-{index}.json"));
+            assert!(
+                schedule.reserve(&destination, now),
+                "destination {index} was permanently rejected"
+            );
+            schedule.complete(&destination, now);
+        }
+
+        assert_eq!(schedule.completed.len(), MAX_TRACKED_REAPER_DESTINATIONS);
+        assert!(
+            schedule
+                .completed
+                .iter()
+                .all(|(path, _)| path != Path::new("state-0.json")),
+            "the oldest completed key should be evicted"
+        );
+    }
+
+    #[test]
+    fn reaper_worker_completion_guard_clears_in_flight_after_guard_failure() {
+        let root = crate::test_tempdir();
+        let destination = root.path().join("missing-parent/state.json");
+        let schedule = std::sync::Mutex::new(ReaperSchedule::default());
+        let now = Instant::now();
+        assert!(schedule.lock().unwrap().reserve(&destination, now));
+        let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+        sender.send(destination.clone()).unwrap();
+        drop(sender);
+
+        run_stale_staged_reaper(receiver, &schedule);
+
+        let state = schedule.lock().unwrap();
+        assert!(!state.in_flight.contains(&destination));
+        assert!(
+            state
+                .completed
+                .iter()
+                .any(|(completed, _)| completed == &destination)
+        );
+    }
+
+    #[test]
+    fn guarded_reaper_removes_only_exact_dead_creator_staged_files() {
+        let dir = crate::test_tempdir();
+        let destination = dir.path().join("state.json");
+        let dead_pid = exited_child_pid();
+        let dead = dir.path().join(format!(".state.json.tmp.{dead_pid}.1.0"));
+        let live = dir
+            .path()
+            .join(format!(".state.json.tmp.{}.1.1", std::process::id()));
+        let malformed = dir.path().join(format!(".state.json.tmp.0{dead_pid}.1.2"));
+        let directory = dir.path().join(format!(".state.json.tmp.{dead_pid}.1.3"));
+        let linked_source = dir.path().join("linked-source");
+        let linked = dir.path().join(format!(".state.json.tmp.{dead_pid}.1.4"));
+
+        drop(create_private_file_new(&dead).unwrap());
+        drop(create_private_file_new(&live).unwrap());
+        drop(create_private_file_new(&malformed).unwrap());
+        fs::create_dir(&directory).unwrap();
+        drop(create_private_file_new(&linked_source).unwrap());
+        fs::hard_link(&linked_source, &linked).unwrap();
+
+        let guard = private::guard_private_parent(&destination).unwrap();
+        reap_stale_staged_files(&destination, &guard);
+
+        assert!(!dead.exists(), "the exact dead-creator temp is reclaimed");
+        assert!(live.is_file(), "a live creator's temp is never touched");
+        assert!(malformed.is_file(), "noncanonical names are never touched");
+        assert!(
+            directory.is_dir(),
+            "nonregular candidates are never touched"
+        );
+        assert!(linked.is_file(), "multi-link candidates are never touched");
+    }
+
+    #[test]
+    fn guarded_reaper_caps_attempts_even_when_nothing_is_removed() {
+        let dir = crate::test_tempdir();
+        let destination = dir.path().join("state.json");
+        for index in 0..40 {
+            drop(create_private_file_new(&dir.path().join(format!("candidate-{index}"))).unwrap());
+        }
+        let guard = private::guard_private_parent(&destination).unwrap();
+        let inspected = std::cell::Cell::new(0usize);
+        let removed = private::reap_guarded_children(&guard, 17, 64, |_| {
+            inspected.set(inspected.get() + 1);
+            false
+        })
+        .unwrap();
+        assert_eq!(removed, 0);
+        assert_eq!(
+            inspected.get(),
+            17,
+            "the scan budget counts attempts, not successful removals"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn guarded_reaper_never_follows_a_replaced_parent_path() {
+        let root = crate::test_tempdir();
+        let live_path = root.path().join("state");
+        fs::create_dir(&live_path).unwrap();
+        let destination = live_path.join("state.json");
+        let guard = private::guard_private_parent(&destination).unwrap();
+        let dead_pid = exited_child_pid();
+        let name = format!(".state.json.tmp.{dead_pid}.1.0");
+        let displaced_candidate = live_path.join(&name);
+        drop(create_private_file_new(&displaced_candidate).unwrap());
+
+        let displaced = root.path().join("displaced");
+        fs::rename(&live_path, &displaced).unwrap();
+        fs::create_dir(&live_path).unwrap();
+        let replacement_candidate = live_path.join(&name);
+        drop(create_private_file_new(&replacement_candidate).unwrap());
+        let replacement_sentinel = live_path.join("sentinel");
+        drop(create_private_file_new(&replacement_sentinel).unwrap());
+
+        reap_stale_staged_files(&destination, &guard);
+
+        assert!(
+            !displaced.join(&name).exists(),
+            "the held original directory is the only cleanup target"
+        );
+        assert!(
+            replacement_candidate.is_file(),
+            "a matching file in a pathname replacement must remain untouched"
+        );
+        assert!(replacement_sentinel.is_file());
+    }
 
     #[test]
     fn atomically_creates_and_replaces_private_file() {

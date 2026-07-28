@@ -39,9 +39,9 @@ pub mod kitty;
 pub mod placeholder;
 pub mod sixel;
 
-pub use extract::{Chunk, Extractor, Progress, PromptKind};
+pub use extract::{Chunk, DeferredGraphics, Extractor, Progress, PromptKind};
 pub use graphics_limits::{GraphicsBudget, GraphicsLimits, GraphicsReservation};
-pub use image::{ImageData, Placed};
+pub use image::{ImageData, Placed, PlacementParams};
 
 #[cfg(test)]
 mod tests {
@@ -404,14 +404,136 @@ mod tests {
         let c3 = e.feed(b"\x1b_Ga=d,d=i,i=7\x1b\\");
         assert!(c3.iter().any(|c| matches!(
             c,
-            Chunk::DeleteImages {
-                all: false,
-                id: Some(7)
-            }
+            Chunk::DeleteImages(delete)
+                if matches!(
+                    delete.target,
+                    kitty::DeleteTarget::Image {
+                        id: 7,
+                        placement_id: None
+                    }
+                ) && !delete.free_data
         )));
-        // After deletion it can no longer be placed.
+        // Lowercase deletion removes placements but retains image data.
         let c4 = e.feed(b"\x1b_Ga=p,i=7\x1b\\");
-        assert!(!c4.iter().any(|c| matches!(c, Chunk::Image(_))));
+        assert!(c4.iter().any(|c| matches!(c, Chunk::Image(_))));
+        // Uppercase deletion frees the stored data.
+        e.feed(b"\x1b_Ga=d,d=I,i=7\x1b\\");
+        let c5 = e.feed(b"\x1b_Ga=p,i=7\x1b\\");
+        assert!(!c5.iter().any(|c| matches!(c, Chunk::Image(_))));
+    }
+
+    #[test]
+    fn kitty_image_stores_are_isolated_across_screen_buffers() {
+        use base64::Engine;
+
+        let primary = base64::engine::general_purpose::STANDARD.encode([1u8, 2, 3, 255]);
+        let alternate = base64::engine::general_purpose::STANDARD.encode([9u8, 8, 7, 255]);
+        let mut e = Extractor::new();
+
+        e.feed(format!("\x1b_Gf=32,s=1,v=1,i=7,a=t;{primary}\x1b\\").as_bytes());
+        e.enter_alternate_screen(false);
+        assert!(
+            !e.feed(b"\x1b_Ga=p,i=7\x1b\\")
+                .iter()
+                .any(|chunk| matches!(chunk, Chunk::Image(_))),
+            "the alternate screen must not see primary image ids"
+        );
+
+        e.feed(format!("\x1b_Gf=32,s=1,v=1,i=7,a=t;{alternate}\x1b\\").as_bytes());
+        let alt_pixel = e
+            .feed(b"\x1b_Ga=p,i=7\x1b\\")
+            .into_iter()
+            .find_map(|chunk| match chunk {
+                Chunk::Image(placed) => Some(placed.img.rgba[0]),
+                _ => None,
+            });
+        assert_eq!(alt_pixel, Some(9));
+
+        e.leave_alternate_screen(false);
+        let primary_pixel =
+            e.feed(b"\x1b_Ga=p,i=7\x1b\\")
+                .into_iter()
+                .find_map(|chunk| match chunk {
+                    Chunk::Image(placed) => Some(placed.img.rgba[0]),
+                    _ => None,
+                });
+        assert_eq!(primary_pixel, Some(1));
+
+        e.enter_alternate_screen(false);
+        let preserved_alt_pixel = e
+            .feed(b"\x1b_Ga=p,i=7\x1b\\")
+            .into_iter()
+            .find_map(|chunk| match chunk {
+                Chunk::Image(placed) => Some(placed.img.rgba[0]),
+                _ => None,
+            });
+        assert_eq!(
+            preserved_alt_pixel,
+            Some(9),
+            "mode 47 must preserve alternate image data"
+        );
+
+        e.leave_alternate_screen(false);
+        e.enter_alternate_screen(true);
+        assert!(
+            !e.feed(b"\x1b_Ga=p,i=7\x1b\\")
+                .iter()
+                .any(|chunk| matches!(chunk, Chunk::Image(_))),
+            "mode 1049 must clear the alternate image store before entry"
+        );
+
+        e.feed(format!("\x1b_Gf=32,s=1,v=1,i=7,a=t;{alternate}\x1b\\").as_bytes());
+        e.leave_alternate_screen(false);
+        e.enter_alternate_screen(false);
+        assert!(
+            e.feed(b"\x1b_Ga=p,i=7\x1b\\")
+                .iter()
+                .any(|chunk| matches!(chunk, Chunk::Image(_))),
+            "mode 1049 must preserve alternate image data on exit"
+        );
+
+        e.leave_alternate_screen(true);
+        e.enter_alternate_screen(false);
+        assert!(
+            !e.feed(b"\x1b_Ga=p,i=7\x1b\\")
+                .iter()
+                .any(|chunk| matches!(chunk, Chunk::Image(_))),
+            "mode 1047 must clear alternate image data on exit"
+        );
+    }
+
+    #[test]
+    fn graphics_clear_is_active_only_but_ris_reset_clears_both_buffers() {
+        use base64::Engine;
+
+        let pixel = base64::engine::general_purpose::STANDARD.encode([1u8, 2, 3, 255]);
+        let transmit = format!("\x1b_Gf=32,s=1,v=1,i=7,a=t;{pixel}\x1b\\");
+        let mut e = Extractor::new();
+        e.feed(transmit.as_bytes());
+
+        e.enter_alternate_screen(false);
+        e.feed(transmit.as_bytes());
+        e.clear_active_graphics();
+        assert!(
+            !e.feed(b"\x1b_Ga=p,i=7\x1b\\")
+                .iter()
+                .any(|chunk| matches!(chunk, Chunk::Image(_)))
+        );
+        e.leave_alternate_screen(false);
+        assert!(
+            e.feed(b"\x1b_Ga=p,i=7\x1b\\")
+                .iter()
+                .any(|chunk| matches!(chunk, Chunk::Image(_))),
+            "ED 2 in alternate must preserve primary graphics"
+        );
+
+        e.reset_all_graphics();
+        assert!(
+            !e.feed(b"\x1b_Ga=p,i=7\x1b\\")
+                .iter()
+                .any(|chunk| matches!(chunk, Chunk::Image(_))),
+            "RIS must clear the primary store too"
+        );
     }
 
     #[test]
@@ -438,6 +560,7 @@ mod tests {
                     h,
                     v,
                     img,
+                    ..
                 } => Some((
                     *id,
                     *placement,
@@ -506,6 +629,7 @@ mod tests {
                     cols,
                     rows,
                     z,
+                    ..
                 } => Some((*id, img.clone(), *cols, *rows, *z)),
                 _ => None,
             })
@@ -516,10 +640,14 @@ mod tests {
         let d = e.feed(b"\x1b_Ga=d,d=i,i=5\x1b\\");
         assert!(d.iter().any(|c| matches!(
             c,
-            Chunk::DeleteImages {
-                all: false,
-                id: Some(5)
-            }
+            Chunk::DeleteImages(delete)
+                if matches!(
+                    delete.target,
+                    kitty::DeleteTarget::Image {
+                        id: 5,
+                        placement_id: None
+                    }
+                )
         )));
     }
 

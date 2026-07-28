@@ -74,10 +74,14 @@ libc = "0.2"
 # `Win32_System_Console` → AttachConsole / Get/SetStdHandle / STD_* /
 #   ATTACH_PARENT_PROCESS; `Win32_Storage_FileSystem` → CreateFileW /
 #   GetFileType / FILE_TYPE_* / FILE_SHARE_* / OPEN_EXISTING;
-# `Win32_Foundation` → INVALID_HANDLE_VALUE / GetLastError.
+# `Win32_Foundation` → INVALID_HANDLE_VALUE / GetLastError;
+# `Win32_System_Pipes` + `Win32_Security` → the native anonymous-pipe
+#   `PIPE_NOWAIT` saturation regression.
 windows-sys = { version = "0.61", features = [
+    "Win32_Security",
     "Win32_System_Console",
     "Win32_System_JobObjects",
+    "Win32_System_Pipes",
     "Win32_System_Threading",
     "Win32_Storage_FileSystem",
     "Win32_Foundation",

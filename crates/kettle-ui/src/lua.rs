@@ -6,8 +6,8 @@
 //! introspection; side-effect APIs build on top of it:
 //!
 //!   kettle.version() / config_path() / theme()  -- read-only foundation
-//!   kettle.send_text(s), set_tab_title(s)
-//!   kettle.exec_action(name)
+//!   kettle.send_text(s), kettle.exec_action(name)
+//!   kettle.notify(title, body), kettle.set_theme(name)
 //!   kettle.on(event, callback) event hooks       -- foundation; see
 //!                                                    docs/TERMINATOR-PLUGIN-DESIGN.md
 //!                                                    for the full roadmap
@@ -28,10 +28,8 @@ use std::sync::{Arc, Mutex};
 /// Per-call cap on `kettle.send_text(s)`. A hostile
 /// `init.lua` running under the default `lua-sandbox = safe` mode
 /// (where `os.execute`/`io.popen` are nil'd by the safe-sandbox setup
-/// in `new_inner`) could still queue gigabytes of PTY-bound text via `for i=1,10000 do
-/// kettle.send_text(string.rep("X", 1<<20)) end` and OOM kettle at
-/// the App's drain step (app.rs:900 unconditionally
-/// `extend_from_slice`s every queued SendText into a single Vec).
+/// in `new_inner`) could still queue gigabytes of PTY-bound text via
+/// `for i=1,10000 do kettle.send_text(string.rep("X", 1<<20)) end`.
 /// 1 MiB per call covers any realistic multi-line snippet paste
 /// with massive headroom and stops the bomb shape early.
 const MAX_LUA_SEND_TEXT_BYTES: usize = 1 << 20;
@@ -41,15 +39,11 @@ const MAX_LUA_SEND_TEXT_BYTES: usize = 1 << 20;
 /// (per-call) and `MAX_PENDING_COMMANDS` (per-entry-count). Without this,
 /// a script could stay under both existing caps yet still bankrupt kettle:
 /// `for i=1,1024 do kettle.send_text(string.rep('X', 1<<20)) end` queues
-/// 1024 commands (well under the 1024-entry cap) each exactly at the
-/// 1 MiB per-call cap, and `pending_lua_send` (app.rs) concatenates every
-/// queued `SendText` into one growing `Vec<u8>` before writing it to the
-/// PTY in a single call — roughly a 1 GiB allocation. 8 MiB (8×the
-/// per-call cap) covers pasting several large snippets back to back with
-/// real headroom while making the aggregate-bomb shape impossible: past
-/// this cap, `bounded_push` drops further `SendText` pushes (loud
-/// `log::warn`, same silent-drop contract as the other Lua caps) until
-/// `drain_commands` resets the running total.
+/// 1024 commands (the entry cap) each exactly at the 1 MiB per-call cap.
+/// 8 MiB (8x the per-call cap) covers pasting several large snippets back
+/// to back with real headroom while making that aggregate-bomb shape
+/// impossible. Past this cap, `bounded_push` rejects further `SendText`
+/// pushes until `drain_commands` resets the running total.
 const MAX_LUA_PENDING_SEND_BYTES: usize = 8 << 20;
 
 /// Per-call cap on `kettle.notify(title, body)`. Real
@@ -61,6 +55,13 @@ const MAX_LUA_PENDING_SEND_BYTES: usize = 8 << 20;
 /// huge title in a loop.
 const MAX_LUA_NOTIFY_BYTES: usize = 8 << 10;
 
+/// Action and theme names are identifiers, not bulk-data channels.
+/// The built-in names are all far below this limit; bounding them keeps
+/// 1024 individually valid commands from retaining arbitrarily large
+/// Rust strings outside Lua's own heap accounting.
+const MAX_LUA_ACTION_NAME_BYTES: usize = 256;
+const MAX_LUA_THEME_NAME_BYTES: usize = 256;
+
 /// Cap on the in-process LuaCommand queue length. A
 /// hostile script that fires `for i=1,10^9 do
 /// kettle.exec_action("noop") end` (or any other API) would grow
@@ -68,7 +69,7 @@ const MAX_LUA_NOTIFY_BYTES: usize = 8 << 10;
 /// × 10^9 = 32 GB. 1024 entries is well above any realistic
 /// init.lua's batch (most fire 1-10 commands; a power user wiring
 /// up a couple dozen hooks tops out around 50). Past the cap, new
-/// pushes drop silently with a `log::warn`.
+/// pushes return `false` with a `log::warn`.
 const MAX_PENDING_COMMANDS: usize = 1024;
 
 /// Per-registry caps on Lua-registered callbacks. The
@@ -77,12 +78,24 @@ const MAX_PENDING_COMMANDS: usize = 1024;
 /// not — a runaway `for i=1,1e9 do kettle.on('output', f) end` grew the
 /// registry unbounded AND made every event fire walk a giant list. Sized far
 /// above any legitimate plugin (a busy config wires up a few dozen). Past the
-/// cap, registration is a no-op with a single `log::warn` (the flags below
+/// cap, registration returns `false` with a single `log::warn` (the flags below
 /// keep a pathological loop from spamming the log).
 const MAX_LUA_CALLBACKS_PER_EVENT: usize = 256;
 const MAX_LUA_MENU_ITEMS: usize = 256;
 const MAX_LUA_URL_HANDLERS: usize = 256;
+
+/// Registry string fields are metadata, not bulk-data channels. Menu labels
+/// render on one line, so 1 KiB leaves ample room for descriptive Unicode
+/// labels while bounding the full 256-item registry to 256 KiB of label bytes.
+/// URL-handler names are identifiers and use the same 256-byte allowance as
+/// action/theme names. Patterns can reasonably be more involved, so they get
+/// 4 KiB each (at most 1 MiB across the bounded handler registry).
+const MAX_LUA_MENU_LABEL_BYTES: usize = 1 << 10;
+const MAX_LUA_URL_HANDLER_NAME_BYTES: usize = 256;
+const MAX_LUA_URL_PATTERN_BYTES: usize = 4 << 10;
+
 static LUA_EVENTS_WARNED: AtomicBool = AtomicBool::new(false);
+static LUA_UNKNOWN_EVENT_WARNED: AtomicBool = AtomicBool::new(false);
 static LUA_MENU_WARNED: AtomicBool = AtomicBool::new(false);
 static LUA_URL_WARNED: AtomicBool = AtomicBool::new(false);
 
@@ -106,13 +119,12 @@ struct PendingQueue {
 /// Locked push with queue-length AND (for `SendText`)
 /// aggregate-byte caps. All four `kettle.*` side-effect callbacks route
 /// through this so the `MAX_PENDING_COMMANDS` invariant is enforced
-/// exactly once, not duplicated four times. Returns `Ok(())` whether or
-/// not the push succeeded — from Lua's perspective the call is
-/// best-effort and dropping past a cap is preferable to raising an error
-/// that user scripts don't expect to handle. A poisoned mutex is the
-/// only hard error (it means kettle is already in an unrecoverable
-/// state — surface it).
-fn bounded_push(pending: &Mutex<PendingQueue>, cmd: LuaCommand) -> mlua::Result<()> {
+/// exactly once, not duplicated four times. The returned boolean tells Lua
+/// whether the command was admitted to this in-process queue. It does not
+/// promise eventual PTY delivery; that remains asynchronous and can still
+/// fail if the target pane closes. A poisoned mutex is the only hard error
+/// because it means kettle's queue state is no longer trustworthy.
+fn bounded_push(pending: &Mutex<PendingQueue>, cmd: LuaCommand) -> mlua::Result<bool> {
     let mut q = pending
         .lock()
         .map_err(|e| mlua::Error::external(format!("pending mutex: {e}")))?;
@@ -121,13 +133,11 @@ fn bounded_push(pending: &Mutex<PendingQueue>, cmd: LuaCommand) -> mlua::Result<
             "lua command queue saturated at {MAX_PENDING_COMMANDS}; dropping {:?}",
             std::mem::discriminant(&cmd)
         );
-        return Ok(());
+        return Ok(false);
     }
-    // Aggregate byte cap only applies to SendText: it's the only
-    // variant whose payload both scales with a hostile loop AND gets
-    // concatenated into one unbounded buffer downstream (app.rs's
-    // pending_lua_send). Checked (and, on admission, accounted) under
-    // the same lock as the length check above so the two invariants
+    // Aggregate byte cap only applies to SendText: it is the only variant
+    // intended to carry bulk data. Checked (and, on admission, accounted)
+    // under the same lock as the length check above so the two invariants
     // can never observe a torn intermediate state.
     if let LuaCommand::SendText(ref s) = cmd {
         let prospective_total = q.send_text_bytes.saturating_add(s.len());
@@ -137,17 +147,17 @@ fn bounded_push(pending: &Mutex<PendingQueue>, cmd: LuaCommand) -> mlua::Result<
                 q.send_text_bytes,
                 s.len()
             );
-            return Ok(());
+            return Ok(false);
         }
         q.send_text_bytes = prospective_total;
     }
     q.commands.push(cmd);
-    Ok(())
+    Ok(true)
 }
 
 /// Side-effect commands buffered from Lua. The Lua VM
 /// can't directly mutate App state (lifetime + threading), so
-/// side-effect APIs (send_text, set_tab_title, notify, ...) push
+/// side-effect APIs (send_text, exec_action, notify, set_theme) push
 /// onto this queue and the App drains it after the script
 /// returns. Same shape as the `--remote-send` / `--remote-file`
 /// remote-command file's line buffer, just in-process.
@@ -246,6 +256,26 @@ impl LuaEvent {
     }
 }
 
+/// Resolve a script-provided event name without allocating a Rust `String`.
+/// Keeping this list closed prevents a script from creating one registry table
+/// per arbitrary name and makes the per-event callback cap a global bound over
+/// the nine event kinds Kettle can actually emit.
+fn supported_lua_event_name(name: &[u8]) -> Option<&'static str> {
+    [
+        "startup",
+        "tab_add",
+        "tab_close",
+        "bell",
+        "pane_close",
+        "output",
+        "pane_focus",
+        "title_changed",
+        "url_clicked",
+    ]
+    .into_iter()
+    .find(|candidate| name == candidate.as_bytes())
+}
+
 /// Owned Lua VM with kettle's namespace registered. Single-threaded
 /// today (Lua VMs aren't natively reentrant); a future change may
 /// wrap in `Arc<Mutex<...>>` to allow event-hook callbacks from
@@ -270,6 +300,9 @@ pub struct LuaEngine {
     /// `MAX_LUA_PENDING_SEND_BYTES`). Drained by the App after
     /// exec_file returns.
     pending: Arc<Mutex<PendingQueue>>,
+    /// Canonical active theme exposed by `kettle.theme()`. App updates this
+    /// only after a queued `set_theme` name resolves and is applied.
+    active_theme: Arc<Mutex<String>>,
     /// Instruction-budget watchdog. `hook_fires` counts how
     /// many times the every-N-instructions hook has fired since the current
     /// top-level Lua invocation began (reset by `arm_budget`); when it exceeds
@@ -425,11 +458,17 @@ impl LuaEngine {
                 lua.create_function(move |_, ()| Ok(cfg_path.clone()))?,
             )
             .context("set kettle.config_path")?;
-        let theme = theme_name.to_string();
+        let active_theme = Arc::new(Mutex::new(theme_name.to_string()));
+        let theme_for_lua = Arc::clone(&active_theme);
         kettle_tbl
             .set(
                 "theme",
-                lua.create_function(move |_, ()| Ok(theme.clone()))?,
+                lua.create_function(move |_, ()| {
+                    theme_for_lua
+                        .lock()
+                        .map(|theme| theme.clone())
+                        .map_err(|e| mlua::Error::external(format!("active theme mutex: {e}")))
+                })?,
             )
             .context("set kettle.theme")?;
         // Side-effect API. `kettle.send_text(s)` queues
@@ -446,14 +485,16 @@ impl LuaEngine {
         kettle_tbl
             .set(
                 "send_text",
-                lua.create_function(move |_, s: String| {
-                    if s.len() > MAX_LUA_SEND_TEXT_BYTES {
+                lua.create_function(move |_, value: mlua::LuaString| {
+                    let len = value.as_bytes().len();
+                    if len > MAX_LUA_SEND_TEXT_BYTES {
                         log::warn!(
                             "kettle.send_text: dropping {} bytes (cap {MAX_LUA_SEND_TEXT_BYTES})",
-                            s.len()
+                            len
                         );
-                        return Ok(());
+                        return Ok(false);
                     }
+                    let s = value.to_str()?.to_string();
                     bounded_push(&pending_for_send, LuaCommand::SendText(s))
                 })?,
             )
@@ -466,7 +507,16 @@ impl LuaEngine {
         kettle_tbl
             .set(
                 "exec_action",
-                lua.create_function(move |_, name: String| {
+                lua.create_function(move |_, value: mlua::LuaString| {
+                    let len = value.as_bytes().len();
+                    if len > MAX_LUA_ACTION_NAME_BYTES {
+                        log::warn!(
+                            "kettle.exec_action: rejecting {}-byte name (cap {MAX_LUA_ACTION_NAME_BYTES})",
+                            len
+                        );
+                        return Ok(false);
+                    }
+                    let name = value.to_str()?.to_string();
                     bounded_push(&pending_for_action, LuaCommand::ExecAction(name))
                 })?,
             )
@@ -481,19 +531,33 @@ impl LuaEngine {
         kettle_tbl
             .set(
                 "notify",
-                lua.create_function(move |_, args: mlua::Variadic<String>| {
+                lua.create_function(move |_, args: mlua::Variadic<mlua::LuaString>| {
                     let mut iter = args.into_iter();
-                    let title = iter.next().unwrap_or_default();
-                    let body = iter.next().unwrap_or_default();
-                    if title.len() > MAX_LUA_NOTIFY_BYTES || body.len() > MAX_LUA_NOTIFY_BYTES {
+                    let title_value = iter.next();
+                    let body_value = iter.next();
+                    let title_len = title_value
+                        .as_ref()
+                        .map_or(0, |value| value.as_bytes().len());
+                    let body_len = body_value
+                        .as_ref()
+                        .map_or(0, |value| value.as_bytes().len());
+                    if title_len > MAX_LUA_NOTIFY_BYTES || body_len > MAX_LUA_NOTIFY_BYTES {
                         log::warn!(
                             "kettle.notify: dropping (title {} bytes, body {} bytes; \
                              cap {MAX_LUA_NOTIFY_BYTES} each)",
-                            title.len(),
-                            body.len()
+                            title_len,
+                            body_len
                         );
-                        return Ok(());
+                        return Ok(false);
                     }
+                    let title = title_value
+                        .map(|value| value.to_str().map(|value| value.to_string()))
+                        .transpose()?
+                        .unwrap_or_default();
+                    let body = body_value
+                        .map(|value| value.to_str().map(|value| value.to_string()))
+                        .transpose()?
+                        .unwrap_or_default();
                     bounded_push(&pending_for_notify, LuaCommand::Notify { title, body })
                 })?,
             )
@@ -505,7 +569,16 @@ impl LuaEngine {
         kettle_tbl
             .set(
                 "set_theme",
-                lua.create_function(move |_, name: String| {
+                lua.create_function(move |_, value: mlua::LuaString| {
+                    let len = value.as_bytes().len();
+                    if len > MAX_LUA_THEME_NAME_BYTES {
+                        log::warn!(
+                            "kettle.set_theme: rejecting {}-byte name (cap {MAX_LUA_THEME_NAME_BYTES})",
+                            len
+                        );
+                        return Ok(false);
+                    }
+                    let name = value.to_str()?.to_string();
                     bounded_push(&pending_for_theme, LuaCommand::SetTheme(name))
                 })?,
             )
@@ -525,23 +598,38 @@ impl LuaEngine {
         kettle_tbl
             .set(
                 "add_menu_item",
-                lua.create_function(|lua, (label, cb): (String, mlua::Function)| {
+                lua.create_function(|lua, (label, cb): (mlua::LuaString, mlua::Function)| {
+                    let label_len = label.as_bytes().len();
+                    if label_len > MAX_LUA_MENU_LABEL_BYTES {
+                        if !LUA_MENU_WARNED.swap(true, Ordering::Relaxed) {
+                            log::warn!(
+                                "kettle.add_menu_item: rejecting {label_len}-byte label \
+                                     (cap {MAX_LUA_MENU_LABEL_BYTES})"
+                            );
+                        }
+                        return Ok(false);
+                    }
+                    // Match the former `String` argument's UTF-8 contract,
+                    // but retain Lua's existing string in the registry
+                    // rather than allocating a Rust copy.
+                    let _ = label.to_str()?;
+
                     let items: mlua::Table = lua.named_registry_value("kettle_menu_items")?;
                     let n = items.len()?;
                     if n as usize >= MAX_LUA_MENU_ITEMS {
                         if !LUA_MENU_WARNED.swap(true, Ordering::Relaxed) {
                             log::warn!(
                                 "kettle.add_menu_item: registry capped at \
-                                 {MAX_LUA_MENU_ITEMS}; ignoring further items"
+                                     {MAX_LUA_MENU_ITEMS}; ignoring further items"
                             );
                         }
-                        return Ok(());
+                        return Ok(false);
                     }
                     let entry = lua.create_table()?;
                     entry.set("label", label)?;
                     entry.set("callback", cb)?;
                     items.set(n + 1, entry)?;
-                    Ok(())
+                    Ok(true)
                 })?,
             )
             .context("set kettle.add_menu_item")?;
@@ -563,7 +651,32 @@ impl LuaEngine {
             .set(
                 "add_url_handler",
                 lua.create_function(
-                    |lua, (name, pattern, cb): (String, String, mlua::Function)| {
+                    |lua,
+                     (name, pattern, cb): (
+                        mlua::LuaString,
+                        mlua::LuaString,
+                        mlua::Function,
+                    )| {
+                        let name_len = name.as_bytes().len();
+                        let pattern_len = pattern.as_bytes().len();
+                        if name_len > MAX_LUA_URL_HANDLER_NAME_BYTES
+                            || pattern_len > MAX_LUA_URL_PATTERN_BYTES
+                        {
+                            if !LUA_URL_WARNED.swap(true, Ordering::Relaxed) {
+                                log::warn!(
+                                    "kettle.add_url_handler: rejecting (name {name_len} bytes, \
+                                     pattern {pattern_len} bytes; caps \
+                                     {MAX_LUA_URL_HANDLER_NAME_BYTES} and \
+                                     {MAX_LUA_URL_PATTERN_BYTES})"
+                                );
+                            }
+                            return Ok(false);
+                        }
+                        // Preserve the old UTF-8-only API without copying either
+                        // field into a Rust allocation before registry admission.
+                        let _ = name.to_str()?;
+                        let _ = pattern.to_str()?;
+
                         let handlers: mlua::Table =
                             lua.named_registry_value("kettle_url_handlers")?;
                         let n = handlers.len()?;
@@ -574,14 +687,14 @@ impl LuaEngine {
                                      {MAX_LUA_URL_HANDLERS}; ignoring further handlers"
                                 );
                             }
-                            return Ok(());
+                            return Ok(false);
                         }
                         let entry = lua.create_table()?;
                         entry.set("name", name)?;
                         entry.set("pattern", pattern)?;
                         entry.set("callback", cb)?;
                         handlers.set(n + 1, entry)?;
-                        Ok(())
+                        Ok(true)
                     },
                 )?,
             )
@@ -589,8 +702,9 @@ impl LuaEngine {
         // Terminator plugin parity foundation:
         // `kettle.on(event_name, callback)` registers a Lua function to
         // fire when the named event occurs. Stored as a registry-table
-        // entry keyed by event name; callbacks accumulate in a list
-        // (multiple subscribers per event).
+        // entry keyed by one of the nine LuaEvent names; callbacks accumulate
+        // in a list (multiple subscribers per event). Unknown names return
+        // false instead of creating permanent registry keys.
         //
         // Today's wiring: registry installed + drift-guarded. App-side
         // emission per LuaEvent variant lands incrementally
@@ -601,30 +715,45 @@ impl LuaEngine {
         kettle_tbl
             .set(
                 "on",
-                lua.create_function(|lua, (name, cb): (String, mlua::Function)| {
-                    let events: mlua::Table = lua.named_registry_value("kettle_events")?;
-                    let list: mlua::Table = match events.get::<mlua::Value>(name.clone())? {
-                        mlua::Value::Table(t) => t,
-                        _ => {
-                            let t = lua.create_table()?;
-                            events.set(name.clone(), t.clone())?;
-                            t
+                lua.create_function(
+                    |lua, (requested_name, cb): (mlua::LuaString, mlua::Function)| {
+                        let Some(name) =
+                            supported_lua_event_name(requested_name.as_bytes().as_ref())
+                        else {
+                            if !LUA_UNKNOWN_EVENT_WARNED.swap(true, Ordering::Relaxed) {
+                                log::warn!(
+                                    "kettle.on: rejecting unknown event name; supported events: \
+                                     startup, tab_add, tab_close, bell, pane_close, output, \
+                                     pane_focus, title_changed, url_clicked"
+                                );
+                            }
+                            return Ok(false);
+                        };
+
+                        let events: mlua::Table = lua.named_registry_value("kettle_events")?;
+                        let list: mlua::Table = match events.get::<mlua::Value>(name)? {
+                            mlua::Value::Table(t) => t,
+                            _ => {
+                                let t = lua.create_table()?;
+                                events.set(name, t.clone())?;
+                                t
+                            }
+                        };
+                        let n = list.len()?;
+                        if n as usize >= MAX_LUA_CALLBACKS_PER_EVENT {
+                            if !LUA_EVENTS_WARNED.swap(true, Ordering::Relaxed) {
+                                log::warn!(
+                                    "kettle.on('{name}'): capped at \
+                                     {MAX_LUA_CALLBACKS_PER_EVENT} callbacks; \
+                                     ignoring further subscribers"
+                                );
+                            }
+                            return Ok(false);
                         }
-                    };
-                    let n = list.len()?;
-                    if n as usize >= MAX_LUA_CALLBACKS_PER_EVENT {
-                        if !LUA_EVENTS_WARNED.swap(true, Ordering::Relaxed) {
-                            log::warn!(
-                                "kettle.on('{name}'): capped at \
-                                 {MAX_LUA_CALLBACKS_PER_EVENT} callbacks; \
-                                 ignoring further subscribers"
-                            );
-                        }
-                        return Ok(());
-                    }
-                    list.set(n + 1, cb)?;
-                    Ok(())
-                })?,
+                        list.set(n + 1, cb)?;
+                        Ok(true)
+                    },
+                )?,
             )
             .context("set kettle.on")?;
         lua.globals()
@@ -633,6 +762,7 @@ impl LuaEngine {
         Ok(Self {
             lua,
             pending,
+            active_theme,
             hook_fires,
         })
     }
@@ -644,6 +774,19 @@ impl LuaEngine {
     /// point that runs user Lua.
     fn arm_budget(&self) {
         self.hook_fires.store(0, Ordering::Relaxed);
+    }
+
+    /// Synchronize `kettle.theme()` after App successfully applies a queued
+    /// theme change. Invalid names never reach this method, so introspection
+    /// continues to describe the active configuration rather than the last
+    /// requested value.
+    pub(crate) fn set_active_theme(&self, theme_name: &str) -> Result<()> {
+        let mut active = self
+            .active_theme
+            .lock()
+            .map_err(|e| anyhow::anyhow!("active theme mutex: {e}"))?;
+        theme_name.clone_into(&mut *active);
+        Ok(())
     }
 
     /// List the labels of every Lua-registered context
@@ -859,27 +1002,242 @@ impl LuaEngine {
 mod tests {
     use super::*;
 
-    /// The callback registries must be bounded against a
-    /// hostile/runaway `init.lua`, mirroring the command-queue cap. Registering
-    /// far past the cap saturates at the cap rather than growing unbounded.
     #[test]
-    fn lua_callback_registries_are_capped() {
+    fn on_rejects_unknown_events_without_creating_registry_keys() {
         let eng = LuaEngine::new("Default").expect("init");
-        // Menu items: register well past the cap, assert it saturates.
-        eng.eval_str("for i=1,400 do kettle.add_menu_item('item '..i, function() end) end")
-            .expect("eval add_menu_item loop");
-        let labels = eng.list_menu_item_labels().expect("labels");
+
+        let accepted = eng
+            .eval_str(
+                "local accepted = 0
+                 for i = 1, 1000 do
+                    if kettle.on('unknown_' .. i, function() end) then
+                        accepted = accepted + 1
+                    end
+                 end
+                 return accepted",
+            )
+            .expect("unknown registrations return admission results");
+        assert_eq!(accepted, "0");
+
+        let events: mlua::Table = eng
+            .lua
+            .named_registry_value("kettle_events")
+            .expect("event registry");
         assert_eq!(
-            labels.len(),
-            MAX_LUA_MENU_ITEMS,
-            "menu registry must saturate at MAX_LUA_MENU_ITEMS, not grow unbounded"
+            events
+                .clone()
+                .pairs::<String, mlua::Value>()
+                .collect::<mlua::Result<Vec<_>>>()
+                .expect("read event registry")
+                .len(),
+            0,
+            "unknown names must not create registry tables"
         );
-        // Event callbacks: register past the cap, then assert firing the event
-        // is bounded (it would panic/hang on an unbounded list; here it just
-        // returns) — the registry walk can't exceed the cap.
-        eng.eval_str("for i=1,400 do kettle.on('output', function() end) end")
-            .expect("eval kettle.on loop");
+
+        assert_eq!(
+            eng.eval_str(
+                "local names = {
+                    'startup', 'tab_add', 'tab_close', 'bell', 'pane_close',
+                    'output', 'pane_focus', 'title_changed', 'url_clicked'
+                 }
+                 for _, name in ipairs(names) do
+                    if not kettle.on(name, function() end) then
+                        return false
+                    end
+                 end
+                 return true",
+            )
+            .expect("implemented event names register"),
+            "true"
+        );
+        let mut registered_names = events
+            .pairs::<String, mlua::Value>()
+            .map(|entry| entry.map(|(name, _)| name))
+            .collect::<mlua::Result<Vec<_>>>()
+            .expect("read registered event names");
+        registered_names.sort();
+        assert_eq!(
+            registered_names,
+            [
+                "bell",
+                "output",
+                "pane_close",
+                "pane_focus",
+                "startup",
+                "tab_add",
+                "tab_close",
+                "title_changed",
+                "url_clicked",
+            ]
+        );
+    }
+
+    #[test]
+    fn on_accepts_exact_per_event_cap_and_rejects_the_next_callback() {
+        let eng = LuaEngine::new("Default").expect("init");
+        let result = eng
+            .eval_str(&format!(
+                "cap_fired = 0
+                 for i = 1, {MAX_LUA_CALLBACKS_PER_EVENT} do
+                    if not kettle.on('output', function()
+                        cap_fired = cap_fired + 1
+                    end) then
+                        return 'rejected_at_' .. i
+                    end
+                 end
+                 if kettle.on('output', function()
+                    cap_fired = cap_fired + 1000
+                 end) then
+                    return 'accepted_past_cap'
+                 end
+                 if not kettle.on('startup', function() end) then
+                    return 'cap_was_not_per_event'
+                 end
+                 return 'bounded'"
+            ))
+            .expect("register event callbacks at boundary");
+        assert_eq!(result, "bounded");
+
+        let events: mlua::Table = eng
+            .lua
+            .named_registry_value("kettle_events")
+            .expect("event registry");
+        let output: mlua::Table = events.get("output").expect("output callbacks");
+        assert_eq!(
+            output.len().expect("output callback count") as usize,
+            MAX_LUA_CALLBACKS_PER_EVENT
+        );
         eng.fire_event(&LuaEvent::Output(1, b"x".to_vec()));
+        assert_eq!(
+            eng.eval_str("return cap_fired").expect("callback count"),
+            MAX_LUA_CALLBACKS_PER_EVENT.to_string()
+        );
+    }
+
+    #[test]
+    fn menu_and_url_registries_accept_exact_caps_and_reject_the_next_entry() {
+        let eng = LuaEngine::new("Default").expect("init");
+        assert_eq!(
+            eng.eval_str(&format!(
+                "for i = 1, {MAX_LUA_MENU_ITEMS} do
+                    if not kettle.add_menu_item('item ' .. i, function() end) then
+                        return 'menu_rejected_at_' .. i
+                    end
+                 end
+                 return kettle.add_menu_item('past cap', function() end)"
+            ))
+            .expect("register menu items at boundary"),
+            "false"
+        );
+        assert_eq!(
+            eng.list_menu_item_labels().expect("menu labels").len(),
+            MAX_LUA_MENU_ITEMS
+        );
+
+        assert_eq!(
+            eng.eval_str(&format!(
+                "for i = 1, {MAX_LUA_URL_HANDLERS} do
+                    if not kettle.add_url_handler(
+                        'handler ' .. i, 'https://example%.com/' .. i, function() end
+                    ) then
+                        return 'url_rejected_at_' .. i
+                    end
+                 end
+                 return kettle.add_url_handler(
+                    'past cap', 'https://example%.com/past', function() end
+                 )"
+            ))
+            .expect("register URL handlers at boundary"),
+            "false"
+        );
+        let handlers: mlua::Table = eng
+            .lua
+            .named_registry_value("kettle_url_handlers")
+            .expect("URL-handler registry");
+        assert_eq!(
+            handlers.len().expect("URL-handler count") as usize,
+            MAX_LUA_URL_HANDLERS
+        );
+    }
+
+    #[test]
+    fn registry_strings_accept_exact_byte_caps_and_reject_oversize_values() {
+        let eng = LuaEngine::new("Default").expect("init");
+        assert_eq!(
+            eng.eval_str(&format!(
+                "return kettle.add_menu_item(
+                    string.rep('M', {MAX_LUA_MENU_LABEL_BYTES}), function() end
+                 )"
+            ))
+            .expect("exact-cap menu label"),
+            "true"
+        );
+        assert_eq!(
+            eng.eval_str(&format!(
+                "return kettle.add_menu_item(
+                    string.char(255) .. string.rep('M', {MAX_LUA_MENU_LABEL_BYTES}),
+                    function() end
+                 )"
+            ))
+            .expect("oversize menu label is rejected before UTF-8 conversion"),
+            "false"
+        );
+
+        assert_eq!(
+            eng.eval_str(&format!(
+                "return kettle.add_url_handler(
+                    string.rep('N', {MAX_LUA_URL_HANDLER_NAME_BYTES}),
+                    'https://example%.com/.*',
+                    function() end
+                 )"
+            ))
+            .expect("exact-cap URL-handler name"),
+            "true"
+        );
+        assert_eq!(
+            eng.eval_str(&format!(
+                "return kettle.add_url_handler(
+                    string.char(255) ..
+                        string.rep('N', {MAX_LUA_URL_HANDLER_NAME_BYTES}),
+                    'https://example%.com/.*',
+                    function() end
+                 )"
+            ))
+            .expect("oversize URL-handler name is rejected before UTF-8 conversion"),
+            "false"
+        );
+
+        assert_eq!(
+            eng.eval_str(&format!(
+                "return kettle.add_url_handler(
+                    'exact pattern',
+                    string.rep('P', {MAX_LUA_URL_PATTERN_BYTES}),
+                    function() end
+                 )"
+            ))
+            .expect("exact-cap URL pattern"),
+            "true"
+        );
+        assert_eq!(
+            eng.eval_str(&format!(
+                "return kettle.add_url_handler(
+                    'oversize pattern',
+                    string.char(255) .. string.rep('P', {MAX_LUA_URL_PATTERN_BYTES}),
+                    function() end
+                 )"
+            ))
+            .expect("oversize URL pattern is rejected before UTF-8 conversion"),
+            "false"
+        );
+
+        let labels = eng.list_menu_item_labels().expect("menu labels");
+        assert_eq!(labels.len(), 1);
+        assert_eq!(labels[0].len(), MAX_LUA_MENU_LABEL_BYTES);
+        let handlers: mlua::Table = eng
+            .lua
+            .named_registry_value("kettle_url_handlers")
+            .expect("URL-handler registry");
+        assert_eq!(handlers.len().expect("URL-handler count"), 2);
     }
 
     #[test]
@@ -892,6 +1250,17 @@ mod tests {
         assert_eq!(v, env!("CARGO_PKG_VERSION"));
         let t = eng.eval_str("return kettle.theme()").expect("theme");
         assert_eq!(t, "TokyoNight Night");
+    }
+
+    #[test]
+    fn kettle_theme_tracks_successfully_applied_runtime_theme() {
+        let eng = LuaEngine::new("Default").expect("init");
+        eng.set_active_theme("Solarized Dark")
+            .expect("synchronize active theme");
+        assert_eq!(
+            eng.eval_str("return kettle.theme()").expect("theme"),
+            "Solarized Dark"
+        );
     }
 
     #[test]
@@ -1463,20 +1832,26 @@ mod tests {
     /// strings larger than `MAX_LUA_SEND_TEXT_BYTES`. Pre-cap, a
     /// hostile script (or even a buggy legitimate one that runs
     /// away on a loop) could queue gigabytes of PTY-bound text and
-    /// OOM kettle at the App's drain step. Verifies the silent-drop
-    /// behavior: the call succeeds (no Lua-side error to handle)
-    /// but the queue stays empty.
+    /// OOM kettle at the App's drain step. Verifies the rejection
+    /// behavior: the call returns false without raising a Lua error
+    /// and the queue stays empty.
     #[test]
-    fn send_text_drops_oversized_payload_silently() {
+    fn send_text_reports_oversized_payload_rejection() {
         let eng = LuaEngine::new("Default").expect("init");
         // 1 MiB + 1 byte — one byte over the cap.
         let oversize = (super::MAX_LUA_SEND_TEXT_BYTES + 1).to_string();
-        let script = format!(
-            "kettle.send_text(string.rep('X', {oversize}))\n\
-             kettle.send_text('legit')\n"
+        assert_eq!(
+            eng.eval_str(&format!(
+                "return kettle.send_text(string.rep('X', {oversize}))"
+            ))
+            .expect("oversized send returns an admission result"),
+            "false"
         );
-        eng.eval_str(&format!("return (function() {script} return true end)()"))
-            .expect("script runs without error (silent drop is the contract)");
+        assert_eq!(
+            eng.eval_str("return kettle.send_text('legit')")
+                .expect("legitimate send returns an admission result"),
+            "true"
+        );
         let cmds = eng.drain_commands();
         // Exactly one command queued — the second (legit) call. The
         // oversize first call must drop without queueing.
@@ -1492,22 +1867,31 @@ mod tests {
     /// notifications are tiny; oversized title/body almost certainly
     /// indicates a runaway script.
     #[test]
-    fn notify_drops_oversized_field_silently() {
+    fn notify_reports_oversized_field_rejection() {
         let eng = LuaEngine::new("Default").expect("init");
         let oversize = (super::MAX_LUA_NOTIFY_BYTES + 1).to_string();
         // Oversize title → drop.
-        eng.eval_str(&format!(
-            "kettle.notify(string.rep('T', {oversize}), 'body'); return true"
-        ))
-        .expect("script runs");
+        assert_eq!(
+            eng.eval_str(&format!(
+                "return kettle.notify(string.rep('T', {oversize}), 'body')"
+            ))
+            .expect("oversized title returns an admission result"),
+            "false"
+        );
         // Oversize body → drop.
-        eng.eval_str(&format!(
-            "kettle.notify('title', string.rep('B', {oversize})); return true"
-        ))
-        .expect("script runs");
+        assert_eq!(
+            eng.eval_str(&format!(
+                "return kettle.notify('title', string.rep('B', {oversize}))"
+            ))
+            .expect("oversized body returns an admission result"),
+            "false"
+        );
         // Sane call → admitted.
-        eng.eval_str("kettle.notify('ok', 'sane'); return true")
-            .expect("script runs");
+        assert_eq!(
+            eng.eval_str("return kettle.notify('ok', 'sane')")
+                .expect("sane notification returns an admission result"),
+            "true"
+        );
         let cmds = eng.drain_commands();
         assert_eq!(cmds.len(), 1, "queue: {cmds:?}");
         assert!(
@@ -1515,6 +1899,47 @@ mod tests {
                 if title == "ok" && body == "sane"),
             "expected only the sane notify to queue, got {cmds:?}"
         );
+    }
+
+    #[test]
+    fn action_and_theme_names_are_bounded_and_report_rejection() {
+        let eng = LuaEngine::new("Default").expect("init");
+        let action_oversize = super::MAX_LUA_ACTION_NAME_BYTES + 1;
+        let theme_oversize = super::MAX_LUA_THEME_NAME_BYTES + 1;
+        assert_eq!(
+            eng.eval_str(&format!(
+                "return kettle.exec_action(string.rep('A', {action_oversize}))"
+            ))
+            .expect("oversized action returns an admission result"),
+            "false"
+        );
+        assert_eq!(
+            eng.eval_str(&format!(
+                "return kettle.set_theme(string.rep('T', {theme_oversize}))"
+            ))
+            .expect("oversized theme returns an admission result"),
+            "false"
+        );
+        assert_eq!(
+            eng.eval_str("return kettle.exec_action('new_tab')")
+                .expect("bounded action"),
+            "true"
+        );
+        assert_eq!(
+            eng.eval_str("return kettle.set_theme('Default')")
+                .expect("bounded theme"),
+            "true"
+        );
+        let commands = eng.drain_commands();
+        assert_eq!(commands.len(), 2, "queue: {commands:?}");
+        assert!(matches!(
+            &commands[0],
+            LuaCommand::ExecAction(name) if name == "new_tab"
+        ));
+        assert!(matches!(
+            &commands[1],
+            LuaCommand::SetTheme(name) if name == "Default"
+        ));
     }
 
     /// The queue length caps at
@@ -1529,10 +1954,16 @@ mod tests {
         // each entry is small (the test is about queue *length*,
         // not per-entry size).
         let n = super::MAX_PENDING_COMMANDS + super::MAX_PENDING_COMMANDS / 2;
-        eng.eval_str(&format!(
-            "for _ = 1, {n} do kettle.exec_action('no_op') end; return true"
-        ))
-        .expect("script runs");
+        assert_eq!(
+            eng.eval_str(&format!(
+                "local accepted = true; \
+                 for _ = 1, {n} do accepted = kettle.exec_action('no_op') end; \
+                 return accepted"
+            ))
+            .expect("script runs"),
+            "false",
+            "the calls after the entry cap must report rejection"
+        );
         let cmds = eng.drain_commands();
         assert_eq!(
             cmds.len(),

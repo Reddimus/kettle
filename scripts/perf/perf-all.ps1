@@ -71,23 +71,82 @@ param(
     [int]$WindowH = 800
 )
 $ErrorActionPreference = 'Stop'
-$releaseVtebenchRevision =
-    'ead80032e57dee2e75f0b51f2ea67528647d9944'
+. "$PSScriptRoot\release-contract.ps1"
+$releaseContract = Get-KettlePerfReleaseAcquisitionContract
 if ($MinimumThroughputIterations -gt $ThroughputIterations) {
     throw 'MinimumThroughputIterations cannot exceed ThroughputIterations'
 }
 if ($Mode -eq 'release') {
-    $releaseTerminals = @(
-        'kettle', 'wt', 'alacritty', 'wezterm', 'rio', 'tabby'
-    )
+    $methodologyDeviations = [Collections.Generic.List[string]]::new()
     if (
-        $Terminals.Count -ne $releaseTerminals.Count -or
-        @($Terminals | Where-Object { $_ -notin $releaseTerminals }).Count -gt 0 -or
-        @($Terminals | Select-Object -Unique).Count -ne $Terminals.Count
+        -not (Test-KettlePerfOrdinalSequenceEqual `
+            -Actual $Terminals -Expected $releaseContract.terminals)
     ) {
-        throw 'Release mode requires the complete six-terminal comparator set'
+        $methodologyDeviations.Add('terminals')
+    }
+    if ($BenchmarkSeed -cne $releaseContract.benchmark_seed) {
+        $methodologyDeviations.Add('benchmark_seed')
+    }
+    if ($VtebenchRevision -cne $releaseContract.vtebench_revision) {
+        $methodologyDeviations.Add('vtebench_revision')
+    }
+    $numericMethodology = [ordered]@{
+        startup_runs = @($StartupRuns, $releaseContract.startup_runs)
+        idle_samples = @($IdleSamples, $releaseContract.idle_samples)
+        idle_seconds = @($IdleSeconds, $releaseContract.idle_seconds)
+        latency_samples = @($LatencySamples, $releaseContract.latency_samples)
+        latency_block_size = @(
+            $LatencyBlockSize,
+            $releaseContract.latency_block_size
+        )
+        max_latency_censored = @(
+            $MaxLatencyCensored,
+            $releaseContract.max_latency_censored
+        )
+        latency_timeout_ms = @(
+            $LatencyTimeoutMs,
+            $releaseContract.latency_timeout_ms
+        )
+        throughput_iterations = @(
+            $ThroughputIterations,
+            $releaseContract.throughput_iterations
+        )
+        minimum_throughput_iterations = @(
+            $MinimumThroughputIterations,
+            $releaseContract.minimum_throughput_iterations
+        )
+        menu_hover_samples = @(
+            $HoverSamples,
+            $releaseContract.menu_hover_samples
+        )
+        monitor_transition_samples_per_state = @(
+            $MonitorTransitionSamples,
+            $releaseContract.monitor_transition_samples_per_state
+        )
+        terminal_order_offset = @(
+            $TerminalOrderOffset,
+            $releaseContract.terminal_order_offset
+        )
+        probe_cooldown_seconds = @(
+            $ProbeCooldownSeconds,
+            $releaseContract.probe_cooldown_seconds
+        )
+        window_width = @($WindowW, $releaseContract.window_pixels.width)
+        window_height = @($WindowH, $releaseContract.window_pixels.height)
+    }
+    foreach ($methodologyField in $numericMethodology.GetEnumerator()) {
+        if ($methodologyField.Value[0] -ne $methodologyField.Value[1]) {
+            $methodologyDeviations.Add([string]$methodologyField.Key)
+        }
+    }
+    if ($methodologyDeviations.Count -gt 0) {
+        throw (
+            'Release mode requires the canonical acquisition methodology; ' +
+            'deviations: ' + ($methodologyDeviations -join ', ')
+        )
     }
     if (
+        $ManifestOnly -or
         $SkipVtebench -or
         $SkipLatency -or
         $SkipMenuHover -or
@@ -95,10 +154,47 @@ if ($Mode -eq 'release') {
         $SkipMonitorTransition -or
         $AllowUnidentifiedDisplay
     ) {
-        throw 'Release mode does not permit skipped probes or unidentified displays'
+        throw (
+            'Release mode does not permit manifest-only acquisition, ' +
+            'skipped probes, or unidentified displays'
+        )
     }
     if ($KettleConfig) {
         throw 'Release mode requires the generated isolated Kettle configuration'
+    }
+    $comparatorOverrides = [Collections.Generic.List[string]]::new()
+    foreach ($override in ([ordered]@{
+        AlacrittyExe = $AlacrittyExe
+        WeztermExe = $WeztermExe
+        RioExe = $RioExe
+        TabbyExe = $TabbyExe
+    }).GetEnumerator()) {
+        if (-not [string]::IsNullOrWhiteSpace([string]$override.Value)) {
+            $comparatorOverrides.Add([string]$override.Key)
+        }
+    }
+    foreach ($environmentName in @(
+        'KETTLE_PERF_WT_EXE',
+        'KETTLE_PERF_ALACRITTY_EXE',
+        'KETTLE_PERF_WEZTERM_EXE',
+        'KETTLE_PERF_RIO_EXE',
+        'KETTLE_PERF_TABBY_EXE'
+    )) {
+        if (-not [string]::IsNullOrWhiteSpace(
+            [Environment]::GetEnvironmentVariable(
+                $environmentName,
+                [EnvironmentVariableTarget]::Process
+            )
+        )) {
+            $comparatorOverrides.Add($environmentName)
+        }
+    }
+    if ($comparatorOverrides.Count -gt 0) {
+        throw (
+            'Release mode requires the pinned offline comparator campaign; ' +
+            'forbidden overrides: ' +
+            ($comparatorOverrides -join ', ')
+        )
     }
     if ($KettleCandidate -eq 'current') {
         if (
@@ -124,27 +220,6 @@ if ($Mode -eq 'release') {
             '-ExpectedKettleSha256'
         )
     }
-    if (
-        $StartupRuns -ne 12 -or
-        $IdleSamples -ne 6 -or
-        $IdleSeconds -ne 10 -or
-        $LatencySamples -ne 60 -or
-        $LatencyBlockSize -ne 10 -or
-        $MaxLatencyCensored -ne 3 -or
-        $LatencyTimeoutMs -ne 800 -or
-        $ThroughputIterations -ne 6 -or
-        $MinimumThroughputIterations -ne 6 -or
-        $HoverSamples -ne 200 -or
-        $MonitorTransitionSamples -lt 10
-    ) {
-        throw 'Release mode requires the pinned sample counts and timing windows'
-    }
-    if ($VtebenchRevision -cne $releaseVtebenchRevision) {
-        throw (
-            'Release mode requires the documented pinned vtebench revision ' +
-            $releaseVtebenchRevision
-        )
-    }
 } elseif (
     $KettleCandidate -ne 'current' -or
     $ExpectedKettleCommit -or
@@ -157,23 +232,41 @@ if ($Mode -eq 'release') {
 $harnessLocks = @()
 $resultsRoot = $null
 $wslLauncherEvidence = $null
+$displayStabilityMonitor = $null
+$comparatorCampaign = $null
+$comparatorCampaignSetup = $null
+$comparatorCampaignEvidence = $null
+$comparatorCampaignLeases = [Collections.Generic.List[object]]::new()
+$comparatorCampaignStreams = [Collections.Generic.List[IO.Stream]]::new()
+$windowsTerminalExecutableLease = $null
+$releaseWindowsTerminalExe = ''
+$releaseWindowsTerminalPackage = $null
+$comparatorEntries = @{}
+$comparatorLeasesByName = @{}
+$terminalVersions = @{}
 try {
 $harnessLocks = @(
     Open-KettlePerfHarnessLocks -ScriptDirectory $PSScriptRoot
 )
 $harnessProvenance = Get-KettlePerfHarnessProvenance -Locks $harnessLocks
 . "$PSScriptRoot\lib-win32.ps1"
+. "$PSScriptRoot\display-stability.ps1"
+. "$PSScriptRoot\comparator-campaign.ps1"
 . "$PSScriptRoot\terminal-specs.ps1"
 . "$PSScriptRoot\json-io.ps1"
 . "$PSScriptRoot\isolated-configs.ps1"
 . "$PSScriptRoot\schedule.ps1"
 . "$PSScriptRoot\wsl-launcher.ps1"
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
-$gitCommit = (
-    & git -C $repoRoot rev-parse 'HEAD^{commit}' 2>$null |
-        Select-Object -First 1
-) -join ''
-if ($LASTEXITCODE -ne 0 -or $gitCommit -notmatch '^[0-9a-fA-F]{40}$') {
+$gitCommitOutput = @(
+    & git -C $repoRoot rev-parse 'HEAD^{commit}' 2>$null
+)
+$gitCommitExitCode = $LASTEXITCODE
+$gitCommit = ($gitCommitOutput | Select-Object -First 1) -join ''
+if (
+    $gitCommitExitCode -ne 0 -or
+    $gitCommit -notmatch '^[0-9a-fA-F]{40}$'
+) {
     throw 'Could not resolve the repository HEAD commit'
 }
 $gitCommit = $gitCommit.ToLowerInvariant()
@@ -184,6 +277,105 @@ if ($LASTEXITCODE -ne 0) {
 $gitDirty = $gitStatus.Count -gt 0
 if ($Mode -eq 'release' -and $gitDirty) {
     throw 'Release acquisition requires a clean repository checkout'
+}
+if ($Mode -eq 'release') {
+    $campaignContract = $releaseContract.comparator_campaign
+    $trackedCampaignRoot = Join-Path $PSScriptRoot 'campaigns'
+    $trackedCampaignPath = Join-Path `
+        $trackedCampaignRoot $campaignContract.relative_path
+    $trackedCampaign = Read-KettlePerfComparatorCampaign `
+        -Path $trackedCampaignPath `
+        -ExpectedCampaignRoot $trackedCampaignRoot
+    if (
+        $trackedCampaign.campaign_id -cne $campaignContract.campaign_id -or
+        $trackedCampaign.campaign_file.relative_path -cne
+            $campaignContract.relative_path -or
+        [long]$trackedCampaign.campaign_file.bytes -ne
+            [long]$campaignContract.bytes -or
+        -not [StringComparer]::OrdinalIgnoreCase.Equals(
+            [string]$trackedCampaign.campaign_file.sha256,
+            [string]$campaignContract.sha256
+        )
+    ) {
+        throw 'Tracked comparator campaign differs from the release contract'
+    }
+    $trackedCampaignStream = [IO.File]::Open(
+        $trackedCampaign.campaign_file.path,
+        [IO.FileMode]::Open,
+        [IO.FileAccess]::Read,
+        [IO.FileShare]::Read
+    )
+    $comparatorCampaignStreams.Add($trackedCampaignStream)
+
+    $setupOutput = @(
+        & "$PSScriptRoot\setup-comparator-campaign.ps1" `
+            -CampaignId $campaignContract.campaign_id -Offline -PassThru
+    )
+    $setupMatches = @($setupOutput | Where-Object {
+        $null -ne $_ -and
+        $null -ne $_.PSObject.Properties['schema'] -and
+        $_.schema -ceq 'kettle-comparator-campaign-setup-v1'
+    })
+    if ($setupMatches.Count -ne 1) {
+        throw 'Offline comparator setup did not return one verified campaign'
+    }
+    $comparatorCampaignSetup = $setupMatches[0]
+    $comparatorCampaign = $comparatorCampaignSetup.campaign
+    if (
+        $comparatorCampaign.campaign_id -cne
+            $campaignContract.campaign_id -or
+        $comparatorCampaign.campaign_file.relative_path -cne
+            $campaignContract.relative_path -or
+        [long]$comparatorCampaign.campaign_file.bytes -ne
+            [long]$campaignContract.bytes -or
+        -not [StringComparer]::OrdinalIgnoreCase.Equals(
+            [string]$comparatorCampaign.campaign_file.sha256,
+            [string]$campaignContract.sha256
+        )
+    ) {
+        throw 'Installed comparator campaign differs from the release contract'
+    }
+    $localCampaignStream = [IO.File]::Open(
+        $comparatorCampaign.campaign_file.path,
+        [IO.FileMode]::Open,
+        [IO.FileAccess]::Read,
+        [IO.FileShare]::Read
+    )
+    $comparatorCampaignStreams.Add($localCampaignStream)
+    $comparatorCampaignEvidence = (
+        Get-KettlePerfComparatorCampaignEvidence `
+            -Campaign $comparatorCampaign
+    )
+
+    foreach ($campaignEntry in $comparatorCampaign.terminals) {
+        $name = [string]$campaignEntry.name
+        $comparatorEntries[$name] = $campaignEntry
+        $terminalVersions[$name] = [string]$campaignEntry.version
+        if ($campaignEntry.role -cne 'confirmed') {
+            continue
+        }
+        $lease = Open-KettlePerfComparatorCampaignExecutableLease `
+            -Campaign $comparatorCampaign -Entry $campaignEntry `
+            -CampaignRoot $comparatorCampaignSetup.campaigns_root `
+            -StagingRoot $comparatorCampaignSetup.campaigns_root
+        $comparatorCampaignLeases.Add($lease)
+        $comparatorLeasesByName[$name] = $lease
+        switch -CaseSensitive ($name) {
+            'alacritty' { $AlacrittyExe = [string]$lease.path }
+            'wezterm' { $WeztermExe = [string]$lease.path }
+            'rio' { $RioExe = [string]$lease.path }
+            'tabby' { $TabbyExe = [string]$lease.path }
+            default {
+                throw "Unexpected confirmed comparator campaign entry: $name"
+            }
+        }
+    }
+    if (
+        $comparatorCampaignLeases.Count -ne 4 -or
+        $comparatorEntries.Count -ne 5
+    ) {
+        throw 'Comparator campaign role or terminal coverage is invalid'
+    }
 }
 $explicitKettleExe = [bool]$KettleExe
 if (-not $KettleExe) {
@@ -340,7 +532,14 @@ function Get-KettlePerfDisplayTopologySnapshot {
 
 $nonClientWidthAllowance = 64
 $nonClientHeightAllowance = 96
+$displayStabilityMonitor = Start-KettlePerfDisplayStabilityMonitor `
+    -RunId $runId
+$displayCheckpoints = [Collections.Generic.List[object]]::new()
 $displayAcquisitionStart = Get-KettlePerfDisplayTopologySnapshot
+$displayCheckpoints.Add([pscustomobject][ordered]@{
+    phase = 'start'
+    snapshot = $displayAcquisitionStart
+})
 $desktopScreens = @($displayAcquisitionStart.desktop_screens)
 $targetDesktopScreen = @($desktopScreens | Where-Object {
     [StringComparer]::OrdinalIgnoreCase.Equals(
@@ -373,6 +572,11 @@ $nativeWindowH = if ($targetDesktopScreen) {
 }
 $nativeClientFits = $nativeWindowW -ge 320 -and $nativeWindowH -ge 240
 $displayIssues = [System.Collections.Generic.List[string]]::new()
+if (-not [bool]$displayStabilityMonitor.registration_succeeded) {
+    $displayIssues.Add(
+        'continuous Windows display-change monitoring was unavailable'
+    )
+}
 foreach ($identityIssue in @($displayAcquisitionStart.identity_issues)) {
     $displayIssues.Add([string]$identityIssue)
 }
@@ -485,11 +689,13 @@ $terminalArgs = @{
     ResultsDir = $resultsDir
     KettleExe = $KettleExe
     KettleConfig = $KettleConfig
+    WindowsTerminalExe = $releaseWindowsTerminalExe
     IsolatedProfile = $isolatedProfile
     AlacrittyExe = $AlacrittyExe
     WeztermExe = $WeztermExe
     RioExe = $RioExe
     TabbyExe = $TabbyExe
+    TerminalVersions = $terminalVersions
 }
 
 function Get-RotatedTerminalOrder([string[]]$Names, [int]$Offset) {
@@ -609,6 +815,109 @@ function Get-TerminalConfigProvenance($Name, $Spec) {
     }
 }
 
+function Get-KettlePerfWindowsTerminalPackageEvidence {
+    param(
+        [Parameter(Mandatory)]
+        [string]$ExpectedVersion,
+        [Parameter(Mandatory)]
+        [string]$Executable
+    )
+
+    $packages = @(
+        Get-AppxPackage -Name Microsoft.WindowsTerminal -ErrorAction Stop
+    )
+    if (
+        $packages.Count -ne 1 -or
+        [string]$packages[0].Version -cne $ExpectedVersion
+    ) {
+        throw (
+            'Windows Terminal campaign requires exactly one installed Appx ' +
+            "version $ExpectedVersion"
+        )
+    }
+    $package = $packages[0]
+    $expectedExecutable = [IO.Path]::GetFullPath(
+        (Join-Path $package.InstallLocation 'WindowsTerminal.exe')
+    )
+    if (-not [StringComparer]::OrdinalIgnoreCase.Equals(
+        $expectedExecutable,
+        [IO.Path]::GetFullPath($Executable)
+    )) {
+        throw 'Windows Terminal executable is outside the pinned Appx package'
+    }
+    $evidence = [pscustomobject][ordered]@{
+        schema = 'kettle-windows-terminal-appx-v1'
+        name = [string]$package.Name
+        publisher_id = [string]$package.PublisherId
+        package_family_name = [string]$package.PackageFamilyName
+        package_full_name = [string]$package.PackageFullName
+        version = [string]$package.Version
+        architecture = [string]$package.Architecture
+        status = [string]$package.Status
+        signature_kind = [string]$package.SignatureKind
+        is_framework = [bool]$package.IsFramework
+        non_removable = [bool]$package.NonRemovable
+        install_location = [string]$package.InstallLocation
+    }
+    if (
+        $evidence.name -cne 'Microsoft.WindowsTerminal' -or
+        $evidence.publisher_id -cne '8wekyb3d8bbwe' -or
+        $evidence.package_family_name -cne
+            'Microsoft.WindowsTerminal_8wekyb3d8bbwe' -or
+        $evidence.version -cne $ExpectedVersion -or
+        $evidence.architecture -cne 'X64' -or
+        $evidence.status -cne 'Ok' -or
+        $evidence.signature_kind -cne 'Store' -or
+        $evidence.is_framework -ne $false
+    ) {
+        throw 'Windows Terminal Appx package identity is not release-eligible'
+    }
+    return $evidence
+}
+
+if ($Mode -eq 'release') {
+    $windowsTerminalEntry = $comparatorEntries['wt']
+    $installedWindowsTerminalPackages = @(
+        Get-AppxPackage -Name Microsoft.WindowsTerminal -ErrorAction Stop
+    )
+    if (
+        $installedWindowsTerminalPackages.Count -ne 1 -or
+        [string]$installedWindowsTerminalPackages[0].Version -cne
+            [string]$windowsTerminalEntry.version
+    ) {
+        throw (
+            'Windows Terminal campaign requires exactly one installed Appx ' +
+            "version $($windowsTerminalEntry.version)"
+        )
+    }
+    $windowsTerminalHost = Join-Path `
+        $installedWindowsTerminalPackages[0].InstallLocation `
+        'WindowsTerminal.exe'
+    if (-not (Test-Path -LiteralPath $windowsTerminalHost -PathType Leaf)) {
+        throw "Windows Terminal hosted executable not found: $windowsTerminalHost"
+    }
+    $releaseWindowsTerminalExe = (
+        Resolve-Path -LiteralPath $windowsTerminalHost -ErrorAction Stop
+    ).Path
+    $releaseWindowsTerminalPackage = (
+        Get-KettlePerfWindowsTerminalPackageEvidence `
+            -ExpectedVersion $windowsTerminalEntry.version `
+            -Executable $releaseWindowsTerminalExe
+    )
+    $windowsTerminalExecutableLease = Open-KettlePerfExecutableLease `
+        -Executable $releaseWindowsTerminalExe `
+        -ExpectedSha256 $windowsTerminalEntry.executable.sha256
+    if (
+        [long]$windowsTerminalExecutableLease.Length -ne
+            [long]$windowsTerminalEntry.executable.bytes
+    ) {
+        Close-KettlePerfExecutableLease $windowsTerminalExecutableLease
+        $windowsTerminalExecutableLease = $null
+        throw 'Windows Terminal Appx host length differs from comparator campaign'
+    }
+    $terminalArgs.WindowsTerminalExe = $releaseWindowsTerminalExe
+}
+
 $terminalManifest = @()
 foreach ($terminal in $Terminals) {
     $isolatedConfig = Get-KettlePerfIsolatedConfigEntry `
@@ -616,11 +925,18 @@ foreach ($terminal in $Terminals) {
     if ($terminal -eq 'kettle' -and $KettleConfig) {
         $isolatedConfig = $null
     }
+    $versionOverride = if ($terminalVersions.ContainsKey($terminal)) {
+        [string]$terminalVersions[$terminal]
+    } else {
+        ''
+    }
     $spec = Resolve-KettlePerfTerminal -Name $terminal -KettleExe $KettleExe `
-        -KettleConfig $KettleConfig -AlacrittyExe $AlacrittyExe `
+        -KettleConfig $KettleConfig `
+        -WindowsTerminalExe $releaseWindowsTerminalExe `
+        -AlacrittyExe $AlacrittyExe `
         -WeztermExe $WeztermExe -RioExe $RioExe -TabbyExe $TabbyExe `
-        -IsolatedConfig $isolatedConfig
-    $terminalManifest += [ordered]@{
+        -VersionOverride $versionOverride -IsolatedConfig $isolatedConfig
+    $terminalRecord = [ordered]@{
         name = $terminal
         available = $spec.Available
         launcher = $spec.Exe
@@ -636,6 +952,70 @@ foreach ($terminal in $Terminals) {
         helper_binaries = [object[]]@($spec.HelperBinaries)
         configuration = Get-TerminalConfigProvenance $terminal $spec
     }
+    if ($terminal -eq 'wt') {
+        $terminalRecord['launch_mode'] = $spec.WindowsTerminalLaunchMode
+    }
+    if ($Mode -eq 'release' -and $terminal -ne 'kettle') {
+        if (-not $comparatorEntries.ContainsKey($terminal)) {
+            throw "Comparator campaign has no entry for $terminal"
+        }
+        $campaignEntry = $comparatorEntries[$terminal]
+        $authenticodeStatus = $null
+        $signerCertSha256 = $null
+        if ($campaignEntry.role -ceq 'confirmed') {
+            if (-not $comparatorLeasesByName.ContainsKey($terminal)) {
+                throw "Comparator campaign has no retained lease for $terminal"
+            }
+            $lease = $comparatorLeasesByName[$terminal]
+            $authenticodeStatus = [string]$lease.authenticode_status
+            $signerCertSha256 = $lease.signer_cert_sha256
+        } elseif ($terminal -ceq 'wt') {
+            if (
+                $null -eq $windowsTerminalExecutableLease -or
+                $null -eq $windowsTerminalExecutableLease.Stream -or
+                -not $windowsTerminalExecutableLease.Stream.CanRead -or
+                -not [StringComparer]::OrdinalIgnoreCase.Equals(
+                    [string]$windowsTerminalExecutableLease.Path,
+                    [string]$spec.Exe
+                ) -or
+                -not [StringComparer]::OrdinalIgnoreCase.Equals(
+                    [string]$spec.Exe,
+                    [string]$spec.BenchmarkExe
+                )
+            ) {
+                throw (
+                    'Windows Terminal release launcher is not the retained ' +
+                    'installed Appx host'
+                )
+            }
+            $signature = Get-AuthenticodeSignature `
+                -FilePath $spec.BenchmarkExe -ErrorAction Stop
+            $authenticodeStatus = [string]$signature.Status
+            $signerCertSha256 = if ($null -ne $signature.SignerCertificate) {
+                Get-KettlePerfComparatorCertificateSha256 `
+                    -Certificate $signature.SignerCertificate
+            } else {
+                $null
+            }
+            $terminalRecord['installed_package'] = $releaseWindowsTerminalPackage
+        } else {
+            throw "Comparator campaign has an unsupported advisory peer: $terminal"
+        }
+        $terminalRecord['executable_bytes'] = [long](
+            Get-Item -LiteralPath $spec.BenchmarkExe -Force
+        ).Length
+        $terminalRecord['authenticode_status'] = $authenticodeStatus
+        $terminalRecord['signer_cert_sha256'] = $signerCertSha256
+        $terminalRecord['comparator_role'] = [string]$campaignEntry.role
+        $terminalRecord['source'] = (
+            New-KettlePerfComparatorTerminalSource -Entry $campaignEntry
+        )
+        if (-not (Test-KettlePerfComparatorCampaignTerminalIdentity `
+            -Entry $campaignEntry -TerminalRecord $terminalRecord)) {
+            throw "Terminal identity differs from comparator campaign: $terminal"
+        }
+    }
+    $terminalManifest += $terminalRecord
 }
 $computer = Get-CimInstance Win32_ComputerSystem -ErrorAction SilentlyContinue
 $manufacturer = $null
@@ -773,7 +1153,7 @@ if ($kettleRecord.Count -eq 1) {
     }
 }
 $manifest = [ordered]@{
-    schema_version = if ($Mode -eq 'release') { 3 } else { 2 }
+    schema_version = if ($Mode -eq 'release') { 4 } else { 2 }
     run_id = $runId
     timestamp = (Get-Date).ToString('o')
     label = $Label
@@ -784,6 +1164,11 @@ $manifest = [ordered]@{
         Get-FileHash -LiteralPath $directKettleConfig -Algorithm SHA256
     ).Hash
     harness_provenance = $harnessProvenance
+    comparator_campaign = if ($Mode -eq 'release') {
+        $comparatorCampaignEvidence
+    } else {
+        $null
+    }
     isolated_configuration = [ordered]@{
         schema_version = $isolatedProfile.schema_version
         root = $isolatedProfile.root
@@ -880,6 +1265,7 @@ $manifest = [ordered]@{
             acquisition_schema = 'kettle-display-topology-acquisition-v2'
             acquisition_start = $displayAcquisitionStart
             acquisition_end = $null
+            stability_monitoring = $null
             start_signature_sha256 = (
                 $displayAcquisitionStart.signature_sha256
             )
@@ -930,6 +1316,11 @@ $manifest = [ordered]@{
             $null
         }
         terminals = $Terminals
+        comparator_campaign_id = if ($Mode -eq 'release') {
+            [string]$comparatorCampaign.campaign_id
+        } else {
+            $null
+        }
         window_pixels = @{ width = $WindowW; height = $WindowH }
         native_window_pixels = @{
             width = $nativeWindowW
@@ -943,6 +1334,7 @@ $manifest = [ordered]@{
         max_latency_censored = $MaxLatencyCensored
         latency_timeout_ms = $LatencyTimeoutMs
         menu_hover_samples = $HoverSamples
+        menu_hover_block_size = $releaseContract.menu_hover_block_size
         native_display_enabled = -not [bool]$SkipNativeDisplay
         monitor_transition_samples_per_state = $MonitorTransitionSamples
         throughput_iterations = $ThroughputIterations
@@ -1057,6 +1449,22 @@ function Start-KettlePerfProbeCooldown {
     }
 }
 
+function Add-KettlePerfDisplayCheckpoint {
+    param(
+        [Parameter(Mandatory)]
+        [ValidatePattern('^[a-z0-9][a-z0-9-]{0,63}$')]
+        [string]$Phase
+    )
+
+    $snapshot = Get-KettlePerfDisplayTopologySnapshot `
+        -TargetScreenDevice $displayAcquisitionStart.target_screen_device
+    $displayCheckpoints.Add([pscustomobject][ordered]@{
+        phase = $Phase
+        snapshot = $snapshot
+    })
+    return $snapshot
+}
+
 Write-Host "--- startup / fresh memory / idle CPU ---"
 & "$PSScriptRoot\startup-idle.ps1" @terminalArgs `
     -Terminals $Terminals `
@@ -1066,6 +1474,7 @@ Write-Host "--- startup / fresh memory / idle CPU ---"
     -IdleScheduleSeed $scheduleSeeds.idle `
     -WindowW $WindowW -WindowH $WindowH
 Start-KettlePerfProbeCooldown 'startup/idle'
+[void](Add-KettlePerfDisplayCheckpoint -Phase 'after-startup-idle')
 
 if (-not $SkipLatency) {
     Write-Host "--- input latency probe ---"
@@ -1077,6 +1486,7 @@ if (-not $SkipLatency) {
         -ScheduleSeed $scheduleSeeds.latency `
         -WindowW $WindowW -WindowH $WindowH
     Start-KettlePerfProbeCooldown 'input latency'
+    [void](Add-KettlePerfDisplayCheckpoint -Phase 'after-input-latency')
 }
 
 if (-not $SkipMenuHover) {
@@ -1084,9 +1494,11 @@ if (-not $SkipMenuHover) {
     & "$PSScriptRoot\menu-hover.ps1" -ResultsDir $resultsDir `
         -KettleExe $KettleExe -ConfigPath $directKettleConfig `
         -RunId $runId -Samples $HoverSamples `
+        -BlockSize $releaseContract.menu_hover_block_size `
         -TargetScreenDevice $targetDesktopScreen.device_name `
         -WindowW $WindowW -WindowH $WindowH -NoFail
     Start-KettlePerfProbeCooldown 'menu hover'
+    [void](Add-KettlePerfDisplayCheckpoint -Phase 'after-menu-hover')
 }
 
 if (-not $SkipNativeDisplay) {
@@ -1094,11 +1506,14 @@ if (-not $SkipNativeDisplay) {
     & "$PSScriptRoot\menu-hover.ps1" -ResultsDir $resultsDir `
         -KettleExe $KettleExe -ConfigPath $directKettleConfig `
         -RunId $runId -Samples $HoverSamples `
+        -BlockSize $releaseContract.menu_hover_block_size `
         -TargetScreenDevice $targetDesktopScreen.device_name `
         -WindowW $nativeWindowW -WindowH $nativeWindowH `
         -ResultFileName 'native-display-menu-hover.json' `
         -Variant native-display -NoFail
     Start-KettlePerfProbeCooldown 'native-display menu hover'
+    [void](Add-KettlePerfDisplayCheckpoint `
+        -Phase 'after-native-display-menu-hover')
 }
 
 if (-not $SkipMonitorTransition) {
@@ -1109,6 +1524,7 @@ if (-not $SkipMonitorTransition) {
         -Samples $MonitorTransitionSamples `
         -WindowW $WindowW -WindowH $WindowH
     Start-KettlePerfProbeCooldown 'monitor transition'
+    [void](Add-KettlePerfDisplayCheckpoint -Phase 'after-monitor-transition')
 }
 
 Write-Host "--- throughput (console write through parser-drain response) ---"
@@ -1119,6 +1535,7 @@ Write-Host "--- throughput (console write through parser-drain response) ---"
     -Iterations $ThroughputIterations `
     -ScheduleSeed $scheduleSeeds.throughput
 Start-KettlePerfProbeCooldown 'throughput'
+[void](Add-KettlePerfDisplayCheckpoint -Phase 'after-throughput')
 
 if (-not $SkipVtebench) {
     Write-Host "--- vtebench (WSL PTY read) ---"
@@ -1131,15 +1548,21 @@ if (-not $SkipVtebench) {
         -VtebenchRepo $VtebenchRepo `
         -VtebenchRevision $VtebenchRevision `
         -WindowW $WindowW -WindowH $WindowH
+    [void](Add-KettlePerfDisplayCheckpoint -Phase 'after-vtebench')
 }
 
-$displayAcquisitionEnd = Get-KettlePerfDisplayTopologySnapshot `
-    -TargetScreenDevice $displayAcquisitionStart.target_screen_device
-$displayStable = [StringComparer]::Ordinal.Equals(
-    [string]$displayAcquisitionStart.signature_sha256,
-    [string]$displayAcquisitionEnd.signature_sha256
-)
+$displayAcquisitionEnd = Add-KettlePerfDisplayCheckpoint -Phase 'end'
+[void](Stop-KettlePerfDisplayStabilityMonitor `
+    -Monitor $displayStabilityMonitor)
+$displayStabilityEvidence = Get-KettlePerfDisplayStabilityEvidence `
+    -Monitor $displayStabilityMonitor `
+    -InitialSignature $displayAcquisitionStart.signature_sha256 `
+    -Checkpoints $displayCheckpoints.ToArray()
+$displayStable = [bool]$displayStabilityEvidence.stable
 $manifest.machine.display_topology.acquisition_end = $displayAcquisitionEnd
+$manifest.machine.display_topology.stability_monitoring = (
+    $displayStabilityEvidence
+)
 $manifest.machine.display_topology.end_signature_sha256 = (
     $displayAcquisitionEnd.signature_sha256
 )
@@ -1173,6 +1596,86 @@ if (-not $displayStable -or -not $endEvidenceValid) {
         )
     )
 }
+if ($Mode -eq 'release') {
+    $freshTrackedCampaign = Read-KettlePerfComparatorCampaign `
+        -Path $trackedCampaignPath `
+        -ExpectedCampaignRoot $trackedCampaignRoot
+    $freshInstalledCampaign = Read-KettlePerfComparatorCampaign `
+        -Path $comparatorCampaign.campaign_file.path `
+        -ExpectedCampaignRoot $comparatorCampaignSetup.campaigns_root
+    if (
+        -not (Test-KettlePerfComparatorCampaignEvidence `
+            -Campaign $freshTrackedCampaign `
+            -Evidence $manifest.comparator_campaign) -or
+        -not (Test-KettlePerfComparatorCampaignEvidence `
+            -Campaign $freshInstalledCampaign `
+            -Evidence $manifest.comparator_campaign)
+    ) {
+        throw 'Comparator campaign identity changed during benchmarking'
+    }
+    foreach ($lease in $comparatorCampaignLeases) {
+        if (
+            $lease.closed -eq $true -or
+            $lease.tree_lease.closed -eq $true -or
+            @($lease.files).Count -ne [int]$lease.staged_file_count -or
+            @($lease.files | Where-Object {
+                $null -eq $_.stream -or -not $_.stream.CanRead
+            }).Count -ne 0
+        ) {
+            throw 'A retained comparator staged-tree lease became invalid'
+        }
+    }
+    foreach ($terminal in @('wt', 'alacritty', 'wezterm', 'rio', 'tabby')) {
+        $records = @($terminalManifest | Where-Object {
+            $_.name -ceq $terminal
+        })
+        if (
+            $records.Count -ne 1 -or
+            -not (Test-KettlePerfComparatorCampaignTerminalIdentity `
+                -Entry $comparatorEntries[$terminal] `
+                -TerminalRecord $records[0])
+        ) {
+            throw "Comparator terminal identity changed during run: $terminal"
+        }
+        $endHash = (
+            Get-FileHash -LiteralPath $records[0].executable `
+                -Algorithm SHA256
+        ).Hash
+        if (-not [StringComparer]::OrdinalIgnoreCase.Equals(
+            $endHash,
+            [string]$records[0].executable_sha256
+        )) {
+            throw "Comparator executable changed during run: $terminal"
+        }
+    }
+    $windowsTerminalRecord = @($terminalManifest | Where-Object {
+        $_.name -ceq 'wt'
+    })[0]
+    if (
+        $null -eq $windowsTerminalExecutableLease -or
+        $null -eq $windowsTerminalExecutableLease.Stream -or
+        -not $windowsTerminalExecutableLease.Stream.CanRead -or
+        -not [StringComparer]::OrdinalIgnoreCase.Equals(
+            [string]$windowsTerminalExecutableLease.Path,
+            [string]$windowsTerminalRecord.launcher
+        )
+    ) {
+        throw 'Windows Terminal Appx host lease became invalid during benchmarking'
+    }
+    $endWindowsTerminalPackage = (
+        Get-KettlePerfWindowsTerminalPackageEvidence `
+            -ExpectedVersion $comparatorEntries['wt'].version `
+            -Executable $windowsTerminalRecord.executable
+    )
+    if (
+        (ConvertTo-Json -InputObject $endWindowsTerminalPackage `
+            -Depth 5 -Compress) -cne
+        (ConvertTo-Json -InputObject $windowsTerminalRecord.installed_package `
+            -Depth 5 -Compress)
+    ) {
+        throw 'Windows Terminal Appx identity changed during benchmarking'
+    }
+}
 $endHarnessProvenance = Get-KettlePerfHarnessProvenance -Locks $harnessLocks
 if (-not [StringComparer]::Ordinal.Equals(
     [string]$endHarnessProvenance.aggregate_sha256,
@@ -1195,8 +1698,24 @@ Write-Host "=== complete - results in $resultsDir ==="
     }
 }
 } finally {
+    Close-KettlePerfExecutableLease $windowsTerminalExecutableLease
+    foreach ($lease in $comparatorCampaignLeases) {
+        Close-KettlePerfComparatorCampaignExecutableLease -Lease $lease
+    }
+    foreach ($stream in $comparatorCampaignStreams) {
+        if ($null -ne $stream) {
+            $stream.Dispose()
+        }
+    }
     if ($null -ne $wslLauncherEvidence) {
         $wslLauncherEvidence.Stream.Dispose()
+    }
+    if (
+        $null -ne $displayStabilityMonitor -and
+        -not [bool]$displayStabilityMonitor.stopped
+    ) {
+        [void](Stop-KettlePerfDisplayStabilityMonitor `
+            -Monitor $displayStabilityMonitor)
     }
     Close-KettlePerfPersistenceRoot $resultsRoot
     Close-KettlePerfHarnessLocks -Locks $harnessLocks

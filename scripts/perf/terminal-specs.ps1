@@ -210,6 +210,9 @@ function Get-KettlePerfVersion {
     if (-not $Spec.Available) {
         return $null
     }
+    if ($Spec.VersionOverride) {
+        return [string]$Spec.VersionOverride
+    }
     if ($Spec.Name -eq 'kettle' -and [bool]$Spec.HasReliableCli) {
         try {
             $capture = Invoke-KettlePerfBoundedProcess `
@@ -309,10 +312,16 @@ function Resolve-KettlePerfTerminal {
         [string]$Name,
         [string]$KettleExe = '',
         [string]$KettleConfig = '',
+        [string]$WindowsTerminalExe = '',
         [string]$AlacrittyExe = '',
         [string]$WeztermExe = '',
         [string]$RioExe = '',
         [string]$TabbyExe = '',
+        [ValidatePattern(
+            '^$|^(?:[0-9]+\.[0-9]+\.[0-9]+(?:\.[0-9]+)?|' +
+            '[0-9]{8}-[0-9]{6}-[0-9a-f]{8})$'
+        )]
+        [string]$VersionOverride = '',
         $IsolatedConfig = $null
     )
 
@@ -323,6 +332,7 @@ function Resolve-KettlePerfTerminal {
     $launchEnvironment = [ordered]@{}
     $configurationMode = 'uncontrolled'
     $configurationEvidence = $null
+    $windowsTerminalLaunchMode = $null
     if ($Name -eq 'kettle' -and $KettleConfig -and $null -ne $IsolatedConfig) {
         throw 'KettleConfig and IsolatedConfig are mutually exclusive'
     }
@@ -348,8 +358,15 @@ function Resolve-KettlePerfTerminal {
             $windowProcessNames = @('kettle')
         }
         'wt' {
-            $exe = Find-KettlePerfExecutable -EnvironmentVariable 'KETTLE_PERF_WT_EXE' `
-                -Candidates @('wt.exe')
+            if ($WindowsTerminalExe) {
+                $exe = Find-KettlePerfExecutable -Explicit $WindowsTerminalExe
+                $windowsTerminalLaunchMode = 'installed-appx-direct-host'
+            } else {
+                $exe = Find-KettlePerfExecutable `
+                    -EnvironmentVariable 'KETTLE_PERF_WT_EXE' `
+                    -Candidates @('wt.exe')
+                $windowsTerminalLaunchMode = 'app-execution-alias-advisory'
+            }
             # A new top-level window is essential for startup timing. Windows
             # Terminal may still host it in an existing process; callers detect
             # that and decline per-process memory/CPU attribution.
@@ -532,6 +549,18 @@ function Resolve-KettlePerfTerminal {
             throw "Windows Terminal hosted executable not found: $hostCandidate"
         }
         $benchmarkExe = (Resolve-Path -LiteralPath $hostCandidate).Path
+        if (
+            $WindowsTerminalExe -and
+            -not [StringComparer]::OrdinalIgnoreCase.Equals(
+                [IO.Path]::GetFullPath($exe),
+                [IO.Path]::GetFullPath($benchmarkExe)
+            )
+        ) {
+            throw (
+                'The explicit Windows Terminal release launcher must be the ' +
+                'exact WindowsTerminal.exe host in the installed Appx package'
+            )
+        }
     }
     $cliExe = if ($name -eq 'kettle' -and $exe) {
         Get-KettlePerfCliExecutable -GuiExecutable $exe
@@ -560,6 +589,7 @@ function Resolve-KettlePerfTerminal {
 
     [pscustomobject]@{
         Name = $Name
+        VersionOverride = $VersionOverride
         Exe = $exe
         BenchmarkExe = $benchmarkExe
         BenchmarkExeSha256 = if ($benchmarkExe) {
@@ -575,9 +605,9 @@ function Resolve-KettlePerfTerminal {
         ProcessName = if ($exe) { [IO.Path]::GetFileNameWithoutExtension($exe) } else { $null }
         WindowProcessNames = @($windowProcessNames)
         CliExe = $cliExe
-        # Windows Terminal is launched through an App Execution Alias reparse
-        # point. The window owner is verified against BenchmarkExe instead;
-        # hashing the mutable alias would misstate it as the hosted binary.
+        # Ambient Windows Terminal smoke discovery may return an App Execution
+        # Alias reparse point, so its CLI hash stays unset. Release mode launches
+        # the exact host and binds it through BenchmarkExeSha256 instead.
         CliExeSha256 = if ($cliExe -and $Name -ne 'wt') {
             Get-KettlePerfExecutableSha256 $cliExe
         } else {
@@ -593,6 +623,7 @@ function Resolve-KettlePerfTerminal {
         Environment = $launchEnvironment
         ConfigurationMode = $configurationMode
         ConfigurationEvidence = $configurationEvidence
+        WindowsTerminalLaunchMode = $windowsTerminalLaunchMode
     }
 }
 

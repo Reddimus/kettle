@@ -333,6 +333,131 @@ pub struct Term<T> {
 
     /// Config directly for the terminal.
     config: Config,
+
+    /// Bounded, ordered terminal mutations consumed by graphics integrations.
+    graphics_events: GraphicsEventJournal,
+}
+
+/// Maximum number of unconsumed graphics events retained by a terminal.
+pub const GRAPHICS_EVENT_JOURNAL_CAPACITY: usize = 256;
+
+/// Direction of a committed grid scroll.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GraphicsScrollDirection {
+    Up,
+    Down,
+}
+
+/// A committed text-grid mutation that must be mirrored by terminal graphics.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GraphicsEvent {
+    SyncMarker {
+        id: u64,
+    },
+    EraseDisplay,
+    EnterAlternate {
+        mode: u16,
+        clear: bool,
+    },
+    LeaveAlternate {
+        mode: u16,
+        clear: bool,
+    },
+    Reset,
+    Scroll {
+        direction: GraphicsScrollDirection,
+        top: usize,
+        bottom: usize,
+        lines: usize,
+        old_screen_top: u64,
+        new_screen_top: u64,
+        screen_lines: usize,
+    },
+}
+
+/// One ordered journal drain.
+#[derive(Debug, PartialEq, Eq)]
+pub struct GraphicsEventBatch {
+    pub events: Vec<GraphicsEvent>,
+    pub overflowed: bool,
+    pub alternate_screen: bool,
+}
+
+struct GraphicsEventJournal {
+    events: Vec<GraphicsEvent>,
+    overflowed: bool,
+}
+
+impl GraphicsEventJournal {
+    fn new() -> Self {
+        Self {
+            events: Vec::with_capacity(GRAPHICS_EVENT_JOURNAL_CAPACITY),
+            overflowed: false,
+        }
+    }
+
+    fn push(&mut self, event: GraphicsEvent) {
+        if self.overflowed {
+            return;
+        }
+
+        if let (
+            Some(GraphicsEvent::Scroll {
+                direction: previous_direction,
+                top: previous_top,
+                bottom: previous_bottom,
+                lines: previous_lines,
+                new_screen_top: previous_screen_top,
+                screen_lines: previous_screen_lines,
+                ..
+            }),
+            GraphicsEvent::Scroll {
+                direction,
+                top,
+                bottom,
+                lines,
+                old_screen_top,
+                new_screen_top,
+                screen_lines,
+                ..
+            },
+        ) = (self.events.last_mut(), event)
+            && *previous_direction == direction
+            && *previous_top == top
+            && *previous_bottom == bottom
+            && *previous_screen_top == old_screen_top
+            && *previous_screen_lines == screen_lines
+        {
+            *previous_lines = previous_lines.saturating_add(lines).min(bottom.saturating_sub(top));
+            *previous_screen_top = new_screen_top;
+            return;
+        }
+
+        if self.events.len() == GRAPHICS_EVENT_JOURNAL_CAPACITY {
+            self.events.clear();
+            self.overflowed = true;
+            return;
+        }
+        self.events.push(event);
+    }
+
+    fn drain(&mut self, alternate_screen: bool) -> GraphicsEventBatch {
+        let events = if self.overflowed {
+            self.events.clear();
+            Vec::new()
+        } else {
+            mem::replace(
+                &mut self.events,
+                Vec::with_capacity(GRAPHICS_EVENT_JOURNAL_CAPACITY),
+            )
+        };
+        let overflowed = mem::take(&mut self.overflowed);
+        GraphicsEventBatch {
+            events,
+            overflowed,
+            alternate_screen,
+        }
+    }
 }
 
 /// Configuration options for the [`Term`].
@@ -449,7 +574,19 @@ impl<T> Term<T> {
             selection: Default::default(),
             title: Default::default(),
             mode: Default::default(),
+            graphics_events: GraphicsEventJournal::new(),
         }
+    }
+
+    /// Drain committed graphics-relevant mutations in terminal execution order.
+    pub fn take_graphics_events(&mut self) -> GraphicsEventBatch {
+        self.graphics_events.drain(self.mode.contains(TermMode::ALT_SCREEN))
+    }
+
+    fn graphics_screen_top(&self) -> u64 {
+        self.grid
+            .history_origin()
+            .saturating_add(u64::try_from(self.grid.history_size()).unwrap_or(u64::MAX))
     }
 
     /// Collect the information about the changes in the lines, which
@@ -503,6 +640,16 @@ impl<T> Term<T> {
         self.damage.full = true;
     }
 
+    #[inline]
+    fn normalize_selection_to_grid(&mut self) {
+        let topmost_line = self.topmost_line();
+        let bottommost_line = self.bottommost_line();
+        self.selection = self
+            .selection
+            .take()
+            .filter(|selection| selection.intersects_range(topmost_line..=bottommost_line));
+    }
+
     /// Set new options for the [`Term`].
     pub fn set_options(&mut self, options: Config)
     where
@@ -522,6 +669,7 @@ impl<T> Term<T> {
         } else {
             self.grid.update_history(self.config.scrolling_history);
         }
+        self.normalize_selection_to_grid();
 
         if self.config.kitty_keyboard != old_config.kitty_keyboard {
             self.keyboard_mode_stack = Vec::new();
@@ -698,6 +846,7 @@ impl<T> Term<T> {
             let range = Line(0)..Line(max_lines);
             self.selection = selection.rotate(self, &range, -delta);
         }
+        self.normalize_selection_to_grid();
 
         // Clamp vi cursor to viewport.
         let vi_point = self.vi_mode_cursor.point;
@@ -722,15 +871,32 @@ impl<T> Term<T> {
 
     /// Swap primary and alternate screen buffer.
     pub fn swap_alt(&mut self) {
+        self.swap_alt_with_clear(true, true);
+    }
+
+    /// Swap primary and alternate screen buffer without clearing on entry.
+    fn swap_alt_preserving(&mut self) {
+        self.swap_alt_with_clear(false, false);
+    }
+
+    fn swap_alt_with_clear(&mut self, clear_on_entry: bool, save_restore_cursor: bool) {
         if !self.mode.contains(TermMode::ALT_SCREEN) {
             // Set alt screen cursor to the current primary screen cursor.
             self.inactive_grid.cursor = self.grid.cursor.clone();
 
-            // Drop information about the primary screens saved cursor.
-            self.grid.saved_cursor = self.grid.cursor.clone();
+            if save_restore_cursor {
+                // Drop information about the primary screen's saved cursor.
+                self.grid.saved_cursor = self.grid.cursor.clone();
+            }
 
-            // Reset alternate screen contents.
-            self.inactive_grid.reset_region(..);
+            if clear_on_entry {
+                // Reset alternate screen contents.
+                self.inactive_grid.reset_region(..);
+            }
+        } else if !save_restore_cursor {
+            // Modes 47 and 1047 switch buffers without DECSC/DECRC, so the
+            // current cursor state follows the active screen in both directions.
+            self.inactive_grid.cursor = self.grid.cursor.clone();
         }
 
         mem::swap(&mut self.keyboard_mode_stack, &mut self.inactive_keyboard_mode_stack);
@@ -753,8 +919,13 @@ impl<T> Term<T> {
 
         lines = cmp::min(lines, (self.scroll_region.end - self.scroll_region.start).0 as usize);
         lines = cmp::min(lines, (self.scroll_region.end - origin).0 as usize);
+        if lines == 0 {
+            return;
+        }
 
         let region = origin..self.scroll_region.end;
+        let old_screen_top = self.graphics_screen_top();
+        let screen_lines = self.screen_lines();
 
         // Scroll selection.
         self.selection =
@@ -769,6 +940,16 @@ impl<T> Term<T> {
         // Scroll between origin and bottom
         self.grid.scroll_down(&region, lines);
         self.mark_fully_damaged();
+        let new_screen_top = self.graphics_screen_top();
+        self.graphics_events.push(GraphicsEvent::Scroll {
+            direction: GraphicsScrollDirection::Down,
+            top: region.start.0 as usize,
+            bottom: region.end.0 as usize,
+            lines,
+            old_screen_top,
+            new_screen_top,
+            screen_lines,
+        });
     }
 
     /// Scroll screen up
@@ -782,11 +963,22 @@ impl<T> Term<T> {
         lines = cmp::min(lines, (self.scroll_region.end - self.scroll_region.start).0 as usize);
 
         let region = origin..self.scroll_region.end;
+        lines = cmp::min(lines, (region.end - region.start).0 as usize);
+        if lines == 0 {
+            return;
+        }
+        let old_screen_top = self.graphics_screen_top();
+        let screen_lines = self.screen_lines();
 
         // Scroll selection.
         self.selection = self.selection.take().and_then(|s| s.rotate(self, &region, lines as i32));
 
         self.grid.scroll_up(&region, lines);
+
+        // Drop selections only after the grid has updated its retained history.
+        // Checking before the scroll would discard valid selections while the
+        // scrollback buffer is still growing.
+        self.normalize_selection_to_grid();
 
         // Scroll vi mode cursor.
         let viewport_top = Line(-(self.grid.display_offset() as i32));
@@ -796,6 +988,16 @@ impl<T> Term<T> {
             *line = cmp::max(*line - lines, top);
         }
         self.mark_fully_damaged();
+        let new_screen_top = self.graphics_screen_top();
+        self.graphics_events.push(GraphicsEvent::Scroll {
+            direction: GraphicsScrollDirection::Up,
+            top: region.start.0 as usize,
+            bottom: region.end.0 as usize,
+            lines,
+            old_screen_top,
+            new_screen_top,
+            screen_lines,
+        });
     }
 
     fn deccolm(&mut self)
@@ -1060,6 +1262,10 @@ impl<T> Dimensions for Term<T> {
 }
 
 impl<T: EventListener> Handler for Term<T> {
+    fn sync_marker(&mut self, id: u64) {
+        self.graphics_events.push(GraphicsEvent::SyncMarker { id });
+    }
+
     /// A character to be displayed.
     #[inline(never)]
     fn input(&mut self, c: char) {
@@ -1763,6 +1969,7 @@ impl<T: EventListener> Handler for Term<T> {
     #[inline]
     fn clear_screen(&mut self, mode: ansi::ClearMode) {
         trace!("Clearing screen: {mode:?}");
+        let erase_display = matches!(&mode, ansi::ClearMode::All);
         let bg = self.grid.cursor.template.bg;
 
         let screen_lines = self.screen_lines();
@@ -1829,6 +2036,9 @@ impl<T: EventListener> Handler for Term<T> {
         }
 
         self.mark_fully_damaged();
+        if erase_display {
+            self.graphics_events.push(GraphicsEvent::EraseDisplay);
+        }
     }
 
     #[inline]
@@ -1871,6 +2081,7 @@ impl<T: EventListener> Handler for Term<T> {
 
         self.event_proxy.send_event(Event::CursorBlinkingChange);
         self.mark_fully_damaged();
+        self.graphics_events.push(GraphicsEvent::Reset);
     }
 
     #[inline]
@@ -1950,6 +2161,17 @@ impl<T: EventListener> Handler for Term<T> {
     fn set_private_mode(&mut self, mode: PrivateMode) {
         let mode = match mode {
             PrivateMode::Named(mode) => mode,
+            PrivateMode::Unknown(mode @ (47 | 1047)) => {
+                trace!("Setting private mode: {mode}");
+                if !self.mode.contains(TermMode::ALT_SCREEN) {
+                    self.swap_alt_preserving();
+                    self.graphics_events.push(GraphicsEvent::EnterAlternate {
+                        mode,
+                        clear: false,
+                    });
+                }
+                return;
+            },
             PrivateMode::Unknown(mode) => {
                 debug!("Ignoring unknown mode {mode} in set_private_mode");
                 return;
@@ -1962,6 +2184,10 @@ impl<T: EventListener> Handler for Term<T> {
             NamedPrivateMode::SwapScreenAndSetRestoreCursor => {
                 if !self.mode.contains(TermMode::ALT_SCREEN) {
                     self.swap_alt();
+                    self.graphics_events.push(GraphicsEvent::EnterAlternate {
+                        mode: 1049,
+                        clear: true,
+                    });
                 }
             },
             NamedPrivateMode::ShowCursor => self.mode.insert(TermMode::SHOW_CURSOR),
@@ -2013,6 +2239,18 @@ impl<T: EventListener> Handler for Term<T> {
     fn unset_private_mode(&mut self, mode: PrivateMode) {
         let mode = match mode {
             PrivateMode::Named(mode) => mode,
+            PrivateMode::Unknown(mode @ (47 | 1047)) => {
+                trace!("Unsetting private mode: {mode}");
+                if self.mode.contains(TermMode::ALT_SCREEN) {
+                    let clear = mode == 1047;
+                    if clear {
+                        self.grid.reset_region(..);
+                    }
+                    self.swap_alt_preserving();
+                    self.graphics_events.push(GraphicsEvent::LeaveAlternate { mode, clear });
+                }
+                return;
+            },
             PrivateMode::Unknown(mode) => {
                 debug!("Ignoring unknown mode {mode} in unset_private_mode");
                 return;
@@ -2025,6 +2263,10 @@ impl<T: EventListener> Handler for Term<T> {
             NamedPrivateMode::SwapScreenAndSetRestoreCursor => {
                 if self.mode.contains(TermMode::ALT_SCREEN) {
                     self.swap_alt();
+                    self.graphics_events.push(GraphicsEvent::LeaveAlternate {
+                        mode: 1049,
+                        clear: false,
+                    });
                 }
             },
             NamedPrivateMode::ShowCursor => self.mode.remove(TermMode::SHOW_CURSOR),
@@ -2535,6 +2777,158 @@ mod tests {
     use crate::vte::ansi::{self, CharsetIndex, Handler, StandardCharset};
 
     #[test]
+    fn selection_survives_while_scrollback_history_grows() {
+        let size = TermSize::new(5, 3);
+        let config = Config {
+            scrolling_history: 4,
+            ..Default::default()
+        };
+        let mut term = Term::new(config, &size, VoidListener);
+
+        // Create the first history row and select it.
+        term.scroll_up_relative(Line(0), 1);
+        let point = Point::new(Line(-1), Column(0));
+        let mut selection = Selection::new(SelectionType::Simple, point, Side::Left);
+        selection.update(Point::new(Line(-1), Column(1)), Side::Right);
+        term.selection = Some(selection);
+
+        // The old topmost line moves above the pre-scroll bounds, but remains
+        // retained once the grid grows its history.
+        term.scroll_up_relative(Line(0), 1);
+
+        let range = term
+            .selection
+            .as_ref()
+            .and_then(|selection| selection.to_range(&term))
+            .expect("selection should follow retained text into growing history");
+        assert_eq!(term.history_size(), 2);
+        assert_eq!(range.start.line, Line(-2));
+        assert_eq!(range.end.line, Line(-2));
+    }
+
+    #[test]
+    fn selection_clears_after_full_scrollback_eviction() {
+        let size = TermSize::new(5, 3);
+        let config = Config {
+            scrolling_history: 4,
+            ..Default::default()
+        };
+        let mut term = Term::new(config, &size, VoidListener);
+
+        // Fill history to capacity and select its oldest retained row.
+        for _ in 0..4 {
+            term.scroll_up_relative(Line(0), 1);
+        }
+        let point = Point::new(Line(-4), Column(0));
+        let mut selection = Selection::new(SelectionType::Simple, point, Side::Left);
+        selection.update(Point::new(Line(-4), Column(1)), Side::Right);
+        term.selection = Some(selection);
+
+        term.scroll_up_relative(Line(0), 1);
+
+        assert!(
+            term.selection.is_none(),
+            "selection must clear after all of its rows leave retained history"
+        );
+    }
+
+    #[test]
+    fn history_limit_reduction_normalizes_selection_to_retained_rows() {
+        let size = TermSize::new(5, 3);
+        let config = Config {
+            scrolling_history: 4,
+            ..Default::default()
+        };
+        let mut term = Term::new(config, &size, VoidListener);
+
+        for _ in 0..4 {
+            term.scroll_up_relative(Line(0), 1);
+        }
+
+        let mut selection = Selection::new(
+            SelectionType::Simple,
+            Point::new(Line(-4), Column(0)),
+            Side::Left,
+        );
+        selection.update(Point::new(Line(-3), Column(1)), Side::Right);
+        term.selection = Some(selection);
+
+        term.set_options(Config {
+            scrolling_history: 3,
+            ..Default::default()
+        });
+
+        let range = term
+            .selection
+            .as_ref()
+            .and_then(|selection| selection.to_range(&term))
+            .expect("selection should survive while it intersects retained history");
+        assert_eq!(range.start.line, Line(-3));
+        assert_eq!(range.end.line, Line(-3));
+
+        term.set_options(Config {
+            scrolling_history: 2,
+            ..Default::default()
+        });
+        assert!(
+            term.selection.is_none(),
+            "selection must clear once history reduction evicts all selected rows"
+        );
+    }
+
+    #[test]
+    fn row_only_resize_normalizes_selection_to_retained_rows() {
+        let size = TermSize::new(5, 4);
+        let config = Config {
+            scrolling_history: 2,
+            ..Default::default()
+        };
+
+        let mut retained_term = Term::new(config.clone(), &size, VoidListener);
+        for _ in 0..2 {
+            retained_term.scroll_up_relative(Line(0), 1);
+        }
+        retained_term.grid_mut().cursor.point.line = Line(3);
+        let mut retained_selection = Selection::new(
+            SelectionType::Simple,
+            Point::new(Line(3), Column(0)),
+            Side::Left,
+        );
+        retained_selection.update(Point::new(Line(3), Column(1)), Side::Right);
+        retained_term.selection = Some(retained_selection);
+
+        retained_term.resize(TermSize::new(5, 2));
+
+        let range = retained_term
+            .selection
+            .as_ref()
+            .and_then(|selection| selection.to_range(&retained_term))
+            .expect("selection should follow a retained row through row-only resize");
+        assert_eq!(range.start.line, Line(1));
+        assert_eq!(range.end.line, Line(1));
+
+        let mut evicted_term = Term::new(config, &size, VoidListener);
+        for _ in 0..2 {
+            evicted_term.scroll_up_relative(Line(0), 1);
+        }
+        evicted_term.grid_mut().cursor.point.line = Line(3);
+        let mut evicted_selection = Selection::new(
+            SelectionType::Simple,
+            Point::new(Line(-2), Column(0)),
+            Side::Left,
+        );
+        evicted_selection.update(Point::new(Line(-2), Column(1)), Side::Right);
+        evicted_term.selection = Some(evicted_selection);
+
+        evicted_term.resize(TermSize::new(5, 2));
+
+        assert!(
+            evicted_term.selection.is_none(),
+            "selection must clear when row-only resize evicts every selected row"
+        );
+    }
+
+    #[test]
     fn scroll_display_page_up() {
         let size = TermSize::new(5, 10);
         let mut term = Term::new(Config::default(), &size, VoidListener);
@@ -2999,6 +3393,164 @@ mod tests {
 
         assert_eq!(term.history_size(), 15);
         assert_eq!(term.grid.cursor.point, Point::new(Line(4), Column(0)));
+    }
+
+    #[test]
+    fn private_mode_47_preserves_alternate_screen_contents() {
+        let size = TermSize::new(5, 3);
+        let mut term = Term::new(Config::default(), &size, VoidListener);
+        term.grid[Line(0)][Column(0)].c = 'p';
+        term.grid.cursor.point = Point::new(Line(0), Column(1));
+
+        term.set_private_mode(PrivateMode::Unknown(47));
+        term.grid[Line(0)][Column(0)].c = 'a';
+        term.grid.cursor.point = Point::new(Line(1), Column(2));
+        term.unset_private_mode(PrivateMode::Unknown(47));
+        assert_eq!(term.grid[Line(0)][Column(0)].c, 'p');
+        assert_eq!(term.grid.cursor.point, Point::new(Line(1), Column(2)));
+
+        term.set_private_mode(PrivateMode::Unknown(47));
+        assert_eq!(term.grid[Line(0)][Column(0)].c, 'a');
+    }
+
+    #[test]
+    fn private_mode_1047_clears_alternate_screen_only_on_exit() {
+        let size = TermSize::new(5, 3);
+        let mut term = Term::new(Config::default(), &size, VoidListener);
+
+        term.set_private_mode(PrivateMode::Unknown(47));
+        term.grid[Line(0)][Column(0)].c = 'a';
+        term.unset_private_mode(PrivateMode::Unknown(47));
+
+        term.set_private_mode(PrivateMode::Unknown(1047));
+        assert_eq!(term.grid[Line(0)][Column(0)].c, 'a');
+        term.unset_private_mode(PrivateMode::Unknown(1047));
+
+        term.set_private_mode(PrivateMode::Unknown(47));
+        assert_eq!(term.grid[Line(0)][Column(0)].c, ' ');
+    }
+
+    #[test]
+    fn private_mode_1049_clears_on_entry_and_preserves_on_exit() {
+        let size = TermSize::new(5, 3);
+        let mut term = Term::new(Config::default(), &size, VoidListener);
+
+        term.set_private_mode(PrivateMode::Unknown(47));
+        term.grid[Line(0)][Column(0)].c = 'a';
+        term.unset_private_mode(PrivateMode::Unknown(47));
+
+        term.grid.cursor.point = Point::new(Line(0), Column(1));
+        term.set_private_mode(NamedPrivateMode::SwapScreenAndSetRestoreCursor.into());
+        assert_eq!(term.grid[Line(0)][Column(0)].c, ' ');
+        term.grid[Line(0)][Column(0)].c = 'b';
+        term.grid.cursor.point = Point::new(Line(1), Column(2));
+        term.unset_private_mode(NamedPrivateMode::SwapScreenAndSetRestoreCursor.into());
+        assert_eq!(term.grid.cursor.point, Point::new(Line(0), Column(1)));
+
+        term.set_private_mode(PrivateMode::Unknown(47));
+        assert_eq!(term.grid[Line(0)][Column(0)].c, 'b');
+    }
+
+    #[test]
+    fn graphics_event_journal_preserves_parser_execution_order() {
+        let size = TermSize::new(5, 5);
+        let mut term = Term::new(Config::default(), &size, VoidListener);
+        let mut processor: ansi::Processor = ansi::Processor::new();
+
+        processor.advance(
+            &mut term,
+            b"\x1b[2J\x1b[?47h\x1b[2;4r\x1b[4H\n\x1b[?47l\x1bc",
+        );
+
+        assert_eq!(
+            term.take_graphics_events(),
+            GraphicsEventBatch {
+                events: vec![
+                    GraphicsEvent::EraseDisplay,
+                    GraphicsEvent::EnterAlternate {
+                        mode: 47,
+                        clear: false,
+                    },
+                    GraphicsEvent::Scroll {
+                        direction: GraphicsScrollDirection::Up,
+                        top: 1,
+                        bottom: 4,
+                        lines: 1,
+                        old_screen_top: 0,
+                        new_screen_top: 0,
+                        screen_lines: 5,
+                    },
+                    GraphicsEvent::LeaveAlternate {
+                        mode: 47,
+                        clear: false,
+                    },
+                    GraphicsEvent::Reset,
+                ],
+                overflowed: false,
+                alternate_screen: false,
+            }
+        );
+    }
+
+    #[test]
+    fn graphics_event_journal_coalesces_adjacent_scrolls_without_losing_screen_delta() {
+        let size = TermSize::new(5, 4);
+        let mut term = Term::new(Config::default(), &size, VoidListener);
+
+        for _ in 0..10 {
+            term.scroll_up_relative(Line(0), 1);
+        }
+
+        assert_eq!(
+            term.take_graphics_events(),
+            GraphicsEventBatch {
+                events: vec![GraphicsEvent::Scroll {
+                    direction: GraphicsScrollDirection::Up,
+                    top: 0,
+                    bottom: 4,
+                    lines: 4,
+                    old_screen_top: 0,
+                    new_screen_top: 10,
+                    screen_lines: 4,
+                }],
+                overflowed: false,
+                alternate_screen: false,
+            }
+        );
+    }
+
+    #[test]
+    fn graphics_event_journal_overflow_is_sticky_until_drain_and_recovers() {
+        let size = TermSize::new(5, 3);
+        let mut term = Term::new(Config::default(), &size, VoidListener);
+
+        for _ in 0..=(GRAPHICS_EVENT_JOURNAL_CAPACITY / 2) {
+            term.set_private_mode(PrivateMode::Unknown(47));
+            term.unset_private_mode(PrivateMode::Unknown(47));
+        }
+        term.set_private_mode(PrivateMode::Unknown(47));
+
+        assert_eq!(
+            term.take_graphics_events(),
+            GraphicsEventBatch {
+                events: Vec::new(),
+                overflowed: true,
+                alternate_screen: true,
+            }
+        );
+
+        term.unset_private_mode(PrivateMode::Unknown(47));
+        assert_eq!(
+            term.take_graphics_events(),
+            GraphicsEventBatch {
+                events: vec![GraphicsEvent::LeaveAlternate {
+                    mode: 47,
+                    clear: false,
+                }],
+                overflowed: false,
+                alternate_screen: false,
+            }
+        );
     }
 
     #[test]

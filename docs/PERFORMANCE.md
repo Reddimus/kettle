@@ -14,6 +14,11 @@ terminal mutex acquisition or viewport copy; a cursor-blink bit captured in the
 snapshot avoids hidden locks in both overlay construction and the event-loop
 blink scheduler. Opening a menu cancels any pointer gesture that could otherwise
 change terminal selection or scrollback without advancing output generation.
+Full non-output frames also no longer lock every pane merely to poll scrollback
+depth: tab activity and `scroll-on-output` follow the reader's lock-free output
+generation. The terminal grid is locked only when that opt-in scroll behavior
+must move a pane after real output, and in-place/alternate-screen updates now
+count correctly instead of being invisible to a history-growth proxy.
 The renderer hashes menu text and layout separately from its highlighted row,
 so hover reuses the main, menu, and stable block-cursor text vertices. It still
 walks the cached cells and rebuilds/uploads the frame's quad batches; this is a
@@ -22,7 +27,27 @@ reorder, or an active gesture fails closed to the full path; menu text, theme,
 enabled-state, anchor, and scroll-window changes force text preparation without
 recapturing an otherwise-current terminal snapshot. Cross-terminal
 frame-latency numbers belong to the machine-local benchmark artifact and are
-not claimed by portable unit tests.
+not claimed by portable unit tests. Menu width is measured in Unicode display
+columns and truncated at grapheme boundaries. Drawing, pointer hit-testing, and
+agent geometry use one clamped panel height, so a partially clipped row cannot
+be activated through otherwise blank bottom pixels. Pointer hit-testing streams
+row kinds instead of allocating a temporary vector, and wheel-scroll clamping
+computes the final fitting suffix in one reverse pass. Both remain O(items) for
+the 512-entry theme submenu.
+
+The remote-context poll submits the newest roots for all panes and windows to
+one background worker. A single-slot wake plus replaceable pending/result state
+coalesces bursts; process enumeration and procfs I/O never run on the winit
+thread, and a completion event repaints affected idle windows. Per-pane
+detection reuses scanner-owned BFS queue and visited storage. Linux follows
+bounded `task/*/children` edges (including non-leader thread children), charges
+all attempted reads to a 4 MiB aggregate ceiling, and caps nodes, task files,
+argv count, decoded argv bytes, and scan time (25 ms). Oversized, budget-limited,
+or deadline-limited scans never replace the last complete applied state. It
+reads `/proc/<pid>/cwd` only for the selected local foreground pid; detected
+remotes, direct nonlocal clients, and nested WSL sessions never install a
+misleading host cwd. Split/duplicate reads the latest foreground-shell result
+from this cache instead of scanning on the input path.
 
 ## Next release — paired six-terminal and physical-display gates
 
@@ -31,7 +56,16 @@ and Tabby in one interleaved session. `-Mode release` is the publication gate;
 `-Mode smoke` is explicitly non-release evidence and allows shortened/skipped
 probes or manifest-only discovery. Release mode pins PowerShell 7, the
 release-candidate binary and source identity, every executable, exact raw sample
-counts, all workload hashes, and the complete display topology.
+counts, all workload hashes, and the complete display topology. Schema 4 also
+binds both candidates to one reviewed comparator campaign: official release
+assets, expanded tree identities, executable bytes/hashes/signatures, versions,
+and roles must match the tracked release contract. Confirmed staged trees stay
+read-leased for the full run. The installed Windows Terminal package is
+revalidated separately, then its exact `WindowsTerminal.exe` Appx host is
+hash-validated, read-leased for the full run, and executed directly. Release
+evidence rejects `PATH`, `KETTLE_PERF_WT_EXE`, App Execution Alias, or other
+launcher indirection; standalone smoke probes retain ambient discovery only as
+explicitly advisory evidence.
 
 Kettle, Alacritty, WezTerm, Rio, and Tabby receive run-local configs with the
 same font, scrollback, colors, opacity, padding, cursor, and disabled effects.
@@ -59,22 +93,47 @@ Release evidence requires the target screen to map to one active EDID-backed
 physical monitor and fit the requested client. The mandatory transition probe
 also requires a second eligible physical screen and measures recovery with the
 context menu closed and open. Display bounds, DPI, refresh, EDID, connection,
-and primary mapping must remain identical from the suite's start to its end.
-The probe deliberately moves Kettle between the two pinned screens; any
-operator-initiated switch or topology change outside it invalidates the entire
-result. A virtual/default 1024×768 desktop can run synthetic or manifest smoke
-checks but cannot produce release evidence.
+and primary mapping must remain identical at every probe boundary. A continuous
+Windows `DisplaySettingsChanged` subscription also records intervening changes,
+so switching away and later returning to the original topology still
+invalidates the run. The probe deliberately moves Kettle between the two pinned
+screens; any operator-initiated switch or topology change outside it invalidates
+the entire result. A virtual/default 1024×768 desktop can run synthetic or
+manifest smoke checks but cannot produce release evidence.
 
-Physical-monitor identity acquisition is versioned and fail-closed. A unique
-active `WmiMonitorID` mapping remains preferred. If WMI is empty or ambiguous,
-the fallback accepts only one active physical CCD path for the desktop source,
-requires its path to use the exact `GUID_DEVINTERFACE_MONITOR` class, derives
-one registry key from that strict device-interface name, and validates the
-complete EDID header, block count, checksums, manufacturer, and product against
-the CCD identifiers. It never searches the
-registry for a matching model. Missing, duplicate, malformed, or inconsistent
-evidence leaves the screen unidentified and therefore cannot pass a release
-gate.
+The 2026-07-27 inspection after the reported monitor switches is exactly that
+blocked case: Windows exposes only default `\\.\DISPLAY1` at 1024×768, and no
+physical PnP monitor is present. The desktop cannot fit the required 1280×800
+client or supply two EDID-backed screens, so no current six-terminal win/loss
+or release claim is recorded. Reconnect a stable two-monitor physical desktop
+and start a new run; returning to the old topology cannot rescue samples taken
+across a switch.
+
+The source recording is useful only as machine-local diagnostic evidence. Its
+626×548 H.264 stream contains 121 frames over 4.095979 seconds at exactly
+30 fps; adjacent frame timestamps are 33.333–33.334 ms apart, with none over
+40 ms. Cursor motion best predicts the highlight seven frames later
+(233.3 ms; 37/56 exact row matches and 0.411-row mean absolute error). Together
+with the matching idle PTY trace, that points to input/event-to-paint/present
+latency rather than encoder cadence or parser output pressure. It is not
+comparator or release evidence.
+
+Physical-monitor identity acquisition is versioned and fail-closed. WMI is
+accepted only when one monitor and one physical connection share the exact
+instance identity. Miracast and indirect wired/virtual connections remain
+ineligible for release evidence even when they expose plausible EDID data. If
+the WMI connection is absent, the fallback accepts only one active physical CCD
+path for the desktop source, uses both its monitor and connection evidence,
+requires the exact `GUID_DEVINTERFACE_MONITOR` class, derives one registry key
+from that strict device-interface name, and validates the complete EDID header,
+block count, checksums, manufacturer, and product against the CCD identifiers.
+It never searches the registry for a matching model or combines sources. The
+scorer independently reconstructs that mapping and revalidates connection
+technology. Missing, duplicate, malformed, synthetic, or inconsistent evidence
+leaves the screen unidentified and therefore cannot pass a release gate.
+Trusted schema-4 evidence is type-exact: flags must be JSON booleans and output
+technologies must be JSON integers, so PowerShell-coercible strings, 0/1
+surrogates, and integral floating-point tokens are rejected.
 
 The vtebench leg pins the Windows WSL engine, one exact registered
 distribution, and the Linux Rustup, Cargo, `timeout`, `setsid`, and `script`
@@ -114,10 +173,19 @@ ancestor commit; both candidates run through the current, byte-identical
 harness and isolated configurations on the same stable machine session.
 
 The raw result directory is private audit evidence. Use
-`sanitize-results.ps1` to publish a separate JSON-only bundle with local paths,
-commands, monitor serials, and device identifiers replaced by run-salted
-tokens. Source/stage identities, reparse rejection, bounded flat-file
-publication, and atomic directory rename keep that sanitizer fail-closed.
+`sanitize-results.ps1` to publish a separate schema-2 JSON-only bundle with
+local paths, commands, monitor serials, device and hardware IDs, EDID
+fingerprints, adapter LUIDs, source/target IDs, and connector instances replaced
+by type-separated HMAC tokens keyed with a cryptographically random secret that
+is discarded instead of published. Tokens correlate equal values only within
+one bundle and cannot be brute-forced from the public run id. Source/stage
+identities, reparse rejection, bounded flat-file publication, and atomic
+directory rename keep that sanitizer fail-closed. Credential-like property
+names are normalized across common case and separator variants, and values of
+any JSON shape are tokenized. Publication accepts only the reviewed fixed
+harness filenames; custom JSON evidence is rejected until its name and schema
+receive an explicit sanitizer review, preventing source filenames from leaking
+user or credential text.
 Exact commands, sample counts, margins, validation steps, and caveats
 are in [`scripts/perf/README.md`](../scripts/perf/README.md).
 
@@ -141,7 +209,7 @@ only adapter without pretending a discrete GPU was selected, while hybrid
 laptops can still opt into `high` for dedicated-GPU headroom or `low` for
 integrated/battery-friendly startup.
 
-**Ubuntu local desktop smoke, current v2.25.1 main**
+**Ubuntu local desktop smoke, v2.25.1 snapshot**
 (`kettle 2.25.1 (5596f3aabbb7)`, `text-renderer = grid`,
 `gpu-power-preference = auto`, timing medians over 3 Hyperfine runs with 1
 warmup, RSS medians over 3 `/usr/bin/time -f %M` runs, real X11/Wayland
@@ -337,7 +405,13 @@ What the overhaul changed (each lands with a regression guard):
    bulk-copies plain runs. `cargo bench -p kettle-vt` pins it (the first
    criterion benches in the repo).
 4. **Wakeup dedup (P4)** — floods enqueued one event-loop wakeup per
-   64 KiB read; an atomic latch now allows one per paint window.
+   64 KiB read; a per-pane atomic gate now allows one pending wake while
+   renderable, retains paint damage while hidden or recovering, and publishes
+   one restore paint wake. An opt-in recorder/Lua output sidechannel keeps
+   transport wakes serviceable while hidden so its bounded queue drains, but
+   visibility/recovery guards still prohibit presentation. A per-window paint
+   state machine keeps failed presents retryable without a zero-delay wake
+   loop.
 5. **Recorder batching (P5)**, **link-scan debounce (P6)**, **session-log
    lock skip (P7)** — per-frame/per-read costs off the hot paths.
 
@@ -385,6 +459,7 @@ needs an interactive session.
 pwsh -NoLogo -NoProfile -File scripts/perf/perf-all.ps1 `
   -Mode release -KettleCandidate current -Label release-candidate
 pwsh -NoLogo -NoProfile -File scripts/perf/score.ps1 `
+  -Mode release `
   -ResultsDir target/perf-results/release-candidate `
   -BaselineResultsDir target/perf-results/baseline-previous-release `
   -RequireLatency -RequireMenuHover -RequireVtebench `
@@ -607,14 +682,23 @@ for each invocation.
   output-generation counter means only windows with new output
   repaint.
 - **Typed echo bypasses the output coalescer (v2.18.0).** PTY output
-  paints are capped at one per ~16 ms frame budget so multi-read
-  bursts (build logs, streaming output) settle into single frames.
+  paints are capped at one per-monitor frame budget so multi-read
+  bursts (build logs, streaming output) settle into single frames. When the
+  current monitor reports a usable refresh rate, the deadline reserves 250 µs
+  of scheduling headroom and remains clamped to 4–33.333 ms; the fallback is
+  16.667 ms. This is a scheduling policy, not a claim of lower live latency:
+  the two-monitor performance campaign remains the acceptance test.
   Keystroke echo used to ride the same `WaitUntil` deadline, and
   Windows' ~16 ms timer granularity made held-key repeat visibly
   stutter; echo output now requests a redraw immediately
   (`request_redraw` is vsync-coalesced, so it can't outpace the
   display) while non-input bursts still coalesce to one paint per
-  frame budget.
+  frame budget. Text and parser side channels first publish one release-ordered
+  output generation and then request a per-pane atomic wake gate. That latch
+  stays closed through a deferred interval; redraw reopens it immediately
+  before taking the candidate-frame snapshot. If a queued wake was already
+  covered by a presented frame, Kettle acknowledges and resamples it so output
+  racing the rearm is retained rather than silently closing the gate.
 
 ## Reproducing
 
@@ -647,24 +731,20 @@ startup is generally faster on macOS arm64, the headless GPU path
 uses Metal / DX12 instead of software-Vulkan, and the binary size
 differs because the universal2 macOS build is fatter.
 
-## Not measured here
+## Legacy microbench exclusions
 
-These would be valuable but need either a live display (FPS) or
-extended runs (steady-state memory, scrollback ingestion). Open
-follow-ups:
+The small `scripts/bench.sh` and `scripts/bench.ps1` microbenchmarks in this
+section do not automate live peer windows, display transitions, input latency,
+or GPU presentation. The current Windows release harness described above does:
+it applies one pinned methodology to Kettle, Windows Terminal, Alacritty,
+WezTerm, Rio, and Tabby, and fails closed when configuration, binary, workload,
+or physical-display identity is not comparable.
 
-- Live-window FPS under text-heavy / image-heavy load.
-- Steady-state memory after the GPU pipeline + font atlas warm up.
-- Scrollback ingestion throughput (`yes | head -10M | kettle`).
-- Time to first frame from `kettle -e bash -ic ls` (perceived
-  start-to-prompt latency).
-
-Comparative perf vs alacritty / kitty / WezTerm is *not* the goal of
-this doc — those projects publish their own numbers and any honest
-side-by-side needs a single methodology applied to all of them
-(consistent fonts, themes, scrollback, hardware). Worth a future
-[`docs/UX-COMPARISON.md`](UX-COMPARISON.md)-style comparison once
-that methodology is pinned down.
+Still outside the automated release evidence are photodiode-grade
+input-to-photon latency, long-duration GPU atlas/residency behavior, battery
+energy, and thermal throttling. Any result from the legacy scripts is historical
+or diagnostic evidence, not a substitute for a valid release-mode comparator
+campaign.
 
 ## Methodology notes
 

@@ -78,8 +78,8 @@ fmt:
 clippy:
     cargo clippy --workspace --all-targets -- -D warnings
 
-# `cargo test --workspace` — runs all 432+ unit + integration tests
-# (baseline was 424 + 8 new kettle-remote BFS tests).
+# `cargo test --workspace` — runs the complete workspace unit and integration
+# suite. Use the command's summary for the current count.
 test:
     cargo test --workspace
 
@@ -93,14 +93,15 @@ doc:
 
 # === Supply chain ==================================================
 
-# `cargo deny check` — supply-chain gate covering advisories,
-# duplicate-version bans, allowed licenses, and crates.io-only
-# sources. CI runs this on every Cargo.lock change via
-# `.github/workflows/deny.yml`. Local run mirrors CI exactly so
-# a green `just deny` means the workflow won't catch new issues.
+# `cargo deny check` — supply-chain gate covering duplicate-version bans,
+# allowed licenses, and crates.io-only sources in both the product and direct
+# vendor-test lock graphs. CI runs this on every Cargo.lock change via
+# `.github/workflows/deny.yml`. Local runs mirror CI exactly so a green
+# `just deny` means the workflow will not catch a new policy issue.
 # Requires `cargo install cargo-deny` (one-time).
 deny:
-    cargo deny check
+    cargo deny check licenses sources bans
+    cargo deny --manifest-path vendor/Cargo.toml check licenses sources bans
 
 # `cargo machete` — finds unused workspace dependencies. CI runs
 # this on every PR via `.github/workflows/machete.yml`. Local
@@ -108,6 +109,27 @@ deny:
 # leftover trips CI later. Requires `cargo install cargo-machete`.
 machete:
     cargo machete
+
+# Run every retained unit target, doctest, and warnings-denied clippy target
+# owned by the patched parser crates. These crates are deliberately outside the
+# product workspace, so `cargo test --workspace` cannot cover them. The
+# committed vendor validation lock keeps this direct test graph reproducible.
+vendor-parser-check:
+    cargo test --locked --manifest-path vendor/Cargo.toml --target-dir target/vendor-check -p vte --features ansi
+    cargo clippy --locked --manifest-path vendor/Cargo.toml --target-dir target/vendor-check -p vte --all-targets --features ansi -- -D warnings
+    cargo test --locked --manifest-path vendor/Cargo.toml --target-dir target/vendor-check -p alacritty_terminal
+    cargo clippy --locked --manifest-path vendor/Cargo.toml --target-dir target/vendor-check -p alacritty_terminal --all-targets -- -D warnings
+
+# Exercise the patched portable-pty package on the current native platform.
+# Run this on both Unix and Windows: only Windows compiles and executes the
+# PIPE_NOWAIT/ConPTY regression, while Linux covers the retained Unix package
+# surface. CI runs both native legs.
+vendor-pty-check:
+    cargo test --locked --manifest-path vendor/Cargo.toml --target-dir target/vendor-check -p portable-pty
+    cargo clippy --locked --manifest-path vendor/Cargo.toml --target-dir target/vendor-check -p portable-pty --all-targets -- -D warnings
+
+# Complete direct validation for all patched crates on the current OS.
+vendor-check: vendor-parser-check vendor-pty-check
 
 # Audit every Git-tracked path: index/worktree object identity, path/case
 # uniqueness, UTF-8/LF hygiene, manifests, Markdown links, and binary font/image
@@ -276,13 +298,14 @@ gauntlet: live-ui-helper-selftest
     @echo ""
     @echo "GAUNTLET PASSED — core Rust gate green. Run 'just gauntlet-full' for full CI parity."
 
-# Strict gate: gauntlet + supply-chain hygiene (adds the
-# `cargo-deny` stale-ignore catch and the `cargo-machete`
+# Strict gate: gauntlet + direct patched-crate validation + supply-chain
+# hygiene (adds the cargo-deny stale-ignore catch and cargo-machete
 # unused-deps catch as separate CI workflows triggered on Cargo.lock
-# changes). Run `just gauntlet-strict` before a release-cut so all
-# CI gates pass locally first. Requires `cargo install cargo-deny
-# cargo-machete` (one-time).
-gauntlet-strict: gauntlet deny machete tracked-audit
+# changes). Run `just gauntlet-strict` before a release cut so all CI gates
+# pass locally first. Requires `cargo install cargo-deny cargo-machete`
+# (one-time). The current-OS vendor check is supplemented by Linux + Windows
+# native vendor legs in CI.
+gauntlet-strict: gauntlet vendor-check deny machete tracked-audit
     @echo ""
     @echo "STRICT GAUNTLET PASSED — fmt/clippy/build/test/doc + supply-chain green."
 
@@ -728,11 +751,11 @@ agent-tui-wsl-smoke:
 # selection drag, tab creation, context-menu split dispatch, and screenshots.
 [unix]
 interaction-smoke:
-    python3 scripts/check-live-ui-smoke.py --kettle ./target/release/kettle interaction
+    python3 scripts/check-live-ui-smoke.py --cargo-release interaction
 
 [windows]
 interaction-smoke:
-    python scripts/check-live-ui-smoke.py interaction
+    python scripts/check-live-ui-smoke.py --cargo-release interaction
 
 # Reproduce a Windows Precision Touchpad gesture: a stream of sub-detent wheel
 # deltas (the units winit actually reports) instead of pre-quantized whole
@@ -743,21 +766,21 @@ interaction-smoke:
 # it. Artifacts under target/diagnostics/touchpad-scroll-*.
 [unix]
 touchpad-scroll-smoke: release
-    python3 scripts/check-live-ui-smoke.py --kettle ./target/release/kettle touchpad-scroll
+    python3 scripts/check-live-ui-smoke.py --cargo-release touchpad-scroll
 
 [windows]
 touchpad-scroll-smoke: release
-    python scripts/check-live-ui-smoke.py touchpad-scroll
+    python scripts/check-live-ui-smoke.py --cargo-release touchpad-scroll
 
 # Reproduce and guard the multi-tab mouse-click visual state. Captures full
 # window PNGs and tab geometry JSON under target/diagnostics/tabbar-click-*.
 [unix]
-tabbar-click-smoke:
+tabbar-click-smoke: release
     KETTLE_BIN=./target/release/kettle ./scripts/check-tabbar-click-smoke.sh
 
 [windows]
 tabbar-click-smoke:
-    python scripts/check-live-ui-smoke.py tabbar
+    python scripts/check-live-ui-smoke.py --cargo-release tabbar
 
 # v2.40.0 (tear-off UX): tear-off regression guards, two tiers. The ctl tier
 # proves the mouseless move_tab_to_new_window tear + tab_moved broadcast; the
@@ -768,52 +791,53 @@ tabbar-click-smoke:
 # (skips cleanly elsewhere); artifacts under target/diagnostics/tearoff-*.
 [unix]
 tearoff-smoke: release
-    python3 scripts/check-live-ui-smoke.py --kettle ./target/release/kettle tearoff
+    python3 scripts/check-live-ui-smoke.py --cargo-release tearoff
     KETTLE_BIN=./target/release/kettle ./scripts/check-tearoff-live-smoke.sh
 
 [windows]
 tearoff-smoke:
-    python scripts/check-live-ui-smoke.py tearoff
+    python scripts/check-live-ui-smoke.py --cargo-release tearoff
 
 # Reproduce cwd-derived title recovery for shell-truncated tab titles.
 # Captures list_panes/list_tabs/ui_geometry under target/diagnostics/tab-title-*.
 [unix]
 tab-title-smoke:
-    python3 scripts/check-live-ui-smoke.py --kettle ./target/release/kettle tab-title
+    python3 scripts/check-live-ui-smoke.py --cargo-release tab-title
 
 [windows]
 tab-title-smoke:
-    python scripts/check-live-ui-smoke.py tab-title
+    python scripts/check-live-ui-smoke.py --cargo-release tab-title
 
-# Reproduce cwd-derived title recovery for split-pane titlebars.
-# Captures screenshot/list_panes/ui_geometry under target/diagnostics/split-titlebar-*.
+# Reproduce cwd-derived split titlebars at both pane edges and verify their
+# focused/receiving/inactive PNG colors against ui_geometry-derived samples.
+# Captures screenshots/list_panes/ui_geometry/analysis under split-titlebar-*.
 [unix]
 split-titlebar-smoke:
-    python3 scripts/check-live-ui-smoke.py --kettle ./target/release/kettle split-titlebar
+    python3 scripts/check-live-ui-smoke.py --cargo-release split-titlebar
 
 [windows]
 split-titlebar-smoke:
-    python scripts/check-live-ui-smoke.py split-titlebar
+    python scripts/check-live-ui-smoke.py --cargo-release split-titlebar
 
 # Reproduce app-level zoom keybind matching without compositor key injection.
 # Captures dispatch_keybind/ui_geometry under target/diagnostics/zoom-keybind-*.
 [unix]
 zoom-keybind-smoke:
-    python3 scripts/check-live-ui-smoke.py --kettle ./target/release/kettle zoom-keybind
+    python3 scripts/check-live-ui-smoke.py --cargo-release zoom-keybind
 
 [windows]
 zoom-keybind-smoke:
-    python scripts/check-live-ui-smoke.py zoom-keybind
+    python scripts/check-live-ui-smoke.py --cargo-release zoom-keybind
 
 # Reproduce underline scrolling with git diff | delta under repeated j/k input.
 # Captures PNG frames and read_cells JSON under target/diagnostics/underline-scroll-*.
 [unix]
-underline-scroll-smoke:
+underline-scroll-smoke: release
     KETTLE_BIN=./target/release/kettle ./scripts/check-underline-scroll-smoke.sh
 
 [windows]
 underline-scroll-smoke:
-    python scripts/check-live-ui-smoke.py underline
+    python scripts/check-live-ui-smoke.py --cargo-release underline
 
 # Clean every build artifact — `cargo clean` plus any temp PNGs
 # the screenshot / menu / bench recipes may have left in the OS

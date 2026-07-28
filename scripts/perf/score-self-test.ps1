@@ -161,8 +161,8 @@ function Write-Fixture {
         },
         [ordered]@{
             identity_source = 'wmi-monitor-id-v1'
-            instance_name = 'DISPLAY\FIXTURE2\2'
-            hardware_id = 'FIXTURE2'
+            instance_name = 'DISPLAY\FIXTURE1\2'
+            hardware_id = 'FIXTURE1'
             friendly_name = 'Fixture Monitor Two'
             serial_number = 'FIXTURE-2'
         }
@@ -201,16 +201,16 @@ function Write-Fixture {
         },
         [ordered]@{
             device_name = '\\.\DISPLAY2'
-            monitor_device_id = 'MONITOR\FIXTURE2\2'
-            monitor_hardware_id = 'FIXTURE2'
+            monitor_device_id = 'MONITOR\FIXTURE1\2'
+            monitor_hardware_id = 'FIXTURE1'
             primary = $false
             edid_backed = $true
             edid_match_count = 1
             edid_monitor = $monitorPhysical[1]
             connection = [ordered]@{
                 identity_source = 'wmi-monitor-connection-v1'
-                instance_name = 'DISPLAY\FIXTURE2\2'
-                hardware_id = 'FIXTURE2'
+                instance_name = 'DISPLAY\FIXTURE1\2'
+                hardware_id = 'FIXTURE1'
                 video_output_technology = 0
             }
             effective_dpi = [ordered]@{ x = 144; y = 144 }
@@ -233,8 +233,8 @@ function Write-Fixture {
     )
     $monitorTopologyStart = [ordered]@{
         identity_acquisition = [ordered]@{
-            schema = 'kettle-display-identity-acquisition-v1'
-            resolver = 'wmi-monitor-id-with-ccd-registry-fallback-v1'
+            schema = 'kettle-display-identity-acquisition-v2'
+            resolver = 'wmi-monitor-id-with-ccd-registry-fallback-v2'
             method = 'wmi-monitor-id-v1'
             ccd_status = 'unavailable'
             desktop_screen_count = 2
@@ -410,10 +410,19 @@ function Write-Fixture {
                         sha256 = (('ab' * 32) -join '')
                     })
                 }
+            } elseif ($name -eq 'wt') {
+                [ordered]@{
+                    mode = 'advisory-built-in-default'
+                    files = @()
+                }
             } else {
                 [ordered]@{
-                    mode = 'built-in-default'
-                    files = @()
+                    mode = 'benchmark-isolated'
+                    files = @([ordered]@{
+                        path = "C:\$name-perf-fixture.config"
+                        bytes = 1
+                        sha256 = (('cd' * 32) -join '')
+                    })
                 }
             }
         }
@@ -549,7 +558,7 @@ function Write-Fixture {
         }
     }
     [ordered]@{
-        schema_version = 1
+        schema_version = 2
         run_id = $runId
         repository_commit = '0123456789abcdef0123456789abcdef01234567'
         repository_dirty = $false
@@ -573,6 +582,7 @@ function Write-Fixture {
             display_topology = [ordered]@{
                 release_evidence_valid = $true
                 topology_stable = $true
+                target_screen_device = '\\.\DISPLAY1'
                 desktop_screens = @(
                     foreach ($screen in $monitorScreens) {
                         [ordered]@{
@@ -589,6 +599,7 @@ function Write-Fixture {
             }
         }
         settings = [ordered]@{
+            mode = 'smoke'
             window_pixels = [ordered]@{
                 width = 1280
                 height = 800
@@ -638,6 +649,22 @@ function Write-Fixture {
     } | Write-ScoreFixtureJson -Path (
         Join-Path $Directory 'vtebench-summary.json'
     ) -Depth 10
+    $menuObservations = @(
+        for ($index = 0; $index -lt 50; $index++) {
+            [ordered]@{
+                terminal = 'kettle'
+                metric = 'menu_hover_ms'
+                sample_id = $index + 1
+                sequence = $index + 1
+                block_id = 1 + [int][Math]::Floor($index / 10)
+                status = 'ok'
+                value = 10.0
+                poll_count = 1
+                baseline_capture_ms = 1.0
+                poll_capture_ms = 1.0
+            }
+        }
+    )
     [ordered]@{
         run_id = $runId
         passed = $true
@@ -647,6 +674,9 @@ function Write-Fixture {
             $manifestTerminals[0].helper_binaries
         )
         kettle_version = 'test-kettle-1.0'
+        config = 'C:\kettle-perf-fixture.config'
+        config_sha256 = (('ab' * 32) -join '')
+        target_screen_device = '\\.\DISPLAY1'
         requested_samples = 50
         samples = 50
         misses = 0
@@ -655,6 +685,29 @@ function Write-Fixture {
         latency_ms_p99 = 10.0
         long_frame_ms = 100.0
         long_frames = 0
+        variant = 'fixed-comparator'
+        block_size = 10
+        block_count = 5
+        observations = $menuObservations
+        window_pixels = [ordered]@{
+            width = 1280
+            height = 800
+        }
+        capture_region = [ordered]@{
+            x = 0
+            y = 0
+            width = 1280
+            height = 800
+        }
+        capture_scope = 'context-menu-roi'
+        observation_limit = (
+            'comparative-software-capture-not-input-to-photon'
+        )
+        gates = [ordered]@{
+            max_p95_ms = 33.0
+            max_p99_ms = 50.0
+            max_long_frames = 1
+        }
     } | Write-ScoreFixtureJson `
         -Path (Join-Path $Directory 'menu-hover.json') -Depth 4
 
@@ -838,6 +891,7 @@ function Invoke-Score {
 
     $arguments = @(
         '-NoProfile', '-File', $scoreScript, '-ResultsDir', $Directory,
+        '-Mode', 'smoke',
         '-RequireLatency', '-RequireMenuHover', '-RequireVtebench',
         '-RequireMonitorTransition'
     )
@@ -865,9 +919,17 @@ try {
         ConvertFrom-Json
     if (
         -not $score.passed -or
+        $score.scoring_mode -cne 'smoke' -or
+        $score.benchmark_mode -cne 'smoke' -or
         $score.kettle_rank -ne 1 -or
         -not $score.coverage_passed -or
-        -not $score.kettle_latency_data_valid
+        -not $score.kettle_latency_data_valid -or
+        $score.minimum_metrics_per_terminal -ne 5 -or
+        $score.minimum_startup_samples -ne 5 -or
+        $score.minimum_throughput_runs -ne 3 -or
+        $score.minimum_latency_samples -ne 20 -or
+        [double]$score.max_latency_miss_rate -ne 0.10 -or
+        $score.minimum_menu_hover_samples -ne 50
     ) {
         throw 'complete fixture produced the wrong score contract'
     }

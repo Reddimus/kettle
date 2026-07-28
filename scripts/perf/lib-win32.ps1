@@ -5,6 +5,7 @@
 # DPI virtualization.
 $ErrorActionPreference = 'Stop'
 . "$PSScriptRoot\statistics.ps1"
+. "$PSScriptRoot\display-identity-contract.ps1"
 
 if (-not ('KettlePerf.Native' -as [type])) {
 Add-Type -TypeDefinition @'
@@ -972,17 +973,6 @@ function Read-KettlePerfExactMonitorEdid {
     return [byte[]]$value
 }
 
-function Test-KettlePerfPhysicalOutputTechnology {
-    param([int]$Value)
-
-    # Miracast and indirect-display targets can synthesize EDID. They are valid
-    # desktop screens, but not physical release-benchmark evidence.
-    return (
-        ($Value -ge 0 -and $Value -le 14) -or
-        $Value -eq [int]::MinValue
-    )
-}
-
 function Convert-KettlePerfCcdPathEvidence {
     param(
         [Parameter(Mandatory = $true)]
@@ -1000,7 +990,7 @@ function Convert-KettlePerfCcdPathEvidence {
         -not [bool]$Path.EdidIdsValid -or
         [bool]$Path.FriendlyNameForced -or
         -not (Test-KettlePerfPhysicalOutputTechnology (
-            [int]$Path.OutputTechnology
+            $Path.OutputTechnology
         ))
     ) {
         throw 'DisplayConfig path is not active physical EDID evidence'
@@ -1194,11 +1184,36 @@ function Resolve-KettlePerfDisplayIdentity {
                 )
             }
         )
+        $strictCcdEvidence = if (
+            $CcdStatus -eq 'available' -and
+            $rawCcdMatches.Count -eq 1 -and
+            $validCcdMatches.Count -eq 1 -and
+            -not $invalidCcdSources.Contains($deviceName) -and
+            (
+                -not $screenHardware -or
+                [StringComparer]::OrdinalIgnoreCase.Equals(
+                    [string]$validCcdMatches[0].monitor.hardware_id,
+                    $screenHardware
+                )
+            )
+        ) {
+            $validCcdMatches[0]
+        } else {
+            $null
+        }
         $chosenMonitor = $null
         $chosenConnection = $null
         if ($wmiMatches.Count -eq 1) {
             $wmi = $wmiMatches[0]
-            $wmiConnectionMatches = @(
+            $wmiInstanceConnectionMatches = @(
+                $WmiConnections | Where-Object {
+                    [StringComparer]::OrdinalIgnoreCase.Equals(
+                        [string]$_.instance_name,
+                        [string]$wmi.instance_name
+                    )
+                }
+            )
+            $wmiHardwareConnectionMatches = @(
                 $WmiConnections | Where-Object {
                     [StringComparer]::OrdinalIgnoreCase.Equals(
                         [string]$_.hardware_id,
@@ -1206,92 +1221,99 @@ function Resolve-KettlePerfDisplayIdentity {
                     )
                 }
             )
-            $ccdCorroboration = if (
-                $validCcdMatches.Count -eq 1 -and
+            $wmiConnection = if (
+                $wmiInstanceConnectionMatches.Count -eq 1 -and
                 [StringComparer]::OrdinalIgnoreCase.Equals(
-                    [string]$validCcdMatches[0].monitor.hardware_id,
+                    [string]$wmiInstanceConnectionMatches[0].hardware_id,
                     $screenHardware
-                )
+                ) -and
+                (Test-KettlePerfPhysicalOutputTechnology (
+                    $wmiInstanceConnectionMatches[0].video_output_technology
+                ))
             ) {
-                $validCcdMatches[0]
+                $wmiInstanceConnectionMatches[0]
             } else {
                 $null
             }
-            $chosenMonitor = [pscustomobject][ordered]@{
-                identity_source = 'wmi-monitor-id-v1'
-                instance_name = [string]$wmi.instance_name
-                hardware_id = [string]$wmi.hardware_id
-                manufacturer_code = $wmi.manufacturer_code
-                product_code = $wmi.product_code
-                friendly_name = $wmi.friendly_name
-                serial_number = $wmi.serial_number
-                manufacture_week = $wmi.manufacture_week
-                manufacture_year = $wmi.manufacture_year
-                monitor_device_path = if ($null -ne $ccdCorroboration) {
-                    $ccdCorroboration.monitor.monitor_device_path
-                } else {
-                    $null
+            if ($null -ne $wmiConnection) {
+                $ccdCorroboration = $strictCcdEvidence
+                $chosenMonitor = [pscustomobject][ordered]@{
+                    identity_source = 'wmi-monitor-id-v1'
+                    instance_name = [string]$wmi.instance_name
+                    hardware_id = [string]$wmi.hardware_id
+                    manufacturer_code = $wmi.manufacturer_code
+                    product_code = $wmi.product_code
+                    friendly_name = $wmi.friendly_name
+                    serial_number = $wmi.serial_number
+                    manufacture_week = $wmi.manufacture_week
+                    manufacture_year = $wmi.manufacture_year
+                    monitor_device_path = if ($null -ne $ccdCorroboration) {
+                        $ccdCorroboration.monitor.monitor_device_path
+                    } else {
+                        $null
+                    }
+                    registry_edid_sha256 = if ($null -ne $ccdCorroboration) {
+                        $ccdCorroboration.monitor.registry_edid_sha256
+                    } else {
+                        $null
+                    }
+                    registry_edid_block_count = if (
+                        $null -ne $ccdCorroboration
+                    ) {
+                        $ccdCorroboration.monitor.registry_edid_block_count
+                    } else {
+                        $null
+                    }
+                    adapter_luid = if ($null -ne $ccdCorroboration) {
+                        $ccdCorroboration.monitor.adapter_luid
+                    } else {
+                        $null
+                    }
+                    source_id = if ($null -ne $ccdCorroboration) {
+                        $ccdCorroboration.monitor.source_id
+                    } else {
+                        $null
+                    }
+                    target_id = if ($null -ne $ccdCorroboration) {
+                        $ccdCorroboration.monitor.target_id
+                    } else {
+                        $null
+                    }
+                    connector_instance = if ($null -ne $ccdCorroboration) {
+                        $ccdCorroboration.monitor.connector_instance
+                    } else {
+                        $null
+                    }
+                    output_technology = if ($null -ne $ccdCorroboration) {
+                        $ccdCorroboration.monitor.output_technology
+                    } else {
+                        $null
+                    }
                 }
-                registry_edid_sha256 = if ($null -ne $ccdCorroboration) {
-                    $ccdCorroboration.monitor.registry_edid_sha256
-                } else {
-                    $null
-                }
-                registry_edid_block_count = if ($null -ne $ccdCorroboration) {
-                    $ccdCorroboration.monitor.registry_edid_block_count
-                } else {
-                    $null
-                }
-                adapter_luid = if ($null -ne $ccdCorroboration) {
-                    $ccdCorroboration.monitor.adapter_luid
-                } else {
-                    $null
-                }
-                source_id = if ($null -ne $ccdCorroboration) {
-                    $ccdCorroboration.monitor.source_id
-                } else {
-                    $null
-                }
-                target_id = if ($null -ne $ccdCorroboration) {
-                    $ccdCorroboration.monitor.target_id
-                } else {
-                    $null
-                }
-                connector_instance = if ($null -ne $ccdCorroboration) {
-                    $ccdCorroboration.monitor.connector_instance
-                } else {
-                    $null
-                }
-                output_technology = if ($null -ne $ccdCorroboration) {
-                    $ccdCorroboration.monitor.output_technology
-                } else {
-                    $null
-                }
-            }
-            if ($wmiConnectionMatches.Count -eq 1) {
                 $chosenConnection = [pscustomobject][ordered]@{
                     identity_source = 'wmi-monitor-connection-v1'
-                    instance_name = [string]$wmiConnectionMatches[0].instance_name
-                    hardware_id = [string]$wmiConnectionMatches[0].hardware_id
+                    instance_name = [string]$wmiConnection.instance_name
+                    hardware_id = [string]$wmiConnection.hardware_id
                     video_output_technology = (
-                        $wmiConnectionMatches[0].video_output_technology
+                        $wmiConnection.video_output_technology
                     )
                     adapter_luid = $null
                     source_id = $null
                     target_id = $null
                     connector_instance = $null
                 }
-            } elseif ($null -ne $ccdCorroboration) {
-                $chosenConnection = $ccdCorroboration.connection
+            } elseif (
+                $wmiInstanceConnectionMatches.Count -eq 0 -and
+                $wmiHardwareConnectionMatches.Count -eq 0 -and
+                $null -ne $strictCcdEvidence
+            ) {
+                $chosenMonitor = $strictCcdEvidence.monitor
+                $chosenConnection = $strictCcdEvidence.connection
+                $screenHardware = [string]$chosenMonitor.hardware_id
             }
-        } elseif (
-            $CcdStatus -eq 'available' -and
-            $rawCcdMatches.Count -eq 1 -and
-            $validCcdMatches.Count -eq 1 -and
-            -not $invalidCcdSources.Contains($deviceName)
-        ) {
-            $chosenMonitor = $validCcdMatches[0].monitor
-            $chosenConnection = $validCcdMatches[0].connection
+        } elseif ($null -ne $strictCcdEvidence) {
+            $chosenMonitor = $strictCcdEvidence.monitor
+            $chosenConnection = $strictCcdEvidence.connection
             $screenHardware = [string]$chosenMonitor.hardware_id
         }
 
@@ -1374,8 +1396,8 @@ function Resolve-KettlePerfDisplayIdentity {
     }
     return [pscustomobject][ordered]@{
         identity_acquisition = [pscustomobject][ordered]@{
-            schema = 'kettle-display-identity-acquisition-v1'
-            resolver = 'wmi-monitor-id-with-ccd-registry-fallback-v1'
+            schema = 'kettle-display-identity-acquisition-v2'
+            resolver = 'wmi-monitor-id-with-ccd-registry-fallback-v2'
             method = $method
             ccd_status = $CcdStatus
             desktop_screen_count = $DesktopScreens.Count

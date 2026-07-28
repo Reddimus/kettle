@@ -38,7 +38,10 @@ nix profile install github:reddimus/kettle
 Persists across nix gc; uninstall with `nix profile remove kettle`
 (or remove its profile index/store path). The wrapped binary lives
 at `~/.nix-profile/bin/kettle`, on the default `$PATH` for both NixOS
-and home-manager users.
+and home-manager users. Linux outputs also install Kettle's Desktop Entry,
+SVG and seven raster hicolor icons, man page, and bash/zsh/fish/PowerShell
+integration snippets under the profile's standard `share/` hierarchy. Darwin
+outputs intentionally contain none of those Linux desktop assets.
 
 ### Add to a flake-based system / home-manager config
 
@@ -91,6 +94,22 @@ be the single source of truth for Rust dependencies).
   [oxalica/rust-overlay](https://github.com/oxalica/rust-overlay)
   — matches the workspace MSRV declared in `Cargo.toml`.
   Drift-proofs the Nix path against a nixpkgs Rust version bump.
+- **Nix tests only the root-identity-independent crates.** The Linux sandbox
+  presents `/` as uid 65534 while the builder runs as uid 1000, so Kettle's
+  private-path policy intentionally rejects positive private-file operations
+  anywhere beneath that ancestry. The derivation therefore runs tests for only
+  the root-independent `kettle-vt` and `kettle-remote` crates; it still builds
+  the complete application. Native Linux, macOS, and Windows CI plus the Linux
+  Rust 1.89 MSRV job are authoritative for the full workspace, including
+  private-state, configuration persistence, screenshots, recording, local IPC,
+  and updater tests. Package-level selection also avoids negative security
+  tests passing for the wrong early rejection reason.
+- **Linux outputs carry the complete desktop payload.** The package installs
+  `kettle.desktop`, the scalable and 16/24/32/48/64/128/256-pixel hicolor
+  icons, `man1/kettle.1`, and all four shell-integration snippets beneath
+  `$out/share`. The Linux-only `package-contents` check byte-compares every
+  installed asset with its checked-in source, verifies immutable regular-file
+  modes, and rejects an unreviewed addition to the package's share tree.
 - **On Linux, `postFixup` appends to the existing RUNPATH** with
   `pkgs.lib.makeLibraryPath runtimeLibs` and asserts that Nix's glibc and
   libgcc paths remain present. wgpu / winit / glyphon

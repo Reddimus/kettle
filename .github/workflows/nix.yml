@@ -3,25 +3,7 @@ name: Nix packaging
 on:
   push:
     branches: [main]
-    paths:
-      - ".github/workflows/nix.yml"
-      - ".cargo/**"
-      - "Cargo.lock"
-      - "Cargo.toml"
-      - "crates/**"
-      - "flake.lock"
-      - "flake.nix"
-      - "vendor/**"
   pull_request:
-    paths:
-      - ".github/workflows/nix.yml"
-      - ".cargo/**"
-      - "Cargo.lock"
-      - "Cargo.toml"
-      - "crates/**"
-      - "flake.lock"
-      - "flake.nix"
-      - "vendor/**"
 
 permissions:
   contents: read
@@ -48,6 +30,10 @@ jobs:
       - name: Build and test package
         run: >-
           nix build .#checks.x86_64-linux.cargo-test
+          --no-link --no-update-lock-file --print-build-logs
+      - name: Verify installed package contents
+        run: >-
+          nix build .#checks.x86_64-linux.package-contents
           --no-link --no-update-lock-file --print-build-logs
       - name: Launch installed package under Xvfb
         run: >-

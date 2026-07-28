@@ -12,6 +12,11 @@ members = [
     "crates/kettle-ui",
     "crates/kettle",
 ]
+exclude = [
+    "vendor/alacritty_terminal-0.26.0",
+    "vendor/portable-pty-0.9.0",
+    "vendor/vte-0.15.0",
+]
 
 [workspace.package]
 version = "2.42.0"
@@ -131,9 +136,24 @@ unimplemented = "deny"
 # alacritty_terminal 0.26.0 evicts from `title_stack` when Kitty's keyboard
 # mode stack reaches its depth cap. That can panic with an empty title stack
 # and corrupts unrelated title state. Its active-mode query/screen bookkeeping
-# also loses direct flag changes. Keep the released source local until an
-# upstream release carries both fixes; `vendor/README.md` records scope.
+# also loses direct flag changes. Kettle additionally needs correct DEC
+# 47/1047/1049 screen semantics, monotonic document-row identities, post-scroll
+# removal of fully evicted selections, and a bounded ordered journal of
+# graphics-relevant lifecycle and margin-scroll mutations. Keep the released
+# source local until an upstream release carries every patch; `vendor/README.md`
+# records the exact scope.
 alacritty_terminal = { path = "vendor/alacritty_terminal-0.26.0" }
+# portable-pty's ConPTY writer uses a synchronous anonymous-pipe handle.
+# Kettle's bounded priority workers require partial/nonblocking progress so a
+# full child-input buffer cannot monopolize the worker ahead of protocol
+# replies or pane shutdown. The local extension opts only Kettle's writer into
+# PIPE_NOWAIT while retaining the synchronous handle required by ConPTY.
+portable-pty = { path = "vendor/portable-pty-0.9.0" }
+# vte 0.15.0 has no out-of-band synchronization markers. Kettle needs an
+# unforgeable marker channel inside the existing DEC 2026 byte buffer so
+# extracted graphics controls can replay at their exact wire position without
+# becoming visible before the synchronized update commits.
+vte = { path = "vendor/vte-0.15.0" }
 
 [profile.release]
 opt-level = 3

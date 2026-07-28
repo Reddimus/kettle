@@ -9,7 +9,9 @@ It intentionally uses only Python stdlib plus `kettle ctl`.
 from __future__ import annotations
 
 import argparse
+import csv
 import json
+import math
 import os
 import platform
 import queue
@@ -38,6 +40,12 @@ NVIM_SNAPSHOT_TAR_OVERHEAD_BYTES = (
     NVIM_SNAPSHOT_MAX_ENTRIES * 1024 + 1024 * 1024
 )
 COPY_CHUNK_BYTES = 1024 * 1024
+SPLIT_TITLEBAR_COLOR_HEX = {
+    "transmit": "#1a7f37",
+    "receive": "#0969da",
+    "inactive": "#6e7781",
+    "grid": "#101010",
+}
 
 
 @dataclass
@@ -72,7 +80,11 @@ class SnapshotCopyBudget:
 
 
 def run(
-    argv: List[str], *, timeout: Optional[float] = None, capture: bool = True
+    argv: List[str],
+    *,
+    timeout: Optional[float] = None,
+    capture: bool = True,
+    env: Optional[Dict[str, str]] = None,
 ) -> subprocess.CompletedProcess:
     return subprocess.run(
         argv,
@@ -83,7 +95,231 @@ def run(
         stderr=subprocess.PIPE if capture else None,
         timeout=timeout,
         check=False,
+        env=env,
     )
+
+
+def path_is_link(path: Path) -> bool:
+    """Recognize symlinks and Windows junctions without following them."""
+    is_junction = getattr(path, "is_junction", None)
+    return path.is_symlink() or (
+        callable(is_junction) and bool(is_junction())
+    )
+
+
+def assert_no_reparse_ancestry(path: Path) -> None:
+    absolute = Path(os.path.abspath(path))
+    ancestry = [absolute, *absolute.parents]
+    for candidate in reversed(ancestry):
+        if candidate.exists() and path_is_link(candidate):
+            raise RuntimeError(
+                f"refusing live-smoke path with reparse ancestry: {candidate}"
+            )
+
+
+def windows_system_executable(*relative_parts: str) -> str:
+    system_root = os.environ.get("SYSTEMROOT")
+    if system_root:
+        candidate = Path(system_root).joinpath(*relative_parts)
+        if candidate.is_file():
+            assert_no_reparse_ancestry(candidate)
+            return str(candidate.resolve())
+    fallback = shutil.which(relative_parts[-1])
+    if fallback is None:
+        raise RuntimeError(
+            f"required Windows system executable is missing: {relative_parts[-1]}"
+        )
+    fallback_path = Path(fallback)
+    assert_no_reparse_ancestry(fallback_path)
+    return str(fallback_path.resolve())
+
+
+def windows_current_user_sid() -> str:
+    cp = run(
+        [
+            windows_system_executable("System32", "whoami.exe"),
+            "/user",
+            "/fo",
+            "csv",
+            "/nh",
+        ],
+        timeout=10,
+        capture=True,
+    )
+    if cp.returncode != 0:
+        raise RuntimeError(
+            "could not resolve the current Windows user SID: "
+            f"rc={cp.returncode} stderr={cp.stderr.strip()!r}"
+        )
+    try:
+        row = next(csv.reader([cp.stdout.strip()]))
+    except (csv.Error, StopIteration) as error:
+        raise RuntimeError(
+            f"could not parse the current Windows user SID: {cp.stdout!r}"
+        ) from error
+    if len(row) != 2 or re.fullmatch(r"S-\d+(?:-\d+)+", row[1]) is None:
+        raise RuntimeError(
+            f"whoami returned an invalid Windows user SID: {cp.stdout!r}"
+        )
+    return row[1]
+
+
+def harden_windows_private_directory(path: Path) -> None:
+    """Replace inherited grants with current-user and SYSTEM full control."""
+    if platform.system() != "Windows":
+        raise RuntimeError("Windows private-directory hardening requires Windows")
+    assert_no_reparse_ancestry(path)
+    if path_is_link(path) or not path.is_dir():
+        raise RuntimeError(f"refusing non-directory or linked private path: {path}")
+    sid = windows_current_user_sid()
+    acl_script = r"""
+$ErrorActionPreference = 'Stop'
+$path = $env:KETTLE_PRIVATE_DIRECTORY
+$user = [System.Security.Principal.SecurityIdentifier]::new(
+    $env:KETTLE_PRIVATE_USER_SID
+)
+$system = [System.Security.Principal.SecurityIdentifier]::new('S-1-5-18')
+$acl = [System.Security.AccessControl.DirectorySecurity]::new()
+$acl.SetOwner($user)
+$acl.SetAccessRuleProtection($true, $false)
+$inheritance = (
+    [System.Security.AccessControl.InheritanceFlags]::ContainerInherit -bor
+    [System.Security.AccessControl.InheritanceFlags]::ObjectInherit
+)
+$propagation = [System.Security.AccessControl.PropagationFlags]::None
+$allow = [System.Security.AccessControl.AccessControlType]::Allow
+foreach ($identity in @($user, $system)) {
+    $rule = [System.Security.AccessControl.FileSystemAccessRule]::new(
+        $identity,
+        [System.Security.AccessControl.FileSystemRights]::FullControl,
+        $inheritance,
+        $propagation,
+        $allow
+    )
+    [void]$acl.AddAccessRule($rule)
+}
+[System.IO.Directory]::SetAccessControl($path, $acl)
+$verified = [System.IO.Directory]::GetAccessControl($path)
+$protected = $verified.AreAccessRulesProtected
+if (-not $protected) {
+    throw 'private directory still inherits access rules'
+}
+$owner = $verified.GetOwner(
+    [System.Security.Principal.SecurityIdentifier]
+).Value
+if ($owner -ne $user.Value) {
+    throw "private directory owner mismatch: $owner"
+}
+$rules = @(
+    $verified.GetAccessRules(
+        $true,
+        $true,
+        [System.Security.Principal.SecurityIdentifier]
+    )
+)
+if ($rules.Count -ne 2) {
+    throw "private directory has $($rules.Count) explicit access rules"
+}
+$expected = @($user.Value, $system.Value)
+foreach ($rule in $rules) {
+    if (
+        $rule.IdentityReference.Value -notin $expected -or
+        $rule.IsInherited -or
+        $rule.AccessControlType -ne $allow -or
+        $rule.FileSystemRights -ne
+            [System.Security.AccessControl.FileSystemRights]::FullControl -or
+        $rule.InheritanceFlags -ne $inheritance -or
+        $rule.PropagationFlags -ne $propagation
+    ) {
+        throw "unexpected private-directory access rule: $rule"
+    }
+}
+Write-Output 'PRIVATE_ACL_OK'
+"""
+    child_env = os.environ.copy()
+    child_env["KETTLE_PRIVATE_DIRECTORY"] = str(path)
+    child_env["KETTLE_PRIVATE_USER_SID"] = sid
+    cp = run(
+        [
+            windows_system_executable(
+                "System32",
+                "WindowsPowerShell",
+                "v1.0",
+                "powershell.exe",
+            ),
+            "-NoLogo",
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            acl_script,
+        ],
+        timeout=30,
+        capture=True,
+        env=child_env,
+    )
+    if cp.returncode != 0 or cp.stdout.strip() != "PRIVATE_ACL_OK":
+        raise RuntimeError(
+            "could not protect Windows live-smoke directory: "
+            f"rc={cp.returncode} stdout={cp.stdout.strip()!r} "
+            f"stderr={cp.stderr.strip()!r}"
+        )
+    assert_no_reparse_ancestry(path)
+    if path_is_link(path) or not path.is_dir():
+        raise RuntimeError(
+            f"Windows live-smoke directory changed during hardening: {path}"
+        )
+
+
+def windows_live_smoke_parent() -> Path:
+    local_app_data = os.environ.get("LOCALAPPDATA")
+    if not local_app_data:
+        raise RuntimeError("LOCALAPPDATA is required for Windows live UI smokes")
+    local_app_data_path = Path(os.path.abspath(local_app_data))
+    assert_no_reparse_ancestry(local_app_data_path)
+    parent = local_app_data_path.resolve()
+    if path_is_link(local_app_data_path) or not parent.is_dir():
+        raise RuntimeError(
+            f"refusing linked or missing Windows local app-data root: {parent}"
+        )
+    app_root = parent / "kettle"
+    app_root.mkdir(exist_ok=True)
+    assert_no_reparse_ancestry(app_root)
+    if path_is_link(app_root) or app_root.resolve().parent != parent:
+        raise RuntimeError(
+            f"refusing linked or escaped Windows Kettle data root: {app_root}"
+        )
+    return app_root.resolve()
+
+
+def create_windows_private_directory(prefix: str) -> Path:
+    if re.fullmatch(r"kettle-[a-z0-9-]+-", prefix) is None:
+        raise ValueError(f"refusing unsafe Windows private-directory prefix: {prefix}")
+    parent = windows_live_smoke_parent()
+    root = Path(tempfile.mkdtemp(prefix=prefix, dir=parent))
+    try:
+        if path_is_link(root):
+            raise RuntimeError(f"private directory is unexpectedly linked: {root}")
+        resolved = root.resolve()
+        if resolved.parent != parent or not resolved.name.startswith(prefix):
+            raise RuntimeError(f"private directory escaped its parent: {resolved}")
+        harden_windows_private_directory(resolved)
+        return resolved
+    except Exception:
+        shutil.rmtree(root, ignore_errors=True)
+        raise
+
+
+def create_default_diagnostic_root(*, windows: Optional[bool] = None) -> Path:
+    use_windows = platform.system() == "Windows" if windows is None else windows
+    if use_windows:
+        if platform.system() != "Windows":
+            raise RuntimeError(
+                "a Windows diagnostic root can only be created on Windows"
+            )
+        return create_windows_private_directory("kettle-live-ui-diagnostics-")
+    root = Path("target/diagnostics").resolve()
+    root.mkdir(parents=True, exist_ok=True)
+    return root
 
 
 def release_kettle_artifact_from_messages(messages: str) -> Path:
@@ -234,6 +470,293 @@ def read_rgba_png(path: Path) -> Tuple[int, int, List[bytes]]:
     return width, height, rows
 
 
+def parse_hex_rgb(value: str) -> Tuple[int, int, int]:
+    if re.fullmatch(r"#[0-9a-fA-F]{6}", value) is None:
+        raise ValueError(f"expected #rrggbb color, got {value!r}")
+    return tuple(int(value[offset : offset + 2], 16) for offset in (1, 3, 5))  # type: ignore[return-value]
+
+
+def split_titlebar_number(value: object, label: str) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise RuntimeError(f"split-titlebar smoke: {label} is not numeric: {value!r}")
+    number = float(value)
+    if not math.isfinite(number):
+        raise RuntimeError(f"split-titlebar smoke: {label} is not finite: {value!r}")
+    return number
+
+
+def split_titlebar_rect(value: object, label: str) -> Tuple[float, float, float, float]:
+    if not isinstance(value, dict):
+        raise RuntimeError(f"split-titlebar smoke: {label} is not a rectangle: {value!r}")
+    rect = tuple(
+        split_titlebar_number(value.get(field), f"{label}.{field}")
+        for field in ("x", "y", "width", "height")
+    )
+    if rect[2] <= 0.0 or rect[3] <= 0.0:
+        raise RuntimeError(f"split-titlebar smoke: {label} is empty: {value!r}")
+    return rect  # type: ignore[return-value]
+
+
+def exact_rgb_patch(
+    rgba_rows: List[bytes],
+    width: int,
+    height: int,
+    x: float,
+    y: float,
+    expected: Tuple[int, int, int],
+    label: str,
+) -> Dict[str, object]:
+    """Check a 3x3 opaque patch centered on a geometry-derived interior point."""
+    center_x = int(math.floor(x))
+    center_y = int(math.floor(y))
+    pixels: List[Tuple[int, int, int, int]] = []
+    for sample_y in range(center_y - 1, center_y + 2):
+        for sample_x in range(center_x - 1, center_x + 2):
+            if not (0 <= sample_x < width and 0 <= sample_y < height):
+                raise RuntimeError(
+                    f"split-titlebar smoke: {label} sample escaped the screenshot "
+                    f"at ({sample_x}, {sample_y}) in {width}x{height}"
+                )
+            offset = sample_x * 4
+            pixels.append(tuple(rgba_rows[sample_y][offset : offset + 4]))  # type: ignore[arg-type]
+    expected_rgba = (*expected, 255)
+    mismatches = [pixel for pixel in pixels if pixel != expected_rgba]
+    if mismatches:
+        observed = sorted(set(pixels))
+        raise RuntimeError(
+            f"split-titlebar smoke: {label} expected {expected_rgba}, "
+            f"observed {observed}"
+        )
+    return {
+        "x": center_x,
+        "y": center_y,
+        "pixels": len(pixels),
+        "rgb": "#{:02x}{:02x}{:02x}".format(*expected),
+    }
+
+
+def analyze_split_titlebar_frame(
+    geometry: Dict[str, object],
+    width: int,
+    height: int,
+    rgba_rows: List[bytes],
+    *,
+    title_at_bottom: bool,
+    broadcast: bool,
+) -> Dict[str, object]:
+    """Validate one real split-titlebar frame from geometry and exact pixels.
+
+    The title label contract begins with two blank cells. Sampling the center of
+    the first one avoids shell-controlled text, group/bell icons, and the
+    one-pixel focus accent. The neighboring body sample stays in the configured
+    vertical padding between the titlebar and the terminal grid.
+    """
+    surface = geometry.get("surface")
+    if not isinstance(surface, dict):
+        raise RuntimeError("split-titlebar smoke: ui_geometry omitted surface")
+    surface_width = int(split_titlebar_number(surface.get("width"), "surface.width"))
+    surface_height = int(
+        split_titlebar_number(surface.get("height"), "surface.height")
+    )
+    if (width, height) != (surface_width, surface_height):
+        raise RuntimeError(
+            "split-titlebar smoke: screenshot/surface dimensions differ: "
+            f"png={width}x{height} geometry={surface_width}x{surface_height}"
+        )
+    if len(rgba_rows) != height or any(len(row) != width * 4 for row in rgba_rows):
+        raise RuntimeError("split-titlebar smoke: malformed RGBA screenshot rows")
+
+    cell = geometry.get("cell")
+    padding = geometry.get("padding")
+    if not isinstance(cell, dict) or not isinstance(padding, dict):
+        raise RuntimeError("split-titlebar smoke: ui_geometry omitted cell/padding")
+    cell_width = split_titlebar_number(cell.get("width"), "cell.width")
+    cell_height = split_titlebar_number(cell.get("height"), "cell.height")
+    padding_y = split_titlebar_number(padding.get("y"), "padding.y")
+    if cell_width < 6.0 or cell_height < 6.0 or padding_y < 6.0:
+        raise RuntimeError(
+            "split-titlebar smoke: cell/padding metrics are too small for the "
+            f"non-glyph pixel oracle: cell={cell_width}x{cell_height} "
+            f"padding_y={padding_y}"
+        )
+
+    titlebars = geometry.get("pane_titlebars")
+    if not isinstance(titlebars, list) or len(titlebars) < 2:
+        raise RuntimeError(
+            f"split-titlebar smoke: expected at least two pane titlebars: {titlebars!r}"
+        )
+    focused = [
+        titlebar
+        for titlebar in titlebars
+        if isinstance(titlebar, dict) and titlebar.get("focused") is True
+    ]
+    if len(focused) != 1:
+        raise RuntimeError(
+            f"split-titlebar smoke: expected one focused titlebar: {titlebars!r}"
+        )
+
+    colors = {
+        name: parse_hex_rgb(value)
+        for name, value in SPLIT_TITLEBAR_COLOR_HEX.items()
+    }
+    tolerance = 0.75
+    pane_analysis: List[Dict[str, object]] = []
+    seen_panes: Set[object] = set()
+    for index, titlebar in enumerate(titlebars):
+        if not isinstance(titlebar, dict):
+            raise RuntimeError(
+                f"split-titlebar smoke: malformed titlebar[{index}]: {titlebar!r}"
+            )
+        pane_id = titlebar.get("pane")
+        if (
+            isinstance(pane_id, bool)
+            or not isinstance(pane_id, int)
+            or pane_id in seen_panes
+        ):
+            raise RuntimeError(
+                f"split-titlebar smoke: invalid/duplicate titlebar pane id: {pane_id!r}"
+            )
+        seen_panes.add(pane_id)
+        bar_x, bar_y, bar_width, bar_height = split_titlebar_rect(
+            titlebar.get("rect"), f"pane_titlebars[{index}].rect"
+        )
+        pane_x, pane_y, pane_width, pane_height = split_titlebar_rect(
+            titlebar.get("pane_rect"), f"pane_titlebars[{index}].pane_rect"
+        )
+        if (
+            abs(bar_x - pane_x) > tolerance
+            or abs(bar_width - pane_width) > tolerance
+            or abs(bar_height - (cell_height + 6.0)) > tolerance
+        ):
+            raise RuntimeError(
+                "split-titlebar smoke: titlebar span/height drifted from pane/cell "
+                f"geometry: titlebar={titlebar!r} cell_height={cell_height}"
+            )
+        expected_bar_y = (
+            pane_y + pane_height - bar_height if title_at_bottom else pane_y
+        )
+        if abs(bar_y - expected_bar_y) > tolerance:
+            edge = "bottom" if title_at_bottom else "top"
+            raise RuntimeError(
+                f"split-titlebar smoke: {edge} titlebar is on the wrong pane edge: "
+                f"titlebar={titlebar!r}"
+            )
+
+        columns_value = titlebar.get("cols")
+        rows_value = titlebar.get("rows")
+        if (
+            isinstance(columns_value, bool)
+            or not isinstance(columns_value, int)
+            or columns_value < 1
+            or isinstance(rows_value, bool)
+            or not isinstance(rows_value, int)
+            or rows_value < 1
+        ):
+            raise RuntimeError(
+                f"split-titlebar smoke: invalid pane grid dimensions: {titlebar!r}"
+            )
+        columns = columns_value
+        rows = rows_value
+        grid_origin_y = pane_y + padding_y + (
+            0.0 if title_at_bottom else bar_height
+        )
+        grid_end_y = grid_origin_y + rows * cell_height
+        grid_limit_y = (
+            bar_y - padding_y
+            if title_at_bottom
+            else pane_y + pane_height - padding_y
+        )
+        remainder = grid_limit_y - grid_end_y
+        if remainder < -tolerance or remainder >= cell_height + tolerance:
+            raise RuntimeError(
+                "split-titlebar smoke: PTY grid does not fit the title-position-aware "
+                f"body: pane={pane_id!r} origin={grid_origin_y} end={grid_end_y} "
+                f"limit={grid_limit_y} rows={rows}"
+            )
+
+        fitted_title = titlebar.get("fitted_title")
+        if not isinstance(fitted_title, str) or not fitted_title.startswith("  "):
+            raise RuntimeError(
+                "split-titlebar smoke: title label lost its two-cell sampling gutter: "
+                f"{titlebar!r}"
+            )
+        sample_x = bar_x + cell_width * 0.5
+        sample_y = bar_y + bar_height * 0.5
+        state = (
+            "transmit"
+            if titlebar.get("focused") is True
+            else ("receive" if broadcast else "inactive")
+        )
+        titlebar_sample = exact_rgb_patch(
+            rgba_rows,
+            width,
+            height,
+            sample_x,
+            sample_y,
+            colors[state],
+            f"pane {pane_id} {state} titlebar",
+        )
+
+        grid_side_y = (
+            bar_y - padding_y * 0.5
+            if title_at_bottom
+            else bar_y + bar_height + padding_y * 0.5
+        )
+        grid_side_sample = exact_rgb_patch(
+            rgba_rows,
+            width,
+            height,
+            sample_x,
+            grid_side_y,
+            colors["grid"],
+            f"pane {pane_id} grid-side edge",
+        )
+        pane_analysis.append(
+            {
+                "pane": pane_id,
+                "focused": titlebar.get("focused") is True,
+                "state": state,
+                "titlebar_rect": titlebar.get("rect"),
+                "pane_rect": titlebar.get("pane_rect"),
+                "grid": {
+                    "cols": columns,
+                    "rows": rows,
+                    "origin_y": grid_origin_y,
+                    "end_y": grid_end_y,
+                    "body_limit_y": grid_limit_y,
+                },
+                "titlebar_sample": titlebar_sample,
+                "grid_side_sample": grid_side_sample,
+            }
+        )
+
+    return {
+        "title_at_bottom": title_at_bottom,
+        "broadcast": broadcast,
+        "surface": {"width": width, "height": height},
+        "colors": SPLIT_TITLEBAR_COLOR_HEX,
+        "panes": pane_analysis,
+    }
+
+
+def analyze_split_titlebar_png(
+    geometry: Dict[str, object],
+    screenshot: Path,
+    *,
+    title_at_bottom: bool,
+    broadcast: bool,
+) -> Dict[str, object]:
+    width, height, rgba_rows = read_rgba_png(screenshot)
+    return analyze_split_titlebar_frame(
+        geometry,
+        width,
+        height,
+        rgba_rows,
+        title_at_bottom=title_at_bottom,
+        broadcast=broadcast,
+    )
+
+
 def bright_at(rgba_rows: List[bytes], x: int, y: int) -> bool:
     if y < 0 or y >= len(rgba_rows) or x < 0:
         return False
@@ -253,6 +776,54 @@ def bright_pixel_count(rgba_rows: List[bytes]) -> int:
             if a > 0 and (r * 299 + g * 587 + b * 114) >= 140_000:
                 total += 1
     return total
+
+
+def magenta_block_metrics(rgba_rows: List[bytes]) -> Tuple[int, int]:
+    """Return the widest magenta run and longest stack of qualifying rows."""
+    widest = 0
+    stacked = 0
+    longest_stack = 0
+    for row in rgba_rows:
+        current = 0
+        row_widest = 0
+        for off in range(0, len(row), 4):
+            r, g, b, a = row[off : off + 4]
+            if a > 0 and r >= 200 and g <= 80 and b >= 200:
+                current += 1
+                row_widest = max(row_widest, current)
+            else:
+                current = 0
+        widest = max(widest, row_widest)
+        if row_widest >= 12:
+            stacked += 1
+            longest_stack = max(longest_stack, stacked)
+        else:
+            stacked = 0
+    return widest, longest_stack
+
+
+def added_magenta_pixel_count(
+    before_rows: List[bytes], after_rows: List[bytes]
+) -> int:
+    """Count newly magenta pixels at the same coordinates in two screenshots."""
+    if len(before_rows) != len(after_rows):
+        raise ValueError("screenshot heights differ")
+    added = 0
+    for before, after in zip(before_rows, after_rows, strict=True):
+        if len(before) != len(after):
+            raise ValueError("screenshot widths differ")
+        for off in range(0, len(after), 4):
+            br, bg, bb, ba = before[off : off + 4]
+            ar, ag, ab, aa = after[off : off + 4]
+            before_magenta = (
+                ba > 0 and br >= 200 and bg <= 80 and bb >= 200
+            )
+            after_magenta = (
+                aa > 0 and ar >= 200 and ag <= 80 and ab >= 200
+            )
+            if after_magenta and not before_magenta:
+                added += 1
+    return added
 
 
 def bright_pixels_in_rect(rgba_rows: List[bytes], x0: float, y0: float, x1: float, y1: float) -> int:
@@ -546,10 +1117,7 @@ class AgentShellTarget:
     @staticmethod
     def path_is_link(path: Path) -> bool:
         """Recognize links and Windows junctions without following them."""
-        is_junction = getattr(path, "is_junction", None)
-        return path.is_symlink() or (
-            callable(is_junction) and bool(is_junction())
-        )
+        return path_is_link(path)
 
     @classmethod
     def validate_native_sandbox_path(cls, sandbox_path: str) -> Path:
@@ -559,9 +1127,14 @@ class AgentShellTarget:
                 f"refusing linked Neovim sandbox path: {candidate}"
             )
         root = candidate.resolve()
-        temp_root = Path(tempfile.gettempdir()).resolve()
-        if root.parent != temp_root or not root.name.startswith(
-            "kettle-agent-tui-"
+        expected_parent = (
+            windows_live_smoke_parent()
+            if platform.system() == "Windows"
+            else Path(tempfile.gettempdir()).resolve()
+        )
+        if (
+            root.parent != expected_parent
+            or not root.name.startswith("kettle-agent-tui-")
         ):
             raise ValueError(f"refusing unsafe Neovim sandbox path: {root}")
         return root
@@ -597,7 +1170,11 @@ class AgentShellTarget:
             self.validate_wsl_sandbox_path(paths[0])
             return paths[0]
 
-        root = Path(tempfile.mkdtemp(prefix="kettle-agent-tui-"))
+        root = (
+            create_windows_private_directory("kettle-agent-tui-")
+            if platform.system() == "Windows"
+            else Path(tempfile.mkdtemp(prefix="kettle-agent-tui-"))
+        )
         try:
             root.chmod(0o700)
             return str(self.validate_native_sandbox_path(str(root)))
@@ -1125,8 +1702,31 @@ class AgentShellTarget:
             return
 
         root = self.validate_native_sandbox_path(sandbox_path)
-        if root.exists():
-            shutil.rmtree(root)
+        if not root.exists():
+            return
+
+        def clear_readonly_and_retry(
+            operation: Callable[[str], None],
+            name: str,
+            _error: Tuple[type, BaseException, object],
+        ) -> None:
+            os.chmod(name, stat.S_IWRITE | stat.S_IREAD)
+            operation(name)
+
+        last_error: Optional[OSError] = None
+        for _attempt in range(5):
+            root = self.validate_native_sandbox_path(sandbox_path)
+            if not root.exists():
+                return
+            try:
+                shutil.rmtree(root, onerror=clear_readonly_and_retry)
+                return
+            except OSError as error:
+                last_error = error
+                time.sleep(0.2)
+        raise RuntimeError(
+            f"failed to remove native Neovim sandbox {root}: {last_error}"
+        )
 
 
 class LiveKettle:
@@ -1291,8 +1891,8 @@ class EventStream:
     def _read_stdout(self) -> None:
         if self.proc.stdout is None:
             return
-        for line in self.proc.stdout:
-            line = line.strip()
+        for raw_line in self.proc.stdout:
+            line = raw_line.strip()
             if not line:
                 continue
             self.lines.append(line)
@@ -1538,6 +2138,132 @@ def active_rect(geometry: Dict[str, object]) -> Tuple[Dict[str, float], int]:
     return active[0]["rect"], int(active[0]["index"])
 
 
+def tab_segment_layout_error(
+    tab_bar: Dict[str, object], *, tolerance: float = 1.0
+) -> Optional[str]:
+    raw_segments = tab_bar.get("segments")
+    if not isinstance(raw_segments, list) or not raw_segments:
+        return "tab bar has no segments"
+    try:
+        rects = [segment["rect"] for segment in raw_segments]
+        widths = [float(rect["width"]) for rect in rects]
+        xs = [float(rect["x"]) for rect in rects]
+    except (KeyError, TypeError, ValueError):
+        return "tab bar contains malformed segment rectangles"
+    if any(width <= 0.0 for width in widths):
+        return f"tab segment widths must be positive: {widths}"
+
+    first_x = xs[0]
+    first_width = widths[0]
+    for index, x in enumerate(xs):
+        expected_x = first_x + first_width * index
+        if abs(x - expected_x) > tolerance:
+            return (
+                "tab segment boundary is not aligned to the common seam: "
+                f"index={index} x={x} expected={expected_x}"
+            )
+
+    # Legacy layouts divided the entire strip into equal tabs.
+    if all(abs(width - first_width) <= tolerance for width in widths[1:]):
+        return None
+
+    if not all(
+        abs(width - first_width) <= tolerance for width in widths[1:-1]
+    ):
+        return f"non-final tab segments are not equal: {widths}"
+    try:
+        new_tab = tab_bar["new_tab"]
+        new_tab_menu = tab_bar["new_tab_menu"]
+        new_tab_width = float(new_tab["width"])
+        new_tab_menu_width = float(new_tab_menu["width"])
+        new_tab_x = float(new_tab["x"])
+        new_tab_menu_x = float(new_tab_menu["x"])
+    except (KeyError, TypeError, ValueError):
+        return "tab bar contains malformed new-tab button rectangles"
+    button_width = new_tab_width + new_tab_menu_width
+    expected_last_width = first_width - button_width
+    if expected_last_width <= 0.0 or abs(widths[-1] - expected_last_width) > tolerance:
+        return (
+            "final tab does not reserve the new-tab button strip: "
+            f"width={widths[-1]} expected={expected_last_width}"
+        )
+    button_left = min(
+        x
+        for x, width in (
+            (new_tab_x, new_tab_width),
+            (new_tab_menu_x, new_tab_menu_width),
+        )
+        if width > 0.0
+    )
+    last_right = xs[-1] + widths[-1]
+    if abs(last_right - button_left) > tolerance:
+        return (
+            "final tab does not meet the new-tab button strip: "
+            f"right={last_right} strip_left={button_left}"
+        )
+    return None
+
+
+def tab_bar_geometry_signature(geometry: Dict[str, object]) -> Tuple[object, ...]:
+    tab_bar = geometry.get("tab_bar")
+    if not isinstance(tab_bar, dict):
+        raise RuntimeError("tabbar smoke: ui_geometry has no tab_bar")
+    segments = tab_bar.get("segments")
+    if not isinstance(segments, list):
+        raise RuntimeError("tabbar smoke: ui_geometry has malformed segments")
+    segment_signature = []
+    for segment in segments:
+        if not isinstance(segment, dict) or not isinstance(segment.get("rect"), dict):
+            raise RuntimeError("tabbar smoke: ui_geometry has malformed segment")
+        rect = segment["rect"]
+        segment_signature.append(
+            (
+                segment.get("index"),
+                segment.get("active"),
+                segment.get("title"),
+                segment.get("fitted_title"),
+                segment.get("path"),
+                rect.get("x"),
+                rect.get("width"),
+            )
+        )
+    return tuple(segment_signature)
+
+
+def wait_for_stable_tab_bar(
+    read_geometry: Callable[[], Dict[str, object]],
+    *,
+    timeout_seconds: float = 5.0,
+    quiet_seconds: float = 0.5,
+    poll_seconds: float = 0.05,
+    monotonic: Callable[[], float] = time.monotonic,
+    sleep: Callable[[float], None] = time.sleep,
+) -> Dict[str, object]:
+    if timeout_seconds <= 0 or quiet_seconds < 0 or poll_seconds <= 0:
+        raise ValueError("tab-bar stability waits require positive bounded timing")
+    started = monotonic()
+    stable_since = started
+    last_signature: Optional[Tuple[object, ...]] = None
+    last_geometry: Dict[str, object] = {}
+    polls = 0
+    while True:
+        last_geometry = read_geometry()
+        signature = tab_bar_geometry_signature(last_geometry)
+        polls += 1
+        now = monotonic()
+        if signature != last_signature:
+            last_signature = signature
+            stable_since = now
+        elif now - stable_since >= quiet_seconds:
+            return last_geometry
+        if now - started >= timeout_seconds:
+            raise RuntimeError(
+                "tabbar smoke: timed out waiting for pre-input title geometry "
+                f"to settle after {polls} polls; signature={last_signature!r}"
+            )
+        sleep(min(poll_seconds, timeout_seconds - (now - started)))
+
+
 def run_tabbar(kettle: str, root: Path) -> Path:
     out = root / f"tabbar-click-{time.strftime('%Y%m%d-%H%M%S')}"
     out.mkdir(parents=True, exist_ok=True)
@@ -1572,15 +2298,15 @@ def run_tabbar(kettle: str, root: Path) -> Path:
         if len(tabs.get("tabs", [])) < 3:
             raise SystemExit("tabbar smoke: expected at least 3 tabs")
 
-        before = live.json_ctl("ui_geometry")
+        before = wait_for_stable_tab_bar(
+            lambda: live.json_ctl("ui_geometry")
+        )
         (out / "geometry-before-press.json").write_text(json.dumps(before, indent=2) + "\n")
         live.screenshot(out / "before-press.png")
-        segments = before["tab_bar"]["segments"]  # type: ignore[index]
-        widths = [float(seg["rect"]["width"]) for seg in segments]  # type: ignore[index]
-        if len(widths) >= 2 and not all(abs(w - widths[0]) < 1.0 for w in widths[1:]):
+        layout_error = tab_segment_layout_error(before["tab_bar"])  # type: ignore[arg-type,index]
+        if layout_error is not None:
             raise SystemExit(
-                "tabbar smoke: homogeneous segments not equal: "
-                f"widths={[round(w, 1) for w in widths]}"
+                f"tabbar smoke: invalid homogeneous segment layout: {layout_error}"
             )
         seg = before["tab_bar"]["segments"][1]["rect"]  # type: ignore[index]
         x, y = rect_center(seg)
@@ -2321,6 +3047,262 @@ def live_helper_selftest() -> None:
     assert transition_shot == artifact_root / "search-open-transition.png"
     assert state_shot != transition_shot
 
+    def titlebar_fixture_geometry(title_at_bottom: bool) -> Dict[str, object]:
+        bar_y = 120.0 if title_at_bottom else 20.0
+        return {
+            "surface": {"width": 220, "height": 140},
+            "cell": {"width": 8.0, "height": 14.0},
+            "padding": {"x": 8.0, "y": 8.0},
+            "pane_titlebars": [
+                {
+                    "pane": 1,
+                    "focused": True,
+                    "rect": {
+                        "x": 0.0,
+                        "y": bar_y,
+                        "width": 110.0,
+                        "height": 20.0,
+                    },
+                    "pane_rect": {
+                        "x": 0.0,
+                        "y": 20.0,
+                        "width": 110.0,
+                        "height": 120.0,
+                    },
+                    "fitted_title": "  fixture-one",
+                    "cols": 11,
+                    "rows": 6,
+                },
+                {
+                    "pane": 2,
+                    "focused": False,
+                    "rect": {
+                        "x": 110.0,
+                        "y": bar_y,
+                        "width": 110.0,
+                        "height": 20.0,
+                    },
+                    "pane_rect": {
+                        "x": 110.0,
+                        "y": 20.0,
+                        "width": 110.0,
+                        "height": 120.0,
+                    },
+                    "fitted_title": "  fixture-two",
+                    "cols": 11,
+                    "rows": 6,
+                },
+            ],
+        }
+
+    def titlebar_fixture_rows(
+        geometry: Dict[str, object], broadcast: bool
+    ) -> List[bytes]:
+        background = parse_hex_rgb(SPLIT_TITLEBAR_COLOR_HEX["grid"])
+        raw_rows = [
+            bytearray((*background, 255) * 220)
+            for _ in range(140)
+        ]
+        titlebars = geometry["pane_titlebars"]
+        assert isinstance(titlebars, list)
+        for titlebar in titlebars:
+            assert isinstance(titlebar, dict)
+            x, y, rect_width, rect_height = split_titlebar_rect(
+                titlebar["rect"], "fixture.titlebar"
+            )
+            state = (
+                "transmit"
+                if titlebar["focused"]
+                else ("receive" if broadcast else "inactive")
+            )
+            color = parse_hex_rgb(SPLIT_TITLEBAR_COLOR_HEX[state])
+            for pixel_y in range(int(y), int(y + rect_height)):
+                for pixel_x in range(int(x), int(x + rect_width)):
+                    offset = pixel_x * 4
+                    raw_rows[pixel_y][offset : offset + 4] = bytes((*color, 255))
+        return [bytes(row) for row in raw_rows]
+
+    for fixture_at_bottom in (False, True):
+        fixture_geometry = titlebar_fixture_geometry(fixture_at_bottom)
+        for fixture_broadcast in (False, True):
+            fixture_rows = titlebar_fixture_rows(
+                fixture_geometry, fixture_broadcast
+            )
+            fixture_analysis = analyze_split_titlebar_frame(
+                fixture_geometry,
+                220,
+                140,
+                fixture_rows,
+                title_at_bottom=fixture_at_bottom,
+                broadcast=fixture_broadcast,
+            )
+            states = {
+                pane["state"]
+                for pane in fixture_analysis["panes"]  # type: ignore[union-attr]
+            }
+            expected_states = {
+                "transmit",
+                "receive" if fixture_broadcast else "inactive",
+            }
+            assert states == expected_states
+
+    wrong_edge_geometry = titlebar_fixture_geometry(True)
+    wrong_edge_titlebars = wrong_edge_geometry["pane_titlebars"]
+    assert isinstance(wrong_edge_titlebars, list)
+    for wrong_edge_titlebar in wrong_edge_titlebars:
+        assert isinstance(wrong_edge_titlebar, dict)
+        wrong_edge_rect = wrong_edge_titlebar["rect"]
+        assert isinstance(wrong_edge_rect, dict)
+        wrong_edge_rect["y"] = 20.0
+    try:
+        analyze_split_titlebar_frame(
+            wrong_edge_geometry,
+            220,
+            140,
+            titlebar_fixture_rows(wrong_edge_geometry, False),
+            title_at_bottom=True,
+            broadcast=False,
+        )
+    except RuntimeError as error:
+        assert "wrong pane edge" in str(error)
+    else:
+        raise AssertionError("bottom titlebar fixture accepted a top-edge rectangle")
+
+    wrong_color_geometry = titlebar_fixture_geometry(False)
+    wrong_color_rows = [
+        bytearray(row)
+        for row in titlebar_fixture_rows(wrong_color_geometry, False)
+    ]
+    wrong_color_offset = 4 * 4
+    wrong_color_rows[30][wrong_color_offset : wrong_color_offset + 4] = (
+        b"\x00\x00\x00\xff"
+    )
+    try:
+        analyze_split_titlebar_frame(
+            wrong_color_geometry,
+            220,
+            140,
+            [bytes(row) for row in wrong_color_rows],
+            title_at_bottom=False,
+            broadcast=False,
+        )
+    except RuntimeError as error:
+        assert "transmit titlebar" in str(error)
+    else:
+        raise AssertionError("titlebar fixture accepted the wrong configured color")
+
+    legacy_tab_bar = {
+        "segments": [
+            {"rect": {"x": 0.0, "width": 100.0}},
+            {"rect": {"x": 100.0, "width": 100.0}},
+            {"rect": {"x": 200.0, "width": 100.0}},
+        ],
+        "new_tab_menu": {"x": 300.0, "width": 0.0},
+        "new_tab": {"x": 300.0, "width": 0.0},
+    }
+    aligned_tab_bar = {
+        "segments": [
+            {"rect": {"x": 0.0, "width": 100.0}},
+            {"rect": {"x": 100.0, "width": 100.0}},
+            {"rect": {"x": 200.0, "width": 60.0}},
+        ],
+        "new_tab_menu": {"x": 260.0, "width": 20.0},
+        "new_tab": {"x": 280.0, "width": 20.0},
+    }
+    assert tab_segment_layout_error(legacy_tab_bar) is None
+    assert tab_segment_layout_error(aligned_tab_bar) is None
+    invalid_boundary = json.loads(json.dumps(aligned_tab_bar))
+    invalid_boundary["segments"][1]["rect"]["x"] = 97.0
+    assert "boundary" in (tab_segment_layout_error(invalid_boundary) or "")
+    invalid_last = json.loads(json.dumps(aligned_tab_bar))
+    invalid_last["segments"][-1]["rect"]["width"] = 65.0
+    assert "reserve" in (tab_segment_layout_error(invalid_last) or "")
+    invalid_width = json.loads(json.dumps(aligned_tab_bar))
+    invalid_width["segments"][0]["rect"]["width"] = 0.0
+    assert "positive" in (tab_segment_layout_error(invalid_width) or "")
+
+    class FakeClock:
+        def __init__(self) -> None:
+            self.value = 0.0
+
+        def monotonic(self) -> float:
+            return self.value
+
+        def sleep(self, seconds: float) -> None:
+            self.value += seconds
+
+    geometry_a = {"tab_bar": json.loads(json.dumps(aligned_tab_bar))}
+    geometry_b = {"tab_bar": json.loads(json.dumps(aligned_tab_bar))}
+    geometry_a["tab_bar"]["segments"][0]["title"] = "starting"
+    geometry_b["tab_bar"]["segments"][0]["title"] = "settled"
+    stable_sequence = [geometry_a, geometry_b, geometry_b, geometry_b]
+    stable_clock = FakeClock()
+
+    def read_stabilizing_geometry() -> Dict[str, object]:
+        if len(stable_sequence) > 1:
+            return stable_sequence.pop(0)
+        return stable_sequence[0]
+
+    settled = wait_for_stable_tab_bar(
+        read_stabilizing_geometry,
+        timeout_seconds=1.0,
+        quiet_seconds=0.2,
+        poll_seconds=0.1,
+        monotonic=stable_clock.monotonic,
+        sleep=stable_clock.sleep,
+    )
+    assert settled["tab_bar"]["segments"][0]["title"] == "settled"
+
+    timeout_clock = FakeClock()
+    timeout_poll = 0
+
+    def read_changing_geometry() -> Dict[str, object]:
+        nonlocal timeout_poll
+        timeout_poll += 1
+        geometry = json.loads(json.dumps(geometry_a))
+        geometry["tab_bar"]["segments"][0]["title"] = f"title-{timeout_poll}"
+        return geometry
+
+    try:
+        wait_for_stable_tab_bar(
+            read_changing_geometry,
+            timeout_seconds=0.25,
+            quiet_seconds=0.2,
+            poll_seconds=0.1,
+            monotonic=timeout_clock.monotonic,
+            sleep=timeout_clock.sleep,
+        )
+    except RuntimeError as error:
+        assert "timed out" in str(error)
+        assert "signature=" in str(error)
+    else:
+        raise AssertionError("changing tab titles did not hit the stability deadline")
+
+    portable_diagnostics = create_default_diagnostic_root(windows=False)
+    assert portable_diagnostics == Path("target/diagnostics").resolve()
+    try:
+        create_windows_private_directory("../escaped-")
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("unsafe Windows private-directory prefix was accepted")
+    if platform.system() == "Windows":
+        windows_diagnostics = create_default_diagnostic_root()
+        try:
+            assert windows_diagnostics.parent == windows_live_smoke_parent()
+            assert windows_diagnostics.name.startswith(
+                "kettle-live-ui-diagnostics-"
+            )
+            assert not path_is_link(windows_diagnostics)
+        finally:
+            if (
+                windows_diagnostics.parent == windows_live_smoke_parent()
+                and windows_diagnostics.name.startswith(
+                    "kettle-live-ui-diagnostics-"
+                )
+            ):
+                shutil.rmtree(windows_diagnostics)
+
     marker = "KETTLE_AGENT_AUTH_EXPECTED"
     output_marker = "KETTLE_AGENT_AUTH_OUTPUT_BEGIN"
     done_marker = "KETTLE_AGENT_AUTH_DONE"
@@ -2665,8 +3647,13 @@ def live_helper_selftest() -> None:
             assert "HOME" in native_setup
             assert "XDG_CONFIG_HOME" in native_setup
             assert "Copy-Item" not in native_setup
+            readonly_cleanup_fixture = native_root / "read-only-cleanup-fixture"
+            readonly_cleanup_fixture.write_text("fixture\n", encoding="utf-8")
+            if platform.system() == "Windows":
+                readonly_cleanup_fixture.chmod(stat.S_IREAD)
         finally:
             snapshot_target.cleanup_nvim_sandbox_host(native_sandbox_path)
+        assert not Path(native_sandbox_path).exists()
 
     # Limits are checked while traversing and before any file body can grow
     # the snapshot without bound.
@@ -2781,18 +3768,122 @@ def live_helper_selftest() -> None:
     second_socket = new_tmux_socket_name()
     assert first_socket != second_socket
     assert re.fullmatch(r"kettle-smoke-[0-9a-f]{24}", first_socket)
+    assert parse_tmux_version("tmux 3.4") == (3, 4)
+    assert parse_tmux_version("tmux 3.6b") == (3, 6)
+    assert parse_tmux_version("tmux next-3.7") is None
+    assert tmux_da1_has_sixel("1b5b3f313b323b3463") is True
+    assert tmux_da1_has_sixel("1b5b3f313b3263") is False
+    assert tmux_da1_has_sixel("not-hex") is None
+    assert tmux_cell_size_from_reply("1b5b363b31383b3974") == (9, 18)
+    assert tmux_cell_size_from_reply("1b5b363b303b3074") == (0, 0)
+    assert tmux_cell_size_from_reply("not-hex") is None
+    query_code = terminal_query_python_code(
+        b"\x1b[c", "KETTLE_TMUX_DA1=", b"c"
+    )
+    assert "KETTLE_TMUX_DA1=" not in query_code
+    assert "while len(data)<64" in query_code
+    assert "deadline=time.monotonic()+2" in query_code
+    assert "finally:" in query_code
+    assert "termios.tcsetattr" in query_code
     target_bash = "/nix/store/test-bash/bin/bash"
     session_command = tmux_session_command(first_socket, target_bash)
+    sixel_session_command = tmux_session_command(
+        first_socket, target_bash, sixel=True
+    )
     split_commands = tmux_split_commands(
         first_socket, target_bash, "LEFT", "RIGHT"
     )
     assert target_bash in session_command
+    assert " -T sixel new-session " in sixel_session_command
+    assert " -T sixel " not in session_command
     assert split_commands[0][-1] == target_bash
     assert split_commands[0][-1] != "/bin/bash"
     assert target_bash in split_commands[1][-1]
     marker_commands = [split_commands[3][-2], split_commands[4][-2]]
     assert "LEFT" not in marker_commands[0]
     assert "RIGHT" not in marker_commands[1]
+    sixel_marker = "KETTLE_TMUX_SIXEL_RUNTIME"
+    sixel_command = tmux_sixel_marker_command(sixel_marker)
+    assert "#1;2;100;0;100!24~-!24~" in sixel_command
+    assert sixel_marker not in sixel_command
+    cell_query = tmux_cell_size_query_command("/usr/bin/python3")
+    assert "/usr/bin/python3" in cell_query
+    assert "KETTLE_TMUX_CELL=" not in cell_query
+    assert "1b5b313674" in cell_query
+
+    black_row = bytes([0, 0, 0, 255] * 16)
+    magenta_row = bytes(
+        [0, 0, 0, 255] * 2
+        + [255, 0, 255, 255] * 12
+        + [0, 0, 0, 255] * 2
+    )
+    before_rows = [black_row] * 8
+    after_rows = [black_row] + [magenta_row] * 6 + [black_row]
+    assert magenta_block_metrics(after_rows) == (12, 6)
+    assert added_magenta_pixel_count(before_rows, after_rows) == 72
+
+    class FakeTmuxCapabilityTarget:
+        def __init__(
+            self, version: str, da1_hex: str, format_value: Optional[str]
+        ):
+            self.version = version
+            self.da1_hex = da1_hex
+            self.format_value = format_value
+            self.calls: List[List[str]] = []
+
+        def command_available(self, command: str) -> bool:
+            return command == "python3"
+
+        def require_command_path(self, command: str) -> str:
+            assert command == "python3"
+            return "/usr/bin/python3"
+
+        def run_command(
+            self, argv: List[str], *, timeout: float
+        ) -> subprocess.CompletedProcess:
+            self.calls.append(argv)
+            assert timeout == 5
+            if argv == ["tmux", "-V"]:
+                return subprocess.CompletedProcess(argv, 0, self.version + "\n", "")
+            if "new-session" in argv:
+                assert "while len(data)<64" in argv[-1]
+                assert "termios.tcsetattr" in argv[-1]
+                return subprocess.CompletedProcess(argv, 0, "", "")
+            if "capture-pane" in argv:
+                return subprocess.CompletedProcess(
+                    argv, 0, f"KETTLE_TMUX_DA1={self.da1_hex}\n", ""
+                )
+            if "display-message" in argv:
+                value = "" if self.format_value is None else self.format_value
+                return subprocess.CompletedProcess(argv, 0, value + "\n", "")
+            if argv[-1] == "kill-server":
+                return subprocess.CompletedProcess(argv, 0, "", "")
+            raise AssertionError(f"unexpected fake tmux command: {argv}")
+
+    enabled_tmux = FakeTmuxCapabilityTarget(
+        "tmux 3.6b", "1b5b3f313b323b3463", "1"
+    )
+    enabled_capability = probe_tmux_sixel_capability(
+        enabled_tmux  # type: ignore[arg-type]
+    )
+    assert enabled_capability["supported"] is True
+    assert enabled_capability["sixel_support_format"] == "1"
+    disabled_tmux = FakeTmuxCapabilityTarget(
+        "tmux 3.4", "1b5b3f313b3263", None
+    )
+    disabled_capability = probe_tmux_sixel_capability(
+        disabled_tmux  # type: ignore[arg-type]
+    )
+    assert disabled_capability["supported"] is False
+    assert "--enable-sixel" in str(disabled_capability["reason"])
+    conflicting_tmux = FakeTmuxCapabilityTarget(
+        "tmux 3.6", "1b5b3f313b323b3463", "0"
+    )
+    conflicting_capability = probe_tmux_sixel_capability(
+        conflicting_tmux  # type: ignore[arg-type]
+    )
+    assert conflicting_capability["supported"] is None
+    assert conflicting_capability["capability_source"] == "conflicting-probes"
     try:
         cleanup_tmux_server(wsl_target, "unsafe")
     except ValueError:
@@ -2927,11 +4018,28 @@ def exit_nvim_to_shell(
             timeout_ms=2500 if shell_target.mode == "wsl" else 10000,
         )
     except SystemExit as error:
-        if (
-            shell_target.mode != "wsl"
-            or "timed out waiting" not in str(error)
-        ):
+        if "timed out waiting" not in str(error):
             raise
+        # A configured distribution can expose more than one asynchronous
+        # hit-enter prompt. Retry the bounded normal-mode quit sequence before
+        # escalating to target-specific process cleanup.
+        for _attempt in range(2):
+            exit_nvim(live)
+            time.sleep(0.6)
+            try:
+                live_shell_command(
+                    live,
+                    marked_command,
+                    shell_marker,
+                    timeout_ms=10000,
+                )
+                return
+            except SystemExit as retry_error:
+                if "timed out waiting" not in str(retry_error):
+                    raise
+                error = retry_error
+        if shell_target.mode != "wsl":
+            raise error
         # An isolated AstroNvim config may surface repeated asynchronous plugin
         # errors behind hit-enter prompts. Stop only Neovim processes carrying
         # this unique sandbox environment, then verify the shell responds.
@@ -2947,6 +4055,231 @@ def exit_nvim_to_shell(
 
 def new_tmux_socket_name() -> str:
     return f"kettle-smoke-{secrets.token_hex(12)}"
+
+
+def parse_tmux_version(output: str) -> Optional[Tuple[int, int]]:
+    match = re.fullmatch(
+        r"tmux ([0-9]+)\.([0-9]+)(?:[a-z])?(?:[-+][A-Za-z0-9._-]+)?",
+        output.strip(),
+    )
+    if match is None:
+        return None
+    return int(match.group(1)), int(match.group(2))
+
+
+def tmux_da1_has_sixel(reply_hex: str) -> Optional[bool]:
+    try:
+        reply = bytes.fromhex(reply_hex)
+    except ValueError:
+        return None
+    match = re.fullmatch(rb"\x1b\[\?([0-9]+(?:;[0-9]+)*)c", reply)
+    if match is None:
+        return None
+    features = match.group(1).decode("ascii").split(";")
+    return "4" in features
+
+
+def tmux_cell_size_from_reply(reply_hex: str) -> Optional[Tuple[int, int]]:
+    try:
+        reply = bytes.fromhex(reply_hex)
+    except ValueError:
+        return None
+    match = re.fullmatch(rb"\x1b\[6;([0-9]+);([0-9]+)t", reply)
+    if match is None:
+        return None
+    height = int(match.group(1))
+    width = int(match.group(2))
+    return width, height
+
+
+def terminal_query_python_code(
+    query: bytes, marker: str, terminator: bytes
+) -> str:
+    if (
+        not query
+        or len(query) > 32
+        or re.fullmatch(r"[A-Z0-9_]+=", marker) is None
+        or len(terminator) != 1
+    ):
+        raise ValueError("invalid bounded terminal-query fixture")
+    split = max(1, len(marker) // 2)
+    left, right = marker[:split], marker[split:]
+    script = (
+        "import os,select,termios,time,tty\n"
+        "old=termios.tcgetattr(0)\n"
+        "data=bytearray()\n"
+        "deadline=time.monotonic()+2\n"
+        "try:\n"
+        "    tty.setraw(0)\n"
+        f"    os.write(1,bytes.fromhex({query.hex()!r}))\n"
+        "    while len(data)<64:\n"
+        "        remaining=deadline-time.monotonic()\n"
+        "        if remaining<=0:\n"
+        "            break\n"
+        "        ready,_,_=select.select([0],[],[],remaining)\n"
+        "        if not ready:\n"
+        "            break\n"
+        "        chunk=os.read(0,64-len(data))\n"
+        "        if not chunk:\n"
+        "            break\n"
+        "        data.extend(chunk)\n"
+        f"        if data.endswith(bytes.fromhex({terminator.hex()!r})):\n"
+        "            break\n"
+        "finally:\n"
+        "    termios.tcsetattr(0,termios.TCSADRAIN,old)\n"
+        f"print({left!r}+{right!r}+data.hex())"
+    )
+    return f"exec({script!r})"
+
+
+def probe_tmux_sixel_capability(
+    shell_target: AgentShellTarget,
+) -> Dict[str, object]:
+    """Detect tmux's compile-time SIXEL gate through its inner DA1 reply."""
+    version_cp = shell_target.run_command(["tmux", "-V"], timeout=5)
+    version_text = version_cp.stdout.strip()
+    result: Dict[str, object] = {
+        "version": version_text,
+        "supported": None,
+        "capability_source": "unverified",
+    }
+    version = parse_tmux_version(version_text)
+    if version_cp.returncode != 0 or version is None:
+        result["reason"] = (
+            "could not parse tmux -V output: "
+            f"rc={version_cp.returncode} output={version_text!r}"
+        )
+        return result
+    result["version_major"] = version[0]
+    result["version_minor"] = version[1]
+    if version < (3, 4):
+        result.update(
+            {
+                "supported": False,
+                "capability_source": "version",
+                "reason": "tmux SIXEL requires tmux 3.4 or newer",
+            }
+        )
+        return result
+    if not shell_target.command_available("python3"):
+        result["reason"] = (
+            "python3 is unavailable, so the tmux build's inner DA1 response "
+            "could not be queried"
+        )
+        return result
+
+    socket = new_tmux_socket_name()
+    python = shell_target.require_command_path("python3")
+    probe_code = terminal_query_python_code(
+        b"\x1b[c", "KETTLE_TMUX_DA1=", b"c"
+    )
+    pane_command = f"{shlex.join([python, '-c', probe_code])}; sleep 15"
+    capture = ""
+    started = False
+    try:
+        start_cp = shell_target.run_command(
+            [
+                "tmux",
+                "-L",
+                socket,
+                "-f",
+                "/dev/null",
+                "new-session",
+                "-d",
+                "-s",
+                "kettle_sixel_probe",
+                pane_command,
+            ],
+            timeout=5,
+        )
+        if start_cp.returncode != 0:
+            result["reason"] = (
+                "could not start the private tmux capability probe: "
+                f"rc={start_cp.returncode} stderr={start_cp.stderr.strip()!r}"
+            )
+            return result
+        started = True
+        for _ in range(30):
+            capture_cp = shell_target.run_command(
+                [
+                    "tmux",
+                    "-L",
+                    socket,
+                    "capture-pane",
+                    "-p",
+                    "-t",
+                    "kettle_sixel_probe:0.0",
+                    "-S",
+                    "-10",
+                ],
+                timeout=5,
+            )
+            if capture_cp.returncode == 0:
+                capture = capture_cp.stdout
+                if "KETTLE_TMUX_DA1=" in capture:
+                    break
+            time.sleep(0.1)
+        match = re.search(r"KETTLE_TMUX_DA1=([0-9a-f]*)", capture)
+        if match is None:
+            result["reason"] = (
+                "the private tmux pane did not return a bounded DA1 response"
+            )
+            return result
+        reply_hex = match.group(1)
+        supported = tmux_da1_has_sixel(reply_hex)
+        result["da1_hex"] = reply_hex
+        if supported is None:
+            result["reason"] = (
+                "tmux returned a malformed DA1 response; build capability "
+                "remains unverified"
+            )
+            return result
+
+        result.update(
+            {
+                "supported": supported,
+                "capability_source": "inner-da1-feature-4",
+            }
+        )
+        if version >= (3, 6):
+            format_cp = shell_target.run_command(
+                [
+                    "tmux",
+                    "-L",
+                    socket,
+                    "display-message",
+                    "-p",
+                    "#{sixel_support}",
+                ],
+                timeout=5,
+            )
+            format_value = format_cp.stdout.strip()
+            result["sixel_support_format"] = format_value
+            if (
+                format_cp.returncode != 0
+                or format_value not in {"0", "1"}
+                or (format_value == "1") != supported
+            ):
+                result.update(
+                    {
+                        "supported": None,
+                        "capability_source": "conflicting-probes",
+                        "reason": (
+                            "tmux's DA1 response disagrees with its "
+                            "#{sixel_support} build-capability format"
+                        ),
+                    }
+                )
+                return result
+        if not supported:
+            result["reason"] = (
+                "tmux was not built with --enable-sixel "
+                "(inner DA1 omits feature code 4)"
+            )
+        return result
+    finally:
+        if started:
+            cleanup_tmux_server(shell_target, socket)
 
 
 def cleanup_tmux_server(
@@ -2978,13 +4311,36 @@ def cleanup_tmux_server(
     )
 
 
-def tmux_session_command(tmux_socket: str, bash_path: str) -> str:
+def tmux_session_command(
+    tmux_socket: str, bash_path: str, *, sixel: bool = False
+) -> str:
     command = shlex.join([bash_path, "--noprofile", "--norc"])
+    feature = "-T sixel " if sixel else ""
     return (
         f"tmux -L {shlex.quote(tmux_socket)} -f /dev/null "
+        f"{feature}"
         "new-session -A -s kettle_smoke "
         f"{shlex.quote(command)}"
     )
+
+
+def tmux_sixel_marker_command(marker: str) -> str:
+    # Two 24x6 full-column bands form a 24x12 pure-magenta raster. The marker
+    # is assembled separately so shell command echo cannot satisfy wait_for.
+    # Clear first so a long capability-query command cannot leave the fixture
+    # on the bottom row where the image and marker would immediately scroll.
+    return (
+        "printf '\\033[2J\\033[H"
+        "\\033Pq#1;2;100;0;100!24~-!24~\\033\\\\'; "
+        + posix_runtime_marker_command(marker)
+    )
+
+
+def tmux_cell_size_query_command(python_path: str) -> str:
+    code = terminal_query_python_code(
+        b"\x1b[16t", "KETTLE_TMUX_CELL=", b"t"
+    )
+    return shlex.join([python_path, "-c", code])
 
 
 def posix_runtime_marker_command(marker: str) -> str:
@@ -3353,7 +4709,28 @@ def run_agent_tui(
             probes.append(
                 {"name": "tmux-split", "status": "skipped", "reason": reason}
             )
+            probes.append(
+                {"name": "tmux-sixel", "status": "skipped", "reason": reason}
+            )
         else:
+            tmux_sixel = probe_tmux_sixel_capability(shell_target)
+            tmux_sixel_supported = tmux_sixel.get("supported") is True
+            if tmux_sixel_supported:
+                probes.append(
+                    {
+                        "name": "tmux-sixel-capability",
+                        "status": "ok",
+                        **tmux_sixel,
+                    }
+                )
+            else:
+                probes.append(
+                    {
+                        "name": "tmux-sixel-capability",
+                        "status": "skipped",
+                        **tmux_sixel,
+                    }
+                )
             tmux_socket = new_tmux_socket_name()
             tmux_bash = shell_target.require_command_path("bash")
             live.add_post_exit_cleanup(
@@ -3370,7 +4747,11 @@ def run_agent_tui(
             live.ctl(
                 "send_text",
                 params={
-                    "text": tmux_session_command(tmux_socket, tmux_bash)
+                    "text": tmux_session_command(
+                        tmux_socket,
+                        tmux_bash,
+                        sixel=tmux_sixel_supported,
+                    )
                 },
             )
             live.ctl("send_keys", params={"keys": ["enter"]})
@@ -3384,6 +4765,150 @@ def run_agent_tui(
             live.ctl("send_keys", params={"keys": ["enter"]})
             live.wait_for_text(tmux_marker, timeout_ms=12000, quiet_ms=500)
             states.append(capture_live_state(live, out, "tmux"))
+            if tmux_sixel_supported:
+                tmux_python = shell_target.require_command_path("python3")
+                live.ctl(
+                    "send_text",
+                    params={
+                        "text": tmux_cell_size_query_command(tmux_python)
+                    },
+                )
+                live.ctl("send_keys", params={"keys": ["enter"]})
+                live.wait_for_text(
+                    "KETTLE_TMUX_CELL=", timeout_ms=12000, quiet_ms=500
+                )
+                cell_screen = live.json_ctl("read_screen")
+                cell_match = re.search(
+                    r"KETTLE_TMUX_CELL=([0-9a-f]*)",
+                    screen_text(cell_screen),
+                )
+                cell_size = (
+                    tmux_cell_size_from_reply(cell_match.group(1))
+                    if cell_match is not None
+                    else None
+                )
+                if cell_size is None:
+                    probes.append(
+                        {
+                            "name": "tmux-sixel",
+                            "status": "skipped",
+                            "reason": (
+                                "tmux's runtime cell-pixel geometry response "
+                                "was missing or malformed"
+                            ),
+                        }
+                    )
+                else:
+                    cell_width, cell_height = cell_size
+                    tmux_sixel_marker = "KTL_TMUX_SIXEL_OK"
+                    live.ctl(
+                        "send_text",
+                        params={
+                            "text": tmux_sixel_marker_command(
+                                tmux_sixel_marker
+                            )
+                        },
+                    )
+                    live.ctl("send_keys", params={"keys": ["enter"]})
+                    live.wait_for_text(
+                        tmux_sixel_marker, timeout_ms=12000, quiet_ms=500
+                    )
+                    sixel_screen = live.json_ctl("read_screen")
+                    if cell_width == 0 or cell_height == 0:
+                        if "SIXEL IMAGE (" not in screen_text(sixel_screen):
+                            raise SystemExit(
+                                "agent-tui smoke: tmux reported zero pixel "
+                                "geometry but did not expose its SIXEL text "
+                                "fallback"
+                            )
+                        states.append(
+                            capture_live_state(
+                                live, out, "tmux-sixel-fallback"
+                            )
+                        )
+                        probes.append(
+                            {
+                                "name": "tmux-sixel",
+                                "status": "skipped",
+                                "reason": (
+                                    "tmux reported zero outer-terminal pixel "
+                                    "cell geometry; its SIXEL text fallback "
+                                    "was observed"
+                                ),
+                                "cell_width": cell_width,
+                                "cell_height": cell_height,
+                                "fallback_observed": True,
+                            }
+                        )
+                    else:
+                        sixel_state = capture_live_state(
+                            live, out, "tmux-sixel"
+                        )
+                        (
+                            before_width,
+                            before_height,
+                            before_rows,
+                        ) = read_rgba_png(
+                            live_state_screenshot_path(out, "tmux")
+                        )
+                        (
+                            after_width,
+                            after_height,
+                            after_rows,
+                        ) = read_rgba_png(
+                            live_state_screenshot_path(out, "tmux-sixel")
+                        )
+                        if (before_width, before_height) != (
+                            after_width,
+                            after_height,
+                        ):
+                            raise SystemExit(
+                                "agent-tui smoke: tmux SIXEL screenshots "
+                                "changed size"
+                            )
+                        widest, stacked = magenta_block_metrics(after_rows)
+                        added = added_magenta_pixel_count(
+                            before_rows, after_rows
+                        )
+                        if widest < 12 or stacked < 6 or added < 64:
+                            raise SystemExit(
+                                "agent-tui smoke: build-capable tmux did not "
+                                "render the 24x12 SIXEL fixture through Kettle "
+                                f"(widest={widest}, stacked={stacked}, "
+                                f"added={added})"
+                            )
+                        sixel_state.update(
+                            {
+                                "magenta_widest_run": widest,
+                                "magenta_stacked_rows": stacked,
+                                "magenta_pixels_added": added,
+                            }
+                        )
+                        states.append(sixel_state)
+                        probes.append(
+                            {
+                                "name": "tmux-sixel",
+                                "status": "ok",
+                                "terminal_feature": "sixel",
+                                "fixture": "24x12-magenta",
+                                "cell_width": cell_width,
+                                "cell_height": cell_height,
+                                "magenta_widest_run": widest,
+                                "magenta_stacked_rows": stacked,
+                                "magenta_pixels_added": added,
+                            }
+                        )
+            else:
+                probes.append(
+                    {
+                        "name": "tmux-sixel",
+                        "status": "skipped",
+                        "reason": tmux_sixel.get(
+                            "reason",
+                            "tmux SIXEL build capability was not verified",
+                        ),
+                    }
+                )
             tmux_cmds = tmux_split_commands(
                 tmux_socket,
                 tmux_bash,
@@ -4397,54 +5922,33 @@ def run_tab_title(kettle: str, root: Path) -> Path:
     return out
 
 
-def run_split_titlebar(kettle: str, root: Path) -> Path:
-    out = root / f"split-titlebar-{time.strftime('%Y%m%d-%H%M%S')}"
-    out.mkdir(parents=True, exist_ok=True)
-    cfg = out / "config"
-    cfg.write_text(
-        "\n".join(
-            [
-                "agent-server = full",
-                "tab-bar = always",
-                "tab-bar-position = top",
-                "status-bar = off",
-                "show-titlebar = true",
-                "title-hide-sizetext = true",
-                "restore-session = false",
-                "update-check = false",
-                "background = #101010",
-                "foreground = #f4f4f4",
-                "window-width = 240",
-                "window-height = 60",
-            ]
-        )
-        + "\n"
-    )
-    # v2.38.2: `tempfile.gettempdir()` rather than a hardcoded POSIX `/tmp` —
-    # the latter is not a valid anchor on Windows (pathlib treats it as
-    # drive-relative to whatever the current drive happens to be), which is
-    # why this fixture used to be written Windows-out instead of
-    # Windows-supported.
-    nested = (
-        Path(tempfile.gettempdir())
-        / f"kettle-split-titlebar-{os.getpid()}"
-        / "Repos"
-        / "SPI-1"
-        / "flight-event-line-server-go"
-    )
-    nested.mkdir(parents=True, exist_ok=True)
-    expected_path = str(nested)
-    marker = "KETTLE_SPLIT_TITLEBAR_READY"
-    truncated_title = "..PI-1/flight-event-line-server-go"
-    command = cwd_title_command(expected_path, truncated_title, marker)
-    extra_args = ["-e", "powershell.exe", "-NoLogo", "-NoProfile"] if platform.system() == "Windows" else []
-
+def run_split_titlebar_position(
+    kettle: str,
+    cfg: Path,
+    out: Path,
+    extra_args: List[str],
+    command: str,
+    marker: str,
+    expected_path: str,
+    truncated_title: str,
+    title_at_bottom: bool,
+    assert_semantics: Callable[
+        [Dict[str, object], Dict[str, object], str], None
+    ],
+) -> Dict[str, object]:
+    position = "bottom" if title_at_bottom else "top"
     with LiveKettle(kettle, cfg, out / "kettle.log", extra_args=extra_args) as live:
         live.ctl("send_text", params={"text": command + "\n"})
+        live.wait_for_text(marker)
+        initial: Dict[str, object] = {}
         for _ in range(50):
             initial = live.json_ctl("list_panes")
-            pane_rows = initial.get("panes", [])
-            focused = [p for p in pane_rows if isinstance(p, dict) and p.get("focused")]
+            initial_rows = initial.get("panes", [])
+            focused = [
+                pane
+                for pane in initial_rows
+                if isinstance(pane, dict) and pane.get("focused")
+            ]
             if (
                 len(focused) == 1
                 and focused[0].get("title") == truncated_title
@@ -4455,18 +5959,18 @@ def run_split_titlebar(kettle: str, root: Path) -> Path:
         else:
             screen = live.json_ctl("read_screen", params={"scrollback_lines": 20})
             raise SystemExit(
-                "split-titlebar smoke: pane title/cwd did not settle; "
-                f"panes={initial} screen={screen.get('text')!r}"
+                f"split-titlebar smoke ({position}): pane title/cwd did not "
+                f"settle; panes={initial} screen={screen.get('text')!r}"
             )
 
         live.json_ctl("perform_action", params={"action": "split_right"})
         panes: Dict[str, object] = {}
-        geo: Dict[str, object] = {}
+        inactive_geometry: Dict[str, object] = {}
         for _ in range(40):
             panes = live.json_ctl("list_panes")
             pane_rows = panes.get("panes", [])
-            geo = live.json_ctl("ui_geometry")
-            titlebars = geo.get("pane_titlebars", [])
+            inactive_geometry = live.json_ctl("ui_geometry")
+            titlebars = inactive_geometry.get("pane_titlebars", [])
             if (
                 isinstance(pane_rows, list)
                 and len(pane_rows) >= 2
@@ -4476,33 +5980,227 @@ def run_split_titlebar(kettle: str, root: Path) -> Path:
                 break
             time.sleep(0.1)
 
-        live.screenshot(out / "split-titlebar.png")
-        (out / "panes.json").write_text(json.dumps(panes, indent=2) + "\n")
-        (out / "geometry.json").write_text(json.dumps(geo, indent=2) + "\n")
-
-    pane_rows = panes.get("panes", [])
-    if not isinstance(pane_rows, list) or len(pane_rows) < 2:
-        raise SystemExit(f"split-titlebar smoke: split did not create two panes: {panes}")
-    if not any(isinstance(p, dict) and p.get("title") == truncated_title for p in pane_rows):
-        raise SystemExit(f"split-titlebar smoke: raw truncated title was not preserved: {panes}")
-
-    titlebars = geo.get("pane_titlebars", [])
-    if not isinstance(titlebars, list) or len(titlebars) < 2:
-        raise SystemExit(f"split-titlebar smoke: missing pane titlebar diagnostics: {geo}")
-    for titlebar in titlebars:
-        if not isinstance(titlebar, dict):
-            raise SystemExit(f"split-titlebar smoke: malformed titlebar: {titlebar}")
-        if titlebar.get("path") != expected_path:
-            raise SystemExit(f"split-titlebar smoke: titlebar path did not track cwd: {titlebar}")
-        fitted = titlebar.get("fitted_title")
-        if not isinstance(fitted, str) or fitted.strip() != expected_path:
-            raise SystemExit(
-                "split-titlebar smoke: wide split titlebar did not recover full cwd: "
-                f"{titlebar}"
+        assert_semantics(panes, inactive_geometry, position)
+        inactive_screenshot = out / "inactive.png"
+        live.screenshot(inactive_screenshot)
+        try:
+            inactive_analysis = analyze_split_titlebar_png(
+                inactive_geometry,
+                inactive_screenshot,
+                title_at_bottom=title_at_bottom,
+                broadcast=False,
             )
-        if fitted.strip().startswith(".."):
-            raise SystemExit(f"split-titlebar smoke: rendered truncated shell title: {titlebar}")
+        except RuntimeError as error:
+            raise SystemExit(str(error)) from error
 
+        action = live.json_ctl(
+            "perform_action", params={"action": "toggle_broadcast_all"}
+        )
+        receiving_geometry = live.json_ctl("ui_geometry")
+        assert_semantics(panes, receiving_geometry, position)
+        receiving_screenshot = out / "receiving.png"
+        live.screenshot(receiving_screenshot)
+        try:
+            receiving_analysis = analyze_split_titlebar_png(
+                receiving_geometry,
+                receiving_screenshot,
+                title_at_bottom=title_at_bottom,
+                broadcast=True,
+            )
+        except RuntimeError as error:
+            raise SystemExit(str(error)) from error
+
+        (out / "panes.json").write_text(
+            json.dumps(panes, indent=2) + "\n", encoding="utf-8"
+        )
+        (out / "geometry-inactive.json").write_text(
+            json.dumps(inactive_geometry, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        (out / "geometry-receiving.json").write_text(
+            json.dumps(receiving_geometry, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        (out / "broadcast-action.json").write_text(
+            json.dumps(action, indent=2) + "\n", encoding="utf-8"
+        )
+
+    return {
+        "position": position,
+        "title_at_bottom": title_at_bottom,
+        "artifacts": {
+            "inactive_png": inactive_screenshot.name,
+            "receiving_png": receiving_screenshot.name,
+            "inactive_geometry": "geometry-inactive.json",
+            "receiving_geometry": "geometry-receiving.json",
+        },
+        "inactive": inactive_analysis,
+        "receiving": receiving_analysis,
+    }
+
+
+def run_split_titlebar(kettle: str, root: Path) -> Path:
+    out = root / (
+        f"split-titlebar-{time.strftime('%Y%m%d-%H%M%S')}-"
+        f"{secrets.token_hex(4)}"
+    )
+    out.mkdir(parents=True, exist_ok=True)
+    nested = (
+        out
+        / "fixture"
+        / "Repos"
+        / "SPI-1"
+        / "flight-event-line-server-go"
+    )
+    nested.mkdir(parents=True, exist_ok=True)
+    expected_path = str(nested)
+    marker = "KETTLE_SPLIT_TITLEBAR_READY"
+    truncated_title = "..PI-1/flight-event-line-server-go"
+    command = cwd_title_command(expected_path, truncated_title, marker)
+    extra_args = (
+        ["-e", "powershell.exe", "-NoLogo", "-NoProfile"]
+        if platform.system() == "Windows"
+        else []
+    )
+
+    def assert_semantics(
+        panes: Dict[str, object],
+        geometry: Dict[str, object],
+        position: str,
+    ) -> None:
+        pane_rows = panes.get("panes", [])
+        if not isinstance(pane_rows, list) or len(pane_rows) < 2:
+            raise SystemExit(
+                f"split-titlebar smoke ({position}): split did not create two "
+                f"panes: {panes}"
+            )
+        if not any(
+            isinstance(pane, dict) and pane.get("title") == truncated_title
+            for pane in pane_rows
+        ):
+            raise SystemExit(
+                f"split-titlebar smoke ({position}): raw truncated title was not "
+                f"preserved: {panes}"
+            )
+        titlebars = geometry.get("pane_titlebars", [])
+        if not isinstance(titlebars, list) or len(titlebars) < 2:
+            raise SystemExit(
+                f"split-titlebar smoke ({position}): missing pane titlebar "
+                f"diagnostics: {geometry}"
+            )
+        for titlebar in titlebars:
+            if not isinstance(titlebar, dict):
+                raise SystemExit(
+                    f"split-titlebar smoke ({position}): malformed titlebar: "
+                    f"{titlebar}"
+                )
+            if titlebar.get("path") != expected_path:
+                raise SystemExit(
+                    f"split-titlebar smoke ({position}): titlebar path did not "
+                    f"track cwd: {titlebar}"
+                )
+            fitted = titlebar.get("fitted_title")
+            bar_rect = titlebar.get("rect")
+            cell = geometry.get("cell")
+            bar_width = (
+                bar_rect.get("width") if isinstance(bar_rect, dict) else None
+            )
+            cell_width = cell.get("width") if isinstance(cell, dict) else None
+            valid_metrics = (
+                isinstance(bar_width, (int, float))
+                and not isinstance(bar_width, bool)
+                and isinstance(cell_width, (int, float))
+                and not isinstance(cell_width, bool)
+                and math.isfinite(float(bar_width))
+                and math.isfinite(float(cell_width))
+                and float(bar_width) > 0.0
+                and float(cell_width) > 0.0
+            )
+            title_budget = (
+                math.floor(float(bar_width) / float(cell_width))
+                if valid_metrics
+                else 0
+            )
+            full_path_fits = (
+                title_budget > 0 and len(expected_path) + 2 <= title_budget
+            )
+            fitted_path = fitted.strip() if isinstance(fitted, str) else ""
+            if (
+                not fitted_path
+                or (full_path_fits and fitted_path != expected_path)
+                or (
+                    not full_path_fits
+                    and not fitted_path.endswith(Path(expected_path).name)
+                )
+            ):
+                raise SystemExit(
+                    f"split-titlebar smoke ({position}): titlebar did not fit "
+                    f"authoritative cwd path/leaf: {titlebar}"
+                )
+            if fitted_path.startswith(".."):
+                raise SystemExit(
+                    f"split-titlebar smoke ({position}): rendered truncated shell "
+                    f"title: {titlebar}"
+                )
+
+    runs: List[Dict[str, object]] = []
+    for title_at_bottom in (False, True):
+        position = "bottom" if title_at_bottom else "top"
+        position_out = out / position
+        position_out.mkdir()
+        cfg = position_out / "config"
+        cfg.write_text(
+            "\n".join(
+                [
+                    "agent-server = full",
+                    "tab-bar = always",
+                    "tab-bar-position = top",
+                    "status-bar = off",
+                    "show-titlebar = true",
+                    f"title-at-bottom = {str(title_at_bottom).lower()}",
+                    "title-hide-sizetext = true",
+                    "icon-bell = false",
+                    "scrollbar = never",
+                    "padding-x = 8",
+                    "padding-y = 8",
+                    "handle-size = 1",
+                    "unfocused-split-opacity = 1.0",
+                    "inactive-color-offset = 1.0",
+                    "inactive-bg-color-offset = 1.0",
+                    "restore-session = false",
+                    "update-check = false",
+                    f"title-transmit-bg-color = {SPLIT_TITLEBAR_COLOR_HEX['transmit']}",
+                    f"title-receive-bg-color = {SPLIT_TITLEBAR_COLOR_HEX['receive']}",
+                    f"title-inactive-bg-color = {SPLIT_TITLEBAR_COLOR_HEX['inactive']}",
+                    "title-transmit-fg-color = #ffffff",
+                    "title-receive-fg-color = #ffffff",
+                    "title-inactive-fg-color = #ffffff",
+                    f"background = {SPLIT_TITLEBAR_COLOR_HEX['grid']}",
+                    "foreground = #f4f4f4",
+                    "window-width = 240",
+                    "window-height = 60",
+                ]
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        run_evidence = run_split_titlebar_position(
+            kettle,
+            cfg,
+            position_out,
+            extra_args,
+            command,
+            marker,
+            expected_path,
+            truncated_title,
+            title_at_bottom,
+            assert_semantics,
+        )
+        runs.append(run_evidence)
+
+    (out / "analysis.json").write_text(
+        json.dumps({"runs": runs}, indent=2) + "\n", encoding="utf-8"
+    )
     return out
 
 
@@ -4757,7 +6455,14 @@ def main() -> int:
             "by Cargo (honors CARGO_TARGET_DIR and configured target triples)"
         ),
     )
-    parser.add_argument("--out-dir", default=os.environ.get("KETTLE_DIAG_DIR", "target/diagnostics"))
+    parser.add_argument(
+        "--out-dir",
+        default=os.environ.get("KETTLE_DIAG_DIR"),
+        help=(
+            "artifact directory (default: an owner-private LocalAppData "
+            "directory on Windows, target/diagnostics elsewhere)"
+        ),
+    )
     parser.add_argument(
         "--shell-mode",
         choices=["native", "wsl"],
@@ -4819,8 +6524,11 @@ def main() -> int:
     if args.cargo_release:
         args.kettle = resolve_release_kettle()
 
-    root = Path(args.out_dir).resolve()
-    root.mkdir(parents=True, exist_ok=True)
+    if args.out_dir:
+        root = Path(args.out_dir).resolve()
+        root.mkdir(parents=True, exist_ok=True)
+    else:
+        root = create_default_diagnostic_root()
     if args.case in ("tabbar", "all"):
         out = run_tabbar(args.kettle, root)
         print(f"tabbar-click smoke: OK artifacts={out}")

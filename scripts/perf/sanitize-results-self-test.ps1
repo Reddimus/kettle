@@ -16,6 +16,7 @@ $scratch = Join-Path $targetRoot (
 )
 $private = Join-Path $scratch 'private'
 $public = Join-Path $scratch 'public'
+$publicSecond = Join-Path $scratch 'public-second'
 New-Item -ItemType Directory -Path $private | Out-Null
 
 function Invoke-KettlePerfExpectedSanitizeFailure {
@@ -68,20 +69,88 @@ try {
                 user_name = 'private-user'
                 username = 'other-private-user'
                 display_topology = [ordered]@{
+                    target_monitor_hardware_id = 'ABC123-PRIVATE'
                     desktop_screens = @(
                         [ordered]@{
                             device_name = '\\.\DISPLAY1'
                             monitor_device_id = 'MONITOR\ABC123\secret'
+                            monitor_hardware_id = 'ABC123-PRIVATE'
                         }
                     )
                     active_physical_monitors = @(
                         [ordered]@{
+                            hardware_id = 'ABC123-PRIVATE'
                             friendly_name = 'Example Display'
                             serial_number = 'SERIAL-SECRET'
                             instance_name = 'DISPLAY\ABC123\secret'
+                            registry_edid_sha256 = ('d' * 64)
+                            adapter_luid = 'deadbeef:01234567'
+                            source_id = [int64]4294967294
+                            target_id = 525252.25
+                            connector_instance = $true
                         }
                     )
                 }
+            }
+            sensitive_redaction_fixtures = [ordered]@{
+                scalar = [ordered]@{
+                    hardware_id = 'ABC123-PRIVATE'
+                    adapter_luid = 'deadbeef:01234567'
+                    source_id = [int64]4294967294
+                    target_id = 525252.25
+                    connector_instance = $true
+                    registry_edid_sha256 = ('d' * 64)
+                }
+                type_domains = [ordered]@{
+                    integer = [ordered]@{ source_id = 1 }
+                    integer_string = [ordered]@{ source_id = '1' }
+                    boolean = [ordered]@{ target_id = $true }
+                    boolean_string = [ordered]@{ target_id = 'true' }
+                }
+                complex = [ordered]@{
+                    object = [ordered]@{
+                        hardware_id = [ordered]@{
+                            private_device = 'COMPLEX-DEVICE-SECRET'
+                            local_route = 987654321
+                        }
+                    }
+                    array = [ordered]@{
+                        target_id = @(
+                            'ARRAY-DEVICE-SECRET',
+                            876543210
+                        )
+                    }
+                    null_value = [ordered]@{
+                        connector_instance = $null
+                    }
+                }
+            }
+            key_redaction_fixtures = [ordered]@{
+                api_token = 'CREDENTIAL-CORRELATION-PRIVATE'
+                'api-key' = 'CREDENTIAL-CORRELATION-PRIVATE'
+                ApiToken = 'CREDENTIAL-CORRELATION-PRIVATE'
+                api_token_sha256 = ('f' * 64)
+                PASSWORD = 'PASSWORD-VALUE-PRIVATE'
+                password_hash = ('e' * 64)
+                accessKeyId = 'ACCESS-KEY-PRIVATE'
+                clientSecret = [ordered]@{
+                    nested_value = 'SECRET-OBJECT-PRIVATE'
+                    sequence = 616161
+                }
+                'refresh-token' = @(
+                    'SECRET-ARRAY-PRIVATE',
+                    717171
+                )
+                sessionToken = 818181
+                authToken = $true
+                nested = [ordered]@{
+                    Authorization = 'Bearer AUTHORIZATION-PRIVATE'
+                    COOKIE = 'COOKIE-VALUE-PRIVATE'
+                    connectionString = (
+                        'Server=private;Password=CONNECTION-PRIVATE'
+                    )
+                }
+                metric_count = 12
             }
             hostile_strings = @(
                 'prefix /mnt/c/Users/private/file.txt suffix'
@@ -111,6 +180,35 @@ try {
 
     . "$PSScriptRoot\sanitize-results.ps1" `
         -ResultsDir $private -OutputDir $public
+    foreach ($allowedName in @(
+        'benchmark-manifest.json',
+        'startup-idle.json',
+        'latency.json',
+        'vtebench-summary.json',
+        'menu-hover.json',
+        'native-display-menu-hover.json',
+        'monitor-transition.json',
+        'score.json',
+        'throughput-kettle.json',
+        'throughput-wt.json',
+        'throughput-alacritty.json',
+        'throughput-wezterm.json',
+        'throughput-rio.json',
+        'throughput-tabby.json'
+    )) {
+        if (-not (Test-KettlePerfPublicEvidenceSourceLeafName $allowedName)) {
+            throw "Reviewed public evidence filename was rejected: $allowedName"
+        }
+    }
+    foreach ($rejectedName in @(
+        'Benchmark-manifest.json',
+        'throughput-custom.json',
+        'api-token-private.json'
+    )) {
+        if (Test-KettlePerfPublicEvidenceSourceLeafName $rejectedName) {
+            throw "Unreviewed public evidence filename was accepted: $rejectedName"
+        }
+    }
     $combined = @(
         Get-ChildItem -LiteralPath $public -File |
             ForEach-Object { Get-Content -Raw -LiteralPath $_.FullName }
@@ -124,6 +222,21 @@ try {
         'secret-host.example',
         'private-user',
         'other-private-user',
+        'ABC123-PRIVATE',
+        'deadbeef:01234567',
+        ('d' * 64),
+        'COMPLEX-DEVICE-SECRET',
+        'ARRAY-DEVICE-SECRET',
+        'CREDENTIAL-CORRELATION-PRIVATE',
+        ('f' * 64),
+        'PASSWORD-VALUE-PRIVATE',
+        ('e' * 64),
+        'ACCESS-KEY-PRIVATE',
+        'SECRET-OBJECT-PRIVATE',
+        'SECRET-ARRAY-PRIVATE',
+        'AUTHORIZATION-PRIVATE',
+        'COOKIE-VALUE-PRIVATE',
+        'CONNECTION-PRIVATE',
         'Jane Doe',
         'project secrets',
         'trace.log after',
@@ -140,6 +253,102 @@ try {
     $sanitizedManifest = Get-Content -Raw -LiteralPath (
         Join-Path $public 'benchmark-manifest.json'
     ) | ConvertFrom-Json
+    $fieldTokenPattern = '^<redacted-field:[0-9a-f]{16}>$'
+    $publicDisplay = $sanitizedManifest.machine.display_topology
+    $publicMonitor = $publicDisplay.active_physical_monitors[0]
+    $publicScalar = $sanitizedManifest.sensitive_redaction_fixtures.scalar
+    foreach ($value in @(
+        $publicDisplay.target_monitor_hardware_id,
+        $publicDisplay.desktop_screens[0].monitor_hardware_id,
+        $publicMonitor.hardware_id,
+        $publicMonitor.registry_edid_sha256,
+        $publicMonitor.adapter_luid,
+        $publicMonitor.source_id,
+        $publicMonitor.target_id,
+        $publicMonitor.connector_instance,
+        $publicScalar.hardware_id,
+        $publicScalar.adapter_luid,
+        $publicScalar.source_id,
+        $publicScalar.target_id,
+        $publicScalar.connector_instance,
+        $publicScalar.registry_edid_sha256
+    )) {
+        if ([string]$value -cnotmatch $fieldTokenPattern) {
+            throw 'Sanitized evidence retained a sensitive scalar value'
+        }
+    }
+    $hardwareTokens = @(
+        @(
+            [string]$publicDisplay.target_monitor_hardware_id,
+            [string]$publicDisplay.desktop_screens[0].monitor_hardware_id,
+            [string]$publicMonitor.hardware_id,
+            [string]$publicScalar.hardware_id
+        ) | Select-Object -Unique
+    )
+    if ($hardwareTokens.Count -ne 1) {
+        throw 'Equivalent hardware identifiers did not retain token correlation'
+    }
+    $typeDomains = $sanitizedManifest.
+        sensitive_redaction_fixtures.type_domains
+    foreach ($value in @(
+        $typeDomains.integer.source_id,
+        $typeDomains.integer_string.source_id,
+        $typeDomains.boolean.target_id,
+        $typeDomains.boolean_string.target_id
+    )) {
+        if ([string]$value -cnotmatch $fieldTokenPattern) {
+            throw 'Sanitized evidence retained a typed sensitive scalar'
+        }
+    }
+    if (
+        $typeDomains.integer.source_id -ceq
+            $typeDomains.integer_string.source_id -or
+        $typeDomains.boolean.target_id -ceq
+            $typeDomains.boolean_string.target_id
+    ) {
+        throw 'Sensitive tokens were not separated by scalar type'
+    }
+    $complex = $sanitizedManifest.sensitive_redaction_fixtures.complex
+    if (
+        [string]$complex.object.hardware_id -cnotmatch $fieldTokenPattern -or
+        [string]$complex.array.target_id -cnotmatch $fieldTokenPattern -or
+        $null -ne $complex.null_value.connector_instance
+    ) {
+        throw 'Sanitized evidence did not safely handle complex or null fields'
+    }
+    $keyFixtures = $sanitizedManifest.key_redaction_fixtures
+    $credentialTokens = @(
+        $keyFixtures.api_token,
+        $keyFixtures.PSObject.Properties['api-key'].Value,
+        $keyFixtures.ApiToken,
+        $keyFixtures.api_token_sha256,
+        $keyFixtures.PASSWORD,
+        $keyFixtures.password_hash,
+        $keyFixtures.accessKeyId,
+        $keyFixtures.clientSecret,
+        $keyFixtures.PSObject.Properties['refresh-token'].Value,
+        $keyFixtures.sessionToken,
+        $keyFixtures.authToken,
+        $keyFixtures.nested.Authorization,
+        $keyFixtures.nested.COOKIE,
+        $keyFixtures.nested.connectionString
+    )
+    foreach ($value in $credentialTokens) {
+        if ([string]$value -cnotmatch $fieldTokenPattern) {
+            throw 'Sanitized evidence retained a credential-like field'
+        }
+    }
+    if (
+        $keyFixtures.api_token -cne
+            $keyFixtures.PSObject.Properties['api-key'].Value -or
+        $keyFixtures.api_token -cne $keyFixtures.ApiToken -or
+        $keyFixtures.metric_count -ne 12
+    ) {
+        throw (
+            'Credential key normalization or safe non-credential ' +
+            'preservation is invalid'
+        )
+    }
     if (
         $sanitizedManifest.repository_commit -ne ('a' * 40) -or
         $sanitizedManifest.kettle_config_sha256 -ne ('b' * 64) -or
@@ -155,10 +364,37 @@ try {
         Join-Path $public 'public-evidence.json'
     ) | ConvertFrom-Json
     if (
+        $publicIndex.schema_version -ne 2 -or
         $publicIndex.raw_artifacts_included -ne $false -or
         @($publicIndex.files).Count -ne 2
     ) {
         throw 'Public evidence index is incomplete'
+    }
+    & "$PSScriptRoot\sanitize-results.ps1" `
+        -ResultsDir $private -OutputDir $publicSecond
+    $secondManifest = Get-Content -Raw -LiteralPath (
+        Join-Path $publicSecond 'benchmark-manifest.json'
+    ) | ConvertFrom-Json
+    $secondIndex = Get-Content -Raw -LiteralPath (
+        Join-Path $publicSecond 'public-evidence.json'
+    ) | ConvertFrom-Json
+    $firstHardwareToken = [string]$publicDisplay.target_monitor_hardware_id
+    $secondHardwareToken = [string](
+        $secondManifest.machine.display_topology.target_monitor_hardware_id
+    )
+    if (
+        $secondIndex.run_id -cne $publicIndex.run_id -or
+        $secondHardwareToken -cnotmatch $fieldTokenPattern -or
+        $secondHardwareToken -ceq $firstHardwareToken -or
+        $secondHardwareToken -cne [string](
+            $secondManifest.machine.display_topology.
+                desktop_screens[0].monitor_hardware_id
+        )
+    ) {
+        throw (
+            'Redaction tokens were not bundle-secret, unpredictable, and ' +
+            'internally correlated'
+        )
     }
 
     Invoke-KettlePerfExpectedSanitizeFailure `
@@ -182,13 +418,42 @@ try {
         throw 'Sanitizer modified preexisting output data'
     }
 
+    $hostileNamePrivate = Join-Path $scratch 'hostile-name-private'
+    $hostileNameOutput = Join-Path $scratch 'hostile-name-public'
+    New-Item -ItemType Directory -Path $hostileNamePrivate | Out-Null
+    Copy-Item -LiteralPath (
+        Join-Path $private 'benchmark-manifest.json'
+    ) -Destination $hostileNamePrivate
+    [IO.File]::WriteAllText(
+        (
+            Join-Path $hostileNamePrivate (
+                'api-token-FILENAME-CREDENTIAL-PRIVATE.json'
+            )
+        ),
+        '{}',
+        [Text.UTF8Encoding]::new($false, $true)
+    )
+    Invoke-KettlePerfExpectedSanitizeFailure `
+        -Description 'JSON leaf outside the public filename contract' `
+        -ExpectedMessagePattern (
+            '(?i)outside the reviewed public evidence filename contract'
+        ) `
+        -Action {
+            & "$PSScriptRoot\sanitize-results.ps1" `
+                -ResultsDir $hostileNamePrivate `
+                -OutputDir $hostileNameOutput
+        }
+    if (Test-Path -LiteralPath $hostileNameOutput) {
+        throw 'Hostile source filename was published'
+    }
+
     $invalidUtf8Private = Join-Path $scratch 'invalid-utf8-private'
     New-Item -ItemType Directory -Path $invalidUtf8Private | Out-Null
     Copy-Item -LiteralPath (
         Join-Path $private 'benchmark-manifest.json'
     ) -Destination $invalidUtf8Private
     [IO.File]::WriteAllBytes(
-        (Join-Path $invalidUtf8Private 'hostile.json'),
+        (Join-Path $invalidUtf8Private 'latency.json'),
         [byte[]]@(0x7B, 0x22, 0x78, 0x22, 0x3A, 0x22, 0xFF, 0x22, 0x7D)
     )
     $invalidUtf8Output = Join-Path $scratch 'invalid-utf8-public'
@@ -217,7 +482,7 @@ try {
     ) -Destination $deepPrivate
     $deepText = ('{"nested":' * 33) + '0' + ('}' * 33)
     [IO.File]::WriteAllText(
-        (Join-Path $deepPrivate 'deep.json'),
+        (Join-Path $deepPrivate 'latency.json'),
         $deepText,
         [Text.UTF8Encoding]::new($false, $true)
     )
@@ -240,7 +505,7 @@ try {
     ) -Destination $widePrivate
     $wideText = '[' + ('0,' * 249999) + '0]'
     [IO.File]::WriteAllText(
-        (Join-Path $widePrivate 'wide.json'),
+        (Join-Path $widePrivate 'latency.json'),
         $wideText,
         [Text.UTF8Encoding]::new($false, $true)
     )
@@ -295,7 +560,7 @@ try {
         ) -Destination $preplacedPrivate
         $preplacedSentinel = Join-Path $preplacedVictim 'sentinel.txt'
         [IO.File]::WriteAllText($preplacedSentinel, 'retain me')
-        $preplacedLeaf = Join-Path $preplacedPrivate 'preplaced.json'
+        $preplacedLeaf = Join-Path $preplacedPrivate 'latency.json'
         New-Item -ItemType Junction -Path $preplacedLeaf `
             -Target $preplacedVictim -ErrorAction Stop | Out-Null
         try {
@@ -325,7 +590,7 @@ try {
             Join-Path $private 'benchmark-manifest.json'
         ) -Destination $oversizePrivate
         $oversizeStream = [IO.FileStream]::new(
-            (Join-Path $oversizePrivate 'oversize.json'),
+            (Join-Path $oversizePrivate 'latency.json'),
             [IO.FileMode]::CreateNew,
             [IO.FileAccess]::Write,
             [IO.FileShare]::None
@@ -353,7 +618,7 @@ try {
         Copy-Item -LiteralPath (
             Join-Path $private 'benchmark-manifest.json'
         ) -Destination $totalPrivate
-        foreach ($leaf in @('large-one.json', 'large-two.json')) {
+        foreach ($leaf in @('latency.json', 'startup-idle.json')) {
             $totalStream = [IO.FileStream]::new(
                 (Join-Path $totalPrivate $leaf),
                 [IO.FileMode]::CreateNew,

@@ -48,25 +48,49 @@ Refusing those channels prevents the stable updater from replacing a
 source-built binary or rewriting its launcher. Only an extracted release
 tarball or the online installer writes a `stable` marker.
 
-On Windows, the updater writes a bounded pending record inside the
-installer-owned prefix containing the target version and the size/SHA-256 of
-every extracted file, copies the current binary to a uniquely named helper, and
-starts that helper. Its ACL is inherited from the selected install prefix, so a
-custom shared prefix must itself be access-controlled. Every managed Kettle process
+On Windows, the updater writes a schema-2 bounded pending record inside the
+installer-owned prefix containing the target version, the copied helper's
+size/SHA-256, and the size/SHA-256 of every extracted file, then starts that
+uniquely named helper. Verification retains root-down directory and file handles
+for the helper, stage root, optional shell directory, and every staged leaf
+through helper launch or transaction consumption, so a rename cannot substitute
+an object after validation. The transaction id is exactly a canonical decimal
+staging-process `u32` PID, a hyphen, and canonical decimal Unix-epoch
+nanoseconds bounded to `u128`; a valid transaction's stage, helper, backup
+marker, journal, pending record, and quarantine evidence must agree on that id
+(unparseable pending evidence receives a fresh bounded quarantine id).
+The saved PowerShell uninstaller understands this same schema-2 record and
+validates its exact field set, scalar types, counters, hashes, managed relative
+paths, and aggregate byte limit. It does not require a named helper or stage to
+remain present after controlled removal or a crash; any extant object still
+passes the independent managed-tree checks before it can be deleted.
+The install prefix must be a dedicated directory named `kettle`; the installer
+rejects shared or broad prefixes and validates the managed tree and transaction
+ACL before recovery or mutation. Every managed Kettle process
 holds a shared run lock; the helper takes it exclusively, also waits until the
 installed `.exe` and `.com` are no longer mapped, re-verifies the staged files,
-and then commits the transaction. A launch that sees pending state starts the
+and then commits the transaction. The helper acquires the update lock before
+the running lock, releases the running lock and then the update lock after the
+commit and pending-record removal are durable, and only then launches the saved
+installer's integration refresh. A launch that sees pending state starts the
 helper and exits rather than prolonging the old version. Failed attempts retain
 the pending record, staged files, and a bounded error message for the next
 launch to retry. Automatic retry stops after three failed helper attempts. An
-invalid or exhausted pending record is atomically quarantined as
+actual transaction attempt resets the independent handoff-timeout counter.
+Timeouts waiting for still-running Kettle processes do not consume transaction
+attempts during the first five minutes; after that grace period, three timed-out
+handoffs stop automatic retry instead of allowing every future launch to hang.
+An invalid or exhausted regular pending record is atomically quarantined as
 `.kettle-update-failed-*.json`; Kettle also writes a bounded `.txt` diagnostic
 when the prefix permits it. Quarantine itself is best-effort so a read-only
 prefix or antivirus sharing denial cannot block the intact old binary from
-starting. Startup emits a stderr message and attempts a desktop recovery
-notification; notification failure is logged. Evidence that could be preserved
-remains in the install prefix for diagnosis instead of trapping every future
-launch in a handoff loop.
+starting. A nonregular pending path is never renamed into trusted evidence.
+Startup emits a stderr message and attempts a desktop recovery notification;
+notification failure is logged. Evidence that could be preserved remains in
+the install prefix for diagnosis instead of trapping every future launch in a
+handoff loop. At most eight failed transaction pairs are retained; older exact
+records are pruned by transaction timestamp and then PID while the update lock
+is held.
 
 ## Automatic policy
 
@@ -131,11 +155,42 @@ and SHA-256 remain mandatory in either case.
 The schema-2 transaction journal records a transaction id, target version,
 durable phase (`prepared`, `applying`, `rolling_back`, or `committed`), and each
 destination's previous/replacement size and SHA-256. Recovery verifies backup
-integrity and checkpoints every restored entry, so a second interruption simply
-resumes rollback. A durably committed journal is cleaned without reverting the
-new files. The journal is deleted and its parent synced before backup cleanup,
-so recovery never points at data it already removed. Schema-1 journals left by
-v2.34 remain recoverable in the corrected order.
+integrity, an id-bound marker, and the exact absence of unjournaled backup files
+or directories, then checkpoints every restored entry, so a second interruption
+simply resumes rollback. A durably committed journal is cleaned without
+reverting the new files. The journal is deleted and its parent synced before
+exact leaf-by-leaf backup cleanup, so recovery never points at data it already
+removed. A crash after that durable boundary can leave only a bounded,
+marker-bound orphan backup; startup removes it under the update lock and refuses
+unknown names, reparse points, or payload paths. Schema-1 journals left by v2.34
+remain recoverable in the corrected order, but cleanup still requires their
+exact journaled tree and never removes an unjournaled sentinel. Before the first
+destination mutation, both new transactions and recovery preflight the aggregate
+backup set against the 512 MiB limit. Backup copies stream through a bounded
+64 KiB buffer rather than allocating each destination in memory.
+Replacement bytes, the final preserved security descriptor, and the final Unix
+mode are applied and synced on the staged inode before its atomic publication.
+An interrupted executable update therefore cannot expose the staging mode
+`0600` at the installed path while its journal still says `prepared`.
+Linux keeps the descriptor-relative parent alive until the destination snapshot
+file is open, so an existing install leaf cannot be mistaken for a new file
+through a dangling `/proc/self/fd` path. Exact same-destination atomic-write
+temps from a definitively dead creator are reclaimed with owner, type,
+single-link, and identity checks; bounded cleanup ignores live or malformed
+lookalikes.
+
+The Windows installer uses the same update-then-running lock order and retains a
+no-follow handle chain from the drive root through the install prefix while it
+validates or mutates managed state. Lock files use the sharing and whole-file
+byte range expected by Kettle's Rust lock implementation. The accepted tree is
+limited to 128 entries and 512 MiB, with exact release-root and
+`shell-integration/kettle.{bash,fish,ps1,zsh}` names. For upgrade compatibility,
+historical binary-backup forms are recognized narrowly:
+`kettle.{exe,com}.bak-MAJOR.MINOR.PATCH-YYYYMMDD`,
+`kettle.{exe,com}.bak-YYYY-MM-DD`, and
+`kettle.{exe,com}.bak-N-N`. They are preserved by an upgrade and removed as
+ordinary leaves by uninstall; arbitrary `.bak-*` names remain unmanaged and
+fail closed.
 
 Release CI accepts only a GitHub-verified annotated tag. All required platform
 artifacts must finish before the signing job can access its environment secret.

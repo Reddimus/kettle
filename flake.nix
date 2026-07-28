@@ -115,12 +115,36 @@
 
           # Nix deliberately supplies a non-existent HOME. portable-pty
           # resolves an unset command cwd through HOME before spawning, so
-          # give the tests a private, existing sandbox directory.
+          # give the tests an existing sandbox directory.
           preCheck = ''
             export HOME="$TMPDIR"
           '';
 
           buildInputs = runtimeLibs;
+
+          # Keep the Nix Linux package at feature parity with Kettle's other
+          # Linux distribution channels. These assets are intentionally
+          # omitted from Darwin outputs, where a Linux Desktop Entry and
+          # hicolor icon hierarchy would be inert and misleading.
+          postInstall = pkgs.lib.optionalString pkgs.stdenv.isLinux ''
+            install -Dm644 packaging/linux/kettle.desktop \
+              "$out/share/applications/kettle.desktop"
+            install -Dm644 packaging/linux/kettle.svg \
+              "$out/share/icons/hicolor/scalable/apps/kettle.svg"
+
+            for size in 16 24 32 48 64 128 256; do
+              install -Dm644 "packaging/linux/kettle-$size.png" \
+                "$out/share/icons/hicolor/''${size}x''${size}/apps/kettle.png"
+            done
+
+            install -Dm644 packaging/linux/kettle.1 \
+              "$out/share/man/man1/kettle.1"
+
+            for shell in bash zsh fish ps1; do
+              install -Dm644 "shell-integration/kettle.$shell" \
+                "$out/share/kettle/shell-integration/kettle.$shell"
+            done
+          '';
 
           # wgpu picks the Vulkan / GL / Wayland icd at runtime via
           # dlopen — Nix needs the runtime search path patched in
@@ -148,9 +172,25 @@
             done
           '';
 
+          # Linux Nix sandboxes map the filesystem root to overflow uid 65534
+          # while running the builder as uid 1000. Kettle deliberately rejects
+          # every private path below a root owned by neither uid 0 nor the
+          # effective user, so positive private-file tests cannot execute
+          # faithfully inside the derivation sandbox. Run only
+          # root-identity-independent crates here. The native CI matrix
+          # executes the complete workspace on Linux, macOS, and Windows, and
+          # the MSRV job repeats it on Rust 1.89. Do not add individual skips:
+          # later private-state, recording, IPC, and update tests share the
+          # same impossible premise, while negative tests could pass for the
+          # wrong early-rejection reason.
+          cargoTestFlags = [
+            "--package=kettle-vt"
+            "--package=kettle-remote"
+          ];
+
           # Skip the offscreen GPU and visual-regression tests during
-          # `nix build`: the sandbox has no Vulkan-capable GPU. CI on
-          # a real runner still exercises them.
+          # `nix build`: the sandbox has no Vulkan-capable GPU. CI on a real
+          # runner still exercises them.
           checkFlags = [
             "--skip=gpu_tests::gpu_pipelines_compile_and_render_offscreen"
             "--skip=context_menu_renders_visibly_with_text"
@@ -186,6 +226,59 @@
         checks = {
           cargo-test = self.packages.${system}.default;
         } // pkgs.lib.optionalAttrs pkgs.stdenv.isLinux {
+          package-contents = pkgs.runCommand "kettle-linux-package-contents" {
+            nativeBuildInputs = [ pkgs.coreutils pkgs.diffutils pkgs.findutils ];
+          } ''
+            package="${self.packages.${system}.default}"
+
+            assert_packaged_file() {
+              source_file="$1"
+              installed_file="$2"
+
+              test -f "$installed_file"
+              test ! -L "$installed_file"
+              # Nix removes write bits when it registers a store path.
+              test "$(stat -c '%a' "$installed_file")" = 444
+              cmp "$source_file" "$installed_file"
+            }
+
+            assert_packaged_file \
+              "${./packaging/linux/kettle.desktop}" \
+              "$package/share/applications/kettle.desktop"
+            assert_packaged_file \
+              "${./packaging/linux/kettle.svg}" \
+              "$package/share/icons/hicolor/scalable/apps/kettle.svg"
+
+            for size in 16 24 32 48 64 128 256; do
+              assert_packaged_file \
+                "${./packaging/linux}/kettle-$size.png" \
+                "$package/share/icons/hicolor/''${size}x''${size}/apps/kettle.png"
+            done
+
+            assert_packaged_file \
+              "${./packaging/linux/kettle.1}" \
+              "$package/share/man/man1/kettle.1"
+
+            for shell in bash zsh fish ps1; do
+              assert_packaged_file \
+                "${./shell-integration}/kettle.$shell" \
+                "$package/share/kettle/shell-integration/kettle.$shell"
+            done
+
+            # The share tree is wholly owned by the declarations above. Count
+            # its directories and files as well as comparing every file so
+            # additions cannot silently bypass a conscious package-content
+            # policy update. Reject links and special nodes explicitly.
+            test -z "$(
+              find "$package/share" \
+                -mindepth 1 ! -type d ! -type f -print -quit
+            )"
+            test "$(find "$package/share" -mindepth 1 -type d | wc -l)" -eq 23
+            test "$(find "$package/share" -type f | wc -l)" -eq 14
+
+            touch "$out"
+          '';
+
           runtime-smoke = pkgs.runCommand "kettle-x11-runtime-smoke" {
             nativeBuildInputs = [ pkgs.coreutils pkgs.xvfb-run ];
           } ''
