@@ -248,22 +248,17 @@ icns-smoke:
     @echo "See 'just ico-smoke' for the Windows .ico equivalent."
 
 # Verify packaging/windows/kettle.ico parses as a well-formed,
-# multi-resolution Windows icon. Implemented as native ICONDIR-header
-# parsing (no `file`/`xxd` dependency, unlike ci.yml's bash version) so
-# it needs nothing beyond PowerShell 5.1+: bytes 0-3 must be the ICO
-# magic (00 00 01 00) and the 2-byte little-endian image count at
-# offset 4 must be >= 4 (the release recipe bakes in 6 sizes; same
-# floor CI's `file`-based check uses). Mirrors CI's Windows-only
-# "Packaging smoke — Windows .ico" step.
+# multi-resolution Windows icon. The check parses the ICONDIR header
+# natively (no `file`/`xxd` dependency, unlike ci.yml's bash version) so
+# it needs nothing beyond PowerShell 5.1+. Mirrors CI's Windows-only
+# "Packaging smoke — Windows .ico" step and shares its >= 4 floor.
+#
+# It lives in scripts/ rather than inline: a plain `just` recipe runs
+# each line in a separate shell, so the inline version this replaces
+# lost `$path` before the line that read it and could never pass.
 [windows]
 ico-smoke:
-    $path = "packaging/windows/kettle.ico"
-    if (-not (Test-Path $path)) { Write-Error "$path is missing"; exit 1 }
-    $bytes = [System.IO.File]::ReadAllBytes($path)
-    if ($bytes.Length -lt 6 -or $bytes[0] -ne 0 -or $bytes[1] -ne 0 -or $bytes[2] -ne 1 -or $bytes[3] -ne 0) { Write-Error "$path is not a well-formed .ico (bad ICONDIR magic)"; exit 1 }
-    $count = $bytes[4] -bor ($bytes[5] -shl 8)
-    if ($count -lt 4) { Write-Error "$path has only $count resolution(s) (expected >= 4)"; exit 1 }
-    Write-Output "kettle.ico OK ($count resolutions)"
+    powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/check-windows-ico.ps1
 
 [unix]
 ico-smoke:
