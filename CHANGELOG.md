@@ -519,6 +519,19 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
     cannot silently discard reviewed local fixes.
 
   ### Benchmark, packaging, and release hardening
+  - The Windows installer smoke no longer aborts before reaching any product
+    logic when it is started from a PowerShell 7 session. Windows PowerShell
+    cannot load PowerShell 7's .NET-Core build of the modules whose names it
+    shares, and the inherited `PSModulePath` put those roots ahead of the system
+    one, so autoloading `Microsoft.PowerShell.Security` for `Get-Acl` failed
+    outright. The check now keeps only module roots its own edition can load.
+  - The Windows `.ico` packaging smoke now runs. Its recipe body was inline
+    PowerShell, and a plain `just` recipe evaluates each line in a separate
+    shell, so the variable holding the icon path was already gone by the line
+    that read it — the check failed on every Windows invocation and took the
+    full local gate down with it. The ICONDIR parsing moved to
+    `scripts/check-windows-ico.ps1`, matching how every other Windows recipe
+    here calls a script, with the resolution floor as a parameter.
   - Windows performance runs now retain a unique active `WmiMonitorID` as the
     preferred physical-display identity and use a versioned, fail-closed CCD
     fallback when WMI is absent or ambiguous. The fallback reads only the exact

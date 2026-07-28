@@ -4,6 +4,32 @@ param()
 
 $ErrorActionPreference = 'Stop'
 
+# Windows PowerShell cannot load PowerShell 7's .NET-Core build of the modules
+# whose names it shares. Launching this script from a pwsh 7 session is the
+# normal case -- `just` shells out to powershell.exe, and pwsh is the default
+# shell on developer machines -- and that inherits a PSModulePath with
+# PowerShell 7's module roots ahead of the system one. Autoloading
+# Microsoft.PowerShell.Security for Get-Acl then resolves to the Core build and
+# fails with CouldNotAutoloadMatchingModule, before any product logic runs.
+#
+# Keep only roots this edition can actually load, and guarantee the system root
+# is present. Assigning $env:PSModulePath also fixes it for child processes.
+if ($PSVersionTable.PSEdition -ne 'Core') {
+    $systemModules = Join-Path $env:SystemRoot 'system32\WindowsPowerShell\v1.0\Modules'
+    # `*\PowerShell\*` excludes PowerShell 7's user and shared roots without
+    # excluding `...\WindowsPowerShell\...`, where no separator precedes
+    # "PowerShell"; `*microsoft.powershell_*` excludes its MSIX package root.
+    $loadable = @(
+        $env:PSModulePath -split ';' |
+            Where-Object { $_ } |
+            Where-Object { $_ -notlike '*\PowerShell\*' -and $_ -notlike '*microsoft.powershell_*' }
+    )
+    if ($loadable -notcontains $systemModules) {
+        $loadable = @($systemModules) + $loadable
+    }
+    $env:PSModulePath = ($loadable -join ';')
+}
+
 $repo = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 Set-Location $repo
 
