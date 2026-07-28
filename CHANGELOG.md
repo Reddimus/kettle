@@ -157,11 +157,27 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
     and advances it in bounded 1 KiB steps; the synchronous handle required by
     `CreatePseudoConsole` is unchanged. A child that stops reading can no
     longer park protocol replies, timeout, cancellation, or pane shutdown
-    behind one blocking user-input write. Native saturation tests cover both
-    zero progress at the Windows pipe boundary and finite `kettle exec`
-    timeout/close after a query. Windows zero-byte pipe progress is normalized
+    behind one blocking user-input write. Two native tests split that claim:
+    one drives an anonymous pipe to real zero progress at the Windows boundary,
+    and one requires a finite `kettle exec` timeout and close after a child
+    query while the writer path is loaded. Neither forces the ConPTY input
+    queue itself to refuse a write — ConPTY buffers input without a bound a
+    test can exhaust, so the zero-progress guarantee is proven at the pipe
+    boundary rather than end to end. Windows zero-byte pipe progress is normalized
     to `WouldBlock`, and complete-message callers retain partial progress
     through bounded retries instead of silently dropping the unwritten suffix.
+  - **A stalled `kettle exec` stdout consumer no longer defeats `--timeout`.**
+    Output was written synchronously on the lifecycle thread, so the slice
+    limits bounded how many bytes were drained per turn but not how long one
+    `write` could block. An automation client that opened the pipe and stopped
+    reading held the lifecycle loop before its timeout check and suppressed
+    timeout, cancellation, and child reaping indefinitely — measured still
+    running 4.59 s into a `--timeout 1` run, and 5.008 s with 65 424 bytes
+    buffered under the regression. Stdout now belongs to a bounded worker; when
+    its queue fills, the lifecycle loop stops draining PTY output and lets
+    backpressure reach the child instead of parking. Normal completion drains
+    and joins losslessly, while timeout and cancellation abandon unaccepted
+    output rather than block teardown. The same run now exits 124 in 1.106 s.
   - Headless `kettle exec` now omits DA1 extension `52`, matching its deliberate
     lack of a clipboard-write sink instead of advertising OSC 52 writes that
     would be discarded.
@@ -306,6 +322,9 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
     wire order. A bounded, out-of-band VTE marker defers Sixel, Kitty, and
     iTerm2 controls before their decoders can mutate state, then replays each
     control against the cursor and screen buffer active at that byte offset.
+    Plain terminal bytes and concurrent row, pixel, or DPI resizes now share
+    the graphics ordering gate, so resize cannot split a committed text scroll
+    from its corresponding graphics-journal mutation.
     Natural close, timeout, EOF, and nested synchronized regions publish one
     atomic result; no graphics mutation or redraw becomes visible mid-region.
     Marker overflow or an inconsistent marker sequence fails closed by clearing

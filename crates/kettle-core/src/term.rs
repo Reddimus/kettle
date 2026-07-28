@@ -1627,6 +1627,23 @@ impl DeferredGraphicsJournal {
     }
 }
 
+fn chunk_needs_graphics_gate(chunk: &Chunk) -> bool {
+    // Pass bytes are not graphics-free: LF, CSI scrolling/erase, alternate
+    // screen switches, and RIS can all commit GraphicsEvents. Hold the gate
+    // across both the terminal mutation and journal application so a resize
+    // cannot observe and reorder the boundary between them.
+    matches!(
+        chunk,
+        Chunk::Pass(_)
+            | Chunk::Image(_)
+            | Chunk::DeleteImages(_)
+            | Chunk::VirtualImage { .. }
+            | Chunk::RelativePlacement { .. }
+            | Chunk::Animation { .. }
+            | Chunk::DeferredGraphics(_)
+    )
+}
+
 fn reset_deferred_graphics(
     active_alternate: &mut bool,
     deferred: &mut DeferredGraphicsJournal,
@@ -1743,6 +1760,19 @@ fn advance_terminal_bytes(
     bytes: &[u8],
     context: &mut SyncGraphicsContext<'_>,
 ) {
+    advance_terminal_bytes_with_commit_hook(processor, term, bytes, context, |_| {});
+}
+
+/// Testable form of [`advance_terminal_bytes`] exposing the real boundary
+/// after the text engine commits and releases its mutex but before the
+/// resulting graphics journal is applied.
+fn advance_terminal_bytes_with_commit_hook(
+    processor: &mut Processor,
+    term: &SharedTerm,
+    bytes: &[u8],
+    context: &mut SyncGraphicsContext<'_>,
+    after_text_commit: impl FnOnce(&GraphicsEventBatch),
+) {
     let batch = {
         let mut term = term.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         processor.advance_with_sync_markers(&mut *term, bytes, &mut |term, id| {
@@ -1758,6 +1788,7 @@ fn advance_terminal_bytes(
         });
         term.take_graphics_events()
     };
+    after_text_commit(&batch);
     let sync_pending = processor.sync_timeout().sync_timeout().is_some();
     apply_sync_dispatch(SyncGraphicsDispatch::Batch(batch), context);
     if sync_pending {
@@ -4024,17 +4055,7 @@ impl Terminal {
                                     tx.send(buffer.clone());
                                 }
                                 extractor.feed_with(&buffer, |extractor, chunk| {
-                                    let graphics_related = matches!(
-                                        &chunk,
-                                        Chunk::Image(_)
-                                            | Chunk::DeleteImages(_)
-                                            | Chunk::VirtualImage { .. }
-                                            | Chunk::RelativePlacement { .. }
-                                            | Chunk::Animation { .. }
-                                            | Chunk::DeferredGraphics(_)
-                                    ) || matches!(&chunk, Chunk::Pass(_))
-                                        && (!deferred_graphics.entries.is_empty()
-                                            || deferred_graphics.overflowed);
+                                    let graphics_related = chunk_needs_graphics_gate(&chunk);
                                     let _graphics_guard = graphics_related.then(|| {
                                         graphics_gate
                                             .lock()
@@ -10851,10 +10872,11 @@ mod image_lifecycle_tests {
         GraphicsScrollDirection, ImageHistoryPruner, Images, InactiveGraphics,
         PTY_PUMP_QUEUE_DEPTH, Placement, PtyGeometry, RelEntry, Relatives, SharedTerm,
         SyncFlushContext, SyncGraphicsContext, SyncGraphicsDispatch, TermSize,
-        VersionedPtyGeometry, VirtualEntry, Virtuals, advance_terminal_bytes, apply_graphics_batch,
-        apply_graphics_chunk_at, apply_graphics_event, apply_sync_dispatch,
-        clear_reflowed_regular_placements, finish_deferred_sync, receive_pty_chunk,
-        scroll_regular_placements,
+        VersionedPtyGeometry, VirtualEntry, Virtuals, advance_terminal_bytes,
+        advance_terminal_bytes_with_commit_hook, apply_graphics_batch, apply_graphics_chunk_at,
+        apply_graphics_event, apply_sync_dispatch, chunk_needs_graphics_gate,
+        clear_reflowed_regular_placements, commit_local_geometry, finish_deferred_sync,
+        receive_pty_chunk, recompute_kitty_placements, scroll_regular_placements,
     };
     use crate::event::OutputWakeGate;
     use crate::{EventProxy, ImageData, Waker};
@@ -11062,6 +11084,128 @@ mod image_lifecycle_tests {
 
     fn close(actual: f32, expected: f32) {
         assert!((actual - expected).abs() < 1e-6, "{actual} != {expected}");
+    }
+
+    #[test]
+    fn plain_scroll_and_resize_share_one_graphics_order() {
+        let (tx, _rx) = crossbeam_channel::unbounded();
+        let proxy = EventProxy::new(tx, Arc::new(|| {}));
+        let term: SharedTerm = Arc::new(Mutex::new(Term::new(
+            TermConfig::default(),
+            &TermSize {
+                columns: 8,
+                screen_lines: 4,
+            },
+            proxy,
+        )));
+        let mut processor = Processor::new();
+        {
+            let mut term = term.lock().unwrap();
+            processor.advance(&mut *term, b"\x1b[4;1H");
+            assert!(term.take_graphics_events().events.is_empty());
+        }
+
+        let (images, virtuals, anims, relatives, inactive) = registries();
+        images.lock().unwrap().push(placement_at(1, 0, 1));
+        let geometry = Arc::new(Mutex::new(VersionedPtyGeometry {
+            geometry: PtyGeometry::new(8, 4, 80, 40),
+            generation: 0,
+        }));
+        let graphics_gate = Arc::new(Mutex::new(()));
+        let order = Arc::new(Mutex::new(Vec::new()));
+        let (text_committed_tx, text_committed_rx) = std::sync::mpsc::channel();
+        let (resize_committed_tx, resize_committed_rx) = std::sync::mpsc::channel();
+        let (reader_done_tx, reader_done_rx) = std::sync::mpsc::channel();
+
+        let reader_term = term.clone();
+        let reader_images = images.clone();
+        let reader_virtuals = virtuals.clone();
+        let reader_anims = anims.clone();
+        let reader_relatives = relatives.clone();
+        let reader_inactive = inactive.clone();
+        let reader_geometry = geometry.clone();
+        let reader_gate = graphics_gate.clone();
+        let reader_order = order.clone();
+        let reader = std::thread::spawn(move || {
+            let chunk = Chunk::Pass(b"\n".to_vec());
+            let mut deferred = DeferredGraphicsJournal::new();
+            let graphics_related = chunk_needs_graphics_gate(&chunk);
+            let _graphics_guard = graphics_related.then(|| {
+                reader_gate
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+            });
+            let Chunk::Pass(bytes) = chunk else {
+                unreachable!("fixture creates a pass chunk")
+            };
+            let mut extractor = Extractor::new();
+            let mut active_alternate = false;
+            let mut context = SyncGraphicsContext {
+                active_alternate: &mut active_alternate,
+                deferred: &mut deferred,
+                registries: GraphicsRegistries {
+                    inactive: &reader_inactive,
+                    images: &reader_images,
+                    virtuals: &reader_virtuals,
+                    anims: &reader_anims,
+                    relatives: &reader_relatives,
+                },
+                actions: GraphicsActionContext {
+                    images: &reader_images,
+                    virtuals: &reader_virtuals,
+                    anims: &reader_anims,
+                    relatives: &reader_relatives,
+                    geometry: &reader_geometry,
+                },
+                extractor: &mut extractor,
+            };
+            advance_terminal_bytes_with_commit_hook(
+                &mut processor,
+                &reader_term,
+                &bytes,
+                &mut context,
+                |batch| {
+                    let saw_scroll =
+                        matches!(batch.events.as_slice(), [GraphicsEvent::Scroll { .. }]);
+                    reader_order.lock().unwrap().push("text-scroll");
+                    text_committed_tx
+                        .send((graphics_related, saw_scroll))
+                        .unwrap();
+                    if !graphics_related {
+                        resize_committed_rx.recv().unwrap();
+                    }
+                },
+            );
+            reader_order.lock().unwrap().push("graphics-scroll");
+            reader_done_tx.send(()).unwrap();
+        });
+
+        let (graphics_related, saw_scroll) = text_committed_rx.recv().unwrap();
+        assert!(
+            saw_scroll,
+            "plain LF must emit a real graphics scroll event"
+        );
+        {
+            let _graphics_guard = graphics_gate
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let resized = PtyGeometry::new(8, 4, 160, 40);
+            commit_local_geometry(&term, &geometry, resized, None);
+            recompute_kitty_placements(&mut images.lock().unwrap(), resized);
+            order.lock().unwrap().push("graphics-resize");
+        }
+        if !graphics_related {
+            resize_committed_tx.send(()).unwrap();
+        }
+        reader_done_rx.recv().unwrap();
+        reader.join().unwrap();
+
+        assert_eq!(
+            *order.lock().unwrap(),
+            ["text-scroll", "graphics-scroll", "graphics-resize"],
+            "a plain-byte scroll committed outside the graphics gate, allowing \
+             resize to split its text and graphics mutations"
+        );
     }
 
     #[test]

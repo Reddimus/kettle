@@ -336,6 +336,140 @@ fn exec_timeout_returns_124() {
     );
 }
 
+const STDOUT_FLOOD_MARKER_ENV: &str = "KETTLE_EXEC_STDOUT_FLOOD_MARKER";
+
+#[test]
+fn stdout_flood_helper() {
+    let Some(marker) = std::env::var_os(STDOUT_FLOOD_MARKER_ENV) else {
+        return;
+    };
+    std::fs::write(marker, b"ready").expect("publish stdout-flood readiness");
+
+    let block = [b'x'; 8192];
+    let mut stdout = std::io::stdout().lock();
+    loop {
+        stdout.write_all(&block).expect("write stdout-flood block");
+        stdout.flush().expect("flush stdout-flood block");
+    }
+}
+
+#[test]
+fn exec_timeout_survives_an_unread_stdout_pipe() {
+    let scratch = tempfile::tempdir_in(private_test_scratch_root())
+        .expect("create stdout-backpressure scratch directory");
+    let marker = scratch.path().join("child-ready");
+    let helper = std::env::current_exe().expect("resolve integration-test helper");
+    let mut cmd = kettle();
+    cmd.args([
+        "exec",
+        "--timeout",
+        "1.0",
+        "--",
+        helper.to_str().expect("integration-test path is UTF-8"),
+        "--exact",
+        "stdout_flood_helper",
+        "--nocapture",
+        "--test-threads=1",
+    ]);
+    cmd.env(STDOUT_FLOOD_MARKER_ENV, &marker);
+    cmd.stdin(Stdio::null());
+    cmd.stdout(Stdio::piped());
+    cmd.stderr(Stdio::piped());
+
+    let mut child = cmd.spawn().expect("spawn stdout-backpressured exec");
+    // Deliberately retain this read end without consuming it until Kettle has
+    // exited. The helper's fixed-size writes must eventually fill this finite
+    // OS pipe; unlike ConPTY input, this precondition does not depend on an
+    // unbounded downstream buffer ever reporting saturation.
+    let mut unread_stdout = child.stdout.take().expect("piped stdout");
+    let mut stderr = child.stderr.take().expect("piped stderr");
+    let ready_deadline = Instant::now() + Duration::from_secs(6);
+    while !marker.exists() && Instant::now() < ready_deadline {
+        if child
+            .try_wait()
+            .expect("poll stdout-backpressured exec")
+            .is_some()
+        {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+
+    if !marker.exists() {
+        let status = child
+            .try_wait()
+            .expect("poll unready stdout-backpressured exec")
+            .unwrap_or_else(|| {
+                child
+                    .kill()
+                    .expect("kill unready stdout-backpressured exec");
+                child
+                    .wait()
+                    .expect("wait for killed stdout-backpressured exec")
+            });
+        let mut out = Vec::new();
+        unread_stdout.read_to_end(&mut out).unwrap();
+        let mut err = String::new();
+        stderr.read_to_string(&mut err).unwrap();
+        if no_pty(status.code().unwrap_or(-1), &err) {
+            eprintln!("skipping exec_timeout_survives_an_unread_stdout_pipe: no PTY");
+            return;
+        }
+        panic!(
+            "stdout-flood helper never became ready; status={status:?}; \
+             stderr={err:?}; stdout={:?}",
+            String::from_utf8_lossy(&out)
+        );
+    }
+
+    let ready_at = Instant::now();
+    let watchdog = ready_at + Duration::from_secs(5);
+    let (status, watchdog_killed) = loop {
+        if let Some(status) = child.try_wait().expect("poll stdout-backpressured exec") {
+            break (status, false);
+        }
+        if Instant::now() >= watchdog {
+            child
+                .kill()
+                .expect("kill stdout-backpressured exec after watchdog");
+            break (
+                child
+                    .wait()
+                    .expect("wait for watchdog-killed stdout-backpressured exec"),
+                true,
+            );
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    let elapsed_after_ready = ready_at.elapsed();
+    let mut out = Vec::new();
+    unread_stdout.read_to_end(&mut out).unwrap();
+    let mut err = String::new();
+    stderr.read_to_string(&mut err).unwrap();
+
+    assert!(
+        !watchdog_killed,
+        "unread stdout suppressed kettle exec timeout for {elapsed_after_ready:?}; \
+         stderr={err:?}; buffered stdout bytes={}",
+        out.len()
+    );
+    assert_eq!(
+        status.code(),
+        Some(124),
+        "stdout-backpressured timeout must exit 124; stderr={err:?}"
+    );
+    assert!(
+        elapsed_after_ready < Duration::from_secs(5),
+        "stdout-backpressured timeout took {elapsed_after_ready:?}"
+    );
+    eprintln!(
+        "unread-stdout reproduction: exit={:?}, after_ready={elapsed_after_ready:?}, \
+         pipe_buffered_bytes={}",
+        status.code(),
+        out.len()
+    );
+}
+
 #[cfg(unix)]
 #[test]
 fn exec_forwards_piped_stdin() {
@@ -539,7 +673,7 @@ fn exec_timeout_closes_a_saturated_conpty_after_a_query() {
     });
     assert!(
         saturated_bytes >= 64 * 1024,
-        "fixture accepted too little input to prove downstream saturation: {saturated_bytes}"
+        "fixture accepted too little input to have loaded the writer path: {saturated_bytes}"
     );
     assert_ne!(
         event_signaled,

@@ -54,6 +54,10 @@ const PTY_EVENT_QUEUE_DEPTH: usize = 1024;
 /// the bounded handoff cannot starve timeout, cancellation, or child reaping.
 const OUTPUT_SLICE_MESSAGES: usize = 16;
 const OUTPUT_SLICE_BYTES: usize = 1024 * 1024;
+/// Rendered stdout commands waiting behind the writer currently in the OS.
+/// One additional command may remain on the lifecycle thread, keeping memory
+/// bounded while leaving timeout/cancellation checks runnable.
+const OUTPUT_WRITER_QUEUE_DEPTH: usize = 4;
 /// Apply the same lifecycle fairness to semantic events. The queue remains
 /// substantially deeper so a short burst can be absorbed without loss.
 const EVENT_SLICE_MESSAGES: usize = 256;
@@ -209,7 +213,17 @@ impl AnsiStripper {
 
 /// Run `kettle exec` end to end; returns the process exit code to propagate.
 pub fn run_exec(opts: ExecOpts) -> i32 {
-    run_exec_with(opts, &default_size_probe, &mut std::io::stdout().lock())
+    let mut output = match WorkerOutput::spawn(opts.mode, std::io::stdout()) {
+        Ok(output) => output,
+        Err(error) => {
+            let _ = writeln!(
+                std::io::stderr(),
+                "kettle exec: cannot start stdout writer: {error}"
+            );
+            return EXIT_INTERNAL;
+        }
+    };
+    run_exec_engine(opts, &default_size_probe, &mut output, None)
 }
 
 /// (agent-first A3): run a command headlessly and CAPTURE its output
@@ -252,7 +266,8 @@ fn run_exec_capture_inner(opts: ExecOpts, cancelled: Option<&AtomicBool>) -> (i3
         buf: Vec::new(),
         cap: 1024 * 1024,
     };
-    let code = run_exec_with_cancellation(opts, &default_size_probe, &mut sink, cancelled);
+    let mut output = DirectOutput::new(opts.mode, &mut sink);
+    let code = run_exec_engine(opts, &default_size_probe, &mut output, cancelled);
     (code, String::from_utf8_lossy(&sink.buf).into_owned())
 }
 
@@ -262,12 +277,14 @@ pub fn default_size_probe() -> Option<(u16, u16)> {
 }
 
 /// Core run loop, with the stdout sink and size probe injected for testing.
+#[cfg(test)]
 pub fn run_exec_with(
     opts: ExecOpts,
     _size_probe: &dyn Fn() -> Option<(u16, u16)>,
     sink: &mut dyn Write,
 ) -> i32 {
-    run_exec_with_cancellation(opts, _size_probe, sink, None)
+    let mut output = DirectOutput::new(opts.mode, sink);
+    run_exec_engine(opts, _size_probe, &mut output, None)
 }
 
 /// Drain one bounded output slice and report whether a backlog remains.
@@ -278,39 +295,75 @@ pub fn run_exec_with(
 fn drain_output_slice(
     receiver: &Receiver<Vec<u8>>,
     recorder: &mut Option<kettle_core::record::Recorder>,
-    output: &mut Outputter,
-    sink: &mut dyn Write,
+    output: &mut dyn ExecOutput,
 ) -> bool {
     let mut bytes_drained = 0usize;
     for _ in 0..OUTPUT_SLICE_MESSAGES {
         if bytes_drained >= OUTPUT_SLICE_BYTES {
             break;
         }
+        if !output.ready() {
+            return true;
+        }
         let Ok(bytes) = receiver.try_recv() else {
             return false;
         };
         bytes_drained = bytes_drained.saturating_add(bytes.len());
         record_chunk(recorder, &bytes);
-        output.output(sink, &bytes);
+        output.output(bytes);
     }
-    !receiver.is_empty()
+    !receiver.is_empty() || !output.ready()
+}
+
+/// Preserve the audit trace during bounded teardown after stdout has stopped
+/// accepting commands. These raw chunks are intentionally not republished:
+/// timeout/cancellation semantics abandon output the consumer has not accepted
+/// rather than letting that consumer delay child reaping.
+fn drain_recording_slice(
+    receiver: &Receiver<Vec<u8>>,
+    recorder: &mut Option<kettle_core::record::Recorder>,
+) {
+    let mut bytes_drained = 0usize;
+    for _ in 0..OUTPUT_SLICE_MESSAGES {
+        if bytes_drained >= OUTPUT_SLICE_BYTES {
+            break;
+        }
+        let Ok(bytes) = receiver.try_recv() else {
+            break;
+        };
+        bytes_drained = bytes_drained.saturating_add(bytes.len());
+        record_chunk(recorder, &bytes);
+    }
 }
 
 /// Drain one bounded semantic-event slice and report whether work remains.
+#[cfg(test)]
 fn drain_event_slice<T>(receiver: &Receiver<T>, mut handle: impl FnMut(T)) -> bool {
+    drain_event_slice_until(receiver, |event| {
+        handle(event);
+        true
+    })
+}
+
+/// Drain semantic events until the budget is spent or `handle` asks to stop.
+/// The latter lets an ordered JSON title wait behind a saturated stdout writer
+/// without consuming later title events or blocking lifecycle checks.
+fn drain_event_slice_until<T>(receiver: &Receiver<T>, mut handle: impl FnMut(T) -> bool) -> bool {
     for _ in 0..EVENT_SLICE_MESSAGES {
         let Ok(event) = receiver.try_recv() else {
             return false;
         };
-        handle(event);
+        if !handle(event) {
+            return true;
+        }
     }
     !receiver.is_empty()
 }
 
-fn run_exec_with_cancellation(
+fn run_exec_engine(
     mut opts: ExecOpts,
     _size_probe: &dyn Fn() -> Option<(u16, u16)>,
-    sink: &mut dyn Write,
+    output: &mut dyn ExecOutput,
     cancelled: Option<&AtomicBool>,
 ) -> i32 {
     if opts.argv.is_empty() {
@@ -422,27 +475,75 @@ fn run_exec_with_cancellation(
         drop(stdin_tx);
     }
 
-    let mut out = Outputter::new(opts.mode);
-    out.start(sink, opts.cols, opts.rows);
+    output.start(opts.cols, opts.rows);
 
     let started = Instant::now();
     let mut child_gone_at: Option<Instant> = None;
     let mut last_lifecycle_trace = started;
 
     loop {
-        let trace_lifecycle = started.elapsed() >= Duration::from_secs(4)
+        // Evaluate both externally imposed stop conditions before touching any
+        // tracing, output, event, stdin, or child-status work. Those operations
+        // are intended to be bounded, but a regression in one of them must
+        // never park the deadline/cancellation decision behind downstream
+        // pressure.
+        let elapsed = started.elapsed();
+        let cancellation_requested = cancelled.is_some_and(|flag| flag.load(Ordering::Acquire));
+        let timeout_expired = opts.timeout.is_some_and(|limit| elapsed >= limit);
+        let lifecycle_stop = if child_gone_at.is_some() {
+            None
+        } else if cancellation_requested {
+            Some(EXIT_CANCELLED)
+        } else if timeout_expired {
+            Some(EXIT_TIMEOUT)
+        } else {
+            None
+        };
+        if let Some(code) = lifecycle_stop {
+            log::debug!(
+                "kettle exec {} reached; starting bounded teardown",
+                if code == EXIT_CANCELLED {
+                    "cancellation"
+                } else {
+                    "timeout"
+                }
+            );
+            process_tree.terminate(&term);
+            if code == EXIT_CANCELLED {
+                // Reap the killed child where the PTY backend exposes its
+                // status; this prevents a cancelled long-running MCP tool from
+                // leaving a zombie behind while still bounding cancellation
+                // latency.
+                let _ = wait_for_exit_code(&term);
+            }
+            std::thread::sleep(SETTLE);
+            // Once an imposed stop wins, never consult downstream output
+            // readiness again. Preserve the bounded audit tail directly from
+            // the raw PTY channel, then apply the explicit abandon contract.
+            drain_recording_slice(&orx, &mut recorder);
+            if let Some(mut recorder) = recorder.take() {
+                recorder.finish();
+            }
+            output.finish(code, started.elapsed(), OutputFinish::AbandonPending);
+            log::debug!("kettle exec bounded stop teardown finished");
+            return code;
+        }
+
+        let trace_lifecycle = elapsed >= Duration::from_secs(4)
             && last_lifecycle_trace.elapsed() >= Duration::from_millis(250);
         if trace_lifecycle {
             last_lifecycle_trace = Instant::now();
             log::debug!(
-                "kettle exec lifecycle turn start: elapsed={:?}, child_gone={}",
-                started.elapsed(),
+                "kettle exec lifecycle turn: elapsed={elapsed:?}, cancelled={cancellation_requested}, \
+                 timeout={:?}, timeout_expired={timeout_expired}, child_gone={}",
+                opts.timeout,
                 child_gone_at.is_some()
             );
         }
+
         // Drain output first, but keep the slice finite. A continuously
         // refilled queue must not hide timeout/cancellation indefinitely.
-        let output_backlog = drain_output_slice(&orx, &mut recorder, &mut out, sink);
+        let output_backlog = drain_output_slice(&orx, &mut recorder, output);
         if trace_lifecycle {
             log::debug!("kettle exec lifecycle output slice returned: backlog={output_backlog}");
         }
@@ -474,41 +575,49 @@ fn run_exec_with_cancellation(
                 }
             }
         };
-        let event_backlog = drain_event_slice(&rx, |ev| {
-            match ev {
-                TermEvent::PtyWrite(s) => queue_reply(s.as_bytes()),
-                TermEvent::Title(t) => out.title(sink, &t),
-                TermEvent::TextAreaSizeRequest(fmt) => {
-                    let (pixel_width, pixel_height) = term.pty_pixel_size();
-                    let reply =
-                        kettle_render::reply_for_text_area_size(pixel_width, pixel_height, &*fmt);
-                    queue_reply(reply.as_bytes());
-                }
-                TermEvent::ColorRequest(idx, fmt) => {
-                    if let Some(s) = term.term.lock().ok().and_then(|t| {
-                        kettle_render::reply_for_query(
-                            idx,
-                            &kettle_config::Theme::default(),
-                            t.colors(),
+        let event_backlog = if output.ready() {
+            drain_event_slice_until(&rx, |ev| {
+                match ev {
+                    TermEvent::PtyWrite(s) => queue_reply(s.as_bytes()),
+                    TermEvent::Title(t) => output.title(t),
+                    TermEvent::TextAreaSizeRequest(fmt) => {
+                        let (pixel_width, pixel_height) = term.pty_pixel_size();
+                        let reply = kettle_render::reply_for_text_area_size(
+                            pixel_width,
+                            pixel_height,
                             &*fmt,
-                        )
-                    }) {
-                        queue_reply(s.as_bytes());
+                        );
+                        queue_reply(reply.as_bytes());
                     }
+                    TermEvent::ColorRequest(idx, fmt) => {
+                        if let Some(s) = term.term.lock().ok().and_then(|t| {
+                            kettle_render::reply_for_query(
+                                idx,
+                                &kettle_config::Theme::default(),
+                                t.colors(),
+                                &*fmt,
+                            )
+                        }) {
+                            queue_reply(s.as_bytes());
+                        }
+                    }
+                    // Headless exec has no clipboard sink and advertises no DA1
+                    // extension 52. Discard writes explicitly at this boundary.
+                    TermEvent::ClipboardStore(_, _) => {}
+                    // OSC 52 read: deny (reply empty so the protocol stays
+                    // well-formed without leaking a clipboard to a headless child).
+                    TermEvent::ClipboardLoad(_, fmt) => queue_reply(fmt("").as_bytes()),
+                    TermEvent::Exit | TermEvent::ChildExit(_) => {
+                        log::debug!("kettle exec handling child-exit event");
+                        child_gone_at.get_or_insert_with(Instant::now);
+                    }
+                    _ => {}
                 }
-                // Headless exec has no clipboard sink and advertises no DA1
-                // extension 52. Discard writes explicitly at this boundary.
-                TermEvent::ClipboardStore(_, _) => {}
-                // OSC 52 read: deny (reply empty so the protocol stays
-                // well-formed without leaking a clipboard to a headless child).
-                TermEvent::ClipboardLoad(_, fmt) => queue_reply(fmt("").as_bytes()),
-                TermEvent::Exit | TermEvent::ChildExit(_) => {
-                    log::debug!("kettle exec handling child-exit event");
-                    child_gone_at.get_or_insert_with(Instant::now);
-                }
-                _ => {}
-            }
-        });
+                output.ready()
+            })
+        } else {
+            !rx.is_empty()
+        };
         if trace_lifecycle {
             log::debug!("kettle exec lifecycle event slice returned: backlog={event_backlog}");
         }
@@ -569,11 +678,11 @@ fn run_exec_with_cancellation(
             process_tree.terminate(&term);
             let _ = wait_for_exit_code(&term);
             std::thread::sleep(SETTLE);
-            let _ = drain_output_slice(&orx, &mut recorder, &mut out, sink);
+            let _ = drain_output_slice(&orx, &mut recorder, output);
             if let Some(mut recorder) = recorder.take() {
                 recorder.finish();
             }
-            out.finish(sink, EXIT_INTERNAL, started.elapsed());
+            output.finish(EXIT_INTERNAL, started.elapsed(), OutputFinish::Complete);
             return EXIT_INTERNAL;
         }
         if let Some(error) = stdin_forwarding_error {
@@ -589,11 +698,11 @@ fn run_exec_with_cancellation(
                 process_tree.terminate(&term);
                 let _ = wait_for_exit_code(&term);
                 std::thread::sleep(SETTLE);
-                let _ = drain_output_slice(&orx, &mut recorder, &mut out, sink);
+                let _ = drain_output_slice(&orx, &mut recorder, output);
                 if let Some(mut recorder) = recorder.take() {
                     recorder.finish();
                 }
-                out.finish(sink, EXIT_INTERNAL, started.elapsed());
+                output.finish(EXIT_INTERNAL, started.elapsed(), OutputFinish::Complete);
                 return EXIT_INTERNAL;
             }
             // EIO/BrokenPipe is the normal final write outcome when a
@@ -616,7 +725,7 @@ fn run_exec_with_cancellation(
             && orx.is_empty()
         {
             // Final drain in case something landed in the settle window.
-            let _ = drain_output_slice(&orx, &mut recorder, &mut out, sink);
+            let _ = drain_output_slice(&orx, &mut recorder, output);
             if let Some(mut r) = recorder.take() {
                 r.finish();
             }
@@ -628,59 +737,12 @@ fn run_exec_with_cancellation(
             let code = wait_for_exit_code(&term)
                 .map(clamp_code)
                 .unwrap_or(EXIT_INTERNAL);
-            out.finish(sink, code, started.elapsed());
+            output.finish(code, started.elapsed(), OutputFinish::Complete);
             return code;
         }
 
-        // MCP cancellation is prompt and follows the same teardown discipline
-        // as timeout: kill the PTY child, drain its last repaint, and finish the
-        // recorder before releasing the worker slot.
-        if trace_lifecycle {
-            log::debug!("kettle exec lifecycle evaluating cancellation");
-        }
-        if cancelled.is_some_and(|flag| flag.load(Ordering::Acquire)) && child_gone_at.is_none() {
-            process_tree.terminate(&term);
-            // Reap the killed child where the PTY backend exposes its status;
-            // this prevents a cancelled long-running MCP tool from leaving a
-            // zombie behind while still bounding cancellation latency.
-            let _ = wait_for_exit_code(&term);
-            std::thread::sleep(SETTLE);
-            let _ = drain_output_slice(&orx, &mut recorder, &mut out, sink);
-            if let Some(mut recorder) = recorder.take() {
-                recorder.finish();
-            }
-            out.finish(sink, EXIT_CANCELLED, started.elapsed());
-            return EXIT_CANCELLED;
-        }
-
-        // Timeout: kill the child, settle briefly, report 124.
-        if trace_lifecycle {
-            log::debug!(
-                "kettle exec lifecycle evaluating timeout: configured={:?}, elapsed={:?}, \
-                 child_gone={}",
-                opts.timeout,
-                started.elapsed(),
-                child_gone_at.is_some()
-            );
-        }
-        if let Some(limit) = opts.timeout
-            && started.elapsed() >= limit
-            && child_gone_at.is_none()
-        {
-            log::debug!("kettle exec timeout reached; starting bounded teardown");
-            process_tree.terminate(&term);
-            log::debug!("kettle exec timeout child termination returned");
-            std::thread::sleep(SETTLE);
-            let _ = drain_output_slice(&orx, &mut recorder, &mut out, sink);
-            if let Some(mut r) = recorder.take() {
-                r.finish();
-            }
-            out.finish(sink, EXIT_TIMEOUT, started.elapsed());
-            log::debug!("kettle exec timeout teardown finished");
-            return EXIT_TIMEOUT;
-        }
-
-        if output_backlog || event_backlog {
+        let output_blocked = !output.ready();
+        if (output_backlog || event_backlog) && !output_blocked {
             // Preserve throughput under a real backlog without paying the idle
             // polling delay, now that lifecycle checks have had a turn.
             std::thread::yield_now();
@@ -986,6 +1048,216 @@ fn push_utf8_streaming(carry: &mut Vec<u8>, bytes: &[u8], out: &mut String) {
                     }
                 }
             }
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum OutputFinish {
+    /// Ordinary completion is lossless: drain every admitted command and wait
+    /// for the final flush before returning the child's status.
+    Complete,
+    /// Timeout/cancellation must not wait for a stalled stdout consumer.
+    AbandonPending,
+}
+
+trait ExecOutput {
+    /// Try to publish the one lifecycle-owned pending command.
+    fn ready(&mut self) -> bool;
+    fn start(&mut self, cols: u16, rows: u16);
+    fn output(&mut self, bytes: Vec<u8>);
+    fn title(&mut self, title: String);
+    fn finish(&mut self, code: i32, duration: Duration, mode: OutputFinish);
+}
+
+struct DirectOutput<'a> {
+    outputter: Outputter,
+    sink: &'a mut dyn Write,
+}
+
+impl<'a> DirectOutput<'a> {
+    fn new(mode: OutputMode, sink: &'a mut dyn Write) -> Self {
+        Self {
+            outputter: Outputter::new(mode),
+            sink,
+        }
+    }
+}
+
+impl ExecOutput for DirectOutput<'_> {
+    fn ready(&mut self) -> bool {
+        true
+    }
+
+    fn start(&mut self, cols: u16, rows: u16) {
+        self.outputter.start(self.sink, cols, rows);
+    }
+
+    fn output(&mut self, bytes: Vec<u8>) {
+        self.outputter.output(self.sink, &bytes);
+    }
+
+    fn title(&mut self, title: String) {
+        self.outputter.title(self.sink, &title);
+    }
+
+    fn finish(&mut self, code: i32, duration: Duration, _mode: OutputFinish) {
+        self.outputter.finish(self.sink, code, duration);
+    }
+}
+
+enum OutputCommand {
+    Start { cols: u16, rows: u16 },
+    Output(Vec<u8>),
+    Title(String),
+    Finish { code: i32, duration: Duration },
+}
+
+/// Own stdout on a dedicated bounded worker so an OS-level `write` cannot park
+/// the PTY lifecycle thread. At most the channel plus `pending` are retained;
+/// once full, the lifecycle stops draining the lossless PTY output channel and
+/// lets bounded backpressure propagate to the child.
+struct WorkerOutput {
+    mode: OutputMode,
+    sender: Option<Sender<OutputCommand>>,
+    pending: Option<OutputCommand>,
+    worker: Option<std::thread::JoinHandle<()>>,
+}
+
+impl WorkerOutput {
+    fn spawn(mode: OutputMode, mut sink: impl Write + Send + 'static) -> std::io::Result<Self> {
+        let (sender, receiver) = crossbeam_channel::bounded(OUTPUT_WRITER_QUEUE_DEPTH);
+        let worker = std::thread::Builder::new()
+            .name("kettle-stdout-writer".into())
+            .spawn(move || {
+                let mut outputter = Outputter::new(mode);
+                while let Ok(command) = receiver.recv() {
+                    match command {
+                        OutputCommand::Start { cols, rows } => {
+                            outputter.start(&mut sink, cols, rows);
+                        }
+                        OutputCommand::Output(bytes) => {
+                            outputter.output(&mut sink, &bytes);
+                        }
+                        OutputCommand::Title(title) => {
+                            outputter.title(&mut sink, &title);
+                        }
+                        OutputCommand::Finish { code, duration } => {
+                            outputter.finish(&mut sink, code, duration);
+                            break;
+                        }
+                    }
+                }
+            })?;
+        Ok(Self {
+            mode,
+            sender: Some(sender),
+            pending: None,
+            worker: Some(worker),
+        })
+    }
+
+    fn try_dispatch(&mut self, command: OutputCommand) {
+        debug_assert!(self.pending.is_none());
+        let Some(sender) = self.sender.as_ref() else {
+            return;
+        };
+        match sender.try_send(command) {
+            Ok(()) => {}
+            Err(crossbeam_channel::TrySendError::Full(command)) => {
+                self.pending = Some(command);
+            }
+            Err(crossbeam_channel::TrySendError::Disconnected(_)) => {
+                log::error!("kettle exec stdout writer stopped unexpectedly");
+            }
+        }
+    }
+
+    fn finish_complete(&mut self, code: i32, duration: Duration) {
+        if let Some(command) = self.pending.take()
+            && self
+                .sender
+                .as_ref()
+                .is_some_and(|sender| sender.send(command).is_err())
+        {
+            log::error!("kettle exec stdout writer stopped with pending output");
+        }
+        if self.sender.as_ref().is_some_and(|sender| {
+            sender
+                .send(OutputCommand::Finish { code, duration })
+                .is_err()
+        }) {
+            log::error!("kettle exec stdout writer stopped before final flush");
+        }
+        drop(self.sender.take());
+        if let Some(worker) = self.worker.take()
+            && worker.join().is_err()
+        {
+            log::error!("kettle exec stdout writer panicked");
+        }
+    }
+
+    fn finish_abandoning_pending(&mut self, code: i32, duration: Duration) {
+        if self.pending.is_none()
+            && let Some(sender) = self.sender.as_ref()
+        {
+            let _ = sender.try_send(OutputCommand::Finish { code, duration });
+        }
+
+        // Chosen timeout/cancellation contract: commands already accepted by
+        // the worker may complete if the consumer resumes immediately, but the
+        // lifecycle never waits. The lifecycle-owned pending command, any raw
+        // PTY tail not admitted to stdout, and a final JSON exit event that
+        // cannot enter the full queue are abandoned explicitly. `main` then
+        // calls `process::exit`, which terminates a writer still blocked in the
+        // OS. Ordinary completion uses `finish_complete` and drops none.
+        self.pending = None;
+        drop(self.sender.take());
+        drop(self.worker.take());
+    }
+}
+
+impl ExecOutput for WorkerOutput {
+    fn ready(&mut self) -> bool {
+        let Some(command) = self.pending.take() else {
+            return true;
+        };
+        let Some(sender) = self.sender.as_ref() else {
+            return true;
+        };
+        match sender.try_send(command) {
+            Ok(()) => true,
+            Err(crossbeam_channel::TrySendError::Full(command)) => {
+                self.pending = Some(command);
+                false
+            }
+            Err(crossbeam_channel::TrySendError::Disconnected(_)) => {
+                log::error!("kettle exec stdout writer stopped unexpectedly");
+                true
+            }
+        }
+    }
+
+    fn start(&mut self, cols: u16, rows: u16) {
+        if self.mode == OutputMode::Json {
+            self.try_dispatch(OutputCommand::Start { cols, rows });
+        }
+    }
+
+    fn output(&mut self, bytes: Vec<u8>) {
+        self.try_dispatch(OutputCommand::Output(bytes));
+    }
+
+    fn title(&mut self, title: String) {
+        if self.mode == OutputMode::Json {
+            self.try_dispatch(OutputCommand::Title(title));
+        }
+    }
+
+    fn finish(&mut self, code: i32, duration: Duration, mode: OutputFinish) {
+        match mode {
+            OutputFinish::Complete => self.finish_complete(code, duration),
+            OutputFinish::AbandonPending => self.finish_abandoning_pending(code, duration),
         }
     }
 }
@@ -1472,22 +1744,13 @@ mod tests {
             sender.send(vec![b'x']).unwrap();
         }
         let mut recorder = None;
-        let mut output = Outputter::new(OutputMode::Raw);
         let mut sink = Vec::new();
+        let mut output = DirectOutput::new(OutputMode::Raw, &mut sink);
 
-        assert!(drain_output_slice(
-            &receiver,
-            &mut recorder,
-            &mut output,
-            &mut sink
-        ));
-        assert_eq!(sink.len(), OUTPUT_SLICE_MESSAGES);
-        assert!(!drain_output_slice(
-            &receiver,
-            &mut recorder,
-            &mut output,
-            &mut sink
-        ));
+        assert!(drain_output_slice(&receiver, &mut recorder, &mut output));
+        assert_eq!(receiver.len(), 1);
+        assert!(!drain_output_slice(&receiver, &mut recorder, &mut output));
+        drop(output);
         assert_eq!(sink.len(), OUTPUT_SLICE_MESSAGES + 1);
     }
 
@@ -1499,15 +1762,11 @@ mod tests {
             sender.send(vec![b'x'; chunk_len]).unwrap();
         }
         let mut recorder = None;
-        let mut output = Outputter::new(OutputMode::Raw);
         let mut sink = Vec::new();
+        let mut output = DirectOutput::new(OutputMode::Raw, &mut sink);
 
-        assert!(drain_output_slice(
-            &receiver,
-            &mut recorder,
-            &mut output,
-            &mut sink
-        ));
+        assert!(drain_output_slice(&receiver, &mut recorder, &mut output));
+        drop(output);
         assert_eq!(sink.len(), chunk_len * 2);
         assert_eq!(receiver.len(), 1);
     }
@@ -1524,6 +1783,95 @@ mod tests {
         assert_eq!(handled.len(), EVENT_SLICE_MESSAGES);
         assert!(!drain_event_slice(&receiver, |event| handled.push(event)));
         assert_eq!(handled.len(), EVENT_SLICE_MESSAGES + 1);
+    }
+
+    #[cfg(any(unix, windows))]
+    #[derive(Default)]
+    struct StopBeforeReadinessOutput {
+        finished: Option<i32>,
+    }
+
+    #[cfg(any(unix, windows))]
+    impl ExecOutput for StopBeforeReadinessOutput {
+        fn ready(&mut self) -> bool {
+            panic!("output readiness ran before an imposed lifecycle stop");
+        }
+
+        fn start(&mut self, _cols: u16, _rows: u16) {}
+
+        fn output(&mut self, _bytes: Vec<u8>) {
+            panic!("output was emitted before an imposed lifecycle stop");
+        }
+
+        fn title(&mut self, _title: String) {
+            panic!("a title was emitted before an imposed lifecycle stop");
+        }
+
+        fn finish(&mut self, code: i32, _duration: Duration, mode: OutputFinish) {
+            assert!(matches!(mode, OutputFinish::AbandonPending));
+            self.finished = Some(code);
+        }
+    }
+
+    #[cfg(any(unix, windows))]
+    fn long_running_stop_test_opts(timeout: Option<Duration>) -> ExecOpts {
+        #[cfg(unix)]
+        let argv = vec!["sh".into(), "-c".into(), "sleep 30".into()];
+        #[cfg(windows)]
+        let argv = vec![
+            "cmd.exe".into(),
+            "/D".into(),
+            "/S".into(),
+            "/C".into(),
+            "ping -n 30 127.0.0.1 >NUL".into(),
+        ];
+        ExecOpts {
+            argv,
+            cols: 80,
+            rows: 24,
+            cwd: None,
+            timeout,
+            mode: OutputMode::Raw,
+            record: None,
+            forward_stdin: false,
+        }
+    }
+
+    #[cfg(any(unix, windows))]
+    fn assert_stop_precedes_output_readiness(
+        opts: ExecOpts,
+        cancelled: Option<&AtomicBool>,
+        expected: i32,
+    ) {
+        let mut output = StopBeforeReadinessOutput::default();
+        let code = run_exec_engine(opts, &|| None, &mut output, cancelled);
+        if code == EXIT_INTERNAL && output.finished.is_none() {
+            eprintln!("skipping lifecycle stop ordering test: no PTY");
+            return;
+        }
+        assert_eq!(code, expected);
+        assert_eq!(output.finished, Some(expected));
+    }
+
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn timeout_is_evaluated_before_output_readiness() {
+        assert_stop_precedes_output_readiness(
+            long_running_stop_test_opts(Some(Duration::ZERO)),
+            None,
+            EXIT_TIMEOUT,
+        );
+    }
+
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn cancellation_is_evaluated_before_output_readiness() {
+        let cancelled = AtomicBool::new(true);
+        assert_stop_precedes_output_readiness(
+            long_running_stop_test_opts(None),
+            Some(&cancelled),
+            EXIT_CANCELLED,
+        );
     }
 
     #[test]
