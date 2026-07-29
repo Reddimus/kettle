@@ -893,6 +893,21 @@ fn make_stdin_raw() -> libc::termios {
     original
 }
 
+#[cfg(any(target_os = "macos", target_os = "ios"))]
+fn enable_apple_extproc(fd: libc::c_int) {
+    // Darwin masks EXTPROC out of tcsetattr updates. TIOCEXT is the owning
+    // interface; libc does not currently expose the public ttycom.h constant.
+    const TIOCEXT: libc::c_ulong = 0x8004_7460;
+    let enabled: libc::c_int = 1;
+    let result = unsafe { libc::ioctl(fd, TIOCEXT, &enabled) };
+    assert_eq!(
+        result,
+        0,
+        "TIOCEXT failed: {}",
+        std::io::Error::last_os_error()
+    );
+}
+
 #[cfg(unix)]
 fn query_pty(query: &[u8], terminator: &[u8]) -> Vec<u8> {
     std::io::stdout().write_all(query).unwrap();
@@ -1113,10 +1128,17 @@ fn large_line_delimited_payload() -> Vec<u8> {
 #[test]
 fn exec_large_canonical_streams_reach_eof_without_unbounded_tracking() {
     let line_delimited = large_line_delimited_payload();
+    #[cfg(not(any(target_os = "macos", target_os = "ios")))]
     let cases = [
         ("large-lines", line_delimited.as_slice()),
         ("large-unterminated", &[b'x'; 70 * 1024][..]),
     ];
+    // Darwin's canonical input queue is smaller than the 64 KiB tracking
+    // threshold. It drops a delimiter-free record once that queue fills, so
+    // the oversized tracker invariant is covered portably by kettle-core's
+    // `oversized_record_is_nonempty_without_unbounded_retention` unit test.
+    #[cfg(any(target_os = "macos", target_os = "ios"))]
+    let cases = [("large-lines", line_delimited.as_slice())];
     for (mode, input) in cases {
         let (code, out, err) = run_synchronized_eof_helper(mode, input);
         if no_pty(code, &err) {
@@ -1308,11 +1330,9 @@ fn pty_semantic_event_flood_helper() {
     if std::env::var_os("KETTLE_EXEC_EVENT_FLOOD_HELPER").is_none() {
         return;
     }
-    let frame = b"\x1b]2;hostile-title\x07";
-    let mut flood = Vec::with_capacity(frame.len() * 20_000);
-    for _ in 0..20_000 {
-        flood.extend_from_slice(frame);
-    }
+    // Every byte is one semantic event. This makes the queue-overflow fixture
+    // independent of the platform's PTY read granularity.
+    let flood = vec![b'\x07'; 20_000];
     std::io::stdout().write_all(&flood).unwrap();
     std::io::stdout().flush().unwrap();
     std::thread::sleep(Duration::from_secs(30));
@@ -1395,7 +1415,13 @@ fn run_backpressured_exec(
     let mut child = cmd.spawn().expect("spawn backpressured kettle exec");
     let mut stdin = child.stdin.take().expect("piped stdin");
     let writer = std::thread::spawn(move || {
-        let _ = stdin.write_all(&vec![b'x'; payload_bytes]);
+        assert!(payload_bytes >= 2);
+        let mut payload = vec![b'x'; payload_bytes];
+        // BSD PTYs apply canonical backpressure only after a complete record
+        // reaches the readable queue. Without this newline, Darwin drops bytes
+        // from its full raw queue and reports every drop with IMAXBEL.
+        payload[1] = b'\n';
+        let _ = stdin.write_all(&payload);
     });
     let mut out = String::new();
     child
@@ -1560,6 +1586,27 @@ fn pty_custom_termios_eof_helper() {
         other => panic!("unknown termios fixture: {other}"),
     };
     assert_eq!(unsafe { libc::tcsetattr(0, libc::TCSANOW, &attrs) }, 0);
+    #[cfg(any(
+        target_os = "linux",
+        target_os = "android",
+        target_os = "macos",
+        target_os = "ios",
+        target_os = "freebsd",
+        target_os = "openbsd",
+        target_os = "netbsd",
+        target_os = "dragonfly"
+    ))]
+    if mode == "extproc" {
+        #[cfg(any(target_os = "macos", target_os = "ios"))]
+        enable_apple_extproc(0);
+        let mut live = unsafe { std::mem::zeroed::<libc::termios>() };
+        assert_eq!(unsafe { libc::tcgetattr(0, &mut live) }, 0);
+        assert_ne!(
+            live.c_lflag & libc::EXTPROC,
+            0,
+            "EXTPROC fixture did not enable EXTPROC"
+        );
+    }
     println!("TERMIOS_MODE_READY");
     std::io::stdout().flush().unwrap();
 

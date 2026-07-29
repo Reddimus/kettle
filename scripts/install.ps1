@@ -714,6 +714,19 @@ namespace KettleInstaller
             }
         }
 
+        private static SecurityIdentifier CurrentTokenOwnerSid()
+        {
+            using (WindowsIdentity identity = WindowsIdentity.GetCurrent())
+            {
+                if (identity.Owner == null)
+                {
+                    throw new IOException(
+                        "The installer process has no Windows token owner SID.");
+                }
+                return identity.Owner;
+            }
+        }
+
         private static SecurityIdentifier[] PrivateDirectoryTrustees()
         {
             SecurityIdentifier current = CurrentUserSid();
@@ -851,7 +864,7 @@ namespace KettleInstaller
             }
         }
 
-        private static void RequireCurrentUserOwner(
+        private static void RequireCurrentTokenOwner(
             SafeFileHandle handle,
             string path)
         {
@@ -862,7 +875,7 @@ namespace KettleInstaller
                     path),
                 0);
             if (descriptor.Owner == null ||
-                !descriptor.Owner.Equals(CurrentUserSid()))
+                !descriptor.Owner.Equals(CurrentTokenOwnerSid()))
             {
                 throw new UnauthorizedAccessException(
                     "Installer temporary file has an untrusted owner: " +
@@ -1844,7 +1857,7 @@ namespace KettleInstaller
                         "Installer temporary path is not a bounded, " +
                         "single-link ordinary file: " + path);
                 }
-                RequireCurrentUserOwner(handle, path);
+                RequireCurrentTokenOwner(handle, path);
                 IntPtr disposition = Marshal.AllocHGlobal(4);
                 try
                 {
