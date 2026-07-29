@@ -164,10 +164,7 @@ impl PastedImages {
             ));
         }
         if self.directory.is_none() {
-            match establish_session_directory(&self.dir) {
-                Ok(directory) => self.directory = Some(directory),
-                Err(error) => return Err(error),
-            }
+            self.directory = Some(establish_session_directory(&self.dir)?);
         }
         let directory = self
             .directory

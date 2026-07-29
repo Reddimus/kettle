@@ -227,7 +227,12 @@
           cargo-test = self.packages.${system}.default;
         } // pkgs.lib.optionalAttrs pkgs.stdenv.isLinux {
           package-contents = pkgs.runCommand "kettle-linux-package-contents" {
-            nativeBuildInputs = [ pkgs.coreutils pkgs.diffutils pkgs.findutils ];
+            nativeBuildInputs = [
+              pkgs.coreutils
+              pkgs.diffutils
+              pkgs.findutils
+              pkgs.gzip
+            ];
           } ''
             package="${self.packages.${system}.default}"
 
@@ -255,9 +260,17 @@
                 "$package/share/icons/hicolor/''${size}x''${size}/apps/kettle.png"
             done
 
-            assert_packaged_file \
-              "${./packaging/linux/kettle.1}" \
-              "$package/share/man/man1/kettle.1"
+            # nixpkgs' compressManPages hook gzips installed man pages, so both
+            # the packaged name and its bytes differ from the checked-in source
+            # and `assert_packaged_file` cannot be used here. Compare the
+            # decompressed stream instead of disabling compression: gzipped man
+            # pages are the Linux norm and `man` reads them transparently, so
+            # turning that off would ship a nonstandard package to suit a check.
+            installed_man="$package/share/man/man1/kettle.1.gz"
+            test -f "$installed_man"
+            test ! -L "$installed_man"
+            test "$(stat -c '%a' "$installed_man")" = 444
+            gzip -dc "$installed_man" | cmp - "${./packaging/linux/kettle.1}"
 
             for shell in bash zsh fish ps1; do
               assert_packaged_file \

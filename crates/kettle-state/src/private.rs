@@ -502,7 +502,7 @@ pub(super) fn same_file_identity(_file: &File, _path: &Path) -> io::Result<bool>
 mod unix {
     use super::*;
     use std::ffi::{CString, OsStr, OsString};
-    use std::os::fd::{AsRawFd as _, FromRawFd as _};
+    use std::os::fd::{AsRawFd as _, FromRawFd as _, IntoRawFd as _};
     use std::os::unix::ffi::OsStrExt as _;
     use std::os::unix::fs::MetadataExt as _;
     use std::path::{Component, PathBuf};
@@ -785,23 +785,27 @@ mod unix {
         ))
     }
 
+    fn open_readable_directory(directory: &File) -> io::Result<File> {
+        let current = c_name(OsStr::new("."), "current directory")?;
+        // SAFETY: the held directory fd and NUL-terminated name are valid.
+        let fd = unsafe {
+            libc::openat(
+                directory.as_raw_fd(),
+                current.as_ptr(),
+                libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+            )
+        };
+        if fd < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        // SAFETY: openat returned a new owned fd.
+        Ok(unsafe { File::from_raw_fd(fd) })
+    }
+
     fn sync_directory(directory: &File) -> io::Result<()> {
         #[cfg(any(target_os = "linux", target_os = "android"))]
         {
-            let current = c_name(OsStr::new("."), "current directory")?;
-            // SAFETY: the held directory fd and name are valid.
-            let fd = unsafe {
-                libc::openat(
-                    directory.as_raw_fd(),
-                    current.as_ptr(),
-                    libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC,
-                )
-            };
-            if fd < 0 {
-                return Err(io::Error::last_os_error());
-            }
-            // SAFETY: openat returned a new owned fd.
-            unsafe { File::from_raw_fd(fd) }.sync_all()
+            open_readable_directory(directory)?.sync_all()
         }
         #[cfg(not(any(target_os = "linux", target_os = "android")))]
         directory.sync_all()
@@ -1172,22 +1176,18 @@ mod unix {
             F: FnMut(&OsStr) -> bool,
         {
             self.require_leaf_policy(current_user())?;
-            // `fdopendir` consumes its descriptor, so duplicate the held
-            // directory capability. Enumeration and every subsequent open
-            // and unlink remain relative to the original directory even if
-            // its pathname is renamed and replaced concurrently.
-            // SAFETY: `directory` owns a live directory descriptor.
-            let duplicate = unsafe { libc::dup(self.directory().as_raw_fd()) };
-            if duplicate < 0 {
-                return Err(io::Error::last_os_error());
-            }
-            // SAFETY: fdopendir takes ownership of `duplicate` on success.
-            let stream = unsafe { libc::fdopendir(duplicate) };
+            // Linux holds the verified directory chain with O_PATH, which
+            // fdopendir cannot enumerate. Open "." relative to the retained
+            // capability to get a readable descriptor with an independent
+            // directory offset. No operation follows the replaceable path.
+            let enumeration = open_readable_directory(self.directory())?.into_raw_fd();
+            // SAFETY: fdopendir takes ownership of `enumeration` on success.
+            let stream = unsafe { libc::fdopendir(enumeration) };
             if stream.is_null() {
                 let error = io::Error::last_os_error();
                 // SAFETY: fdopendir did not consume the descriptor on failure.
                 unsafe {
-                    libc::close(duplicate);
+                    libc::close(enumeration);
                 }
                 return Err(error);
             }
