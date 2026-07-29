@@ -91,7 +91,10 @@ to route graphics controls around the text parser.
   required by the Windows API. Validation-only maintenance also replaces an
   uninitialized Win32 attribute buffer with initialized storage and applies
   behavior-preserving lint cleanups required by Kettle's warnings-denied
-  direct-package clippy gate.
+  direct-package clippy gate. Five additional Unix-only cleanups apply Rust
+  1.97's suggestions for redundant imports, borrows, conversions, and
+  `Option` dereferencing. Drop those cleanups if a later upstream release
+  already carries them.
 - Excluded: the crates.io package's registry marker, generated lockfile, and
   standalone examples. Their explicit target stanzas and example-only
   development dependencies are removed from the local manifest; the optional

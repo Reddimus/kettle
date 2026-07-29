@@ -126,6 +126,12 @@ struct ShellUser {
 impl ShellUser {
     /// look for shell, username, longname, and home dir in the respective environment variables
     /// before falling back on looking into `passwd`.
+    // From Rust 1.97, `clippy::question_mark` flags the three `match pw` fallbacks below and
+    // suggests `pw?`. That suggestion does not compile here: `?` takes the scrutinee by value,
+    // and all three fallbacks share this one `pw`, so rewriting the first moves it out from
+    // under the other two. The existing form only moves on the diverging `return` path, which
+    // is why it is accepted as written.
+    #[allow(clippy::question_mark)]
     fn from_env() -> Result<Self> {
         let mut buf = [0; 1024];
         let pw = get_pw_entry(&mut buf);

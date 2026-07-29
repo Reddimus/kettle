@@ -39,8 +39,6 @@
 //!
 use anyhow::Error;
 use downcast_rs::{impl_downcast, Downcast};
-#[cfg(unix)]
-use libc;
 #[cfg(feature = "serde_support")]
 use serde_derive::*;
 use std::io::Result as IoResult;

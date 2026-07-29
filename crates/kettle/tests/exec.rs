@@ -1235,9 +1235,14 @@ fn exec_query_reply_flood_fails_at_the_bounded_arbiter_queue() {
         code, 125,
         "query flood did not fail closed; stderr: {err}; stdout: {out:?}"
     );
+    // One PTY read can publish more queries than the semantic-event bound
+    // before the lifecycle thread runs. Otherwise that thread can drain events
+    // until the smaller reply bound fills. Scheduling decides which explicit
+    // fail-closed queue trips first, so require either bounded diagnostic.
     assert!(
-        err.contains("PTY reply queue exceeded its 64-message bound"),
-        "missing bounded-reply diagnostic: {err:?}"
+        err.contains("PTY reply queue exceeded its 64-message bound")
+            || err.contains("PTY semantic event queue exceeded its 1024-message bound"),
+        "missing bounded-queue diagnostic: {err:?}"
     );
     assert!(
         elapsed < Duration::from_secs(10),
@@ -1257,8 +1262,9 @@ fn exec_query_reply_flood_without_stdin_cannot_defeat_timeout() {
         "no-stdin query flood did not fail closed; stderr: {err}; stdout: {out:?}"
     );
     assert!(
-        err.contains("PTY reply queue exceeded its 64-message bound"),
-        "missing bounded-reply diagnostic: {err:?}"
+        err.contains("PTY reply queue exceeded its 64-message bound")
+            || err.contains("PTY semantic event queue exceeded its 1024-message bound"),
+        "missing bounded-queue diagnostic: {err:?}"
     );
     assert!(
         elapsed < Duration::from_secs(10),
