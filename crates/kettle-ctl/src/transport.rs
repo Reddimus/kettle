@@ -1557,11 +1557,20 @@ mod tests {
             let endpoint = test_endpoint(tag);
             let listener = CtlListener::bind(&endpoint).expect("bind");
             let (release, released) = std::sync::mpsc::channel();
+            // A Windows client can connect before the server's synchronous
+            // ConnectNamedPipe returns. Do not let the timed-out client vanish
+            // first: accept would see ERROR_NO_DATA, retry on a fresh instance,
+            // and wait forever for a second client this fixture never creates.
+            let (accepted, wait_for_accept) = std::sync::mpsc::channel();
             let server = std::thread::spawn(move || {
                 let _conn = listener.accept().expect("accept");
+                accepted.send(()).expect("signal accepted peer");
                 released.recv().expect("release stalled peer");
             });
             let stream = connect(&endpoint).expect("connect");
+            wait_for_accept
+                .recv_timeout(Duration::from_secs(1))
+                .expect("server accepted stalled peer");
 
             #[cfg(unix)]
             {
