@@ -63,6 +63,10 @@ upstream release that contains all of these fixes.
   markers to defer graphics control strings before decoding can mutate
   buffer-local state, then replay each action against the exact terminal
   screen and cursor state that existed at its position in the PTY stream.
+  One unrelated single-token fix: an OSC debug log borrowed its buffer
+  redundantly, which upstream's own `#![deny(clippy::all)]` rejects from Rust
+  1.97 onward under `clippy::useless_borrows_in_formatting`. Drop the fix if a
+  later upstream release already carries it.
 - Excluded: the crates.io registry marker, generated lockfile/build output,
   upstream CI metadata, parser-log example/demo fixture, and unrelated
   documentation sample. This crate is excluded from root workspace membership.
