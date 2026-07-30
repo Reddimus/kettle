@@ -56,6 +56,22 @@
         runtimeSmokeScript = pkgs.writeShellScript "kettle-x11-runtime-smoke" ''
           set -eu
 
+          # `xvfb-run` exports DISPLAY and execs this script, but Xvfb is not
+          # necessarily accepting connections yet. Launching straight into that
+          # window makes kettle exit 1 with "Failed to open connection to X
+          # server", which this check then reports as a kettle failure — an
+          # infrastructure race wearing a product bug's clothes. Wait for the
+          # server, and fail with a message that names the real culprit.
+          attempt=0
+          until ${pkgs.xdotool}/bin/xdotool getdisplaygeometry >/dev/null 2>&1; do
+            attempt=$((attempt + 1))
+            if [ "$attempt" -ge 100 ]; then
+              echo "Xvfb did not accept a connection on ''${DISPLAY:-unset} within 10 seconds" >&2
+              exit 1
+            fi
+            sleep 0.1
+          done
+
           log="$TMPDIR/kettle-runtime-smoke.log"
           "${self.packages.${system}.default}/bin/kettle" \
             --config "$KETTLE_SMOKE_CONFIG" \
