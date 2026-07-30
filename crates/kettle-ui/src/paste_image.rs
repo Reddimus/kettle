@@ -25,6 +25,7 @@
 //! reclaims an exact, old session only after its creator PID is definitively
 //! dead, so a long-running sibling is never deleted merely because it is old.
 
+use std::ffi::{OsStr, OsString};
 use std::fs::{File, OpenOptions};
 use std::io::{self, Write as _};
 use std::path::{Path, PathBuf};
@@ -64,7 +65,7 @@ const MAX_SWEEP_DURATION: Duration = Duration::from_millis(250);
 
 struct LiveImage {
     path: PathBuf,
-    removal_path: PathBuf,
+    name: OsString,
     file: File,
 }
 
@@ -180,8 +181,8 @@ impl PastedImages {
         })?;
         let leaf = format!("{sequence:04}.png");
         let path = self.dir.join(&leaf);
-        let removal_path = session_child_path(directory, std::ffi::OsStr::new(&leaf));
-        let file = create_private_file_in_session(directory, &removal_path)?;
+        let name = OsStr::new(&leaf);
+        let file = create_private_file_in_session(directory, name)?;
         let mut writer = BudgetWriter::new(io::BufWriter::new(file), remaining);
         // `image` is already a kettle-ui dependency (the window icon decodes
         // through it), and the `png` feature it is built with covers encoding.
@@ -205,18 +206,18 @@ impl PastedImages {
         let buffered = writer.into_inner();
         let (file, _pending) = buffered.into_parts();
         if let Err(error) = encoded {
-            discard_private_file(file, &removal_path);
+            discard_private_file_in_session(directory, file, name);
             return Err(error);
         }
         let actual = match file.metadata() {
             Ok(metadata) => metadata.len(),
             Err(error) => {
-                discard_private_file(file, &removal_path);
+                discard_private_file_in_session(directory, file, name);
                 return Err(error);
             }
         };
         if actual != written || actual > remaining {
-            discard_private_file(file, &removal_path);
+            discard_private_file_in_session(directory, file, name);
             return Err(if actual > remaining {
                 budget_error(self.files.len(), self.bytes)
             } else {
@@ -231,10 +232,10 @@ impl PastedImages {
         // Reopen through the held session-directory capability, then compare
         // kernel identities before releasing the creator. Windows also has the
         // creator's no-delete share pin; Unix does not rely on path stability.
-        let retained = match kettle_state::open_existing_private_file(&removal_path) {
+        let retained = match open_existing_private_file_in_session(directory, name) {
             Ok(retained) => retained,
             Err(error) => {
-                discard_private_file(file, &removal_path);
+                discard_private_file_in_session(directory, file, name);
                 return Err(error);
             }
         };
@@ -242,13 +243,13 @@ impl PastedImages {
             Ok(same) => same,
             Err(error) => {
                 drop(retained);
-                discard_private_file(file, &removal_path);
+                discard_private_file_in_session(directory, file, name);
                 return Err(error);
             }
         };
         if !same_file {
             drop(retained);
-            discard_private_file(file, &removal_path);
+            discard_private_file_in_session(directory, file, name);
             return Err(io::Error::new(
                 io::ErrorKind::PermissionDenied,
                 "pasted-image path no longer identifies the created PNG",
@@ -259,7 +260,7 @@ impl PastedImages {
                 Ok(true) => {}
                 Ok(false) => {
                     drop(retained);
-                    discard_private_file(file, &removal_path);
+                    discard_private_file_in_session(directory, file, name);
                     return Err(io::Error::new(
                         io::ErrorKind::PermissionDenied,
                         "pasted-image session changed while publishing the PNG path",
@@ -267,14 +268,14 @@ impl PastedImages {
                 }
                 Err(error) => {
                     drop(retained);
-                    discard_private_file(file, &removal_path);
+                    discard_private_file_in_session(directory, file, name);
                     return Err(error);
                 }
             }
         }
         drop(file);
         let Some(total) = self.bytes.checked_add(actual) else {
-            let _ = kettle_state::remove_open_private_file(retained, &removal_path);
+            let _ = remove_open_private_file_in_session(directory, retained, name);
             return Err(io::Error::new(
                 io::ErrorKind::QuotaExceeded,
                 "pasted-image byte accounting overflowed",
@@ -284,7 +285,7 @@ impl PastedImages {
         self.seq = sequence;
         self.files.push(LiveImage {
             path: path.clone(),
-            removal_path,
+            name: name.to_os_string(),
             file: retained,
         });
         Ok(path)
@@ -298,9 +299,15 @@ impl PastedImages {
             return;
         }
         for image in self.files.drain(..) {
-            if let Err(error) =
-                kettle_state::remove_open_private_file(image.file, &image.removal_path)
-                && error.kind() != io::ErrorKind::NotFound
+            let removal = self.directory.as_ref().ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "pasted image has no held session directory",
+                )
+            });
+            if let Err(error) = removal.and_then(|directory| {
+                remove_open_private_file_in_session(directory, image.file, &image.name)
+            }) && error.kind() != io::ErrorKind::NotFound
             {
                 log::debug!(
                     "pasted-image cleanup left {} unchanged: {error}",
@@ -453,14 +460,15 @@ fn reap_stale_session(path: &Path, now: SystemTime) -> io::Result<()> {
         ));
     }
 
-    let mut files = Vec::new();
-    let mut entries = std::fs::read_dir(session_directory_capability_path(&directory))?;
-    for _ in 0..MAX_FILES {
-        let Some(entry) = entries.next() else {
-            break;
-        };
-        let entry = entry?;
-        let name = entry.file_name();
+    let entries = session_directory_entry_names(&directory, MAX_FILES + 1)?;
+    if entries.len() > MAX_FILES {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "pasted-image session exceeds its file-count bound",
+        ));
+    }
+    let mut files = Vec::with_capacity(entries.len());
+    for name in entries {
         let Some(name) = name.to_str() else {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -474,16 +482,9 @@ fn reap_stale_session(path: &Path, now: SystemTime) -> io::Result<()> {
             ));
         }
         verify_session_directory_path(&directory)?;
-        let child = entry.path();
-        let file = kettle_state::open_existing_private_file(&child)?;
+        let file = open_existing_private_file_in_session(&directory, OsStr::new(name))?;
         verify_session_directory_path(&directory)?;
-        files.push((file, child));
-    }
-    if entries.next().is_some() {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "pasted-image session exceeds its file-count bound",
-        ));
+        files.push((file, OsString::from(name)));
     }
     if files.is_empty() {
         return Err(io::Error::new(
@@ -492,9 +493,9 @@ fn reap_stale_session(path: &Path, now: SystemTime) -> io::Result<()> {
         ));
     }
 
-    for (file, child) in files {
+    for (file, name) in files {
         verify_session_directory_path(&directory)?;
-        kettle_state::remove_open_private_file(file, &child)?;
+        remove_open_private_file_in_session(&directory, file, &name)?;
     }
     remove_session_directory(directory)
 }
@@ -522,6 +523,7 @@ fn create_private_file(path: &Path) -> io::Result<std::fs::File> {
 /// use its capability. If a same-user process races the create/open boundary,
 /// identity comparison fails before any screenshot bytes are encoded.
 fn establish_session_directory(path: &Path) -> io::Result<SessionDirectory> {
+    let bootstrap_name = OsStr::new("0001.png");
     let bootstrap_path = path.join("0001.png");
     let creator = create_private_file(&bootstrap_path)?;
     let directory = match open_session_directory(path) {
@@ -531,11 +533,10 @@ fn establish_session_directory(path: &Path) -> io::Result<SessionDirectory> {
             return Err(error);
         }
     };
-    let capability_path = session_child_path(&directory, std::ffi::OsStr::new("0001.png"));
-    let reopened = match kettle_state::open_existing_private_file(&capability_path) {
+    let reopened = match open_existing_private_file_in_session(&directory, bootstrap_name) {
         Ok(reopened) => reopened,
         Err(error) => {
-            discard_private_file(creator, &capability_path);
+            discard_private_file_in_session(&directory, creator, bootstrap_name);
             return Err(error);
         }
     };
@@ -543,13 +544,13 @@ fn establish_session_directory(path: &Path) -> io::Result<SessionDirectory> {
         Ok(same_file) => same_file,
         Err(error) => {
             drop(reopened);
-            discard_private_file(creator, &capability_path);
+            discard_private_file_in_session(&directory, creator, bootstrap_name);
             return Err(error);
         }
     };
     if !same_file {
         drop(reopened);
-        discard_private_file(creator, &capability_path);
+        discard_private_file_in_session(&directory, creator, bootstrap_name);
         return Err(io::Error::new(
             io::ErrorKind::PermissionDenied,
             "pasted-image bootstrap path no longer identifies the created file",
@@ -559,44 +560,24 @@ fn establish_session_directory(path: &Path) -> io::Result<SessionDirectory> {
     // The reopened handle remains an exact identity anchor after the creator's
     // restrictive Windows share mode is released.
     drop(creator);
-    kettle_state::remove_open_private_file(reopened, &capability_path)?;
+    remove_open_private_file_in_session(&directory, reopened, bootstrap_name)?;
     verify_session_directory_path(&directory)?;
     Ok(directory)
 }
 
 #[cfg(unix)]
-fn create_private_file_in_session(directory: &SessionDirectory, path: &Path) -> io::Result<File> {
-    use std::ffi::CString;
+fn create_private_file_in_session(directory: &SessionDirectory, name: &OsStr) -> io::Result<File> {
     use std::os::fd::{AsRawFd as _, FromRawFd as _};
-    use std::os::unix::ffi::OsStrExt as _;
-    use std::os::unix::fs::MetadataExt as _;
 
-    let name = path.file_name().ok_or_else(|| {
-        io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "pasted-image path has no file name",
-        )
-    })?;
-    if Path::new(name).components().count() != 1 {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "pasted-image file name is not a single path component",
-        ));
-    }
-    let name = CString::new(name.as_bytes()).map_err(|_| {
-        io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "pasted-image file name contains a NUL byte",
-        )
-    })?;
+    let c_name = session_c_name(name)?;
     // SAFETY: `name` is NUL-terminated, the held descriptor identifies an
     // owner-private directory, and a successful call transfers a new fd.
     let descriptor = unsafe {
         libc::openat(
             directory.file.as_raw_fd(),
-            name.as_ptr(),
+            c_name.as_ptr(),
             libc::O_RDWR | libc::O_CREAT | libc::O_EXCL | libc::O_NOFOLLOW | libc::O_CLOEXEC,
-            0o600,
+            (0o600 as libc::mode_t) as libc::c_uint,
         )
     };
     if descriptor < 0 {
@@ -604,30 +585,278 @@ fn create_private_file_in_session(directory: &SessionDirectory, path: &Path) -> 
     }
     // SAFETY: `openat` returned a new owned descriptor.
     let file = unsafe { File::from_raw_fd(descriptor) };
-    let metadata = match file.metadata() {
-        Ok(metadata) => metadata,
-        Err(error) => {
-            discard_private_file(file, path);
-            return Err(error);
-        }
-    };
-    if !metadata.file_type().is_file()
-        || metadata.uid() != unsafe { libc::geteuid() }
-        || metadata.mode() & 0o777 != 0o600
-        || metadata.nlink() != 1
+    if let Err(error) = restrict_private_session_file(&file) {
+        discard_private_file_in_session(directory, file, name);
+        return Err(error);
+    }
+    Ok(file)
+}
+
+#[cfg(not(unix))]
+fn create_private_file_in_session(directory: &SessionDirectory, name: &OsStr) -> io::Result<File> {
+    create_private_file(&directory.path.join(name))
+}
+
+#[cfg(unix)]
+fn session_c_name(name: &OsStr) -> io::Result<std::ffi::CString> {
+    use std::os::unix::ffi::OsStrExt as _;
+    use std::path::Component;
+
+    let mut components = Path::new(name).components();
+    if !matches!(
+        (components.next(), components.next()),
+        (Some(Component::Normal(component)), None) if component == name
+    ) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "pasted-image file name is not a single normal path component",
+        ));
+    }
+    std::ffi::CString::new(name.as_bytes()).map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "pasted-image file name contains a NUL byte",
+        )
+    })
+}
+
+#[cfg(unix)]
+fn require_owned_session_file(file: &File) -> io::Result<std::fs::Metadata> {
+    use std::os::unix::fs::MetadataExt as _;
+
+    let metadata = file.metadata()?;
+    if metadata.file_type().is_file()
+        && metadata.uid() == unsafe { libc::geteuid() }
+        && metadata.nlink() == 1
     {
-        discard_private_file(file, path);
+        Ok(metadata)
+    } else {
+        Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "pasted image is not a user-owned, single-link regular file",
+        ))
+    }
+}
+
+#[cfg(unix)]
+fn restrict_private_session_file(file: &File) -> io::Result<()> {
+    use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+
+    require_owned_session_file(file)?;
+    file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+    if file.metadata()?.mode() & 0o777 == 0o600 {
+        Ok(())
+    } else {
+        Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "pasted-image mode verification failed after fchmod",
+        ))
+    }
+}
+
+#[cfg(unix)]
+fn session_entry_matches(
+    directory: &SessionDirectory,
+    file: &File,
+    name: &OsStr,
+) -> io::Result<bool> {
+    use std::os::fd::AsRawFd as _;
+    use std::os::unix::fs::MetadataExt as _;
+
+    let opened = file.metadata()?;
+    let name = session_c_name(name)?;
+    // SAFETY: the held directory descriptor, NUL-terminated name, and output
+    // buffer are valid. AT_SYMLINK_NOFOLLOW compares the directory entry itself.
+    let mut current = unsafe { std::mem::zeroed::<libc::stat>() };
+    if unsafe {
+        libc::fstatat(
+            directory.file.as_raw_fd(),
+            name.as_ptr(),
+            std::ptr::addr_of_mut!(current),
+            libc::AT_SYMLINK_NOFOLLOW,
+        )
+    } != 0
+    {
+        let error = io::Error::last_os_error();
+        return if error.kind() == io::ErrorKind::NotFound {
+            Ok(false)
+        } else {
+            Err(error)
+        };
+    }
+    #[allow(clippy::unnecessary_cast)]
+    Ok(current.st_mode & libc::S_IFMT == libc::S_IFREG
+        && opened.dev() == current.st_dev as u64
+        && opened.ino() == current.st_ino as u64)
+}
+
+#[cfg(unix)]
+fn open_existing_private_file_in_session(
+    directory: &SessionDirectory,
+    name: &OsStr,
+) -> io::Result<File> {
+    use std::os::fd::{AsRawFd as _, FromRawFd as _};
+
+    let c_name = session_c_name(name)?;
+    // SAFETY: the name and held directory descriptor are valid. O_NOFOLLOW
+    // rejects a leaf symlink, and a successful open transfers a new descriptor.
+    let descriptor = unsafe {
+        libc::openat(
+            directory.file.as_raw_fd(),
+            c_name.as_ptr(),
+            libc::O_RDWR | libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC,
+            0 as libc::c_uint,
+        )
+    };
+    if descriptor < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: `openat` returned a new owned descriptor.
+    let file = unsafe { File::from_raw_fd(descriptor) };
+    restrict_private_session_file(&file)?;
+    if !session_entry_matches(directory, &file, name)? {
         return Err(io::Error::new(
             io::ErrorKind::PermissionDenied,
-            "new pasted image is not an owner-private, single-link regular file",
+            "pasted-image entry changed while it was opened",
         ));
     }
     Ok(file)
 }
 
 #[cfg(not(unix))]
-fn create_private_file_in_session(_directory: &SessionDirectory, path: &Path) -> io::Result<File> {
-    create_private_file(path)
+fn open_existing_private_file_in_session(
+    directory: &SessionDirectory,
+    name: &OsStr,
+) -> io::Result<File> {
+    kettle_state::open_existing_private_file(&directory.path.join(name))
+}
+
+#[cfg(unix)]
+fn remove_open_private_file_in_session(
+    directory: &SessionDirectory,
+    file: File,
+    name: &OsStr,
+) -> io::Result<()> {
+    use std::os::fd::AsRawFd as _;
+
+    require_owned_session_file(&file)?;
+    if !session_entry_matches(directory, &file, name)? {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "pasted-image entry no longer identifies the open file",
+        ));
+    }
+    let name = session_c_name(name)?;
+    // SAFETY: the held directory descriptor and NUL-terminated child name are
+    // valid. The identity check above prevents deleting a known replacement.
+    if unsafe { libc::unlinkat(directory.file.as_raw_fd(), name.as_ptr(), 0) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    drop(file);
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn remove_open_private_file_in_session(
+    directory: &SessionDirectory,
+    file: File,
+    name: &OsStr,
+) -> io::Result<()> {
+    kettle_state::remove_open_private_file(file, &directory.path.join(name))
+}
+
+#[cfg(unix)]
+fn discard_private_file_in_session(directory: &SessionDirectory, file: File, name: &OsStr) {
+    if let Err(error) = remove_open_private_file_in_session(directory, file, name) {
+        log::debug!(
+            "failed to discard partial pasted image {}: {error}",
+            directory.path.join(name).display()
+        );
+    }
+}
+
+#[cfg(not(unix))]
+fn discard_private_file_in_session(directory: &SessionDirectory, file: File, name: &OsStr) {
+    discard_private_file(file, &directory.path.join(name));
+}
+
+#[cfg(unix)]
+fn session_directory_entry_names(
+    directory: &SessionDirectory,
+    limit: usize,
+) -> io::Result<Vec<OsString>> {
+    use errno::{Errno, errno, set_errno};
+    use std::os::fd::{AsRawFd as _, FromRawFd as _, IntoRawFd as _};
+    use std::os::unix::ffi::OsStrExt as _;
+
+    let current = std::ffi::CString::new(".").expect("static path has no NUL");
+    // Open "." relative to the retained capability to get a readable
+    // descriptor with an independent directory offset on every Unix.
+    let descriptor = unsafe {
+        libc::openat(
+            directory.file.as_raw_fd(),
+            current.as_ptr(),
+            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+            0 as libc::c_uint,
+        )
+    };
+    if descriptor < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: `openat` returned a new owned descriptor.
+    let descriptor = unsafe { File::from_raw_fd(descriptor) }.into_raw_fd();
+    // SAFETY: fdopendir takes ownership of `descriptor` on success.
+    let stream = unsafe { libc::fdopendir(descriptor) };
+    if stream.is_null() {
+        let error = io::Error::last_os_error();
+        // SAFETY: fdopendir did not consume the descriptor on failure.
+        unsafe {
+            libc::close(descriptor);
+        }
+        return Err(error);
+    }
+    struct DirectoryStream(*mut libc::DIR);
+    impl Drop for DirectoryStream {
+        fn drop(&mut self) {
+            // SAFETY: the stream is owned and closed exactly once.
+            unsafe {
+                libc::closedir(self.0);
+            }
+        }
+    }
+    let stream = DirectoryStream(stream);
+    let mut names = Vec::with_capacity(limit.min(MAX_FILES + 1));
+    while names.len() < limit {
+        set_errno(Errno(0));
+        // SAFETY: the stream remains live, and the returned entry is borrowed
+        // only until the next readdir call.
+        let entry = unsafe { libc::readdir(stream.0) };
+        if entry.is_null() {
+            let error = errno();
+            if error.0 == 0 {
+                break;
+            }
+            return Err(io::Error::from_raw_os_error(error.0));
+        }
+        // SAFETY: POSIX dirent names are NUL terminated.
+        let name = unsafe { std::ffi::CStr::from_ptr((*entry).d_name.as_ptr()) }.to_bytes();
+        if matches!(name, b"." | b"..") {
+            continue;
+        }
+        names.push(OsStr::from_bytes(name).to_os_string());
+    }
+    Ok(names)
+}
+
+#[cfg(not(unix))]
+fn session_directory_entry_names(
+    directory: &SessionDirectory,
+    limit: usize,
+) -> io::Result<Vec<OsString>> {
+    std::fs::read_dir(&directory.path)?
+        .take(limit)
+        .map(|entry| entry.map(|entry| entry.file_name()))
+        .collect()
 }
 
 #[cfg(not(windows))]
@@ -841,29 +1070,6 @@ fn verify_session_directory_path(directory: &SessionDirectory) -> io::Result<()>
             "pasted-image session path no longer identifies the held directory",
         ))
     }
-}
-
-#[cfg(any(target_os = "linux", target_os = "android"))]
-fn session_directory_capability_path(directory: &SessionDirectory) -> PathBuf {
-    use std::os::fd::AsRawFd as _;
-
-    PathBuf::from(format!("/proc/self/fd/{}", directory.file.as_raw_fd()))
-}
-
-#[cfg(all(unix, not(any(target_os = "linux", target_os = "android"))))]
-fn session_directory_capability_path(directory: &SessionDirectory) -> PathBuf {
-    use std::os::fd::AsRawFd as _;
-
-    PathBuf::from(format!("/dev/fd/{}", directory.file.as_raw_fd()))
-}
-
-#[cfg(not(unix))]
-fn session_directory_capability_path(directory: &SessionDirectory) -> PathBuf {
-    directory.path.clone()
-}
-
-fn session_child_path(directory: &SessionDirectory, name: &std::ffi::OsStr) -> PathBuf {
-    session_directory_capability_path(directory).join(name)
 }
 
 #[cfg(unix)]
@@ -1353,7 +1559,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn held_directory_creation_never_writes_into_a_path_replacement() {
-        use std::os::unix::fs::DirBuilderExt as _;
+        use std::os::unix::fs::{DirBuilderExt as _, PermissionsExt as _};
 
         let path = scratch("held-create");
         let displaced = path.with_extension("displaced");
@@ -1364,11 +1570,21 @@ mod tests {
             .create(&path)
             .expect("create path replacement");
 
-        let capability = session_child_path(&directory, std::ffi::OsStr::new("0001.png"));
-        let mut file =
-            create_private_file_in_session(&directory, &capability).expect("create through fd");
+        let name = OsStr::new("0001.png");
+        let mut file = create_private_file_in_session(&directory, name).expect("create through fd");
         file.write_all(b"screenshot bytes")
             .expect("write through held directory");
+        let reopened =
+            open_existing_private_file_in_session(&directory, name).expect("reopen through fd");
+        assert!(
+            same_open_file_identity(&file, &reopened).expect("compare open files"),
+            "reopen must retain the created file identity"
+        );
+        assert_eq!(
+            session_directory_entry_names(&directory, 2).expect("enumerate through fd"),
+            [OsString::from("0001.png")],
+            "enumeration must remain anchored to the displaced held directory"
+        );
         assert!(
             !path.join("0001.png").exists(),
             "clipboard bytes must never enter the pathname replacement"
@@ -1378,7 +1594,15 @@ mod tests {
             b"screenshot bytes"
         );
 
-        kettle_state::remove_open_private_file(file, &capability).expect("remove exact file");
+        drop(file);
+        reopened
+            .set_permissions(std::fs::Permissions::from_mode(0o400))
+            .expect("narrow retained file permissions");
+        remove_open_private_file_in_session(&directory, reopened, name).expect("remove exact file");
+        assert!(
+            !displaced.join(name).exists(),
+            "fd-relative removal must unlink from the held directory"
+        );
         drop(directory);
         std::fs::remove_dir(displaced).expect("remove displaced session");
         std::fs::remove_dir(path).expect("remove replacement");

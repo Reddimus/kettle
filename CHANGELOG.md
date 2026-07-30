@@ -192,7 +192,13 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
     replaced directory: Unix child operations resolve from the held descriptor,
     while Windows identity-transitions to a DELETE handle; final empty-directory
     removal compares volume/file IDs on Windows and owner/mode/device/inode on
-    Unix. Crash sweeping moved off the startup/UI thread, has independent
+    Unix. Those Unix child operations are genuinely descriptor-relative on every
+    platform — `openat`, `fdopendir`, `fstatat`, and `unlinkat` — rather than
+    reached by joining a child name onto `/proc/self/fd/<n>`. Only Linux
+    resolves such a path: Darwin's `/dev/fd/<n>` names the open file
+    description itself and cannot be traversed into, so the shortcut would have
+    returned `ENOENT` for every save, reopen, and removal on macOS.
+    Crash sweeping moved off the startup/UI thread, has independent
     time/attempt/removal/entry caps, and requires an exact creator/session name,
     a `0001.png` through `0064.png` child name, more than 24 hours of age, a
     definitively dead PID, and only verified private, non-reparse, single-link

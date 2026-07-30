@@ -2005,6 +2005,7 @@ dependencies = [
  "anyhow",
  "arboard",
  "crossbeam-channel",
+ "errno",
  "image",
  "kettle-config",
  "kettle-core",
