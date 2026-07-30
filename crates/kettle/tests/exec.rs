@@ -337,6 +337,9 @@ fn exec_timeout_returns_124() {
 }
 
 const STDOUT_FLOOD_MARKER_ENV: &str = "KETTLE_EXEC_STDOUT_FLOOD_MARKER";
+const STDOUT_FLOOD_EXEC_TIMEOUT: &str = "8.0";
+const STDOUT_FLOOD_READY_BUDGET: Duration = Duration::from_secs(4);
+const STDOUT_FLOOD_POST_READY_BOUND: Duration = Duration::from_secs(12);
 
 #[test]
 fn stdout_flood_helper() {
@@ -363,7 +366,7 @@ fn exec_timeout_survives_an_unread_stdout_pipe() {
     cmd.args([
         "exec",
         "--timeout",
-        "1.0",
+        STDOUT_FLOOD_EXEC_TIMEOUT,
         "--",
         helper.to_str().expect("integration-test path is UTF-8"),
         "--exact",
@@ -383,7 +386,12 @@ fn exec_timeout_survives_an_unread_stdout_pipe() {
     // unbounded downstream buffer ever reporting saturation.
     let mut unread_stdout = child.stdout.take().expect("piped stdout");
     let mut stderr = child.stderr.take().expect("piped stderr");
-    let ready_deadline = Instant::now() + Duration::from_secs(6);
+    // Keep setup and the behavior under test in separate timing windows. The
+    // parent declares setup failure four seconds before Kettle's timeout can
+    // fire; once ready, the helper has at least four seconds to fill the finite
+    // unread pipe. Thus exit 124 cannot win the readiness race, and a ready
+    // fixture cannot reach the timeout without sustained stdout flooding.
+    let ready_deadline = Instant::now() + STDOUT_FLOOD_READY_BUDGET;
     while !marker.exists() && Instant::now() < ready_deadline {
         if child
             .try_wait()
@@ -423,7 +431,7 @@ fn exec_timeout_survives_an_unread_stdout_pipe() {
     }
 
     let ready_at = Instant::now();
-    let watchdog = ready_at + Duration::from_secs(5);
+    let watchdog = ready_at + STDOUT_FLOOD_POST_READY_BOUND;
     let (status, watchdog_killed) = loop {
         if let Some(status) = child.try_wait().expect("poll stdout-backpressured exec") {
             break (status, false);
@@ -446,6 +454,7 @@ fn exec_timeout_survives_an_unread_stdout_pipe() {
     unread_stdout.read_to_end(&mut out).unwrap();
     let mut err = String::new();
     stderr.read_to_string(&mut err).unwrap();
+    let flood_bytes = out.iter().filter(|&&byte| byte == b'x').count();
 
     assert!(
         !watchdog_killed,
@@ -459,12 +468,18 @@ fn exec_timeout_survives_an_unread_stdout_pipe() {
         "stdout-backpressured timeout must exit 124; stderr={err:?}"
     );
     assert!(
-        elapsed_after_ready < Duration::from_secs(5),
+        elapsed_after_ready < STDOUT_FLOOD_POST_READY_BOUND,
         "stdout-backpressured timeout took {elapsed_after_ready:?}"
+    );
+    assert!(
+        flood_bytes >= 1024,
+        "stdout-flood helper did not fill the unread pipe: \
+         flood bytes={flood_bytes}; buffered stdout bytes={}",
+        out.len()
     );
     eprintln!(
         "unread-stdout reproduction: exit={:?}, after_ready={elapsed_after_ready:?}, \
-         pipe_buffered_bytes={}",
+         pipe_buffered_bytes={}, flood_bytes={flood_bytes}",
         status.code(),
         out.len()
     );
