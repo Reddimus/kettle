@@ -4,6 +4,21 @@ All notable changes to kettle. Format roughly follows
 [Keep a Changelog](https://keepachangelog.com/); the project moves in small,
 durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
+## [Unreleased]
+
+  ### Fixed
+  - The release workflow's asset verification never ran, and the release never
+    published itself. It read the release through
+    `GET /releases/tags/{tag}`, which only finds *published* releases, so the
+    draft it had just created returned 404 — and under `set -e` the step died
+    there, before `verify-release-assets.py` could compare uploaded sizes and
+    SHA-256 records against the local set. v2.43.0's assets were therefore
+    uploaded, left unverified by the gate, and stranded as a draft until
+    published by hand. Every lookup now goes through the list endpoint, which is
+    the only one that sees drafts, and the release id it returns addresses the
+    verification read and the final publish. A re-run also recognizes its own
+    leftover draft instead of failing to recreate it.
+
 ## [2.43.0] — 2026-07-28
 
   ### Fixed

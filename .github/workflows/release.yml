@@ -664,14 +664,32 @@ jobs:
           tag="$GITHUB_REF_NAME"
           release_assets_json=$(mktemp)
           trap 'rm -f "$release_assets_json"' EXIT
-          if gh release view "$tag" >/dev/null 2>&1; then
-            draft=$(gh release view "$tag" --json isDraft --jq '.isDraft')
-            if [ "$draft" != true ]; then
+          # Every lookup here goes through the list endpoint, which is the only
+          # one that sees drafts. Addressing a draft by tag returns 404, so a
+          # re-run of this job would otherwise fail to notice its own leftover
+          # draft and then fail again trying to recreate it.
+          find_release() {
+            gh api --paginate "repos/${GITHUB_REPOSITORY}/releases" \
+              --jq "map(select(.tag_name == \"${tag}\")) | .[0] | \
+                    if . == null then empty else \"\(.id) \(.draft)\" end"
+          }
+
+          existing=$(find_release)
+          if [ -n "$existing" ]; then
+            release_id=${existing%% *}
+            is_draft=${existing##* }
+            if [ "$is_draft" != true ]; then
               echo "::error::release $tag already exists and is public"
               exit 1
             fi
           else
             gh release create "$tag" --verify-tag --draft --generate-notes --title "$tag"
+            existing=$(find_release)
+            if [ -z "$existing" ]; then
+              echo "::error::created release $tag but could not resolve its id"
+              exit 1
+            fi
+            release_id=${existing%% *}
           fi
 
           files=(
@@ -703,7 +721,7 @@ jobs:
 
           verified=
           for attempt in 1 2 3 4 5; do
-            gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${tag}" \
+            gh api "repos/${GITHUB_REPOSITORY}/releases/${release_id}" \
               > "$release_assets_json"
             verify_args=()
             for file in "${files[@]}"; do
@@ -723,4 +741,7 @@ jobs:
             sleep 5
           done
           test "$verified" = 1
-          gh release edit "$tag" --draft=false --latest
+          # Publish by id for the same reason, so the transition cannot depend
+          # on GitHub having associated the tag with a still-draft release.
+          gh api -X PATCH "repos/${GITHUB_REPOSITORY}/releases/${release_id}" \
+            -F draft=false -f make_latest=true >/dev/null
