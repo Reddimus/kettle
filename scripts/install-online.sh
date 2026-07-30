@@ -21,8 +21,8 @@
 # - Linux x86_64 + aarch64. macOS users: grab the `.app` bundle from
 #   https://github.com/Reddimus/kettle/releases/latest and drag it to
 #   /Applications. Windows users: extract the zip and add to PATH.
-# - The script uses `curl`, `tar`, and `gzip` — all standard on every
-#   Linux distro we ship for. `gh` (GitHub CLI) is NOT required.
+# - The script uses `curl`, GNU `tar`, `gzip`, OpenSSL 3.0+, and standard
+#   POSIX text tools. `gh` (GitHub CLI) is NOT required.
 # - Verifies the downloaded tarball is non-empty and has a recognizable
 #   gzip header before extracting — guards against partial / hijacked
 #   downloads.
@@ -30,10 +30,13 @@
 #   Ed25519-signed `kettle-update-manifest.json` that kettle-update's
 #   self-updater trusts (a signing key held only by the release pipeline,
 #   independent of whatever serves the tarball) and checks the tarball's
-#   SHA-256 against the signed entry for this asset. Falls back to a
-#   same-origin `.sha256` sidecar — which only catches transport
-#   corruption, not a compromised release channel — when `openssl` can't
-#   do Ed25519 verification or the release predates manifest publishing.
+#   SHA-256 and byte count against the signed entry for this asset. Modern
+#   releases fail closed when Ed25519 verification is unavailable. Releases
+#   predating signed manifests require their same-origin `.sha256` sidecar;
+#   an archive is never extracted without at least that integrity check.
+# - Bounds every download and preflights the authenticated tar stream before
+#   extraction: at most 256 MiB compressed, 128 entries, and 512 MiB unpacked,
+#   with only safe regular files/directories under one `kettle/` root.
 # - All work happens in a temp directory that's removed on exit (via
 #   `trap`) regardless of success/failure.
 # - To uninstall later: run `<prefix>/share/kettle/install.sh --uninstall`
@@ -48,6 +51,10 @@
 # validated before extraction, so a truncated `curl` can't masquerade as
 # a clean extract).
 set -eu
+LC_ALL=C
+LANG=C
+CDPATH=
+export LC_ALL LANG CDPATH
 
 REPO="Reddimus/kettle"
 VERSION="${KETTLE_VERSION:-latest}"
@@ -67,14 +74,13 @@ ASSET="kettle-linux-x86_64.tar.gz"
 # asset delivery) can regenerate a matching sidecar for their own payload,
 # but can't forge a signature without the release key.
 #
-# This is the DER SubjectPublicKeyInfo (RFC 8410) encoding of the same 32
-# raw bytes as `UPDATE_PUBLIC_KEY` in crates/kettle-update/src/lib.rs —
+# This is the canonical `packaging/update-public.pem` trust root, whose DER
+# SubjectPublicKeyInfo (RFC 8410) contains the same 32 raw bytes as
+# `UPDATE_PUBLIC_KEY` in crates/kettle-update/src/lib.rs —
 # fingerprint (SHA-256 of the raw 32 bytes, matching the comment there):
 # e8e73619a959b34c24fa255714719a61c9cee810340bf041497c39475ab2dbb7
-# Keep this byte-for-byte in sync with that constant if the key ever
-# rotates; a mismatch here just means every install falls back to the
-# weaker sidecar check below, not a build failure, so drift is easy to
-# miss — double-check after any key rotation.
+# `scripts/test-update-manifest.py` enforces byte-for-byte lockstep across all
+# three forms and the release workflow.
 MANIFEST_PUBLIC_KEY_PEM='-----BEGIN PUBLIC KEY-----
 MCowBQYDK2VwAyEApCcwEc0sux/uhXTzuO9E/RDsNZD/+QcIih2agK9LQQs=
 -----END PUBLIC KEY-----'
@@ -82,6 +88,19 @@ MCowBQYDK2VwAyEApCcwEc0sux/uhXTzuO9E/RDsNZD/+QcIih2agK9LQQs=
 # signs ahead of the manifest bytes — must match `SIGNING_CONTEXT` in
 # crates/kettle-update/src/lib.rs byte-for-byte.
 MANIFEST_SIGNING_CONTEXT="kettle-update-manifest-v1"
+MAX_ARCHIVE_BYTES=268435456
+MAX_MANIFEST_BYTES=131072
+MAX_SIGNATURE_BYTES=1024
+MAX_SIDECAR_BYTES=1024
+MAX_ARCHIVE_ENTRIES=128
+MAX_UNPACKED_BYTES=536870912
+MAX_LATEST_HEADERS_BYTES=131072
+CURL_CONNECT_TIMEOUT_SECONDS=15
+CURL_TOTAL_TIMEOUT_SECONDS=600
+CURL_LOW_SPEED_SECONDS=30
+CURL_LOW_SPEED_BYTES=1024
+CURL_MAX_REDIRECTS=5
+POSIX_FILE_LIMIT_BLOCK_BYTES=512
 
 # --- Platform check ------------------------------------------------
 case "$(uname -s)" in
@@ -104,8 +123,14 @@ esac
 # Raspberry Pi 4/5, ARM servers/VPS, ARM laptops on Linux) both ship a
 # prebuilt tarball; anything else builds from source.
 case "$(uname -m)" in
-  x86_64 | amd64) ASSET="kettle-linux-x86_64.tar.gz" ;;
-  aarch64 | arm64) ASSET="kettle-linux-aarch64.tar.gz" ;;
+  x86_64 | amd64)
+    ASSET="kettle-linux-x86_64.tar.gz"
+    EXPECTED_TARGET="x86_64-unknown-linux-gnu"
+    ;;
+  aarch64 | arm64)
+    ASSET="kettle-linux-aarch64.tar.gz"
+    EXPECTED_TARGET="aarch64-unknown-linux-gnu"
+    ;;
   *)
     # Name the supported arches and give 32-bit users a
     # real path instead of a dead end. wgpu/glyphon have no tier-1 support on
@@ -125,13 +150,106 @@ case "$(uname -m)" in
 esac
 
 # --- Required tools ------------------------------------------------
-for cmd in curl tar uname mktemp; do
+for cmd in awk cat chmod cp curl dirname find grep mkdir mktemp od rm sed tail tar tr uname wc; do
   if ! command -v "$cmd" >/dev/null 2>&1; then
     echo "kettle install-online.sh: missing required tool '$cmd'." >&2
     echo "Install it via your distro's package manager and re-run." >&2
     exit 1
   fi
 done
+
+if ! curl --help all 2>/dev/null | grep -q -- '--max-filesize'; then
+  echo "kettle install-online.sh: curl lacks --max-filesize support." >&2
+  echo "Install a current curl so downloads can be bounded before re-running." >&2
+  exit 1
+fi
+if ! tar --version 2>/dev/null | grep -q 'GNU tar'; then
+  echo "kettle install-online.sh: hardened extraction requires GNU tar." >&2
+  echo "Install GNU tar with your distro package manager and re-run." >&2
+  exit 1
+fi
+
+download_limited() {
+  download_url=$1
+  download_path=$2
+  download_limit=$3
+  download_label=$4
+  download_progress=${5:-0}
+  download_blocks=$((
+    (download_limit + POSIX_FILE_LIMIT_BLOCK_BYTES - 1) /
+      POSIX_FILE_LIMIT_BLOCK_BYTES
+  ))
+
+  rm -f "$download_path"
+  if [ "$download_progress" -eq 1 ]; then
+    curl_flags="-fL --proto =https --proto-redir =https --tlsv1.2 --max-redirs ${CURL_MAX_REDIRECTS} --connect-timeout ${CURL_CONNECT_TIMEOUT_SECONDS} --max-time ${CURL_TOTAL_TIMEOUT_SECONDS} --speed-limit ${CURL_LOW_SPEED_BYTES} --speed-time ${CURL_LOW_SPEED_SECONDS} --max-filesize ${download_limit} --progress-bar"
+  else
+    curl_flags="-fsSL --proto =https --proto-redir =https --tlsv1.2 --max-redirs ${CURL_MAX_REDIRECTS} --connect-timeout ${CURL_CONNECT_TIMEOUT_SECONDS} --max-time ${CURL_TOTAL_TIMEOUT_SECONDS} --speed-limit ${CURL_LOW_SPEED_BYTES} --speed-time ${CURL_LOW_SPEED_SECONDS} --max-filesize ${download_limit}"
+  fi
+  # Word splitting here is intentional: every flag is a fixed token assembled
+  # above; URLs and paths remain separately quoted arguments.
+  # shellcheck disable=SC2086
+  if ! (
+    # POSIX sh defines `ulimit -f` in 512-byte blocks. This kernel-enforced
+    # ceiling covers chunked/unknown-length responses on curls older than 8.4,
+    # where --max-filesize checked only a declared Content-Length.
+    ulimit -f "$download_blocks"
+    curl $curl_flags -o "$download_path" "$download_url"
+  ); then
+    rm -f "$download_path"
+    return 1
+  fi
+  download_size=$(wc -c < "$download_path" | tr -d '[:space:]')
+  case "$download_size" in
+    '' | *[!0-9]*)
+      rm -f "$download_path"
+      return 1
+      ;;
+  esac
+  if [ "$download_size" -le 0 ] || [ "$download_size" -gt "$download_limit" ]; then
+    echo "kettle install-online.sh: ${download_label} is ${download_size} bytes; limit is ${download_limit}." >&2
+    rm -f "$download_path"
+    return 1
+  fi
+  return 0
+}
+
+download_headers_limited() {
+  download_url=$1
+  download_path=$2
+  download_limit=$3
+  download_blocks=$((
+    (download_limit + POSIX_FILE_LIMIT_BLOCK_BYTES - 1) /
+      POSIX_FILE_LIMIT_BLOCK_BYTES
+  ))
+
+  rm -f "$download_path"
+  if ! (
+    ulimit -f "$download_blocks"
+    curl -fsSLI --proto '=https' --proto-redir '=https' --tlsv1.2 \
+      --max-redirs "$CURL_MAX_REDIRECTS" \
+      --connect-timeout "$CURL_CONNECT_TIMEOUT_SECONDS" \
+      --max-time "$CURL_TOTAL_TIMEOUT_SECONDS" \
+      --speed-limit "$CURL_LOW_SPEED_BYTES" \
+      --speed-time "$CURL_LOW_SPEED_SECONDS" \
+      -o "$download_path" "$download_url"
+  ); then
+    rm -f "$download_path"
+    return 1
+  fi
+  download_size=$(wc -c < "$download_path" | tr -d '[:space:]')
+  case "$download_size" in
+    '' | *[!0-9]*)
+      rm -f "$download_path"
+      return 1
+      ;;
+  esac
+  if [ "$download_size" -le 0 ] || [ "$download_size" -gt "$download_limit" ]; then
+    rm -f "$download_path"
+    return 1
+  fi
+  return 0
+}
 
 # Detect the SHA-256 verifier UP FRONT, not after the
 # download. On a minimal container image (e.g. `docker run -it ubuntu`)
@@ -150,14 +268,25 @@ if ! command -v sha256sum >/dev/null 2>&1 && ! command -v shasum >/dev/null 2>&1
   exit 1
 fi
 
+# Allocate the private workspace before resolving `latest` so redirect headers
+# are also written under a kernel-enforced file-size limit.
+TMP=$(mktemp -d)
+trap 'rm -rf "$TMP"' EXIT INT TERM
+
 # --- Resolve target version + URL ----------------------------------
 if [ "$VERSION" = "latest" ]; then
   # The /releases/latest endpoint redirects to /releases/tag/<tag>.
   # `curl -sLI` follows redirects and dumps headers; grep the final
   # `location:` line for the tag. Bare-bones (no jq) so the script
   # has zero non-coreutils deps.
-  RESOLVED=$(curl -fsSLI "https://github.com/${REPO}/releases/latest" 2>/dev/null \
-    | awk 'tolower($1) == "location:" { print $2 }' \
+  LATEST_HEADERS="${TMP}/latest.headers"
+  if ! download_headers_limited \
+      "https://github.com/${REPO}/releases/latest" \
+      "$LATEST_HEADERS" "$MAX_LATEST_HEADERS_BYTES"; then
+    echo "kettle install-online.sh: could not fetch bounded latest-release headers." >&2
+    exit 1
+  fi
+  RESOLVED=$(awk 'tolower($1) == "location:" { print $2 }' "$LATEST_HEADERS" \
     | tail -n1 \
     | sed -e 's|.*/tag/||' -e 's|[[:space:]]*$||')
   if [ -z "$RESOLVED" ]; then
@@ -169,15 +298,33 @@ if [ "$VERSION" = "latest" ]; then
   VERSION="$RESOLVED"
 fi
 
+if ! VERSION_NUMBER=$(awk -v value="$VERSION" '
+  BEGIN {
+    if (value !~ /^v[0-9]+\.[0-9]+\.[0-9]+$/) {
+      exit 1
+    }
+    count = split(substr(value, 2), component, ".")
+    if (count != 3) {
+      exit 1
+    }
+    for (i = 1; i <= 3; i++) {
+      if (length(component[i]) > 9 ||
+          (length(component[i]) > 1 && substr(component[i], 1, 1) == "0")) {
+        exit 1
+      }
+    }
+    print substr(value, 2)
+  }
+'); then
+  echo "kettle install-online.sh: invalid version '$VERSION'; expected exact vMAJOR.MINOR.PATCH." >&2
+  exit 1
+fi
+
 URL="https://github.com/${REPO}/releases/download/${VERSION}/${ASSET}"
 echo "kettle: installing ${VERSION} from ${URL}"
 
-# --- Download to a temp dir ----------------------------------------
-TMP=$(mktemp -d)
-trap 'rm -rf "$TMP"' EXIT INT TERM
-
 TAR="${TMP}/${ASSET}"
-if ! curl -fL --progress-bar -o "$TAR" "$URL"; then
+if ! download_limited "$URL" "$TAR" "$MAX_ARCHIVE_BYTES" "release archive" 1; then
   echo "kettle install-online.sh: download failed." >&2
   echo "Check the version string '$VERSION' and try again." >&2
   echo "See available releases: https://github.com/${REPO}/releases" >&2
@@ -218,20 +365,32 @@ MANIFEST_VERIFIED=0
 # for those a *capable* openssl that still can't fetch-and-verify the manifest
 # means it is being suppressed or tampered with — fail closed rather than
 # silently downgrading to the same-origin `.sha256` sidecar, which anyone who
-# can swap the tarball can forge. Only genuinely older releases (no manifest was
-# ever published) or a system whose openssl lacks Ed25519 entirely may take the
-# weaker fallback, and neither of those is a condition an on-path attacker can
-# induce. `sort -V` does the version compare (POSIX-adjacent, present on the
-# GNU/BSD/BusyBox coreutils this Linux/macOS installer targets).
+# can swap the tarball can forge. Only genuinely older releases (no manifest
+# was ever published) may take the weaker fallback. A modern release never
+# downgrades merely because its verifier is missing: that would let a
+# compromised release channel choose the weaker trust policy.
 MANIFEST_MIN_VERSION="v2.35.0"
-if [ "$VERSION" = "$MANIFEST_MIN_VERSION" ] || [ "$(printf '%s\n%s\n' "$MANIFEST_MIN_VERSION" "$VERSION" | sort -V 2>/dev/null | head -n1)" = "$MANIFEST_MIN_VERSION" ]; then
-  MANIFEST_REQUIRED=1
-else
-  MANIFEST_REQUIRED=0
-fi
+MANIFEST_REQUIRED=$(awk -v value="$VERSION_NUMBER" '
+  BEGIN {
+    split(value, component, ".")
+    required = component[1] > 2 ||
+      (component[1] == 2 && component[2] > 35) ||
+      (component[1] == 2 && component[2] == 35 && component[3] >= 0)
+    print required ? 1 : 0
+  }
+')
+PACKAGE_MANIFEST_REQUIRED=$(awk -v value="$VERSION_NUMBER" '
+  BEGIN {
+    split(value, component, ".")
+    required = component[1] > 2 ||
+      (component[1] == 2 && component[2] > 36) ||
+      (component[1] == 2 && component[2] == 36 && component[3] >= 0)
+    print required ? 1 : 0
+  }
+')
 
 # Feature-probe `openssl` up front, and keep it SEPARATE from the manifest
-# download: `openssl` older than 1.1.1 has no Ed25519 support, and
+# download: `pkeyutl` before OpenSSL 3.0 cannot verify Ed25519, and
 # `pkeyutl -verify` won't accept `-rawin` — which Ed25519 needs, since it
 # hashes the message itself instead of taking a pre-hashed digest.
 # `-help` always exits 0 and lists supported flags, so grepping it is a
@@ -246,8 +405,10 @@ if command -v openssl >/dev/null 2>&1 \
 fi
 
 if [ "$OPENSSL_ED25519" -eq 1 ] \
-  && curl -fsSL -o "$MANIFEST_FILE" "$MANIFEST_URL" 2>/dev/null \
-  && curl -fsSL -o "$MANIFEST_SIG_FILE" "$MANIFEST_SIG_URL" 2>/dev/null; then
+  && download_limited "$MANIFEST_URL" "$MANIFEST_FILE" "$MAX_MANIFEST_BYTES" \
+    "signed manifest" 0 2>/dev/null \
+  && download_limited "$MANIFEST_SIG_URL" "$MANIFEST_SIG_FILE" \
+    "$MAX_SIGNATURE_BYTES" "manifest signature" 0 2>/dev/null; then
   PUBKEY_FILE="${TMP}/kettle-update-manifest.pub.pem"
   SIG_RAW_FILE="${TMP}/kettle-update-manifest.sig.bin"
   SIGNED_FILE="${TMP}/kettle-update-manifest.signed.bin"
@@ -255,6 +416,11 @@ if [ "$OPENSSL_ED25519" -eq 1 ] \
   if ! openssl base64 -d -A -in "$MANIFEST_SIG_FILE" -out "$SIG_RAW_FILE" 2>/dev/null; then
     echo "kettle install-online.sh: signed manifest's .sig is not valid base64 for ${VERSION} — aborting." >&2
     echo "Refusing to trust an unauthenticated manifest; ${MANIFEST_SIG_URL} looks corrupt or tampered." >&2
+    exit 1
+  fi
+  SIG_RAW_SIZE=$(wc -c < "$SIG_RAW_FILE" | tr -d '[:space:]')
+  if [ "$SIG_RAW_SIZE" != 64 ]; then
+    echo "kettle install-online.sh: signed manifest has a ${SIG_RAW_SIZE}-byte Ed25519 signature; expected 64." >&2
     exit 1
   fi
   # The signed payload is the domain-separation prefix (with its
@@ -270,45 +436,112 @@ if [ "$OPENSSL_ED25519" -eq 1 ] \
     echo "Refusing to trust a hash from an unauthenticated manifest. Aborting." >&2
     exit 1
   fi
-  # A valid signature only proves kettle's release key signed *some*
-  # manifest — cheaply confirm it is the one for this exact release
-  # before trusting any hash out of it. Replaying an old (still validly
-  # signed) manifest for a different tag can't forge a hash match for
-  # different content (that would need a SHA-256 preimage), but failing
-  # closed on a mismatch costs nothing and also catches release-pipeline
-  # bugs early.
-  if ! grep -q "\"tag\":\"${VERSION}\"" "$MANIFEST_FILE" \
-    || ! grep -q '"product":"kettle"' "$MANIFEST_FILE" \
-    || ! grep -q '"channel":"stable"' "$MANIFEST_FILE"; then
-    echo "kettle install-online.sh: signed manifest does not describe ${VERSION} (kettle/stable) — aborting." >&2
+  # Parse the canonical generator format as one exact record, rather than
+  # grepping independent fragments that could come from different objects.
+  # The signed top-level identity, schema, tag/version, selected target/name,
+  # byte count, and hash are bound together before any field is trusted.
+  if ! MANIFEST_FIELDS=$(awk \
+    -v version="$VERSION" \
+    -v version_number="$VERSION_NUMBER" \
+    -v wanted_name="$ASSET" \
+    -v wanted_target="$EXPECTED_TARGET" '
+    function reject() {
+      bad = 1
+      exit 1
+    }
+    NR == 1 {
+      line = $0
+      next
+    }
+    {
+      reject()
+    }
+    END {
+      if (bad || NR != 1) {
+        exit 1
+      }
+      prefix = "{\"assets\":["
+      if (substr(line, 1, length(prefix)) != prefix) {
+        exit 1
+      }
+      top = "],\"channel\":\"stable\",\"product\":\"kettle\",\"published_at\":\""
+      top_at = index(line, top)
+      if (top_at == 0 || index(substr(line, top_at + 1), top) != 0) {
+        exit 1
+      }
+      assets = substr(line, length(prefix) + 1, top_at - length(prefix) - 1)
+      remainder = substr(line, top_at + length(top))
+      quote_at = index(remainder, "\"")
+      if (quote_at <= 1) {
+        exit 1
+      }
+      published_at = substr(remainder, 1, quote_at - 1)
+      if (length(published_at) > 64 || published_at !~ /^[0-9T:+.-]+$/) {
+        exit 1
+      }
+      suffix = substr(remainder, quote_at)
+      expected_suffix = "\",\"schema\":1,\"tag\":\"" version \
+        "\",\"version\":\"" version_number "\"}"
+      if (suffix != expected_suffix) {
+        exit 1
+      }
+
+      needle = "{\"name\":\"" wanted_name "\",\"sha256\":\""
+      asset_at = index(assets, needle)
+      if (asset_at == 0 ||
+          index(substr(assets, asset_at + length(needle)), needle) != 0) {
+        exit 1
+      }
+      object = substr(assets, asset_at)
+      close_at = index(object, "}")
+      if (close_at == 0) {
+        exit 1
+      }
+      object = substr(object, 1, close_at)
+      hash = substr(object, length(needle) + 1, 64)
+      if (length(hash) != 64 || hash !~ /^[0-9a-f]+$/) {
+        exit 1
+      }
+      after_hash = substr(object, length(needle) + 65)
+      size_prefix = "\",\"size\":"
+      if (substr(after_hash, 1, length(size_prefix)) != size_prefix) {
+        exit 1
+      }
+      size_tail = substr(after_hash, length(size_prefix) + 1)
+      comma_at = index(size_tail, ",")
+      if (comma_at <= 1) {
+        exit 1
+      }
+      size = substr(size_tail, 1, comma_at - 1)
+      if (size !~ /^[0-9]+$/ || length(size) > 9) {
+        exit 1
+      }
+      expected_tail = ",\"target\":\"" wanted_target "\"}"
+      if (substr(size_tail, comma_at) != expected_tail) {
+        exit 1
+      }
+      print hash " " size
+    }
+  ' "$MANIFEST_FILE"); then
+    echo "kettle install-online.sh: signed manifest is non-canonical or does not bind ${VERSION}/${EXPECTED_TARGET}/${ASSET} exactly." >&2
     exit 1
   fi
-  # The manifest is compact, sorted-key JSON generated by
-  # scripts/make-update-manifest.py (one flat object per asset, no
-  # nested braces), so bounding each asset entry at its own `}` and
-  # pulling the sha256 out of that slice is exact, not a best-effort
-  # scrape of arbitrary JSON. Done in `awk` with plain `index()`/`substr()`
-  # (no `grep -o` or `sed -E`, both GNU/BSD extensions absent from some
-  # minimal/BusyBox `grep`/`sed` builds) so this stays as portable as the
-  # rest of the script; `-v` assignment and interval-free ERE matching are
-  # both POSIX-mandated `awk` behavior.
-  NAME_FIELD="\"name\":\"${ASSET}\""
-  MANIFEST_SHA=$(awk -v want="$NAME_FIELD" '
-    {
-      start = index($0, want)
-      if (start == 0) { next }
-      obj = substr($0, start)
-      close_brace = index(obj, "}")
-      if (close_brace > 0) { obj = substr(obj, 1, close_brace) }
-      key = "\"sha256\":\""
-      key_at = index(obj, key)
-      if (key_at == 0) { next }
-      hash = substr(obj, key_at + length(key), 64)
-      if (length(hash) == 64 && hash ~ /^[0-9a-f]+$/) { print hash }
-    }
-  ' "$MANIFEST_FILE") || true
-  if [ -z "$MANIFEST_SHA" ]; then
-    echo "kettle install-online.sh: signed manifest has no SHA-256 entry for ${ASSET} — aborting." >&2
+  # MANIFEST_FIELDS contains only a validated lowercase hex digest and decimal
+  # size, so normal POSIX field splitting is safe and deterministic.
+  # shellcheck disable=SC2086
+  set -- $MANIFEST_FIELDS
+  if [ "$#" -ne 2 ]; then
+    echo "kettle install-online.sh: signed manifest field extraction was ambiguous." >&2
+    exit 1
+  fi
+  MANIFEST_SHA=$1
+  MANIFEST_SIZE=$2
+  if [ "$MANIFEST_SIZE" -le 0 ] || [ "$MANIFEST_SIZE" -gt "$MAX_ARCHIVE_BYTES" ]; then
+    echo "kettle install-online.sh: signed archive size ${MANIFEST_SIZE} is outside the accepted range." >&2
+    exit 1
+  fi
+  if [ "$SIZE" -ne "$MANIFEST_SIZE" ]; then
+    echo "kettle install-online.sh: archive size mismatch against signed manifest (expected ${MANIFEST_SIZE}, got ${SIZE})." >&2
     exit 1
   fi
   if command -v sha256sum >/dev/null 2>&1; then
@@ -324,28 +557,22 @@ if [ "$OPENSSL_ED25519" -eq 1 ] \
   fi
   echo "kettle: SHA-256 verified. (Ed25519-signed manifest — independent trust root.)"
   MANIFEST_VERIFIED=1
-elif [ "$OPENSSL_ED25519" -eq 1 ] && [ "$MANIFEST_REQUIRED" -eq 1 ]; then
-  # openssl CAN verify Ed25519 and this release (>= v2.35.0) must ship a signed
-  # manifest, yet the manifest or its signature could not be fetched. On a
-  # reachable network that is suppression/tampering, not a legitimate absence —
-  # do not fall through to the forgeable same-origin sidecar.
-  echo "kettle install-online.sh: ${VERSION} must ship an Ed25519-signed manifest, but ${MANIFEST_URL}[.sig] could not be fetched." >&2
-  echo "If you are online, a >= ${MANIFEST_MIN_VERSION} release that serves no signed manifest indicates suppression or tampering of the release channel." >&2
+elif [ "$MANIFEST_REQUIRED" -eq 1 ]; then
+  if [ "$OPENSSL_ED25519" -eq 1 ]; then
+    echo "kettle install-online.sh: ${VERSION} must ship a bounded Ed25519-signed manifest, but ${MANIFEST_URL}[.sig] could not be fetched." >&2
+    echo "A missing or oversized manifest on a release from ${MANIFEST_MIN_VERSION} onward can indicate suppression or tampering." >&2
+  else
+    echo "kettle install-online.sh: ${VERSION} requires Ed25519 verification, but OpenSSL is missing or lacks pkeyutl -rawin support." >&2
+    echo "Install OpenSSL 3.0 or newer and re-run." >&2
+  fi
   echo "Refusing to downgrade to the weaker same-origin checksum. Aborting." >&2
   exit 1
-elif [ "$OPENSSL_ED25519" -ne 1 ] && [ "$MANIFEST_REQUIRED" -eq 1 ]; then
-  # A genuine capability gap (not attacker-inducible): openssl is missing or
-  # predates Ed25519. Warn loudly and let the sidecar fallback run — the user
-  # can install a modern openssl for an independent trust root.
-  echo "kettle install-online.sh: cannot verify ${VERSION}'s Ed25519-signed manifest — openssl is missing or too old for Ed25519 (needs >= 1.1.1)." >&2
-  echo "Proceeding with the weaker same-origin SHA-256 sidecar; install a modern openssl for an independent trust root." >&2
 fi
 
 # --- SHA-256 verification (fallback) --------------------------------
-# Only runs when the signed-manifest check above couldn't complete:
-# `openssl` lacks Ed25519 support, the manifest/signature didn't fetch
-# (network hiccup, or this release predates manifest publishing), or
-# there was no earlier hard failure to abort on. Releases since v1.3.4
+# Only runs for a release that predates signed manifests. Modern releases
+# already failed closed above if the signature path was unavailable.
+# Releases since v1.3.4
 # ship a `<artifact>.sha256` sidecar generated on the same CI runner as
 # the artifact and served from the very same release-asset channel as
 # the tarball. That still catches what it can: transport corruption, a
@@ -356,34 +583,39 @@ fi
 # asset delivery) can regenerate a matching `.sha256` for their own
 # payload just as easily as the real CI runner did. Treat a pass here as
 # "not obviously corrupted or truncated", not as "verified authentic".
-# Older releases (≤ v1.3.3) didn't publish a sidecar either, so a missing
-# .sha256 is a soft failure (warn + continue) rather than a hard error.
+# Older releases (≤ v1.3.3) did not publish a sidecar; the one-line installer
+# now refuses those rather than execute an unauthenticated archive.
 if [ "$MANIFEST_VERIFIED" -ne 1 ]; then
   echo "kettle install-online.sh: signed-manifest verification unavailable for ${VERSION} — falling back to the weaker same-origin SHA-256 sidecar." >&2
   SHA_URL="${URL}.sha256"
   SHA_FILE="${TMP}/${ASSET}.sha256"
-  if curl -fL -o "$SHA_FILE" "$SHA_URL" 2>/dev/null; then
-    # sha256sum reads `<hex>  <filename>` and looks for the file relative
-    # to the cwd. Run it in $TMP so the bare filename matches.
-    # Split tool-availability and verification-result so the
-    # error diagnostic is accurate. Pre-fix, a system without sha256sum
-    # AND without shasum would print "SHA-256 verification FAILED"
-    # implying tampering, when actually the verification couldn't run.
-    # Now: detect "no hashing tool" explicitly and emit the correct
-    # diagnostic.
-    if command -v sha256sum >/dev/null 2>&1; then
-      HASH_CMD="sha256sum -c"
-    elif command -v shasum >/dev/null 2>&1; then
-      # Some BusyBox / Alpine environments ship shasum but not sha256sum.
-      HASH_CMD="shasum -a 256 -c"
-    else
-      echo "kettle install-online.sh: neither sha256sum nor shasum is installed." >&2
-      echo "Install one of them (coreutils / perl-base / busybox-utils) to verify" >&2
-      echo "the release SHA-256, then re-run. Refusing to extract an unverified" >&2
-      echo "archive." >&2
+  if download_limited "$SHA_URL" "$SHA_FILE" "$MAX_SIDECAR_BYTES" \
+    "SHA-256 sidecar" 0 2>/dev/null; then
+    if ! SIDECAR_SHA=$(awk -v wanted="$ASSET" '
+      NR == 1 && NF == 2 && length($1) == 64 &&
+        $1 ~ /^[0-9a-f]+$/ && ($2 == wanted || $2 == "*" wanted) {
+          hash = $1
+          next
+        }
+      {
+        bad = 1
+      }
+      END {
+        if (bad || NR != 1 || hash == "") {
+          exit 1
+        }
+        print hash
+      }
+    ' "$SHA_FILE"); then
+      echo "kettle install-online.sh: ${SHA_URL} is not one exact lowercase SHA-256 record for ${ASSET}." >&2
       exit 1
     fi
-    if (cd "$TMP" && $HASH_CMD "$(basename "$SHA_FILE")" >/dev/null 2>&1); then
+    if command -v sha256sum >/dev/null 2>&1; then
+      ACTUAL_SHA=$(sha256sum "$TAR" | awk '{print $1}')
+    else
+      ACTUAL_SHA=$(shasum -a 256 "$TAR" | awk '{print $1}')
+    fi
+    if [ "$ACTUAL_SHA" = "$SIDECAR_SHA" ]; then
       echo "kettle: SHA-256 verified. (same-origin checksum only — see install-online.sh for caveats.)"
     else
       echo "kettle install-online.sh: SHA-256 verification FAILED for ${ASSET}." >&2
@@ -392,16 +624,169 @@ if [ "$MANIFEST_VERIFIED" -ne 1 ]; then
       exit 1
     fi
   else
-    # No sidecar — older release predating the v1.3.4 sha256 sidecar publish.
-    # Warn but continue so the one-liner still installs v1.3.0..v1.3.3.
-    echo "kettle install-online.sh: no .sha256 sidecar found for ${VERSION} — skipping verification." >&2
-    echo "Releases from v1.3.4 onward publish checksums; pin to a newer version with KETTLE_VERSION." >&2
+    echo "kettle install-online.sh: no bounded .sha256 sidecar found for legacy release ${VERSION}." >&2
+    echo "Refusing to extract an unverified archive; pin to v1.3.4 or newer." >&2
+    exit 1
   fi
 fi
 
-# --- Extract + run the bundled install.sh --------------------------
-tar -C "$TMP" -xzf "$TAR"
-if [ ! -x "$TMP/kettle/install.sh" ]; then
+# --- Bounded archive preflight + extraction -------------------------
+# The outer archive is authenticated above. This structural pass still
+# prevents a release-pipeline mistake from consuming unbounded disk or asking
+# tar to materialize links, devices, path aliases, or writable special modes.
+# GNU tar's fixed listing has six fields for Kettle's ASCII-only paths;
+# rejecting any other shape also rejects whitespace and control characters.
+if ! ARCHIVE_PREFLIGHT=$(
+  tar --numeric-owner --full-time --quoting-style=escape -tvzf "$TAR" |
+    awk \
+      -v max_entries="$MAX_ARCHIVE_ENTRIES" \
+      -v max_bytes="$MAX_UNPACKED_BYTES" \
+      -v require_manifest="$PACKAGE_MANIFEST_REQUIRED" '
+      function reject() {
+        bad = 1
+        exit 1
+      }
+      function reserved_device(component, lowered) {
+        lowered = tolower(component)
+        sub(/\..*$/, "", lowered)
+        return lowered == "con" || lowered == "prn" ||
+          lowered == "aux" || lowered == "nul" ||
+          lowered ~ /^com[1-9]$/ || lowered ~ /^lpt[1-9]$/
+      }
+      {
+        if (NF != 6) {
+          reject()
+        }
+        mode = $1
+        size = $3
+        path = $6
+        type = substr(mode, 1, 1)
+        if (length(mode) != 10 || (type != "-" && type != "d") ||
+            mode ~ /[sStT]/ || substr(mode, 6, 1) == "w" ||
+            substr(mode, 9, 1) == "w" || size !~ /^[0-9]+$/) {
+          reject()
+        }
+        if (type == "d") {
+          if (substr(path, length(path), 1) != "/") {
+            reject()
+          }
+          clean = substr(path, 1, length(path) - 1)
+        } else {
+          if (substr(path, length(path), 1) == "/") {
+            reject()
+          }
+          clean = path
+        }
+        if (clean == "kettle") {
+          if (type != "d") {
+            reject()
+          }
+          saw_root = 1
+        } else if (substr(clean, 1, 7) != "kettle/") {
+          reject()
+        }
+        if (clean !~ /^[A-Za-z0-9._+\/-]+$/) {
+          reject()
+        }
+
+        component_count = split(clean, component, "/")
+        prefix = ""
+        for (i = 1; i <= component_count; i++) {
+          current = component[i]
+          if (current == "" || current == "." || current == ".." ||
+              length(current) > 255 ||
+              substr(current, length(current), 1) == "." ||
+              reserved_device(current)) {
+            reject()
+          }
+          prefix = prefix == "" ? current : prefix "/" current
+          folded_prefix = tolower(prefix)
+          if (i < component_count) {
+            if (kind[folded_prefix] == "file") {
+              reject()
+            }
+            needed_directory[folded_prefix] = 1
+          }
+        }
+
+        folded = tolower(clean)
+        if (seen[folded]) {
+          reject()
+        }
+        seen[folded] = 1
+        if (type == "-" && needed_directory[folded]) {
+          reject()
+        }
+        kind[folded] = type == "d" ? "directory" : "file"
+        entries++
+        if (entries > max_entries) {
+          reject()
+        }
+        if (type == "-") {
+          total += size
+          if (total > max_bytes) {
+            reject()
+          }
+        }
+        if (clean == "kettle/kettle-package-manifest.json") {
+          if (type != "-" || size > 262144) {
+            reject()
+          }
+          saw_manifest = 1
+        }
+      }
+      END {
+        minimum_entries = require_manifest ? 4 : 3
+        if (bad || !saw_root ||
+            kind["kettle/kettle"] != "file" ||
+            kind["kettle/install.sh"] != "file" ||
+            (require_manifest && !saw_manifest) ||
+            entries < minimum_entries || total <= 0) {
+          exit 1
+        }
+        print entries " " total
+      }
+    '
+); then
+  echo "kettle install-online.sh: authenticated archive failed the bounded structural preflight." >&2
+  exit 1
+fi
+# ARCHIVE_PREFLIGHT is produced only as two validated decimal counters.
+# shellcheck disable=SC2086
+set -- $ARCHIVE_PREFLIGHT
+if [ "$#" -ne 2 ]; then
+  echo "kettle install-online.sh: archive preflight returned an ambiguous result." >&2
+  exit 1
+fi
+PREFLIGHT_ENTRIES=$1
+PREFLIGHT_BYTES=$2
+
+EXTRACT_ROOT="${TMP}/extracted"
+mkdir -m 700 "$EXTRACT_ROOT"
+if ! tar --extract --gzip --file "$TAR" --directory "$EXTRACT_ROOT" \
+  --no-same-owner --no-same-permissions --delay-directory-restore \
+  --keep-old-files; then
+  echo "kettle install-online.sh: bounded archive extraction failed." >&2
+  exit 1
+fi
+
+SPECIAL_ENTRY=$(find "$EXTRACT_ROOT" -mindepth 1 ! -type f ! -type d -print -quit)
+ACTUAL_ENTRIES=$(find "$EXTRACT_ROOT" -mindepth 1 -print | awk 'END { print NR + 0 }')
+ACTUAL_BYTES=$(
+  find "$EXTRACT_ROOT" -type f -exec wc -c {} \; |
+    awk '{ total += $1 } END { print total + 0 }'
+)
+if [ -n "$SPECIAL_ENTRY" ] ||
+  [ "$ACTUAL_ENTRIES" -gt "$MAX_ARCHIVE_ENTRIES" ] ||
+  [ "$ACTUAL_BYTES" -ne "$PREFLIGHT_BYTES" ] ||
+  [ "$ACTUAL_BYTES" -gt "$MAX_UNPACKED_BYTES" ]; then
+  echo "kettle install-online.sh: extracted archive violated its preflight bounds." >&2
+  echo "entries=${ACTUAL_ENTRIES}/${PREFLIGHT_ENTRIES}, bytes=${ACTUAL_BYTES}/${PREFLIGHT_BYTES}" >&2
+  exit 1
+fi
+
+PACKAGE_ROOT="${EXTRACT_ROOT}/kettle"
+if [ ! -x "$PACKAGE_ROOT/install.sh" ]; then
   echo "kettle install-online.sh: extracted tarball doesn't contain install.sh." >&2
   echo "This is likely a bug in the upstream release pipeline; please report at" >&2
   echo "  https://github.com/${REPO}/issues" >&2
@@ -425,12 +810,12 @@ fi
 # uninstall helper below instead. Keep stderr live so real failures are visible.
 INSTALL_LOG="${TMP}/install.log"
 if [ -n "${KETTLE_PREFIX:-}" ]; then
-  if ! "$TMP/kettle/install.sh" --skip-build "--prefix=$KETTLE_PREFIX" > "$INSTALL_LOG"; then
+  if ! "$PACKAGE_ROOT/install.sh" --skip-build "--prefix=$KETTLE_PREFIX" > "$INSTALL_LOG"; then
     cat "$INSTALL_LOG"
     exit 1
   fi
 else
-  if ! "$TMP/kettle/install.sh" --skip-build > "$INSTALL_LOG"; then
+  if ! "$PACKAGE_ROOT/install.sh" --skip-build > "$INSTALL_LOG"; then
     cat "$INSTALL_LOG"
     exit 1
   fi
@@ -452,7 +837,7 @@ INSTALL_PREFIX="${KETTLE_PREFIX:-${HOME}/.local}"
 INSTALL_HELPER="${INSTALL_PREFIX}/share/kettle/install.sh"
 INSTALL_REAL="${INSTALL_PREFIX}/share/kettle/install-real.sh"
 mkdir -p "$(dirname "$INSTALL_HELPER")"
-cp "$TMP/kettle/install.sh" "$INSTALL_REAL"
+cp "$PACKAGE_ROOT/install.sh" "$INSTALL_REAL"
 cat > "$INSTALL_HELPER" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -475,9 +860,9 @@ fi
 EOF
 chmod +x "$INSTALL_HELPER"
 chmod +x "$INSTALL_REAL"
-if [ -d "$TMP/kettle/shell-integration" ]; then
+if [ -d "$PACKAGE_ROOT/shell-integration" ]; then
   mkdir -p "${INSTALL_PREFIX}/share/kettle/shell-integration"
-  cp "$TMP/kettle/shell-integration/"* "${INSTALL_PREFIX}/share/kettle/shell-integration/"
+  cp "$PACKAGE_ROOT/shell-integration/"* "${INSTALL_PREFIX}/share/kettle/shell-integration/"
   chmod 644 "${INSTALL_PREFIX}/share/kettle/shell-integration/"*
 fi
 

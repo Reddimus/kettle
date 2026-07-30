@@ -3,7 +3,8 @@
 ## Done
 
 - [x] Cargo workspace, MIT, CI matrix (Linux/macOS/Windows)
-- [x] PTY + `alacritty_terminal` + `vte` core, per-pane reader thread
+- [x] PTY + `alacritty_terminal` + `vte` core, with one bounded blocking pump,
+      parser worker, and input worker per pane
 - [x] `wgpu` + `glyphon` renderer: text, bg, cursor, selection, search rects
 - [x] Ghostty-syntax config + ~500 bundled themes (default TokyoNight Night)
 - [x] Bundled JetBrains Mono Nerd Font (embedded)
@@ -39,11 +40,23 @@
 - [x] Hyperlinks: OSC 8 + URL autodetection, underline + Ctrl/Cmd-click to open
 
 - [x] Image protocols: Sixel + kitty graphics + iTerm2 OSC 1337, extracted
-      ahead of the VT parser, decoded to RGBA, GPU-composited, scroll-anchored
+      ahead of the VT parser, decoded to RGBA, and GPU-composited. Full-screen
+      scroll/eviction uses monotonic document rows; mode 47 preserves alternate
+      graphics, 1047 clears them on exit, and 1049 clears them on entry while
+      saving/restoring the cursor. ED 2 is active-only and RIS clears both
+      buffers. An authoritative bounded engine journal drives ordered lifecycle
+      and scroll-region changes. Wholly contained images move and crop at
+      partial DECSTBM margins while crossing images stay fixed; top-anchored
+      coalesced scrolling preserves stable document ids. Inline destination/UV
+      clipping confines output to the pane interior and terminal grid.
 
 - [x] Mouse reporting passthrough (X10 + SGR 1006): click/drag/wheel to
       vim/tmux/htop/fzf; local selection/scroll when tracking is off
 - [x] Shell integration (OSC 133 A/B/C/D) + jump-to-prompt
+- [x] OSC 133 prompt marks use stable document-row ids backed by the terminal
+      grid's monotonic `history_origin`. Scrollback-ring eviction and reset
+      prune only stale rows, alternate-screen activity does not corrupt
+      normal-screen marks, and reflow clears marks rather than retargeting them.
       (`Ctrl+Up`/`Ctrl+Down`); bash/zsh/fish/**powershell** snippets in
       docs/SHELL-INTEGRATION.md (the PowerShell variant is available
       via `--shell-integration powershell` for Win11 + cross-platform
@@ -64,14 +77,11 @@
 - [x] SSH multiplexing: per-pane argv, `Ctrl+Shift+S` SSH launcher with
       configured `ssh-host` tab-complete, SSH tabs persisted in sessions
 
-- [x] Automated test harness (318 deterministic tests across vt/config/
-      core/ui/render: decoders, extractor, config, keybinds, split-tree,
-      session round-trip, 8 MiB perf guard, plugin LuaCommand contracts,
-      detachable-tabs serialize/insert, GPU offscreen) + CI fmt-check,
-      headless GPU smoke, CLI smoke on all three OSes — see
-      docs/TESTING.md. The "automated test harness" entry was first
-      logged at 19 tests circa v0.2 and now reflects v1.40.0; the
-      same per-feature drift-guard discipline grew it.
+- [x] Automated deterministic workspace suite across VT, config, state, core,
+      UI, renderer, updater, control, remote, and CLI boundaries, plus CI
+      fmt/clippy/docs gates, headless GPU smoke, native PTY checks, and CLI
+      smoke on all three OSes. See `docs/TESTING.md` and run
+      `cargo test --workspace` for the current count.
 
 - [x] Offscreen GPU self-test (compiles WGSL + renders a pass with no
       window) run in CI on Linux/macOS/Windows — real cross-platform GPU
@@ -161,8 +171,10 @@
 
 - [x] Conformance: XTWINOPS CSI 18 t text-area size (8;rows;cols t),
       DSR CSI 5 n device-status (→ CSI 0 n), exact DA1 reply
-      `CSI ? 6;4;52 c` incl. the `CSI 0 c` alias and DECID, advertising
-      the shipped sixel and OSC 52 surfaces (44+ conformance tests).
+      `CSI ? 6;4;52 c` incl. the `CSI 0 c` alias and DECID when OSC 52 writes
+      are allowed, or `CSI ? 6;4 c` when policy/platform availability denies
+      them; the sixel surface remains advertised in both cases (44+
+      conformance tests).
       CSI 14 t pixel size routes through a windowing callback — exercised
       live, not asserted headless.
 
@@ -243,8 +255,28 @@
       placement's abs_line/col) **and relative chains** — pure
       `resolve_chain` walks child→parent with a depth bound of 8
       (`ETOODEEP`/cycles → not drawn); origins unified from placeholder
-      cells + the image registry (+1 test, 103 workspace). The kitty
-      graphics protocol surface is now complete.
+      cells + the image registry (+1 test, 103 workspace).
+
+- [x] kitty physical/relative placement geometry: source crop
+      intersection (`x/y/w/h`), explicit or aspect-preserving destination
+      sizing (`c/r`), in-cell pixel offsets (`X/Y`), exact effective-cell
+      cursor movement, and `C=1` suppression. Raw parameters remain attached
+      to placements so a monitor/DPI pixel-geometry change re-resolves their
+      destination without accumulating rounding error; the renderer consumes
+      fractional offsets/extents directly.
+
+- [x] kitty deletion selectors end-to-end: visible, image/placement, cursor,
+      cell, cell-plus-z, id-range, column, row, z-index, and animation-frame
+      deletion; lowercase retains image data and uppercase frees it. Deletion
+      is applied before later APCs from the same read, so an immediate
+      delete-and-replace cannot resurrect stale decoder state.
+
+- [ ] Remaining kitty protocol conformance is tracked explicitly in
+      `docs/AUDIT-DEFERRED.md`: immediate query/acknowledgement replies,
+      replacement cleanup when an existing image id is retransmitted, and
+      exact `Q=` parent-placement selection when one image has multiple
+      placements. The implemented decode/render surface must not be described
+      as the complete protocol until those lifecycle/reply paths ship.
 
 - [x] Broader conformance sweep: IRM insert mode (shift-right),
       DECTCEM cursor visibility (`?25`), LNM mode bit (`CSI 20h/l`),
@@ -460,8 +492,9 @@
       Uses `UnicodeWidthChar::width()`. +1 test.
 - [x] **Local paste capped at 4 MiB.** Pair to the OSC 52 1 MiB
       cap — guards against accidentally pasting a multi-
-      GB file from the clipboard and freezing the PTY. Reuses
-      `clamp_osc52` byte-clamper.
+      GB file from the clipboard and freezing the PTY. Payloads over
+      the limit are rejected with visible feedback rather than truncated:
+      silently shortening a command, patch, or encoded file is unsafe.
 - [x] **`selection-foreground` actually applied.** Config key was
       parsed but ignored at render time. Selected cells now get
       `theme.selection_foreground` (applied after INVERSE so the
@@ -492,6 +525,11 @@
 - [x] **Session restore brings back the focused pane.** `STab`
       records `focus: usize` (DFS-order index, `#[serde(default)]`
       for back-compat). +2 tests.
+- [x] **Session restore is preflight-bounded before native allocation.**
+      The complete normalized workspace is limited to 16 non-empty windows,
+      256 panes, 32 Mi pixels per surface, and 64 Mi aggregate
+      surface pixels. Saved rectangles are clamped to the current monitor
+      layout and applied before restored windows are revealed.
 - [x] **`focused-split-color` config key.** Inactive border was
       already overridable via `split-divider-color`; the focused
       border (the "here am I" accent) was hard-wired. +1 test.
@@ -1082,11 +1120,10 @@
       With broadcast on (Ctrl+Shift+G), typing wrote to every
       pane but skipped the scroll-to-bottom snap, so any
       scrolled-back pane stayed pinned to history while the
-      bytes invisibly reached the remote shell. New
-      `Mux::broadcast_scroll_to_bottom` matches `broadcast_write`'s
-      scope (the `leaf_ids` helper from the broadcast-scoping fix).
-      No new test — same chrome-only pattern as the
-      live-config-reload filter fix.
+      bytes invisibly reached the remote shell.
+      `Mux::broadcast_write_with_scroll` uses the same target computation as
+      `broadcast_write` and scrolls only panes that actually accepted the
+      bounded enqueue.
 - [x] **`Trigger::label` uses Plus/Minus/Equal for the punctuation
       keys.** `Ctrl++` (zoom in) showed as `Ctrl++` — ambiguous on
       first read. Parser already accepts `plus` / `minus` /
@@ -1332,14 +1369,20 @@
 - [x] **Vi-mode scrollback** (Alacritty parity).
       `Ctrl+Shift+Space` enters; h/j/k/l/0/$/g/G/H/M/L + arrows;
       `v` visual selection; `y` yank to clipboard; Esc exit.
-      Magenta hollow block at vi cursor + selection-background
-      highlight for the visual range.
+      Kettle delegates motion, cursor, selection, viewport following, reflow,
+      and history eviction to `alacritty_terminal`'s native vi mode; the UI
+      owns only the pane/modal route and visual-mode intent. The renderer uses
+      the captured native hollow cursor and selection.
 - [x] **Remote-control IPC** (kitty `@` parity).
       `kettle --remote-send TEXT` writes to a notify-watched file;
-      the running kettle's receiver dispatches `send-text TEXT` to
-      its focused pane. File IPC over the live-config-reload notify
-      watcher — cross-platform free; per-window socket addressing
-      is a planned follow-up.
+      current senders use a reversible `send-text-json <JSON_STRING>` line and
+      the running kettle dispatches the exact decoded bytes to its focused
+      pane. The legacy lossy `send-text TEXT` form remains receiver-compatible
+      for direct writers. Sender append and receiver claim share a bounded lock;
+      the spool is capped at 1 MiB and claimed batches dispatch in order with
+      deadline retries on pane backpressure. This compatibility file transport
+      is at-most-once after claim. `kettle ctl` is the acknowledged local RPC
+      surface and reports typed enqueue failures.
 - [x] **Quake dropdown** `--toggle` (Yakuake / Tilda / Ghostty
       quick-terminal parity). Piggybacks on the
       remote-control IPC; receiver flips
@@ -1379,12 +1422,16 @@ deliverables table. Highlights:
       + SCM_RIGHTS IPC path (`--tab-handoff-fd FD`) both end-to-end
       for the JSON payload. Live-PTY adoption (Terminal::from_raw_fd)
       is kettle-core internal opt, tracked separately.
-- [x] **Per-pane titlebar** (Terminator parity). All 10
-      phases from `docs/TERMINATOR-PANE-TITLEBAR-DESIGN.md`: bg quad
+- [x] **Per-pane titlebar** (Terminator parity). Functional phases
+      2-9 from `docs/TERMINATOR-PANE-TITLEBAR-DESIGN.md`: bg quad
       + title text + 3 color variants (transmit/receive/inactive) +
       size text + icon_bell + click hit-test → EditPaneTitle anchor +
       title_at_bottom flip + cell layout-shift + named broadcast
-      groups (`Action::EditPaneGroup`).
+      groups (`Action::EditPaneGroup`). A live smoke captures the
+      rendered split state in separate top/bottom windows, checks
+      titlebar/grid-edge geometry, and uses deterministic interior PNG
+      samples to verify focused/transmit, receiving, and inactive colors.
+      Phase 10 is complete.
 - [x] **Background image** (Terminator parity). Decoder
       foundation, wgpu texture upload, 4 UV modes (stretch_and_fill,
       tile, center, scale), align horiz/vert, darkness compose,
@@ -1566,9 +1613,21 @@ features list. What's left is genuinely-multi-week threads + polish.
       `read_cells`, and `screenshot` so the pass is reproducible instead of a
       manual eyeball-only sweep, then compare captured frames for blank panes,
       overlapping UI, stale text, and unintended blinking.
-- [ ] **Performance comparison pass.** Keep Kettle faster than Terminator and
-      close to Ghostty for startup, scrollback ingestion, resize, sustained
-      output, memory, and GPU/frame-time behavior. The Ubuntu same-machine
+- [ ] **Performance comparison pass.** Keep Kettle competitive on startup,
+      scrollback ingestion/navigation, resize, sustained output, memory, and
+      input-to-present behavior. The Windows release campaign now covers
+      Kettle, Windows Terminal, Alacritty, WezTerm, Rio, and Tabby with pinned
+      binaries/configs, balanced schedules, provenance, immutable release
+      thresholds, and fail-closed physical-display identity. After the reported
+      monitor switches, the 2026-07-27 desktop inspection exposes only the
+      default `\\.\DISPLAY1` at 1024x768, with no present physical PnP monitor.
+      It cannot fit the required 1280x800 client or provide the two EDID-backed
+      screens required by the transition probe. Manifest/synthetic smokes may
+      run there, but no comparative win/loss or release benchmark may be
+      claimed. Rerun the full campaign only after Windows exposes a stable
+      interactive desktop with two present eligible physical monitors; any
+      operator monitor switch outside the dedicated probe invalidates the run.
+      The Ubuntu same-machine
       startup, ASCII-flood, and SGR/underline-flood rows in
       `docs/PERFORMANCE.md` are refreshed for current `main` and pass the
       Terminator/Ghostty timing gate; the Linux gate also records advisory
@@ -1579,11 +1638,10 @@ features list. What's left is genuinely-multi-week threads + polish.
       `perform_action scroll_page_up/down` is timed with `read_screen`
       verification. Those live timings are Kettle-only advisory regression
       evidence because they include control-plane overhead and do not yet have
-      equivalent Terminator/Ghostty automation. Remaining work: include Windows
-      11 and Windows 11 WSL where possible, broaden the local peer suite to
-      resize, scrollback navigation, and GPU/frame-time probes, and prioritize
-      row-level damage tracking, persistent GPU cell buffers, and continued
-      memory reduction if grid-mode frame cost or RSS remains above target.
+      equivalent Terminator/Ghostty automation. After valid Windows evidence,
+      extend Windows 11 WSL coverage and prioritize row-level damage tracking,
+      persistent GPU cell buffers, and continued memory reduction only where
+      the measurements justify it.
       The first post-`13ffdda` memory pass confirmed grid and legacy modes have
       effectively the same Kettle-only RSS, so the RSS gap is not caused by the
       new grid renderer. It also removed the duplicated heap copy of bundled
@@ -1646,9 +1704,11 @@ features list. What's left is genuinely-multi-week threads + polish.
       forwards pipe/file/socket stdin to the child PTY while leaving
       interactive terminal stdin and `/dev/null` alone. Covered by
       `crates/kettle/tests/exec.rs`.
-- [ ] **Native Windows ConPTY stdin forwarding for `kettle exec`** — disabled
-      until the input lifecycle avoids `STATUS_CONTROL_C_EXIT` for console
-      children on Windows CI.
+- [x] **Native Windows ConPTY stdin forwarding for `kettle exec`** — delimited
+      pipe/file input reaches the child through a bounded `PIPE_NOWAIT` writer
+      and native regressions cover backpressure, terminal replies, timeout, and
+      closure. ConPTY's anonymous input pipe still has no EOF half-close, so a
+      child waiting for EOF needs an explicit delimiter or finite `--timeout`.
 - [x] **Live-grid `screenshot` control method** for `kettle ctl` / the MCP
       surface. It queues the existing live renderer readback, works in
       `agent-server=read-only`, and returns the saved PNG path.

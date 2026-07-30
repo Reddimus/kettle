@@ -229,10 +229,24 @@ fi
   || fail "published asset probe returned HTTP ${asset_status} for ${asset_url}"
 
 online_prefix="${tmp_root}/online"
-KETTLE_VERSION="$tag" KETTLE_PREFIX="$online_prefix" sh scripts/install-online.sh \
-  > "${tmp_root}/online-install.out"
-grep -q 'kettle: SHA-256 verified\.' "${tmp_root}/online-install.out" \
-  || fail "online installer did not verify SHA-256"
+if ! KETTLE_VERSION="$tag" KETTLE_PREFIX="$online_prefix" \
+    sh scripts/install-online.sh \
+      > "${tmp_root}/online-install.out" 2> "${tmp_root}/online-install.err"; then
+  cat "${tmp_root}/online-install.out"
+  cat "${tmp_root}/online-install.err" >&2
+  fail "online installer failed"
+fi
+grep -Fq \
+  'kettle: SHA-256 verified. (Ed25519-signed manifest' \
+  "${tmp_root}/online-install.out" \
+  || {
+    cat "${tmp_root}/online-install.err" >&2
+    fail "online installer did not use the mandatory Ed25519-signed manifest"
+  }
+if grep -Fq 'falling back to the weaker same-origin SHA-256 sidecar' \
+    "${tmp_root}/online-install.err"; then
+  fail "online installer downgraded a modern release to the checksum sidecar"
+fi
 grep -q "Uninstall later via:" "${tmp_root}/online-install.out" \
   || fail "online installer did not print uninstall section"
 grep -q "${online_prefix}/share/kettle/install.sh --uninstall" \

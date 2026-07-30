@@ -30,12 +30,34 @@ tracked here so they are not lost.
 
 ## Terminal / protocol
 
-- **Kitty graphics `a=q` capability reply** (and the `Chunk::PtyReply` plumbing it
-  needs) so probers like `kitten icat` don't conclude graphics are unsupported.
-- **OSC 52 selection target** (`p`/`s` vs `c`): route PRIMARY writes/reads to the
-  X11 PRIMARY selection on Linux instead of always CLIPBOARD.
-- **Vi-mode over scrollback**: vi navigation is currently viewport-only; make
-  `k`/`j` scroll at the viewport edge and `g`/`G` jump to history top/bottom.
+- **Kitty graphics acknowledgement/query response path.** Immediate
+  acknowledgements/errors and capability-query replies still need bounded
+  `Chunk::PtyReply`-style plumbing, so probers such as `kitten icat` can
+  distinguish supported operations from silent failure.
+- **Kitty image-id replacement lifecycle.** Retransmitting data for an existing
+  id must remove every old physical/virtual/relative placement before retaining
+  the new pixels, including for transmit-only `a=t`. The decoder and terminal
+  core need an ordered replacement signal rather than inferring this from a
+  later placement.
+- **Kitty relative `Q=` selection.** Relative-chain origin maps currently
+  collapse concrete parents by image id; preserve the full `(image id,
+  placement id)` key so a child selects the exact named parent when one image
+  has multiple placements.
+- ~~**Inline-image scrolling inside partial DECSTBM margins.**~~ Done in the
+  next release: the terminal engine now emits bounded, ordered scroll-region
+  events with direction, margins, count, and monotonic screen-top ids. Images
+  wholly inside the margins move and permanently crop their destination/source
+  range at an edge; images already crossing a margin remain fixed. Full-screen
+  and top-anchored coalesced scrolls preserve exact history anchors, while
+  overflow clears both graphics buffers and resynchronizes fail-safe.
+- ~~**OSC 52 selection target** (`p`/`s` vs `c`).~~ Done in the next release:
+  `ClipboardType::Selection` now reads and writes Linux PRIMARY through
+  arboard, without falling back to CLIPBOARD on a failed query; platforms
+  without a separate selection retain their single clipboard channel.
+- ~~**Vi-mode over scrollback.**~~ Done in the next release: Kettle now toggles
+  `alacritty_terminal`'s native vi mode and dispatches its `ViMotion`, so the
+  engine owns viewport following, history bounds, cursor, selection, reflow,
+  and eviction. The UI retains only pane ownership and visual-mode intent.
 
 ## UX / feedback
 
@@ -51,11 +73,23 @@ tracked here so they are not lost.
 
 ## Performance (measure first)
 
-- **redraw scroll-on-output lock**: gate the per-pane history `Term` lock behind
-  the lock-free `output_generation` atomic so idle frames acquire zero locks.
-- **Remote-poll tick**: reuse BFS scratch buffers, refresh cwd only for the one
-  foreground pid that needs it, and fan out across all windows (not just the
-  painting one).
+- ~~**redraw scroll-on-output lock**~~ Done in the next release: tab activity
+  and `scroll-on-output` now use each pane's lock-free `output_generation`
+  edge. Idle/UI-only frames acquire no history locks, in-place and alternate
+  screen output are no longer missed, and the terminal lock is taken only when
+  the user opted into `scroll-on-output` and a generation actually changed.
+- ~~**Remote-poll tick**~~ Done in the next release: one bounded process-tree
+  worker now coalesces the newest roots across the checked-out window and every
+  stored window. The UI consumes only completed snapshots; it never walks the
+  OS process table. Linux retains no cwd string per process, reads cwd only for
+  the selected foreground pid, and applies byte/node/task/argv bounds.
+- **PTY I/O worker consolidation:** each pane currently uses a parser thread
+  plus a blocking pump thread so DEC 2026 deadlines remain independent of a
+  blocked native read. The channel is bounded and buffers are recycled, so this
+  is measured thread-count debt rather than a memory-growth bug. Profile large
+  pane counts before considering an async/native-overlapped reader or a shared
+  I/O service; any replacement must preserve ConPTY teardown, Unix portability,
+  parser deadlines, and per-pane backpressure.
 - Per-window `FontSystem` sharing; lazy system-font load on first frame. Both are
   speculative — profile on the maintainer's machine before implementing.
 
@@ -103,33 +137,37 @@ The whole-repository audit recorded in
 shipped 52. The seven below were deliberately deferred as multi-session refactors
 or cross-crate plumbing that should not be rushed into one release:
 
-- **`app.rs` god-file split (24.7k lines).** Extract along the seams the
+- **`app.rs` god-file split.** Extract along the seams the
   `Action` enum already implies — `action_dispatch`, drag/menu modules reusing
   the `detach.rs` pattern, `session_glue` (ctl/MCP/recorder wiring), and
   `window_lifecycle` — keeping `App` as a struct plus small `impl App` blocks
   split across files. Best paired with making per-event handlers return a typed
   `Outcome` list (pure deciders + thin applier) so the source-text drift guards
   become behavioural unit tests. Supersedes the earlier `app.rs` entry above.
-- **`kettle-render/src/lib.rs` module split.** The remaining ~11k-line file still
+- **`kettle-render/src/lib.rs` module split.** The remaining file still
   interleaves the `impl Renderer` frame pipeline with overlay/menu data types,
   GPU adapter selection, the screenshot capture pipeline, and text-fit geometry
   helpers, even though eight sibling submodules were already carved out. Extract
   in isolation order: `gpu.rs` (adapter selection, no `Renderer` state) →
   `screenshot.rs` → `overlays.rs` (data structs) → `text_fit.rs` (pure helpers).
-- **OSC 52 selection target (`p`/`s` vs `c`).** `TermEvent::ClipboardStore/Load`
-  carry an `alacritty_terminal::term::ClipboardType`; route `Selection` through
-  the existing arboard `LinuxClipboardKind::Primary` path used by
-  `copy_selection`/`paste_primary`. Needs the event→handler plumbing, not an
-  `app.rs`-local change. (Overlaps the older OSC 52 entry above.)
-- **OSC 133 prompt marks desync once scrollback wraps.** Absolute line numbers
-  drift after the grid's history ring hits `max_scroll_limit`
-  (`total_lines()`/`history_size()` both cap). Needs an anchor that survives the
-  ring cap rather than a raw absolute line index.
-- **Global kitty `a=d,d=f` animation clear is dropped.** `kitty.rs` clears its
-  own frame/anim state but the clear never reaches the renderer (only `id != 0`
-  stores round-trip), so cleared animations keep playing. Needs a
-  `Chunk::PtyReply`-style clear signal across the vt→render boundary.
+- ~~**OSC 52 selection target (`p`/`s` vs `c`).**~~ Done in the next release;
+  see the terminal/protocol entry above.
+- ~~**OSC 133 prompt marks desync once scrollback wraps.**~~ Done in the next
+  release: the vendored grid maintains a monotonic `history_origin`; prompt
+  marks store stable document-row ids, prune on genuine eviction/reset, ignore
+  alternate-screen rows, and clear on reflow rather than targeting unrelated
+  text.
 - **Command palette / layout picker / SSH launcher stay single-line bars.** Fold
   them into the responsive, multi-row layout the search bar gained in v2.38.0
   (also makes room for per-row keybind hints). Extends the vertical-list-pickers
   entry above.
+
+Two related Kitty findings from the same audit are also resolved in the next
+release. Global/frame deletion now crosses the extractor/core boundary and
+updates physical, virtual, relative, animation, and stored-image state using
+the full selector set; same-read delete/replacement order is explicit.
+Physical and relative placements now retain and re-resolve source crop,
+destination cells, pixel offsets, aspect ratio, and cursor-movement intent.
+These fixes do **not** close the acknowledgement/query, existing-id
+retransmission lifecycle, or exact `(image id, placement id)` `Q=` parent gaps
+listed above.

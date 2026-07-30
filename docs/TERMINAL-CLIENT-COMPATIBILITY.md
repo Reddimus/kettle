@@ -3,33 +3,76 @@
 Kettle transports terminal input and output; Codex CLI and Claude Code own image
 decoding and attachment. Kettle does not add a proprietary image protocol.
 
-## Clipboard image paste
+On Unix and WSL, piped stdin EOF does not close Kettle's bidirectional PTY
+master: doing so would also discard DA, DSR, Kitty-keyboard, and other replies
+that interactive clients issue after startup. Kettle signals canonical EOF
+with the live PTY's configured VEOF character. A client already in raw mode
+must use its own delimiter or a `kettle exec --timeout`; Kettle reports that
+case explicitly and preserves the terminal-reply path without injecting a
+guessed control byte. The headless path also omits DA1 extension `52` because
+it has no clipboard sink; a live GUI pane advertises that extension only when
+its current OSC 52 write policy and platform clipboard permit it.
 
-| Client location | Chord in Kettle | What Kettle sends |
-|---|---|---|
-| Codex CLI on native Windows or Linux | `Ctrl+V` | `C-v` (`0x16`) |
-| Codex CLI under WSL | `Ctrl+Alt+V` | `M-C-v` (`ESC`, `0x16`) |
-| Claude Code on native Windows | `Alt+V` | `M-v` (`ESC v`) |
-| Claude Code on WSL or native Linux | `Ctrl+V` | `C-v` (`0x16`) |
+Native Windows ConPTY forwards piped bytes but has no safe portable EOF
+half-close. Delimiter- or length-driven consumers work; an EOF-waiting child
+must use its own protocol delimiter or `--timeout`. Kettle leaves conin open so
+terminal queries and normal child lifetime are not converted into a forced
+`STATUS_CONTROL_C_EXIT`.
 
-`Ctrl+Shift+V` remains Kettle's normal text-paste command. Bare `Ctrl+V` and
-`Alt+V` and `Ctrl+Alt+V` are not default Kettle bindings, so the client receives
-them unchanged. Current Codex WSL builds can read image data through a Windows
-PowerShell clipboard fallback when Linux clipboard APIs are unavailable. The
-client still controls accepted formats, size limits, prompts, and attachment UI.
+## Terminal-rendered inline graphics
 
-To test, place a PNG or screenshot in the Windows clipboard, focus the client's
-prompt, and press its chord from the table. A text-only paste result means the
-client did not detect image data; Kettle cannot convert clipboard text back into
-an image.
+Sixel, Kitty graphics, and iTerm2 OSC 1337 are terminal output protocols,
+separate from the Codex/Claude attachment boundary below. Their registries
+follow the active screen: mode 47 preserves alternate graphics on entry and
+exit; mode 1047 preserves them on entry and clears them on exit; mode 1049
+saves/restores the cursor, clears alternate graphics on entry, and preserves
+them on exit. ED 2 clears only the active graphics buffer and RIS clears both.
+
+Each rendered placement is clipped to the intersection of its pane interior
+and exact terminal grid. Kettle crops destination geometry and source UVs by
+the same fractions, so negative or oversized placements do not bleed into
+padding, titlebars, borders, sibling panes, or window chrome. Full-screen
+scrolling and eviction use stable document rows. Inside a partial DECSTBM
+region, images wholly contained by the page margins move with text and crop
+their destination/source range at an edge; images already crossing a margin
+stay fixed, matching the Kitty graphics protocol.
+
+## Image attachment boundaries
+
+Kettle does not promise a Codex CLI or Claude Code clipboard-attachment chord.
+Those clients own their interactive composers, accepted formats, attachment UI,
+and platform/version-specific shortcuts. Kettle's default keymap reserves
+`Ctrl+Shift+V` for its own paste action and does not bind bare `Ctrl+V`,
+`Alt+V`, or `Ctrl+Alt+V`. An unbound key reaches the PTY through the active
+legacy-xterm or negotiated Kitty keyboard encoding, but that proves input
+transport only; it does not prove that a client attached clipboard image data.
+
+For Kettle's stable, client-independent path, focus the agent pane and press
+`Ctrl+Shift+V`. When the clipboard contains a bitmap and `paste-images` is on
+(the default), Kettle writes a bounded owner-only temporary PNG and pastes its
+shell-quoted path. The running agent can read that path without needing native
+clipboard-bitmap support.
+
+Current local `codex --help` also exposes `-i, --image <FILE>...` for images
+attached to an initial prompt. This is the durable Codex fallback when starting
+a session:
+
+```sh
+codex --image ./screenshot.png "Inspect this image"
+# short form:
+codex -i ./screenshot.png "Inspect this image"
+```
+
+Under WSL, pass a path visible inside the distro, such as
+`/mnt/c/Users/me/Pictures/screenshot.png`. No equivalent Claude Code local-image
+flag is claimed here; consult the installed client's current help for its
+supported attachment flows.
 
 ## File paste (paths)
 
-Image paste (above) covers images only. For any other file — a video, a PDF, an
-arbitrary binary — the portable channel both Claude Code and Codex accept is a
-**file path pasted as text**: the client reads the path (`Read`, or `ffmpeg`/
-`ffprobe` via a shell for a video) rather than receiving bytes over an escape
-sequence.
+Kettle's path-paste channel also works for a video, PDF, or arbitrary binary:
+the agent reads the **file path pasted as text** (`Read`, or `ffmpeg`/`ffprobe`
+via a shell for a video) rather than receiving bytes over an escape sequence.
 
 Kettle supports this three ways, all of which paste a shell-quoted path (never
 raw bytes):
@@ -42,12 +85,8 @@ raw bytes):
   no file and no text behind it, so Kettle writes it to a temporary PNG and
   pastes that path. Controlled by `paste-images` (on by default). The temp files
   are owner-only, bounded, and deleted when Kettle exits — fine for handing an
-  image to a running agent, not a durable store. This also avoids depending on
-  the client's own clipboard-bitmap support, which varies by platform: Claude
-  Code's documented image-paste chord is `Alt+V` on Windows/WSL and `Ctrl+V`
-  elsewhere, and native-Windows bitmap paste is unreliable. Kettle leaves those
-  chords unbound (its own paste is `Ctrl+Shift+V`) so they still reach the
-  client for anyone who prefers that route.
+  image to a running agent, not a durable store. This avoids depending on the
+  client's platform- and version-specific clipboard-bitmap support.
 - **Drag and drop** a file onto the window — always pastes the path.
 
 Multiple selected files paste as space-separated quoted paths. Paths are quoted
@@ -92,12 +131,14 @@ See Neovim's [TUI input documentation](https://neovim.io/doc/user/tui/#tui-input
 - Kettle forwards application cursor/keypad modes, focus reports, SGR mouse
   events, bracketed paste, alternate-scroll behavior, resize events, Kitty
   keyboard negotiation, OSC 8 links, OSC 52 clipboard writes, styled
-  underlines, and synchronized updates through the PTY.
+  underlines, and synchronized updates through the PTY. OSC 52 target `c`
+  addresses the regular clipboard; `p`/`s` addresses Linux PRIMARY without
+  falling back to the regular clipboard when a PRIMARY operation fails.
 - Keep Kettle's outer `TERM=xterm-256color`. Inside tmux, keep tmux's
   `default-terminal` at `tmux-256color`; do not globally force either value over
   the other. `COLORTERM=truecolor`, `TERM_PROGRAM=kettle`, and
   `TERM_PROGRAM_VERSION` are already exported by Kettle.
-- tmux does not yet auto-detect Kettle's feature set. For tmux 3.2 or newer,
+- tmux does not yet auto-detect Kettle's feature set. For tmux 3.4 or newer,
   add this to `~/.tmux.conf`:
 
   ```tmux
@@ -111,11 +152,46 @@ See Neovim's [TUI input documentation](https://neovim.io/doc/user/tui/#tui-input
   preserve xterm mode 2. The options and feature names are defined in the
   [tmux manual](https://man.openbsd.org/tmux#extended-keys) and
   [tmux changelog](https://github.com/tmux/tmux/blob/master/CHANGES).
+  On tmux 3.3 or older, use only the feature names documented by that
+  installed version instead of copying this newer list; for example, OSC 7 and
+  OSC 8 terminal-feature support arrived in later tmux releases.
+- SIXEL through tmux has a separate **version and build-capability gate**.
+  Kettle supports SIXEL directly, but tmux supports it only in tmux 3.4 or
+  newer when tmux itself was configured with `--enable-sixel`. Do not infer
+  that compile-time option from `tmux -V`. A capable tmux advertises DA1
+  feature code `4` to an application inside its pane; tmux 3.6 or newer also
+  exposes the direct check `tmux display-message -p '#{sixel_support}'`
+  (`1` means enabled). `just agent-tui-smoke` and
+  `just agent-tui-wsl-smoke` perform the DA1 check on tmux 3.4 and newer and
+  cross-check the format on tmux 3.6 and newer.
+
+  Only after both gates are confirmed, add `sixel` for Kettle's outer terminal
+  type (or append `:sixel` to the existing feature entry):
+
+  ```tmux
+  # tmux >= 3.4 AND a tmux build configured with --enable-sixel only
+  set -as terminal-features ',xterm-256color:sixel'
+  ```
+
+  The live smoke then starts its private tmux client with that feature. Rendering
+  also requires tmux to know the outer terminal's nonzero pixel cell size. This
+  is commonly missing from `TIOCGWINSZ` across WSL/ConPTY; tmux 3.5a and newer
+  can query the outer terminal when the ioctl values are zero, so that version
+  or newer is preferred for SIXEL in a Kettle WSL pane. The smoke queries
+  `CSI 16 t`: with nonzero geometry it requires a generated 24x12 SIXEL to
+  reach Kettle's renderer; with zero geometry it requires and records tmux's
+  `SIXEL IMAGE (WxH)` text fallback instead of claiming an image pass.
+
+  If tmux is older, was built without SIXEL, or cannot be verified, leave
+  `sixel` out. Run the image command outside tmux, or select the application's
+  text/block fallback (for example, `chafa -f symbols`) instead; Kettle cannot
+  restore an image sequence an intervening tmux did not preserve.
 - Hold `Shift` while using the wheel to scroll Kettle's own scrollback when a
   mouse-aware tmux/TUI pane would otherwise consume the wheel.
-- Client-owned `Ctrl+V`, `Alt+V`, and `Ctrl+Alt+V` chords remain PTY input inside
-  and outside tmux. A tmux binding using the same chord takes precedence by tmux
-  design.
+- Keys not bound by Kettle remain PTY input inside and outside tmux. A tmux
+  binding using the same key takes precedence by tmux design. This transport
+  guarantee does not assert that an inner client interprets any particular key
+  as an image attachment.
 - Kettle's Codex-specific cursor compatibility policy is limited to the known
   transient native-Windows ConPTY sequence. The global unfocused-window rule is
   client-independent and does not identify processes by name.
@@ -123,4 +199,13 @@ See Neovim's [TUI input documentation](https://neovim.io/doc/user/tui/#tui-input
 Run `scripts/check-agent-cli-smoke.sh` from a Kettle checkout to verify the
 installed Codex CLI, Claude Code CLI, tmux, clean Neovim, and configured
 Neovim/AstroNvim against the current Kettle binary. The smoke also performs a
-real `CSI ? u` PTY round trip and validates tmux's additive feature entry.
+real `CSI ? u` PTY round trip when Unix Python with `termios` is available,
+checks Codex's documented `--image` help entry, and validates tmux's additive
+feature entry when tmux is available. It does not populate a clipboard, inject
+keys into either client's interactive composer, or assert that an image
+attachment appeared. Under Windows Git Bash, npm-installed clients are launched
+through their `.cmd` entry points and `cmd.exe`, rather than passing an
+extensionless POSIX shim to `CreateProcessW`; run the script with `--self-test`
+to exercise that resolver without installed clients.
+The live `agent-tui` variants add the build-gated tmux SIXEL render check; an
+older, disabled, or unverified tmux build is recorded as a skip, not a pass.

@@ -112,6 +112,24 @@ plumbing that should not be rushed into one release:
 - **Command palette / layout / SSH pickers stay single-line** — fold into the
   responsive multi-row layout the search bar already uses.
 
+### Follow-up status (2026-07-27)
+
+This list is retained as the audit's historical seven-finding result. The
+subsequent performance/quality campaign resolved four entries without erasing
+that record:
+
+- OSC 52 `p`/`s` now uses Linux PRIMARY with no cross-target fallback.
+- OSC 133 prompt marks use stable `history_origin`-based document-row ids.
+- Global Kitty deletion and `d=f` frame deletion now update renderer-visible
+  state; the full spatial/id selector set and same-read delete/replacement
+  ordering are covered.
+- Windows private state/lock creation now requires a protected current-user
+  DACL and fails closed when it cannot establish one.
+
+The Kitty acknowledgement/query path, existing-image-id retransmission cleanup,
+and exact `Q=` parent-placement selection remain deferred; completed deletion
+and placement geometry must not be read as full Kitty protocol conformance.
+
 ## Verification
 
 `just gauntlet-strict` green (GPU binaries excepted, see scope); 690 tests pass;

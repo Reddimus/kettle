@@ -205,7 +205,13 @@ mux server.
 The reason kettle ships its own anyway:
 
 - Native scrollback + image protocol passthrough on reattach.
-  tmux can't pass kitty/sixel images through.
+  tmux does not pass the Kitty graphics protocol through. SIXEL is available
+  only with tmux 3.4 or newer built using `--enable-sixel`, after declaring
+  Kettle's outer `xterm-256color:sixel` terminal feature; older and
+  non-SIXEL builds need a text fallback or the image command run outside tmux.
+  tmux also needs nonzero outer-terminal pixel geometry; tmux 3.5a or newer is
+  preferred across WSL/ConPTY because it can query when the tty ioctl omits it.
+  See [terminal client compatibility](TERMINAL-CLIENT-COMPATIBILITY.md#tmux-and-full-screen-clients).
 - Native config sharing: a `--profile dev` config applies to both the
   server's panes + the client's chrome without a tmux-config detour.
 - Native key-binding semantics: keystrokes go to the server with

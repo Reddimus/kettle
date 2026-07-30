@@ -48,17 +48,6 @@ ignore = [
   # (scripts/check-ttf-parser-scope.sh verifies the graph). Remove
   # this once glyphon ships a compatible fontdb-free stack.
   "RUSTSEC-2026-0192",
-  # RUSTSEC-2026-0194 / 0195 (`quick-xml` DoS issues): the runtime
-  # path through `notify-rust → tauri-winrt-notification` is fixed by
-  # `tauri-winrt-notification` 0.7.3, which removes quick-xml 0.37.
-  # The only remaining quick-xml 0.39 path is build-time Wayland codegen:
-  # `wayland-scanner` parses bundled protocol XML while compiling
-  # winit/smithay/sctk-adwaita. No untrusted XML reaches kettle at
-  # runtime through that path, and crates.io currently has no newer
-  # wayland-scanner release. Remove these ignores when wayland-scanner
-  # moves to quick-xml >= 0.41.
-  "RUSTSEC-2026-0194",
-  "RUSTSEC-2026-0195",
 ]
 # Note: RUSTSEC-2024-0436 (`paste` unmaintained) used to be ignored
 # here while it reached kettle via `image → rav1e → paste` (AVIF

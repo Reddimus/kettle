@@ -2,16 +2,379 @@
 //! independent terminal; splits tile the tab area; focus moves by geometry.
 
 use std::collections::HashMap;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::time::Duration;
 
-use anyhow::Result;
-use crossbeam_channel::{Receiver, Sender};
+use anyhow::{Context, Result};
+use crossbeam_channel::{Receiver, Sender, TrySendError};
 use kettle_config::{Config, CursorStyle};
-use kettle_core::{CursorShape, PtyOutputSender, TermEvent, Terminal, Waker};
+use kettle_core::{
+    CursorShape, PtyGeometry, PtyOutputSender, TermEvent, Terminal, TerminalCapabilities, Waker,
+};
 
 /// At the PTY reader's 64 KiB maximum chunk size, this bounds lossless recorder
 /// backlog to 512 KiB per pane. The sender blocks before taking the terminal
 /// lock, so backpressure cannot deadlock rendering.
 const LOSSLESS_OUTPUT_QUEUE_DEPTH: usize = 8;
+
+/// Semantic terminal events are generated while the parser holds the terminal
+/// mutex, so their sender may never block. Overflow is a hostile/stalled-pane
+/// condition handled explicitly by the UI instead of growing memory without a
+/// limit or silently dropping protocol replies.
+const TERM_EVENT_QUEUE_DEPTH: usize = 1024;
+
+/// All UI-originated PTY input and terminal protocol replies are serialized on
+/// a worker so a child that stops reading cannot block the window thread.
+const PTY_INPUT_QUEUE_DEPTH: usize = 64;
+const PTY_INPUT_WRITE_CHUNK_BYTES: usize = 8 * 1024;
+// `LOCAL_PASTE_MAX` is 4 MiB; leave room for the bracketed-paste envelope and
+// a small amount of already-queued interactive input.
+const MAX_USER_INPUT_MESSAGE_BYTES: usize = 4 * 1024 * 1024 + 64;
+const MAX_QUEUED_USER_INPUT_BYTES: usize = MAX_USER_INPUT_MESSAGE_BYTES + 64 * 1024;
+// A 1 MiB OSC 52 clipboard payload expands to roughly 1.34 MiB after base64.
+const MAX_PROTOCOL_REPLY_MESSAGE_BYTES: usize = 2 * 1024 * 1024;
+const MAX_QUEUED_PROTOCOL_REPLY_BYTES: usize = 2 * 1024 * 1024;
+
+/// Result of attempting to enqueue input for a pane.
+///
+/// Keeping these states distinct is a correctness boundary: read-only is a
+/// user policy, backpressure is transient and retryable, oversize is a caller
+/// error, and a failed transport requires closing the pane. Conflating them
+/// previously made agent RPCs report every queue failure as `read_only` and
+/// let GUI input disappear without feedback.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[must_use]
+pub enum PaneInputResult {
+    Queued,
+    ReadOnly,
+    Backpressured,
+    Oversize,
+    Failed,
+}
+
+impl PaneInputResult {
+    #[inline]
+    pub fn is_queued(self) -> bool {
+        self == Self::Queued
+    }
+
+    fn merge(self, other: Self) -> Self {
+        use PaneInputResult::{Backpressured, Failed, Oversize, Queued, ReadOnly};
+        match (self, other) {
+            (Failed, _) | (_, Failed) => Failed,
+            (Oversize, _) | (_, Oversize) => Oversize,
+            (Backpressured, _) | (_, Backpressured) => Backpressured,
+            (ReadOnly, _) | (_, ReadOnly) => ReadOnly,
+            _ => Queued,
+        }
+    }
+}
+
+fn pane_input_policy(failed: bool, read_only: bool) -> Option<PaneInputResult> {
+    if failed {
+        Some(PaneInputResult::Failed)
+    } else if read_only {
+        Some(PaneInputResult::ReadOnly)
+    } else {
+        None
+    }
+}
+
+struct QueuedPtyInput {
+    bytes: Arc<[u8]>,
+    queued_bytes: Arc<AtomicUsize>,
+}
+
+impl Drop for QueuedPtyInput {
+    fn drop(&mut self) {
+        self.queued_bytes
+            .fetch_sub(self.bytes.len(), Ordering::AcqRel);
+    }
+}
+
+struct PendingPtyInput {
+    message: QueuedPtyInput,
+    offset: usize,
+}
+
+impl PendingPtyInput {
+    fn new(message: QueuedPtyInput) -> Self {
+        Self { message, offset: 0 }
+    }
+
+    fn next_chunk(&self) -> &[u8] {
+        let end = self
+            .offset
+            .saturating_add(PTY_INPUT_WRITE_CHUNK_BYTES)
+            .min(self.message.bytes.len());
+        &self.message.bytes[self.offset..end]
+    }
+
+    fn advance(&mut self, written: usize) -> bool {
+        self.offset = self.offset.saturating_add(written);
+        self.offset == self.message.bytes.len()
+    }
+}
+
+struct PtyInputQueue {
+    user_tx: Sender<QueuedPtyInput>,
+    reply_tx: Sender<QueuedPtyInput>,
+    queued_user_bytes: Arc<AtomicUsize>,
+    queued_reply_bytes: Arc<AtomicUsize>,
+    failed: Arc<AtomicBool>,
+    stop: Arc<AtomicBool>,
+    waker: Waker,
+}
+
+impl PtyInputQueue {
+    fn new(term: &Terminal, waker: Waker) -> Result<Self> {
+        let (user_tx, user_rx) = crossbeam_channel::bounded(PTY_INPUT_QUEUE_DEPTH);
+        let (reply_tx, reply_rx) = crossbeam_channel::bounded(PTY_INPUT_QUEUE_DEPTH);
+        let queued_user_bytes = Arc::new(AtomicUsize::new(0));
+        let queued_reply_bytes = Arc::new(AtomicUsize::new(0));
+        let failed = Arc::new(AtomicBool::new(false));
+        let stop = Arc::new(AtomicBool::new(false));
+        let worker_failed = failed.clone();
+        let worker_stop = stop.clone();
+        let worker_waker = waker.clone();
+        let mut pty_stdin = term.stdin_handle()?;
+        std::thread::Builder::new()
+            .name("kettle-pty-input".into())
+            .spawn(move || {
+                let mut reply_current: Option<PendingPtyInput> = None;
+                let mut user_current: Option<PendingPtyInput> = None;
+                let mut replies_open = true;
+                let mut user_open = true;
+                let never_reply = crossbeam_channel::never::<QueuedPtyInput>();
+                let never_user = crossbeam_channel::never::<QueuedPtyInput>();
+
+                while !worker_stop.load(Ordering::Acquire) {
+                    if reply_current.is_none() && replies_open {
+                        match reply_rx.try_recv() {
+                            Ok(message) => reply_current = Some(PendingPtyInput::new(message)),
+                            Err(crossbeam_channel::TryRecvError::Empty) => {}
+                            Err(crossbeam_channel::TryRecvError::Disconnected) => {
+                                replies_open = false;
+                            }
+                        }
+                    }
+                    if user_current.is_none() && user_open {
+                        match user_rx.try_recv() {
+                            Ok(message) => user_current = Some(PendingPtyInput::new(message)),
+                            Err(crossbeam_channel::TryRecvError::Empty) => {}
+                            Err(crossbeam_channel::TryRecvError::Disconnected) => {
+                                user_open = false;
+                            }
+                        }
+                    }
+
+                    let writing_reply = reply_current.is_some();
+                    let write_result = if let Some(reply) = reply_current.as_ref() {
+                        Some(pty_stdin.try_write(reply.next_chunk()))
+                    } else {
+                        user_current
+                            .as_ref()
+                            .map(|user| pty_stdin.try_write(user.next_chunk()))
+                    };
+                    if let Some(result) = write_result {
+                        match result {
+                            Ok(0) if !writing_reply && replies_open => {
+                                match reply_rx.recv_timeout(Duration::from_millis(1)) {
+                                    Ok(message) => {
+                                        reply_current = Some(PendingPtyInput::new(message));
+                                    }
+                                    Err(crossbeam_channel::RecvTimeoutError::Disconnected) => {
+                                        replies_open = false;
+                                    }
+                                    Err(crossbeam_channel::RecvTimeoutError::Timeout) => {}
+                                }
+                            }
+                            Ok(0) => std::thread::sleep(Duration::from_millis(1)),
+                            Ok(written) if writing_reply => {
+                                if reply_current
+                                    .as_mut()
+                                    .is_some_and(|reply| reply.advance(written))
+                                {
+                                    reply_current = None;
+                                }
+                            }
+                            Ok(written) => {
+                                if user_current
+                                    .as_mut()
+                                    .is_some_and(|user| user.advance(written))
+                                {
+                                    user_current = None;
+                                }
+                            }
+                            Err(error) => {
+                                log::error!("PTY input worker failed: {error:#}");
+                                if !worker_failed.swap(true, Ordering::AcqRel) {
+                                    (worker_waker)();
+                                }
+                                break;
+                            }
+                        }
+                        continue;
+                    }
+
+                    if !replies_open && !user_open {
+                        break;
+                    }
+                    let reply_receiver = if replies_open {
+                        &reply_rx
+                    } else {
+                        &never_reply
+                    };
+                    let user_receiver = if user_open { &user_rx } else { &never_user };
+                    crossbeam_channel::select_biased! {
+                        recv(reply_receiver) -> message => match message {
+                            Ok(message) => {
+                                reply_current = Some(PendingPtyInput::new(message));
+                            }
+                            Err(_) => replies_open = false,
+                        },
+                        recv(user_receiver) -> message => match message {
+                            Ok(message) => {
+                                user_current = Some(PendingPtyInput::new(message));
+                            }
+                            Err(_) => user_open = false,
+                        },
+                    }
+                }
+            })
+            .context("cannot spawn PTY input worker")?;
+        Ok(Self {
+            user_tx,
+            reply_tx,
+            queued_user_bytes,
+            queued_reply_bytes,
+            failed,
+            stop,
+            waker,
+        })
+    }
+
+    #[cfg(test)]
+    fn disconnected_for_test(waker: Waker) -> Self {
+        let (user_tx, user_rx) = crossbeam_channel::bounded(PTY_INPUT_QUEUE_DEPTH);
+        let (reply_tx, reply_rx) = crossbeam_channel::bounded(PTY_INPUT_QUEUE_DEPTH);
+        drop(user_rx);
+        drop(reply_rx);
+        Self {
+            user_tx,
+            reply_tx,
+            queued_user_bytes: Arc::new(AtomicUsize::new(0)),
+            queued_reply_bytes: Arc::new(AtomicUsize::new(0)),
+            failed: Arc::new(AtomicBool::new(false)),
+            stop: Arc::new(AtomicBool::new(false)),
+            waker,
+        }
+    }
+
+    fn enqueue_user(&self, bytes: Arc<[u8]>) -> PaneInputResult {
+        self.enqueue(
+            &self.user_tx,
+            &self.queued_user_bytes,
+            MAX_USER_INPUT_MESSAGE_BYTES,
+            MAX_QUEUED_USER_INPUT_BYTES,
+            bytes,
+            false,
+        )
+    }
+
+    fn enqueue_reply(&self, bytes: Arc<[u8]>) -> PaneInputResult {
+        self.enqueue(
+            &self.reply_tx,
+            &self.queued_reply_bytes,
+            MAX_PROTOCOL_REPLY_MESSAGE_BYTES,
+            MAX_QUEUED_PROTOCOL_REPLY_BYTES,
+            bytes,
+            true,
+        )
+    }
+
+    fn enqueue(
+        &self,
+        tx: &Sender<QueuedPtyInput>,
+        queued_bytes: &Arc<AtomicUsize>,
+        max_message_bytes: usize,
+        max_queued_bytes: usize,
+        bytes: Arc<[u8]>,
+        fail_on_reject: bool,
+    ) -> PaneInputResult {
+        if bytes.is_empty() {
+            return if self.failed.load(Ordering::Acquire) {
+                PaneInputResult::Failed
+            } else {
+                PaneInputResult::Queued
+            };
+        }
+        if self.failed.load(Ordering::Acquire) {
+            return PaneInputResult::Failed;
+        }
+        if bytes.len() > max_message_bytes {
+            if fail_on_reject {
+                self.fail();
+                return PaneInputResult::Failed;
+            }
+            return PaneInputResult::Oversize;
+        }
+        if queued_bytes
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+                current
+                    .checked_add(bytes.len())
+                    .filter(|next| *next <= max_queued_bytes)
+            })
+            .is_err()
+        {
+            if fail_on_reject {
+                self.fail();
+                return PaneInputResult::Failed;
+            }
+            return PaneInputResult::Backpressured;
+        }
+
+        let message = QueuedPtyInput {
+            bytes,
+            queued_bytes: queued_bytes.clone(),
+        };
+        match tx.try_send(message) {
+            Ok(()) => PaneInputResult::Queued,
+            Err(TrySendError::Full(_)) => {
+                // The unsent message releases its byte reservation on drop.
+                if fail_on_reject {
+                    self.fail();
+                    PaneInputResult::Failed
+                } else {
+                    PaneInputResult::Backpressured
+                }
+            }
+            Err(TrySendError::Disconnected(_)) => {
+                // A disconnected worker is terminal even for user input; no
+                // retry can succeed and drain_events must tear the pane down.
+                self.fail();
+                PaneInputResult::Failed
+            }
+        }
+    }
+
+    fn fail(&self) {
+        if !self.failed.swap(true, Ordering::AcqRel) {
+            (self.waker)();
+        }
+    }
+
+    fn failed(&self) -> bool {
+        self.failed.load(Ordering::Acquire)
+    }
+}
+
+impl Drop for PtyInputQueue {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Release);
+    }
+}
 
 /// Initial pane title seeded from the launching argv before the program's
 /// first OSC 2. Plain shells use the placeholder "kettle" — the
@@ -91,7 +454,7 @@ fn engine_cursor_shape(s: CursorStyle) -> CursorShape {
     }
 }
 
-use crate::session::{SNode, STab, Session};
+use crate::session::{MAX_RESTORE_PANES, SNode, STab, Session};
 
 /// Pixel rectangle: `(x, y, w, h)`.
 pub type Rect = (f32, f32, f32, f32);
@@ -104,9 +467,18 @@ pub enum Dir {
     Vertical,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PaneTitleOrigin {
+    Placeholder,
+    ExplicitLaunch,
+    Osc,
+    Remote,
+}
+
 pub struct Pane {
     pub term: Terminal,
     pub rx: Receiver<TermEvent>,
+    pty_input: PtyInputQueue,
     /// Terminator plugin parity: optional output sidechannel. `Some` when the
     /// LuaEngine subscribed at App startup; the App drains it each tick and
     /// fires LuaEvent::Output(pane_id, bytes).
@@ -120,6 +492,8 @@ pub struct Pane {
     /// instant any real OSC 2 title is stored, so a program-set title is never
     /// suppressed. Seeded `true` only for generic-shell panes (see `spawn_pane`).
     pub title_is_placeholder: bool,
+    pub(crate) title_origin: PaneTitleOrigin,
+    pub(crate) title_before_remote: Option<(String, PaneTitleOrigin)>,
     /// Terminator parity, named broadcast groups foundation: per-pane group
     /// name. When set, the pane is part of a named broadcast group;
     /// keyboard input to any member of the group broadcasts to every
@@ -136,10 +510,10 @@ pub struct Pane {
     /// marks a pane deliberately KEPT on screen after its shell exited (Hold);
     /// reap skips it until the user explicitly closes it (which sets `closed`).
     pub held: bool,
-    /// Scrollback `history_size()` observed at the *previous* redraw — used
-    /// to detect new output for `scroll-on-output`. `None` while no frame
-    /// has been drawn yet (so the first frame doesn't look like growth).
-    pub last_history: Option<usize>,
+    /// PTY output generation observed at the previous full redraw. This is the
+    /// lock-free edge for tab activity and `scroll-on-output`; `None` keeps the
+    /// first frame from treating pre-spawn output as new activity.
+    pub last_output_generation: Option<u64>,
     /// Launching argv ([] means the configured shell). Held so a
     /// closed-tab snapshot can re-spawn the same program in
     /// `Action::UndoCloseTab` — SSH tabs and `-e PROG`
@@ -172,17 +546,40 @@ pub struct Pane {
 impl Pane {
     /// Terminator parity: write user-originated input (keystroke /
     /// paste / IME / drag-drop / send-text) to the PTY, honoring the read-only
-    /// toggle. Returns `true` when the bytes were written. VTE
+    /// toggle. Returns the explicit enqueue outcome. VTE
     /// `feed_child` + `input-enabled` semantics: read-only blocks the *user*
     /// (and anything acting as the user — Lua send_text, remote.cmd, agent
-    /// `send_text`/`run_command`), NOT the terminal protocol; replies like
-    /// focus/mouse reports and DSR keep flowing through `term.write` directly.
-    pub fn feed_input(&self, bytes: &[u8]) -> bool {
-        if self.read_only {
-            return false;
+    /// `send_text`/`run_command`), NOT the terminal protocol. Both paths share
+    /// the bounded PTY-input worker so neither can block the UI.
+    pub fn feed_input(&self, bytes: &[u8]) -> PaneInputResult {
+        if let Some(result) = pane_input_policy(self.pty_input.failed(), self.read_only) {
+            return result;
         }
-        self.term.write(bytes);
-        true
+        if bytes.len() > MAX_USER_INPUT_MESSAGE_BYTES {
+            return PaneInputResult::Oversize;
+        }
+        self.feed_input_shared(Arc::from(bytes))
+    }
+
+    pub fn feed_input_shared(&self, bytes: Arc<[u8]>) -> PaneInputResult {
+        if let Some(result) = pane_input_policy(self.pty_input.failed(), self.read_only) {
+            return result;
+        }
+        self.pty_input.enqueue_user(bytes)
+    }
+
+    /// Queue a terminal-protocol reply or report irrespective of read-only
+    /// mode. Failure is sticky and causes the pane to be torn down.
+    pub fn queue_protocol_reply(&self, bytes: &[u8]) -> PaneInputResult {
+        if bytes.len() > MAX_PROTOCOL_REPLY_MESSAGE_BYTES {
+            self.pty_input.fail();
+            return PaneInputResult::Failed;
+        }
+        self.pty_input.enqueue_reply(Arc::from(bytes))
+    }
+
+    pub fn pty_input_failed(&self) -> bool {
+        self.pty_input.failed()
     }
 }
 
@@ -766,6 +1163,10 @@ pub struct Mux {
     /// When the dev recorder is teeing PTY output, use bounded lossless
     /// backpressure rather than the Lua plugin tap's best-effort delivery.
     pub record_lossless: bool,
+    /// Effective OSC 52 write capability after combining config policy with
+    /// platform clipboard availability. New panes inherit it and live panes
+    /// receive updates through [`Mux::set_osc52_copy_allowed`].
+    pub osc52_copy_allowed: bool,
     /// Ring buffer of recently-closed tab snapshots.
     /// Bounded so a long-running session doesn't accumulate state.
     /// LIFO: `pop_back` returns the most-recently-closed tab.
@@ -781,7 +1182,15 @@ impl Mux {
             broadcast: BroadcastScope::Off,
             lua_output_subscribed: false,
             record_lossless: false,
+            osc52_copy_allowed: true,
             closed_tabs: std::collections::VecDeque::with_capacity(CLOSED_TAB_RING_CAP),
+        }
+    }
+
+    pub fn set_osc52_copy_allowed(&mut self, allowed: bool) {
+        self.osc52_copy_allowed = allowed;
+        for pane in self.panes.values() {
+            pane.term.set_osc52_copy_allowed(allowed);
         }
     }
 
@@ -835,31 +1244,13 @@ impl Mux {
     fn spawn_pane(
         &mut self,
         cfg: &Config,
-        cols: usize,
-        rows: usize,
-        cw: u16,
-        ch: u16,
+        geometry: PtyGeometry,
         waker: Waker,
         cwd: Option<&str>,
         argv: &[String],
     ) -> Result<u64> {
-        // Investigated and intentionally kept unbounded:
-        // a bounded channel here is UNSAFE in both variants. `TermEvent` is
-        // `alacritty_terminal::event::Event`, which carries one-shot events that
-        // must never be dropped — `Exit` (child gone → pane close; dropping it
-        // zombies the pane) and `PtyWrite(..)` (protocol replies written back to
-        // the PTY, e.g. cursor-position / device-attribute answers; dropping one
-        // hangs the querying program). So `bounded` + `try_send` (drop-on-full)
-        // is out. And `bounded` + blocking `send` deadlocks: the sender
-        // (`EventProxy::send_event`) runs inside `processor.advance(&mut *t, ..)`
-        // while the reader holds `term.lock()` (term.rs); a full channel would
-        // block the reader *with the lock held*, and the UI thread — which locks
-        // the same `term` to render — would block forever waiting for it. The
-        // channel is drained every UI iteration via `try_recv` and the waker
-        // fires per event, so it does not grow unbounded in normal operation;
-        // sustained growth only happens if the UI thread is already wedged, at
-        // which point OOM is a symptom, not the disease. Keep it unbounded.
-        let (tx, rx): (Sender<TermEvent>, Receiver<TermEvent>) = crossbeam_channel::unbounded();
+        let (tx, rx): (Sender<TermEvent>, Receiver<TermEvent>) =
+            crossbeam_channel::bounded(TERM_EVENT_QUEUE_DEPTH);
         // Terminator plugin parity: optional output sidechannel for
         // LuaEvent::Output emission.
         // The Mux's output_tx is set when a LuaEngine subscribes
@@ -886,15 +1277,12 @@ impl Mux {
         // cfg.term / cfg.colorterm / cfg.login_shell take effect at
         // PTY spawn. The legacy `Terminal::new` shim still exists
         // for non-Mux callers (currently none in-tree).
-        let term = Terminal::new_with_env_and_output(
+        let term = Terminal::new_with_env_and_output_geometry_and_capabilities(
             argv,
             cwd,
             cfg.scrollback,
             cfg.scrollback_bytes,
-            cols.max(1),
-            rows.max(1),
-            cw,
-            ch,
+            geometry,
             cfg.cursor_blink,
             engine_cursor_shape(cfg.cursor_style),
             Some(cfg.word_delimiters.as_str()),
@@ -903,16 +1291,25 @@ impl Mux {
             &cfg.env,
             cfg.login_shell,
             cfg.shell_integration,
+            TerminalCapabilities {
+                osc52_copy: self.osc52_copy_allowed,
+            },
             tx,
-            waker,
+            waker.clone(),
             output_tx,
         )?;
+        let pty_input = PtyInputQueue::new(&term, waker)?;
         let id = NEXT_PANE_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let initial_title = initial_pane_title(argv);
         // Only generic-shell panes ("kettle" seed) are eligible for conhost
         // startup-title suppression + cwd labelling; a `-e htop`/`ssh` pane keeps
         // its real seed and is never treated as a placeholder.
         let title_is_placeholder = initial_title == "kettle";
+        let title_origin = if title_is_placeholder {
+            PaneTitleOrigin::Placeholder
+        } else {
+            PaneTitleOrigin::ExplicitLaunch
+        };
         let output_rx = if self.lua_output_subscribed {
             Some(out_rx)
         } else {
@@ -923,13 +1320,16 @@ impl Mux {
             Pane {
                 term,
                 rx,
+                pty_input,
                 output_rx,
                 title: initial_title,
                 title_is_placeholder,
+                title_origin,
+                title_before_remote: None,
                 group_name: None,
                 closed: false,
                 held: false,
-                last_history: None,
+                last_output_generation: None,
                 argv: argv.to_vec(),
                 remote_context: None,
                 agent_attached: false,
@@ -1014,8 +1414,7 @@ impl Mux {
         &mut self,
         n: &SNode,
         cfg: &Config,
-        cw: u16,
-        ch: u16,
+        geometries: &mut dyn Iterator<Item = PtyGeometry>,
         mk: &dyn Fn() -> Waker,
         // Every pane id spawned while building this
         // subtree is appended here so the caller can reap them if a LATER
@@ -1032,7 +1431,10 @@ impl Mux {
                 } else {
                     cmd.clone()
                 };
-                let id = self.spawn_pane(cfg, 80, 24, cw, ch, mk(), cwd.as_deref(), &argv)?;
+                let geometry = geometries
+                    .next()
+                    .unwrap_or_else(|| PtyGeometry::from_cell_size(80, 24, 8, 16));
+                let id = self.spawn_pane(cfg, geometry, mk(), cwd.as_deref(), &argv)?;
                 spawned.push(id);
                 // C7 (audit v2.32.0): rejoin the saved broadcast group.
                 if let Some(p) = self.panes.get_mut(&id) {
@@ -1046,8 +1448,8 @@ impl Mux {
                 a,
                 b,
             } => {
-                let a = self.build_node(a, cfg, cw, ch, mk, spawned)?;
-                let b = self.build_node(b, cfg, cw, ch, mk, spawned)?;
+                let a = self.build_node(a, cfg, geometries, mk, spawned)?;
+                let b = self.build_node(b, cfg, geometries, mk, spawned)?;
                 Ok(Node::Split {
                     dir: if *vertical {
                         Dir::Vertical
@@ -1064,6 +1466,7 @@ impl Mux {
 
     /// Rebuild tabs/splits from a saved session, spawning shells in their
     /// recorded directories. Returns whether anything was restored.
+    #[allow(dead_code)]
     pub fn restore(
         &mut self,
         s: &Session,
@@ -1072,31 +1475,64 @@ impl Mux {
         ch: u16,
         mk: &dyn Fn() -> Waker,
     ) -> bool {
+        let mut total = 0usize;
+        let mut geometries = Vec::with_capacity(s.tabs.len().min(MAX_RESTORE_PANES));
+        for tab in &s.tabs {
+            let Some(leaves) = tab
+                .root
+                .bounded_leaf_count(MAX_RESTORE_PANES.saturating_sub(total))
+            else {
+                log::warn!("session restore rejected: pane fan-out exceeds the global cap");
+                return false;
+            };
+            total += leaves;
+            geometries.push(
+                std::iter::repeat_n(PtyGeometry::from_cell_size(80, 24, cw, ch), leaves).collect(),
+            );
+        }
+        self.restore_geometry(s, cfg, &geometries, mk)
+    }
+
+    /// Restore with one exact initial geometry per serialized leaf, in DFS
+    /// order. The UI computes these from the live surface and saved split tree
+    /// before any child starts, avoiding an initial rounded 80x24 ioctl.
+    pub fn restore_geometry(
+        &mut self,
+        s: &Session,
+        cfg: &Config,
+        geometries: &[Vec<PtyGeometry>],
+        mk: &dyn Fn() -> Waker,
+    ) -> bool {
         // Bound the total PTY fan-out. The 16 MiB file-size
         // cap is a weak proxy — a small session.json of minimal flat leaves
         // (~30 bytes each) could ask to fork hundreds of thousands of shells on
         // launch, hanging/OOMing the machine. Stop restoring further tabs once
         // the running pane count would exceed the cap (256 panes is far past any
         // real layout) and surface why.
-        const MAX_RESTORE_PANES: usize = 256;
         let mut spawned = 0usize;
         for (i, st) in s.tabs.iter().enumerate() {
-            let tab_leaves = st.root.leaf_count();
-            if spawned + tab_leaves > MAX_RESTORE_PANES {
+            let Some(tab_leaves) = st
+                .root
+                .bounded_leaf_count(MAX_RESTORE_PANES.saturating_sub(spawned))
+            else {
                 log::warn!(
                     "session restore: stopping at tab {i} — would exceed the \
                      {MAX_RESTORE_PANES}-pane restore cap (session may be corrupt or crafted)"
                 );
                 break;
-            }
-            spawned += tab_leaves;
+            };
             // Track every pane id this tab's tree spawns so
             // a partial failure (e.g. the 2nd pane of a split fails to fork)
             // can reap the panes already created for the same tree instead of
             // leaking their PTYs + child processes.
             let mut tab_pane_ids: Vec<u64> = Vec::new();
-            match self.build_node(&st.root, cfg, cw, ch, mk, &mut tab_pane_ids) {
+            let mut tab_geometries = geometries
+                .get(i)
+                .into_iter()
+                .flat_map(|values| values.iter().copied());
+            match self.build_node(&st.root, cfg, &mut tab_geometries, mk, &mut tab_pane_ids) {
                 Ok(root) => {
+                    spawned += tab_leaves;
                     // Restore the focused leaf at its DFS index (saved
                     // by `snapshot`). `nth_leaf` falls back to the
                     // first leaf if the index is past the end, which
@@ -1143,6 +1579,7 @@ impl Mux {
         !self.tabs.is_empty()
     }
 
+    #[allow(dead_code)]
     pub fn new_tab(
         &mut self,
         cfg: &Config,
@@ -1152,14 +1589,24 @@ impl Mux {
         ch: u16,
         waker: Waker,
     ) -> Result<()> {
+        self.new_tab_geometry(cfg, PtyGeometry::from_cell_size(cols, rows, cw, ch), waker)
+    }
+
+    pub fn new_tab_geometry(
+        &mut self,
+        cfg: &Config,
+        geometry: PtyGeometry,
+        waker: Waker,
+    ) -> Result<()> {
         let argv = shell_argv(cfg);
         let cwd = self.focused_cwd();
-        self.new_tab_with(cfg, cols, rows, cw, ch, waker, &argv, cwd.as_deref())
+        self.new_tab_with_geometry(cfg, geometry, waker, &argv, cwd.as_deref())
     }
 
     /// Open a new tab running an explicit `argv` in `cwd` (CLI `-e`/`-d`);
     /// an empty `argv` means the configured shell.
     #[allow(clippy::too_many_arguments)]
+    #[allow(dead_code)]
     pub fn new_tab_with(
         &mut self,
         cfg: &Config,
@@ -1171,7 +1618,24 @@ impl Mux {
         argv: &[String],
         cwd: Option<&str>,
     ) -> Result<()> {
-        let id = self.spawn_pane(cfg, cols, rows, cw, ch, waker, cwd, argv)?;
+        self.new_tab_with_geometry(
+            cfg,
+            PtyGeometry::from_cell_size(cols, rows, cw, ch),
+            waker,
+            argv,
+            cwd,
+        )
+    }
+
+    pub fn new_tab_with_geometry(
+        &mut self,
+        cfg: &Config,
+        geometry: PtyGeometry,
+        waker: Waker,
+        argv: &[String],
+        cwd: Option<&str>,
+    ) -> Result<()> {
+        let id = self.spawn_pane(cfg, geometry, waker, cwd, argv)?;
         let new_tab = Tab {
             root: Node::Leaf(id),
             focus: id,
@@ -1206,6 +1670,7 @@ impl Mux {
     /// tab fell back to the home dir — the same class of regression fixed for
     /// splits/duplicates by wiring them through `launch_cwd`.
     #[allow(clippy::too_many_arguments)]
+    #[allow(dead_code)]
     pub fn new_tab_with_launch(
         &mut self,
         cfg: &Config,
@@ -1217,12 +1682,30 @@ impl Mux {
         argv: Vec<String>,
         raw_cwd: Option<String>,
     ) -> Result<()> {
+        self.new_tab_with_launch_geometry(
+            cfg,
+            PtyGeometry::from_cell_size(cols, rows, cw, ch),
+            waker,
+            argv,
+            raw_cwd,
+        )
+    }
+
+    pub fn new_tab_with_launch_geometry(
+        &mut self,
+        cfg: &Config,
+        geometry: PtyGeometry,
+        waker: Waker,
+        argv: Vec<String>,
+        raw_cwd: Option<String>,
+    ) -> Result<()> {
         let (argv, cwd) = launch_cwd(argv, raw_cwd);
-        self.new_tab_with(cfg, cols, rows, cw, ch, waker, &argv, cwd.as_deref())
+        self.new_tab_with_geometry(cfg, geometry, waker, &argv, cwd.as_deref())
     }
 
     /// Open a new tab running `ssh -t <target>` (SSH multiplexing).
     #[allow(clippy::too_many_arguments)]
+    #[allow(dead_code)]
     pub fn new_ssh_tab(
         &mut self,
         cfg: &Config,
@@ -1233,12 +1716,27 @@ impl Mux {
         waker: Waker,
         target: &str,
     ) -> Result<()> {
+        self.new_ssh_tab_geometry(
+            cfg,
+            PtyGeometry::from_cell_size(cols, rows, cw, ch),
+            waker,
+            target,
+        )
+    }
+
+    pub fn new_ssh_tab_geometry(
+        &mut self,
+        cfg: &Config,
+        geometry: PtyGeometry,
+        waker: Waker,
+        target: &str,
+    ) -> Result<()> {
         let argv = vec!["ssh".to_string(), "-t".to_string(), target.to_string()];
         // `spawn_pane` sees argv[0] == "ssh" and seeds the pane title to
         // `ssh <target>` so the tab is distinguishable from a regular
         // shell tab while the connection is establishing. The OSC 2
         // handler overwrites this when the remote shell sets a title.
-        let id = self.spawn_pane(cfg, cols, rows, cw, ch, waker, None, &argv)?;
+        let id = self.spawn_pane(cfg, geometry, waker, None, &argv)?;
         self.tabs.push(Tab {
             root: Node::Leaf(id),
             focus: id,
@@ -1296,6 +1794,7 @@ impl Mux {
     }
 
     #[allow(clippy::too_many_arguments)]
+    #[allow(dead_code)]
     pub fn split(
         &mut self,
         dir: Dir,
@@ -1306,14 +1805,29 @@ impl Mux {
         ch: u16,
         waker: Waker,
     ) -> Result<()> {
+        self.split_geometry(
+            dir,
+            cfg,
+            PtyGeometry::from_cell_size(cols, rows, cw, ch),
+            waker,
+        )
+    }
+
+    pub fn split_geometry(
+        &mut self,
+        dir: Dir,
+        cfg: &Config,
+        geometry: PtyGeometry,
+        waker: Waker,
+    ) -> Result<()> {
         if self.tabs.is_empty() {
-            return self.new_tab(cfg, cols, rows, cw, ch, waker);
+            return self.new_tab_geometry(cfg, geometry, waker);
         }
         // v2.33.1: clone shell-like launches, but keep direct
         // agent/editor panes split-friendly by falling back to a shell in the
         // focused cwd. See `split_focused_launch`.
         let (argv, cwd) = self.split_focused_launch(cfg);
-        let new_id = self.spawn_pane(cfg, cols, rows, cw, ch, waker, cwd.as_deref(), &argv)?;
+        let new_id = self.spawn_pane(cfg, geometry, waker, cwd.as_deref(), &argv)?;
         let a = self.active;
         let grafted = self
             .tabs
@@ -1336,6 +1850,7 @@ impl Mux {
     /// caller-supplied command instead of cloning the pane's launch argv; the
     /// WSL `--cd` dir handling is applied via `launch_cwd`.
     #[allow(clippy::too_many_arguments)]
+    #[allow(dead_code)]
     pub fn split_with(
         &mut self,
         dir: Dir,
@@ -1348,11 +1863,30 @@ impl Mux {
         argv: Vec<String>,
         raw_cwd: Option<String>,
     ) -> Result<()> {
+        self.split_with_geometry(
+            dir,
+            cfg,
+            PtyGeometry::from_cell_size(cols, rows, cw, ch),
+            waker,
+            argv,
+            raw_cwd,
+        )
+    }
+
+    pub fn split_with_geometry(
+        &mut self,
+        dir: Dir,
+        cfg: &Config,
+        geometry: PtyGeometry,
+        waker: Waker,
+        argv: Vec<String>,
+        raw_cwd: Option<String>,
+    ) -> Result<()> {
         let (argv, cwd) = launch_cwd(argv, raw_cwd);
         if self.tabs.is_empty() {
-            return self.new_tab_with(cfg, cols, rows, cw, ch, waker, &argv, cwd.as_deref());
+            return self.new_tab_with_geometry(cfg, geometry, waker, &argv, cwd.as_deref());
         }
-        let new_id = self.spawn_pane(cfg, cols, rows, cw, ch, waker, cwd.as_deref(), &argv)?;
+        let new_id = self.spawn_pane(cfg, geometry, waker, cwd.as_deref(), &argv)?;
         let a = self.active;
         let grafted = self
             .tabs
@@ -1381,6 +1915,33 @@ impl Mux {
             }
         }
         v
+    }
+
+    pub fn active_pane_count(&self) -> usize {
+        self.tabs
+            .get(self.active)
+            .map(|tab| tab.root.leaf_ids().len())
+            .unwrap_or(0)
+    }
+
+    /// Rectangle the newly spawned second child will occupy after a 50/50 split
+    /// of the focused leaf. This intentionally ignores zoom (the split action
+    /// exits zoom) and mirrors `Node::layout` rounding exactly.
+    pub fn prospective_split_rect(&self, dir: Dir, area: Rect) -> Option<Rect> {
+        let tab = self.tabs.get(self.active)?;
+        let mut layout = Vec::new();
+        tab.root.layout(area, &mut layout);
+        let (_, (x, y, width, height)) = layout.into_iter().find(|(id, _)| *id == tab.focus)?;
+        Some(match dir {
+            Dir::Horizontal => {
+                let first_width = (width * 0.5).round();
+                (x + first_width, y, width - first_width, height)
+            }
+            Dir::Vertical => {
+                let first_height = (height * 0.5).round();
+                (x, y + first_height, width, height - first_height)
+            }
+        })
     }
 
     /// The divider seams of `tab` laid out over `area`,
@@ -1897,6 +2458,7 @@ impl Mux {
     /// chrome layer treats that as a no-op the same way it treats
     /// `new_tab` on an empty mux.
     #[allow(clippy::too_many_arguments)]
+    #[allow(dead_code)]
     pub fn duplicate_focused_tab(
         &mut self,
         cfg: &Config,
@@ -1906,17 +2468,30 @@ impl Mux {
         ch: u16,
         waker: Waker,
     ) -> Result<()> {
+        self.duplicate_focused_tab_geometry(
+            cfg,
+            PtyGeometry::from_cell_size(cols, rows, cw, ch),
+            waker,
+        )
+    }
+
+    pub fn duplicate_focused_tab_geometry(
+        &mut self,
+        cfg: &Config,
+        geometry: PtyGeometry,
+        waker: Waker,
+    ) -> Result<()> {
         if self
             .active_focus()
             .and_then(|id| self.panes.get(&id))
             .is_none()
         {
-            return self.new_tab(cfg, cols, rows, cw, ch, waker);
+            return self.new_tab_geometry(cfg, geometry, waker);
         }
         // Clone via the shared helper so a WSL tab duplicates
         // with `wsl --cd <dir>` instead of falling back to the home dir.
         let (argv, cwd) = self.clone_focused_launch(cfg);
-        self.new_tab_with(cfg, cols, rows, cw, ch, waker, &argv, cwd.as_deref())
+        self.new_tab_with_geometry(cfg, geometry, waker, &argv, cwd.as_deref())
     }
 
     /// Split the focused pane and run the *same* program in the new
@@ -1925,6 +2500,7 @@ impl Mux {
     /// shell — so a `kettle -e vim file` pane duplicates into a
     /// second vim instance in the same cwd.
     #[allow(clippy::too_many_arguments)]
+    #[allow(dead_code)]
     pub fn duplicate_focused_pane(
         &mut self,
         dir: Dir,
@@ -1935,13 +2511,28 @@ impl Mux {
         ch: u16,
         waker: Waker,
     ) -> Result<()> {
+        self.duplicate_focused_pane_geometry(
+            dir,
+            cfg,
+            PtyGeometry::from_cell_size(cols, rows, cw, ch),
+            waker,
+        )
+    }
+
+    pub fn duplicate_focused_pane_geometry(
+        &mut self,
+        dir: Dir,
+        cfg: &Config,
+        geometry: PtyGeometry,
+        waker: Waker,
+    ) -> Result<()> {
         if self.tabs.is_empty() {
-            return self.new_tab(cfg, cols, rows, cw, ch, waker);
+            return self.new_tab_geometry(cfg, geometry, waker);
         }
         // Shares `clone_focused_launch` with `split` (now also a
         // clone) — clones the focused pane's argv + cwd, WSL-aware.
         let (argv, cwd) = self.clone_focused_launch(cfg);
-        let new_id = self.spawn_pane(cfg, cols, rows, cw, ch, waker, cwd.as_deref(), &argv)?;
+        let new_id = self.spawn_pane(cfg, geometry, waker, cwd.as_deref(), &argv)?;
         let a = self.active;
         let grafted = self
             .tabs
@@ -1963,6 +2554,7 @@ impl Mux {
     /// was actually restored. Inserts at the original index (clamped
     /// to the current tab count); the new tab becomes active.
     #[allow(clippy::too_many_arguments)]
+    #[allow(dead_code)]
     pub fn undo_close_tab(
         &mut self,
         cfg: &Config,
@@ -1972,21 +2564,21 @@ impl Mux {
         ch: u16,
         waker: Waker,
     ) -> Result<bool> {
+        self.undo_close_tab_geometry(cfg, PtyGeometry::from_cell_size(cols, rows, cw, ch), waker)
+    }
+
+    pub fn undo_close_tab_geometry(
+        &mut self,
+        cfg: &Config,
+        geometry: PtyGeometry,
+        waker: Waker,
+    ) -> Result<bool> {
         let Some(snap) = self.closed_tabs.pop_back() else {
             return Ok(false);
         };
         // Re-spawn the same argv + cwd. Empty argv → configured shell
         // (matches `new_tab_with`'s contract).
-        let id = self.spawn_pane(
-            cfg,
-            cols,
-            rows,
-            cw,
-            ch,
-            waker,
-            snap.cwd.as_deref(),
-            &snap.argv,
-        )?;
+        let id = self.spawn_pane(cfg, geometry, waker, snap.cwd.as_deref(), &snap.argv)?;
         let insert_at = snap.original_index.min(self.tabs.len());
         self.tabs.insert(
             insert_at,
@@ -2107,19 +2699,37 @@ impl Mux {
     /// `broadcast_all` is per-window-per-tab; iTerm2's "Send Input to All
     /// Sessions" defaults per-window; kitty's `send_text` targets all
     /// windows in the current tab. We follow that convention.
-    pub fn broadcast_write(&mut self, bytes: &[u8]) {
+    pub fn broadcast_write(&mut self, bytes: &[u8]) -> PaneInputResult {
+        self.broadcast_write_inner(bytes, false)
+    }
+
+    /// Broadcast a keystroke and scroll only panes which actually accepted it.
+    pub fn broadcast_write_with_scroll(&mut self, bytes: &[u8]) -> PaneInputResult {
+        self.broadcast_write_inner(bytes, true)
+    }
+
+    fn broadcast_write_inner(&mut self, bytes: &[u8], scroll_to_bottom: bool) -> PaneInputResult {
         // Respect the `BroadcastScope` enum (phase 3 of the named-groups
         // design). Off short-circuits; Tab keeps the
         // active-tab behavior; All targets every pane
         // window-wide; Group(name) targets cross-tab matches.
         let ids = self.broadcast_target_ids();
+        let mut result = PaneInputResult::Queued;
         for id in ids {
             if let Some(p) = self.panes.get_mut(&id) {
                 // A read-only pane drops user input (keystroke /
                 // paste / broadcast). The child still produces output.
-                p.feed_input(bytes);
+                let pane_result = p.feed_input(bytes);
+                if pane_result.is_queued()
+                    && scroll_to_bottom
+                    && let Ok(mut term) = p.term.term.lock()
+                {
+                    term.scroll_display(kettle_core::Scroll::Bottom);
+                }
+                result = result.merge(pane_result);
             }
         }
+        result
     }
 
     /// Toggle the focused pane's read-only state; returns the new
@@ -2183,32 +2793,6 @@ impl Mux {
         targets
     }
 
-    /// Snap every pane in the active tab's broadcast set back to the
-    /// bottom of its scrollback. Companion to
-    /// `broadcast_write`: `scroll-on-keystroke` (default true) needs to
-    /// apply to every targeted pane, not just the focused one, otherwise
-    /// the user broadcasting input to N panes sees a confusing mismatch
-    /// (typing reaches the remote shells but the local view of any
-    /// scrolled-back pane stays pinned to history). Same scoping as
-    /// `broadcast_write` — active tab's leaves only, never other tabs.
-    /// Skips read-only panes — their keystroke was dropped
-    /// by `feed_input`, so yanking their viewport would break the "no input,
-    /// no snap" rule the focused-pane path follows (a scrolled-back read-only
-    /// monitoring pane must stay where the user put it).
-    pub fn broadcast_scroll_to_bottom(&mut self) {
-        // Scope-aware target set (phase 3 of the named-groups design),
-        // same as broadcast_write / broadcast_paste.
-        let ids = self.broadcast_target_ids();
-        for id in ids {
-            if let Some(p) = self.panes.get_mut(&id)
-                && !p.read_only
-                && let Ok(mut t) = p.term.term.lock()
-            {
-                t.scroll_display(kettle_core::Scroll::Bottom);
-            }
-        }
-    }
-
     /// Return true when any writable pane in the active broadcast target set
     /// would receive a raw paste instead of bracketed paste wrapping. Used by
     /// the app-level paste protection prompt: a multi-line paste is safe to
@@ -2229,9 +2813,8 @@ impl Mux {
     }
 
     /// Distribute a clipboard paste to every pane in the active tab's
-    /// broadcast set. Companion to `broadcast_write` and
-    /// `broadcast_scroll_to_bottom`: with broadcast on (group-input
-    /// mode, Ctrl+Shift+G), keystrokes go to every pane, and paste is
+    /// broadcast set. Companion to `broadcast_write`: with broadcast on
+    /// (group-input mode, Ctrl+Shift+G), keystrokes go to every pane, and paste is
     /// also user input so it should follow the same scoping. Each pane
     /// gets its own `BRACKETED_PASTE` wrap decision read from its own
     /// `Term::mode()` — panes can disagree on whether the running
@@ -2241,12 +2824,12 @@ impl Mux {
     /// command line or leave bytes vulnerable to the bracketed-paste
     /// auto-execute attack inside vim. Pure modulo the writes; the
     /// per-pane wrap is the only logic here.
-    pub fn broadcast_paste(&mut self, text: &str) {
+    pub fn broadcast_paste(&mut self, text: &str) -> PaneInputResult {
         // Route through the scope-aware target computation
         // (phase 3 of the named-groups design), same as broadcast_write.
         let ids = self.broadcast_target_ids();
         if ids.is_empty() {
-            return;
+            return PaneInputResult::Queued;
         }
         // Build the two possible payloads lazily — only when we hit the
         // first pane that needs each variant. With a 4 MiB clipboard
@@ -2256,10 +2839,19 @@ impl Mux {
         // two copies regardless of pane count. `OnceCell`-style lazy
         // via `Option`: skip even one allocation when the broadcast
         // set is entirely one BRACKETED_PASTE state.
-        let mut raw: Option<Vec<u8>> = None;
-        let mut wrapped: Option<Vec<u8>> = None;
+        let mut raw: Option<Arc<[u8]>> = None;
+        let mut wrapped: Option<Arc<[u8]>> = None;
+        let mut result = PaneInputResult::Queued;
         for id in ids {
             if let Some(p) = self.panes.get_mut(&id) {
+                if p.pty_input_failed() {
+                    result = result.merge(PaneInputResult::Failed);
+                    continue;
+                }
+                if p.read_only {
+                    result = result.merge(PaneInputResult::ReadOnly);
+                    continue;
+                }
                 let bracketed = p
                     .term
                     .term
@@ -2267,15 +2859,17 @@ impl Mux {
                     .ok()
                     .map(|t| t.mode().contains(kettle_core::TermMode::BRACKETED_PASTE))
                     .unwrap_or(false);
-                let bytes: &[u8] = if bracketed {
-                    wrapped.get_or_insert_with(|| crate::input::paste_payload(text, true))
+                let bytes = if bracketed {
+                    wrapped
+                        .get_or_insert_with(|| Arc::from(crate::input::paste_payload(text, true)))
                 } else {
-                    raw.get_or_insert_with(|| crate::input::paste_payload(text, false))
+                    raw.get_or_insert_with(|| Arc::from(crate::input::paste_payload(text, false)))
                 };
                 // Paste is user input — read-only panes drop it.
-                p.feed_input(bytes);
+                result = result.merge(p.feed_input_shared(bytes.clone()));
             }
         }
+        result
     }
 
     pub fn tab_titles(&self) -> Vec<String> {
@@ -2777,6 +3371,171 @@ impl Default for Mux {
 mod node_tests {
     use super::*;
 
+    #[test]
+    fn pane_input_outcome_precedence_is_explicit() {
+        use PaneInputResult::{Backpressured, Failed, Oversize, Queued, ReadOnly};
+
+        assert_eq!(Queued.merge(ReadOnly), ReadOnly);
+        assert_eq!(ReadOnly.merge(Queued), ReadOnly);
+        assert_eq!(ReadOnly.merge(Backpressured), Backpressured);
+        assert_eq!(Backpressured.merge(Oversize), Oversize);
+        assert_eq!(Oversize.merge(Failed), Failed);
+        assert_eq!(Failed.merge(Queued), Failed);
+
+        assert_eq!(pane_input_policy(false, false), None);
+        assert_eq!(pane_input_policy(false, true), Some(ReadOnly));
+        assert_eq!(
+            pane_input_policy(true, true),
+            Some(Failed),
+            "sticky transport failure must dominate read-only policy"
+        );
+    }
+
+    #[test]
+    fn full_user_channel_is_backpressure_and_releases_failed_reservation() {
+        let (user_tx, user_rx) = crossbeam_channel::bounded(PTY_INPUT_QUEUE_DEPTH);
+        let (reply_tx, _reply_rx) = crossbeam_channel::bounded(PTY_INPUT_QUEUE_DEPTH);
+        let queued_user_bytes = Arc::new(AtomicUsize::new(0));
+        let queue = PtyInputQueue {
+            user_tx,
+            reply_tx,
+            queued_user_bytes: queued_user_bytes.clone(),
+            queued_reply_bytes: Arc::new(AtomicUsize::new(0)),
+            failed: Arc::new(AtomicBool::new(false)),
+            stop: Arc::new(AtomicBool::new(false)),
+            waker: Arc::new(|| {}),
+        };
+
+        for _ in 0..PTY_INPUT_QUEUE_DEPTH {
+            assert_eq!(
+                queue.enqueue_user(Arc::from(&b"x"[..])),
+                PaneInputResult::Queued
+            );
+        }
+        assert_eq!(
+            queued_user_bytes.load(Ordering::Acquire),
+            PTY_INPUT_QUEUE_DEPTH
+        );
+        assert_eq!(
+            queue.enqueue_user(Arc::from(&b"y"[..])),
+            PaneInputResult::Backpressured
+        );
+        assert_eq!(
+            queued_user_bytes.load(Ordering::Acquire),
+            PTY_INPUT_QUEUE_DEPTH,
+            "the unsent message must release its one-byte reservation"
+        );
+        assert!(!queue.failed(), "user backpressure must remain retryable");
+
+        // Crossbeam retains buffered values while either side still owns the
+        // channel. Tear down both endpoints before asserting that every queued
+        // message's Drop released its byte reservation.
+        drop(queue);
+        drop(user_rx);
+        assert_eq!(
+            queued_user_bytes.load(Ordering::Acquire),
+            0,
+            "tearing down the channel must release every queued byte reservation"
+        );
+    }
+
+    #[test]
+    fn pty_input_queues_preserve_paste_contract_and_fail_replies_closed() {
+        let (user_tx, user_rx) = crossbeam_channel::bounded(PTY_INPUT_QUEUE_DEPTH);
+        let (reply_tx, reply_rx) = crossbeam_channel::bounded(PTY_INPUT_QUEUE_DEPTH);
+        let queued_user_bytes = Arc::new(AtomicUsize::new(0));
+        let queued_reply_bytes = Arc::new(AtomicUsize::new(0));
+        let failed = Arc::new(AtomicBool::new(false));
+        let wakes = Arc::new(AtomicUsize::new(0));
+        let wakes_for_callback = wakes.clone();
+        let queue = PtyInputQueue {
+            user_tx,
+            reply_tx,
+            queued_user_bytes: queued_user_bytes.clone(),
+            queued_reply_bytes: queued_reply_bytes.clone(),
+            failed: failed.clone(),
+            stop: Arc::new(AtomicBool::new(false)),
+            waker: Arc::new(move || {
+                wakes_for_callback.fetch_add(1, Ordering::Relaxed);
+            }),
+        };
+
+        assert_eq!(
+            queue.enqueue_user(Arc::from(vec![b'x'; 4 * 1024 * 1024 + 12])),
+            PaneInputResult::Queued
+        );
+        assert_eq!(
+            queued_user_bytes.load(Ordering::Acquire),
+            4 * 1024 * 1024 + 12
+        );
+        let aggregate_headroom =
+            MAX_QUEUED_USER_INPUT_BYTES - queued_user_bytes.load(Ordering::Acquire);
+        assert_eq!(
+            queue.enqueue_user(Arc::from(vec![b'b'; aggregate_headroom])),
+            PaneInputResult::Queued,
+            "the exact aggregate byte budget must remain admissible"
+        );
+        assert_eq!(
+            queued_user_bytes.load(Ordering::Acquire),
+            MAX_QUEUED_USER_INPUT_BYTES
+        );
+        assert_eq!(
+            queue.enqueue_user(Arc::from(&b"b"[..])),
+            PaneInputResult::Backpressured,
+            "one byte over the bounded user-input budget is retryable, not read-only or failed"
+        );
+        assert!(!failed.load(Ordering::Acquire));
+        assert_eq!(
+            queue.enqueue_user(Arc::from(vec![b'x'; MAX_USER_INPUT_MESSAGE_BYTES + 1])),
+            PaneInputResult::Oversize,
+            "oversized user input must be distinct and must not kill the pane"
+        );
+        assert!(!failed.load(Ordering::Acquire));
+
+        assert_eq!(
+            queue.enqueue_reply(Arc::from(vec![b'r'; MAX_PROTOCOL_REPLY_MESSAGE_BYTES])),
+            PaneInputResult::Queued
+        );
+        assert_eq!(
+            queue.enqueue_reply(Arc::from(&b"y"[..])),
+            PaneInputResult::Failed,
+            "protocol reply byte-budget exhaustion must fail closed"
+        );
+        assert!(failed.load(Ordering::Acquire));
+        assert_eq!(wakes.load(Ordering::Acquire), 1);
+        assert_eq!(
+            queue.enqueue_reply(Arc::from(&b"z"[..])),
+            PaneInputResult::Failed,
+            "failure must remain sticky"
+        );
+        assert_eq!(wakes.load(Ordering::Acquire), 1, "wake only on the edge");
+
+        drop(user_rx);
+        drop(reply_rx);
+    }
+
+    #[test]
+    fn disconnected_pty_input_queue_releases_its_byte_reservation() {
+        let wakes = Arc::new(AtomicUsize::new(0));
+        let wakes_for_callback = wakes.clone();
+        let queue = PtyInputQueue::disconnected_for_test(Arc::new(move || {
+            wakes_for_callback.fetch_add(1, Ordering::Relaxed);
+        }));
+
+        assert_eq!(
+            queue.enqueue_reply(Arc::from(&b"reply"[..])),
+            PaneInputResult::Failed
+        );
+        assert_eq!(
+            queue.enqueue_user(Arc::from(&b"user"[..])),
+            PaneInputResult::Failed,
+            "a disconnected user-input worker is terminal rather than retryable"
+        );
+        assert_eq!(queue.queued_reply_bytes.load(Ordering::Acquire), 0);
+        assert!(queue.failed());
+        assert_eq!(wakes.load(Ordering::Acquire), 1);
+    }
+
     /// Drift guard. Session focus persistence is the core
     /// state machine for relaunch: `snapshot` records the focused pane's
     /// DFS-order *index* via `leaf_index_of` (pane ids are reallocated across
@@ -2833,6 +3592,27 @@ mod node_tests {
             bell: false,
         });
         m.active = m.tabs.len() - 1;
+    }
+
+    #[test]
+    fn prospective_split_geometry_matches_post_graft_second_child() {
+        let mut mux = Mux::new();
+        push_tab(&mut mux, Node::Leaf(7), 7);
+        assert_eq!(
+            mux.prospective_split_rect(Dir::Horizontal, (0.0, 0.0, 101.0, 51.0)),
+            Some((51.0, 0.0, 50.0, 51.0))
+        );
+        assert_eq!(
+            mux.prospective_split_rect(Dir::Vertical, (0.0, 0.0, 101.0, 51.0)),
+            Some((0.0, 26.0, 101.0, 25.0))
+        );
+
+        mux.tabs[0].zoomed = true;
+        assert_eq!(
+            mux.prospective_split_rect(Dir::Horizontal, (0.0, 0.0, 101.0, 51.0)),
+            Some((51.0, 0.0, 50.0, 51.0)),
+            "splitting exits zoom, so initial geometry must use the unzoomed tree"
+        );
     }
     fn hsplit(ratio: f32, a: Node, b: Node) -> Node {
         Node::Split {

@@ -1,9 +1,8 @@
 # Terminator plugin system — design
 
-> Status: design only. The implementation pairs naturally with the existing
-> Lua scripting foundation (`crates/kettle-ui/src/lua.rs`); this doc lays
-> out the architecture + phased roadmap so the work lands as a series of
-> small, testable phases instead of one heroic push.
+> Status: historical design with the core Lua plugin surface implemented.
+> The phase table preserves the original decomposition and records remaining
+> gaps; current queueing and delivery semantics are documented below.
 
 ## What it is
 
@@ -55,7 +54,7 @@ vendored Lua 5.4. Reasons:
     `kettle.*` namespace; a follow-up added `send_text` + `exec_action`.
     Extending that surface is incremental.
 
-## End-state UX
+## Current UX
 
 ```lua
 -- ~/.config/kettle/init.lua
@@ -63,20 +62,22 @@ vendored Lua 5.4. Reasons:
 -- Replicate Terminator's activitywatch plugin: notify on burst output
 kettle.on('output', function(pane_id, bytes)
   if #bytes > 4096 then
-    kettle.notify(string.format('Pane %d: %d bytes', pane_id, #bytes))
+    kettle.notify('Busy pane',
+      string.format('Pane %d: %d bytes', pane_id, #bytes))
   end
 end)
 
 -- Replicate custom_commands: add right-click menu items
 kettle.add_menu_item('Open in Vim', function(pane_id)
-  kettle.send_text(pane_id, 'vim .\n')
+  kettle.send_text('vim .\n')
 end)
 
 -- Replicate url_handlers: claim a URL pattern
 kettle.add_url_handler('github_pr',
   'https://github.com/[^/]+/[^/]+/pull/(%d+)',
-  function(url, captures)
-    kettle.notify('PR #' .. captures[1])
+  function(url)
+    kettle.notify('Matched GitHub pull request', url)
+    -- Requires `lua-sandbox = trusted`; safe mode omits os.execute.
     os.execute('xdg-open ' .. url)
   end
 )
@@ -104,9 +105,10 @@ graph LR
     D[PTY output] -->|TermEvent::Output| C
     E[Tab open] -->|TermEvent::TabAdd| C
     F[Bell] -->|TermEvent::Bell| C
-    G[URL hover] -->|UrlMatched| C
+    G[Safe URL click] -->|UrlClicked| C
     C -->|dispatch| H[Lua callbacks]
-    H -->|kettle.send_text| I[Pane PTY write]
+    H -->|kettle.send_text| I[Ordered bounded App FIFO]
+    I --> M[Pane input worker]
     H -->|kettle.exec_action| J[Action dispatcher]
     H -->|kettle.set_theme| K[Theme switch]
     H -->|kettle.add_menu_item| L[Context-menu registry]
@@ -116,25 +118,52 @@ Where today's code lives:
 
   - `crates/kettle-ui/src/lua.rs`: `LuaEngine` + `LuaCommand` queue.
     The event-hook registry lives here.
-  - `crates/kettle-ui/src/app.rs`: `App::pending_lua_actions` /
-    `App::pending_lua_send` drain. Event dispatch extends this.
+  - `crates/kettle-ui/src/app.rs`: one process-wide
+    `PendingLuaCommands` FIFO plus event dispatch.
+
+Lua callbacks are synchronous, but their side effects are not direct App or PTY
+mutations. Each callback queues `SendText`, `ExecAction`, `Notify`, or
+`SetTheme`; the App transfers them immediately into one ordered FIFO shared by
+startup and every hook. The Lua-side and App-side boundaries each admit at
+most 1,024 commands and 8 MiB of pending send text, and one `send_text` call is
+limited to 1 MiB. `send_text`, `exec_action`, `notify`, and `set_theme` return
+`true` when admitted to the Lua-to-App queue and `false` when a size or capacity
+limit rejects them; `true` is queue admission, not a promise of eventual PTY
+delivery. Rejection logs a warning without raising a Lua error.
+
+Registry calls also report admission as a boolean. `kettle.on` accepts only
+the nine events Kettle emits (`startup`, `tab_add`, `tab_close`, `bell`,
+`pane_close`, `output`, `pane_focus`, `title_changed`, and `url_clicked`) and
+caps each event at 256 callbacks. `add_menu_item` caps the registry at 256
+items and each label at 1 KiB. `add_url_handler` caps the registry at 256
+handlers, names at 256 bytes, and patterns at 4 KiB. These byte limits are
+checked before copying Lua strings into Rust-owned storage; an unknown event or
+capacity/size violation returns `false` and leaves the registry unchanged.
+
+The App processes at most 16 commands and 1 MiB of send data per event-loop
+turn. A backpressured `SendText` remains at the FIFO head byte-for-byte and is
+retried on an event-loop deadline with 10–250 ms exponential backoff; later
+theme/action/notification commands cannot overtake it. The focused pane is
+resolved and latched on the first attempt, so a later focus change cannot
+redirect delayed text. A closed target is dropped with visible feedback rather
+than rerouted.
 
 ## Phased roadmap
 
 | # | Scope | Status |
 |---|------|--------|
 | 1 | This doc. Design + roadmap. No code. | ✅ |
-| 2 | `kettle.on(event, callback)` foundation. New `LuaEvent` enum with one variant: `Startup`. Registry on `LuaEngine`; dispatch on App resumed. | pending |
-| 3 | `LuaEvent::Output(pane_id, bytes)` — wire the existing PTY-output loop to fire this event after each chunk drained. Throttle: max 100 fires/sec to bound Lua-callback overhead. | pending |
+| 2 | `kettle.on(event, callback)` foundation. New `LuaEvent` enum with one variant: `Startup`. Registry on `LuaEngine`; dispatch on App resumed. | ✅ shipped |
+| 3 | `LuaEvent::Output(pane_id, bytes)` — wire PTY-output batches to callbacks without allowing a slow plugin to grow memory indefinitely. | ✅ shipped through a bounded best-effort output queue; plugin backpressure may drop batches |
 | 4 | `LuaEvent::TabAdd/TabClose/PaneAdd/PaneClose` — fire from Mux mutations. | ✅ `tab_add` / `tab_close`, `pane_close` (`kettle.on('pane_close', function(pane_id) … end)`, fires from every ClosePane path before the pane's PTY teardown); `pane_add` still pending |
-| 5 | `LuaEvent::Bell(pane_id)` — fire when TermEvent::Bell arrives. | pending |
-| 6 | `LuaEvent::UrlMatched(url, captures)` — fire from hint mode + the Ctrl-click path. | pending |
-| 7 | `kettle.notify(text)` — desktop notification via `notify-rust` crate. | pending |
-| 8 | `kettle.add_menu_item(label, callback)` — extend the context menu with Lua-supplied entries. New menu state field; menu render appends after the default entries. | pending |
-| 9 | `kettle.add_url_handler(name, pattern, callback)` — extend hint mode + Ctrl-click to consult registered handlers before falling through to system open. | pending |
-| 10 | `kettle.set_theme(name)` — runtime theme switch via existing `NextTheme` infrastructure. | pending |
+| 5 | `LuaEvent::Bell(pane_id)` — fire when TermEvent::Bell arrives. | ✅ shipped |
+| 6 | URL event and handler dispatch — fire from hint mode + Ctrl-click before falling through to system open. | ✅ shipped as `url_clicked` plus `add_url_handler` |
+| 7 | `kettle.notify(title, body)` — desktop notification via `notify-rust` crate. | ✅ shipped |
+| 8 | `kettle.add_menu_item(label, callback)` — extend the context menu with Lua-supplied entries. New menu state field; menu render appends after the default entries. | ✅ shipped |
+| 9 | `kettle.add_url_handler(name, pattern, callback)` — extend hint mode + Ctrl-click to consult registered handlers before falling through to system open. | ✅ shipped |
+| 10 | `kettle.set_theme(name)` — runtime theme switch via existing theme infrastructure. | ✅ shipped |
 | 11 | Per-plugin porting: rewrite each of the 6 NEW plugins (custom_commands, remote, logger, dir_open, auto_theme, command_notify) as Lua modules shipped under `~/.config/kettle/plugins/*.lua` template files. Auto-load alongside `init.lua`. | pending |
-| 12 | Sandboxing decisions: which Lua stdlib bindings are exposed (os.execute? io.open?), error containment (one plugin's runtime error doesn't crash kettle), config-knob to disable plugins entirely. | pending |
+| 12 | Sandboxing decisions: which Lua stdlib bindings are exposed (os.execute? io.open?), error containment (one plugin's runtime error doesn't crash kettle), config-knob to disable plugins entirely. | ✅ `lua-sandbox = safe|trusted`; callback errors are contained |
 | 13 | End-to-end acceptance test: ship a fixture `init.lua` that exercises every hook; integration test verifies all hooks fired. | pending |
 
 ## Architecture choices (rationale)
@@ -147,12 +176,13 @@ are idiomatic + zero-boilerplate. Same model as Neovim's `vim.api.
 nvim_create_autocmd`, WezTerm's `wezterm.on`, Awesome WM's
 `client.connect_signal`.
 
-### Why coalesce Output events (throttle 100 fires/sec)
+### Why Output delivery is bounded and best-effort
 
 A busy build can emit thousands of TermEvent::Output chunks per second.
 Firing a Lua callback for each would either swamp the VM or starve
-PTY reads. Bound the rate at the dispatch site; Lua callbacks see a
-coalesced chunk-of-bytes since last fire.
+PTY reads. The raw-output tap therefore uses a bounded best-effort queue:
+a stalled plugin may miss output batches, while terminal parsing, rendering,
+recording, and `kettle exec` keep their separate delivery contracts.
 
 ### Why `notify-rust` instead of writing to stderr
 

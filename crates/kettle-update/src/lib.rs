@@ -26,6 +26,8 @@ pub const SIGNATURE_URL: &str =
 
 /// Dedicated Ed25519 verification key for the kettle stable update feed.
 ///
+/// `packaging/update-public.pem` is the canonical release-pipeline form of
+/// this key; `scripts/test-update-manifest.py` keeps every consumer in sync.
 /// Fingerprint (SHA-256 of these raw bytes):
 /// `e8e73619a959b34c24fa255714719a61c9cee810340bf041497c39475ab2dbb7`.
 pub const UPDATE_PUBLIC_KEY: [u8; 32] = [

@@ -5,20 +5,29 @@
 # bounded time; the runner adapts iteration count when a payload is slow.
 # Deterministic content (no RNG) so every run and every terminal sees identical bytes.
 param(
-    [string]$Dir = "$PSScriptRoot\..\..\target\perf-payloads"
+    [string]$Dir = ''
 )
 $ErrorActionPreference = 'Stop'
-New-Item -ItemType Directory -Force $Dir | Out-Null
+. "$PSScriptRoot\payload-contract.ps1"
+. "$PSScriptRoot\json-io.ps1"
+if (-not $Dir) {
+    $Dir = Join-Path $PSScriptRoot '..\..\target\perf-payloads'
+}
+$Dir = [IO.Path]::GetFullPath($Dir)
+$payloadRoot = if ([IO.Directory]::Exists($Dir)) {
+    Open-KettlePerfPersistenceRoot -Directory $Dir
+} else {
+    New-KettlePerfPersistenceRoot `
+        -ParentDirectory ([IO.Path]::GetDirectoryName($Dir)) `
+        -LeafName ([IO.Path]::GetFileName($Dir))
+}
 
 $asciiPath = Join-Path $Dir 'ascii.txt'
 $sgrPath = Join-Path $Dir 'sgr.txt'
 $unicodePath = Join-Path $Dir 'unicode.txt'
 
-function Test-PayloadStale([string]$Path, [long]$Target) {
-    -not (Test-Path $Path) -or [Math]::Abs((Get-Item $Path).Length - $Target) -gt ($Target * 0.2)
-}
-
-if (Test-PayloadStale $asciiPath 17MB) {
+try {
+if (-not (Test-KettlePerfPayloadFile -Path $asciiPath -Name ascii)) {
     $sb = [System.Text.StringBuilder]::new(20MB)
     $line = '0123456789 the quick brown fox jumps over the lazy dog ABCDEFGHIJKLMNOPQRSTUVWXYZ ./usr/lib/x86_64 -rw-r--r-- 1 root 4096'
     for ($i = 0; $i -lt 128000; $i++) {
@@ -26,10 +35,11 @@ if (Test-PayloadStale $asciiPath 17MB) {
         [void]$sb.Append($line)
         [void]$sb.Append("`n")
     }
-    [System.IO.File]::WriteAllText($asciiPath, $sb.ToString(), [System.Text.UTF8Encoding]::new($false))
+    Write-KettlePerfUtf8File -Path $asciiPath -Text $sb.ToString() `
+        -MaximumBytes 32MB -Root $payloadRoot
 }
 
-if (Test-PayloadStale $sgrPath 6.1MB) {
+if (-not (Test-KettlePerfPayloadFile -Path $sgrPath -Name sgr)) {
     $e = [char]27
     $sb = [System.Text.StringBuilder]::new(10MB)
     for ($i = 0; $i -lt 48000; $i++) {
@@ -40,18 +50,35 @@ if (Test-PayloadStale $sgrPath 6.1MB) {
         }
         [void]$sb.Append("$e[0m`n")
     }
-    [System.IO.File]::WriteAllText($sgrPath, $sb.ToString(), [System.Text.UTF8Encoding]::new($false))
+    Write-KettlePerfUtf8File -Path $sgrPath -Text $sb.ToString() `
+        -MaximumBytes 16MB -Root $payloadRoot
 }
 
-if (Test-PayloadStale $unicodePath 4.3MB) {
+if (-not (Test-KettlePerfPayloadFile -Path $unicodePath -Name unicode)) {
     $sb = [System.Text.StringBuilder]::new(6MB)
-    $row = '日本語テキスト 中文测试 한국어 ─━│┃┌┐└┘├┤ αβγδε ∑∏∫√ ▲►▼◄ 🚀🔥💧🌍 ABC abc 123 '
+    # Keep this source file ASCII-safe so Windows PowerShell 5.1 and pwsh
+    # decode the script identically without a UTF-8 BOM. This base64 is the
+    # pinned UTF-8 row used by the payload contract.
+    $row = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String(
+        '5pel5pys6Kqe44OG44Kt44K544OIIOS4reaWh+a1i+ivlSDtlZzqta3slrQg4pSA4pSB4pSC4pSD4pSM4pSQ4pSU4pSY4pSc4pSkIM6xzrLOs860zrUg4oiR4oiP4oir4oiaIOKWsuKWuuKWvOKXhCDwn5qA8J+UpfCfkqfwn4yNIEFCQyBhYmMgMTIzIA=='
+    ))
     for ($i = 0; $i -lt 30000; $i++) {
         [void]$sb.Append(('{0:d6} ' -f $i))
         [void]$sb.Append($row)
         [void]$sb.Append("`n")
     }
-    [System.IO.File]::WriteAllText($unicodePath, $sb.ToString(), [System.Text.UTF8Encoding]::new($false))
+    Write-KettlePerfUtf8File -Path $unicodePath -Text $sb.ToString() `
+        -MaximumBytes 16MB -Root $payloadRoot
+}
+
+foreach ($name in $KettlePerfPayloadContracts.Keys) {
+    $path = Join-Path $Dir $KettlePerfPayloadContracts[$name].file
+    if (-not (Test-KettlePerfPayloadFile -Path $path -Name $name)) {
+        throw "Generated payload does not match its byte/hash contract: $path"
+    }
 }
 
 Get-ChildItem $Dir | ForEach-Object { '{0,-12} {1,8:n1} MB' -f $_.Name, ($_.Length / 1MB) }
+} finally {
+    Close-KettlePerfPersistenceRoot $payloadRoot
+}

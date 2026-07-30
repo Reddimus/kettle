@@ -48,11 +48,12 @@ pub mod url_trim;
 pub use alacritty_terminal::grid::{Dimensions, Scroll};
 pub use alacritty_terminal::index::{Column, Line, Point, Side};
 pub use alacritty_terminal::selection::{Selection, SelectionType};
-pub use alacritty_terminal::term::{TermMode, cell::Flags, viewport_to_point};
+pub use alacritty_terminal::term::{ClipboardType, TermMode, cell::Flags, viewport_to_point};
+pub use alacritty_terminal::vi_mode::ViMotion;
 pub use alacritty_terminal::vte::ansi::{Color as AnsiColor, CursorShape, NamedColor};
 
 pub use event::{EventProxy, TermEvent, Waker};
-pub use images::{ImageData, ImageSourceRect, Images, Placement};
+pub use images::{ImageData, ImageSourceCrop, ImageSourceRect, Images, Placement, PlacementParams};
 pub use links::{Link, links, links_with_cwd};
 pub use search::{
     CaseSensitivity, CompiledSearch, MAX_SEARCH_LOGICAL_LINE_CONTEXT, MAX_SEARCH_MATCHES,
@@ -62,8 +63,8 @@ pub use search::{
     SearchPoint, SearchScanToken, SearchSpan, search, search_with,
 };
 pub use term::{
-    CommandFinished, ProtocolNotification, PtyOutputSender, PtyWriter, ScreenText, SharedTerm,
-    Terminal,
+    CommandFinished, ProtocolNotification, PtyEofProgress, PtyGeometry, PtyInputTail,
+    PtyOutputSender, PtyStdin, PtyWriter, ScreenText, SharedTerm, Terminal, TerminalCapabilities,
 };
 // OSC 9;4 taskbar-progress state, surfaced by `Terminal::progress`
 // (re-exported so the UI can name it without depending on kettle-vt directly).

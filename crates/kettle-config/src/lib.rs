@@ -5349,7 +5349,13 @@ cell-height = 1.2\n";
                     _ => false,
                 };
                 let sub_prefixed = i >= 4 && &lower[i - 4..i] == b"sub-";
-                if numbered_or_placeholder || sub_prefixed {
+                // A contiguous leading dash is command-line option syntax for
+                // the PowerShell schedule-count parameter, not a prose audit
+                // label. Spaced list labels and numeric suffix forms still
+                // match. Do not exempt the independently banned sub-prefix
+                // shape.
+                let option_identifier = i > 0 && lower[i - 1] == b'-' && !sub_prefixed;
+                if (numbered_or_placeholder && !option_identifier) || sub_prefixed {
                     let end = (i + 40).min(raw.len());
                     offenders.push(format!(
                         "{}:{}: {}",

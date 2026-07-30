@@ -85,10 +85,14 @@ kettle.add_url_handler(
 --   - "tab_add"          → tab index appended; payload = new index
 --   - "tab_close"        → tab being closed; payload = closing index
 --   - "bell"             → bell rang in a pane; payload = pane id
+--   - "pane_close"        → pane about to close; payload = pane id
 --   - "output"           → pane produced output; payload = (pane id,
 --                          bytes since last emission). Throttled at
 --                          the dispatch site so a busy build doesn't
 --                          flood the callback.
+--   - "pane_focus"       → focus changed; payload = (old id or nil, new id)
+--   - "title_changed"    → pane title changed; payload = (pane id, title)
+--   - "url_clicked"      → URL activation; payload = URL string
 -------------------------------------------------------------------------------
 
 kettle.on("startup", function()

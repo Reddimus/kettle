@@ -107,6 +107,9 @@ winit = { version = "0.30.13", default-features = false, features = [
 # (Linux + macOS + BSDs); Windows + Wayland get the
 # Action::MoveTabToNewWindow keyboard-driven fallback.
 [target.'cfg(unix)'.dependencies]
+# Distinguish fdopendir/readdir EOF from an enumeration error without
+# platform-specific errno accessors.
+errno = "0.3"
 libc = "0.2"
 
 # v2.40.0 (tear-off UX): live screen-pointer queries during torn-tab drags —
@@ -138,6 +141,7 @@ windows = { version = "0.62", features = [
     "Win32_UI_WindowsAndMessaging",
     "Win32_UI_Input_KeyboardAndMouse",
     "Win32_System_Com",
+    "Win32_System_Threading",
     "Win32_Foundation",
     "Win32_Graphics_Dwm",
 ] }

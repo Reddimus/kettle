@@ -1,0 +1,160 @@
+{
+  "schema": "kettle-windows-comparator-campaign-v1",
+  "campaign_id": "windows-x86_64-20260727T012800Z-d76cbf4b8173c691",
+  "platform": {
+    "os": "windows",
+    "architecture": "x86_64"
+  },
+  "selection": {
+    "policy": "official-stable-pinned-assets-v1",
+    "started_at_utc": "2026-07-27T01:28:00Z",
+    "completed_at_utc": "2026-07-27T01:36:59Z"
+  },
+  "terminals": [
+    {
+      "name": "alacritty",
+      "role": "confirmed",
+      "version": "0.17.0",
+      "source": {
+        "origin": "https://github.com/alacritty/alacritty",
+        "package": "Alacritty.Alacritty",
+        "release_tag": "v0.17.0",
+        "asset": {
+          "kind": "direct-executable",
+          "name": "Alacritty-v0.17.0-portable.exe",
+          "url": "https://github.com/alacritty/alacritty/releases/download/v0.17.0/Alacritty-v0.17.0-portable.exe",
+          "bytes": 6003200,
+          "sha256": "5ad70ddc5c2a2bfe84084a2c4c73558e9360914f035a902d7a69277be7249f1f",
+          "executable_entry": "Alacritty-v0.17.0-portable.exe",
+          "staged_file_count": 1,
+          "staged_total_bytes": 6003200,
+          "staged_tree_sha256": "159332f45e409aeec97a8d315914c1b6f6dc3373f170f7a671d3bd5260a4f5d1"
+        }
+      },
+      "executable": {
+        "leaf": "alacritty.exe",
+        "staging_path": "staging/alacritty/0.17.0/alacritty.exe",
+        "bytes": 6003200,
+        "sha256": "5ad70ddc5c2a2bfe84084a2c4c73558e9360914f035a902d7a69277be7249f1f",
+        "authenticode_status": "NotSigned",
+        "signer_cert_sha256": null
+      }
+    },
+    {
+      "name": "wezterm",
+      "role": "confirmed",
+      "version": "20240203-110809-5046fc22",
+      "source": {
+        "origin": "https://github.com/wezterm/wezterm",
+        "package": "wez.wezterm",
+        "release_tag": "20240203-110809-5046fc22",
+        "asset": {
+          "kind": "zip",
+          "name": "WezTerm-windows-20240203-110809-5046fc22.zip",
+          "url": "https://github.com/wezterm/wezterm/releases/download/20240203-110809-5046fc22/WezTerm-windows-20240203-110809-5046fc22.zip",
+          "bytes": 66162319,
+          "sha256": "57e5d03b585303d81e8b8e96d1230362852eb39aca92b3b29c7a42cfb82f9ac4",
+          "executable_entry": "WezTerm-windows-20240203-110809-5046fc22/wezterm-gui.exe",
+          "staged_file_count": 10,
+          "staged_total_bytes": 188427264,
+          "staged_tree_sha256": "9b7ae029922f2b8df7ce22c09138846ff56f253ee722e600c0feff439d321fa4"
+        }
+      },
+      "executable": {
+        "leaf": "wezterm-gui.exe",
+        "staging_path": "staging/wezterm/20240203-110809-5046fc22/wezterm-gui.exe",
+        "bytes": 67704832,
+        "sha256": "9491ca934f32d008329ae084e88305975b16a89f830af7df5750a6186b59f4ce",
+        "authenticode_status": "NotSigned",
+        "signer_cert_sha256": null
+      }
+    },
+    {
+      "name": "rio",
+      "role": "confirmed",
+      "version": "0.4.12",
+      "source": {
+        "origin": "https://github.com/raphamorim/rio",
+        "package": "raphamorim.rio",
+        "release_tag": "v0.4.12",
+        "asset": {
+          "kind": "direct-executable",
+          "name": "rio-portable-x86_64.exe",
+          "url": "https://github.com/raphamorim/rio/releases/download/v0.4.12/rio-portable-x86_64.exe",
+          "bytes": 24377856,
+          "sha256": "1617abf851a252c058fc7b9689c2a06d1a62425d77f67c0997ffaf420bae1c79",
+          "executable_entry": "rio-portable-x86_64.exe",
+          "staged_file_count": 1,
+          "staged_total_bytes": 24377856,
+          "staged_tree_sha256": "948b2348bf0251c5ec77f035902109164eb23d30a2d602cd639d9b15f19dbf38"
+        }
+      },
+      "executable": {
+        "leaf": "rio.exe",
+        "staging_path": "staging/rio/0.4.12/rio.exe",
+        "bytes": 24377856,
+        "sha256": "1617abf851a252c058fc7b9689c2a06d1a62425d77f67c0997ffaf420bae1c79",
+        "authenticode_status": "NotSigned",
+        "signer_cert_sha256": null
+      }
+    },
+    {
+      "name": "tabby",
+      "role": "confirmed",
+      "version": "1.0.235",
+      "source": {
+        "origin": "https://github.com/Eugeny/tabby",
+        "package": "Eugeny.Tabby",
+        "release_tag": "v1.0.235",
+        "asset": {
+          "kind": "zip",
+          "name": "tabby-1.0.235-portable-x64.zip",
+          "url": "https://github.com/Eugeny/tabby/releases/download/v1.0.235/tabby-1.0.235-portable-x64.zip",
+          "bytes": 174563816,
+          "sha256": "192ee1f402e046f8be5a31118da1dfa38aa290387e7e57dceafcc0b3dfd1a835",
+          "executable_entry": "Tabby.exe",
+          "staged_file_count": 1558,
+          "staged_total_bytes": 475031900,
+          "staged_tree_sha256": "ad840115c1a25c2cac2278489afd87abe4509b8607d142540947ab71a1cc9aa4"
+        }
+      },
+      "executable": {
+        "leaf": "Tabby.exe",
+        "staging_path": "staging/tabby/1.0.235/Tabby.exe",
+        "bytes": 210493480,
+        "sha256": "40c0a711c30ee36a168ac435ea726d1a692793bdf43841581a1238954f62eee6",
+        "authenticode_status": "Valid",
+        "signer_cert_sha256": "ff9d23bd5e859a29730297c0f7b6a021248c067c951a78e8154cb3a246f0239d"
+      }
+    },
+    {
+      "name": "wt",
+      "role": "advisory",
+      "version": "1.24.11911.0",
+      "source": {
+        "origin": "https://github.com/microsoft/terminal",
+        "package": "Microsoft.WindowsTerminal",
+        "release_tag": "v1.24.11911.0",
+        "asset": {
+          "kind": "zip",
+          "name": "Microsoft.WindowsTerminal_1.24.11911.0_x64.zip",
+          "url": "https://github.com/microsoft/terminal/releases/download/v1.24.11911.0/Microsoft.WindowsTerminal_1.24.11911.0_x64.zip",
+          "bytes": 11651776,
+          "sha256": "7691efeb71c8dd0b95536c84e366fa4cf809a42c534912f9cefa1056534383bd",
+          "executable_entry": "terminal-1.24.11911.0/WindowsTerminal.exe",
+          "staged_file_count": 57,
+          "staged_total_bytes": 33467812,
+          "staged_tree_sha256": "039601dda01ee68e174d4ccbe91ae40fab5234ec206b9b7d799199612fbaf84b"
+        }
+      },
+      "executable": {
+        "leaf": "WindowsTerminal.exe",
+        "staging_path": "staging/wt/1.24.11911.0/WindowsTerminal.exe",
+        "bytes": 600376,
+        "sha256": "c2159565e068cee5a0018d89560f4d8d40364e91380dfe27a6ffb2b8b8c8bf89",
+        "authenticode_status": "Valid",
+        "signer_cert_sha256": "d33927e4dda9b91def9f8ed282549a49217ed8cacf54577a690963cbc5eff3ed"
+      }
+    }
+  ]
+}

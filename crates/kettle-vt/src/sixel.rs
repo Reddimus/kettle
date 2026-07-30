@@ -438,6 +438,25 @@ mod tests {
     }
 
     #[test]
+    fn tmux_3_4_normalized_sixel_decodes() {
+        // Captured from tmux 3.4 built with --enable-sixel. With a 16x32 outer
+        // cell, tmux adds raster attributes, a background register, and empty
+        // columns while scaling Kettle's 24x12 magenta fixture.
+        let body = b"\"1;1;32;30#0;0;0;0;0#1;2;100;0;100#1!24~!8?-#1!24~!8?";
+        let img = decode(body).expect("tmux-normalized SIXEL decodes");
+        assert_eq!((img.width, img.height), (32, 32));
+
+        let pixel = |x: usize, y: usize| {
+            let start = (y * img.width as usize + x) * 4;
+            &img.rgba[start..start + 4]
+        };
+        assert_eq!(pixel(0, 0), &[255, 0, 255, 255]);
+        assert_eq!(pixel(23, 11), &[255, 0, 255, 255]);
+        assert_eq!(pixel(24, 0), &[0, 0, 0, 0]);
+        assert_eq!(pixel(0, 12), &[0, 0, 0, 0]);
+    }
+
+    #[test]
     fn newline_introducer_adds_a_band_below() {
         // `@-@` = column in band 0, carriage `-` to the next band, column
         // in band 1 → 1 wide, 12 tall.

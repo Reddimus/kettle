@@ -103,29 +103,27 @@ pub fn reply_for_query(
 /// Format the engine-supplied reply for `CSI 14 t` (text-area size in
 /// pixels).
 ///
-/// `alacritty_terminal` raises `TermEvent::TextAreaSizeRequest(fmt)` with
-/// a formatter that needs a `WindowSize { num_lines, num_cols, cell_width,
-/// cell_height }` and produces the standard xtwinops reply `CSI 4 ; h ; w t`
-/// (height = rows × cell-height, width = cols × cell-width). Sixel, kitty
-/// graphics and iTerm2-OSC-1337-aware apps use this to compute
-/// pixel-perfect image placements; without it they fall back to guessed
-/// 8×16 cells.
+/// `alacritty_terminal` raises `TermEvent::TextAreaSizeRequest(fmt)` with a
+/// formatter that produces the standard xtwinops reply `CSI 4 ; h ; w t`.
+/// Feed it a one-cell synthetic window whose cell is the exact total pixel
+/// extent. This preserves a fractional-DPI text area (for example 100 columns
+/// at 9.6 px = 960 px); multiplying a rounded per-cell metric would report
+/// 1000 px instead. Sixel, kitty graphics and iTerm2-OSC-1337-aware apps use
+/// this reply for pixel-perfect placement.
 ///
 /// Same layering rationale as `reply_for_query`: keep the engine
 /// `WindowSize` type contained here so kettle-ui can stay engine-internal-
-/// free and just call this helper with the four numbers it already knows.
+/// free and just call this helper with the exact totals the PTY already knows.
 pub fn reply_for_text_area_size(
-    cols: u16,
-    rows: u16,
-    cell_w: u16,
-    cell_h: u16,
+    pixel_width: u16,
+    pixel_height: u16,
     fmt: &(dyn Fn(alacritty_terminal::event::WindowSize) -> String + Send + Sync),
 ) -> String {
     fmt(alacritty_terminal::event::WindowSize {
-        num_lines: rows,
-        num_cols: cols,
-        cell_width: cell_w,
-        cell_height: cell_h,
+        num_lines: 1,
+        num_cols: 1,
+        cell_width: pixel_width,
+        cell_height: pixel_height,
     })
 }
 
@@ -289,6 +287,21 @@ pub fn average_color(rgba: &[u8]) -> Rgb {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn text_area_reply_preserves_exact_fractional_dpi_totals() {
+        let formatter = |size: alacritty_terminal::event::WindowSize| {
+            format!(
+                "\u{1b}[4;{};{}t",
+                u32::from(size.num_lines) * u32::from(size.cell_height),
+                u32::from(size.num_cols) * u32::from(size.cell_width)
+            )
+        };
+        assert_eq!(
+            reply_for_text_area_size(960, 768, &formatter),
+            "\u{1b}[4;768;960t"
+        );
+    }
 
     #[test]
     fn average_color_means_and_skips_transparent() {

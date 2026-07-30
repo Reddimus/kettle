@@ -62,6 +62,49 @@ pub(crate) fn discard_created_private_file(file: File, path: &Path) {
     discard_created_private_file_impl(file, path);
 }
 
+/// Enumerate, open, and remove matching children relative to the held parent
+/// capability. The callback sees names only; it cannot redirect an operation
+/// through a replacement pathname.
+#[cfg(unix)]
+pub(super) fn reap_guarded_children<F>(
+    guard: &PrivateParentGuard,
+    max_scan: usize,
+    max_remove: usize,
+    predicate: F,
+) -> io::Result<usize>
+where
+    F: FnMut(&std::ffi::OsStr) -> bool,
+{
+    guard.reap_matching_children(max_scan, max_remove, predicate)
+}
+
+#[cfg(windows)]
+pub(super) fn reap_guarded_children<F>(
+    guard: &PrivateParentGuard,
+    max_scan: usize,
+    max_remove: usize,
+    predicate: F,
+) -> io::Result<usize>
+where
+    F: FnMut(&std::ffi::OsStr) -> bool,
+{
+    guard.reap_matching_children(max_scan, max_remove, predicate)
+}
+
+#[cfg(not(any(unix, windows)))]
+pub(super) fn reap_guarded_children<F>(
+    guard: &PrivateParentGuard,
+    max_scan: usize,
+    max_remove: usize,
+    predicate: F,
+) -> io::Result<usize>
+where
+    F: FnMut(&std::ffi::OsStr) -> bool,
+{
+    let _ = (guard, max_scan, max_remove, predicate);
+    Ok(0)
+}
+
 #[cfg(unix)]
 fn create_private_file_new_impl(path: &Path) -> io::Result<File> {
     unix::create_private_file_new(path, false)
@@ -459,7 +502,7 @@ pub(super) fn same_file_identity(_file: &File, _path: &Path) -> io::Result<bool>
 mod unix {
     use super::*;
     use std::ffi::{CString, OsStr, OsString};
-    use std::os::fd::{AsRawFd as _, FromRawFd as _};
+    use std::os::fd::{AsRawFd as _, FromRawFd as _, IntoRawFd as _};
     use std::os::unix::ffi::OsStrExt as _;
     use std::os::unix::fs::MetadataExt as _;
     use std::path::{Component, PathBuf};
@@ -742,23 +785,27 @@ mod unix {
         ))
     }
 
+    fn open_readable_directory(directory: &File) -> io::Result<File> {
+        let current = c_name(OsStr::new("."), "current directory")?;
+        // SAFETY: the held directory fd and NUL-terminated name are valid.
+        let fd = unsafe {
+            libc::openat(
+                directory.as_raw_fd(),
+                current.as_ptr(),
+                libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+            )
+        };
+        if fd < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        // SAFETY: openat returned a new owned fd.
+        Ok(unsafe { File::from_raw_fd(fd) })
+    }
+
     fn sync_directory(directory: &File) -> io::Result<()> {
         #[cfg(any(target_os = "linux", target_os = "android"))]
         {
-            let current = c_name(OsStr::new("."), "current directory")?;
-            // SAFETY: the held directory fd and name are valid.
-            let fd = unsafe {
-                libc::openat(
-                    directory.as_raw_fd(),
-                    current.as_ptr(),
-                    libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC,
-                )
-            };
-            if fd < 0 {
-                return Err(io::Error::last_os_error());
-            }
-            // SAFETY: openat returned a new owned fd.
-            unsafe { File::from_raw_fd(fd) }.sync_all()
+            open_readable_directory(directory)?.sync_all()
         }
         #[cfg(not(any(target_os = "linux", target_os = "android")))]
         directory.sync_all()
@@ -1117,6 +1164,79 @@ mod unix {
 
         pub(super) fn sync(&self) -> io::Result<()> {
             sync_directory(self.directory())
+        }
+
+        pub(super) fn reap_matching_children<F>(
+            &self,
+            max_scan: usize,
+            max_remove: usize,
+            mut predicate: F,
+        ) -> io::Result<usize>
+        where
+            F: FnMut(&OsStr) -> bool,
+        {
+            self.require_leaf_policy(current_user())?;
+            // Linux holds the verified directory chain with O_PATH, which
+            // fdopendir cannot enumerate. Open "." relative to the retained
+            // capability to get a readable descriptor with an independent
+            // directory offset. No operation follows the replaceable path.
+            let enumeration = open_readable_directory(self.directory())?.into_raw_fd();
+            // SAFETY: fdopendir takes ownership of `enumeration` on success.
+            let stream = unsafe { libc::fdopendir(enumeration) };
+            if stream.is_null() {
+                let error = io::Error::last_os_error();
+                // SAFETY: fdopendir did not consume the descriptor on failure.
+                unsafe {
+                    libc::close(enumeration);
+                }
+                return Err(error);
+            }
+            struct DirectoryStream(*mut libc::DIR);
+            impl Drop for DirectoryStream {
+                fn drop(&mut self) {
+                    // SAFETY: this stream is owned and closed exactly once.
+                    unsafe {
+                        libc::closedir(self.0);
+                    }
+                }
+            }
+            let stream = DirectoryStream(stream);
+            let mut scanned = 0usize;
+            let mut removed = 0usize;
+            while scanned < max_scan && removed < max_remove {
+                // SAFETY: `stream` remains live for the loop and readdir's
+                // returned entry is borrowed until the next call.
+                let entry = unsafe { libc::readdir(stream.0) };
+                if entry.is_null() {
+                    break;
+                }
+                // SAFETY: POSIX dirent names are NUL terminated.
+                let name = unsafe { std::ffi::CStr::from_ptr((*entry).d_name.as_ptr()) }.to_bytes();
+                if matches!(name, b"." | b"..") {
+                    continue;
+                }
+                scanned += 1;
+                let name = OsStr::from_bytes(name);
+                if !predicate(name) {
+                    continue;
+                }
+                let candidate = self.path.join(name);
+                let Ok(file) = open_at(self, &candidate, libc::O_RDWR, 0) else {
+                    continue;
+                };
+                let Ok(metadata) = file.metadata() else {
+                    continue;
+                };
+                if require_user_owned_regular(&file, &candidate).is_err()
+                    || self.require_leaf_policy(metadata.uid()).is_err()
+                {
+                    continue;
+                }
+                if self.unlink_open_file(&file, name).is_ok() {
+                    removed += 1;
+                }
+            }
+            Ok(removed)
         }
     }
 
@@ -2484,6 +2604,44 @@ mod windows {
                 ));
             }
             std::fs::hard_link(source, destination)
+        }
+
+        pub(super) fn reap_matching_children<F>(
+            &self,
+            max_scan: usize,
+            max_remove: usize,
+            mut predicate: F,
+        ) -> io::Result<usize>
+        where
+            F: FnMut(&std::ffi::OsStr) -> bool,
+        {
+            // Every directory handle in this guard omits FILE_SHARE_DELETE,
+            // so the verified parent chain cannot be renamed or replaced
+            // while this pathname enumeration runs.
+            self.verify()?;
+            let mut scanned = 0usize;
+            let mut removed = 0usize;
+            for entry in std::fs::read_dir(&self.path)? {
+                if scanned >= max_scan || removed >= max_remove {
+                    break;
+                }
+                let Ok(entry) = entry else {
+                    continue;
+                };
+                scanned += 1;
+                let name = entry.file_name();
+                if !predicate(&name) {
+                    continue;
+                }
+                let path = self.path.join(&name);
+                let Ok(file) = open_existing_private_file(&path, false) else {
+                    continue;
+                };
+                if remove_open_private_file(file, &path).is_ok() {
+                    removed += 1;
+                }
+            }
+            Ok(removed)
         }
     }
 

@@ -99,7 +99,10 @@ and **WezTerm** into one tool.
   links for agent/editor output, underlined with hover and opened with
   `Ctrl`/`Cmd`+click.
 - **Inline images** — Sixel, kitty graphics, and iTerm2 (OSC 1337) decoded
-  and GPU-composited (`img2sixel`, `kitten icat`, `imgcat`).
+  and GPU-composited (`img2sixel`, `kitten icat`, `imgcat`). Graphics follow
+  the active primary/alternate screen, move and crop with DECSTBM page-region
+  scrolling, and use destination/UV clipping to stay inside the pane's terminal
+  grid.
 - **Shell integration** — OSC 133 prompt marks; jump between prompts with
   `Ctrl+Up`/`Ctrl+Down` (see [docs/SHELL-INTEGRATION.md](docs/SHELL-INTEGRATION.md)).
 - **Mouse reporting** — full passthrough so `vim`/`tmux`/`htop`/`fzf` mouse
@@ -154,7 +157,7 @@ and **WezTerm** into one tool.
 
 | OS | Versions | Recommended install |
 |----|----------|---------------------|
-| **Linux** | X11 + Wayland | one-line installer (below) |
+| **Linux** | glibc 2.35+; X11 + Wayland | one-line installer (below) |
 | **macOS** | 11+ — Intel & Apple Silicon (universal `.app`) | drag-to-Applications (below) |
 | **Windows** | Windows 11 | `install.ps1` from the release `.zip` (below) |
 
@@ -172,12 +175,19 @@ everything into `~/.local/` (no `sudo`, no Rust toolchain):
 curl -fsSL https://raw.githubusercontent.com/Reddimus/kettle/main/scripts/install-online.sh | sh
 ```
 
+The prebuilt GNU/Linux archive targets glibc 2.35 or newer (Ubuntu 22.04,
+Debian 12, and current Fedora/Arch satisfy that floor). Older distributions
+can build from source or use the Nix package.
+
 Then search **"kettle"** in GNOME Activities / KDE Krunner / Ubuntu's
 Super-key, or run `kettle` from any shell on your `$PATH`.
 
-Pin a specific version: `KETTLE_VERSION=v2.42.0 sh` instead of `sh`.
+Pin a specific version: `KETTLE_VERSION=v2.43.0 sh` instead of `sh`.
 System-wide install: `KETTLE_PREFIX=/usr/local sh` (needs write access).
 Uninstall later: `~/.local/share/kettle/install.sh --uninstall`.
+The one-line path requires a current `curl`, GNU `tar`, and OpenSSL 3.0+
+with Ed25519 support. Current releases require the bounded signed manifest;
+an explicitly pinned legacy release requires its exact bounded checksum.
 
 ### macOS
 
@@ -325,11 +335,14 @@ tear-off while keeping tab switching and in-window reordering.
 > your actual chord) — see [docs/CONFIG.md](docs/CONFIG.md)
 > "Editing the config from inside kettle" for the full toggle map.
 
-Clipboard images are attached by the interactive client, not by a Kettle-only
-protocol: use `Ctrl+V` in native Codex CLI and in Claude Code on Linux/WSL,
-`Ctrl+Alt+V` in Codex under WSL, or `Alt+V` in native-Windows Claude Code. See
-[terminal client compatibility](docs/TERMINAL-CLIENT-COMPATIBILITY.md) for tmux
-behavior and the exact PTY sequences.
+For a clipboard screenshot, `Ctrl+Shift+V` uses Kettle's stable path-based
+handoff: it writes a bounded private temporary PNG and pastes the quoted path.
+Client-native image shortcuts vary by client version and platform and are not a
+Kettle compatibility promise. When starting Codex, its documented
+`codex --image <file>` / `codex -i <file>` option is the durable direct
+attachment path. See
+[terminal client compatibility](docs/TERMINAL-CLIENT-COMPATIBILITY.md) for the
+exact support and test boundaries.
 
 ## Configuration
 
@@ -385,6 +398,22 @@ claude mcp add kettle -- kettle mcp   # register kettle as MCP tools for Claude 
 See [docs/AGENT.md](docs/AGENT.md) for the full surface, methods, and security
 model.
 
+## Performance benchmarking
+
+The Windows release harness compares Kettle with Windows Terminal, Alacritty,
+WezTerm, Rio, and Tabby using balanced raw observations. Five terminals receive
+run-local isolated configs; Windows Terminal is advisory because the installed
+application has no per-launch settings-file switch. Release claims require
+physical EDID-backed displays, both fixed-size and native-display context-menu
+ROI checks, a two-monitor transition probe, end-to-drain throughput, paired
+bootstrap/drift gates, the exact binary from a compatible signed prior release
+as a pinned baseline, and a clean release-candidate build. Smoke and synthetic
+self-tests validate the harness but are not live GPU/display evidence.
+
+Start with [the performance harness guide](scripts/perf/README.md) for exact
+commands, prerequisites, sample counts, statistical margins, and the
+privacy-sanitized publication flow.
+
 ## Documentation
 
 - [docs/GETTING-STARTED.md](docs/GETTING-STARTED.md) — friendly first-run walkthrough (no jargon)
@@ -397,7 +426,7 @@ model.
 - [docs/TESTING.md](docs/TESTING.md) — test suite + CI
 - [docs/AUDIT-2026-07.md](docs/AUDIT-2026-07.md) — Windows reliability investigation + tracked-tree audit
 - [docs/AUDIT-2026-07-22-SEARCH.md](docs/AUDIT-2026-07-22-SEARCH.md) — frame-by-frame search regression evidence + implementation audit
-- [docs/PERFORMANCE.md](docs/PERFORMANCE.md) — measured startup / memory / render numbers
+- [docs/PERFORMANCE.md](docs/PERFORMANCE.md) — historical measurements and the current release benchmark methodology
 - [CHANGELOG.md](CHANGELOG.md) — release history
 - [docs/CONFIG.md](docs/CONFIG.md) — every config key
 - [docs/AGENT.md](docs/AGENT.md) — driving kettle from AI agents (`kettle exec` / `kettle ctl` / `kettle mcp`)

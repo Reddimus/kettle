@@ -18,7 +18,7 @@ workspace = true
 # / `record = on`, a runtime toggle in every build) and the bin crate
 # (`kettle exec --record`). Pulls in serde_json for JSON escaping and fs4 for
 # cross-platform active-cast locks.
-asciicast = ["dep:serde_json", "dep:log", "dep:fs4", "dep:kettle-state"]
+asciicast = ["dep:serde_json", "dep:fs4", "dep:kettle-state"]
 
 [dependencies]
 alacritty_terminal = "0.26.0"
@@ -33,7 +33,9 @@ regex-automata.workspace = true
 # a dev-dependency too (the `replays_asciicast_v2_output_into_grid` test
 # parses .cast).
 fs4 = { version = "1.1", optional = true }
-log = { workspace = true, optional = true }
+# PTY worker failures must remain observable even when the optional recorder is
+# disabled.
+log.workspace = true
 serde_json = { version = "1", optional = true }
 
 [target.'cfg(unix)'.dependencies]
@@ -53,10 +55,8 @@ windows-sys = { version = "0.61", features = [
 # record.rs writes — so a recorded session can be replayed through the VT
 # pipeline deterministically. Dev-only; not in the shipped crate.
 # `record.rs` is compiled under `cfg(test)` (feature off) so its unit
-# tests + the replay test run in the plain suite; it calls `log::warn!`,
-# so `log` must be present at test time even when `asciicast` is off.
+# tests + the replay test run in the plain suite.
 fs4 = "1.1"
 kettle-state.workspace = true
-log.workspace = true
 serde_json = "1"
 tempfile = "3"

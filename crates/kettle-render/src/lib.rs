@@ -169,7 +169,7 @@ pub mod menu {
     /// Separator row height. Smaller than a regular row so the menu
     /// reads as grouped without wasting vertical space.
     pub const SEP_H: f32 = 8.0;
-    /// Horizontal padding inside the panel: `max_chars * cw + H_PAD`.
+    /// Horizontal padding inside the panel: `max_columns * cw + H_PAD`.
     /// Gives the longest label breathing room and lets short labels
     /// (Copy) still feel like a real menu surface.
     pub const H_PAD: f32 = 40.0;
@@ -256,17 +256,143 @@ pub struct ContextMenuRow {
     pub hint: String,
 }
 
-/// Dropdown-parity: a menu row's character budget — the label plus
+/// Dropdown-parity: a menu row's display-column budget — the label plus
 /// its right-aligned shortcut hint (2 spacer columns between them). One
 /// formula shared by the renderer's shape + draw passes; the App's
-/// anchor-clamp and hit-test twins mirror it.
+/// anchor-clamp and hit-test twins mirror it. Display width, rather than scalar
+/// count, keeps CJK, emoji, and combining-mark labels inside the panel.
 pub fn menu_row_chars(row: &ContextMenuRow) -> usize {
-    row.label.chars().count()
+    use unicode_width::UnicodeWidthStr as _;
+
+    row.label.width()
         + if row.hint.is_empty() {
             0
         } else {
-            row.hint.chars().count() + 2
+            row.hint.width() + 2
         }
+}
+
+#[cfg(test)]
+mod context_menu_row_width_tests {
+    use super::{
+        ContextMenu, ContextMenuRow, context_menu_clip_indicators, context_menu_panel_width,
+        menu_chrome_quads, menu_row_chars,
+    };
+
+    #[test]
+    fn row_budget_uses_display_columns() {
+        let row = ContextMenuRow {
+            label: "主题 👩‍💻".to_string(),
+            separator: false,
+            enabled: true,
+            hint: "Ctrl+界".to_string(),
+        };
+        assert_eq!(
+            menu_row_chars(&row),
+            unicode_width::UnicodeWidthStr::width(row.label.as_str())
+                + unicode_width::UnicodeWidthStr::width(row.hint.as_str())
+                + 2
+        );
+    }
+
+    #[test]
+    fn app_clamped_width_is_authoritative_for_every_render_pass() {
+        let row = ContextMenuRow {
+            label: "short".to_string(),
+            separator: false,
+            enabled: true,
+            hint: String::new(),
+        };
+        let menu = ContextMenu {
+            anchor: (0.0, 0.0),
+            rows: vec![row],
+            highlight: 0,
+            scroll_offset: 0,
+            panel_w_clamped: 237.5,
+            panel_h_clamped: 0.0,
+        };
+        assert_eq!(context_menu_panel_width(&menu, 9.6), 237.5);
+    }
+
+    #[test]
+    fn scroll_indicators_follow_the_remaining_suffix() {
+        let rows = [false, false, true, false, false]
+            .into_iter()
+            .enumerate()
+            .map(|(index, separator)| ContextMenuRow {
+                label: format!("row {index}"),
+                separator,
+                enabled: !separator,
+                hint: String::new(),
+            })
+            .collect::<Vec<_>>();
+        let row_h = 24.0;
+        let sep_h = 8.0;
+        let panel_h = 48.0;
+
+        assert_eq!(
+            context_menu_clip_indicators(&rows, 0, panel_h, row_h, sep_h),
+            (false, true),
+            "the first window has content below but none above"
+        );
+        assert_eq!(
+            context_menu_clip_indicators(&rows, 2, panel_h, row_h, sep_h),
+            (true, true),
+            "the middle window has content on both sides"
+        );
+        assert_eq!(
+            context_menu_clip_indicators(&rows, 3, panel_h, row_h, sep_h),
+            (true, false),
+            "the final two rows fit exactly, so no down indicator remains"
+        );
+        assert_eq!(
+            context_menu_clip_indicators(&rows, rows.len(), panel_h, row_h, sep_h),
+            (true, false),
+            "an out-of-range offset is clamped to the empty suffix"
+        );
+    }
+
+    #[test]
+    fn tiny_or_invalid_menu_never_emits_negative_or_nonfinite_quads() {
+        let menu = ContextMenu {
+            anchor: (0.0, 0.0),
+            rows: vec![ContextMenuRow {
+                label: String::new(),
+                separator: true,
+                enabled: false,
+                hint: String::new(),
+            }],
+            highlight: 0,
+            scroll_offset: 0,
+            panel_w_clamped: 1.0,
+            panel_h_clamped: 1.0,
+        };
+        let theme = kettle_config::Theme::default();
+        let quads = menu_chrome_quads(&menu, &theme, kettle_config::Rgb::new(1, 2, 3), 8.0, 16.0);
+        assert!(!quads.is_empty());
+        assert!(quads.iter().all(|quad| {
+            quad.pos.iter().all(|value| value.is_finite())
+                && quad
+                    .size
+                    .iter()
+                    .all(|value| value.is_finite() && *value >= 0.0)
+        }));
+
+        let invalid = ContextMenu {
+            anchor: (f32::NAN, 0.0),
+            ..menu
+        };
+        assert!(
+            menu_chrome_quads(
+                &invalid,
+                &theme,
+                kettle_config::Rgb::new(1, 2, 3),
+                8.0,
+                16.0
+            )
+            .is_empty()
+        );
+    }
 }
 
 /// Text/layout damage key for the context-menu renderer.
@@ -292,6 +418,7 @@ fn context_menu_text_damage_key(
         menu.anchor.0.to_bits().hash(&mut hash);
         menu.anchor.1.to_bits().hash(&mut hash);
         menu.scroll_offset.hash(&mut hash);
+        menu.panel_w_clamped.to_bits().hash(&mut hash);
         menu.panel_h_clamped.to_bits().hash(&mut hash);
         menu.rows.len().hash(&mut hash);
         for row in &menu.rows {
@@ -334,12 +461,53 @@ pub struct ContextMenu {
     /// accumulated row height exceeds `panel_h_clamped`. Zero means
     /// "show from the top" (the default before scrollable submenus).
     pub scroll_offset: usize,
+    /// Panel width after the surface clamp. Zero means use natural width.
+    pub panel_w_clamped: f32,
     /// Panel height after the surface clamp (App-side
     /// `context_menu_geometry` already applies the clamp); the
     /// renderer reuses it to decide which rows are visible + to
     /// position the ▲/▼ arrows. Zero means "no clamp", in which
     /// case the renderer falls back to the natural panel height.
     pub panel_h_clamped: f32,
+}
+
+/// Width shared by context-menu buffer preparation, text placement, chrome,
+/// and headless capture. A nonzero App-supplied width is authoritative because
+/// it already accounts for surface clamping and label ellipsis; recomputing a
+/// smaller natural width would desynchronize paint bounds from hit testing.
+fn context_menu_panel_width(menu: &ContextMenu, cell_width: f32) -> f32 {
+    let width = if menu.panel_w_clamped > 0.0 {
+        menu.panel_w_clamped
+    } else {
+        let max_columns = menu
+            .rows
+            .iter()
+            .filter(|row| !row.separator)
+            .map(menu_row_chars)
+            .max()
+            .unwrap_or(0) as f32;
+        (max_columns * cell_width + menu::H_PAD).max(menu::MIN_W)
+    };
+    if width.is_finite() {
+        width.max(1.0)
+    } else {
+        1.0
+    }
+}
+
+fn context_menu_clip_indicators(
+    rows: &[ContextMenuRow],
+    scroll_offset: usize,
+    panel_h: f32,
+    row_h: f32,
+    sep_h: f32,
+) -> (bool, bool) {
+    let start = scroll_offset.min(rows.len());
+    let remaining_h: f32 = rows[start..]
+        .iter()
+        .map(|row| if row.separator { sep_h } else { row_h })
+        .sum();
+    (start > 0, remaining_h > panel_h)
 }
 
 /// Title-edit overlay projected by the UI.
@@ -596,17 +764,6 @@ pub struct Overlay {
     /// top of everything else so an overlapping pane border doesn't
     /// occlude the menu.
     pub context_menu: Option<ContextMenu>,
-    /// Vi-mode cursor. `Some((row,col))` while the user is in
-    /// vi-mode; the renderer paints a 1-cell outlined block at that
-    /// grid position in the focused pane. Different chrome from the
-    /// terminal cursor (block vs outline) so the user can tell the
-    /// two modes apart at a glance.
-    pub vi_cursor: Option<(usize, usize)>,
-    /// Vi-mode visual selection. `Some` when the user has pressed
-    /// `v` to start a selection. The renderer
-    /// highlights cells from `vi_visual_anchor` to `vi_cursor`
-    /// (inclusive both ends) using theme.selection_background.
-    pub vi_visual_anchor: Option<(usize, usize)>,
     /// Phase 3 of [`TERMINATOR-CONFIRM-DIALOG-DESIGN.md`](
     /// ../../../docs/TERMINATOR-CONFIRM-DIALOG-DESIGN.md): when
     /// `Some`, render a centered modal dialog over a dimming
@@ -1487,6 +1644,23 @@ pub struct Renderer {
     /// stop dispatching while output globals are changing. The worker owns the
     /// finite GPU wait, mapping, PNG encoding, and file write.
     screenshot_worker: Option<ScreenshotWorker>,
+}
+
+/// CPU-owned renderer state that must survive a surface/device rebuild.
+///
+/// GPU resources and retained draw caches deliberately stay out of this
+/// snapshot: they are tied to the failed device and are rebuilt lazily. The
+/// values here are the live per-window overrides that may have diverged from
+/// [`Config`] since launch, plus a screenshot request that has not yet been
+/// submitted to the worker.
+#[derive(Clone, Debug)]
+pub struct RendererRecoveryState {
+    font_family: Arc<str>,
+    font_size: f32,
+    cell_scale_w: f32,
+    cell_scale_h: f32,
+    accent_override: Option<Rgb>,
+    pending_screenshot: Option<ScreenshotRequest>,
 }
 
 /// A queued screenshot request. Phase 4 of the terminalshot design
@@ -2499,6 +2673,40 @@ impl Renderer {
     /// context is a refcount bump.
     pub fn gpu(&self) -> &GpuContext {
         &self.gpu
+    }
+
+    /// Snapshot the CPU-owned live state needed to rebuild this renderer.
+    ///
+    /// A screenshot already submitted to `screenshot_worker` owns its request
+    /// and completion sender on that worker thread, so it continues to finish
+    /// independently when the renderer is dropped. Only a request still queued
+    /// for the next frame belongs in the recovery snapshot.
+    pub fn recovery_state(&self) -> RendererRecoveryState {
+        RendererRecoveryState {
+            font_family: self.font_family.clone(),
+            font_size: self.font_size,
+            cell_scale_w: self.cell_scale_w,
+            cell_scale_h: self.cell_scale_h,
+            accent_override: self.accent_override,
+            pending_screenshot: self.pending_screenshot.clone(),
+        }
+    }
+
+    /// Reapply a recovery snapshot to a freshly constructed renderer.
+    ///
+    /// The replacement keeps the scale and surface size selected by its
+    /// constructor because those values may have changed while the GPU was
+    /// unavailable (for example, after moving the window to another monitor).
+    /// All font-derived metrics are recomputed once at that current scale.
+    pub fn restore_recovery_state(&mut self, state: &RendererRecoveryState) {
+        self.font_family = state.font_family.clone();
+        self.font_size = clamp_font_size(state.font_size);
+        self.cell_scale_w = state.cell_scale_w.max(0.01);
+        self.cell_scale_h = state.cell_scale_h.max(0.01);
+        self.accent_override = state.accent_override;
+        self.pending_screenshot = state.pending_screenshot.clone();
+        self.metrics = metrics_for(self.font_size, self.scale);
+        self.remeasure_cell();
     }
 
     /// Multi-window (Peacock): set/clear this window's accent.
@@ -3718,14 +3926,11 @@ impl Renderer {
                     pv.focused,
                     tabbar.broadcast,
                 );
-                // Terminator parity, titlebar Bucket-D
-                // phase 9 of TERMINATOR-PANE-TITLEBAR-DESIGN.md: title_at_bottom flips the bar from
-                // (top of pane) to (bottom of pane). Cells shift
-                // is still applied at the top — that's the
-                // intentional follow-up. Today the bar lands at the
-                // user's chosen position; the small top-pad gap
-                // when title_at_bottom is true is a layout-shift
-                // follow-up.
+                // Terminator parity, titlebar Bucket-D phase 9 of
+                // TERMINATOR-PANE-TITLEBAR-DESIGN.md: title_at_bottom flips
+                // the bar from the top of the pane to the bottom. Terminal
+                // content uses `pane_grid_origin`, so the reserved strip moves
+                // with the title instead of leaving a phantom top inset.
                 let bar_y = if cfg.title_at_bottom {
                     ry + rh - bw - pane_titlebar_h
                 } else {
@@ -3745,6 +3950,12 @@ impl Renderer {
                 .search
                 .as_ref()
                 .map_or(pv.focused, |search| search.target_pane == Some(pv.id));
+            let grid_origin = pane_grid_origin(
+                pv.rect,
+                (pad_x, pad_y),
+                pane_titlebar_h,
+                cfg.title_at_bottom,
+            );
             any_pane_text_changed |= self.build_pane(
                 i,
                 pv,
@@ -3752,8 +3963,6 @@ impl Renderer {
                 &family,
                 overlay.window_focused,
                 overlay.cursor_visible,
-                overlay.vi_cursor,
-                overlay.vi_visual_anchor,
                 if pane_has_search {
                     &overlay.highlights
                 } else {
@@ -3768,21 +3977,36 @@ impl Renderer {
 
             // Image placements, anchored history-aware so they scroll.
             {
-                let top = pv.snap.history_size as i64 - pv.snap.display_offset as i64;
                 let quota = placement_quotas[i];
+                let image_clip =
+                    pane_backdrop_rect(pv.rect, bw, pane_titlebar_h, cfg.title_at_bottom).and_then(
+                        |pane_body| {
+                            inline_image_clip(
+                                pane_body,
+                                grid_origin,
+                                (pv.snap.columns, pv.snap.screen_lines),
+                                (cw, ch),
+                            )
+                        },
+                    );
                 let mut draw = |p: &kettle_core::Placement| {
-                    let row = p.abs_line - top;
+                    let Some(image_clip) = image_clip else {
+                        return;
+                    };
+                    let Some(row) = placement_viewport_row(pv.snap, p) else {
+                        return;
+                    };
+                    let (image_x, image_y, image_width, image_height) =
+                        inline_placement_rect(grid_origin.0, grid_origin.1, row, cw, ch, p);
                     inline_live.insert(p.img.allocation_key());
+                    // Placements shift below the titlebar so a Kitty/Sixel
+                    // image at row zero cannot overlap the pane chrome.
                     img_items.push(imgpipe::ImageItem::placement(
-                        rx + pad_x + p.col as f32 * cw,
-                        // Image placements also shift
-                        // below the titlebar so a kitty/sixel
-                        // image at row 0 doesn't overlap the bar.
-                        ry + pad_y + pane_titlebar_h + row as f32 * ch,
-                        p.cell_cols as f32 * cw,
-                        p.cell_rows as f32 * ch,
+                        [image_x, image_y, image_width, image_height],
                         p.img.clone(),
                         p.source_rect,
+                        p.source_crop,
+                        image_clip,
                     ));
                 };
                 if quota > 1 {
@@ -3819,8 +4043,8 @@ impl Renderer {
                     theme.palette[4]
                 };
                 quads.push(rect(
-                    rx + pad_x + ln.col as f32 * cw,
-                    ry + pad_y + pane_titlebar_h + ln.row as f32 * ch + ch - 1.5,
+                    grid_origin.0 + ln.col as f32 * cw,
+                    grid_origin.1 + ln.row as f32 * ch + ch - 1.5,
                     ln.width as f32 * cw,
                     1.5,
                     col,
@@ -3833,8 +4057,8 @@ impl Renderer {
             if pane_has_search {
                 for hl in &overlay.highlights {
                     quads.push(rect(
-                        rx + pad_x + hl.col as f32 * cw,
-                        ry + pad_y + pane_titlebar_h + hl.row as f32 * ch,
+                        grid_origin.0 + hl.col as f32 * cw,
+                        grid_origin.1 + hl.row as f32 * ch,
                         hl.width as f32 * cw,
                         ch,
                         if hl.active {
@@ -3853,8 +4077,8 @@ impl Renderer {
                 for hint in &overlay.hint_labels {
                     let n = hint.label.chars().count().max(1) as f32;
                     quads.push(rect(
-                        rx + pad_x + hint.col as f32 * cw,
-                        ry + pad_y + pane_titlebar_h + hint.row as f32 * ch,
+                        grid_origin.0 + hint.col as f32 * cw,
+                        grid_origin.1 + hint.row as f32 * ch,
                         n * cw,
                         ch,
                         if hint.dim {
@@ -3867,8 +4091,8 @@ impl Renderer {
                 }
                 if let Some(preedit) = &overlay.ime_preedit {
                     let cells = unicode_width::UnicodeWidthStr::width(preedit.text.as_str()).max(1);
-                    let x = rx + pad_x + preedit.col as f32 * cw;
-                    let y = ry + pad_y + pane_titlebar_h + preedit.row as f32 * ch;
+                    let x = grid_origin.0 + preedit.col as f32 * cw;
+                    let y = grid_origin.1 + preedit.row as f32 * ch;
                     quads.push(rect(
                         x,
                         y,
@@ -4583,23 +4807,10 @@ impl Renderer {
             self.context_menu_texts.truncate(menu.rows.len());
             self.context_menu_hint_buffers.truncate(menu.rows.len());
             self.context_menu_hint_texts.truncate(menu.rows.len());
-            // Approximate widest row (label + right-aligned hint) so the
-            // panel fits without wrapping; the renderer doesn't try to
-            // measure precisely because the labels are short and we pad
-            // generously.
-            let max_chars = menu
-                .rows
-                .iter()
-                .filter(|r| !r.separator)
-                .map(menu_row_chars)
-                .max()
-                .unwrap_or(0) as f32;
-            // Panel sizing — more generous than v1.3.0's tight box so
-            // the menu reads as a polished surface rather than a wall
-            // of text. Horizontal pad 40 px (was 32), min width 180 px
-            // (was 140) so even a single-character action label gives
-            // the panel real presence.
-            let panel_w = (max_chars * cw + 40.0).max(180.0);
+            // The App's clamped width is authoritative when present; all
+            // render passes share this helper so text, chrome, and hit testing
+            // cannot drift by a fractional cell after ellipsis.
+            let panel_w = context_menu_panel_width(menu, cw);
             // Row height matches a comfortable click target (~28-32 px
             // on default cell metrics) — was 6 px of pad which gave a
             // cramped 18-19 px row.
@@ -4810,6 +5021,12 @@ impl Renderer {
         }
         for (i, pv) in panes.iter().enumerate() {
             let (rx, ry, rw, rh) = pv.rect;
+            let grid_origin = pane_grid_origin(
+                pv.rect,
+                (pad_x, pad_y),
+                pane_titlebar_h,
+                cfg.title_at_bottom,
+            );
             // Per-pane OSC 10 default-fg: glyphon's `default_color` is the
             // fallback when a span lacks an explicit color. Almost every
             // cell does carry an explicit color via `Attrs::color`, but
@@ -4825,11 +5042,10 @@ impl Renderer {
             if cfg.text_renderer == TextRendererMode::Legacy {
                 areas.push(TextArea {
                     buffer: &self.pane_buffers[i],
-                    left: rx + pad_x,
-                    // Shift cell text below the titlebar
-                    // when active. Same offset used inside build_pane
-                    // (which renders cells/cursor/images/links).
-                    top: ry + pad_y + pane_titlebar_h,
+                    left: grid_origin.0,
+                    // The legacy and cell-locked paths share the exact same
+                    // title-position-aware terminal-grid origin.
+                    top: grid_origin.1,
                     scale: 1.0,
                     bounds: TextBounds {
                         left: rx as i32,
@@ -5061,17 +5277,20 @@ impl Renderer {
         }
         // Hint labels over the focused pane (chips drawn above as quads).
         if let Some((frx, fry, frw, frh)) = focus_origin {
+            let focus_grid_origin = pane_grid_origin(
+                (frx, fry, frw, frh),
+                (pad_x, pad_y),
+                pane_titlebar_h,
+                cfg.title_at_bottom,
+            );
             // Hint-label text follows the theme background (dark on
             // the theme-yellow chip) unless overridden.
             let lab = cfg.search_foreground.unwrap_or(theme.background);
             for (i, hint) in overlay.hint_labels.iter().enumerate() {
                 areas.push(TextArea {
                     buffer: &self.hint_buffers[i],
-                    left: frx + pad_x + hint.col as f32 * cw,
-                    // Hint labels also shift below the
-                    // titlebar so they land over the cell they
-                    // mark, not over the title text.
-                    top: fry + pad_y + pane_titlebar_h + hint.row as f32 * ch,
+                    left: focus_grid_origin.0 + hint.col as f32 * cw,
+                    top: focus_grid_origin.1 + hint.row as f32 * ch,
                     scale: 1.0,
                     bounds: TextBounds {
                         left: frx as i32,
@@ -5086,8 +5305,8 @@ impl Renderer {
             if let Some(preedit) = &overlay.ime_preedit {
                 areas.push(TextArea {
                     buffer: &self.ime_buffer,
-                    left: frx + pad_x + preedit.col as f32 * cw,
-                    top: fry + pad_y + pane_titlebar_h + preedit.row as f32 * ch,
+                    left: focus_grid_origin.0 + preedit.col as f32 * cw,
+                    top: focus_grid_origin.1 + preedit.row as f32 * ch,
                     scale: 1.0,
                     bounds: TextBounds {
                         left: frx as i32,
@@ -5114,14 +5333,7 @@ impl Renderer {
             menu_q.extend(chrome);
             // Row labels — collected into `menu_areas` so the second
             // TextRenderer can prepare them as their own batch.
-            let max_chars = menu
-                .rows
-                .iter()
-                .filter(|r| !r.separator)
-                .map(menu_row_chars)
-                .max()
-                .unwrap_or(0) as f32;
-            let panel_w = (max_chars * cw + 40.0).max(180.0);
+            let panel_w = context_menu_panel_width(menu, cw);
             let row_h = ch + 12.0;
             let sep_h = 8.0_f32;
             let (ax, ay) = menu.anchor;
@@ -5176,10 +5388,11 @@ impl Renderer {
                 // Dropdown-parity: the right-aligned dimmed hint.
                 if !row.hint.is_empty() {
                     let hint_fg = dim_blend(theme.foreground, theme.background);
-                    let hint_w = row.hint.chars().count() as f32 * cw;
+                    let hint_w =
+                        unicode_width::UnicodeWidthStr::width(row.hint.as_str()) as f32 * cw;
                     menu_areas.push(TextArea {
                         buffer: &self.context_menu_hint_buffers[i],
-                        left: ax + panel_w - 16.0 - hint_w,
+                        left: (ax + panel_w - 16.0 - hint_w).max(ax + 16.0),
                         top: row_y + 6.0,
                         scale: 1.0,
                         bounds,
@@ -5791,8 +6004,6 @@ impl Renderer {
         family: &str,
         window_focused: bool,
         cursor_visible: bool,
-        vi_cursor: Option<(usize, usize)>,
-        vi_visual_anchor: Option<(usize, usize)>,
         search_highlights: &[HighlightRect],
         quads: &mut Vec<QuadInstance>,
         // Terminator parity, per-pane-titlebar Bucket-D,
@@ -5817,9 +6028,13 @@ impl Renderer {
         // cursor) therefore costs no reshape AND no glyph re-encode.
         let mut text_changed = false;
         let theme = &cfg.theme;
-        let (rx, ry, rw, rh) = pv.rect;
-        let ox = rx + cfg.padding_x;
-        let oy = ry + cfg.padding_y + pane_titlebar_h;
+        let (_, _, rw, rh) = pv.rect;
+        let (ox, oy) = pane_grid_origin(
+            pv.rect,
+            (cfg.padding_x, cfg.padding_y),
+            pane_titlebar_h,
+            cfg.title_at_bottom,
+        );
         let cw = self.cell_w;
         let ch = self.cell_h;
         // v2.20.0 P2: everything below reads the lock-free snapshot captured
@@ -5908,23 +6123,38 @@ impl Renderer {
         // underline leave it visible, so they aren't recolored).
         use alacritty_terminal::vte::ansi::CursorShape as EShape;
         let cp = snap.cursor.point;
-        let shape = snap.cursor.shape;
+        // The terminal engine owns the scrollback-aware vi cursor point. Give
+        // it a stable hollow shape regardless of the application's current
+        // DECSCUSR cursor style so vi mode remains visually distinct without a
+        // second, viewport-relative cursor model in the UI.
+        let shape = if snap.vi_mode {
+            EShape::HollowBlock
+        } else {
+            snap.cursor.shape
+        };
         let cvrow = cp.line.0 + display_off;
         let base_draw_cursor = cursor_focus_gate(
             window_focused,
             shape != EShape::Hidden
                 && (0..screen_rows).contains(&cvrow)
                 && pv.focused
-                && cursor_visible,
+                && (snap.vi_mode || cursor_visible),
         );
-        let draw_cursor = cursor_policy::cursor_draw_allowed(
-            snap,
-            cvrow,
-            base_draw_cursor,
-            cfg!(target_os = "windows"),
-        );
+        // Codex's native-Windows cursor compatibility shim applies to the
+        // application's writing cursor, never to the user-controlled vi
+        // cursor.
+        let draw_cursor = if snap.vi_mode {
+            base_draw_cursor
+        } else {
+            cursor_policy::cursor_draw_allowed(
+                snap,
+                cvrow,
+                base_draw_cursor,
+                cfg!(target_os = "windows"),
+            )
+        };
         let recolor_cursor_cell: Option<(i32, usize)> = {
-            if draw_cursor && window_focused && shape == EShape::Block {
+            if draw_cursor && !snap.vi_mode && window_focused && shape == EShape::Block {
                 Some((cp.line.0, cp.column.0))
             } else {
                 None
@@ -6183,14 +6413,10 @@ impl Renderer {
         // visible branch since DECSCUSR shapes and DEC ?25 hide are
         // independent (a program can use HollowBlock to mean "I'm
         // not in this pane" while still wanting the cursor visible).
-        // The cursor point is grid-absolute
-        // (kettle never enters alacritty vi-mode), so when scrolled back
-        // (display_offset > 0) it must convert to a viewport row like the cells
-        // and selection already do above — else a phantom cursor block
-        // paints over scrollback after the text has scrolled away. The old
-        // `cp.line.0 >= 0` guard was dead (a writing cursor's absolute line is
-        // always >= 0); the real visibility test is whether its viewport row is
-        // on screen.
+        // The cursor point is grid-absolute, including alacritty's native vi
+        // cursor. When scrolled back (`display_offset > 0`) it must convert to
+        // a viewport row like the cells and selection already do above — else
+        // a phantom cursor block paints over unrelated scrollback.
         if draw_cursor {
             // A wide glyph under a solid block cursor widens the
             // block to both columns (and a spacer-parked cursor re-anchors to
@@ -6206,8 +6432,13 @@ impl Renderer {
             // could set the cursor color but the renderer kept drawing the
             // theme cursor (a silent drop, mirror of the OSC color-query
             // bug that was fixed two weeks ago for the *read* direction).
-            let cursor_color =
-                color::resolve_query(258, theme, term_colors).unwrap_or(theme.cursor);
+            let cursor_color = if snap.vi_mode {
+                // Keep vi navigation distinct from both the application
+                // cursor and broadcast-mode yellow.
+                theme.palette[5]
+            } else {
+                color::resolve_query(258, theme, term_colors).unwrap_or(theme.cursor)
+            };
             // Hollow outline only when the running program requests
             // `HollowBlock` through DECSCUSR. Window focus is a renderer gate
             // above, so losing focus does not mutate or substitute DEC state.
@@ -6249,60 +6480,6 @@ impl Renderer {
             }
         }
 
-        // Vi-mode visual selection. Drawn
-        // BEFORE the vi cursor so the cursor's hollow block reads on
-        // top of the selection's solid fill. Selection spans
-        // [anchor..cursor] inclusive; the anchor / cursor order is
-        // normalized to (start, end) ordered ascending.
-        if pv.focused
-            && let (Some((arow, acol)), Some((crow, ccol))) = (vi_visual_anchor, vi_cursor)
-        {
-            let (start, end) = if (arow, acol) <= (crow, ccol) {
-                ((arow, acol), (crow, ccol))
-            } else {
-                ((crow, ccol), (arow, acol))
-            };
-            // Char-visual semantics (Alacritty default): start..end
-            // sweeps cells row by row.
-            let mut r = start.0;
-            while r <= end.0 {
-                if let Some((first, last)) = vi_selection_row_span(r, start, end, cols) {
-                    let bx = ox + first as f32 * cw;
-                    let by = oy + r as f32 * ch;
-                    let bw = (last - first + 1) as f32 * cw;
-                    quads.push(rect(bx, by, bw, ch, theme.selection_background, 0.55));
-                }
-                r += 1;
-            }
-        }
-
-        // Vi-mode cursor. When the user
-        // is in vi-mode, draw a magenta hollow block at the vi
-        // cursor's grid position over the focused pane. Distinct
-        // from the terminal cursor (different color + always hollow,
-        // even in focused-block mode) so the user can tell vi-mode
-        // is on at a glance. Drawn only on the focused pane —
-        // multi-pane setups don't paint vi cursors over inactive
-        // panes.
-        if pv.focused
-            && let Some((vrow, vcol)) = vi_cursor
-        {
-            let vi_color = theme.palette[5]; // magenta — distinct from
-            // broadcast yellow (3),
-            // accent blue (4), text fg.
-            let bx = ox + vcol as f32 * cw;
-            let by = oy + vrow as f32 * ch;
-            // Hollow block outline (4 quads). Same shape as the
-            // HollowBlock terminal cursor above but a dedicated
-            // color so the two never visually merge.
-            quads.push(rect(bx, by, cw, 1.0, vi_color, 1.0));
-            quads.push(rect(bx, by + ch - 1.0, cw, 1.0, vi_color, 1.0));
-            quads.push(rect(bx, by, 1.0, ch, vi_color, 1.0));
-            quads.push(rect(bx + cw - 1.0, by, 1.0, ch, vi_color, 1.0));
-            // Faint fill so the block reads even on busy text.
-            quads.push(rect(bx, by, cw, ch, vi_color, 0.20));
-        }
-
         // Lay out the text buffer. Advance lines by the grid's
         // `cell_h` (which includes the cfg.cell_height multiplier) so the text
         // rows stay locked to the cursor/quad row step — see `pane_metrics`.
@@ -6315,7 +6492,7 @@ impl Renderer {
         buf.set_metrics(pm);
         buf.set_size(
             Some((rw - cfg.padding_x * 2.0).max(1.0)),
-            Some((rh - cfg.padding_y * 2.0).max(1.0)),
+            Some((rh - cfg.padding_y * 2.0 - pane_titlebar_h).max(1.0)),
         );
         // Terminal rows are hard-wrapped by the VT engine at `cols`; the renderer
         // must NEVER soft-wrap. Wrap::None keeps exactly one layout run per buffer
@@ -6502,8 +6679,12 @@ impl Renderer {
 
         for (i, pv) in panes.iter().enumerate() {
             let (rx, ry, rw, rh) = pv.rect;
-            let ox = rx + pad_x;
-            let oy = ry + pad_y + pane_titlebar_h;
+            let (ox, oy) = pane_grid_origin(
+                pv.rect,
+                (pad_x, pad_y),
+                pane_titlebar_h,
+                cfg.title_at_bottom,
+            );
             // This pane's glyphs form one contiguous instance range; record it
             // with the pane rect so `draw` can scissor-clip text to the pane.
             let clip_start = out.len() as u32;
@@ -6576,10 +6757,72 @@ fn fair_placement_quotas(counts: &[usize], limit: usize) -> Vec<usize> {
 }
 
 fn placement_is_visible(snap: &PaneSnapshot, placement: &kettle_core::Placement) -> bool {
-    let top = snap.history_size as i64 - snap.display_offset as i64;
-    let row = placement.abs_line - top;
-    let nrows = snap.screen_lines as i64;
-    row + placement.cell_rows as i64 > 0 && row < nrows
+    let top = u128::from(snapshot_viewport_top(snap));
+    let start = u128::from(placement.abs_line);
+    let end = start + placement.cell_rows as u128;
+    let viewport_end = top + snap.screen_lines as u128;
+    snap.screen_lines != 0 && placement.cell_rows != 0 && start < viewport_end && top < end
+}
+
+fn snapshot_viewport_top(snap: &PaneSnapshot) -> u64 {
+    snap.history_origin
+        .saturating_add(snap.history_size as u64)
+        .saturating_sub(snap.display_offset.min(snap.history_size) as u64)
+}
+
+fn placement_viewport_row(snap: &PaneSnapshot, placement: &kettle_core::Placement) -> Option<i64> {
+    let delta = i128::from(placement.abs_line) - i128::from(snapshot_viewport_top(snap));
+    i64::try_from(delta).ok()
+}
+
+fn inline_placement_rect(
+    base_x: f32,
+    base_y: f32,
+    row: i64,
+    cell_width: f32,
+    cell_height: f32,
+    placement: &kettle_core::Placement,
+) -> (f32, f32, f32, f32) {
+    (
+        base_x + (placement.col as f32 + placement.x_offset_cells) * cell_width,
+        base_y + (row as f32 + placement.y_offset_cells) * cell_height,
+        placement.display_cols * cell_width,
+        placement.display_rows * cell_height,
+    )
+}
+
+/// Intersect the owning pane's drawable body with its terminal grid viewport.
+///
+/// Inline images are cell-anchored terminal content: they must not paint the
+/// pane border/titlebar, padding, sibling panes, or window chrome even when a
+/// placement starts above the viewport or declares an oversized destination.
+fn inline_image_clip(
+    pane_body: (f32, f32, f32, f32),
+    grid_origin: (f32, f32),
+    grid_size: (usize, usize),
+    cell_size: (f32, f32),
+) -> Option<[f32; 4]> {
+    let body = [pane_body.0, pane_body.1, pane_body.2, pane_body.3];
+    let grid = [
+        grid_origin.0,
+        grid_origin.1,
+        grid_size.0 as f32 * cell_size.0,
+        grid_size.1 as f32 * cell_size.1,
+    ];
+    if !body.into_iter().chain(grid).all(f32::is_finite)
+        || body[2] <= 0.0
+        || body[3] <= 0.0
+        || grid[2] <= 0.0
+        || grid[3] <= 0.0
+    {
+        return None;
+    }
+
+    let x0 = body[0].max(grid[0]);
+    let y0 = body[1].max(grid[1]);
+    let x1 = (body[0] + body[2]).min(grid[0] + grid[2]);
+    let y1 = (body[1] + body[3]).min(grid[1] + grid[3]);
+    (x1 > x0 && y1 > y0).then_some([x0, y0, x1 - x0, y1 - y0])
 }
 
 /// Whether a `tile` background's source image yields a sane number of tiles for
@@ -6603,31 +6846,6 @@ fn font_features(cfg: &Config) -> FontFeatures {
         ff.set(FeatureTag::new(&f.tag), f.value);
     }
     ff
-}
-
-/// The inclusive `(first_col, last_col)` the vi-mode visual selection
-/// highlights on grid row `r`, given the normalized `(start, end)` endpoints and
-/// the pane's column count, or `None` when the row's span is empty.
-///
-/// An intermediate (non-end) row extends to the pane's
-/// real last column (`cols - 1`), not a hardcoded `256`. On a pane wider than
-/// 256 columns — common on 4K/ultrawide with a small font (a 3840-px pane at a
-/// ~7-px cell is ~548 cols) — the middle rows of a multi-row visual selection
-/// used to highlight only to column 256 while the selection still yanked the
-/// full rows, a visible highlight/behavior mismatch.
-fn vi_selection_row_span(
-    r: usize,
-    start: (usize, usize),
-    end: (usize, usize),
-    cols: usize,
-) -> Option<(usize, usize)> {
-    let first = if r == start.0 { start.1 } else { 0 };
-    let last = if r == end.0 {
-        end.1
-    } else {
-        cols.saturating_sub(1)
-    };
-    (last >= first).then_some((first, last))
 }
 
 /// The inclusive `(first_col, last_col)` the mouse selection highlights on grid
@@ -8778,17 +8996,7 @@ fn menu_chrome_quads(
     ch: f32,
 ) -> Vec<QuadInstance> {
     let mut out: Vec<QuadInstance> = Vec::new();
-    // Dropdown-parity: the panel must budget for the right-aligned
-    // shortcut hints too — same `menu_row_chars` formula as the text passes,
-    // or hints would render past the panel background.
-    let max_chars = menu
-        .rows
-        .iter()
-        .filter(|r| !r.separator)
-        .map(menu_row_chars)
-        .max()
-        .unwrap_or(0) as f32;
-    let panel_w = (max_chars * cw + 40.0).max(180.0);
+    let panel_w = context_menu_panel_width(menu, cw);
     let row_h = ch + 12.0;
     let sep_h = 8.0_f32;
     // Terminator menu UX: natural panel height
@@ -8806,9 +9014,18 @@ fn menu_chrome_quads(
     } else {
         natural_h
     };
-    let clipped_top = menu.scroll_offset > 0;
-    let clipped_bottom = panel_h < natural_h;
     let (ax, ay) = menu.anchor;
+    if !panel_w.is_finite()
+        || !panel_h.is_finite()
+        || !ax.is_finite()
+        || !ay.is_finite()
+        || panel_w <= 0.0
+        || panel_h <= 0.0
+    {
+        return out;
+    }
+    let (clipped_top, clipped_bottom) =
+        context_menu_clip_indicators(&menu.rows, menu.scroll_offset, panel_h, row_h, sep_h);
 
     // Soft drop shadow — offset 4 px down-right at low opacity for
     // depth (GTK / iTerm2 convention).
@@ -8857,7 +9074,7 @@ fn menu_chrome_quads(
             out.push(rect(
                 ax + 12.0,
                 row_y + sep_h * 0.5 - 0.5,
-                panel_w - 24.0,
+                (panel_w - 24.0).max(0.0),
                 1.0,
                 theme.palette[8],
                 0.55,
@@ -8867,7 +9084,14 @@ fn menu_chrome_quads(
         }
         if i == menu.highlight && row.enabled {
             // Soft accent tint across the row.
-            out.push(rect(ax + 1.0, row_y, panel_w - 2.0, row_h, accent, 0.18));
+            out.push(rect(
+                ax + 1.0,
+                row_y,
+                (panel_w - 2.0).max(0.0),
+                row_h,
+                accent,
+                0.18,
+            ));
             // 2-px accent strip on the left of the highlighted row —
             // same pattern as the active-tab accent strip and
             // the focused-pane border.
@@ -8875,14 +9099,9 @@ fn menu_chrome_quads(
         }
         row_y += row_h;
     }
-    // Terminator menu UX: ▲/▼ scroll arrows when
-    // the natural list is clipped above or below. Drawn as small
-    // accent-colored bars rather than glyphs so they don't need a
-    // separate text-buffer path. The text-area loop in render_frame
-    // also bakes literal ▲ / ▼ unicode into the row labels for
-    // accessibility, but the chrome quad here gives the visual cue
-    // even when the row glyph is otherwise occupied (e.g. the first
-    // visible row's label might wrap).
+    // Terminator menu UX: top/bottom overflow cues when the natural list is
+    // clipped. Drawn as small accent-colored bars rather than glyphs so they
+    // do not need a separate text-buffer path.
     if clipped_top {
         // Centered 12-px wide accent bar near the top edge.
         let bar_w = 12.0;
@@ -8922,6 +9141,26 @@ fn srgb(c: u8) -> f64 {
 ///                               so users get the dim tint stage early)
 ///
 /// All inputs already clamped at parse time so no defensive math needed.
+/// Surface-pixel origin of a pane's terminal grid.
+///
+/// A top titlebar consumes space before row zero; a bottom titlebar consumes
+/// the same vertical space after the final row and therefore must not move the
+/// origin. Renderer content and UI pointer/IME projection share this helper so
+/// changing the title position cannot shift their coordinate systems apart.
+pub fn pane_grid_origin(
+    pane: (f32, f32, f32, f32),
+    padding: (f32, f32),
+    pane_titlebar_h: f32,
+    title_at_bottom: bool,
+) -> (f32, f32) {
+    let title_top = if title_at_bottom {
+        0.0
+    } else {
+        pane_titlebar_h
+    };
+    (pane.0 + padding.0, pane.1 + padding.1 + title_top)
+}
+
 /// The interior rectangle of a pane to paint with its
 /// own default background, given the pane `(x, y, w, h)`, border width
 /// `bw`, titlebar strip height `pane_titlebar_h` (0 when off), and whether
@@ -9856,6 +10095,7 @@ pub fn capture_png_with_annotation(
                 // unclamped (the harness paints all 8 rows in their
                 // natural height).
                 scroll_offset: 0,
+                panel_w_clamped: 0.0,
                 panel_h_clamped: 0.0,
             };
             menu_q.extend(menu_chrome_quads(
@@ -9868,14 +10108,7 @@ pub fn capture_png_with_annotation(
 
             // Text areas — one TextBuffer per non-separator row.
             // Positioning mirrors the live renderer's menu block.
-            let max_chars = menu
-                .rows
-                .iter()
-                .filter(|r| !r.separator)
-                .map(menu_row_chars)
-                .max()
-                .unwrap_or(0) as f32;
-            let panel_w = (max_chars * cw + 40.0).max(180.0);
+            let panel_w = context_menu_panel_width(&menu, cw);
             let row_h = ch + 12.0;
             let sep_h = 8.0_f32;
             let (ax, ay) = menu.anchor;
@@ -11074,6 +11307,47 @@ mod clamp_font_size_tests {
 }
 
 #[cfg(test)]
+mod renderer_recovery_state_tests {
+    use super::{RendererRecoveryState, ScreenshotRequest};
+    use kettle_config::Rgb;
+    use std::sync::Arc;
+
+    #[test]
+    fn clone_retains_live_overrides_and_screenshot_completion() {
+        let (completion, finished) = std::sync::mpsc::channel();
+        let expected_path = std::path::PathBuf::from("recovered-screenshot.png");
+        let state = RendererRecoveryState {
+            font_family: Arc::from("Live Runtime Font"),
+            font_size: 19.5,
+            cell_scale_w: 1.25,
+            cell_scale_h: 1.5,
+            accent_override: Some(Rgb::new(0x12, 0x34, 0x56)),
+            pending_screenshot: Some(ScreenshotRequest {
+                out_path: expected_path.clone(),
+                crop: Some((1.0, 2.0, 3.0, 4.0)),
+                completion: Some(completion),
+            }),
+        };
+
+        let retained = state.clone();
+        drop(state);
+        assert_eq!(retained.font_family.as_ref(), "Live Runtime Font");
+        assert_eq!(retained.font_size, 19.5);
+        assert_eq!((retained.cell_scale_w, retained.cell_scale_h), (1.25, 1.5));
+        assert_eq!(retained.accent_override, Some(Rgb::new(0x12, 0x34, 0x56)));
+        let request = retained.pending_screenshot.expect("queued screenshot");
+        assert_eq!(request.out_path, expected_path);
+        assert_eq!(request.crop, Some((1.0, 2.0, 3.0, 4.0)));
+        request
+            .completion
+            .expect("completion sender")
+            .send(Ok(expected_path.clone()))
+            .unwrap();
+        assert_eq!(finished.recv().unwrap(), Ok(expected_path));
+    }
+}
+
+#[cfg(test)]
 mod hidpi_scale_tests {
     use super::{measure_cell, metrics_for, pane_metrics};
     use glyphon::{Buffer as TextBuffer, FontSystem};
@@ -11311,6 +11585,7 @@ mod pane_buffer_lifecycle_tests {
             ],
             highlight: 0,
             scroll_offset: 0,
+            panel_w_clamped: 240.0,
             panel_h_clamped: 120.0,
         };
         let foreground = kettle_config::Rgb::new(220, 220, 220);
@@ -11602,7 +11877,7 @@ mod pane_buffer_lifecycle_tests {
     /// focus border or per-pane titlebar.
     #[test]
     fn pane_backdrop_rect_stays_inside_border_and_titlebar() {
-        use super::pane_backdrop_rect;
+        use super::{pane_backdrop_rect, pane_grid_origin};
         // 200x150 pane at (10, 20), 2px border, 18px titlebar at the top.
         let pane = (10.0, 20.0, 200.0, 150.0);
         let (x, y, w, h) = pane_backdrop_rect(pane, 2.0, 18.0, false).unwrap();
@@ -11626,6 +11901,14 @@ mod pane_buffer_lifecycle_tests {
 
         // Degenerate pane (border ≥ half the size) → None, no quad pushed.
         assert!(pane_backdrop_rect((0.0, 0.0, 3.0, 3.0), 2.0, 0.0, false).is_none());
+
+        // The terminal grid follows the title position: top titles move row
+        // zero down, bottom titles reserve the same height after the grid.
+        assert_eq!(
+            pane_grid_origin(pane, (6.0, 8.0), 18.0, false),
+            (16.0, 46.0)
+        );
+        assert_eq!(pane_grid_origin(pane, (6.0, 8.0), 18.0, true), (16.0, 28.0));
     }
 
     /// The background-image cache must (a) key on blur
@@ -12729,7 +13012,31 @@ mod bg_tile_cap_tests {
 
 #[cfg(test)]
 mod inline_placement_budget_tests {
-    use super::fair_placement_quotas;
+    use super::{
+        PaneSnapshot, fair_placement_quotas, inline_image_clip, inline_placement_rect,
+        pane_backdrop_rect, pane_grid_origin, placement_is_visible, placement_viewport_row,
+    };
+    use kettle_core::{ImageData, Placement};
+
+    fn placement_at(abs_line: u64) -> Placement {
+        Placement {
+            abs_line,
+            col: 0,
+            cell_cols: 1,
+            cell_rows: 1,
+            x_offset_cells: 0.0,
+            y_offset_cells: 0.0,
+            display_cols: 1.0,
+            display_rows: 1.0,
+            img: ImageData::new(1, 1, vec![0, 0, 0, 0]).expect("pixel"),
+            source_rect: None,
+            source_crop: None,
+            id: Some(1),
+            placement_id: 0,
+            kitty_params: None,
+            z: 0,
+        }
+    }
 
     #[test]
     fn busy_early_pane_cannot_starve_later_panes() {
@@ -12764,31 +13071,102 @@ mod inline_placement_budget_tests {
             );
         }
     }
-}
 
-#[cfg(test)]
-mod vi_selection_row_span_tests {
-    use super::vi_selection_row_span;
-
-    /// Drift guard: middle rows of a multi-row vi visual selection
-    /// extend to the real last column, not a hardcoded 256.
     #[test]
-    fn middle_rows_use_real_width_not_256() {
-        let (start, end) = ((10, 5), (12, 8));
-        let cols = 600; // wider than the old 256 bound
-        // First row: from the anchor column to the real last column.
-        assert_eq!(vi_selection_row_span(10, start, end, cols), Some((5, 599)));
-        // Middle row: full width [0, cols-1] — was [0, 256] before the fix.
-        assert_eq!(vi_selection_row_span(11, start, end, cols), Some((0, 599)));
-        // Last row: from 0 to the cursor column.
-        assert_eq!(vi_selection_row_span(12, start, end, cols), Some((0, 8)));
-        // Single-row selection stays within its endpoints.
+    fn kitty_offsets_and_fractional_extent_reach_the_gpu_destination() {
+        let placement = Placement {
+            abs_line: 12,
+            col: 3,
+            cell_cols: 3,
+            cell_rows: 2,
+            x_offset_cells: 0.25,
+            y_offset_cells: 0.5,
+            display_cols: 2.75,
+            display_rows: 1.5,
+            img: ImageData::new(1, 1, vec![0, 0, 0, 0]).expect("pixel"),
+            source_rect: None,
+            source_crop: None,
+            id: Some(1),
+            placement_id: 2,
+            kitty_params: None,
+            z: 0,
+        };
         assert_eq!(
-            vi_selection_row_span(10, (10, 3), (10, 7), cols),
-            Some((3, 7))
+            inline_placement_rect(100.0, 200.0, 2, 10.0, 20.0, &placement),
+            (132.5, 250.0, 27.5, 30.0)
         );
-        // Empty span → None (guards the draw against a zero/negative width).
-        assert_eq!(vi_selection_row_span(10, (10, 9), (10, 3), cols), None);
+    }
+
+    #[test]
+    fn monotonic_history_origin_prevents_capped_scrollback_aliasing() {
+        let mut snap = PaneSnapshot {
+            history_origin: 100,
+            history_size: 3,
+            display_offset: 0,
+            screen_lines: 3,
+            ..PaneSnapshot::default()
+        };
+        let current = placement_at(103);
+        assert!(placement_is_visible(&snap, &current));
+        assert_eq!(placement_viewport_row(&snap, &current), Some(0));
+
+        let stale_legacy_coordinate = placement_at(3);
+        assert!(!placement_is_visible(&snap, &stale_legacy_coordinate));
+        assert_eq!(
+            placement_viewport_row(&snap, &stale_legacy_coordinate),
+            Some(-100)
+        );
+
+        snap.display_offset = 2;
+        let retained_history = placement_at(101);
+        assert!(placement_is_visible(&snap, &retained_history));
+        assert_eq!(placement_viewport_row(&snap, &retained_history), Some(0));
+    }
+
+    #[test]
+    fn empty_viewport_never_admits_an_image_placement() {
+        let snap = PaneSnapshot {
+            history_origin: 100,
+            history_size: 3,
+            display_offset: 0,
+            screen_lines: 0,
+            ..PaneSnapshot::default()
+        };
+        let mut spanning = placement_at(100);
+        spanning.cell_rows = 10;
+        assert!(!placement_is_visible(&snap, &spanning));
+    }
+
+    #[test]
+    fn inline_image_clip_excludes_padding_titlebar_and_pane_edges() {
+        let pane = (10.0, 30.0, 200.0, 120.0);
+        let padding = (8.0, 8.0);
+        let titlebar_h = 20.0;
+        // Pane interior after a 1px border and 20px top titlebar.
+        let pane_body = pane_backdrop_rect(pane, 1.0, titlebar_h, false).expect("pane body");
+        let top_origin = pane_grid_origin(pane, padding, titlebar_h, false);
+        // The grid starts another 8px inside the pane and is wider/taller than
+        // the remaining body. The intersection must start at the grid (so no
+        // padding/titlebar paint) and end at the pane body (so no sibling/chrome
+        // bleed).
+        assert_eq!(
+            inline_image_clip(pane_body, top_origin, (30, 10), (8.0, 16.0)),
+            Some([18.0, 58.0, 191.0, 91.0])
+        );
+        assert_eq!(
+            inline_image_clip(pane_body, top_origin, (30, 0), (8.0, 16.0)),
+            None
+        );
+
+        let bottom_title_body =
+            pane_backdrop_rect(pane, 1.0, titlebar_h, true).expect("bottom-title pane body");
+        let bottom_origin = pane_grid_origin(pane, padding, titlebar_h, true);
+        assert_eq!(
+            inline_image_clip(bottom_title_body, bottom_origin, (30, 10), (8.0, 16.0)),
+            Some([18.0, 38.0, 191.0, 91.0]),
+            "moving the titlebar must translate the grid and clip together, \
+             not shrink the drawable image viewport"
+        );
     }
 }
 

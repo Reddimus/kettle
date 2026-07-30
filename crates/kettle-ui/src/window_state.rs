@@ -54,6 +54,9 @@ const FRAME_RETRY_MAX: std::time::Duration = std::time::Duration::from_secs(5);
 const OCCLUDED_RETRY_MIN: std::time::Duration = std::time::Duration::from_millis(250);
 const RENDERER_REBUILD_BASE: std::time::Duration = std::time::Duration::from_millis(100);
 const RENDERER_REBUILD_MAX: std::time::Duration = std::time::Duration::from_secs(5);
+const PTY_RESIZE_RETRY_BASE: std::time::Duration = std::time::Duration::from_millis(16);
+const PTY_RESIZE_RETRY_MAX: std::time::Duration = std::time::Duration::from_secs(1);
+const PTY_RESIZE_RETRY_LIMIT: u32 = 8;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum FrameRecoveryAction {
@@ -186,6 +189,226 @@ impl FrameRecoveryState {
                 self.pending = Some(PendingFrameRecovery { action, deadline });
             }
         }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+enum OutputPaintPhase {
+    #[default]
+    Idle,
+    /// Output is dirty but still inside the current frame budget.
+    Deferred,
+    /// A deferred output redraw has been requested from winit.
+    Queued,
+    /// A redraw callback is attempting to present the deferred damage.
+    Presenting,
+}
+
+/// Behavioral output-paint state machine.
+///
+/// This replaces two independently mutable booleans whose invalid combinations
+/// could erase the sustained-flood signal or schedule a 1 ns wake loop while a
+/// redraw was already queued.
+#[derive(Debug, Default)]
+pub(crate) struct OutputPaintPacer {
+    phase: OutputPaintPhase,
+}
+
+impl OutputPaintPacer {
+    pub(crate) fn defer(&mut self) {
+        if self.phase == OutputPaintPhase::Idle {
+            self.phase = OutputPaintPhase::Deferred;
+        }
+    }
+
+    /// Mark a redraw request that will flush deferred output. Returns whether
+    /// this call transitioned from deferred to newly queued.
+    pub(crate) fn queue_deferred_redraw(&mut self) -> bool {
+        if self.phase == OutputPaintPhase::Deferred {
+            self.phase = OutputPaintPhase::Queued;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Consume a redraw callback. The return value is retained until frame
+    /// outcome so flood accounting only advances on presentation.
+    pub(crate) fn begin_frame(&mut self) -> bool {
+        match self.phase {
+            OutputPaintPhase::Deferred | OutputPaintPhase::Queued => {
+                self.phase = OutputPaintPhase::Presenting;
+                true
+            }
+            OutputPaintPhase::Idle | OutputPaintPhase::Presenting => false,
+        }
+    }
+
+    pub(crate) fn presented(&mut self) {
+        self.phase = OutputPaintPhase::Idle;
+    }
+
+    /// A frame that did not present retains output damage for the recovery
+    /// deadline, but no longer claims a winit redraw is outstanding.
+    pub(crate) fn presentation_failed(&mut self) {
+        if self.phase == OutputPaintPhase::Presenting {
+            self.phase = OutputPaintPhase::Deferred;
+        }
+    }
+
+    pub(crate) fn reset(&mut self) {
+        self.phase = OutputPaintPhase::Idle;
+    }
+
+    pub(crate) fn is_deferred(&self) -> bool {
+        matches!(
+            self.phase,
+            OutputPaintPhase::Deferred | OutputPaintPhase::Queued | OutputPaintPhase::Presenting
+        )
+    }
+
+    pub(crate) fn redraw_queued(&self) -> bool {
+        self.phase == OutputPaintPhase::Queued
+    }
+}
+
+/// Pure per-window state machine for coalescing a monitor DPI transition with
+/// its accompanying physical-size event.
+///
+/// On Windows, `WM_DPICHANGED` produces `ScaleFactorChanged` before the
+/// `SetWindowPos`-driven `Resized`. Applying the new cell metrics to the old
+/// physical size in the first event would transiently reflow every PTY, then
+/// immediately reflow it back in the second event. Other winit backends are not
+/// required to deliver that follow-up resize, so `AboutToWait` is a bounded
+/// fallback once the renderer is usable.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum DpiResizeEvent {
+    ScaleFactorChanged,
+    Resized {
+        width: u32,
+        height: u32,
+        renderer_ready: bool,
+    },
+    AboutToWait {
+        width: u32,
+        height: u32,
+        renderer_ready: bool,
+    },
+    RendererRebuilt {
+        width: u32,
+        height: u32,
+    },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum DpiResizeAction {
+    Defer,
+    /// Keep the pending scale transition and schedule one more event-loop
+    /// turn. This gives a backend's paired `Resized` event a chance to arrive
+    /// before the bounded old-size fallback commits.
+    DeferAndWake,
+    ApplyLayout,
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct DpiResizeCoalescer {
+    pending_scale_change: bool,
+    fallback_turn_seen: bool,
+}
+
+impl DpiResizeCoalescer {
+    pub(crate) fn on_event(&mut self, event: DpiResizeEvent) -> DpiResizeAction {
+        match event {
+            DpiResizeEvent::ScaleFactorChanged => {
+                self.pending_scale_change = true;
+                self.fallback_turn_seen = false;
+                DpiResizeAction::Defer
+            }
+            DpiResizeEvent::Resized {
+                width,
+                height,
+                renderer_ready,
+            } => {
+                if width == 0 || height == 0 || !renderer_ready {
+                    return DpiResizeAction::Defer;
+                }
+                self.pending_scale_change = false;
+                self.fallback_turn_seen = false;
+                DpiResizeAction::ApplyLayout
+            }
+            DpiResizeEvent::AboutToWait {
+                width,
+                height,
+                renderer_ready,
+            } => {
+                if !self.pending_scale_change || width == 0 || height == 0 || !renderer_ready {
+                    return DpiResizeAction::Defer;
+                }
+                if !self.fallback_turn_seen {
+                    self.fallback_turn_seen = true;
+                    return DpiResizeAction::DeferAndWake;
+                }
+                self.pending_scale_change = false;
+                self.fallback_turn_seen = false;
+                DpiResizeAction::ApplyLayout
+            }
+            DpiResizeEvent::RendererRebuilt { width, height } => {
+                if width == 0 || height == 0 {
+                    return DpiResizeAction::Defer;
+                }
+                self.pending_scale_change = false;
+                self.fallback_turn_seen = false;
+                DpiResizeAction::ApplyLayout
+            }
+        }
+    }
+
+    pub(crate) fn render_allowed(&self) -> bool {
+        !self.pending_scale_change
+    }
+
+    #[cfg(test)]
+    fn is_pending(&self) -> bool {
+        self.pending_scale_change
+    }
+}
+
+/// Bounded retry state for a native PTY resize that failed after the local grid
+/// accepted the desired geometry. Retries are deadline-driven so output/redraw
+/// traffic cannot create a tight syscall loop, and stop after a finite burst;
+/// any later real layout pass remains eligible to try again.
+#[derive(Debug, Default)]
+pub(crate) struct PtyResizeRetryState {
+    deadline: Option<std::time::Instant>,
+    attempts: u32,
+}
+
+impl PtyResizeRetryState {
+    pub(crate) fn record_result(&mut self, now: std::time::Instant, failed: bool) {
+        if !failed {
+            *self = Self::default();
+            return;
+        }
+        if self.deadline.is_some() || self.attempts >= PTY_RESIZE_RETRY_LIMIT {
+            return;
+        }
+        self.attempts = self.attempts.saturating_add(1);
+        let delay =
+            capped_exponential_delay(PTY_RESIZE_RETRY_BASE, PTY_RESIZE_RETRY_MAX, self.attempts);
+        self.deadline = Some(now + delay);
+    }
+
+    pub(crate) fn take_due(&mut self, now: std::time::Instant) -> bool {
+        if self.deadline.is_none_or(|deadline| now < deadline) {
+            return false;
+        }
+        self.deadline = None;
+        true
+    }
+
+    pub(crate) fn remaining(&self, now: std::time::Instant) -> Option<std::time::Duration> {
+        self.deadline
+            .map(|deadline| deadline.saturating_duration_since(now))
     }
 }
 
@@ -409,18 +632,28 @@ pub(crate) struct WindowState {
     pub(crate) blink_on: bool,
     pub(crate) last_blink: std::time::Instant,
     pub(crate) last_bell: Option<std::time::Instant>,
-    /// Coalesce output-driven repaints (R2). `last_paint` is when
-    /// the last frame painted; `coalescing_paint` marks a deferred output
-    /// paint whose frame budget has not elapsed yet. Input/cursor paints
-    /// bypass this (they call `request_redraw` directly).
+    /// Coalesce output-driven repaints (R2). `last_paint` is when the last
+    /// frame painted; `output_pacer` owns the deferred -> queued -> presenting
+    /// transaction. Input/cursor paints bypass this state machine.
     pub(crate) last_paint: Option<std::time::Instant>,
-    pub(crate) coalescing_paint: bool,
+    pub(crate) output_pacer: OutputPaintPacer,
     /// v2.21.1 (throughput): consecutive output-coalesced frames — i.e. how
     /// sustained the current PTY-output flood is. `effective_output_budget`
-    /// stretches the paint budget (60→30→20 fps) as this climbs, so fewer
-    /// per-frame snapshots are taken under the `Term` lock the PTY reader needs;
-    /// reset to 0 by any non-coalesced paint (`redraw`).
+    /// stretches the monitor-derived paint budget as this climbs, so fewer
+    /// per-frame snapshots are taken under the `Term` lock the PTY reader
+    /// needs; reset to 0 by any non-coalesced paint (`redraw`).
     pub(crate) flood_paints: u32,
+    /// Output-coalescing base period for this window's current monitor.
+    /// Derived from winit's millihertz refresh value and refreshed on monitor,
+    /// DPI, and size transitions; windows on different displays pace
+    /// independently.
+    pub(crate) output_frame_budget: std::time::Duration,
+    /// Last synchronous current-monitor refresh probe. Windows implements this
+    /// through MonitorFromWindow/GetMonitorInfo/EnumDisplaySettings, so move
+    /// storms rate-limit it and retain a trailing probe deadline.
+    pub(crate) output_monitor: Option<winit::monitor::MonitorHandle>,
+    pub(crate) output_refresh_probe_at: Option<std::time::Instant>,
+    pub(crate) output_refresh_probe_pending: bool,
     pub(crate) last_click: Option<(std::time::Instant, usize, usize, u8)>,
     /// Last OS window title set (dedupe `set_title` syscalls).
     pub(crate) last_title: String,
@@ -447,6 +680,22 @@ pub(crate) struct WindowState {
     /// one lost swapchain cannot falsely escalate or stall the healthy
     /// renderers sharing the same GPU device.
     pub(crate) frame_recovery: FrameRecoveryState,
+    /// Deadline-driven retries for native PTY resize failures. Local terminal
+    /// geometry may already reflect the desired layout, while CSI 14t continues
+    /// to expose the last geometry actually accepted by the PTY.
+    pub(crate) pty_resize_retry: PtyResizeRetryState,
+    /// Live CPU-owned renderer state retained while a process-wide GPU-device
+    /// recovery rebuilds every surface. This outlives failed adapter attempts,
+    /// so runtime font zoom, cell scaling, per-window accent, and a queued
+    /// screenshot completion cannot be reset or lost between retries.
+    pub(crate) renderer_recovery: Option<kettle_render::RendererRecoveryState>,
+    /// Coalesces a monitor scale transition with its corresponding physical
+    /// resize so PTYs observe one final grid, never an intermediate reflow.
+    pub(crate) dpi_resize: DpiResizeCoalescer,
+    /// Set by `Resized(0, 0)` while minimized. Some Windows APIs continue to
+    /// expose a nonzero restore rect through `inner_size`; DPI fallback must
+    /// not treat that stale rect as a usable surface.
+    pub(crate) dpi_resize_surface_suspended: bool,
     /// Multi-window effort (Peacock): this window's resolved accent claim.
     /// `None` while unresolved (first frame) or when the user opted out
     /// (`accent-color = theme`/`off`/`none` or a pinned hex). Kept in sync
@@ -456,7 +705,7 @@ pub(crate) struct WindowState {
     /// PTY in this window. Output arriving within `TYPING_ECHO_WINDOW` of a
     /// keystroke paints IMMEDIATELY (request_redraw is vsync-coalesced, so
     /// this can't outpace the display) instead of through the
-    /// output coalescer (`coalescing_paint`) — whose WaitUntil deadline has ~16ms timer
+    /// output coalescer (`output_pacer`) — whose WaitUntil deadline has ~16ms timer
     /// granularity on Windows, which made held-key echo visibly stutter
     /// while Terminator (steady GTK frame clock) stayed smooth.
     pub(crate) last_typed: Option<std::time::Instant>,
@@ -557,8 +806,12 @@ impl WindowState {
             last_blink: std::time::Instant::now(),
             last_bell: None,
             last_paint: None,
-            coalescing_paint: false,
+            output_pacer: OutputPaintPacer::default(),
             flood_paints: 0,
+            output_frame_budget: std::time::Duration::from_nanos(16_666_667),
+            output_monitor: None,
+            output_refresh_probe_at: None,
+            output_refresh_probe_pending: false,
             last_click: None,
             last_title: String::new(),
             pending_pane_restarts: Vec::new(),
@@ -566,6 +819,10 @@ impl WindowState {
             seen_output_gen: std::collections::HashMap::new(),
             pending_output_gen: std::collections::HashMap::new(),
             frame_recovery: FrameRecoveryState::default(),
+            pty_resize_retry: PtyResizeRetryState::default(),
+            renderer_recovery: None,
+            dpi_resize: DpiResizeCoalescer::default(),
+            dpi_resize_surface_suspended: false,
             accent: None,
             last_typed: None,
             resize_overlay: None,
@@ -582,6 +839,62 @@ impl WindowState {
 mod tests {
     use super::*;
     use winit::keyboard::{KeyCode, PhysicalKey};
+
+    #[test]
+    fn output_wake_stays_latched_through_defer_queue_and_one_restore_frame() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let wakes = Arc::new(AtomicUsize::new(0));
+        let wakes_for_gate = wakes.clone();
+        let gate = kettle_core::event::OutputWakeGate::new(Arc::new(move || {
+            wakes_for_gate.fetch_add(1, Ordering::SeqCst);
+        }));
+        let mut pacer = OutputPaintPacer::default();
+
+        for _ in 0..10_000 {
+            gate.request();
+        }
+        assert_eq!(wakes.load(Ordering::SeqCst), 1);
+        pacer.defer();
+        assert!(pacer.queue_deferred_redraw());
+        assert!(!pacer.queue_deferred_redraw());
+        for _ in 0..10_000 {
+            gate.request();
+        }
+        assert_eq!(
+            wakes.load(Ordering::SeqCst),
+            1,
+            "the pane latch must remain closed for the whole deferred frame budget"
+        );
+
+        // App::redraw acknowledges before it snapshots generations. Output
+        // racing after that point owns a fresh wake and cannot be lost.
+        gate.acknowledge();
+        assert!(pacer.begin_frame());
+        assert!(gate.request());
+        assert_eq!(wakes.load(Ordering::SeqCst), 2);
+        pacer.presented();
+
+        // Hiding converts that racing pending wake to one dirty bit. Any
+        // amount of hidden output stays silent, and restore publishes one
+        // wake whose deferred frame can only be queued once.
+        gate.set_enabled(false);
+        pacer.reset();
+        for _ in 0..10_000 {
+            gate.request();
+        }
+        assert_eq!(wakes.load(Ordering::SeqCst), 2);
+        gate.set_enabled(true);
+        assert_eq!(wakes.load(Ordering::SeqCst), 3);
+        pacer.defer();
+        assert!(pacer.queue_deferred_redraw());
+        assert!(!pacer.queue_deferred_redraw());
+        gate.acknowledge();
+        assert!(pacer.begin_frame());
+        pacer.presented();
+        assert!(!pacer.is_deferred());
+    }
 
     #[test]
     fn frame_timeout_retries_are_one_shot_deadlines_with_a_cap() {
@@ -676,6 +989,232 @@ mod tests {
         assert_eq!(
             recovery.poll(now, false),
             FrameRecoveryPoll::Ready(FrameRecoveryAction::RebuildRenderer)
+        );
+    }
+
+    #[test]
+    fn dpi_scale_then_resize_commits_exactly_one_layout() {
+        let mut coalescer = DpiResizeCoalescer::default();
+        let events = [
+            DpiResizeEvent::ScaleFactorChanged,
+            DpiResizeEvent::Resized {
+                width: 3000,
+                height: 2000,
+                renderer_ready: true,
+            },
+        ];
+
+        let layout_commits = events
+            .into_iter()
+            .filter(|event| coalescer.on_event(*event) == DpiResizeAction::ApplyLayout)
+            .count();
+
+        assert_eq!(layout_commits, 1);
+        assert!(!coalescer.is_pending());
+    }
+
+    #[test]
+    fn dpi_scale_suppresses_intermediate_redraw_until_resize_commit() {
+        let mut coalescer = DpiResizeCoalescer::default();
+        assert!(coalescer.render_allowed());
+        assert_eq!(
+            coalescer.on_event(DpiResizeEvent::ScaleFactorChanged),
+            DpiResizeAction::Defer
+        );
+        assert!(
+            !coalescer.render_allowed(),
+            "a queued RedrawRequested must not snapshot or paint new-scale metrics \
+             against the old surface/grid"
+        );
+        assert_eq!(
+            coalescer.on_event(DpiResizeEvent::Resized {
+                width: 3000,
+                height: 2000,
+                renderer_ready: true,
+            }),
+            DpiResizeAction::ApplyLayout
+        );
+        assert!(coalescer.render_allowed());
+    }
+
+    #[test]
+    fn pty_resize_failures_retry_on_bounded_exponential_deadlines() {
+        let mut retry = PtyResizeRetryState::default();
+        let mut now = std::time::Instant::now();
+        let mut previous = std::time::Duration::ZERO;
+
+        for _ in 0..PTY_RESIZE_RETRY_LIMIT {
+            retry.record_result(now, true);
+            let wait = retry.remaining(now).expect("failure arms a retry");
+            assert!(wait >= previous);
+            assert!(wait <= PTY_RESIZE_RETRY_MAX);
+            assert!(!retry.take_due(now));
+            now += wait;
+            assert!(retry.take_due(now));
+            previous = wait;
+        }
+
+        retry.record_result(now, true);
+        assert!(
+            retry.remaining(now).is_none(),
+            "a persistent dead PTY must not keep the event loop on a timer forever"
+        );
+
+        retry.record_result(now, false);
+        retry.record_result(now, true);
+        assert_eq!(
+            retry.remaining(now),
+            Some(PTY_RESIZE_RETRY_BASE),
+            "a successful native resize resets retry history"
+        );
+    }
+
+    #[test]
+    fn dpi_resize_stays_pending_while_minimized_or_renderer_unavailable() {
+        let mut coalescer = DpiResizeCoalescer::default();
+        // A normal resize must not reflow against fallback 800x600/8x16
+        // geometry while the renderer is absent during GPU recovery.
+        assert_eq!(
+            coalescer.on_event(DpiResizeEvent::Resized {
+                width: 3000,
+                height: 2000,
+                renderer_ready: false,
+            }),
+            DpiResizeAction::Defer
+        );
+        assert_eq!(
+            coalescer.on_event(DpiResizeEvent::ScaleFactorChanged),
+            DpiResizeAction::Defer
+        );
+        assert_eq!(
+            coalescer.on_event(DpiResizeEvent::Resized {
+                width: 0,
+                height: 0,
+                renderer_ready: true,
+            }),
+            DpiResizeAction::Defer
+        );
+        assert_eq!(
+            coalescer.on_event(DpiResizeEvent::Resized {
+                width: 3000,
+                height: 2000,
+                renderer_ready: false,
+            }),
+            DpiResizeAction::Defer
+        );
+        assert_eq!(
+            coalescer.on_event(DpiResizeEvent::AboutToWait {
+                width: 3000,
+                height: 2000,
+                renderer_ready: false,
+            }),
+            DpiResizeAction::Defer
+        );
+        assert_eq!(
+            coalescer.on_event(DpiResizeEvent::RendererRebuilt {
+                width: 0,
+                height: 0,
+            }),
+            DpiResizeAction::Defer
+        );
+        assert!(coalescer.is_pending());
+
+        assert_eq!(
+            coalescer.on_event(DpiResizeEvent::RendererRebuilt {
+                width: 3000,
+                height: 2000,
+            }),
+            DpiResizeAction::ApplyLayout
+        );
+        assert!(!coalescer.is_pending());
+    }
+
+    #[test]
+    fn dpi_about_to_wait_is_only_a_pending_scale_fallback() {
+        let usable_fallback = DpiResizeEvent::AboutToWait {
+            width: 3000,
+            height: 2000,
+            renderer_ready: true,
+        };
+        let mut coalescer = DpiResizeCoalescer::default();
+
+        assert_eq!(coalescer.on_event(usable_fallback), DpiResizeAction::Defer);
+        coalescer.on_event(DpiResizeEvent::ScaleFactorChanged);
+        assert_eq!(
+            coalescer.on_event(usable_fallback),
+            DpiResizeAction::DeferAndWake
+        );
+        assert_eq!(
+            coalescer.on_event(usable_fallback),
+            DpiResizeAction::ApplyLayout
+        );
+        assert_eq!(coalescer.on_event(usable_fallback), DpiResizeAction::Defer);
+    }
+
+    #[test]
+    fn dpi_paired_resize_wins_over_one_turn_fallback() {
+        let mut coalescer = DpiResizeCoalescer::default();
+        assert_eq!(
+            coalescer.on_event(DpiResizeEvent::ScaleFactorChanged),
+            DpiResizeAction::Defer
+        );
+        assert_eq!(
+            coalescer.on_event(DpiResizeEvent::AboutToWait {
+                width: 2400,
+                height: 1600,
+                renderer_ready: true,
+            }),
+            DpiResizeAction::DeferAndWake
+        );
+        assert_eq!(
+            coalescer.on_event(DpiResizeEvent::Resized {
+                width: 3000,
+                height: 2000,
+                renderer_ready: true,
+            }),
+            DpiResizeAction::ApplyLayout
+        );
+        assert!(!coalescer.is_pending());
+        assert_eq!(
+            coalescer.on_event(DpiResizeEvent::AboutToWait {
+                width: 3000,
+                height: 2000,
+                renderer_ready: true,
+            }),
+            DpiResizeAction::Defer,
+            "the paired resize must consume the transition exactly once"
+        );
+    }
+
+    #[test]
+    fn dpi_minimized_restore_rect_never_drives_fallback_layout() {
+        let mut coalescer = DpiResizeCoalescer::default();
+        coalescer.on_event(DpiResizeEvent::ScaleFactorChanged);
+        assert_eq!(
+            coalescer.on_event(DpiResizeEvent::Resized {
+                width: 0,
+                height: 0,
+                renderer_ready: true,
+            }),
+            DpiResizeAction::Defer
+        );
+        // App marks the fallback renderer_ready=false while its last resize
+        // event was zero, even if Window::inner_size exposes a restore rect.
+        assert_eq!(
+            coalescer.on_event(DpiResizeEvent::AboutToWait {
+                width: 3000,
+                height: 2000,
+                renderer_ready: false,
+            }),
+            DpiResizeAction::Defer
+        );
+        assert_eq!(
+            coalescer.on_event(DpiResizeEvent::Resized {
+                width: 3000,
+                height: 2000,
+                renderer_ready: true,
+            }),
+            DpiResizeAction::ApplyLayout
         );
     }
 
