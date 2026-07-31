@@ -365,7 +365,17 @@ pub fn encode(
 
     if let Key::Named(n) = key {
         match n {
-            NamedKey::Enter => return Some(vec![b'\r']),
+            NamedKey::Enter => {
+                // Keep ordinary Enter byte-for-byte compatible. When the
+                // focused application has not negotiated Kitty CSI-u, use
+                // xterm modifyOtherKeys level-2 form for modified Enter so
+                // Shift/Ctrl/Alt do not collapse into a submit keystroke.
+                return Some(if modded {
+                    format!("\x1b[27;{m};13~").into_bytes()
+                } else {
+                    vec![b'\r']
+                });
+            }
             NamedKey::Backspace => {
                 // The three flavors every modern terminal emits:
                 //   plain Backspace  → DEL (0x7F)  — xterm convention,
@@ -1721,6 +1731,35 @@ mod tests {
             Some(b"\x1b[Z".to_vec()),
             "Shift+Tab must be back-tab CSI Z"
         );
+    }
+
+    #[test]
+    fn enter_chords_are_distinct_with_and_without_kitty_negotiation() {
+        use std::collections::HashSet;
+        use winit::keyboard::{Key, NamedKey};
+
+        let enter = Key::Named(NamedKey::Enter);
+        let modifiers = [
+            ModifiersState::empty(),
+            ModifiersState::SHIFT,
+            ModifiersState::CONTROL,
+            ModifiersState::ALT,
+        ];
+        let legacy =
+            modifiers.map(|mods| encode_key_press(&enter, mods, TermMode::empty()).unwrap());
+        assert_eq!(legacy[0], b"\r");
+        assert_eq!(legacy[1], b"\x1b[27;2;13~");
+        assert_eq!(legacy[2], b"\x1b[27;5;13~");
+        assert_eq!(legacy[3], b"\x1b[27;3;13~");
+        assert_eq!(legacy.iter().collect::<HashSet<_>>().len(), legacy.len());
+
+        let kitty_mode = TermMode::DISAMBIGUATE_ESC_CODES;
+        let kitty = modifiers.map(|mods| encode_key_press(&enter, mods, kitty_mode).unwrap());
+        assert_eq!(kitty[0], b"\r");
+        assert_eq!(kitty[1], b"\x1b[13;2u");
+        assert_eq!(kitty[2], b"\x1b[13;5u");
+        assert_eq!(kitty[3], b"\x1b[13;3u");
+        assert_eq!(kitty.iter().collect::<HashSet<_>>().len(), kitty.len());
     }
 
     #[test]

@@ -16,7 +16,8 @@ pub fn create_private_file_new(path: &Path) -> io::Result<File> {
 /// Open a private regular file for reading and writing, creating it if absent.
 ///
 /// Existing Unix symbolic links and Windows reparse points are rejected.
-/// On Windows, an existing file must be owned by the effective user.
+/// On Windows, a broad existing file is hardened only when its owner matches
+/// the effective token's default owner SID.
 pub fn open_private_file(path: &Path) -> io::Result<File> {
     open_private_file_impl(path)
 }
@@ -39,10 +40,9 @@ pub fn open_private_file_append(path: &Path) -> io::Result<File> {
 /// Restrict an already-open private file to the effective user.
 ///
 /// Unix applies mode `0600`. Windows replaces the DACL with one protected,
-/// full-access ACE for the effective token user, but only when the object is
-/// owned by that user. Neither a group-valued token owner nor an exact DACL can
-/// substitute for user ownership: a different owner retains implicit authority
-/// to rewrite the DACL.
+/// full-access ACE for the effective token user, but authorizes that rewrite
+/// only when the object's owner matches the effective token's `TokenOwner` SID.
+/// Objects owned by any other principal are rejected.
 pub fn restrict_private_file(file: &File) -> io::Result<()> {
     restrict_private_object(file)
 }
@@ -364,13 +364,13 @@ pub(super) fn owned_by_current_user(file: &File) -> io::Result<bool> {
 }
 
 #[cfg(all(test, windows))]
-pub(super) fn dacl_signature(path: &Path) -> io::Result<(Option<Vec<u8>>, bool)> {
-    windows::dacl_signature(path)
+pub(super) fn owned_by_current_token_owner(file: &File) -> io::Result<bool> {
+    windows::owned_by_current_token_owner(file)
 }
 
 #[cfg(all(test, windows))]
-fn make_private_file_inheritable(file: &File) -> io::Result<()> {
-    windows::make_private_file_inheritable(file)
+pub(super) fn dacl_signature(path: &Path) -> io::Result<(Option<Vec<u8>>, bool)> {
+    windows::dacl_signature(path)
 }
 
 #[cfg(unix)]
@@ -1424,9 +1424,9 @@ mod windows {
         IsValidAcl, IsValidSid, OWNER_SECURITY_INFORMATION, PROTECTED_DACL_SECURITY_INFORMATION,
         PSECURITY_DESCRIPTOR, PSID, SE_DACL_PROTECTED, SECURITY_ATTRIBUTES, SECURITY_DESCRIPTOR,
         SECURITY_MAX_SID_SIZE, SetSecurityDescriptorControl, SetSecurityDescriptorDacl,
-        SetSecurityDescriptorOwner, TOKEN_QUERY, TOKEN_USER, TokenUser,
-        UNPROTECTED_DACL_SECURITY_INFORMATION, WELL_KNOWN_SID_TYPE, WinBuiltinAdministratorsSid,
-        WinLocalSystemSid,
+        SetSecurityDescriptorOwner, TOKEN_INFORMATION_CLASS, TOKEN_OWNER, TOKEN_QUERY, TOKEN_USER,
+        TokenOwner, TokenUser, UNPROTECTED_DACL_SECURITY_INFORMATION, WELL_KNOWN_SID_TYPE,
+        WinBuiltinAdministratorsSid, WinLocalSystemSid,
     };
     use windows_sys::Win32::Storage::FileSystem::{
         BY_HANDLE_FILE_INFORMATION, CREATE_NEW, CreateDirectoryW, CreateFileW, DELETE,
@@ -1480,16 +1480,28 @@ mod windows {
         Ok(TokenHandle(token))
     }
 
-    struct TokenUserSid {
+    struct TokenSid {
         _buffer: Vec<u64>,
         sid: PSID,
     }
 
-    fn current_user_sid() -> io::Result<TokenUserSid> {
-        let token = effective_token()?;
+    fn token_information_sid(
+        token: &TokenHandle,
+        information_class: TOKEN_INFORMATION_CLASS,
+        sid_from_buffer: impl FnOnce(*const u8) -> PSID,
+        sid_kind: &str,
+    ) -> io::Result<TokenSid> {
         let mut len = 0_u32;
         // SAFETY: the null-buffer call is the documented size query.
-        unsafe { GetTokenInformation(token.0, TokenUser, std::ptr::null_mut(), 0, &mut len) };
+        unsafe {
+            GetTokenInformation(
+                token.0,
+                information_class,
+                std::ptr::null_mut(),
+                0,
+                &mut len,
+            )
+        };
         if len == 0 {
             return Err(io::Error::last_os_error());
         }
@@ -1499,7 +1511,7 @@ mod windows {
         if unsafe {
             GetTokenInformation(
                 token.0,
-                TokenUser,
+                information_class,
                 buffer.as_mut_ptr().cast(),
                 len,
                 &mut len,
@@ -1508,19 +1520,44 @@ mod windows {
         {
             return Err(io::Error::last_os_error());
         }
-        // SAFETY: successful GetTokenInformation populated a TOKEN_USER header
-        // whose SID points into `buffer`, retained by TokenUserSid.
-        let sid = unsafe { (*buffer.as_ptr().cast::<TOKEN_USER>()).User.Sid };
+        let sid = sid_from_buffer(buffer.as_ptr().cast());
         if sid.is_null() || unsafe { IsValidSid(sid) } == 0 {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
-                "the effective token has an invalid user SID",
+                format!("the effective token has an invalid {sid_kind} SID"),
             ));
         }
-        Ok(TokenUserSid {
+        Ok(TokenSid {
             _buffer: buffer,
             sid,
         })
+    }
+
+    fn token_user_sid(token: &TokenHandle) -> io::Result<TokenSid> {
+        // SAFETY: a successful TokenUser query writes a TOKEN_USER header at
+        // the start of the retained, suitably aligned buffer.
+        token_information_sid(
+            token,
+            TokenUser,
+            |buffer| unsafe { (*buffer.cast::<TOKEN_USER>()).User.Sid },
+            "user",
+        )
+    }
+
+    fn token_owner_sid(token: &TokenHandle) -> io::Result<TokenSid> {
+        // SAFETY: a successful TokenOwner query writes a TOKEN_OWNER header at
+        // the start of the retained, suitably aligned buffer.
+        token_information_sid(
+            token,
+            TokenOwner,
+            |buffer| unsafe { (*buffer.cast::<TOKEN_OWNER>()).Owner },
+            "owner",
+        )
+    }
+
+    fn current_user_sid() -> io::Result<TokenSid> {
+        let token = effective_token()?;
+        token_user_sid(&token)
     }
 
     struct WellKnownSid {
@@ -1830,7 +1867,7 @@ mod windows {
             })?;
             if created {
                 let valid_security =
-                    owned_by_user_handle_direct(&child, current_user.sid).map_err(|error| {
+                    owned_by_any_handle_direct(&child, &[current_user.sid]).map_err(|error| {
                         io::Error::new(
                             error.kind(),
                             format!("verify new private directory owner: {error}"),
@@ -2080,9 +2117,16 @@ mod windows {
     }
 
     fn private_object_is_exact(file: &File) -> io::Result<bool> {
-        let current_user = current_user_sid()?;
-        Ok(owned_by_user_handle_direct(file, current_user.sid)?
-            && has_current_user_only_dacl_direct(file, current_user.sid)?)
+        let token = effective_token()?;
+        let current_user = token_user_sid(&token)?;
+        let current_owner = token_owner_sid(&token)?;
+        // Kettle-created private objects explicitly select TokenUser as owner;
+        // pre-existing objects hardened in place retain the kernel's
+        // TokenOwner default. Both have the same protected TokenUser-only DACL.
+        Ok(
+            owned_by_any_handle_direct(file, &[current_user.sid, current_owner.sid])?
+                && has_current_user_only_dacl_direct(file, current_user.sid)?,
+        )
     }
 
     pub(crate) struct PreservedDacl {
@@ -2800,7 +2844,9 @@ mod windows {
         handle: HANDLE,
         owner_handle: Option<HANDLE>,
     ) -> io::Result<()> {
-        let current_user = current_user_sid()?;
+        let token = effective_token()?;
+        let current_user = token_user_sid(&token)?;
+        let current_owner = token_owner_sid(&token)?;
         let mut owner = std::ptr::null_mut();
         let mut dacl = std::ptr::null_mut();
         let mut descriptor = std::ptr::null_mut();
@@ -2823,7 +2869,7 @@ mod windows {
         }
         let descriptor = SecurityDescriptor(descriptor);
         let already_private = dacl_is_current_user_only(descriptor.0, dacl, current_user.sid)?;
-        if !owner_authorizes_hardening(owner, current_user.sid) {
+        if !owner_authorizes_hardening(owner, current_owner.sid) {
             let administrators = builtin_administrators_sid()?;
             let legacy_elevated_owner =
                 !owner.is_null() && unsafe { EqualSid(owner, administrators.sid) } != 0;
@@ -2841,7 +2887,7 @@ mod windows {
             }
             return Err(io::Error::new(
                 io::ErrorKind::PermissionDenied,
-                "refusing to change the ACL of an object not owned by the effective user",
+                "refusing to change the ACL of an object not owned by the effective token owner",
             ));
         }
         if already_private {
@@ -2920,8 +2966,8 @@ mod windows {
         }
     }
 
-    fn owner_authorizes_hardening(owner: PSID, current_user: PSID) -> bool {
-        !owner.is_null() && unsafe { EqualSid(owner, current_user) } != 0
+    fn owner_authorizes_hardening(owner: PSID, token_owner: PSID) -> bool {
+        !owner.is_null() && unsafe { EqualSid(owner, token_owner) } != 0
     }
 
     fn dacl_is_current_user_only(
@@ -3003,14 +3049,18 @@ mod windows {
 
     fn owned_by_user_handle(file: &File, current_user: PSID) -> io::Result<bool> {
         let handle = reopen_for_acl(file)?;
-        owned_by_user_raw(handle.as_raw_handle() as HANDLE, current_user)
+        owned_by_any_raw(handle.as_raw_handle() as HANDLE, &[current_user])
     }
 
-    fn owned_by_user_handle_direct(file: &File, current_user: PSID) -> io::Result<bool> {
-        owned_by_user_raw(file.as_raw_handle() as HANDLE, current_user)
+    fn owned_by_any_handle_direct(file: &File, expected_owners: &[PSID]) -> io::Result<bool> {
+        owned_by_any_raw(file.as_raw_handle() as HANDLE, expected_owners)
     }
 
     fn owned_by_user_raw(handle: HANDLE, current_user: PSID) -> io::Result<bool> {
+        owned_by_any_raw(handle, &[current_user])
+    }
+
+    fn owned_by_any_raw(handle: HANDLE, expected_owners: &[PSID]) -> io::Result<bool> {
         let mut owner = std::ptr::null_mut();
         let mut descriptor = std::ptr::null_mut();
         // SAFETY: output pointers are valid and the handle has READ_CONTROL.
@@ -3030,7 +3080,10 @@ mod windows {
             return Err(io::Error::from_raw_os_error(status as i32));
         }
         let _descriptor = SecurityDescriptor(descriptor);
-        Ok(owner_authorizes_hardening(owner, current_user))
+        Ok(!owner.is_null()
+            && expected_owners
+                .iter()
+                .any(|expected| unsafe { EqualSid(owner, *expected) } != 0))
     }
 
     #[cfg(test)]
@@ -3043,6 +3096,13 @@ mod windows {
     pub(super) fn owned_by_current_user(file: &File) -> io::Result<bool> {
         let current_user = current_user_sid()?;
         owned_by_user_handle(file, current_user.sid)
+    }
+
+    #[cfg(test)]
+    pub(super) fn owned_by_current_token_owner(file: &File) -> io::Result<bool> {
+        let token = effective_token()?;
+        let current_owner = token_owner_sid(&token)?;
+        owned_by_user_handle(file, current_owner.sid)
     }
 
     #[cfg(test)]
@@ -3059,95 +3119,39 @@ mod windows {
     }
 
     #[cfg(test)]
-    pub(super) fn make_private_file_inheritable(file: &File) -> io::Result<()> {
-        let current_user = current_user_sid()?;
-        let handle = reopen_for_acl(file)?;
-        if !owned_by_user_raw(handle.as_raw_handle() as HANDLE, current_user.sid)? {
-            return Err(io::Error::new(
-                io::ErrorKind::PermissionDenied,
-                "test fixture must remain owned by the effective user",
-            ));
-        }
-        let mut dacl = std::ptr::null_mut();
-        let mut descriptor = std::ptr::null_mut();
-        // SAFETY: output pointers are valid and the reopened handle has
-        // READ_CONTROL.
-        let status = unsafe {
-            GetSecurityInfo(
-                handle.as_raw_handle() as HANDLE,
-                SE_FILE_OBJECT,
-                DACL_SECURITY_INFORMATION,
-                std::ptr::null_mut(),
-                std::ptr::null_mut(),
-                &mut dacl,
-                std::ptr::null_mut(),
-                &mut descriptor,
-            )
-        };
-        if status != 0 {
-            return Err(io::Error::from_raw_os_error(status as i32));
-        }
-        let descriptor = SecurityDescriptor(descriptor);
-        // Make a deterministic legacy fixture without relying on the process
-        // token's default owner. Elevated runners otherwise create ordinary
-        // files with Administrators ownership, which production must reject.
-        let status = unsafe {
-            SetSecurityInfo(
-                handle.as_raw_handle() as HANDLE,
-                SE_FILE_OBJECT,
-                DACL_SECURITY_INFORMATION | UNPROTECTED_DACL_SECURITY_INFORMATION,
-                std::ptr::null_mut(),
-                std::ptr::null_mut(),
-                dacl,
-                std::ptr::null(),
-            )
-        };
-        drop(descriptor);
-        if status != 0 {
-            return Err(io::Error::from_raw_os_error(status as i32));
-        }
-        if has_current_user_only_dacl_raw(handle.as_raw_handle() as HANDLE, current_user.sid)? {
-            Err(io::Error::other(
-                "test fixture DACL unexpectedly remained protected",
-            ))
-        } else {
-            Ok(())
-        }
-    }
-
-    #[cfg(test)]
     mod tests {
         use super::*;
-        use windows_sys::Win32::Security::{
-            CreateWellKnownSid, SECURITY_MAX_SID_SIZE, WinBuiltinAdministratorsSid,
-        };
 
         #[test]
-        fn group_owner_is_never_private_file_provenance() {
-            let current_user = current_user_sid().unwrap();
-            let words = (SECURITY_MAX_SID_SIZE as usize).div_ceil(std::mem::size_of::<u64>());
-            let mut group = vec![0_u64; words];
-            let mut len = (group.len() * std::mem::size_of::<u64>()) as u32;
-            // SAFETY: the aligned buffer is writable for `len` bytes.
-            assert_ne!(
-                unsafe {
-                    CreateWellKnownSid(
-                        WinBuiltinAdministratorsSid,
-                        std::ptr::null_mut(),
-                        group.as_mut_ptr().cast(),
-                        &mut len,
-                    )
-                },
-                0
-            );
-            let group = group.as_mut_ptr().cast();
+        fn hardening_uses_token_owner_instead_of_token_user() {
+            let token = effective_token().unwrap();
+            let current_user = token_user_sid(&token).unwrap();
+            let current_owner = token_owner_sid(&token).unwrap();
             assert!(
-                !owner_authorizes_hardening(group, current_user.sid),
-                "a group-valued owner alone must never authorize a DACL rewrite"
+                owner_authorizes_hardening(current_owner.sid, current_owner.sid),
+                "the effective token owner must authorize its own object"
+            );
+
+            // Simulate the elevated-token case even on a non-elevated test
+            // host: TokenUser remains the account SID while TokenOwner is the
+            // builtin Administrators SID.
+            let administrators = builtin_administrators_sid().unwrap();
+            assert_eq!(
+                unsafe { EqualSid(current_user.sid, administrators.sid) },
+                0,
+                "TokenUser must differ from the simulated elevated TokenOwner"
             );
             assert!(
-                owner_authorizes_hardening(current_user.sid, current_user.sid),
-                "the effective user must authorize its own file"
+                owner_authorizes_hardening(administrators.sid, administrators.sid),
+                "a matching group-valued TokenOwner must authorize hardening"
+            );
+            assert!(
+                !owner_authorizes_hardening(current_user.sid, administrators.sid),
+                "TokenUser must not substitute for a different TokenOwner"
+            );
+            assert!(
+                !owner_authorizes_hardening(administrators.sid, current_user.sid),
+                "a hard-coded Administrators exception must not substitute for TokenOwner"
             );
         }
 
@@ -3217,11 +3221,16 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
-    fn existing_user_owned_file_is_hardened() {
+    fn existing_token_owned_file_is_hardened() {
         let dir = crate::test_tempdir();
         let path = dir.path().join("legacy");
-        let file = create_private_file_new(&path).unwrap();
-        make_private_file_inheritable(&file).unwrap();
+        std::fs::write(&path, b"legacy").unwrap();
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&path)
+            .unwrap();
+        assert!(owned_by_current_token_owner(&file).unwrap());
         restrict_private_file(&file).unwrap();
         assert!(has_current_user_only_dacl(&file).unwrap());
     }
@@ -3263,10 +3272,7 @@ mod tests {
     fn legacy_windows_hardening_requires_exclusive_access() {
         let dir = crate::test_tempdir();
         let path = dir.path().join("legacy");
-        let mut file = create_private_file_new(&path).unwrap();
-        file.write_all(b"private").unwrap();
-        make_private_file_inheritable(&file).unwrap();
-        drop(file);
+        std::fs::write(&path, b"private").unwrap();
         let preexisting_reader = File::open(&path).unwrap();
 
         assert!(open_private_file(&path).is_err());

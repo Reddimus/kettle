@@ -217,8 +217,7 @@ pub enum Action {
     /// Closes the last Bucket-D plugin gap
     /// (`launcher.py` → layout overlay).
     OpenLayoutPicker,
-    /// Terminator parity (`key_send_newline` /
-    /// Shift+Return). Writes a literal `\n` to the focused
+    /// Terminator parity (`key_send_newline`). Writes a literal `\n` to the focused
     /// pane's PTY. Mostly useful for inserting a newline into a
     /// shell line-editor that's otherwise consuming Enter
     /// (e.g. multi-line readline prompts that submit on Enter

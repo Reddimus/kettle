@@ -109,20 +109,56 @@ time-indeterminate candidates fail closed. PID reuse therefore delays
 reclamation rather than risking a live sibling.
 
 `kettle-update` composes those primitives into one managed-install
-transaction. Windows names stage/helper/backup/quarantine state from one exact
-decimal PID-and-epoch-nanoseconds id, admits only the release root plus four
-named shell-integration leaves, and caps the expanded state at 128 entries and
-512 MiB. Each schema-2 backup has an id-bound marker and must exactly match the
-journal's `existed=true` paths, sizes, and hashes before rollback or cleanup.
+transaction. Windows names archive/helper/backup/quarantine state from one
+exact decimal PID-and-epoch-nanoseconds id. Its schema-3 pending capsule carries
+the exact signed release document and signature, selected asset digest, inner
+package manifest, and retained archive/helper identities. The helper rechecks
+that capsule against the compiled Ed25519 key and freshness window after taking
+the update and running locks, reads the actually installed version from the
+held PE version resource, and accepts only a strict upgrade.
+
+Both platforms parse the digest-verified archive directly and materialize its
+manifest-verified members into immutable byte buffers; transaction publication
+never returns to an extracted pathname. The release grammar is capped at 128
+entries and 512 MiB. Each schema-2 backup has an id-bound marker and must exactly
+match the journal's `existed=true` paths, sizes, and hashes before rollback or
+cleanup. Rollback also compares each live destination with the recorded
+replacement fingerprint and preserves later writes on conflict. A committed
+journal retains the last-known-good bytes until a process at the target version
+reaches the managed startup checkpoint.
+
 Linux retains the open descriptor-relative parent until each destination
 snapshot leaf is opened; a `/proc/self/fd/...` capability can therefore never
 be converted into a dangling path that misclassifies an existing file as new.
-The lock order is update then running; the helper releases running then update
-after durable commit and pending-record removal, before asking the saved
-installer to refresh OS integration. The PowerShell installer implements the
-same byte-range and sharing contract while retaining non-reparse directory
-handles from the drive root through the prefix, so validation and leaf-only
-mutation cannot be redirected through an exchanged ancestor.
+Linux installer layouts add a second, user-visible provenance layer at
+`share/kettle/install-files.json`: it binds the normalized prefix and owner to
+the sorted path/mode/size/SHA-256 identity of every managed file and records
+only directories that Kettle created. Install, authenticated update, and
+uninstall walk components without following links, validate owner/write modes,
+and verify the complete prior record before mutation. Uninstall consequently
+unlinks only recorded leaves and removes only recorded empty directories; it
+does not recursively delete a shared XDG prefix or adopt a legacy tree.
+The Windows lock order is update then running; the helper releases running then
+update after durable commit and pending-record removal, before asking a fully
+qualified system PowerShell to execute the exact archive-verified `install.ps1`
+while a no-write/no-delete handle remains held. The PowerShell installer
+implements the same byte-range and sharing contract while retaining non-reparse
+directory handles from the drive root through the prefix, so validation and
+leaf-only mutation cannot be redirected through an exchanged ancestor.
+The Windows installer separately protects permanent state: every created root,
+managed directory, coordination file, staged payload, and published file has an
+explicit protected DACL for the initiating identity, SYSTEM, and Administrators.
+It holds and validates the fixed-volume ancestor chain before root creation,
+rejects untrusted replacement rights, and requires that exact ACL on an existing
+root. An opt-in legacy migration from a trusted external installer accepts only
+the bounded known tree before replacing inherited ACLs.
+On Windows, a pending helper cannot replace the mapped `kettle.exe`/`kettle.com`
+images until the old process releases its running-install guard and exits, so
+that process cannot transparently re-exec the replacement and still propagate
+its eventual status. A bare GUI handoff may exit zero, but any invocation with
+arguments prints that no requested work ran and exits 75 (`EX_TEMPFAIL`). This
+keeps help/version, configuration checks, CLI subcommands, and MCP launchers
+truthful while the verified update waits for other windows to close.
 After extraction, both supported updater paths verify any inner package
 manifest that is present. Signed release archives from v2.36.0 onward must
 contain that manifest; older archives may omit it for compatibility, but do
@@ -510,6 +546,17 @@ use a bounded best-effort sender and may drop under plugin backpressure;
 recording and `kettle exec` use lossless delivery. `kettle exec` pairs that
 policy with a four-slot queue, so a slow stdout pipe blocks the PTY reader before
 it takes the terminal lock and bounds memory without creating a lock cycle.
+Rendered stdout commands cross a second four-slot queue to a dedicated writer,
+keeping blocking OS writes off the lifecycle thread. The lifecycle counts
+admitted commands and polls their completion plus the final flush/join; timeout
+and cancellation therefore remain observable after child exit, while ordinary
+completion still drains losslessly.
+Every stdout write and flush returns through a worker-outcome channel to the
+lifecycle thread. A genuine write/flush failure is not an abandonment: Kettle
+diagnoses it on stderr, terminates and reaps the command tree, finalizes any
+recording, and returns 74 (`EX_IOERR`) instead of the child's status. A deadline
+that finds a merely stalled consumer retains the separate bounded-abandonment
+contract and its `stdout was not fully delivered` warning.
 Its independent PTY writer arbiter gives the bounded 64-message terminal-reply
 lane priority over forwarded stdin and incremental Unix VEOF injection. Reply
 admission and the arbiter's final reply recheck plus one nonblocking VEOF

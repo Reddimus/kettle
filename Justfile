@@ -103,6 +103,13 @@ deny:
     cargo deny check licenses sources bans
     cargo deny --manifest-path vendor/Cargo.toml check licenses sources bans
 
+# RustSec advisory coverage for both committed lock graphs. The product graph
+# retains one narrowly guarded unmaintained-crate exception; the vendor graph
+# has no product exceptions. Missing cargo-audit is a hard command failure.
+audit:
+    cargo audit --db target/advisory-db --url https://github.com/RustSec/advisory-db.git --ignore RUSTSEC-2026-0192
+    cargo audit --db target/advisory-db --url https://github.com/RustSec/advisory-db.git --file vendor/Cargo.lock
+
 # `cargo machete` — finds unused workspace dependencies. CI runs
 # this on every PR via `.github/workflows/machete.yml`. Local
 # pre-flight before adding a `Cargo.toml` dep, since a forgotten
@@ -145,8 +152,13 @@ tracked-audit:
 # Guard the temporary RUSTSEC-2026-0192 ignore. This must pass while #36 is
 # open, and should print the "remove ignores" instruction once upstream makes
 # `ttf-parser` disappear from the tree.
+[unix]
 ttf-parser-scope:
-    ./scripts/check-ttf-parser-scope.sh
+    python3 scripts/check-ttf-parser-scope.py
+
+[windows]
+ttf-parser-scope:
+    python scripts/check-ttf-parser-scope.py
 
 # === Packaging & release metadata ==================================
 # These four wrap CI checks that used to have NO `just` entry point at
@@ -218,20 +230,17 @@ online-installer-test:
 # `iconutil` CI uses, and sanity-check the result isn't a malformed or
 # empty container (the same regression class the release.yml iconutil
 # step could otherwise only catch at tag-cut time). `iconutil` ships
-# with macOS only — there's no Linux/Windows equivalent — so this is
-# [unix]-gated and self-skips with a clear message on non-macOS Unix
-# rather than failing on missing tooling. Mirrors CI's macOS-only
+# with macOS only — there's no Linux/Windows equivalent. The macOS recipe
+# fails if the required tool is missing; other OS recipes only classify it as
+# inapplicable and are not dependencies of their full gate. Mirrors CI's
 # "Packaging smoke — macOS .icns" step. Output lands under
 # `{{TMPDIR}}` like the `screenshot`/`menu` recipes.
-[unix]
+[macos]
 icns-smoke:
     #!/usr/bin/env bash
     set -euo pipefail
-    if ! command -v iconutil >/dev/null 2>&1; then
-      echo "icns-smoke needs iconutil (macOS-only); skipping on this OS."
-      echo "This check only runs for real on macOS — trust CI's macOS leg elsewhere."
-      exit 0
-    fi
+    command -v iconutil >/dev/null 2>&1 \
+      || { echo "error: icns-smoke requires iconutil on macOS" >&2; exit 1; }
     out="{{TMPDIR}}/kettle-icns-smoke.icns"
     iconutil -c icns packaging/macos/kettle.iconset -o "$out"
     file "$out" | grep -q "Mac OS X icon" \
@@ -241,6 +250,10 @@ icns-smoke:
     test "$size" -gt 100000 \
       || { echo "icns too small ($size bytes) — iconutil likely produced an empty container"; exit 1; }
     echo "iconutil OK ($size bytes)"
+
+[linux]
+icns-smoke:
+    @echo "icns-smoke requires macOS iconutil and is not a Linux gate."
 
 [windows]
 icns-smoke:
@@ -291,18 +304,18 @@ gauntlet: live-ui-helper-selftest
     cargo test --workspace
     cargo doc --workspace --no-deps
     @echo ""
-    @echo "GAUNTLET PASSED — core Rust gate green. Run 'just gauntlet-full' for full CI parity."
+    @echo "GAUNTLET PASSED — core Rust gate green. Run 'just gauntlet-full' for required current-OS native gates."
 
 # Strict gate: gauntlet + direct patched-crate validation + supply-chain
 # hygiene (adds the cargo-deny stale-ignore catch and cargo-machete
 # unused-deps catch as separate CI workflows triggered on Cargo.lock
 # changes). Run `just gauntlet-strict` before a release cut so all CI gates
-# pass locally first. Requires `cargo install cargo-deny cargo-machete`
+# pass locally first. Requires cargo-audit, cargo-deny, and cargo-machete
 # (one-time). The current-OS vendor check is supplemented by Linux + Windows
 # native vendor legs in CI.
-gauntlet-strict: gauntlet vendor-check deny machete tracked-audit
+gauntlet-strict: gauntlet vendor-check deny audit ttf-parser-scope machete tracked-audit
     @echo ""
-    @echo "STRICT GAUNTLET PASSED — fmt/clippy/build/test/doc + supply-chain green."
+    @echo "STRICT GAUNTLET PASSED — core, patched crates, RustSec product/vendor audits, ttf-parser scope, deny, machete, and tracked-file audit are green."
 
 # The FULL CI-equivalent gate: gauntlet-strict plus every packaging,
 # installer, update-manifest, and GPU-render check ci.yml runs that
@@ -315,10 +328,25 @@ gauntlet-strict: gauntlet vendor-check deny machete tracked-audit
 # `release` runs once and is shared across every recipe that needs it.
 # Run this before a release cut, or before any change to packaging/*,
 # scripts/install*, scripts/*manifest*.{py,ps1}, or the renderer —
-# `gauntlet`/`gauntlet-strict` alone won't catch a regression there.
-gauntlet-full: gauntlet-strict package-templates update-manifest-test release-assets-test package-manifest-test online-installer-test icns-smoke ico-smoke linux-installer-smoke windows-installer-smoke headless-gpu-smoke gpu-render-smoke cli-smoke touchpad-scroll-smoke
+# `gauntlet`/`gauntlet-strict` alone won't catch a regression there. The
+# platform-specific dependency set contains no successful stubs: every listed
+# dependency performs a real check, and missing required tooling fails.
+gauntlet-full: gauntlet-strict full-native-gates
     @echo ""
-    @echo "FULL GAUNTLET PASSED — every ci.yml check this OS can run locally is green."
+    @echo "CURRENT-OS FULL GAUNTLET PASSED — every required native gate listed above is green."
+    @echo "This is not a PASS for native legs on other operating systems."
+
+[windows]
+full-native-gates: update-manifest-test release-assets-test package-manifest-test ico-smoke windows-installer-smoke gpu-render-smoke cli-smoke touchpad-scroll-smoke perf-self-test
+    @echo "NOT APPLICABLE on Windows: Linux installer/online/package-template/headless-Xvfb and macOS iconutil gates."
+
+[linux]
+full-native-gates: package-templates update-manifest-test release-assets-test package-manifest-test online-installer-test linux-installer-smoke headless-gpu-smoke gpu-render-smoke cli-smoke touchpad-scroll-smoke
+    @echo "NOT APPLICABLE on Linux: Windows installer/ICO/performance-matrix and macOS iconutil gates."
+
+[macos]
+full-native-gates: package-templates update-manifest-test release-assets-test package-manifest-test online-installer-test icns-smoke gpu-render-smoke cli-smoke touchpad-scroll-smoke
+    @echo "NOT APPLICABLE on macOS: Windows installer/ICO/performance-matrix and Linux installer/Xvfb gates."
 
 # === End-to-end smoke ==============================================
 
@@ -361,14 +389,13 @@ menu OUT=(TMPDIR / "kettle-menu.png"):
 # a clear message elsewhere rather than failing on missing tooling.
 # Mirrors CI's Linux-only "Headless GPU smoke" step. Needs a release
 # binary.
-[unix]
+[linux]
 headless-gpu-smoke: release
     #!/usr/bin/env bash
     set -euo pipefail
     if ! command -v xvfb-run >/dev/null 2>&1; then
-      echo "headless-gpu-smoke needs xvfb-run (Linux/Xvfb); not available on this OS — skipping."
-      echo "See 'just gpu-render-smoke' for the offscreen render checks that also run on macOS."
-      exit 0
+      echo "error: headless-gpu-smoke requires xvfb-run on Linux" >&2
+      exit 1
     fi
     export LIBGL_ALWAYS_SOFTWARE=1
     log="{{TMPDIR}}/kettle-headless-smoke.log"
@@ -378,6 +405,10 @@ headless-gpu-smoke: release
       grep -qiE "panic|thread .* panicked" '"$log"' && { echo "panic in run"; cat '"$log"'; exit 1; }; \
       test $rc -eq 124 -o $rc -eq 0 || { echo "bad exit $rc"; cat '"$log"'; exit 1; }; \
       echo "headless run OK (exit $rc)"'
+
+[macos]
+headless-gpu-smoke:
+    @echo "headless-gpu-smoke requires Linux/Xvfb and is not a macOS gate."
 
 [windows]
 headless-gpu-smoke:
@@ -420,11 +451,8 @@ gpu-render-smoke: release
     echo "gpu-render-smoke PASSED (gpu-info + screenshot-menu + screenshot)"
 
 [windows]
-gpu-render-smoke:
-    @echo "gpu-render-smoke (gpu-info + screenshot-menu + screenshot) needs bash + xxd,"
-    @echo "matching ci.yml's Linux/macOS-only legs. On Windows, build a release binary"
-    @echo "and run 'kettle --gpu-info' / '--screenshot' / '--screenshot-menu' by hand,"
-    @echo "or trust CI's windows-latest leg."
+gpu-render-smoke: release
+    powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/check-gpu-render-smoke.ps1
 
 # Faithful local mirror of ci.yml's "CLI smoke (all OSes)" step: drives
 # every introspection flag (--version, --help, --check-config,
@@ -541,10 +569,7 @@ cli-smoke:
 
 [windows]
 cli-smoke:
-    @echo "cli-smoke's implementation is bash-based (matches ci.yml's CLI smoke,"
-    @echo "which itself runs via Git Bash on windows-latest). Not wired up as a"
-    @echo "native PowerShell recipe here — trust CI's windows-latest leg, or run"
-    @echo "'cargo build -q -p kettle' and exercise target\\debug\\kettle.exe by hand."
+    python scripts/check-cli-smoke.py
 
 # Reproduce the docs/PERFORMANCE.md baseline. Runs each measurement
 # 5× via `/usr/bin/time` (Linux/macOS) or `Measure-Command` (Win11).
@@ -562,6 +587,24 @@ bench:
 [windows]
 bench:
     & ./scripts/bench.ps1
+
+# GUI-free invariants for the Windows performance harness. CI requires both
+# PowerShell runtimes, so the Windows full gate does too; a missing runtime is
+# a hard failure instead of a successful skip.
+[windows]
+perf-self-test: perf-self-test-ps7 perf-self-test-ps5
+
+[windows]
+perf-self-test-ps7:
+    pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/perf/self-test.ps1
+
+[windows]
+perf-self-test-ps5:
+    powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/perf/self-test.ps1
+
+[unix]
+perf-self-test:
+    @echo "perf-self-test is the Windows PowerShell 7/5.1 CI matrix and is not a Unix gate."
 
 # Compare Kettle against installed Linux peer terminals using Hyperfine.
 # Terminator and Ghostty are required, Alacritty is included when present.
@@ -662,9 +705,16 @@ linux-installer-smoke:
 # isolated default-install integration mode — including upgrading a
 # stale pre-existing shortcut — on real Windows. Needs a release build
 # (kettle.exe + kettle-console.exe). Mirrors CI's Windows-only
-# "Windows installer smoke" step.
+# installer-smoke matrix. Both runtimes are required locally just as in CI.
 [windows]
-windows-installer-smoke: release
+windows-installer-smoke: windows-installer-smoke-ps7 windows-installer-smoke-ps5
+
+[windows]
+windows-installer-smoke-ps7: release
+    pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/check-windows-installer.ps1
+
+[windows]
+windows-installer-smoke-ps5: release
     powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/check-windows-installer.ps1
 
 [unix]

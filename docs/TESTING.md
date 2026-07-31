@@ -22,8 +22,18 @@ just gauntlet-strict
 ```
 
 The strict gate includes the normal gauntlet, direct patched-crate validation,
-dependency-policy checks, and unused-dependency checks; install `cargo-deny`
-and `cargo-machete` locally first.
+RustSec advisory scans of the product and vendor lock graphs, the scoped
+`ttf-parser` exception guard, dependency-policy checks, unused-dependency
+checks, and the tracked-file ledger. Install `cargo-audit`, `cargo-deny`, and
+`cargo-machete` locally first; a missing tool fails the recipe. `cargo-audit`
+fetches into ignored `target/advisory-db` rather than trusting a stale global
+cache.
+
+`just gauntlet-full` adds every required native check supported by the current
+OS. Its platform dependency lists contain real checks rather than successful
+stubs. It prints other-OS legs as explicitly not applicable and claims only a
+current-OS pass; cross-platform release evidence still requires the native CI
+matrix.
 
 The three patched crates under `vendor/` are explicitly excluded from the
 product workspace, so the root gates exercise their public Kettle integration
@@ -351,15 +361,21 @@ discipline here.
   real macOS runner because AF_UNIX full-buffer behavior cannot be claimed from
   Linux alone.
 
-- **kettle-update archive boundary**: Linux tests hash and extract one bounded
-  in-memory archive buffer, overwrite the former download path between those
-  operations, and prove only verified bytes reach staging. Hash mismatch,
-  entry count, unpacked bytes, path, link/special/sparse-file, mode, and
-  package-manifest failures remain fail-closed. The
-  `package_manifest_is_mandatory_from_v2_36_onward` regression proves a
-  pre-v2.36 signed archive may omit the inner manifest, v2.36.0 and newer may
-  not, and a valid modern manifest is accepted. Any manifest that is present is
-  verified. Windows separately exercises its mandatory archive range lock.
+- **kettle-update archive boundary**: Linux and Windows tests parse one bounded,
+  digest-verified archive into immutable member buffers, destroy or overwrite
+  the former archive storage, and prove transaction publication still consumes
+  only the verified bytes. Hash mismatch, entry count, unpacked bytes, path,
+  link/special/sparse-file, mode, and exact package-manifest failures remain
+  fail-closed. Windows separately proves a held archive blocks overwrite and
+  rename, a forged pending capsule with correct local archive/helper hashes but
+  no valid Ed25519 signature is rejected, and a correctly authenticated pending
+  version cannot downgrade the installed version. Timestamp regressions cover
+  expired/future signed metadata and strict RFC 3339 parsing. Post-update
+  integration tests require the installed script to match the verified archive
+  bytes and retain it against replacement through execution. Transaction tests
+  prove rollback preserves a post-update conflicting write and its recovery
+  evidence, while committed last-known-good bytes remain until the target
+  version reaches managed startup.
 
 - **kettle-core VT conformance** (150+ tests): drives the *real*
   vte + alacritty_terminal path used by the PTY reader and asserts
@@ -907,7 +923,10 @@ These need a real display and are run by hand (or on real hardware):
     `kettle mcp --self-test`. When Unix Python with `termios` is available, it
     also performs a real Kitty keyboard capability-query round trip. The Codex
     top-level help probe requires its `--image <FILE>` initial-attachment
-    option. It does not drive an interactive Codex/Claude composer, populate a
+    option. Exact input-encoder regressions require Enter, Shift+Enter,
+    Ctrl+Enter, and Alt+Enter to be pairwise distinct in both legacy xterm and
+    negotiated Kitty modes while plain Enter remains CR. The smoke script does
+    not drive an interactive Codex/Claude composer, populate a
     clipboard, inject paste keys, or assert an image attachment. The tmux probe
     verifies `tmux-256color`, progressive extended keys, and Kettle's additive
     terminal feature declaration. Missing
@@ -1034,6 +1053,20 @@ These need a real display and are run by hand (or on real hardware):
     fixture verifies punctuation-sensitive VWERASE followed by a complete EOF
     sequence; native `EXTPROC` coverage requires explicit refusal while DSR,
     DA1, and Kitty replies remain usable.
+    Unread-stdout coverage has two distinct child states. The infinite-flood
+    helper stays alive and must return 124 at its deadline. The Linux
+    finite-burst helper exits 23 after 64–128 KiB; its parent shrinks and
+    preloads Kettle's stdout pipe before spawn, then confirms the helper is a
+    zombie or gone through `/proc`. It must terminate at the deadline and
+    preserve 23. Do not replace those state assertions with a sleep or a guessed
+    burst threshold.
+    A separate Windows/Linux broken-pipe fixture reads one line and closes the
+    only stdout reader while the child keeps producing output. It requires the
+    dedicated exit 74 diagnostic and verifies the child no longer runs. This is
+    intentionally separate from the unread-pipe deadline fixtures, which must
+    retain the `stdout was not fully delivered` warning. Another native test
+    supplies a nonexistent explicit `--cwd`, requires exit 125, and proves a
+    child-side marker was never created.
     Backpressure regressions must cover both piped stdin and `/dev/null`: a
     query-flooding child that never reads replies must hit the bounded
     64-message reply queue promptly rather than defeating timeout. A separate
@@ -1193,7 +1226,8 @@ name the shape of bug each pass caught.
   proves atomic publication replaces the managed directory entry without
   overwriting the unrelated backing file. The smoke additionally exercises an
   exact interrupted stage/journal/hash-bound backup, a post-commit orphan
-  backup, a real schema-2 pending record with its stage/helper/file identities,
+  backup, a real schema-3 pending capsule with archive/helper, signed-asset, and
+  package-manifest identities,
   rejection of legacy-schema and unknown-field pending records, the narrowly
   supported legacy binary-backup names, and rejection of a near-miss backup
   name. It proves uninstall can finish after its first updater artifact has
@@ -1224,7 +1258,12 @@ name the shape of bug each pass caught.
   attribute, timestamp, BOM, newline, and outside-block preservation. A
   pre-replacement fault proves the original profile name and bytes remain
   present without retired-name or temporary artifacts. CI runs the whole
-  script separately under Windows PowerShell 5.1 and PowerShell 7.
+  script separately under Windows PowerShell 5.1 and PowerShell 7. The same
+  smoke rejects an `Everyone:Modify` ancestor before prefix creation, verifies
+  every permanent managed object has the exact protected ACL, refuses a legacy
+  broad root without opt-in, and proves trusted `-MigrateLegacyPermissions`
+  repairs both root and file ACLs. `just windows-installer-smoke` runs both
+  PowerShell engines locally.
 
   These subprocess terminations bypass PowerShell `finally` blocks and model a
   hard process stop after explicit file flushes. They do not claim resilience
@@ -1240,8 +1279,11 @@ name the shape of bug each pass caught.
 
 Separate workflows:
 
-- `.github/workflows/audit.yml` — `rustsec/audit-
-  check` on every Cargo.lock change + daily 06:00 UTC cron.
+- `.github/workflows/audit.yml` — pull requests run the editable scope guard
+  and both `cargo audit` scans in a read-only job whose checkout does not
+  persist credentials. Pushes to `main` and the daily 06:00 UTC schedule run
+  `rustsec/audit-check` in a separate trusted job; Checks/issues writes are
+  job-scoped and the token is passed only to the RustSec action step.
 - `.github/workflows/nix.yml` — on every pull request and push to `main`,
   installs upstream Nix, rejects lock-file drift, evaluates every supported
   system, builds the x86_64 Linux cargo-test check, launches the installed
@@ -1280,7 +1322,10 @@ Separate workflows:
   unconditional. CI runs auto mode on Linux.
 - `scripts/check-linux-installers.sh` — starts from the release binary produced
   by CI, installs into throwaway custom prefixes, and verifies desktop, man,
-  icon, helper, and `local-dev` ownership state. It proves that this normal
+  icon, no-follow helper, provenance, and `local-dev` ownership state. It
+  preserves unrelated shared-prefix content and reproduces the audited
+  `share/kettle` symlink replacement, proving uninstall refuses before mutation
+  and the external victim sentinel survives. It proves that this normal
   binary is refused for `--record-dir`, builds the `dev-record` variant, and
   repeats with prefix/record paths containing every Desktop Entry quoting edge
   (`\\`, `%`, `$`, `"`, and backtick), plus private mode and symlink-refusal
@@ -1293,7 +1338,7 @@ Separate workflows:
   binary is built, installs to a throwaway custom prefix, verifies the portable
   install payload, then uninstalls through the saved helper without repeating
   `-Prefix`. Windows CI runs the complete script once under PowerShell 7 and
-  once under Windows PowerShell 5.1; `just windows-installer-smoke` remains the
-  local Windows PowerShell 5.1 entry point. Installer fault-injection
+  once under Windows PowerShell 5.1; `just windows-installer-smoke` runs both
+  engines locally. Installer fault-injection
   environment variables are honored only with the isolated
   `-IntegrationTestRoot` test boundary.

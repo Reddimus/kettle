@@ -19,12 +19,14 @@ on:
       - "**/Cargo.toml"
       - "**/Cargo.lock"
       - "scripts/check-ttf-parser-scope.sh"
+      - "scripts/check-ttf-parser-scope.py"
       - ".github/workflows/audit.yml"
   pull_request:
     paths:
       - "**/Cargo.toml"
       - "**/Cargo.lock"
       - "scripts/check-ttf-parser-scope.sh"
+      - "scripts/check-ttf-parser-scope.py"
       - ".github/workflows/audit.yml"
   schedule:
     # 06:00 UTC daily — far enough off Dependabot's Monday-08:00 cadence to
@@ -33,20 +35,44 @@ on:
 
 permissions:
   contents: read
-  # rustsec/audit-check uses the Checks API to annotate the run summary
-  # with each finding; without `checks: write` it errors with "Resource
-  # not accessible by integration" because an explicit `permissions:`
-  # block zeroes everything not listed.
-  checks: write
-  # On push to the default branch the action opens (or updates) a single
-  # tracking issue per finding (idempotent) instead of spamming new
-  # issues every run.
-  issues: write
 
 jobs:
-  audit:
-    name: cargo audit (${{ matrix.workspace.name }})
+  pull-request-audit:
+    name: read-only pull request audit
+    if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    timeout-minutes: 15
+    steps:
+      # The checked-out scripts and manifests are pull-request-controlled.
+      # Keep this job read-only and do not place even its read token in Git's
+      # credential configuration.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
+        with:
+          toolchain: stable
+      - name: Guard scoped ttf-parser exception
+        run: ./scripts/check-ttf-parser-scope.sh
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --version 0.22.1 --locked
+      - name: Audit product graph with scoped ttf-parser exception
+        run: cargo audit --ignore RUSTSEC-2026-0192
+      - name: Audit vendor validation graph without product exceptions
+        run: cargo audit --file vendor/Cargo.lock
+
+  trusted-audit:
+    name: cargo audit (${{ matrix.workspace.name }})
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      # The RustSec action annotates Checks and synchronizes one tracking
+      # issue per advisory only for trusted push/schedule executions.
+      checks: write
+      issues: write
     strategy:
       fail-fast: false
       matrix:
@@ -60,6 +86,8 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
         with:
           toolchain: stable
@@ -70,7 +98,8 @@ jobs:
       # advisory DB, posts a Checks-API annotation per finding, and on
       # `push` to `main` syncs a per-advisory tracking issue. The token
       # is the standard GITHUB_TOKEN; permissions come from the
-      # workflow-level `permissions:` block above.
+      # trusted job-level `permissions:` block above. It is passed only to
+      # these action steps and is never persisted by checkout.
       #
       # RUSTSEC-2026-0192 (`ttf-parser` unmaintained) remains only through
       # upstream text-rendering stacks (`glyphon → cosmic-text → fontdb`).

@@ -381,7 +381,9 @@ claude mcp add kettle -- kettle mcp   # register kettle as MCP tools for Claude 
 
 - **`kettle exec -- <cmd>`** runs a command headlessly under a real PTY (full
   VT emulation, no window) and streams its output to stdout, propagating the
-  child's exit code (`--strip-ansi` / `--json` output modes).
+  child's exit code (`--strip-ansi` / `--json` output modes). A failed stdout
+  write returns 74 after stopping the child; an explicit invalid `--cwd`
+  returns 125 without spawning it.
 - **`kettle --agent-server <mode>` + `kettle ctl <method>`** drives a *running*
   kettle — list panes, read the screen, send text, **press named keys/chords
   (`send_keys`) and wait for screen conditions (`wait_for`)**, run commands —
