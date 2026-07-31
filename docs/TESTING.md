@@ -22,8 +22,18 @@ just gauntlet-strict
 ```
 
 The strict gate includes the normal gauntlet, direct patched-crate validation,
-dependency-policy checks, and unused-dependency checks; install `cargo-deny`
-and `cargo-machete` locally first.
+RustSec advisory scans of the product and vendor lock graphs, the scoped
+`ttf-parser` exception guard, dependency-policy checks, unused-dependency
+checks, and the tracked-file ledger. Install `cargo-audit`, `cargo-deny`, and
+`cargo-machete` locally first; a missing tool fails the recipe. `cargo-audit`
+fetches into ignored `target/advisory-db` rather than trusting a stale global
+cache.
+
+`just gauntlet-full` adds every required native check supported by the current
+OS. Its platform dependency lists contain real checks rather than successful
+stubs. It prints other-OS legs as explicitly not applicable and claims only a
+current-OS pass; cross-platform release evidence still requires the native CI
+matrix.
 
 The three patched crates under `vendor/` are explicitly excluded from the
 product workspace, so the root gates exercise their public Kettle integration
@@ -913,7 +923,10 @@ These need a real display and are run by hand (or on real hardware):
     `kettle mcp --self-test`. When Unix Python with `termios` is available, it
     also performs a real Kitty keyboard capability-query round trip. The Codex
     top-level help probe requires its `--image <FILE>` initial-attachment
-    option. It does not drive an interactive Codex/Claude composer, populate a
+    option. Exact input-encoder regressions require Enter, Shift+Enter,
+    Ctrl+Enter, and Alt+Enter to be pairwise distinct in both legacy xterm and
+    negotiated Kitty modes while plain Enter remains CR. The smoke script does
+    not drive an interactive Codex/Claude composer, populate a
     clipboard, inject paste keys, or assert an image attachment. The tmux probe
     verifies `tmux-256color`, progressive extended keys, and Kettle's additive
     terminal feature declaration. Missing
@@ -1047,6 +1060,13 @@ These need a real display and are run by hand (or on real hardware):
     zombie or gone through `/proc`. It must terminate at the deadline and
     preserve 23. Do not replace those state assertions with a sleep or a guessed
     burst threshold.
+    A separate Windows/Linux broken-pipe fixture reads one line and closes the
+    only stdout reader while the child keeps producing output. It requires the
+    dedicated exit 74 diagnostic and verifies the child no longer runs. This is
+    intentionally separate from the unread-pipe deadline fixtures, which must
+    retain the `stdout was not fully delivered` warning. Another native test
+    supplies a nonexistent explicit `--cwd`, requires exit 125, and proves a
+    child-side marker was never created.
     Backpressure regressions must cover both piped stdin and `/dev/null`: a
     query-flooding child that never reads replies must hit the bounded
     64-message reply queue promptly rather than defeating timeout. A separate
@@ -1238,7 +1258,12 @@ name the shape of bug each pass caught.
   attribute, timestamp, BOM, newline, and outside-block preservation. A
   pre-replacement fault proves the original profile name and bytes remain
   present without retired-name or temporary artifacts. CI runs the whole
-  script separately under Windows PowerShell 5.1 and PowerShell 7.
+  script separately under Windows PowerShell 5.1 and PowerShell 7. The same
+  smoke rejects an `Everyone:Modify` ancestor before prefix creation, verifies
+  every permanent managed object has the exact protected ACL, refuses a legacy
+  broad root without opt-in, and proves trusted `-MigrateLegacyPermissions`
+  repairs both root and file ACLs. `just windows-installer-smoke` runs both
+  PowerShell engines locally.
 
   These subprocess terminations bypass PowerShell `finally` blocks and model a
   hard process stop after explicit file flushes. They do not claim resilience
@@ -1254,8 +1279,11 @@ name the shape of bug each pass caught.
 
 Separate workflows:
 
-- `.github/workflows/audit.yml` — `rustsec/audit-
-  check` on every Cargo.lock change + daily 06:00 UTC cron.
+- `.github/workflows/audit.yml` — pull requests run the editable scope guard
+  and both `cargo audit` scans in a read-only job whose checkout does not
+  persist credentials. Pushes to `main` and the daily 06:00 UTC schedule run
+  `rustsec/audit-check` in a separate trusted job; Checks/issues writes are
+  job-scoped and the token is passed only to the RustSec action step.
 - `.github/workflows/nix.yml` — on every pull request and push to `main`,
   installs upstream Nix, rejects lock-file drift, evaluates every supported
   system, builds the x86_64 Linux cargo-test check, launches the installed
@@ -1294,7 +1322,10 @@ Separate workflows:
   unconditional. CI runs auto mode on Linux.
 - `scripts/check-linux-installers.sh` — starts from the release binary produced
   by CI, installs into throwaway custom prefixes, and verifies desktop, man,
-  icon, helper, and `local-dev` ownership state. It proves that this normal
+  icon, no-follow helper, provenance, and `local-dev` ownership state. It
+  preserves unrelated shared-prefix content and reproduces the audited
+  `share/kettle` symlink replacement, proving uninstall refuses before mutation
+  and the external victim sentinel survives. It proves that this normal
   binary is refused for `--record-dir`, builds the `dev-record` variant, and
   repeats with prefix/record paths containing every Desktop Entry quoting edge
   (`\\`, `%`, `$`, `"`, and backtick), plus private mode and symlink-refusal
@@ -1307,7 +1338,7 @@ Separate workflows:
   binary is built, installs to a throwaway custom prefix, verifies the portable
   install payload, then uninstalls through the saved helper without repeating
   `-Prefix`. Windows CI runs the complete script once under PowerShell 7 and
-  once under Windows PowerShell 5.1; `just windows-installer-smoke` remains the
-  local Windows PowerShell 5.1 entry point. Installer fault-injection
+  once under Windows PowerShell 5.1; `just windows-installer-smoke` runs both
+  engines locally. Installer fault-injection
   environment variables are honored only with the isolated
   `-IntegrationTestRoot` test boundary.

@@ -42,6 +42,8 @@ const MAX_ARCHIVE_ENTRIES: usize = 128;
 const MAX_UNPACKED_BYTES: u64 = 512 * 1024 * 1024;
 #[cfg(any(windows, target_os = "linux"))]
 const PACKAGE_MANIFEST_FILE: &str = "kettle-package-manifest.json";
+#[cfg(target_os = "linux")]
+const UNIX_INSTALL_PROVENANCE_FILE: &str = "share/kettle/install-files.json";
 #[cfg(any(windows, target_os = "linux"))]
 const MAX_PACKAGE_MANIFEST_BYTES: usize = 256 * 1024;
 #[cfg(windows)]
@@ -87,6 +89,37 @@ struct InstallMarker {
     channel: String,
     target: String,
     version: String,
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+struct UnixInstallProvenance {
+    schema: u32,
+    product: String,
+    managed_by: String,
+    prefix: String,
+    owner_uid: u32,
+    files: Vec<UnixInstallFile>,
+    directories: Vec<UnixInstallDirectory>,
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+struct UnixInstallFile {
+    path: String,
+    size: u64,
+    sha256: String,
+    mode: u32,
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+struct UnixInstallDirectory {
+    path: String,
+    mode: u32,
 }
 
 #[derive(Debug, Clone)]
@@ -744,6 +777,210 @@ pub fn marker_json(version: &str) -> Result<String, UpdateError> {
     Ok(serde_json::to_string_pretty(&marker)? + "\n")
 }
 
+#[cfg(target_os = "linux")]
+fn open_trusted_linux_install_prefix(prefix: &Path) -> Result<File, UpdateError> {
+    use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+
+    if !prefix.is_absolute() || prefix == Path::new("/") {
+        return Err(UpdateError::UnmanagedInstall(
+            "Linux install prefix must be an absolute non-root path".into(),
+        ));
+    }
+    let effective_uid = unsafe { libc::geteuid() };
+    let components = prefix.components().collect::<Vec<_>>();
+    let mut directory = open_anchored_directory(Path::new("/")).map_err(|error| {
+        UpdateError::UnmanagedInstall(format!("cannot anchor Linux filesystem root: {error}"))
+    })?;
+    for (index, component) in components.iter().enumerate() {
+        match component {
+            Component::RootDir => continue,
+            Component::Normal(name) => {
+                let candidate = directory_descriptor_path(&directory).join(name);
+                let next = open_anchored_directory(&candidate).map_err(|error| {
+                    UpdateError::UnmanagedInstall(format!(
+                        "cannot safely open Linux install path component {}: {error}",
+                        prefix.display()
+                    ))
+                })?;
+                let metadata = next.metadata()?;
+                let mode = metadata.permissions().mode() & 0o7777;
+                let final_component = index == components.len() - 1;
+                let trusted_sticky_ancestor =
+                    !final_component && metadata.uid() == 0 && mode & libc::S_ISVTX != 0;
+                if metadata.uid() != 0 && metadata.uid() != effective_uid {
+                    return Err(UpdateError::UnmanagedInstall(format!(
+                        "Linux install path component has an untrusted owner: {}",
+                        prefix.display()
+                    )));
+                }
+                if mode & 0o022 != 0 && !trusted_sticky_ancestor {
+                    return Err(UpdateError::UnmanagedInstall(format!(
+                        "Linux install path component is group/other writable: {}",
+                        prefix.display()
+                    )));
+                }
+                directory = next;
+            }
+            Component::Prefix(_) | Component::CurDir | Component::ParentDir => {
+                return Err(UpdateError::UnmanagedInstall(format!(
+                    "Linux install prefix is not absolute and normalized: {}",
+                    prefix.display()
+                )));
+            }
+        }
+    }
+    Ok(directory)
+}
+
+#[cfg(target_os = "linux")]
+fn read_linux_install_provenance(prefix: &Path) -> Result<UnixInstallProvenance, UpdateError> {
+    use std::collections::HashSet;
+    use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+
+    let relative = Path::new(UNIX_INSTALL_PROVENANCE_FILE);
+    let parent = anchored_parent(prefix, relative, false).map_err(|error| {
+        UpdateError::UnmanagedInstall(format!("cannot anchor Linux install provenance: {error}"))
+    })?;
+    let path = parent.destination(relative).map_err(|error| {
+        UpdateError::UnmanagedInstall(format!("cannot resolve Linux install provenance: {error}"))
+    })?;
+    let metadata = fs::symlink_metadata(&path).map_err(|error| {
+        UpdateError::UnmanagedInstall(format!(
+            "{} is missing or unreadable ({error}); reinstall with the hardened installer",
+            prefix.join(relative).display()
+        ))
+    })?;
+    let prefix_metadata = open_trusted_linux_install_prefix(prefix)
+        .and_then(|directory| directory.metadata().map_err(UpdateError::from))
+        .map_err(|error| {
+            UpdateError::UnmanagedInstall(format!(
+                "cannot validate the Linux install prefix owner: {error}"
+            ))
+        })?;
+    if !metadata.file_type().is_file()
+        || metadata.nlink() != 1
+        || metadata.uid() != prefix_metadata.uid()
+        || metadata.permissions().mode() & 0o7777 != 0o644
+        || metadata.len() == 0
+        || metadata.len() > 1024 * 1024
+    {
+        return Err(UpdateError::UnmanagedInstall(
+            "Linux install provenance is not an owned bounded regular file".into(),
+        ));
+    }
+    let bytes = read_bounded_regular(&path, 1024 * 1024).map_err(|error| {
+        UpdateError::UnmanagedInstall(format!("cannot read Linux install provenance: {error}"))
+    })?;
+    let provenance: UnixInstallProvenance = serde_json::from_slice(&bytes).map_err(|error| {
+        UpdateError::UnmanagedInstall(format!("invalid Linux install provenance: {error}"))
+    })?;
+    let expected_prefix = prefix.to_str().ok_or_else(|| {
+        UpdateError::UnmanagedInstall("Linux install prefix is not valid UTF-8".into())
+    })?;
+    if provenance.schema != 1
+        || provenance.product != "kettle"
+        || provenance.managed_by != "kettle-installer"
+        || provenance.prefix != expected_prefix
+        || provenance.owner_uid != prefix_metadata.uid()
+        || provenance.files.is_empty()
+        || provenance.files.len() > MAX_ARCHIVE_ENTRIES
+        || provenance.directories.len() > MAX_ARCHIVE_ENTRIES
+    {
+        return Err(UpdateError::UnmanagedInstall(
+            "Linux install provenance does not identify this installation".into(),
+        ));
+    }
+
+    let mut last_file = None::<&str>;
+    let mut seen_files = HashSet::new();
+    for record in &provenance.files {
+        let relative = Path::new(&record.path);
+        if record.path == UNIX_INSTALL_PROVENANCE_FILE
+            || validate_relative(relative).is_err()
+            || record.size > MAX_UNPACKED_BYTES
+            || !is_sha256(&record.sha256)
+            || !record
+                .sha256
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+            || !matches!(record.mode, 0o644 | 0o755)
+            || last_file.is_some_and(|previous| previous >= record.path.as_str())
+            || !seen_files.insert(record.path.as_str())
+        {
+            return Err(UpdateError::UnmanagedInstall(
+                "Linux install provenance contains an invalid file record".into(),
+            ));
+        }
+        last_file = Some(record.path.as_str());
+        let parent = anchored_parent(prefix, relative, false).map_err(|error| {
+            UpdateError::UnmanagedInstall(format!(
+                "cannot anchor recorded install file {}: {error}",
+                record.path
+            ))
+        })?;
+        let anchored = parent.destination(relative)?;
+        let metadata = fs::symlink_metadata(&anchored)?;
+        if !metadata.file_type().is_file()
+            || metadata.nlink() != 1
+            || metadata.uid() != provenance.owner_uid
+            || metadata.permissions().mode() & 0o7777 != record.mode
+            || metadata.len() != record.size
+            || sha256_file(&anchored)? != record.sha256
+        {
+            return Err(UpdateError::UnmanagedInstall(format!(
+                "recorded Linux install file changed identity or content: {}",
+                record.path
+            )));
+        }
+    }
+    for required in [
+        "bin/kettle",
+        "share/applications/kettle.desktop",
+        "share/kettle/install.sh",
+        "share/kettle/install-unix.py",
+        "share/kettle/install.json",
+    ] {
+        if !seen_files.contains(required) {
+            return Err(UpdateError::UnmanagedInstall(format!(
+                "Linux install provenance is missing {required}"
+            )));
+        }
+    }
+
+    let mut last_directory = None::<&str>;
+    let mut seen_directories = HashSet::new();
+    for record in &provenance.directories {
+        let relative = Path::new(&record.path);
+        if validate_relative(relative).is_err()
+            || record.mode != 0o755
+            || last_directory.is_some_and(|previous| previous >= record.path.as_str())
+            || !seen_directories.insert(record.path.as_str())
+        {
+            return Err(UpdateError::UnmanagedInstall(
+                "Linux install provenance contains an invalid directory record".into(),
+            ));
+        }
+        last_directory = Some(record.path.as_str());
+        let probe = relative.join(".kettle-provenance-anchor");
+        let directory = anchored_parent(prefix, &probe, false).map_err(|error| {
+            UpdateError::UnmanagedInstall(format!(
+                "cannot anchor recorded install directory {}: {error}",
+                record.path
+            ))
+        })?;
+        let metadata = directory.directory.metadata()?;
+        if metadata.uid() != provenance.owner_uid
+            || metadata.permissions().mode() & 0o7777 != record.mode
+        {
+            return Err(UpdateError::UnmanagedInstall(format!(
+                "recorded Linux install directory changed identity: {}",
+                record.path
+            )));
+        }
+    }
+    Ok(provenance)
+}
+
 #[cfg(any(windows, target_os = "linux"))]
 pub fn detect_managed_install() -> Result<ManagedInstall, UpdateError> {
     let executable = std::env::current_exe()?;
@@ -830,6 +1067,8 @@ fn detect_managed_install_at(executable: &Path) -> Result<ManagedInstall, Update
             marker.channel
         )));
     }
+    #[cfg(target_os = "linux")]
+    let _ = read_linux_install_provenance(&prefix)?;
     Ok(ManagedInstall {
         prefix,
         executable,
@@ -2630,13 +2869,19 @@ fn apply_staged_update(
     install: &ManagedInstall,
     update: &AvailableUpdate,
 ) -> Result<(), UpdateError> {
+    use std::collections::BTreeMap;
+    use std::os::unix::fs::MetadataExt as _;
+
     let root = staging.join("kettle");
     let binary = root.join("kettle");
     require_file(&binary, "kettle/kettle")?;
     require_file(&root.join("install.sh"), "kettle/install.sh")?;
+    require_file(&root.join("install-unix.py"), "kettle/install-unix.py")?;
+    let previous_provenance = read_linux_install_provenance(&install.prefix)?;
 
     let map = [
         ("install.sh", "share/kettle/install.sh", 0o755),
+        ("install-unix.py", "share/kettle/install-unix.py", 0o755),
         ("LICENSE", "share/doc/kettle/LICENSE", 0o644),
         ("NOTICE", "share/doc/kettle/NOTICE", 0o644),
         ("README.md", "share/doc/kettle/README.md", 0o644),
@@ -2702,7 +2947,32 @@ fn apply_staged_update(
     }
     destinations.push(PathBuf::from("bin/kettle"));
     destinations.push(PathBuf::from("share/kettle/install.json"));
+    destinations.push(PathBuf::from(UNIX_INSTALL_PROVENANCE_FILE));
+
+    let mut owned_directories = previous_provenance
+        .directories
+        .into_iter()
+        .map(|record| (record.path, record.mode))
+        .collect::<BTreeMap<_, _>>();
+    for destination in &destinations {
+        let mut relative = PathBuf::new();
+        if let Some(parent) = destination.parent() {
+            for component in parent.components() {
+                let Component::Normal(name) = component else {
+                    return Err(UpdateError::Transaction(format!(
+                        "unsafe Linux provenance directory {}",
+                        destination.display()
+                    )));
+                };
+                relative.push(name);
+                if !install.prefix.join(&relative).try_exists()? {
+                    owned_directories.insert(relative_to_string(&relative)?, 0o755);
+                }
+            }
+        }
+    }
     transaction.preflight_destinations(&destinations)?;
+    let mut provenance_files = Vec::with_capacity(destinations.len() - 1);
     for (source, destination, mode) in map {
         let source = root.join(source);
         require_file(
@@ -2715,8 +2985,20 @@ fn apply_staged_update(
         if destination.ends_with("kettle.desktop") {
             let desktop = render_linux_desktop(&source, &install.prefix)?;
             transaction.install_bytes(Path::new(destination), desktop.as_bytes(), Some(mode))?;
+            provenance_files.push(UnixInstallFile {
+                path: destination.to_string(),
+                size: desktop.len() as u64,
+                sha256: sha256_bytes(desktop.as_bytes()),
+                mode,
+            });
         } else {
             transaction.install(Path::new(destination), &source, Some(mode))?;
+            provenance_files.push(UnixInstallFile {
+                path: destination.to_string(),
+                size: source.metadata()?.len(),
+                sha256: sha256_file(&source)?,
+                mode,
+            });
         }
     }
     for source in shell_sources {
@@ -2728,12 +3010,77 @@ fn apply_staged_update(
             &source,
             Some(0o644),
         )?;
+        let destination = Path::new("share/kettle/shell-integration").join(relative);
+        provenance_files.push(UnixInstallFile {
+            path: relative_to_string(&destination)?,
+            size: source.metadata()?.len(),
+            sha256: sha256_file(&source)?,
+            mode: 0o644,
+        });
     }
     transaction.install(Path::new("bin/kettle"), &binary, Some(0o755))?;
+    provenance_files.push(UnixInstallFile {
+        path: "bin/kettle".into(),
+        size: binary.metadata()?.len(),
+        sha256: sha256_file(&binary)?,
+        mode: 0o755,
+    });
     let marker = marker_json(&update.version.to_string())?;
     transaction.install_bytes(
         Path::new("share/kettle/install.json"),
         marker.as_bytes(),
+        Some(0o644),
+    )?;
+    provenance_files.push(UnixInstallFile {
+        path: "share/kettle/install.json".into(),
+        size: marker.len() as u64,
+        sha256: sha256_bytes(marker.as_bytes()),
+        mode: 0o644,
+    });
+    provenance_files.sort_by(|left, right| left.path.cmp(&right.path));
+    if provenance_files.len() > MAX_ARCHIVE_ENTRIES {
+        return Err(UpdateError::Transaction(
+            "Linux install provenance exceeds its file limit".into(),
+        ));
+    }
+    let prefix = install.prefix.to_str().ok_or_else(|| {
+        UpdateError::Transaction("Linux install prefix is not valid UTF-8".into())
+    })?;
+    // Enforce the reader's bounds here, before writing. `read_linux_install_provenance`
+    // refuses a record whose file or directory count exceeds MAX_ARCHIVE_ENTRIES, so
+    // writing past it would produce provenance this installer can never read back —
+    // and since upgrade and uninstall both require a readable record first, the
+    // install would be permanently stranded by its own success.
+    if provenance_files.len() > MAX_ARCHIVE_ENTRIES || owned_directories.len() > MAX_ARCHIVE_ENTRIES
+    {
+        return Err(UpdateError::UnmanagedInstall(format!(
+            "refusing to record Linux install provenance with {} files and {} \
+             directories; the readable maximum is {MAX_ARCHIVE_ENTRIES} each",
+            provenance_files.len(),
+            owned_directories.len()
+        )));
+    }
+    let provenance = UnixInstallProvenance {
+        schema: 1,
+        product: "kettle".into(),
+        managed_by: "kettle-installer".into(),
+        prefix: prefix.into(),
+        owner_uid: install.prefix.metadata()?.uid(),
+        files: provenance_files,
+        directories: owned_directories
+            .into_iter()
+            .map(|(path, mode)| UnixInstallDirectory { path, mode })
+            .collect(),
+    };
+    let provenance = serde_json::to_string_pretty(&provenance)? + "\n";
+    if provenance.len() > 1024 * 1024 {
+        return Err(UpdateError::Transaction(
+            "Linux install provenance exceeds its byte limit".into(),
+        ));
+    }
+    transaction.install_bytes(
+        Path::new(UNIX_INSTALL_PROVENANCE_FILE),
+        provenance.as_bytes(),
         Some(0o644),
     )?;
     transaction.finish_preflight()?;
@@ -3026,8 +3373,11 @@ fn anchored_parent(
                 Err(UpdateError::Io(error))
                     if create_missing && error.kind() == std::io::ErrorKind::NotFound =>
                 {
+                    use std::os::unix::fs::PermissionsExt as _;
+
                     match fs::create_dir(&candidate) {
                         Ok(()) => {
+                            fs::set_permissions(&candidate, fs::Permissions::from_mode(0o755))?;
                             // Persist each new directory entry before a journal
                             // can refer to content below it.
                             directory.sync_all()?;
@@ -5357,6 +5707,74 @@ mod tests {
         }
     }
 
+    #[cfg(target_os = "linux")]
+    fn seed_linux_install_provenance(prefix: &Path) {
+        use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+
+        for (relative, contents, mode) in [
+            ("bin/kettle", b"fixture".as_slice(), 0o755),
+            (
+                "share/applications/kettle.desktop",
+                b"[Desktop Entry]\nExec=fixture\n".as_slice(),
+                0o644,
+            ),
+            ("share/kettle/install.sh", b"#!/bin/sh\n".as_slice(), 0o755),
+            (
+                "share/kettle/install-unix.py",
+                b"#!/usr/bin/env python3\n".as_slice(),
+                0o755,
+            ),
+            // Listed in `paths` below, so create it here too: leaving it to the
+            // caller makes this helper panic in `set_permissions` the first time
+            // it is reused by a test that does not already seed the file.
+            ("share/kettle/install.json", b"{}\n".as_slice(), 0o644),
+        ] {
+            let path = prefix.join(relative);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            if !path.exists() {
+                fs::write(&path, contents).unwrap();
+            }
+            fs::set_permissions(&path, fs::Permissions::from_mode(mode)).unwrap();
+        }
+        let paths = [
+            ("bin/kettle", 0o755),
+            ("share/applications/kettle.desktop", 0o644),
+            ("share/kettle/install.sh", 0o755),
+            ("share/kettle/install-unix.py", 0o755),
+            ("share/kettle/install.json", 0o644),
+        ];
+        let mut files = paths
+            .into_iter()
+            .map(|(relative, mode)| {
+                let path = prefix.join(relative);
+                fs::set_permissions(&path, fs::Permissions::from_mode(mode)).unwrap();
+                UnixInstallFile {
+                    path: relative.into(),
+                    size: path.metadata().unwrap().len(),
+                    sha256: sha256_file(&path).unwrap(),
+                    mode,
+                }
+            })
+            .collect::<Vec<_>>();
+        files.sort_by(|left, right| left.path.cmp(&right.path));
+        let provenance = UnixInstallProvenance {
+            schema: 1,
+            product: "kettle".into(),
+            managed_by: "kettle-installer".into(),
+            prefix: prefix.canonicalize().unwrap().to_str().unwrap().into(),
+            owner_uid: prefix.metadata().unwrap().uid(),
+            files,
+            directories: Vec::new(),
+        };
+        let path = prefix.join(UNIX_INSTALL_PROVENANCE_FILE);
+        fs::write(
+            &path,
+            serde_json::to_string_pretty(&provenance).unwrap() + "\n",
+        )
+        .unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+    }
+
     #[test]
     fn marker_is_explicit_and_target_bound() {
         if let Some(target) = current_target() {
@@ -5397,6 +5815,8 @@ mod tests {
         let mut marker: InstallMarker =
             serde_json::from_str(&marker_json("2.35.0").unwrap()).unwrap();
         fs::write(&marker_path, serde_json::to_vec(&marker).unwrap()).unwrap();
+        #[cfg(target_os = "linux")]
+        seed_linux_install_provenance(&prefix);
         let detected = detect_managed_install_at(&executable).unwrap();
         assert_eq!(detected.prefix, prefix.canonicalize().unwrap());
 
@@ -5407,6 +5827,22 @@ mod tests {
             assert!(error.to_string().contains("local development install"));
             assert!(error.to_string().contains("rebuild and reinstall"));
         }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn managed_install_prefix_rejects_group_or_other_write_access() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let root = test_tempdir();
+        let prefix = root.path().join("kettle");
+        fs::create_dir(&prefix).unwrap();
+        fs::set_permissions(&prefix, fs::Permissions::from_mode(0o775)).unwrap();
+        let error = open_trusted_linux_install_prefix(&prefix).unwrap_err();
+        assert!(error.to_string().contains("group/other writable"));
+
+        fs::set_permissions(&prefix, fs::Permissions::from_mode(0o755)).unwrap();
+        open_trusted_linux_install_prefix(&prefix).unwrap();
     }
 
     #[cfg(not(any(windows, target_os = "linux")))]
@@ -6194,9 +6630,17 @@ mod tests {
         fs::create_dir_all(stage.join("shell-integration")).unwrap();
         fs::create_dir_all(prefix.join("bin")).unwrap();
         fs::write(prefix.join("bin/kettle"), b"old-binary").unwrap();
+        fs::create_dir_all(prefix.join("share/kettle")).unwrap();
+        fs::write(
+            prefix.join("share/kettle/install.json"),
+            marker_json("2.35.0").unwrap(),
+        )
+        .unwrap();
+        seed_linux_install_provenance(&prefix);
         for (relative, body) in [
             ("kettle", "new-binary"),
             ("install.sh", "install"),
+            ("install-unix.py", "helper"),
             ("LICENSE", "license"),
             ("NOTICE", "notice"),
             ("README.md", "readme"),
@@ -6277,6 +6721,15 @@ mod tests {
             );
         }
         assert!(prefix.join("share/kettle/install.json").is_file());
+        assert!(prefix.join("share/kettle/install-unix.py").is_file());
+        let provenance = read_linux_install_provenance(&prefix).unwrap();
+        assert!(
+            provenance
+                .files
+                .iter()
+                .any(|record| record.path == "bin/kettle"
+                    && record.sha256 == sha256_bytes(b"new-binary"))
+        );
     }
 
     #[cfg(target_os = "linux")]

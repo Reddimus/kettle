@@ -261,6 +261,7 @@ jobs:
           # bundled install.sh can drop it into ~/.local/share/man/man1.
           cp packaging/linux/kettle.1       dist/kettle/packaging/linux/
           install -Dm755 scripts/install.sh dist/kettle/install.sh
+          install -Dm755 scripts/install-unix.py dist/kettle/install-unix.py
           # Also ship the OSC 133 shell-integration snippets
           # so a user can read/customize them before sourcing. The same
           # bodies are embedded into the binary via include_str!,

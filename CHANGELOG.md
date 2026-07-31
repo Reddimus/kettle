@@ -7,6 +7,24 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 ## [Unreleased]
 
   ### Fixed
+  - A `kettle exec` run whose consumer closed the pipe could die from `SIGPIPE`
+    instead of reporting the exit code it had already chosen. The stdout worker
+    blocks `SIGPIPE` for itself, so a broken pipe correctly surfaced as `EPIPE`,
+    was reported on stderr, and became exit 74 — but the worker wrote through
+    the process-global `std::io::stdout()`, and bytes the failed write left in
+    that shared buffer were retried by the runtime's exit-time flush on the main
+    thread, where `SIGPIPE` is back at its default fatal disposition. The signal
+    then killed Kettle and discarded the code, so callers saw a signal death
+    with no status at all. Whether bytes remained buffered was a timing race, so
+    the failure was intermittent. The child stream now goes to a descriptor of
+    exec's own and never enters that shared buffer; a broken stdout
+    additionally makes the chosen exit code final. Streaming also stops paying
+    for a process-wide lock and a second copy of every byte.
+  - Diagnostics no longer contaminate `kettle exec`'s output.
+    `tracing_subscriber`'s default writer is stdout, so a single warning could
+    splice a log line into byte-exact child output, or between the NDJSON
+    records agent callers parse. Logging now writes to stderr, which the
+    adjacent ANSI-detection had already assumed.
   - `kettle exec --timeout` now keeps its deadline and MCP cancellation
     enforceable while draining output after the child exits. If stdout is still
     stalled at the deadline, Kettle abandons output the downstream consumer
