@@ -662,6 +662,13 @@ fn init_logging() {
     tracing_subscriber::fmt()
         .with_env_filter(filter)
         .with_target(true)
+        // Diagnostics belong on stderr. `tracing_subscriber`'s default writer
+        // is stdout, which for `kettle exec` is the machine-readable data
+        // channel: one `warn!` would splice a log line into byte-exact child
+        // output, or between the NDJSON records agent callers parse. The ANSI
+        // decision below already assumed stderr, so the writer had simply
+        // drifted from the intent.
+        .with_writer(std::io::stderr)
         .with_ansi(std::io::stderr().is_terminal())
         .init();
 }

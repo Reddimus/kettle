@@ -247,9 +247,47 @@ impl AnsiStripper {
     }
 }
 
+/// A private handle to this process's standard output for the child stream.
+///
+/// `Outputter` flushes after every command, so the process-global
+/// `std::io::stdout()` contributes nothing but a shared lock and a second copy
+/// of every byte on the hottest path Kettle has. It also costs correctness on
+/// Unix: bytes a failed write leaves in that global buffer are retried by the
+/// runtime's exit-time flush, on the main thread, where SIGPIPE is back at
+/// SIG_DFL — so a broken pipe kills the process by signal and discards the
+/// lifecycle's chosen exit code. A duplicated descriptor keeps exec's output
+/// out of that buffer entirely.
+///
+/// Windows keeps the standard handle deliberately: it has no SIGPIPE, and
+/// `Stdout` there transcodes to UTF-16 for `WriteConsoleW`. Raw handle writes
+/// would emit UTF-8 bytes for the console's active code page to misread
+/// whenever stdout is a console rather than a pipe.
+#[cfg(unix)]
+fn exec_stdout_sink() -> std::io::Result<std::fs::File> {
+    use std::os::fd::AsFd as _;
+    Ok(std::fs::File::from(
+        std::io::stdout().as_fd().try_clone_to_owned()?,
+    ))
+}
+
+#[cfg(not(unix))]
+fn exec_stdout_sink() -> std::io::Result<std::io::Stdout> {
+    Ok(std::io::stdout())
+}
+
 /// Run `kettle exec` end to end; returns the process exit code to propagate.
 pub fn run_exec(opts: ExecOpts) -> i32 {
-    let mut output = match WorkerOutput::spawn(opts.mode, std::io::stdout()) {
+    let sink = match exec_stdout_sink() {
+        Ok(sink) => sink,
+        Err(error) => {
+            let _ = writeln!(
+                std::io::stderr(),
+                "kettle exec: cannot open stdout for the child stream: {error}"
+            );
+            return EXIT_INTERNAL;
+        }
+    };
+    let mut output = match WorkerOutput::spawn(opts.mode, sink) {
         Ok(output) => output,
         Err(error) => {
             let _ = writeln!(
@@ -372,6 +410,28 @@ fn drain_recording_slice(
     }
 }
 
+/// Make the chosen exit code final once stdout has failed.
+///
+/// `main` restores SIGPIPE to SIG_DFL so ordinary pipelines
+/// (`kettle --list-themes | head`) die quietly like every other CLI. That
+/// convention is wrong from here on: the lifecycle has already converted the
+/// broken pipe into exit 74 and explained it on stderr. A later EPIPE — the
+/// runtime flushing whatever another code path had buffered on the global
+/// stdout, on the main thread, during `process::exit` — would kill Kettle by
+/// signal and discard both the code and the diagnostic.
+#[cfg(unix)]
+fn commit_output_failure_exit() {
+    // SAFETY: `signal` is async-signal-safe and SIG_IGN installs no handler
+    // state. The exec lifecycle has already stopped writing to stdout, so no
+    // thread can be mid-write when the disposition changes.
+    unsafe {
+        libc::signal(libc::SIGPIPE, libc::SIG_IGN);
+    }
+}
+
+#[cfg(not(unix))]
+fn commit_output_failure_exit() {}
+
 fn stop_after_output_failure(
     error: OutputDeliveryError,
     term: &Terminal,
@@ -381,6 +441,7 @@ fn stop_after_output_failure(
     output: &mut dyn ExecOutput,
     started: Instant,
 ) -> i32 {
+    commit_output_failure_exit();
     let _ = writeln!(
         std::io::stderr(),
         "kettle exec: stdout delivery failed: {error}"
@@ -2776,6 +2837,55 @@ mod tests {
         assert_eq!(
             validate_exec_cwd(Some(temp.path())).unwrap(),
             temp.path().to_str()
+        );
+    }
+
+    /// The child stream must not travel through the process-global stdout
+    /// buffer. Anything left there by a failed write is retried by the
+    /// runtime's exit-time flush on the main thread, long after exec has
+    /// chosen its exit code.
+    #[cfg(unix)]
+    #[test]
+    fn exec_stdout_sink_is_a_private_descriptor() {
+        use std::os::fd::AsRawFd as _;
+
+        let sink = exec_stdout_sink().expect("duplicate stdout");
+        assert_ne!(
+            sink.as_raw_fd(),
+            1,
+            "exec must own a duplicate, not descriptor 1 itself"
+        );
+    }
+
+    /// The end-to-end guarantee — a broken stdout yields exit 74 rather than
+    /// death by SIGPIPE — belongs to
+    /// `exec_reports_a_broken_stdout_and_reaps_the_child` in `tests/exec.rs`,
+    /// which runs Kettle as its own process. It cannot be proven from here:
+    /// showing that SIG_DFL becomes SIG_IGN means making SIGPIPE briefly fatal
+    /// process-wide, which would kill unrelated parallel tests that write to
+    /// pipes. What is safe to pin is the direction: the commitment must never
+    /// leave the signal fatal.
+    #[cfg(unix)]
+    #[test]
+    fn committing_an_output_failure_exit_never_leaves_sigpipe_fatal() {
+        commit_output_failure_exit();
+
+        // SAFETY: a null `act` queries the disposition without changing it, so
+        // this observes process state that other tests share but never mutates
+        // it. `oldact` is fully initialized by the call.
+        let disposition = unsafe {
+            let mut current: libc::sigaction = std::mem::zeroed();
+            assert_eq!(
+                libc::sigaction(libc::SIGPIPE, std::ptr::null(), &mut current),
+                0,
+                "querying the SIGPIPE disposition must succeed"
+            );
+            current.sa_sigaction
+        };
+        assert_eq!(
+            disposition,
+            libc::SIG_IGN,
+            "a committed output failure must leave SIGPIPE ignored"
         );
     }
 }
