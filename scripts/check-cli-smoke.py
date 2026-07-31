@@ -160,9 +160,20 @@ def main() -> int:
             ("--print-completions", "tcsh"),
         ):
             result = subprocess.run(
-                [str(EXE), *command], cwd=ROOT, env=environment, check=False
+                [str(EXE), *command],
+                cwd=ROOT,
+                env=environment,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                check=False,
             )
-            require(result.returncode != 0, f"{' '.join(command)} unexpectedly succeeded")
+            require(
+                result.returncode != 0,
+                f"{' '.join(command)} unexpectedly succeeded: {result.stdout.strip()}",
+            )
 
         missing = scratch / "definitely-no-such-path"
         for command in (
@@ -170,9 +181,20 @@ def main() -> int:
             ("--working-directory", str(missing), "--config-path"),
         ):
             result = subprocess.run(
-                [str(EXE), *command], cwd=ROOT, env=environment, check=False
+                [str(EXE), *command],
+                cwd=ROOT,
+                env=environment,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                check=False,
             )
-            require(result.returncode != 0, f"{' '.join(command)} unexpectedly succeeded")
+            require(
+                result.returncode != 0,
+                f"{' '.join(command)} unexpectedly succeeded: {result.stdout.strip()}",
+            )
 
         resolved = run(
             "--config", str(config_path), "--config-path", environment=environment

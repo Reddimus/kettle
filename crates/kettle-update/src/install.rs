@@ -3046,6 +3046,20 @@ fn apply_staged_update(
     let prefix = install.prefix.to_str().ok_or_else(|| {
         UpdateError::Transaction("Linux install prefix is not valid UTF-8".into())
     })?;
+    // Enforce the reader's bounds here, before writing. `read_linux_install_provenance`
+    // refuses a record whose file or directory count exceeds MAX_ARCHIVE_ENTRIES, so
+    // writing past it would produce provenance this installer can never read back —
+    // and since upgrade and uninstall both require a readable record first, the
+    // install would be permanently stranded by its own success.
+    if provenance_files.len() > MAX_ARCHIVE_ENTRIES || owned_directories.len() > MAX_ARCHIVE_ENTRIES
+    {
+        return Err(UpdateError::UnmanagedInstall(format!(
+            "refusing to record Linux install provenance with {} files and {} \
+             directories; the readable maximum is {MAX_ARCHIVE_ENTRIES} each",
+            provenance_files.len(),
+            owned_directories.len()
+        )));
+    }
     let provenance = UnixInstallProvenance {
         schema: 1,
         product: "kettle".into(),
@@ -5710,6 +5724,10 @@ mod tests {
                 b"#!/usr/bin/env python3\n".as_slice(),
                 0o755,
             ),
+            // Listed in `paths` below, so create it here too: leaving it to the
+            // caller makes this helper panic in `set_permissions` the first time
+            // it is reused by a test that does not already seed the file.
+            ("share/kettle/install.json", b"{}\n".as_slice(), 0o644),
         ] {
             let path = prefix.join(relative);
             fs::create_dir_all(path.parent().unwrap()).unwrap();
