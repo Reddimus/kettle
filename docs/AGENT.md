@@ -60,8 +60,9 @@ already reserves a `kind` field (`"gui"` today, `"muxd"` later).
 ## `kettle exec` — headless one-shot
 
 Run a command under a real PTY (full VT emulation) with no GPU and no window,
-and stream its output to real stdout. Propagates the child's exit code (124 on
-`--timeout`, 125 on an internal error).
+and stream its output to real stdout. Propagates the child's exit code (124 when
+`--timeout` expires before a child status is collected, 125 on an internal
+error).
 
 ```sh
 kettle exec -- python -c "print(2+2)"           # → 4
@@ -74,6 +75,12 @@ kettle exec --record run.cast -- make            # also save an asciicast trace
 Output modes: raw (default, verbatim PTY bytes — includes a terminal's normal
 control sequences), `--strip-ansi` (plain text, good for assertions), `--json`
 (one JSON object per line).
+
+The timeout also bounds trailing output after the child exits. If stdout is
+still stalled at the deadline, Kettle abandons output the downstream consumer
+cannot accept and returns an already-collected child status, or 124 when no
+status was available. MCP cancellation takes precedence at every lifecycle
+stage and returns 130.
 
 `--record PATH` is output-only and uses the same private asciicast writer as
 the developer GUI recorder. Kettle acquires the file's exclusive lock and

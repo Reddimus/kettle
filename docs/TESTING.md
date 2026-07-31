@@ -1034,6 +1034,13 @@ These need a real display and are run by hand (or on real hardware):
     fixture verifies punctuation-sensitive VWERASE followed by a complete EOF
     sequence; native `EXTPROC` coverage requires explicit refusal while DSR,
     DA1, and Kitty replies remain usable.
+    Unread-stdout coverage has two distinct child states. The infinite-flood
+    helper stays alive and must return 124 at its deadline. The Linux
+    finite-burst helper exits 23 after 64–128 KiB; its parent shrinks and
+    preloads Kettle's stdout pipe before spawn, then confirms the helper is a
+    zombie or gone through `/proc`. It must terminate at the deadline and
+    preserve 23. Do not replace those state assertions with a sleep or a guessed
+    burst threshold.
     Backpressure regressions must cover both piped stdin and `/dev/null`: a
     query-flooding child that never reads replies must hit the bounded
     64-message reply queue promptly rather than defeating timeout. A separate

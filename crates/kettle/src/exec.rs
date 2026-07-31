@@ -32,7 +32,7 @@
 
 use std::io::Write;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
@@ -47,6 +47,10 @@ use kettle_core::{
 /// screen-differ can emit a final paint after the child is gone. Same order of
 /// magnitude as the dev-record reap settle.
 const SETTLE: Duration = Duration::from_millis(60);
+/// How long an exit event may lead the authoritative child status. Keep the
+/// lifecycle loop polling during this window so cancellation and deadlines
+/// remain enforceable.
+const CHILD_EXIT_STATUS_WAIT: Duration = Duration::from_millis(250);
 /// Semantic events emitted by the VT parser. A full queue is a fail-command
 /// condition because silently dropping a reply request can deadlock the child.
 const PTY_EVENT_QUEUE_DEPTH: usize = 1024;
@@ -62,12 +66,19 @@ const OUTPUT_WRITER_QUEUE_DEPTH: usize = 4;
 /// substantially deeper so a short burst can be absorbed without loss.
 const EVENT_SLICE_MESSAGES: usize = 256;
 
-/// Exit code for `--timeout` expiry (coreutils `timeout(1)` convention).
+/// Exit code for `--timeout` expiry when no child status was collected
+/// (coreutils `timeout(1)` convention).
 pub const EXIT_TIMEOUT: i32 = 124;
 /// Exit code for an internal kettle error (spawn failure, no PTY, bad args).
 pub const EXIT_INTERNAL: i32 = 125;
 /// Internal exit status when an MCP request cancels a running headless child.
 pub const EXIT_CANCELLED: i32 = 130;
+
+#[derive(Clone, Copy)]
+enum LifecycleStop {
+    Cancellation,
+    Deadline,
+}
 
 /// How the child's output is rendered to stdout.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -479,6 +490,8 @@ fn run_exec_engine(
 
     let started = Instant::now();
     let mut child_gone_at: Option<Instant> = None;
+    let mut child_exit_code: Option<i32> = None;
+    let mut completion_code: Option<i32> = None;
     let mut last_lifecycle_trace = started;
 
     loop {
@@ -490,26 +503,33 @@ fn run_exec_engine(
         let elapsed = started.elapsed();
         let cancellation_requested = cancelled.is_some_and(|flag| flag.load(Ordering::Acquire));
         let timeout_expired = opts.timeout.is_some_and(|limit| elapsed >= limit);
-        let lifecycle_stop = if child_gone_at.is_some() {
-            None
-        } else if cancellation_requested {
-            Some(EXIT_CANCELLED)
+        // An exit event can lead the authoritative status by a few turns. Poll
+        // it before deciding an expired deadline so a status already available
+        // from the OS wins over the timeout sentinel.
+        if child_exit_code.is_none()
+            && (child_gone_at.is_some() || timeout_expired)
+            && let Some(code) = term.child_exit_code()
+        {
+            child_exit_code = Some(clamp_code(code));
+            child_gone_at.get_or_insert_with(Instant::now);
+        }
+        let lifecycle_stop = if cancellation_requested {
+            Some(LifecycleStop::Cancellation)
         } else if timeout_expired {
-            Some(EXIT_TIMEOUT)
+            Some(LifecycleStop::Deadline)
         } else {
             None
         };
-        if let Some(code) = lifecycle_stop {
+        if let Some(stop) = lifecycle_stop {
+            let (reason, code) = match stop {
+                LifecycleStop::Cancellation => ("cancellation", EXIT_CANCELLED),
+                LifecycleStop::Deadline => ("timeout", child_exit_code.unwrap_or(EXIT_TIMEOUT)),
+            };
             log::debug!(
-                "kettle exec {} reached; starting bounded teardown",
-                if code == EXIT_CANCELLED {
-                    "cancellation"
-                } else {
-                    "timeout"
-                }
+                "kettle exec {reason} reached; starting bounded teardown with exit code {code}"
             );
             process_tree.terminate(&term);
-            if code == EXIT_CANCELLED {
+            if matches!(stop, LifecycleStop::Cancellation) {
                 // Reap the killed child where the PTY backend exposes its
                 // status; this prevents a cancelled long-running MCP tool from
                 // leaving a zombie behind while still bounding cancellation
@@ -527,6 +547,18 @@ fn run_exec_engine(
             output.finish(code, started.elapsed(), OutputFinish::AbandonPending);
             log::debug!("kettle exec bounded stop teardown finished");
             return code;
+        }
+
+        // Ordinary completion is also driven asynchronously. In particular,
+        // never join the stdout worker on this lifecycle thread: its final
+        // write/flush can become blocked after the child has exited.
+        if let Some(code) = completion_code {
+            let _ = output.ready();
+            if output.completion_ready() {
+                return code;
+            }
+            std::thread::sleep(Duration::from_millis(8));
+            continue;
         }
 
         let trace_lifecycle = elapsed >= Duration::from_secs(4)
@@ -682,13 +714,18 @@ fn run_exec_engine(
             if let Some(mut recorder) = recorder.take() {
                 recorder.finish();
             }
-            output.finish(EXIT_INTERNAL, started.elapsed(), OutputFinish::Complete);
+            output.finish(
+                EXIT_INTERNAL,
+                started.elapsed(),
+                OutputFinish::AbandonPending,
+            );
             return EXIT_INTERNAL;
         }
         if let Some(error) = stdin_forwarding_error {
             log::debug!("kettle exec checking child after PTY forwarding error");
             if child_gone_at.is_none() && term.child_exited() {
                 child_gone_at = Some(Instant::now());
+                child_exit_code = term.child_exit_code().map(clamp_code);
             }
             if child_gone_at.is_none() {
                 let _ = writeln!(
@@ -702,7 +739,11 @@ fn run_exec_engine(
                 if let Some(mut recorder) = recorder.take() {
                     recorder.finish();
                 }
-                output.finish(EXIT_INTERNAL, started.elapsed(), OutputFinish::Complete);
+                output.finish(
+                    EXIT_INTERNAL,
+                    started.elapsed(),
+                    OutputFinish::AbandonPending,
+                );
                 return EXIT_INTERNAL;
             }
             // EIO/BrokenPipe is the normal final write outcome when a
@@ -719,26 +760,36 @@ fn run_exec_engine(
         }
         if child_exited {
             child_gone_at = Some(Instant::now());
+            child_exit_code = term.child_exit_code().map(clamp_code);
         }
         if let Some(gone) = child_gone_at
             && gone.elapsed() >= SETTLE
             && orx.is_empty()
         {
-            // Final drain in case something landed in the settle window.
-            let _ = drain_output_slice(&orx, &mut recorder, output);
-            if let Some(mut r) = recorder.take() {
-                r.finish();
+            // The VT `Exit` event can arrive before the OS exposes an
+            // authoritative status. Poll it from normal lifecycle turns rather
+            // than blocking here, and retain the existing non-zero fallback if
+            // it never materializes.
+            let status_ready =
+                child_exit_code.is_some() || gone.elapsed() >= SETTLE + CHILD_EXIT_STATUS_WAIT;
+            if status_ready {
+                // Final drain in case something landed in the settle window.
+                // `drained` also waits for every command already admitted to
+                // the stdout worker; an empty raw channel alone is insufficient.
+                let final_output_backlog = drain_output_slice(&orx, &mut recorder, output);
+                if !final_output_backlog && orx.is_empty() && output.drained() {
+                    if let Some(mut r) = recorder.take() {
+                        r.finish();
+                    }
+                    let code = child_exit_code.unwrap_or(EXIT_INTERNAL);
+                    output.finish(code, started.elapsed(), OutputFinish::Complete);
+                    completion_code = Some(code);
+                    // Give cancellation/deadline one final turn before
+                    // returning, even when a direct in-memory sink finished
+                    // synchronously.
+                    continue;
+                }
             }
-            // The VT `Exit` event can arrive a hair before the OS has reaped the
-            // child, so `child_exit_code()` may still be `None` here. Poll it
-            // briefly rather than defaulting to 0 (which would report a FAILED
-            // child as success); fall back to a non-zero sentinel only if the
-            // status never materializes.
-            let code = wait_for_exit_code(&term)
-                .map(clamp_code)
-                .unwrap_or(EXIT_INTERNAL);
-            output.finish(code, started.elapsed(), OutputFinish::Complete);
-            return code;
         }
 
         let output_blocked = !output.ready();
@@ -1008,7 +1059,7 @@ fn clamp_code(code: u32) -> i32 {
 /// cover the brief window before the OS reaps it. `None` only if it never
 /// materializes (then the caller reports a non-zero sentinel, never a false 0).
 fn wait_for_exit_code(term: &Terminal) -> Option<u32> {
-    let deadline = Instant::now() + Duration::from_millis(250);
+    let deadline = Instant::now() + CHILD_EXIT_STATUS_WAIT;
     loop {
         if let Some(c) = term.child_exit_code() {
             return Some(c);
@@ -1054,16 +1105,26 @@ fn push_utf8_streaming(carry: &mut Vec<u8>, bytes: &[u8], out: &mut String) {
 
 #[derive(Clone, Copy)]
 enum OutputFinish {
-    /// Ordinary completion is lossless: drain every admitted command and wait
-    /// for the final flush before returning the child's status.
+    /// Ordinary completion is lossless: enqueue a final flush after every
+    /// admitted command has completed, then poll it from lifecycle turns.
     Complete,
-    /// Timeout/cancellation must not wait for a stalled stdout consumer.
+    /// Timeout, cancellation, and fatal teardown must not wait for a stalled
+    /// stdout consumer.
     AbandonPending,
 }
 
 trait ExecOutput {
     /// Try to publish the one lifecycle-owned pending command.
     fn ready(&mut self) -> bool;
+    /// Whether every command admitted before this call has completed.
+    fn drained(&mut self) -> bool {
+        self.ready()
+    }
+    /// Whether a previously requested complete finish has flushed and joined.
+    /// Direct sinks finish synchronously; worker-backed sinks override this.
+    fn completion_ready(&mut self) -> bool {
+        true
+    }
     fn start(&mut self, cols: u16, rows: u16);
     fn output(&mut self, bytes: Vec<u8>);
     fn title(&mut self, title: String);
@@ -1121,31 +1182,43 @@ struct WorkerOutput {
     mode: OutputMode,
     sender: Option<Sender<OutputCommand>>,
     pending: Option<OutputCommand>,
+    outstanding: Arc<AtomicUsize>,
+    completion_started: bool,
     worker: Option<std::thread::JoinHandle<()>>,
 }
 
 impl WorkerOutput {
     fn spawn(mode: OutputMode, mut sink: impl Write + Send + 'static) -> std::io::Result<Self> {
         let (sender, receiver) = crossbeam_channel::bounded(OUTPUT_WRITER_QUEUE_DEPTH);
+        let outstanding = Arc::new(AtomicUsize::new(0));
+        let worker_outstanding = Arc::clone(&outstanding);
         let worker = std::thread::Builder::new()
             .name("kettle-stdout-writer".into())
             .spawn(move || {
                 let mut outputter = Outputter::new(mode);
                 while let Ok(command) = receiver.recv() {
-                    match command {
+                    let finished = match command {
                         OutputCommand::Start { cols, rows } => {
                             outputter.start(&mut sink, cols, rows);
+                            false
                         }
                         OutputCommand::Output(bytes) => {
                             outputter.output(&mut sink, &bytes);
+                            false
                         }
                         OutputCommand::Title(title) => {
                             outputter.title(&mut sink, &title);
+                            false
                         }
                         OutputCommand::Finish { code, duration } => {
                             outputter.finish(&mut sink, code, duration);
-                            break;
+                            true
                         }
+                    };
+                    let previous = worker_outstanding.fetch_sub(1, Ordering::AcqRel);
+                    debug_assert!(previous != 0, "stdout command was not tracked");
+                    if finished {
+                        break;
                     }
                 }
             })?;
@@ -1153,55 +1226,59 @@ impl WorkerOutput {
             mode,
             sender: Some(sender),
             pending: None,
+            outstanding,
+            completion_started: false,
             worker: Some(worker),
         })
     }
 
-    fn try_dispatch(&mut self, command: OutputCommand) {
+    fn dispatch(&mut self, command: OutputCommand) -> bool {
         debug_assert!(self.pending.is_none());
         let Some(sender) = self.sender.as_ref() else {
-            return;
+            return true;
         };
+        self.outstanding.fetch_add(1, Ordering::AcqRel);
         match sender.try_send(command) {
-            Ok(()) => {}
+            Ok(()) => true,
             Err(crossbeam_channel::TrySendError::Full(command)) => {
+                self.outstanding.fetch_sub(1, Ordering::AcqRel);
                 self.pending = Some(command);
+                false
             }
             Err(crossbeam_channel::TrySendError::Disconnected(_)) => {
+                self.outstanding.fetch_sub(1, Ordering::AcqRel);
                 log::error!("kettle exec stdout writer stopped unexpectedly");
+                true
             }
         }
+    }
+
+    fn try_dispatch(&mut self, command: OutputCommand) {
+        let _ = self.dispatch(command);
     }
 
     fn finish_complete(&mut self, code: i32, duration: Duration) {
-        if let Some(command) = self.pending.take()
-            && self
-                .sender
-                .as_ref()
-                .is_some_and(|sender| sender.send(command).is_err())
-        {
-            log::error!("kettle exec stdout writer stopped with pending output");
-        }
-        if self.sender.as_ref().is_some_and(|sender| {
-            sender
-                .send(OutputCommand::Finish { code, duration })
-                .is_err()
-        }) {
-            log::error!("kettle exec stdout writer stopped before final flush");
-        }
-        drop(self.sender.take());
-        if let Some(worker) = self.worker.take()
-            && worker.join().is_err()
-        {
-            log::error!("kettle exec stdout writer panicked");
-        }
+        debug_assert!(self.pending.is_none());
+        debug_assert!(!self.completion_started);
+        self.completion_started = true;
+        self.try_dispatch(OutputCommand::Finish { code, duration });
     }
 
     fn finish_abandoning_pending(&mut self, code: i32, duration: Duration) {
-        if self.pending.is_none()
-            && let Some(sender) = self.sender.as_ref()
-        {
-            let _ = sender.try_send(OutputCommand::Finish { code, duration });
+        if !self.completion_started && self.pending.is_none() {
+            self.try_dispatch(OutputCommand::Finish { code, duration });
+        }
+
+        // Say so on stderr rather than only in a debug log. The exit code here
+        // is the child's own when it was collected, so a caller that reads only
+        // the status cannot otherwise tell a fully delivered run from one whose
+        // tail was dropped because the caller's own reader stalled.
+        if self.pending.is_some() || self.outstanding.load(Ordering::Acquire) != 0 {
+            let _ = writeln!(
+                std::io::stderr(),
+                "kettle exec: stdout was not fully delivered before the run stopped; \
+                 the consumer had not accepted all output"
+            );
         }
 
         // Chosen timeout/cancellation contract: commands already accepted by
@@ -1210,7 +1287,9 @@ impl WorkerOutput {
         // PTY tail not admitted to stdout, and a final JSON exit event that
         // cannot enter the full queue are abandoned explicitly. `main` then
         // calls `process::exit`, which terminates a writer still blocked in the
-        // OS. Ordinary completion uses `finish_complete` and drops none.
+        // OS. Ordinary completion polls acknowledgements and the final worker
+        // exit from the lifecycle loop, so it remains lossless without hiding
+        // a later deadline or cancellation.
         self.pending = None;
         drop(self.sender.take());
         drop(self.worker.take());
@@ -1222,20 +1301,36 @@ impl ExecOutput for WorkerOutput {
         let Some(command) = self.pending.take() else {
             return true;
         };
-        let Some(sender) = self.sender.as_ref() else {
+        self.dispatch(command)
+    }
+
+    fn drained(&mut self) -> bool {
+        if !self.ready() {
+            return false;
+        }
+        self.outstanding.load(Ordering::Acquire) == 0
+            || self
+                .worker
+                .as_ref()
+                .is_none_or(|worker| worker.is_finished())
+    }
+
+    fn completion_ready(&mut self) -> bool {
+        let Some(worker) = self.worker.as_ref() else {
             return true;
         };
-        match sender.try_send(command) {
-            Ok(()) => true,
-            Err(crossbeam_channel::TrySendError::Full(command)) => {
-                self.pending = Some(command);
-                false
-            }
-            Err(crossbeam_channel::TrySendError::Disconnected(_)) => {
-                log::error!("kettle exec stdout writer stopped unexpectedly");
-                true
-            }
+        if !worker.is_finished() {
+            return false;
         }
+        drop(self.sender.take());
+        if self
+            .worker
+            .take()
+            .is_some_and(|worker| worker.join().is_err())
+        {
+            log::error!("kettle exec stdout writer panicked");
+        }
+        true
     }
 
     fn start(&mut self, cols: u16, rows: u16) {
