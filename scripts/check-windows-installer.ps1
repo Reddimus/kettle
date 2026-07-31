@@ -33,7 +33,12 @@ if ($PSVersionTable.PSEdition -ne 'Core') {
 $repo = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 Set-Location $repo
 
-$tempRoot = if ($env:RUNNER_TEMP) { $env:RUNNER_TEMP } else { [System.IO.Path]::GetTempPath() }
+# The hardened installer intentionally rejects ancestors writable by another
+# local principal. RUNNER_TEMP and %TEMP% can carry runner/sandbox group Modify
+# ACEs, so put the security smoke below the current user's normal protected
+# LocalAppData chain instead of weakening the production check for test hosts.
+$tempRoot = Join-Path $env:LOCALAPPDATA 'kettle-windows-installer-smoke-root'
+[void][System.IO.Directory]::CreateDirectory($tempRoot)
 $portableRoot = Join-Path $tempRoot "kettle-windows-install-smoke"
 $prefix = Join-Path $portableRoot 'kettle'
 $integrationRoot = Join-Path $tempRoot "kettle-windows-default-install-smoke"
@@ -63,6 +68,92 @@ function Assert-Equal {
     param([string] $Actual, [string] $Expected, [string] $Label)
     if ($Actual -ne $Expected) {
         throw "${Label} mismatch: expected '$Expected', got '$Actual'"
+    }
+}
+
+function Assert-KettleProtectedAcl {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string] $Path,
+        [Parameter(Mandatory = $true)]
+        [bool] $Directory
+    )
+
+    $acl = Get-Acl -LiteralPath $Path
+    if (-not $acl.AreAccessRulesProtected) {
+        throw "Kettle ACL inherits from its parent: $Path"
+    }
+    $currentSid = [Security.Principal.WindowsIdentity]::GetCurrent().User
+    $ownerSid = $acl.GetOwner(
+        [Security.Principal.SecurityIdentifier]
+    ).Value
+    if ($ownerSid -ne $currentSid.Value) {
+        throw "Kettle ACL has the wrong owner '$ownerSid': $Path"
+    }
+
+    $expected = @(
+        $currentSid.Value,
+        'S-1-5-18',
+        'S-1-5-32-544'
+    )
+    $rules = @(
+        $acl.GetAccessRules(
+            $true,
+            $true,
+            [Security.Principal.SecurityIdentifier]
+        )
+    )
+    if ($rules.Count -ne $expected.Count) {
+        throw "Kettle ACL has $($rules.Count) rules instead of three: $Path"
+    }
+    foreach ($rule in $rules) {
+        if (
+            $rule.AccessControlType -ne
+                [Security.AccessControl.AccessControlType]::Allow -or
+            $rule.FileSystemRights -ne
+                [Security.AccessControl.FileSystemRights]::FullControl -or
+            $expected -notcontains $rule.IdentityReference.Value
+        ) {
+            throw "Kettle ACL has an unexpected rule '$rule': $Path"
+        }
+        $expected = @(
+            $expected | Where-Object {
+                $_ -ne $rule.IdentityReference.Value
+            }
+        )
+        if ($Directory) {
+            $requiredInheritance = (
+                [Security.AccessControl.InheritanceFlags]::ContainerInherit -bor
+                [Security.AccessControl.InheritanceFlags]::ObjectInherit
+            )
+            if (
+                $rule.InheritanceFlags -ne $requiredInheritance -or
+                $rule.PropagationFlags -ne
+                    [Security.AccessControl.PropagationFlags]::None
+            ) {
+                throw "Kettle directory ACL has unexpected inheritance: $Path"
+            }
+        } elseif (
+            $rule.InheritanceFlags -ne
+                [Security.AccessControl.InheritanceFlags]::None -or
+            $rule.PropagationFlags -ne
+                [Security.AccessControl.PropagationFlags]::None
+        ) {
+            throw "Kettle file ACL unexpectedly propagates: $Path"
+        }
+    }
+    if ($expected.Count -ne 0) {
+        throw "Kettle ACL is missing a required trustee: $Path"
+    }
+}
+
+function Assert-KettleProtectedTree {
+    param([Parameter(Mandatory = $true)][string] $Path)
+
+    Assert-KettleProtectedAcl -Path $Path -Directory $true
+    foreach ($item in Get-ChildItem -LiteralPath $Path -Force -Recurse) {
+        Assert-KettleProtectedAcl -Path $item.FullName `
+            -Directory ([bool]$item.PSIsContainer)
     }
 }
 
@@ -100,6 +191,9 @@ function Assert-InstallerRejected {
                 $index++
                 $invokeParameters.IntegrationTestRoot =
                     [string]$Arguments[$index]
+            }
+            '-MigrateLegacyPermissions' {
+                $invokeParameters.MigrateLegacyPermissions = $true
             }
             default {
                 throw "unsupported installer-test argument: $($Arguments[$index])"
@@ -399,6 +493,43 @@ try {
         -ErrorAction SilentlyContinue
 }
 
+# An otherwise valid fixed-volume prefix must not be created below an ancestor
+# that another local user can modify. Such a user could replace the permanent
+# root after installation even if the root itself received a private DACL.
+$broadAclRoot = Join-Path $tempRoot 'kettle-installer-broad-acl-parent'
+$broadAclPrefix = Join-Path $broadAclRoot 'kettle'
+Remove-Item -LiteralPath $broadAclRoot -Recurse -Force `
+    -ErrorAction SilentlyContinue
+[void][System.IO.Directory]::CreateDirectory($broadAclRoot)
+$broadAcl = Get-Acl -LiteralPath $broadAclRoot
+$everyoneSid = New-Object Security.Principal.SecurityIdentifier `
+    -ArgumentList 'S-1-1-0'
+$broadAclRule = New-Object Security.AccessControl.FileSystemAccessRule `
+    -ArgumentList @(
+        $everyoneSid,
+        [Security.AccessControl.FileSystemRights]::Modify,
+        (
+            [Security.AccessControl.InheritanceFlags]::ContainerInherit -bor
+            [Security.AccessControl.InheritanceFlags]::ObjectInherit
+        ),
+        [Security.AccessControl.PropagationFlags]::None,
+        [Security.AccessControl.AccessControlType]::Allow
+    )
+$broadAcl.AddAccessRule($broadAclRule)
+Set-Acl -LiteralPath $broadAclRoot -AclObject $broadAcl
+Assert-InstallerRejected `
+    -Arguments @(
+        '-Prefix',
+        $broadAclPrefix,
+        '-IntegrationTestRoot',
+        $integrationRoot
+    ) `
+    -MessagePattern '*grants untrusted replacement access*' `
+    -Label 'broad-ACL install ancestor'
+Assert-PathAbsent $broadAclPrefix 'broad-ACL install prefix'
+Remove-Item -LiteralPath $broadAclRoot -Recurse -Force
+Write-Output 'windows-installer check: broad-ACL ancestor rejection OK'
+
 # A portable install owns only its prefix. Seed isolated default-install state
 # and verify the portable uninstaller cannot remove it.
 New-Item -ItemType Directory -Force -Path $startMenuDir | Out-Null
@@ -428,19 +559,15 @@ Remove-Item -LiteralPath $unownedRoot -Recurse -Force `
     -ErrorAction SilentlyContinue
 New-Item -ItemType Directory -Force -Path $unownedPrefix | Out-Null
 Set-Content -LiteralPath $unownedSentinel -Value 'sentinel' -NoNewline
-$unownedRejected = $false
-try {
-    & (Join-Path $repo 'scripts\install.ps1') -Prefix $unownedPrefix `
-        -IntegrationTestRoot $integrationRoot | Out-Null
-} catch {
-    $unownedRejected = (
-        $_.Exception.Message -like '*Installed kettle.exe*' -or
-        $_.Exception.Message -like '*Install ownership marker*'
-    )
-}
-if (-not $unownedRejected) {
-    throw 'an unowned nonempty install prefix was not rejected'
-}
+Assert-InstallerRejected `
+    -Arguments @(
+        '-Prefix',
+        $unownedPrefix,
+        '-IntegrationTestRoot',
+        $integrationRoot
+    ) `
+    -MessagePattern '*does not have Kettle''s protected owner/DACL*' `
+    -Label 'unowned nonempty install prefix'
 Assert-PathPresent $unownedSentinel 'unowned-prefix sentinel'
 Remove-Item -LiteralPath $unownedRoot -Recurse -Force
 
@@ -517,6 +644,34 @@ Assert-Equal $savedHelperMarker.channel 'local-dev' `
     'saved local-development helper marker channel'
 Assert-PathPresent (Join-Path $prefix 'kettle.ico') 'icon'
 Assert-PathPresent (Join-Path $prefix 'shell-integration\kettle.ps1') 'PowerShell shell integration'
+Assert-KettleProtectedTree -Path $prefix
+
+# Legacy installers inherited their root and file ACLs. A normal rerun must
+# fail closed, while an explicit migration from this trusted source checkout
+# must repair both the root and every bounded managed leaf before publication.
+$legacyInstallerPath = Join-Path $prefix 'install.ps1'
+& icacls.exe $prefix /grant '*S-1-1-0:(OI)(CI)M' | Out-Null
+if ($LASTEXITCODE -ne 0) {
+    throw "could not prepare legacy writable root ACL (icacls $LASTEXITCODE)"
+}
+& icacls.exe $legacyInstallerPath /grant '*S-1-1-0:M' | Out-Null
+if ($LASTEXITCODE -ne 0) {
+    throw "could not prepare legacy writable file ACL (icacls $LASTEXITCODE)"
+}
+Assert-InstallerRejected `
+    -Arguments @(
+        '-Prefix',
+        $prefix,
+        '-IntegrationTestRoot',
+        $integrationRoot
+    ) `
+    -MessagePattern '*does not have Kettle''s protected owner/DACL*' `
+    -Label 'legacy writable install without migration opt-in'
+& (Join-Path $repo 'scripts\install.ps1') -Prefix $prefix `
+    -IntegrationTestRoot $integrationRoot -MigrateLegacyPermissions |
+    Out-Null
+Assert-KettleProtectedTree -Path $prefix
+Write-Output 'windows-installer check: permanent ACL migration OK'
 
 # Rust atomic writes use a distinct PID-bearing staging grammar. Remove only
 # exact leaves whose owner process is provably dead; retain live or linked
@@ -978,6 +1133,15 @@ $helperName = ".kettle-update-helper-$transactionId.exe"
 $helperPath = Join-Path $prefix $helperName
 Copy-Item -LiteralPath (Join-Path $prefix 'kettle.exe') `
     -Destination $helperPath
+$archiveName = ".kettle-update-archive-$transactionId.zip"
+$archivePath = Join-Path $prefix $archiveName
+[System.IO.File]::WriteAllBytes(
+    $archivePath,
+    [System.Text.Encoding]::UTF8.GetBytes('bounded updater archive fixture')
+)
+$archiveSize = (Get-Item -LiteralPath $archivePath).Length
+$archiveHash = (Get-FileHash -LiteralPath $archivePath `
+    -Algorithm SHA256).Hash.ToLowerInvariant()
 $pendingFiles = @(
     [ordered]@{
         path = 'README.md'
@@ -987,6 +1151,7 @@ $pendingFiles = @(
         sha256 = (Get-FileHash -LiteralPath (
             Join-Path $stagePath 'README.md'
         ) -Algorithm SHA256).Hash.ToLowerInvariant()
+        mode = $null
     },
     [ordered]@{
         path = 'shell-integration/kettle.ps1'
@@ -996,20 +1161,48 @@ $pendingFiles = @(
         sha256 = (Get-FileHash -LiteralPath (
             Join-Path $stageShell 'kettle.ps1'
         ) -Algorithm SHA256).Hash.ToLowerInvariant()
+        mode = $null
     }
 )
+$asset = [ordered]@{
+    target = 'x86_64-pc-windows-msvc'
+    name = 'kettle-v99.0.0-x86_64-pc-windows-msvc.zip'
+    size = $archiveSize
+    sha256 = $archiveHash
+}
+$packageManifest = [ordered]@{
+    schema = 1
+    product = 'kettle'
+    target = 'x86_64-pc-windows-msvc'
+    version = '99.0.0'
+    files = $pendingFiles
+} | ConvertTo-Json -Compress -Depth 5
+$releaseManifest = [ordered]@{
+    schema = 1
+    product = 'kettle'
+    channel = 'stable'
+    version = '99.0.0'
+    tag = 'v99.0.0'
+    published_at = '2026-07-31T00:00:00Z'
+    assets = @($asset)
+} | ConvertTo-Json -Compress -Depth 5
 $pending = [ordered]@{
-    schema = 2
+    schema = 3
     product = 'kettle'
     target = 'x86_64-pc-windows-msvc'
     transaction_id = $transactionId
     target_version = '99.0.0'
-    staging_dir = ".kettle-update-stage-$transactionId"
+    archive = $archiveName
+    archive_size = $archiveSize
+    archive_sha256 = $archiveHash
+    release_manifest = $releaseManifest
+    release_signature = [Convert]::ToBase64String((New-Object byte[] 64))
+    asset = $asset
+    package_manifest = $packageManifest
     helper = $helperName
     helper_size = (Get-Item -LiteralPath $helperPath).Length
     helper_sha256 = (Get-FileHash -LiteralPath $helperPath `
         -Algorithm SHA256).Hash.ToLowerInvariant()
-    files = $pendingFiles
     attempts = 0
     handoff_timeouts = 0
     last_error = $null
@@ -1021,7 +1214,7 @@ $pending = [ordered]@{
 )
 $pendingPath = Join-Path $prefix '.kettle-update-pending.json'
 $legacyPending = $pending | ConvertFrom-Json
-$legacyPending.schema = 1
+$legacyPending.schema = 2
 [System.IO.File]::WriteAllText(
     $pendingPath,
     ($legacyPending | ConvertTo-Json -Depth 5),
@@ -1105,7 +1298,7 @@ Set-Content -LiteralPath (
 
 & (Join-Path $prefix 'install.ps1') -RefreshIntegration `
     -IntegrationTestRoot $integrationRoot | Out-Null
-Write-Output 'windows-installer check: schema-2 pending updater tree accepted'
+Write-Output 'windows-installer check: schema-3 pending updater tree accepted'
 Remove-Item -LiteralPath (
     Join-Path $prefix '.kettle-update-journal.json'
 ) -Force

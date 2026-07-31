@@ -10,9 +10,7 @@ use windows_sys::Win32::Foundation::{HANDLE, S_OK};
 use windows_sys::Win32::System::Console::{
     COORD, ClosePseudoConsole, CreatePseudoConsole, HPCON, ResizePseudoConsole,
 };
-use windows_sys::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryW};
 use windows_sys::core::{HRESULT, PWSTR};
-use windows_sys::{s, w};
 
 use windows_sys::Win32::System::Threading::{
     CREATE_UNICODE_ENVIRONMENT, CreateProcessW, EXTENDED_STARTUPINFO_PRESENT,
@@ -28,15 +26,11 @@ use crate::tty::windows::{Pty, cmdline, win32_string};
 
 const PIPE_CAPACITY: usize = crate::event_loop::READ_BUFFER_SIZE;
 
-/// Load the pseudoconsole API from conpty.dll if possible, otherwise use the
-/// standard Windows API.
+/// Signatures for the pseudoconsole API, resolved from the system exports.
 ///
-/// The conpty.dll from the Windows Terminal project
-/// supports loading OpenConsole.exe, which offers many improvements and
-/// bugfixes compared to the standard conpty that ships with Windows.
-///
-/// The conpty.dll and OpenConsole.exe files will be searched in PATH and in
-/// the directory where Alacritty's executable is located.
+/// Upstream additionally probed a sideloaded `conpty.dll` from the Windows
+/// Terminal project, searched through `PATH` and the executable's directory.
+/// Kettle removed that probe; see the note on `ConptyApi::new` below.
 type CreatePseudoConsoleFn =
     unsafe extern "system" fn(COORD, HANDLE, HANDLE, u32, *mut HPCON) -> HRESULT;
 type ResizePseudoConsoleFn = unsafe extern "system" fn(HPCON, COORD) -> HRESULT;
@@ -49,41 +43,25 @@ struct ConptyApi {
 }
 
 impl ConptyApi {
+    // Upstream preferred a sideloaded `conpty.dll` here, loaded by bare name.
+    // A bare name sends `LoadLibraryW` through the whole DLL search order,
+    // which includes the application directory, the current directory, and
+    // `PATH`. A terminal emulator is routinely launched with its working
+    // directory set to a project the user just cloned, so that is a DLL
+    // preloading vector: a planted `conpty.dll` would run its `DllMain` in
+    // process. Kettle neither ships nor supports a sideloaded OpenConsole, so
+    // resolve the system exports only.
+    //
+    // Kettle does not use this backend at all — it creates panes through
+    // `portable-pty`, where the same probe was removed for the same reason —
+    // but the module still compiles into the binary, and a known preload
+    // pattern should not ship even unreferenced.
     fn new() -> Self {
-        match Self::load_conpty() {
-            Some(conpty) => {
-                info!("Using conpty.dll for pseudoconsole");
-                conpty
-            },
-            None => {
-                // Cannot load conpty.dll - use the standard Windows API.
-                info!("Using Windows API for pseudoconsole");
-                Self {
-                    create: CreatePseudoConsole,
-                    resize: ResizePseudoConsole,
-                    close: ClosePseudoConsole,
-                }
-            },
-        }
-    }
-
-    /// Try loading ConptyApi from conpty.dll library.
-    fn load_conpty() -> Option<Self> {
-        type LoadedFn = unsafe extern "system" fn() -> isize;
-        unsafe {
-            let hmodule = LoadLibraryW(w!("conpty.dll"));
-            if hmodule.is_null() {
-                return None;
-            }
-            let create_fn = GetProcAddress(hmodule, s!("CreatePseudoConsole"))?;
-            let resize_fn = GetProcAddress(hmodule, s!("ResizePseudoConsole"))?;
-            let close_fn = GetProcAddress(hmodule, s!("ClosePseudoConsole"))?;
-
-            Some(Self {
-                create: mem::transmute::<LoadedFn, CreatePseudoConsoleFn>(create_fn),
-                resize: mem::transmute::<LoadedFn, ResizePseudoConsoleFn>(resize_fn),
-                close: mem::transmute::<LoadedFn, ClosePseudoConsoleFn>(close_fn),
-            })
+        info!("Using Windows API for pseudoconsole");
+        Self {
+            create: CreatePseudoConsole,
+            resize: ResizePseudoConsole,
+            close: ClosePseudoConsole,
         }
     }
 }

@@ -29,7 +29,7 @@ pub fn commands() -> Vec<(&'static str, Action)> {
         ("Zoom / unzoom pane", ToggleZoom),
         ("Scaled zoom (zoom + 1.5x font)", ScaledZoom),
         ("Open kettle help / README", ShowHelp),
-        ("Send newline (Shift+Return) to focused pane", SendNewline),
+        ("Send literal newline to focused pane", SendNewline),
         ("Open layout picker", OpenLayoutPicker),
         ("Open settings", OpenSettings),
         ("About kettle", About),

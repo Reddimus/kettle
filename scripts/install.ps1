@@ -50,6 +50,12 @@
     when Prefix is non-default (the assumption is a custom install means
     "no system traces").
 
+.PARAMETER MigrateLegacyPermissions
+    Re-ACL an existing Kettle-managed install created by an older installer.
+    This must be run from a trusted extracted release or source checkout, not
+    from the helper inside the legacy writable prefix. The parent chain must
+    already prevent untrusted users from replacing the install directory.
+
 .EXAMPLE
     .\install.ps1
     # Default install. Drops kettle into %LOCALAPPDATA%\Programs\kettle,
@@ -77,6 +83,7 @@ param(
     [switch] $NoPath,
     [switch] $WithShellIntegration,
     [switch] $RefreshIntegration,
+    [switch] $MigrateLegacyPermissions,
     [string] $Prefix = (Join-Path $env:LOCALAPPDATA "Programs\kettle"),
     [Parameter(DontShow = $true)]
     [string] $IntegrationTestRoot
@@ -104,10 +111,12 @@ namespace KettleInstaller
     {
         private const uint GENERIC_READ = 0x80000000;
         private const uint GENERIC_WRITE = 0x40000000;
+        private const int GENERIC_WRITE_ACCESS = 0x40000000;
         private const uint DELETE = 0x00010000;
         private const uint READ_CONTROL = 0x00020000;
         private const uint WRITE_DAC = 0x00040000;
         private const uint FILE_READ_ATTRIBUTES = 0x00000080;
+        private const int FILE_DELETE_CHILD = 0x00000040;
         private const uint FILE_SHARE_READ = 0x00000001;
         private const uint FILE_SHARE_WRITE = 0x00000002;
         private const uint FILE_SHARE_DELETE = 0x00000004;
@@ -137,6 +146,8 @@ namespace KettleInstaller
         private const int ERROR_ALREADY_EXISTS = 183;
         private const int OWNER_SECURITY_INFORMATION = 0x00000001;
         private const int DACL_SECURITY_INFORMATION = 0x00000004;
+        private const int WRITE_OWNER_ACCESS = 0x00080000;
+        private const int GENERIC_ALL_ACCESS = 0x10000000;
         private const int FILE_BASIC_INFORMATION = 0;
         private const int FILE_DISPOSITION_INFORMATION = 4;
         private const int FILE_RENAME_INFORMATION_EX = 22;
@@ -309,6 +320,12 @@ namespace KettleInstaller
             byte[] securityDescriptor,
             uint length,
             out uint needed);
+
+        [DllImport("advapi32.dll", SetLastError = true)]
+        private static extern bool SetKernelObjectSecurity(
+            IntPtr handle,
+            int securityInformation,
+            byte[] securityDescriptor);
 
         [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
         private struct Win32FindStreamData
@@ -714,19 +731,6 @@ namespace KettleInstaller
             }
         }
 
-        private static SecurityIdentifier CurrentTokenOwnerSid()
-        {
-            using (WindowsIdentity identity = WindowsIdentity.GetCurrent())
-            {
-                if (identity.Owner == null)
-                {
-                    throw new IOException(
-                        "The installer process has no Windows token owner SID.");
-                }
-                return identity.Owner;
-            }
-        }
-
         private static SecurityIdentifier[] PrivateDirectoryTrustees()
         {
             SecurityIdentifier current = CurrentUserSid();
@@ -759,6 +763,38 @@ namespace KettleInstaller
                 }
             }
             return result.ToArray();
+        }
+
+        private static bool IsTrustedPermanentPrincipal(
+            SecurityIdentifier candidate)
+        {
+            foreach (SecurityIdentifier trusted in PrivateDirectoryTrustees())
+            {
+                if (trusted.Equals(candidate))
+                {
+                    return true;
+                }
+            }
+            SecurityIdentifier trustedInstaller = new SecurityIdentifier(
+                "S-1-5-80-956008885-3418522649-1831038044-" +
+                "1853292631-2271478464");
+            return trustedInstaller.Equals(candidate);
+        }
+
+        private static string ProtectedObjectSddl(bool directory)
+        {
+            SecurityIdentifier current = CurrentUserSid();
+            StringBuilder sddl = new StringBuilder();
+            sddl.Append("O:");
+            sddl.Append(current.Value);
+            sddl.Append("D:P");
+            foreach (SecurityIdentifier trustee in PrivateDirectoryTrustees())
+            {
+                sddl.Append(directory ? "(A;OICI;FA;;;" : "(A;;FA;;;");
+                sddl.Append(trustee.Value);
+                sddl.Append(")");
+            }
+            return sddl.ToString();
         }
 
         private static byte[] ReadSecurityDescriptor(
@@ -795,9 +831,11 @@ namespace KettleInstaller
             return descriptor;
         }
 
-        private static void RequirePrivateDirectorySecurity(
+        private static void RequireProtectedObjectSecurity(
             SafeFileHandle handle,
-            string path)
+            string path,
+            bool directory,
+            string label)
         {
             RawSecurityDescriptor descriptor = new RawSecurityDescriptor(
                 ReadSecurityDescriptor(
@@ -815,8 +853,8 @@ namespace KettleInstaller
                 descriptor.DiscretionaryAcl == null)
             {
                 throw new UnauthorizedAccessException(
-                    "The private installer transaction directory has an " +
-                    "untrusted owner or access-control list: " + path);
+                    label + " has an untrusted owner or access-control list: " +
+                    path);
             }
 
             System.Collections.Generic.List<SecurityIdentifier> remaining =
@@ -831,13 +869,12 @@ namespace KettleInstaller
                     ace.IsCallback ||
                     ace.AceQualifier != AceQualifier.AccessAllowed ||
                     ace.AccessMask != fullControl ||
-                    ace.AceFlags != (
-                        AceFlags.ContainerInherit |
-                        AceFlags.ObjectInherit))
+                    ace.AceFlags != (directory
+                        ? AceFlags.ContainerInherit | AceFlags.ObjectInherit
+                        : AceFlags.None))
                 {
                     throw new UnauthorizedAccessException(
-                        "The private installer transaction directory has " +
-                        "an unexpected access-control entry: " + path);
+                        label + " has an unexpected access-control entry: " + path);
                 }
                 int trustee = -1;
                 for (int expected = 0; expected < remaining.Count; expected++)
@@ -851,22 +888,108 @@ namespace KettleInstaller
                 if (trustee < 0)
                 {
                     throw new UnauthorizedAccessException(
-                        "The private installer transaction directory grants " +
-                        "access to an unexpected principal: " + path);
+                        label + " grants access to an unexpected principal: " +
+                        path);
                 }
                 remaining.RemoveAt(trustee);
             }
             if (remaining.Count != 0)
             {
                 throw new UnauthorizedAccessException(
-                    "The private installer transaction directory is missing " +
-                    "a required access-control entry: " + path);
+                    label + " is missing a required access-control entry: " + path);
             }
         }
 
-        private static void RequireCurrentTokenOwner(
+        private static void RequirePrivateDirectorySecurity(
             SafeFileHandle handle,
             string path)
+        {
+            RequireProtectedObjectSecurity(
+                handle,
+                path,
+                true,
+                "The private installer transaction directory");
+        }
+
+        private static void RequireNoUntrustedReplacementAccess(
+            SafeFileHandle handle,
+            string path)
+        {
+            RawSecurityDescriptor descriptor = new RawSecurityDescriptor(
+                ReadSecurityDescriptor(
+                    handle,
+                    OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION,
+                    path),
+                0);
+            if (descriptor.Owner == null ||
+                !IsTrustedPermanentPrincipal(descriptor.Owner) ||
+                (descriptor.ControlFlags &
+                    ControlFlags.DiscretionaryAclPresent) == 0 ||
+                descriptor.DiscretionaryAcl == null)
+            {
+                throw new UnauthorizedAccessException(
+                    "Install path ancestor has an untrusted owner or DACL: " + path);
+            }
+            int replacementRights =
+                unchecked((int)DELETE) |
+                FILE_DELETE_CHILD |
+                unchecked((int)WRITE_DAC) |
+                WRITE_OWNER_ACCESS |
+                GENERIC_WRITE_ACCESS |
+                GENERIC_ALL_ACCESS;
+            RawAcl dacl = descriptor.DiscretionaryAcl;
+            for (int index = 0; index < dacl.Count; index++)
+            {
+                QualifiedAce ace = dacl[index] as QualifiedAce;
+                if (ace == null ||
+                    ace.AceQualifier != AceQualifier.AccessAllowed ||
+                    (ace.AceFlags & AceFlags.InheritOnly) != 0)
+                {
+                    continue;
+                }
+                if (!IsTrustedPermanentPrincipal(ace.SecurityIdentifier) &&
+                    (ace.AccessMask & replacementRights) != 0)
+                {
+                    throw new UnauthorizedAccessException(
+                        "Install path ancestor grants untrusted replacement " +
+                        "access to " + ace.SecurityIdentifier.Value + ": " + path);
+                }
+            }
+        }
+
+        private static SecurityIdentifier CurrentTokenOwnerSid()
+        {
+            using (WindowsIdentity identity = WindowsIdentity.GetCurrent())
+            {
+                if (identity.Owner == null)
+                {
+                    throw new IOException(
+                        "The installer process has no Windows token owner SID.");
+                }
+                return identity.Owner;
+            }
+        }
+
+        // Two kinds of temporary file reach these checks, and they are owned by
+        // different principals *by construction*. Compare each against the SID
+        // its own creator caused to be set; neither rule is correct for both.
+        //
+        //   - Files this installer creates apply ProtectedObjectSddl, which
+        //     names the user SID explicitly, so an elevated token's default
+        //     owner is not the identity that created them.
+        //   - Rust atomic staging leaves (`.name.tmp.<pid>.<n>.<n>`) are created
+        //     by kettle-state with no explicit descriptor, so Windows assigns
+        //     the token's *owner* — Administrators for an elevated member. That
+        //     is also exactly what kettle-state itself requires before it will
+        //     harden them, so the two sides must agree on the same SID.
+        //
+        // Containment for the Rust leaves comes from the enclosing directory,
+        // which is locked and validated as an owner-private protected directory
+        // before any leaf is opened — not from the leaf's own owner.
+        private static void RequireTemporaryOwner(
+            SafeFileHandle handle,
+            string path,
+            SecurityIdentifier expected)
         {
             RawSecurityDescriptor descriptor = new RawSecurityDescriptor(
                 ReadSecurityDescriptor(
@@ -875,7 +998,7 @@ namespace KettleInstaller
                     path),
                 0);
             if (descriptor.Owner == null ||
-                !descriptor.Owner.Equals(CurrentTokenOwnerSid()))
+                !descriptor.Owner.Equals(expected))
             {
                 throw new UnauthorizedAccessException(
                     "Installer temporary file has an untrusted owner: " +
@@ -911,34 +1034,22 @@ namespace KettleInstaller
             }
         }
 
-        public static void CreatePrivateDirectory(string path)
+        private static void CreateProtectedDirectory(string path, string label)
         {
-            SecurityIdentifier current = CurrentUserSid();
-            StringBuilder sddl = new StringBuilder();
-            sddl.Append("O:");
-            sddl.Append(current.Value);
-            sddl.Append("D:P");
-            foreach (SecurityIdentifier trustee in PrivateDirectoryTrustees())
-            {
-                sddl.Append("(A;OICI;FA;;;");
-                sddl.Append(trustee.Value);
-                sddl.Append(")");
-            }
-
             IntPtr descriptor = IntPtr.Zero;
             IntPtr securityAttributes = IntPtr.Zero;
             try
             {
                 uint descriptorSize;
                 if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(
-                    sddl.ToString(),
+                    ProtectedObjectSddl(true),
                     1,
                     out descriptor,
                     out descriptorSize))
                 {
                     throw new Win32Exception(
                         Marshal.GetLastWin32Error(),
-                        "Cannot create the private installer security descriptor");
+                        "Cannot create " + label + " security descriptor");
                 }
                 SecurityAttributes attributes = new SecurityAttributes();
                 attributes.Length = Marshal.SizeOf(
@@ -954,7 +1065,7 @@ namespace KettleInstaller
                 {
                     throw new Win32Exception(
                         Marshal.GetLastWin32Error(),
-                        "Cannot create the private installer transaction directory");
+                        "Cannot create " + label);
                 }
             }
             finally
@@ -967,6 +1078,210 @@ namespace KettleInstaller
                 {
                     LocalFree(descriptor);
                 }
+            }
+        }
+
+        public static void CreatePrivateDirectory(string path)
+        {
+            CreateProtectedDirectory(
+                path,
+                "the private installer transaction directory");
+        }
+
+        public static void CreatePermanentDirectory(string path)
+        {
+            CreateProtectedDirectory(path, "the protected Kettle directory");
+        }
+
+        private static SafeFileHandle OpenProtectedFileForCreation(
+            string path,
+            uint creationDisposition)
+        {
+            IntPtr descriptor = IntPtr.Zero;
+            IntPtr securityAttributes = IntPtr.Zero;
+            try
+            {
+                uint descriptorSize;
+                if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                    ProtectedObjectSddl(false),
+                    1,
+                    out descriptor,
+                    out descriptorSize))
+                {
+                    throw new Win32Exception(
+                        Marshal.GetLastWin32Error(),
+                        "Cannot create the protected Kettle file descriptor");
+                }
+                SecurityAttributes attributes = new SecurityAttributes();
+                attributes.Length = Marshal.SizeOf(typeof(SecurityAttributes));
+                attributes.SecurityDescriptor = descriptor;
+                attributes.InheritHandle = 0;
+                securityAttributes = Marshal.AllocHGlobal(attributes.Length);
+                Marshal.StructureToPtr(
+                    attributes,
+                    securityAttributes,
+                    false);
+                SafeFileHandle handle = CreateFileW(
+                    path,
+                    GENERIC_WRITE,
+                    FILE_SHARE_READ,
+                    securityAttributes,
+                    creationDisposition,
+                    FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT,
+                    IntPtr.Zero);
+                if (handle.IsInvalid)
+                {
+                    int error = Marshal.GetLastWin32Error();
+                    handle.Dispose();
+                    throw new Win32Exception(
+                        error,
+                        "Cannot create the protected Kettle file");
+                }
+                return handle;
+            }
+            finally
+            {
+                if (securityAttributes != IntPtr.Zero)
+                {
+                    Marshal.FreeHGlobal(securityAttributes);
+                }
+                if (descriptor != IntPtr.Zero)
+                {
+                    LocalFree(descriptor);
+                }
+            }
+        }
+
+        private static byte[] ProtectedObjectDescriptor(bool directory)
+        {
+            RawSecurityDescriptor descriptor = new RawSecurityDescriptor(
+                ProtectedObjectSddl(directory));
+            byte[] bytes = new byte[descriptor.BinaryLength];
+            descriptor.GetBinaryForm(bytes, 0);
+            return bytes;
+        }
+
+        private static void RequireCurrentUserOwner(
+            SafeFileHandle handle,
+            string path)
+        {
+            RawSecurityDescriptor descriptor = new RawSecurityDescriptor(
+                ReadSecurityDescriptor(
+                    handle,
+                    OWNER_SECURITY_INFORMATION,
+                    path),
+                0);
+            if (descriptor.Owner == null ||
+                !descriptor.Owner.Equals(CurrentUserSid()))
+            {
+                throw new UnauthorizedAccessException(
+                    "Legacy Kettle path is not owned by the current user: " + path);
+            }
+        }
+
+        public static void ProtectPermanentDirectory(string path)
+        {
+            SafeFileHandle handle = OpenNoFollow(
+                path,
+                FILE_READ_ATTRIBUTES | READ_CONTROL | WRITE_DAC,
+                FILE_SHARE_READ | FILE_SHARE_WRITE,
+                FILE_FLAG_BACKUP_SEMANTICS);
+            try
+            {
+                ByHandleFileInformation information = Information(handle, path);
+                if ((information.FileAttributes & FILE_ATTRIBUTE_DIRECTORY) == 0 ||
+                    (information.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0)
+                {
+                    throw new IOException(
+                        "Cannot protect a non-directory Kettle path: " + path);
+                }
+                RequireCurrentUserOwner(handle, path);
+                if (!SetKernelObjectSecurity(
+                    handle.DangerousGetHandle(),
+                    DACL_SECURITY_INFORMATION,
+                    ProtectedObjectDescriptor(true)))
+                {
+                    throw new Win32Exception(
+                        Marshal.GetLastWin32Error(),
+                        "Cannot protect Kettle directory " + path);
+                }
+                RequireProtectedObjectSecurity(
+                    handle,
+                    path,
+                    true,
+                    "The permanent Kettle directory");
+            }
+            finally
+            {
+                handle.Dispose();
+            }
+        }
+
+        public static void ProtectPermanentFile(string path)
+        {
+            SafeFileHandle handle = OpenNoFollow(
+                path,
+                FILE_READ_ATTRIBUTES | READ_CONTROL | WRITE_DAC,
+                FILE_SHARE_READ | FILE_SHARE_WRITE,
+                0);
+            try
+            {
+                ByHandleFileInformation information = Information(handle, path);
+                if ((information.FileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0 ||
+                    (information.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0 ||
+                    information.NumberOfLinks != 1)
+                {
+                    throw new IOException(
+                        "Cannot protect a non-ordinary Kettle file: " + path);
+                }
+                RequireCurrentUserOwner(handle, path);
+                if (!SetKernelObjectSecurity(
+                    handle.DangerousGetHandle(),
+                    DACL_SECURITY_INFORMATION,
+                    ProtectedObjectDescriptor(false)))
+                {
+                    throw new Win32Exception(
+                        Marshal.GetLastWin32Error(),
+                        "Cannot protect Kettle file " + path);
+                }
+                RequireProtectedObjectSecurity(
+                    handle,
+                    path,
+                    false,
+                    "The permanent Kettle file");
+            }
+            finally
+            {
+                handle.Dispose();
+            }
+        }
+
+        public static void RequirePermanentFileSecurity(string path)
+        {
+            SafeFileHandle handle = OpenNoFollow(
+                path,
+                FILE_READ_ATTRIBUTES | READ_CONTROL,
+                FILE_SHARE_READ | FILE_SHARE_WRITE,
+                0);
+            try
+            {
+                ByHandleFileInformation information = Information(handle, path);
+                if ((information.FileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0 ||
+                    (information.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0 ||
+                    information.NumberOfLinks != 1)
+                {
+                    throw new IOException(
+                        "Permanent Kettle path is not an ordinary file: " + path);
+                }
+                RequireProtectedObjectSecurity(
+                    handle,
+                    path,
+                    false,
+                    "The permanent Kettle file");
+            }
+            finally
+            {
+                handle.Dispose();
             }
         }
 
@@ -1022,11 +1337,146 @@ namespace KettleInstaller
             }
         }
 
+        private static SafeFileHandle LockTrustedDirectory(
+            string path,
+            bool requirePermanent)
+        {
+            SafeFileHandle handle = OpenNoFollow(
+                path,
+                FILE_READ_ATTRIBUTES | READ_CONTROL,
+                FILE_SHARE_READ | FILE_SHARE_WRITE,
+                FILE_FLAG_BACKUP_SEMANTICS);
+            try
+            {
+                ByHandleFileInformation information = Information(handle, path);
+                if ((information.FileAttributes & FILE_ATTRIBUTE_DIRECTORY) == 0 ||
+                    (information.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0)
+                {
+                    throw new IOException(
+                        "Install path component is not a real directory: " + path);
+                }
+                if (requirePermanent)
+                {
+                    RequireProtectedObjectSecurity(
+                        handle,
+                        path,
+                        true,
+                        "The permanent Kettle directory");
+                }
+                else
+                {
+                    RequireNoUntrustedReplacementAccess(handle, path);
+                }
+                return handle;
+            }
+            catch
+            {
+                handle.Dispose();
+                throw;
+            }
+        }
+
+        private static DirectoryChainGuard LockTrustedDirectoryChainInner(
+            string path,
+            bool createMissing,
+            bool requireFinalPermanent)
+        {
+            string full = Path.GetFullPath(path);
+            string root = Path.GetPathRoot(full);
+            if (String.IsNullOrEmpty(root))
+            {
+                throw new IOException(
+                    "Trusted install chain has no filesystem root: " + path);
+            }
+            if (full.Length > root.Length)
+            {
+                full = full.TrimEnd(
+                    Path.DirectorySeparatorChar,
+                    Path.AltDirectorySeparatorChar);
+            }
+            string[] relative = full.Substring(root.Length).Split(
+                new char[] {
+                    Path.DirectorySeparatorChar,
+                    Path.AltDirectorySeparatorChar
+                },
+                StringSplitOptions.RemoveEmptyEntries);
+            SafeFileHandle[] handles = new SafeFileHandle[relative.Length + 1];
+            int opened = 0;
+            try
+            {
+                string driveName = root.Substring(0, 2);
+                string driveTarget = FixedDriveTarget(full);
+                string current = root;
+                handles[opened] = LockTrustedDirectory(current, false);
+                opened++;
+                for (int index = 0; index < relative.Length; index++)
+                {
+                    current = Path.Combine(current, relative[index]);
+                    if (!Directory.Exists(current))
+                    {
+                        if (!createMissing)
+                        {
+                            throw new DirectoryNotFoundException(
+                                "Trusted install path is missing: " + current);
+                        }
+                        CreatePermanentDirectory(current);
+                    }
+                    bool permanent =
+                        requireFinalPermanent && index == relative.Length - 1;
+                    handles[opened] = LockTrustedDirectory(current, permanent);
+                    opened++;
+                }
+                DirectoryChainGuard guard = new DirectoryChainGuard(
+                    handles,
+                    driveName,
+                    driveTarget);
+                guard.Verify();
+                return guard;
+            }
+            catch
+            {
+                for (int index = opened - 1; index >= 0; index--)
+                {
+                    handles[index].Dispose();
+                }
+                throw;
+            }
+        }
+
+        public static DirectoryChainGuard LockTrustedDirectoryChain(
+            string path,
+            bool createMissing)
+        {
+            return LockTrustedDirectoryChainInner(path, createMissing, false);
+        }
+
+        public static DirectoryChainGuard LockPermanentDirectoryChain(string path)
+        {
+            return LockTrustedDirectoryChainInner(path, false, true);
+        }
+
         public static InstallerFileLock AcquireExclusiveFileLock(string path)
         {
+            if (!File.Exists(path))
+            {
+                try
+                {
+                    using (SafeFileHandle created =
+                        OpenProtectedFileForCreation(path, CREATE_NEW))
+                    {
+                    }
+                }
+                catch (Win32Exception error)
+                {
+                    if (error.NativeErrorCode != ERROR_ALREADY_EXISTS)
+                    {
+                        throw;
+                    }
+                }
+            }
             SafeFileHandle handle = CreateFileW(
                 path,
-                GENERIC_READ | GENERIC_WRITE,
+                GENERIC_READ | GENERIC_WRITE | READ_CONTROL,
                 FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
                 IntPtr.Zero,
                 OPEN_ALWAYS,
@@ -1049,6 +1499,11 @@ namespace KettleInstaller
                         "Installer lock path is not a single-link ordinary file: " +
                         path);
                 }
+                RequireProtectedObjectSecurity(
+                    handle,
+                    path,
+                    false,
+                    "The Kettle coordination file");
                 Overlapped overlapped = new Overlapped();
                 if (!LockFileEx(
                     handle,
@@ -1691,23 +2146,9 @@ namespace KettleInstaller
                         "Install source file exceeds its safety limit: " + source);
                 }
 
-                temporaryHandle = CreateFileW(
+                temporaryHandle = OpenProtectedFileForCreation(
                     temporary,
-                    GENERIC_WRITE,
-                    FILE_SHARE_READ,
-                    IntPtr.Zero,
-                    CREATE_NEW,
-                    FILE_ATTRIBUTE_NORMAL,
-                    IntPtr.Zero);
-                if (temporaryHandle.IsInvalid)
-                {
-                    int error = Marshal.GetLastWin32Error();
-                    temporaryHandle.Dispose();
-                    temporaryHandle = null;
-                    throw new Win32Exception(
-                        error,
-                        "Cannot create the installer temporary file");
-                }
+                    CREATE_NEW);
 
                 using (FileStream input =
                     new FileStream(sourceHandle, FileAccess.Read))
@@ -1769,23 +2210,9 @@ namespace KettleInstaller
             SafeFileHandle temporaryHandle = null;
             try
             {
-                temporaryHandle = CreateFileW(
+                temporaryHandle = OpenProtectedFileForCreation(
                     temporary,
-                    GENERIC_WRITE,
-                    FILE_SHARE_READ,
-                    IntPtr.Zero,
-                    CREATE_NEW,
-                    FILE_ATTRIBUTE_NORMAL,
-                    IntPtr.Zero);
-                if (temporaryHandle.IsInvalid)
-                {
-                    int error = Marshal.GetLastWin32Error();
-                    temporaryHandle.Dispose();
-                    temporaryHandle = null;
-                    throw new Win32Exception(
-                        error,
-                        "Cannot create the installer temporary file");
-                }
+                    CREATE_NEW);
                 using (FileStream output =
                     new FileStream(temporaryHandle, FileAccess.Write))
                 {
@@ -1834,7 +2261,9 @@ namespace KettleInstaller
             }
         }
 
-        private static void DeleteValidatedTemporaryLeaf(string path)
+        private static void DeleteValidatedTemporaryLeaf(
+            string path,
+            SecurityIdentifier expectedOwner)
         {
             SafeFileHandle handle = OpenNoFollow(
                 path,
@@ -1857,7 +2286,7 @@ namespace KettleInstaller
                         "Installer temporary path is not a bounded, " +
                         "single-link ordinary file: " + path);
                 }
-                RequireCurrentTokenOwner(handle, path);
+                RequireTemporaryOwner(handle, path, expectedOwner);
                 IntPtr disposition = Marshal.AllocHGlobal(4);
                 try
                 {
@@ -1896,7 +2325,7 @@ namespace KettleInstaller
                     "Refusing to delete a noncanonical installer temporary file: " +
                     path);
             }
-            DeleteValidatedTemporaryLeaf(path);
+            DeleteValidatedTemporaryLeaf(path, CurrentUserSid());
         }
 
         public static void DeleteRustAtomicTemporaryLeaf(
@@ -1961,7 +2390,7 @@ namespace KettleInstaller
                     error,
                     "Cannot prove the Rust atomic temporary owner process is dead");
             }
-            DeleteValidatedTemporaryLeaf(path);
+            DeleteValidatedTemporaryLeaf(path, CurrentTokenOwnerSid());
         }
 
         public static void RemoveEmptyDirectory(string path)
@@ -2705,6 +3134,12 @@ function Test-KettleManagedRootFileName {
         return $true
     }
     if (
+        $Name -cmatch '^\.kettle-update-archive-(.+)\.zip$' -and
+        (Test-KettleUpdateTransactionId -Value $Matches[1])
+    ) {
+        return $true
+    }
+    if (
         $Name -cmatch '^\.kettle-update-failed-(.+)\.(?:json|txt)$' -and
         (Test-KettleUpdateTransactionId -Value $Matches[1])
     ) {
@@ -2851,6 +3286,10 @@ function Remove-KettleRustAtomicTemporarySet {
                     ) -or (
                         $destinationName -cmatch
                             '^\.kettle-update-helper-(.+)\.exe$' -and
+                        (Test-KettleUpdateTransactionId -Value $Matches[1])
+                    ) -or (
+                        $destinationName -cmatch
+                            '^\.kettle-update-archive-(.+)\.zip$' -and
                         (Test-KettleUpdateTransactionId -Value $Matches[1])
                     ) -or (
                         $destinationName -cmatch
@@ -3659,7 +4098,7 @@ function Invoke-KettlePackageTransaction {
                 )
             if ($hasDestinationShell) {
                 if (-not (Test-Path -LiteralPath $destinationShell)) {
-                    [void][System.IO.Directory]::CreateDirectory(
+                    [KettleInstaller.NativeFileSystemV1]::CreatePermanentDirectory(
                         $destinationShell
                     )
                 }
@@ -3766,7 +4205,9 @@ function Invoke-KettlePackageTransaction {
                 )
                 $destinationParent = Split-Path $destination -Parent
                 if (-not (Test-Path -LiteralPath $destinationParent)) {
-                    [void][System.IO.Directory]::CreateDirectory($destinationParent)
+                    [KettleInstaller.NativeFileSystemV1]::CreatePermanentDirectory(
+                        $destinationParent
+                    )
                 }
                 # Record rollback coverage durably before the destination
                 # mutation. Recovery may safely restore/delete an unchanged
@@ -4193,11 +4634,16 @@ function Assert-KettleManagedInstallTree {
             'target',
             'transaction_id',
             'target_version',
-            'staging_dir',
+            'archive',
+            'archive_size',
+            'archive_sha256',
+            'release_manifest',
+            'release_signature',
+            'asset',
+            'package_manifest',
             'helper',
             'helper_size',
             'helper_sha256',
-            'files',
             'attempts',
             'handoff_timeouts',
             'last_error'
@@ -4212,7 +4658,7 @@ function Assert-KettleManagedInstallTree {
                 $pending.schema -isnot [int] -and
                 $pending.schema -isnot [long]
             ) -or
-            $pending.schema -ne 2 -or
+            $pending.schema -ne 3 -or
             $pending.product -isnot [string] -or
             $pending.product -cne 'kettle' -or
             $pending.target -isnot [string] -or
@@ -4230,10 +4676,31 @@ function Assert-KettleManagedInstallTree {
                 '[0-9A-Za-z-]*[A-Za-z-][0-9A-Za-z-]*))*)?' +
                 '(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$'
             ) -or
-            $pending.staging_dir -isnot [string] -or
-            $pending.staging_dir -cne (
-                '.kettle-update-stage-' + $pending.transaction_id
+            $pending.archive -isnot [string] -or
+            $pending.archive -cne (
+                '.kettle-update-archive-' +
+                $pending.transaction_id +
+                '.zip'
             ) -or
+            (
+                $pending.archive_size -isnot [int] -and
+                $pending.archive_size -isnot [long]
+            ) -or
+            $pending.archive_size -lt 1 -or
+            $pending.archive_size -gt 268435456 -or
+            $pending.archive_sha256 -isnot [string] -or
+            $pending.archive_sha256 -cnotmatch '^[0-9a-f]{64}$' -or
+            $pending.release_manifest -isnot [string] -or
+            $pending.release_manifest.Length -lt 1 -or
+            $pending.release_manifest.Length -gt 131072 -or
+            $pending.release_manifest.IndexOf([char]0) -ge 0 -or
+            $pending.release_signature -isnot [string] -or
+            $pending.release_signature -cnotmatch '^[A-Za-z0-9+/]{86}==$' -or
+            $pending.asset -isnot [System.Management.Automation.PSCustomObject] -or
+            $pending.package_manifest -isnot [string] -or
+            $pending.package_manifest.Length -lt 1 -or
+            $pending.package_manifest.Length -gt 262144 -or
+            $pending.package_manifest.IndexOf([char]0) -ge 0 -or
             $pending.helper -isnot [string] -or
             $pending.helper -cne (
                 '.kettle-update-helper-' +
@@ -4244,13 +4711,10 @@ function Assert-KettleManagedInstallTree {
                 $pending.helper_size -isnot [int] -and
                 $pending.helper_size -isnot [long]
             ) -or
-            $pending.helper_size -lt 0 -or
+            $pending.helper_size -lt 1 -or
             $pending.helper_size -gt 536870912 -or
             $pending.helper_sha256 -isnot [string] -or
             $pending.helper_sha256 -cnotmatch '^[0-9a-fA-F]{64}$' -or
-            $pending.files -isnot [System.Array] -or
-            $pending.files.Count -lt 1 -or
-            $pending.files.Count -gt 128 -or
             (
                 $pending.attempts -isnot [int] -and
                 $pending.attempts -isnot [long]
@@ -4270,20 +4734,75 @@ function Assert-KettleManagedInstallTree {
         ) {
             throw 'The pending update record has an invalid artifact identity.'
         }
+        $assetKeys = @($pending.asset.PSObject.Properties.Name)
+        if (
+            $assetKeys.Count -ne 4 -or
+            @($assetKeys | Where-Object {
+                @('target', 'name', 'size', 'sha256') -cnotcontains $_
+            }).Count -ne 0 -or
+            $pending.asset.target -isnot [string] -or
+            $pending.asset.target -cne $pending.target -or
+            $pending.asset.name -isnot [string] -or
+            $pending.asset.name -cnotmatch (
+                '^[A-Za-z0-9][A-Za-z0-9._-]{0,250}\.zip$'
+            ) -or
+            (
+                $pending.asset.size -isnot [int] -and
+                $pending.asset.size -isnot [long]
+            ) -or
+            $pending.asset.size -ne $pending.archive_size -or
+            $pending.asset.sha256 -isnot [string] -or
+            $pending.asset.sha256 -cne $pending.archive_sha256
+        ) {
+            throw 'The pending update record contains an invalid signed asset identity.'
+        }
+        try {
+            $pendingPackage =
+                $pending.package_manifest | ConvertFrom-Json -ErrorAction Stop
+        } catch {
+            throw 'The pending update record contains an invalid package manifest.'
+        }
+        $packageKeys = @($pendingPackage.PSObject.Properties.Name)
+        if (
+            $pendingPackage -isnot [System.Management.Automation.PSCustomObject] -or
+            $packageKeys.Count -ne 5 -or
+            @($packageKeys | Where-Object {
+                @('schema', 'product', 'target', 'version', 'files') `
+                    -cnotcontains $_
+            }).Count -ne 0 -or
+            (
+                $pendingPackage.schema -isnot [int] -and
+                $pendingPackage.schema -isnot [long]
+            ) -or
+            $pendingPackage.schema -ne 1 -or
+            $pendingPackage.product -isnot [string] -or
+            $pendingPackage.product -cne 'kettle' -or
+            $pendingPackage.target -isnot [string] -or
+            $pendingPackage.target -cne $pending.target -or
+            $pendingPackage.version -isnot [string] -or
+            $pendingPackage.version -cne $pending.target_version -or
+            $pendingPackage.files -isnot [System.Array] -or
+            $pendingPackage.files.Count -lt 1 -or
+            $pendingPackage.files.Count -gt 127
+        ) {
+            throw 'The pending update record contains an invalid package identity.'
+        }
         $pendingPaths =
             New-Object 'System.Collections.Generic.HashSet[string]' (
                 [System.StringComparer]::OrdinalIgnoreCase
             )
+        $lastPendingPath = $null
         [uint64]$pendingBytes = 0
-        foreach ($record in $pending.files) {
+        foreach ($record in $pendingPackage.files) {
             $recordKeys = @($record.PSObject.Properties.Name)
             if (
                 $record -isnot [System.Management.Automation.PSCustomObject] -or
-                $recordKeys.Count -ne 3 -or
+                $recordKeys.Count -ne 4 -or
                 @($recordKeys | Where-Object {
-                    @('path', 'size', 'sha256') -cnotcontains $_
+                    @('path', 'size', 'sha256', 'mode') -cnotcontains $_
                 }).Count -ne 0 -or
                 $record.path -isnot [string] -or
+                $record.path -ceq 'kettle-package-manifest.json' -or
                 $record.path.Contains('\') -or
                 -not (Test-KettleWindowsPayloadRelativePath `
                     -Relative $record.path) -or
@@ -4295,14 +4814,23 @@ function Assert-KettleManagedInstallTree {
                 $record.size -lt 0 -or
                 $record.size -gt 536870912 -or
                 $record.sha256 -isnot [string] -or
-                $record.sha256 -cnotmatch '^[0-9a-fA-F]{64}$'
+                $record.sha256 -cnotmatch '^[0-9a-f]{64}$' -or
+                $null -ne $record.mode -or
+                (
+                    $null -ne $lastPendingPath -and
+                    [StringComparer]::Ordinal.Compare(
+                        $lastPendingPath,
+                        $record.path
+                    ) -ge 0
+                )
             ) {
                 throw 'The pending update record contains an invalid file identity.'
             }
             $pendingBytes += [uint64]$record.size
             if ($pendingBytes -gt 536870912) {
-                throw 'The pending update record exceeds its staged-byte limit.'
+                throw 'The pending update record exceeds its package-byte limit.'
             }
+            $lastPendingPath = $record.path
         }
         # Do not require the named leaves to exist here. The managed remover
         # deliberately revalidates the root after deleting each updater
@@ -4438,6 +4966,74 @@ function Invoke-KettleManagedInstallTreeRemoval {
     }
 }
 
+function Protect-KettleLegacyManagedTree {
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute(
+        'PSUseShouldProcessForStateChangingFunctions',
+        '',
+        Justification = 'Explicit opt-in migration applies the installer ACL.'
+    )]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string] $Path
+    )
+
+    [KettleInstaller.NativeFileSystemV1]::ProtectPermanentDirectory($Path)
+    $rootItems = @(
+        Get-ChildItem -LiteralPath $Path -Force -ErrorAction Stop
+    )
+    if ($rootItems.Count -gt 128) {
+        throw 'Legacy Kettle permission migration exceeded its root entry limit.'
+    }
+    foreach ($item in $rootItems) {
+        if (
+            ($item.Attributes -band
+                [System.IO.FileAttributes]::ReparsePoint) -ne 0
+        ) {
+            throw "Legacy Kettle permission migration found a reparse point: $($item.FullName)"
+        }
+        if ($item.PSIsContainer) {
+            if ($item.Name -cne 'shell-integration') {
+                throw "Legacy Kettle permission migration found an unmanaged directory: $($item.Name)"
+            }
+            [KettleInstaller.NativeFileSystemV1]::ProtectPermanentDirectory(
+                $item.FullName
+            )
+            $shellItems = @(
+                Get-ChildItem -LiteralPath $item.FullName -Force `
+                    -ErrorAction Stop
+            )
+            if ($shellItems.Count -gt 4) {
+                throw 'Legacy shell-integration migration exceeded four entries.'
+            }
+            foreach ($shellItem in $shellItems) {
+                if (
+                    $shellItem.PSIsContainer -or
+                    ($shellItem.Attributes -band
+                        [System.IO.FileAttributes]::ReparsePoint) -ne 0 -or
+                    @(
+                        'kettle.bash',
+                        'kettle.fish',
+                        'kettle.ps1',
+                        'kettle.zsh'
+                    ) -cnotcontains $shellItem.Name
+                ) {
+                    throw "Legacy Kettle permission migration found an unmanaged shell entry: $($shellItem.Name)"
+                }
+                [KettleInstaller.NativeFileSystemV1]::ProtectPermanentFile(
+                    $shellItem.FullName
+                )
+            }
+            continue
+        }
+        if (-not (Test-KettleManagedRootFileName -Name $item.Name)) {
+            throw "Legacy Kettle permission migration found an unmanaged file: $($item.Name)"
+        }
+        [KettleInstaller.NativeFileSystemV1]::ProtectPermanentFile(
+            $item.FullName
+        )
+    }
+}
+
 # Detect the layout: extracted-zip mode keeps `kettle.exe` next to
 # this script; in-repo mode has it under `target/release/`.
 $scriptDir = [System.IO.Path]::GetFullPath(
@@ -4451,6 +5047,12 @@ if (
 ) {
     $Prefix = Read-KettleInstallPrefixMarker -Path $prefixMarker
     $prefixFromMarker = $true
+}
+if ($MigrateLegacyPermissions -and $prefixFromMarker) {
+    throw (
+        'Permission migration must run from a trusted extracted release or ' +
+        'source checkout, not from the helper inside the legacy prefix.'
+    )
 }
 $zipModeExe = Join-Path $scriptDir "kettle.exe"
 $repoModeExe = Join-Path (Split-Path -Parent $scriptDir) "target\release\kettle.exe"
@@ -4575,7 +5177,7 @@ if ($Uninstall) {
     Write-Output "Removing kettle..."
     if (Test-Path -LiteralPath $Prefix -PathType Container) {
         $prefixChain =
-            [KettleInstaller.NativeFileSystemV1]::LockRealDirectoryChain(
+            [KettleInstaller.NativeFileSystemV1]::LockPermanentDirectoryChain(
             $Prefix
         )
         try {
@@ -4716,7 +5318,7 @@ if (
 if ($RefreshIntegration) {
     Assert-KettleInstallOwnership -Path $Prefix
     $refreshPrefixChain =
-        [KettleInstaller.NativeFileSystemV1]::LockRealDirectoryChain(
+        [KettleInstaller.NativeFileSystemV1]::LockPermanentDirectoryChain(
         $Prefix
     )
     try {
@@ -4826,23 +5428,63 @@ if ($RefreshIntegration) {
 Write-Output "Installing kettle (source: $sourceMode mode, from $sourceDir)"
 Write-Output ""
 
-if (Test-Path -LiteralPath $Prefix) {
-    $existingPrefix = Get-Item -LiteralPath $Prefix -Force -ErrorAction Stop
-    if (
-        -not $existingPrefix.PSIsContainer -or
-        ($existingPrefix.Attributes -band
-            [System.IO.FileAttributes]::ReparsePoint) -ne 0
-    ) {
-        throw 'The install prefix is not a real directory.'
+$installParent = Split-Path $Prefix -Parent
+$installParentChain =
+    [KettleInstaller.NativeFileSystemV1]::LockTrustedDirectoryChain(
+        $installParent,
+        $true
+    )
+$installPrefixChain = $null
+try {
+    if (Test-Path -LiteralPath $Prefix) {
+        $existingPrefix = Get-Item -LiteralPath $Prefix -Force -ErrorAction Stop
+        if (
+            -not $existingPrefix.PSIsContainer -or
+            ($existingPrefix.Attributes -band
+                [System.IO.FileAttributes]::ReparsePoint) -ne 0
+        ) {
+            throw 'The install prefix is not a real directory.'
+        }
+        $existingSecurity = $null
+        try {
+            $existingSecurity =
+                [KettleInstaller.NativeFileSystemV1]::LockPermanentDirectoryChain(
+                    $Prefix
+                )
+        } catch {
+            if (-not $MigrateLegacyPermissions) {
+                throw (
+                    'Existing install root does not have Kettle''s protected ' +
+                    'owner/DACL. Re-run this trusted installer with ' +
+                    '-MigrateLegacyPermissions after reviewing the tree. ' +
+                    "Validation detail: $($_.Exception.Message)"
+                )
+            }
+            if ($sourceMode -eq 'installed') {
+                throw (
+                    'Refusing to migrate permissions from the helper inside ' +
+                    'the legacy writable prefix. Use a trusted extracted ' +
+                    'release or source checkout.'
+                )
+            }
+            Protect-KettleLegacyManagedTree -Path $Prefix
+            Write-Output "  migrated legacy install root and file ACLs"
+        } finally {
+            if ($null -ne $existingSecurity) {
+                $existingSecurity.Dispose()
+            }
+        }
+    } else {
+        [KettleInstaller.NativeFileSystemV1]::CreatePermanentDirectory($Prefix)
     }
-} else {
-    [void][System.IO.Directory]::CreateDirectory($Prefix)
+    Assert-KettleInstallPathChain -Path $Prefix
+    $installPrefixChain =
+        [KettleInstaller.NativeFileSystemV1]::LockPermanentDirectoryChain(
+            $Prefix
+        )
+} finally {
+    $installParentChain.Dispose()
 }
-Assert-KettleInstallPathChain -Path $Prefix
-$installPrefixChain =
-    [KettleInstaller.NativeFileSystemV1]::LockRealDirectoryChain(
-    $Prefix
-)
 $installUpdateLock = $null
 $installRunningLock = $null
 try {
@@ -5134,6 +5776,21 @@ if (Test-Path $shellIntegrationSrc) {
 Write-Output "  wrote authenticated-update ownership marker ($installChannel)"
 Assert-KettleInstallOwnership -Path $Prefix
 Assert-KettleManagedInstallTree -Path $Prefix
+foreach ($publishedEntry in $packagePlan) {
+    [KettleInstaller.NativeFileSystemV1]::RequirePermanentFileSecurity(
+        (Join-Path $Prefix $publishedEntry.Relative.Replace('/', '\'))
+    )
+}
+if (
+    $null -ne $shellIntegrationDst -and
+    (Test-Path -LiteralPath $shellIntegrationDst -PathType Container)
+) {
+    $publishedShellSecurity =
+        [KettleInstaller.NativeFileSystemV1]::LockPermanentDirectoryChain(
+            $shellIntegrationDst
+        )
+    $publishedShellSecurity.Dispose()
+}
 $unpublishedInstallerFiles = @(
     Get-ChildItem -LiteralPath $Prefix -Force -ErrorAction Stop |
         Where-Object {

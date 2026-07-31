@@ -9,6 +9,8 @@
 //! Soft-skips when no PTY is available in the sandbox (mirrors kettle-core's
 //! teardown tests) so CI without a console doesn't red the suite.
 
+#[cfg(any(windows, target_os = "linux"))]
+use std::io::BufRead;
 use std::io::{Read, Write};
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
@@ -286,6 +288,42 @@ fn private_test_scratch_root() -> PathBuf {
 const ECHO: [&str; 3] = ["cmd", "/c", "echo"];
 #[cfg(unix)]
 const ECHO: [&str; 1] = ["echo"];
+const CWD_SPAWN_MARKER_ENV: &str = "KETTLE_EXEC_CWD_SPAWN_MARKER";
+
+#[test]
+fn cwd_spawn_marker_helper() {
+    let Some(marker) = std::env::var_os(CWD_SPAWN_MARKER_ENV) else {
+        return;
+    };
+    std::fs::write(marker, b"spawned").expect("write cwd spawn marker");
+}
+
+#[test]
+fn exec_rejects_an_explicit_missing_cwd_before_spawn() {
+    let scratch = tempfile::tempdir_in(private_test_scratch_root())
+        .expect("create invalid-cwd scratch directory");
+    let missing = scratch.path().join("missing-directory");
+    let marker = scratch.path().join("child-spawned");
+    let helper = std::env::current_exe().expect("resolve integration-test helper");
+    let (code, out, err) = run_exec_with_env(
+        &["--cwd", missing.to_str().unwrap()],
+        &[
+            helper.to_str().expect("integration-test path is UTF-8"),
+            "--exact",
+            "cwd_spawn_marker_helper",
+            "--nocapture",
+            "--test-threads=1",
+        ],
+        None,
+        &[(CWD_SPAWN_MARKER_ENV, marker.to_str().unwrap())],
+    );
+    assert_eq!(code, 125, "stdout={out:?}; stderr={err:?}");
+    assert!(
+        err.contains("kettle exec: invalid --cwd:") && err.contains("missing-directory"),
+        "missing explicit-cwd diagnostic: {err:?}"
+    );
+    assert!(!marker.exists(), "invalid --cwd still spawned the child");
+}
 
 #[test]
 fn exec_streams_stdout_and_exits_zero() {
@@ -340,6 +378,141 @@ const STDOUT_FLOOD_MARKER_ENV: &str = "KETTLE_EXEC_STDOUT_FLOOD_MARKER";
 const STDOUT_FLOOD_EXEC_TIMEOUT: &str = "8.0";
 const STDOUT_FLOOD_READY_BUDGET: Duration = Duration::from_secs(4);
 const STDOUT_FLOOD_POST_READY_BOUND: Duration = Duration::from_secs(12);
+#[cfg(any(windows, target_os = "linux"))]
+const STDOUT_FAILURE_PID_ENV: &str = "KETTLE_EXEC_STDOUT_FAILURE_PID";
+#[cfg(any(windows, target_os = "linux"))]
+const OUTPUT_DELIVERY_EXIT_CODE: i32 = 74;
+
+#[cfg(target_os = "linux")]
+const STDOUT_BURST_PID_ENV: &str = "KETTLE_EXEC_STDOUT_BURST_PID";
+#[cfg(target_os = "linux")]
+const STDOUT_BURST_BYTES_ENV: &str = "KETTLE_EXEC_STDOUT_BURST_BYTES";
+#[cfg(target_os = "linux")]
+const STDOUT_BURST_CHILD_EXIT_CODE: i32 = 23;
+#[cfg(target_os = "linux")]
+const STDOUT_BURST_EXEC_TIMEOUT: &str = "8.0";
+#[cfg(target_os = "linux")]
+const STDOUT_BURST_SETUP_BUDGET: Duration = Duration::from_secs(4);
+#[cfg(target_os = "linux")]
+const STDOUT_BURST_POST_EXIT_BOUND: Duration = Duration::from_secs(12);
+
+#[cfg(target_os = "linux")]
+fn sized_unread_pipe() -> (std::fs::File, Stdio, usize, usize) {
+    use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+
+    let mut descriptors = [-1; 2];
+    // SAFETY: `descriptors` has room for the two fds written by pipe2.
+    if unsafe { libc::pipe2(descriptors.as_mut_ptr(), libc::O_CLOEXEC) } != 0 {
+        panic!(
+            "create deterministic unread-stdout pipe: {}",
+            std::io::Error::last_os_error()
+        );
+    }
+    // SAFETY: a successful pipe2 returned two distinct owned descriptors.
+    let reader = unsafe { OwnedFd::from_raw_fd(descriptors[0]) };
+    let writer = unsafe { OwnedFd::from_raw_fd(descriptors[1]) };
+
+    // Shrinking before spawn removes dependence on the host's adaptive pipe
+    // sizing and gives the fixture an exact capacity it can preload.
+    // SAFETY: sysconf has no pointer arguments and does not mutate Rust state.
+    let page_size = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
+    assert!(page_size > 0, "Linux must report a positive page size");
+    let requested_capacity =
+        libc::c_int::try_from(page_size).expect("page size must fit Linux fcntl");
+    // SAFETY: writer is a live pipe descriptor and F_SETPIPE_SZ takes an int.
+    let resized =
+        unsafe { libc::fcntl(writer.as_raw_fd(), libc::F_SETPIPE_SZ, requested_capacity) };
+    if resized < 0 {
+        panic!(
+            "shrink deterministic unread-stdout pipe: {}",
+            std::io::Error::last_os_error()
+        );
+    }
+    // SAFETY: F_GETPIPE_SZ and fpathconf only inspect the live pipe descriptor.
+    let capacity = unsafe { libc::fcntl(reader.as_raw_fd(), libc::F_GETPIPE_SZ) };
+    let atomic_write = unsafe { libc::fpathconf(reader.as_raw_fd(), libc::_PC_PIPE_BUF) };
+    assert!(capacity > 0, "Linux pipe capacity must be positive");
+    assert!(atomic_write > 0, "Linux PIPE_BUF must be positive");
+
+    let capacity = usize::try_from(capacity).unwrap();
+    let reader = std::fs::File::from(reader);
+    let mut writer = std::fs::File::from(writer);
+    writer
+        .write_all(&vec![b'p'; capacity])
+        .expect("preload deterministic unread-stdout pipe");
+    assert_eq!(
+        unread_pipe_bytes(&reader),
+        capacity,
+        "preloaded unread-stdout pipe must be full before spawn"
+    );
+
+    (
+        reader,
+        Stdio::from(writer),
+        capacity,
+        usize::try_from(atomic_write).unwrap(),
+    )
+}
+
+#[cfg(target_os = "linux")]
+fn unread_pipe_bytes(reader: &std::fs::File) -> usize {
+    use std::os::fd::AsRawFd;
+
+    let mut available: libc::c_int = 0;
+    // SAFETY: FIONREAD writes one c_int to the supplied live pointer.
+    if unsafe { libc::ioctl(reader.as_raw_fd(), libc::FIONREAD, &mut available) } != 0 {
+        panic!(
+            "inspect deterministic unread-stdout pipe: {}",
+            std::io::Error::last_os_error()
+        );
+    }
+    usize::try_from(available).expect("Linux FIONREAD cannot report negative bytes")
+}
+
+#[cfg(target_os = "linux")]
+fn linux_process_has_exited(pid: u32) -> bool {
+    let stat = match std::fs::read_to_string(format!("/proc/{pid}/stat")) {
+        Ok(stat) => stat,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return true,
+        Err(error) => panic!("read helper process state for pid {pid}: {error}"),
+    };
+    // The comm field is parenthesized and may itself contain spaces or `)`, so
+    // split at the final delimiter before reading the one-byte state field.
+    let (_, after_comm) = stat
+        .rsplit_once(") ")
+        .unwrap_or_else(|| panic!("malformed /proc/{pid}/stat: {stat:?}"));
+    matches!(after_comm.as_bytes().first(), Some(b'Z' | b'X' | b'x'))
+}
+
+#[cfg(windows)]
+fn windows_process_has_exited(pid: u32) -> bool {
+    use windows_sys::Win32::Foundation::{CloseHandle, WAIT_OBJECT_0};
+    use windows_sys::Win32::System::Threading::{
+        OpenProcess, PROCESS_SYNCHRONIZE, WaitForSingleObject,
+    };
+
+    // SAFETY: the fixture published its positive process id. The returned
+    // synchronization-only handle is closed before returning.
+    let process = unsafe { OpenProcess(PROCESS_SYNCHRONIZE, 0, pid) };
+    if process.is_null() {
+        return true;
+    }
+    let exited = unsafe { WaitForSingleObject(process, 0) } == WAIT_OBJECT_0;
+    unsafe { CloseHandle(process) };
+    exited
+}
+
+#[cfg(any(windows, target_os = "linux"))]
+fn stdout_failure_child_has_exited(pid: u32) -> bool {
+    #[cfg(windows)]
+    {
+        windows_process_has_exited(pid)
+    }
+    #[cfg(target_os = "linux")]
+    {
+        linux_process_has_exited(pid)
+    }
+}
 
 #[test]
 fn stdout_flood_helper() {
@@ -354,6 +527,147 @@ fn stdout_flood_helper() {
         stdout.write_all(&block).expect("write stdout-flood block");
         stdout.flush().expect("flush stdout-flood block");
     }
+}
+
+#[cfg(any(windows, target_os = "linux"))]
+#[test]
+fn stdout_until_killed_helper() {
+    let Some(pid_path) = std::env::var_os(STDOUT_FAILURE_PID_ENV) else {
+        return;
+    };
+    std::fs::write(pid_path, std::process::id().to_string())
+        .expect("publish stdout-failure helper pid");
+    let mut stdout = std::io::stdout().lock();
+    writeln!(stdout, "STDOUT_FAILURE_HELPER_READY").unwrap();
+    stdout.flush().unwrap();
+    let block = [b'x'; 8192];
+    loop {
+        stdout.write_all(&block).unwrap();
+        stdout.flush().unwrap();
+    }
+}
+
+#[cfg(any(windows, target_os = "linux"))]
+#[test]
+fn exec_reports_a_broken_stdout_and_reaps_the_child() {
+    let scratch = tempfile::tempdir_in(private_test_scratch_root())
+        .expect("create stdout-failure scratch directory");
+    let pid_path = scratch.path().join("child.pid");
+    let helper = std::env::current_exe().expect("resolve integration-test helper");
+    let mut cmd = kettle();
+    cmd.args([
+        "exec",
+        "--",
+        helper.to_str().expect("integration-test path is UTF-8"),
+        "--exact",
+        "stdout_until_killed_helper",
+        "--nocapture",
+        "--test-threads=1",
+    ]);
+    cmd.env(STDOUT_FAILURE_PID_ENV, &pid_path);
+    cmd.stdin(Stdio::null());
+    cmd.stdout(Stdio::piped());
+    cmd.stderr(Stdio::piped());
+    let mut child = cmd.spawn().expect("spawn stdout-failure exec");
+    let stdout = child.stdout.take().expect("piped stdout");
+    let mut stdout = std::io::BufReader::new(stdout);
+    let mut prefix = String::new();
+    let ready_deadline = Instant::now() + Duration::from_secs(5);
+    while !pid_path.exists() && Instant::now() < ready_deadline {
+        let mut line = String::new();
+        if stdout.read_line(&mut line).expect("read helper readiness") == 0 {
+            break;
+        }
+        prefix.push_str(&line);
+    }
+
+    // Closing the only read handle makes the next real stdout write fail with
+    // BrokenPipe/ERROR_BROKEN_PIPE. This is distinct from a merely stalled
+    // reader, which the deadline tests below exercise.
+    drop(stdout);
+    let watchdog = Instant::now() + Duration::from_secs(10);
+    let (status, watchdog_killed) = loop {
+        if let Some(status) = child.try_wait().expect("poll stdout-failure exec") {
+            break (status, false);
+        }
+        if Instant::now() >= watchdog {
+            child.kill().expect("kill hung stdout-failure exec");
+            break (
+                child.wait().expect("wait for killed stdout-failure exec"),
+                true,
+            );
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    let mut err = String::new();
+    child
+        .stderr
+        .take()
+        .unwrap()
+        .read_to_string(&mut err)
+        .unwrap();
+    let code = status.code().unwrap_or(-1);
+    if no_pty(code, &err) {
+        eprintln!("skipping exec_reports_a_broken_stdout_and_reaps_the_child: no PTY");
+        return;
+    }
+    assert!(
+        pid_path.exists(),
+        "helper never became ready; prefix={prefix:?}; stderr={err:?}"
+    );
+    assert!(
+        !watchdog_killed,
+        "broken stdout hung Kettle; stderr={err:?}"
+    );
+    assert_eq!(
+        code, OUTPUT_DELIVERY_EXIT_CODE,
+        "status={status:?}; stderr={err:?}"
+    );
+    assert!(
+        err.contains("kettle exec: stdout delivery failed:"),
+        "missing stdout failure diagnostic: {err:?}"
+    );
+
+    let pid = std::fs::read_to_string(&pid_path)
+        .unwrap()
+        .trim()
+        .parse::<u32>()
+        .unwrap();
+    let reap_deadline = Instant::now() + Duration::from_secs(2);
+    while !stdout_failure_child_has_exited(pid) && Instant::now() < reap_deadline {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(
+        stdout_failure_child_has_exited(pid),
+        "stdout-producing child {pid} survived delivery failure"
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn stdout_burst_then_exit_helper() {
+    let Some(pid_path) = std::env::var_os(STDOUT_BURST_PID_ENV) else {
+        return;
+    };
+    let burst_bytes: usize = std::env::var(STDOUT_BURST_BYTES_ENV)
+        .expect("stdout-burst byte count")
+        .parse()
+        .expect("stdout-burst byte count is an integer");
+    std::fs::write(pid_path, std::process::id().to_string())
+        .expect("publish stdout-burst helper pid");
+
+    let block = [b'x'; 8192];
+    let mut remaining = burst_bytes;
+    let mut stdout = std::io::stdout().lock();
+    while remaining != 0 {
+        let count = remaining.min(block.len());
+        stdout
+            .write_all(&block[..count])
+            .expect("write finite stdout burst");
+        remaining -= count;
+    }
+    stdout.flush().expect("flush finite stdout burst");
+    std::process::exit(STDOUT_BURST_CHILD_EXIT_CODE);
 }
 
 #[test]
@@ -468,6 +782,10 @@ fn exec_timeout_survives_an_unread_stdout_pipe() {
         "stdout-backpressured timeout must exit 124; stderr={err:?}"
     );
     assert!(
+        err.contains("stdout was not fully delivered before the run stopped"),
+        "timeout must retain the abandoned-output warning: {err:?}"
+    );
+    assert!(
         elapsed_after_ready < STDOUT_FLOOD_POST_READY_BOUND,
         "stdout-backpressured timeout took {elapsed_after_ready:?}"
     );
@@ -482,6 +800,167 @@ fn exec_timeout_survives_an_unread_stdout_pipe() {
          pipe_buffered_bytes={}, flood_bytes={flood_bytes}",
         status.code(),
         out.len()
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn exec_timeout_bounds_stalled_output_after_child_exit() {
+    let scratch = tempfile::tempdir_in(private_test_scratch_root())
+        .expect("create exited-child stdout-backpressure scratch directory");
+    let pid_path = scratch.path().join("child.pid");
+    let helper = std::env::current_exe().expect("resolve integration-test helper");
+    let (mut unread_stdout, child_stdout, pipe_capacity, pipe_buf) = sized_unread_pipe();
+
+    // Keep the requested 64-128 KiB child burst, but derive the exact count
+    // from the pipe Kettle will inherit. The pipe was filled before spawn, so
+    // Kettle's first stdout write is deterministically stalled; setup then
+    // proves that the finite-burst helper is already a zombie or gone.
+    let burst_bytes = (64 * 1024).max(pipe_capacity.saturating_add(pipe_buf));
+    assert!(
+        (64 * 1024..=128 * 1024).contains(&burst_bytes),
+        "derived burst escaped the 64-128 KiB regression window: \
+         burst={burst_bytes}, pipe_capacity={pipe_capacity}, PIPE_BUF={pipe_buf}"
+    );
+
+    let mut cmd = kettle();
+    cmd.args([
+        "exec",
+        "--timeout",
+        STDOUT_BURST_EXEC_TIMEOUT,
+        "--",
+        helper.to_str().expect("integration-test path is UTF-8"),
+        "--exact",
+        "stdout_burst_then_exit_helper",
+        "--nocapture",
+        "--test-threads=1",
+    ]);
+    cmd.env(STDOUT_BURST_PID_ENV, &pid_path);
+    cmd.env(STDOUT_BURST_BYTES_ENV, burst_bytes.to_string());
+    cmd.stdin(Stdio::null());
+    cmd.stdout(child_stdout);
+    cmd.stderr(Stdio::piped());
+
+    let started = Instant::now();
+    let mut child = cmd
+        .spawn()
+        .expect("spawn exited-child stdout-backpressured exec");
+    // `Command` retains its configured Stdio so it can be spawned again. Drop
+    // that parent-side writer now; otherwise diagnostic `read_to_end` would
+    // keep its own custom pipe open after Kettle exits.
+    drop(cmd);
+    let mut stderr = child.stderr.take().expect("piped stderr");
+
+    let setup_deadline = started + STDOUT_BURST_SETUP_BUDGET;
+    let mut helper_pid = None;
+    let mut buffered_bytes = 0usize;
+    let mut helper_exited = false;
+    while Instant::now() < setup_deadline {
+        if helper_pid.is_none()
+            && let Ok(pid) = std::fs::read_to_string(&pid_path)
+        {
+            helper_pid = Some(pid.trim().parse::<u32>().expect("helper pid is an integer"));
+        }
+        buffered_bytes = unread_pipe_bytes(&unread_stdout);
+        helper_exited = helper_pid.is_some_and(linux_process_has_exited);
+        if helper_exited {
+            break;
+        }
+        if child
+            .try_wait()
+            .expect("poll exited-child stdout-backpressured exec")
+            .is_some()
+        {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+
+    if buffered_bytes != pipe_capacity || !helper_exited {
+        let status = child
+            .try_wait()
+            .expect("poll invalid exited-child fixture")
+            .unwrap_or_else(|| {
+                child.kill().expect("kill invalid exited-child fixture");
+                child.wait().expect("wait for invalid exited-child fixture")
+            });
+        let mut out = Vec::new();
+        unread_stdout.read_to_end(&mut out).unwrap();
+        let mut err = String::new();
+        stderr.read_to_string(&mut err).unwrap();
+        if no_pty(status.code().unwrap_or(-1), &err) {
+            eprintln!("skipping exec_timeout_bounds_stalled_output_after_child_exit: no PTY");
+            return;
+        }
+        panic!(
+            "exited-child fixture did not establish its prerequisites; \
+             status={status:?}; helper_pid={helper_pid:?}; helper_exited={helper_exited}; \
+             pipe={buffered_bytes}/{pipe_capacity}; burst={burst_bytes}; \
+             stderr={err:?}; stdout={:?}",
+            String::from_utf8_lossy(&out)
+        );
+    }
+
+    let child_exit_observed_at = Instant::now();
+    let watchdog = child_exit_observed_at + STDOUT_BURST_POST_EXIT_BOUND;
+    let (status, watchdog_killed) = loop {
+        if let Some(status) = child
+            .try_wait()
+            .expect("poll exited-child stdout-backpressured exec")
+        {
+            break (status, false);
+        }
+        if Instant::now() >= watchdog {
+            child
+                .kill()
+                .expect("kill hung exited-child stdout-backpressured exec");
+            break (
+                child
+                    .wait()
+                    .expect("wait for watchdog-killed exited-child exec"),
+                true,
+            );
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    let elapsed_after_child_exit = child_exit_observed_at.elapsed();
+    let buffered_at_exit = unread_pipe_bytes(&unread_stdout);
+    let mut out = Vec::new();
+    unread_stdout.read_to_end(&mut out).unwrap();
+    let mut err = String::new();
+    stderr.read_to_string(&mut err).unwrap();
+
+    assert!(
+        !watchdog_killed,
+        "child exited but unread stdout defeated kettle exec's deadline for \
+         {elapsed_after_child_exit:?}; helper_pid={helper_pid:?}; \
+         pipe={buffered_at_exit}/{pipe_capacity}; burst={burst_bytes}; \
+         stderr={err:?}; stdout bytes={}",
+        out.len()
+    );
+    assert_eq!(
+        status.code(),
+        Some(STDOUT_BURST_CHILD_EXIT_CODE),
+        "a collected child status must win when only trailing output reaches \
+         the deadline; stderr={err:?}"
+    );
+    assert!(
+        err.contains("stdout was not fully delivered before the run stopped"),
+        "post-exit deadline must retain the abandoned-output warning: {err:?}"
+    );
+    assert!(
+        elapsed_after_child_exit < STDOUT_BURST_POST_EXIT_BOUND,
+        "post-exit output drain took {elapsed_after_child_exit:?}"
+    );
+    assert_eq!(
+        buffered_at_exit, pipe_capacity,
+        "the parent never read, so the proven-full stdout pipe must remain full"
+    );
+    eprintln!(
+        "exited-child unread-stdout reproduction: exit={:?}, \
+         after_child_exit={elapsed_after_child_exit:?}, \
+         pipe={buffered_at_exit}/{pipe_capacity}, burst={burst_bytes}",
+        status.code()
     );
 }
 
@@ -649,7 +1128,14 @@ fn exec_timeout_closes_a_saturated_conpty_after_a_query() {
     // SAFETY: release_event exclusively owns a valid event handle for the
     // duration of this call.
     let event_signaled = unsafe { SetEvent(release_event.0) };
-    let query_observed = query_rx.recv_timeout(Duration::from_secs(1));
+    // Observing the child's query is a precondition, not the behavior under
+    // test, so it must not lose a race it does not need to win. One second was
+    // enough in isolation but not inside a full-workspace run, where the
+    // helper's write, the ConPTY round trip, and this reader thread all compete
+    // for a loaded machine — the marker did arrive, just past the deadline.
+    // Five seconds still proves the query was prompt relative to the eight
+    // second `--timeout` this test actually asserts on.
+    let query_observed = query_rx.recv_timeout(Duration::from_secs(5));
 
     let (status, watchdog_killed) = loop {
         if let Some(status) = child.try_wait().expect("poll backpressured exec") {

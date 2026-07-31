@@ -125,6 +125,10 @@ mod update_cli;
 /// - `kettle 0.1.0` — non-git build; concat with an empty string
 ///   leaves the version pristine.
 const KETTLE_VERSION: &str = concat!(env!("CARGO_PKG_VERSION"), env!("KETTLE_GIT_SHA"));
+/// `sysexits.h`'s temporary-failure status. A staged Windows update cannot
+/// replace the running image until this process exits, so an argument-bearing
+/// invocation must tell automation that none of its requested work ran.
+const EXIT_PENDING_UPDATE_TEMPORARY_FAILURE: i32 = 75;
 
 #[derive(Parser, Debug)]
 #[command(
@@ -534,7 +538,8 @@ enum AgentServerArg {
 enum Cmd {
     /// Run a command under a real PTY, headlessly, and stream its output to
     /// stdout (the non-interactive counterpart to the GUI). Propagates the
-    /// child's exit code; 124 on `--timeout`, 125 on an internal error.
+    /// child's exit code; 124 when `--timeout` expires before a status is
+    /// collected, 74 on stdout delivery failure, 125 on an internal error.
     Exec(ExecArgs),
     /// Drive a running kettle's agent control server: call a method (e.g.
     /// `list_panes`, `read_screen`, `screenshot`, `send_text`, `run_command`) or stream
@@ -607,10 +612,12 @@ struct ExecArgs {
     /// Terminal height in rows (default: probe the console, else 24).
     #[arg(long)]
     rows: Option<u16>,
-    /// Working directory for the child (default: inherit).
+    /// Working directory for the child (default: inherit). An explicit path
+    /// must exist and be a directory; otherwise the child is not started.
     #[arg(short = 'd', long = "cwd", value_name = "DIR")]
     cwd: Option<std::path::PathBuf>,
-    /// Kill the child and exit 124 after this many seconds (finite, ≥ 0).
+    /// Stop at this deadline; preserve a collected child status, else exit 124
+    /// (finite seconds, ≥ 0).
     #[arg(long, value_name = "SECS")]
     timeout: Option<f64>,
     /// Strip ANSI escape sequences — emit plain text (good for assertions).
@@ -655,6 +662,13 @@ fn init_logging() {
     tracing_subscriber::fmt()
         .with_env_filter(filter)
         .with_target(true)
+        // Diagnostics belong on stderr. `tracing_subscriber`'s default writer
+        // is stdout, which for `kettle exec` is the machine-readable data
+        // channel: one `warn!` would splice a log line into byte-exact child
+        // output, or between the NDJSON records agent callers parse. The ANSI
+        // decision below already assumed stderr, so the writer had simply
+        // drifted from the intent.
+        .with_writer(std::io::stderr)
         .with_ansi(std::io::stderr().is_terminal())
         .init();
 }
@@ -663,6 +677,14 @@ fn is_bare_gui_argv(args: impl IntoIterator) -> bool {
     let mut args = args.into_iter();
     let _program = args.next();
     args.next().is_none()
+}
+
+fn pending_update_exit_code(bare_gui_launch: bool) -> i32 {
+    if bare_gui_launch {
+        0
+    } else {
+        EXIT_PENDING_UPDATE_TEMPORARY_FAILURE
+    }
 }
 
 /// Compute where a crash report is written, in addition to
@@ -971,6 +993,7 @@ fn main() -> anyhow::Result<()> {
             }
         });
     }
+    let bare_gui_launch = is_bare_gui_argv(std::env::args_os());
     let (_running_install_guard, startup_update_warning) =
         match kettle_update::prepare_process_start()? {
             kettle_update::ProcessStart::Ready { guard, warning } => (guard, warning),
@@ -978,11 +1001,18 @@ fn main() -> anyhow::Result<()> {
                 eprintln!(
                     "A verified Kettle update is waiting for running windows to close; exiting this old build."
                 );
+                let code = pending_update_exit_code(bare_gui_launch);
+                if code != 0 {
+                    eprintln!(
+                        "No requested command ran; retry after the other Kettle windows close \
+                         (temporary failure, exit {code})."
+                    );
+                }
                 // Do not unwind and drop the shared installation lock. The
                 // helper may replace kettle.exe only after the OS has fully
                 // terminated this process and released the handle.
                 let _guard = guard;
-                std::process::exit(0);
+                std::process::exit(code);
             }
         };
     if let Some(warning) = startup_update_warning {
@@ -1004,7 +1034,6 @@ fn main() -> anyhow::Result<()> {
     // the user has bumped logging (`RUST_LOG=info kettle …`); on the
     // default filter it stays out of the way.
     log::info!("kettle {KETTLE_VERSION} starting");
-    let bare_gui_launch = is_bare_gui_argv(std::env::args_os());
     let cli = Cli::parse();
 
     // Agent-first: subcommands are self-contained non-GUI entry
@@ -2059,7 +2088,9 @@ mod window_state_flag_tests {
 
 #[cfg(test)]
 mod activation_cli_tests {
-    use super::{Cli, is_bare_gui_argv};
+    use super::{
+        Cli, EXIT_PENDING_UPDATE_TEMPORARY_FAILURE, is_bare_gui_argv, pending_update_exit_code,
+    };
     use clap::Parser as _;
 
     #[test]
@@ -2068,6 +2099,27 @@ mod activation_cli_tests {
         assert!(!is_bare_gui_argv(["kettle", "--new-process"]));
         assert!(!is_bare_gui_argv(["kettle", "-d", "/tmp"]));
         assert!(!is_bare_gui_argv(["kettle", "--version"]));
+    }
+
+    #[test]
+    fn pending_update_is_truthful_for_argument_bearing_invocations() {
+        assert_eq!(pending_update_exit_code(true), 0);
+        assert_eq!(
+            pending_update_exit_code(false),
+            EXIT_PENDING_UPDATE_TEMPORARY_FAILURE
+        );
+        for argv in [
+            vec!["kettle", "exec", "--", "cargo", "test"],
+            vec!["kettle", "mcp"],
+            vec!["kettle", "--check-config"],
+            vec!["kettle", "--help"],
+            vec!["kettle", "--version"],
+        ] {
+            assert_eq!(
+                pending_update_exit_code(is_bare_gui_argv(argv)),
+                EXIT_PENDING_UPDATE_TEMPORARY_FAILURE
+            );
+        }
     }
 
     #[test]
