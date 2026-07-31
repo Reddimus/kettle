@@ -1,5 +1,5 @@
 use std::io::Read;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use base64::Engine as _;
 use ed25519_dalek::{Signature, Verifier as _, VerifyingKey};
@@ -15,6 +15,8 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 const IO_TIMEOUT: Duration = Duration::from_secs(10);
 const TOTAL_TIMEOUT: Duration = Duration::from_secs(20);
 const RELEASE_DOWNLOAD_PREFIX: &str = "https://github.com/Reddimus/kettle/releases/download";
+pub(crate) const MAX_MANIFEST_AGE: Duration = Duration::from_secs(90 * 24 * 60 * 60);
+pub(crate) const MAX_MANIFEST_FUTURE_SKEW: Duration = Duration::from_secs(24 * 60 * 60);
 
 #[derive(Debug, thiserror::Error)]
 pub enum UpdateError {
@@ -28,6 +30,15 @@ pub enum UpdateError {
     InvalidSignature,
     #[error("the update manifest is malformed: {0}")]
     MalformedManifest(String),
+    #[error("the signed update manifest is stale: {0}")]
+    StaleManifest(String),
+    #[error("the update was not derived from authenticated release metadata")]
+    UnauthenticatedRelease,
+    #[error("refusing to replace installed Kettle {installed} with {candidate}")]
+    Rollback {
+        candidate: Version,
+        installed: Version,
+    },
     #[error("unsupported update manifest schema {0}")]
     UnsupportedSchema(u32),
     #[error("the signed manifest has no artifact for {0}")]
@@ -90,6 +101,13 @@ pub struct AvailableUpdate {
     pub release_url: String,
     pub download_url: Option<String>,
     pub asset: Option<ManifestAsset>,
+    pub(crate) signed_manifest: Option<SignedManifest>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SignedManifest {
+    pub(crate) manifest: String,
+    pub(crate) signature: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -147,14 +165,38 @@ impl FeedClient {
     }
 
     pub fn fetch_manifest(&self) -> Result<Manifest, UpdateError> {
+        self.fetch_signed_manifest().map(|(manifest, _)| manifest)
+    }
+
+    fn fetch_signed_manifest(&self) -> Result<(Manifest, SignedManifest), UpdateError> {
         let manifest = self.get_limited(&self.manifest_url, MAX_MANIFEST_BYTES)?;
         let signature = self.get_limited(&self.signature_url, MAX_SIGNATURE_BYTES)?;
-        verify_manifest(&manifest, &signature, &self.public_key)
+        let verified = verify_manifest(&manifest, &signature, &self.public_key)?;
+        let signed = SignedManifest {
+            manifest: String::from_utf8(manifest)
+                .map_err(|error| UpdateError::MalformedManifest(error.to_string()))?,
+            signature: std::str::from_utf8(&signature)
+                .map_err(|_| UpdateError::MalformedSignature)?
+                .trim()
+                .to_string(),
+        };
+        Ok((verified, signed))
     }
 
     pub fn check(&self, current: &str) -> Result<CheckOutcome, UpdateError> {
-        let manifest = self.fetch_manifest()?;
-        evaluate_manifest(manifest, current, current_target(), &self.download_prefix)
+        self.check_at(current, SystemTime::now())
+    }
+
+    fn check_at(&self, current: &str, now: SystemTime) -> Result<CheckOutcome, UpdateError> {
+        let (manifest, signed) = self.fetch_signed_manifest()?;
+        validate_manifest_freshness(&manifest, now)?;
+        evaluate_manifest(
+            manifest,
+            current,
+            current_target(),
+            &self.download_prefix,
+            Some(signed),
+        )
     }
 
     #[cfg(any(windows, target_os = "linux"))]
@@ -282,6 +324,7 @@ fn evaluate_manifest(
     current: &str,
     target: Option<&str>,
     download_prefix: &str,
+    signed_manifest: Option<SignedManifest>,
 ) -> Result<CheckOutcome, UpdateError> {
     let latest = Version::parse(&manifest.version)
         .map_err(|e| UpdateError::MalformedManifest(format!("invalid version: {e}")))?;
@@ -314,7 +357,55 @@ fn evaluate_manifest(
         download_url,
         tag: manifest.tag,
         asset,
+        signed_manifest,
     }))
+}
+
+pub(crate) fn reverify_available_update(
+    update: &AvailableUpdate,
+    public_key: &[u8; 32],
+    now: SystemTime,
+) -> Result<Manifest, UpdateError> {
+    let signed = update
+        .signed_manifest
+        .as_ref()
+        .ok_or(UpdateError::UnauthenticatedRelease)?;
+    let manifest = verify_manifest(
+        signed.manifest.as_bytes(),
+        signed.signature.as_bytes(),
+        public_key,
+    )?;
+    validate_manifest_freshness(&manifest, now)?;
+    let version = Version::parse(&manifest.version)
+        .map_err(|error| UpdateError::MalformedManifest(error.to_string()))?;
+    let target = current_target().ok_or(UpdateError::UnsupportedPlatform)?;
+    let asset = manifest
+        .assets
+        .iter()
+        .find(|asset| asset.target == target)
+        .ok_or_else(|| UpdateError::MissingTarget(target.to_string()))?;
+    if version != update.version
+        || manifest.tag != update.tag
+        || update.asset.as_ref() != Some(asset)
+    {
+        return Err(UpdateError::MalformedManifest(
+            "selected update does not match its signed manifest".into(),
+        ));
+    }
+    Ok(manifest)
+}
+
+pub(crate) fn require_strict_upgrade(
+    candidate: &Version,
+    installed: &Version,
+) -> Result<(), UpdateError> {
+    if candidate <= installed {
+        return Err(UpdateError::Rollback {
+            candidate: candidate.clone(),
+            installed: installed.clone(),
+        });
+    }
+    Ok(())
 }
 
 fn user_agent() -> &'static str {
@@ -371,9 +462,9 @@ fn validate_manifest(manifest: &Manifest) -> Result<(), UpdateError> {
             "stable version and tag do not agree".to_string(),
         ));
     }
-    if manifest.published_at.trim().is_empty() || manifest.assets.is_empty() {
+    if parse_rfc3339_seconds(&manifest.published_at).is_none() || manifest.assets.is_empty() {
         return Err(UpdateError::MalformedManifest(
-            "published_at and assets are required".to_string(),
+            "published_at must be an RFC 3339 timestamp and assets are required".to_string(),
         ));
     }
     let mut targets = std::collections::HashSet::new();
@@ -410,6 +501,130 @@ fn validate_manifest(manifest: &Manifest) -> Result<(), UpdateError> {
         }
     }
     Ok(())
+}
+
+pub(crate) fn validate_manifest_freshness(
+    manifest: &Manifest,
+    now: SystemTime,
+) -> Result<(), UpdateError> {
+    let published = parse_rfc3339_seconds(&manifest.published_at).ok_or_else(|| {
+        UpdateError::MalformedManifest("published_at must be an RFC 3339 timestamp".into())
+    })?;
+    let now = now
+        .duration_since(UNIX_EPOCH)
+        .map_err(|_| UpdateError::StaleManifest("system clock predates Unix epoch".into()))?
+        .as_secs();
+    let published = u64::try_from(published)
+        .map_err(|_| UpdateError::MalformedManifest("published_at predates Unix epoch".into()))?;
+    if published > now.saturating_add(MAX_MANIFEST_FUTURE_SKEW.as_secs()) {
+        return Err(UpdateError::StaleManifest(format!(
+            "published_at {} is too far in the future",
+            manifest.published_at
+        )));
+    }
+    if now.saturating_sub(published) > MAX_MANIFEST_AGE.as_secs() {
+        return Err(UpdateError::StaleManifest(format!(
+            "published_at {} is older than {} days",
+            manifest.published_at,
+            MAX_MANIFEST_AGE.as_secs() / 86_400
+        )));
+    }
+    Ok(())
+}
+
+fn parse_rfc3339_seconds(value: &str) -> Option<i64> {
+    let (date, time_and_zone) = value.split_once('T')?;
+    if date.len() != 10
+        || date.as_bytes().get(4) != Some(&b'-')
+        || date.as_bytes().get(7) != Some(&b'-')
+    {
+        return None;
+    }
+    let year = date.get(0..4)?.parse::<i64>().ok()?;
+    let month = date.get(5..7)?.parse::<u32>().ok()?;
+    let day = date.get(8..10)?.parse::<u32>().ok()?;
+    if !(1970..=9999).contains(&year) || !(1..=12).contains(&month) {
+        return None;
+    }
+    let leap = year % 4 == 0 && (year % 100 != 0 || year % 400 == 0);
+    let month_days = [
+        31,
+        28 + u32::from(leap),
+        31,
+        30,
+        31,
+        30,
+        31,
+        31,
+        30,
+        31,
+        30,
+        31,
+    ];
+    if day == 0 || day > month_days[usize::try_from(month - 1).ok()?] {
+        return None;
+    }
+
+    let (time, offset_seconds) = if let Some(time) = time_and_zone.strip_suffix('Z') {
+        (time, 0_i64)
+    } else {
+        let zone_at = time_and_zone.rfind(['+', '-'])?;
+        let (time, zone) = time_and_zone.split_at(zone_at);
+        if zone.len() != 6 || zone.as_bytes().get(3) != Some(&b':') {
+            return None;
+        }
+        let hours = zone.get(1..3)?.parse::<i64>().ok()?;
+        let minutes = zone.get(4..6)?.parse::<i64>().ok()?;
+        if hours > 23 || minutes > 59 {
+            return None;
+        }
+        let magnitude = hours
+            .checked_mul(3600)?
+            .checked_add(minutes.checked_mul(60)?)?;
+        let offset = if zone.starts_with('+') {
+            magnitude
+        } else if zone.starts_with('-') {
+            -magnitude
+        } else {
+            return None;
+        };
+        (time, offset)
+    };
+    let clock = time.split_once('.').map_or(time, |(clock, fraction)| {
+        if fraction.is_empty()
+            || fraction.len() > 9
+            || !fraction.bytes().all(|byte| byte.is_ascii_digit())
+        {
+            ""
+        } else {
+            clock
+        }
+    });
+    if clock.len() != 8
+        || clock.as_bytes().get(2) != Some(&b':')
+        || clock.as_bytes().get(5) != Some(&b':')
+    {
+        return None;
+    }
+    let hour = clock.get(0..2)?.parse::<i64>().ok()?;
+    let minute = clock.get(3..5)?.parse::<i64>().ok()?;
+    let second = clock.get(6..8)?.parse::<i64>().ok()?;
+    if hour > 23 || minute > 59 || second > 59 {
+        return None;
+    }
+
+    let adjusted_year = year - i64::from(month <= 2);
+    let era = adjusted_year.div_euclid(400);
+    let year_of_era = adjusted_year - era * 400;
+    let shifted_month = i64::from(month) + if month > 2 { -3 } else { 9 };
+    let day_of_year = (153 * shifted_month + 2) / 5 + i64::from(day) - 1;
+    let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
+    let days = era * 146_097 + day_of_era - 719_468;
+    days.checked_mul(86_400)?
+        .checked_add(hour.checked_mul(3600)?)?
+        .checked_add(minute.checked_mul(60)?)?
+        .checked_add(second)?
+        .checked_sub(offset_seconds)
 }
 
 #[cfg(test)]
@@ -486,7 +701,7 @@ mod tests {
     #[test]
     fn unsupported_platform_still_discovers_a_signed_release() {
         let outcome =
-            evaluate_manifest(manifest(), "1.0.0", None, "https://example.invalid").unwrap();
+            evaluate_manifest(manifest(), "1.0.0", None, "https://example.invalid", None).unwrap();
         let CheckOutcome::UpdateAvailable(update) = outcome else {
             panic!("expected newer release");
         };
@@ -496,10 +711,10 @@ mod tests {
 
     #[test]
     fn signed_feed_check_is_hermetic() {
-        let (manifest, signature, public) = signed_manifest();
+        let (manifest_body, signature, public) = signed_manifest();
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
-        let manifest = Arc::new(manifest);
+        let manifest_bytes = Arc::new(manifest_body);
         let signature = Arc::new(signature);
         let server = std::thread::spawn(move || {
             for _ in 0..2 {
@@ -508,7 +723,7 @@ mod tests {
                 let n = stream.read(&mut request).unwrap();
                 let request = String::from_utf8_lossy(&request[..n]);
                 let body = if request.starts_with("GET /manifest ") {
-                    manifest.as_slice()
+                    manifest_bytes.as_slice()
                 } else {
                     signature.as_slice()
                 };
@@ -522,8 +737,71 @@ mod tests {
             }
         });
         let client = FeedClient::for_test(&format!("http://{addr}"), public);
-        let outcome = client.check("1.0.0").unwrap();
+        let published = parse_rfc3339_seconds(&manifest().published_at).unwrap();
+        let now = UNIX_EPOCH + Duration::from_secs(u64::try_from(published).unwrap());
+        let outcome = client.check_at("1.0.0", now).unwrap();
         assert!(matches!(outcome, CheckOutcome::UpdateAvailable(_)));
         server.join().unwrap();
+    }
+
+    #[test]
+    fn signed_manifest_timestamp_is_strict_and_bounded() {
+        let cases = [
+            ("1970-01-01T00:00:00Z", 0),
+            ("2000-02-29T12:34:56.123456789+02:30", 951_818_696),
+            ("2026-07-11T00:00:00-07:00", 1_783_753_200),
+        ];
+        for (timestamp, expected) in cases {
+            assert_eq!(
+                parse_rfc3339_seconds(timestamp),
+                Some(expected),
+                "{timestamp}"
+            );
+        }
+        for invalid in [
+            "",
+            "2026-02-29T00:00:00Z",
+            "2026-07-11 00:00:00Z",
+            "2026-07-11T24:00:00Z",
+            "2026-07-11T00:00:00",
+            "2026-07-11T00:00:00.0000000000Z",
+        ] {
+            assert_eq!(parse_rfc3339_seconds(invalid), None, "accepted {invalid}");
+        }
+    }
+
+    #[test]
+    fn signed_manifest_freshness_rejects_expired_and_future_metadata() {
+        let mut candidate = manifest();
+        candidate.published_at = "2026-07-11T00:00:00Z".into();
+        let published =
+            u64::try_from(parse_rfc3339_seconds(&candidate.published_at).unwrap()).unwrap();
+        validate_manifest_freshness(&candidate, UNIX_EPOCH + Duration::from_secs(published))
+            .unwrap();
+
+        let stale = UNIX_EPOCH + Duration::from_secs(published + MAX_MANIFEST_AGE.as_secs() + 1);
+        assert!(matches!(
+            validate_manifest_freshness(&candidate, stale),
+            Err(UpdateError::StaleManifest(_))
+        ));
+
+        let before_publication =
+            UNIX_EPOCH + Duration::from_secs(published - MAX_MANIFEST_FUTURE_SKEW.as_secs() - 1);
+        assert!(matches!(
+            validate_manifest_freshness(&candidate, before_publication),
+            Err(UpdateError::StaleManifest(_))
+        ));
+    }
+
+    #[test]
+    fn pending_update_versions_must_be_strictly_newer() {
+        let installed = Version::new(2, 45, 0);
+        require_strict_upgrade(&Version::new(2, 46, 0), &installed).unwrap();
+        for candidate in [Version::new(2, 45, 0), Version::new(2, 44, 0)] {
+            assert!(matches!(
+                require_strict_upgrade(&candidate, &installed),
+                Err(UpdateError::Rollback { .. })
+            ));
+        }
     }
 }
