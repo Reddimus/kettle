@@ -357,6 +357,17 @@ const CELL_FLAG_ALL_UNDERLINES: u16 = CELL_FLAG_UNDERLINE
 const MAX_CTL_SELECTION_BYTES: usize = 128 * 1024;
 const MAX_CTL_TEXT_PAGE_BYTES: usize = 256 * 1024;
 const MAX_CTL_COMMAND_OUTPUT_BYTES: usize = 512 * 1024;
+/// Bound live-state enumeration before building JSON values or terminal
+/// snapshots. This matches the core search materialization ceiling and is far
+/// above a plausible interactive terminal/window inventory.
+const MAX_CTL_COLLECTION_ITEMS: usize = 262_144;
+/// `read_screen` pages are smaller than this, but the complete snapshot is
+/// hashed for stable pagination. Reject before materializing a larger scrape.
+const MAX_CTL_SCREEN_SNAPSHOT_BYTES: usize = 512 * 1024;
+const MAX_CTL_SCROLLBACK_LINES: usize = 10_000;
+const MAX_CTL_SEND_KEYS: usize = 1024;
+const MAX_CTL_SEND_KEY_TOKEN_BYTES: usize = 64;
+const MAX_CTL_SEND_KEY_BYTES: usize = 64 * 1024;
 
 fn optional_u64_param(
     params: &serde_json::Value,
@@ -470,6 +481,21 @@ fn ctl_snapshot(kind: &str, value: &(impl serde::Serialize + ?Sized)) -> String 
     format!("{:016x}", hasher.0)
 }
 
+/// Sum a lazily-produced inventory while stopping as soon as the budget is
+/// crossed. Keeping this lazy is important: the limit exists to bound the
+/// enumeration itself, not merely the result allocation that follows it.
+fn ctl_bounded_sum(counts: impl IntoIterator<Item = usize>, limit: usize) -> Option<usize> {
+    let mut total = 0usize;
+    for count in counts {
+        total = total.checked_add(count)?;
+        if total > limit {
+            return None;
+        }
+    }
+    Some(total)
+}
+
+#[cfg(test)]
 fn ctl_page_values(
     req: &kettle_ctl::protocol::Request,
     key: &str,
@@ -481,6 +507,24 @@ fn ctl_page_values(
         Ok(page) => page,
         Err(message) => return Response::err(req.id, ec::BAD_PARAMS, message),
     };
+    ctl_page_values_with_page(req, key, values, page)
+}
+
+fn ctl_page_values_with_page(
+    req: &kettle_ctl::protocol::Request,
+    key: &str,
+    values: Vec<serde_json::Value>,
+    page: kettle_ctl::protocol::PageRequest,
+) -> kettle_ctl::protocol::Response {
+    use kettle_ctl::protocol::{Response, error_codes as ec};
+
+    if values.len() > MAX_CTL_COLLECTION_ITEMS {
+        return Response::err(
+            req.id,
+            ec::RESPONSE_TOO_LARGE,
+            "live-state collection exceeds the control enumeration budget",
+        );
+    }
     let snapshot = ctl_snapshot(key, &values);
     if page
         .snapshot
@@ -13937,9 +13981,22 @@ impl App {
         ws: &WindowState,
         req: &kettle_ctl::protocol::Request,
     ) -> kettle_ctl::protocol::Response {
+        use kettle_ctl::protocol::{PageRequest, Response, error_codes as ec};
+
+        let page = match PageRequest::from_params(&req.params) {
+            Ok(page) => page,
+            Err(message) => return Response::err(req.id, ec::BAD_PARAMS, message),
+        };
+        let Some(capacity) = self.ctl_window_inventory_size(ws) else {
+            return Response::err(
+                req.id,
+                ec::RESPONSE_TOO_LARGE,
+                "window/tab/pane inventory exceeds the control enumeration budget",
+            );
+        };
         // C8 (multi-window): tabs across EVERY window, ordered by window seq.
         // `index` and `active` are in-window values; `window` disambiguates.
-        let mut tabs = Vec::new();
+        let mut tabs = Vec::with_capacity(capacity.min(MAX_CTL_COLLECTION_ITEMS));
         for w in self.all_windows(ws) {
             let titles = w.mux.tab_titles();
             for (i, t) in w.mux.tabs.iter().enumerate() {
@@ -13953,7 +14010,7 @@ impl App {
                 }));
             }
         }
-        ctl_page_values(req, "tabs", tabs)
+        ctl_page_values_with_page(req, "tabs", tabs, page)
     }
 
     /// `list_panes`: id, tab, title, cwd, size, focused, argv, child_pid,
@@ -13963,14 +14020,27 @@ impl App {
         ws: &WindowState,
         req: &kettle_ctl::protocol::Request,
     ) -> kettle_ctl::protocol::Response {
+        use kettle_ctl::protocol::{PageRequest, Response, error_codes as ec};
+
+        let page = match PageRequest::from_params(&req.params) {
+            Ok(page) => page,
+            Err(message) => return Response::err(req.id, ec::BAD_PARAMS, message),
+        };
+        let Some(capacity) = self.ctl_window_inventory_size(ws) else {
+            return Response::err(
+                req.id,
+                ec::RESPONSE_TOO_LARGE,
+                "window/tab/pane inventory exceeds the control enumeration budget",
+            );
+        };
         // C8 (multi-window): panes across EVERY window; `tab` is the
         // in-window tab index, `window` the owning window's seq, `focused`
         // means focused WITHIN its window.
-        let mut panes = Vec::new();
+        let mut panes = Vec::with_capacity(capacity.min(MAX_CTL_COLLECTION_ITEMS));
         for w in self.all_windows(ws) {
             self.ctl_list_panes_of(w, &mut panes);
         }
-        ctl_page_values(req, "panes", panes)
+        ctl_page_values_with_page(req, "panes", panes, page)
     }
 
     fn ctl_list_panes_of(&self, ws: &WindowState, panes: &mut Vec<serde_json::Value>) {
@@ -14022,63 +14092,163 @@ impl App {
         ws: &mut WindowState,
         req: &kettle_ctl::protocol::Request,
     ) -> kettle_ctl::protocol::Response {
-        use kettle_ctl::protocol::{Response, error_codes as ec};
+        use kettle_ctl::protocol::{PageRequest, Response, error_codes as ec};
+        let page = match PageRequest::from_params(&req.params) {
+            Ok(page) => page,
+            Err(message) => return Response::err(req.id, ec::BAD_PARAMS, message),
+        };
         let pane = match self.ctl_resolve_pane(ws, &req.params) {
             Ok(p) => p,
             Err((code, message)) => return Response::err(req.id, code, message),
         };
-        let scrollback = req
-            .params
-            .get("scrollback_lines")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(0) as usize;
-        let include_selection = req
-            .params
-            .get("include_selection")
-            .and_then(|value| value.as_bool())
-            .unwrap_or(false);
+        let scrollback = match req.params.get("scrollback_lines") {
+            None | Some(serde_json::Value::Null) => 0,
+            Some(value) => match value.as_u64().and_then(|n| usize::try_from(n).ok()) {
+                Some(lines) => lines.min(MAX_CTL_SCROLLBACK_LINES),
+                None => {
+                    return Response::err(
+                        req.id,
+                        ec::BAD_PARAMS,
+                        "'scrollback_lines' must be an unsigned integer",
+                    );
+                }
+            },
+        };
+        let include_selection = match req.params.get("include_selection") {
+            None | Some(serde_json::Value::Null) => false,
+            Some(value) => match value.as_bool() {
+                Some(include) => include,
+                None => {
+                    return Response::err(
+                        req.id,
+                        ec::BAD_PARAMS,
+                        "'include_selection' must be a boolean",
+                    );
+                }
+            },
+        };
         let Some(p) = Self::ctl_pane_ref(ws, &self.windows, pane) else {
             return Response::err(req.id, ec::NO_SUCH_PANE, "pane vanished");
         };
-        let (selection_present, selection, selection_truncated, selection_range) = p
-            .term
-            .term
-            .lock()
-            .ok()
-            .map(|term| {
-                let range = term
-                    .selection
-                    .as_ref()
-                    .and_then(|selection| selection.to_range(&term));
-                let (selection, selection_truncated) = if include_selection {
-                    term.selection_to_string()
-                        .map(cap_ctl_selection)
-                        .map(|(text, truncated)| (Some(text), truncated))
-                        .unwrap_or((None, false))
-                } else {
-                    (None, false)
-                };
-                (
-                    term.selection.is_some(),
-                    selection,
-                    selection_truncated,
-                    range.map(|range| {
-                        serde_json::json!({
-                            "start": [range.start.line.0, range.start.column.0],
-                            "end": [range.end.line.0, range.end.column.0],
-                            "block": range.is_block,
-                        })
-                    }),
-                )
-            })
-            .unwrap_or((false, None, false, None));
-        let Some(s) = p.term.screen_text(scrollback) else {
+        let Ok(term) = p.term.term.lock() else {
             return Response::err(req.id, ec::INTERNAL, "could not read the grid");
         };
-        let page = match kettle_ctl::protocol::PageRequest::from_params(&req.params) {
-            Ok(page) => page,
-            Err(message) => return Response::err(req.id, ec::BAD_PARAMS, message),
+        use kettle_core::Dimensions as _;
+        let range = term
+            .selection
+            .as_ref()
+            .and_then(|selection| selection.to_range(&term));
+
+        // `selection_to_string` owns an unbounded String API. Prove a
+        // conservative byte upper bound from the selected grid cells first;
+        // if it does not fit, omit the content and report truncation without
+        // ever materializing the oversized selection.
+        let selection_fits = !include_selection
+            || range.as_ref().is_none_or(|range| {
+                let columns = term.columns();
+                let mut bytes = 0usize;
+                for line in range.start.line.0..=range.end.line.0 {
+                    // Newline plus wide-cell boundary behavior. Eight bytes is
+                    // a conservative allowance for both.
+                    bytes = bytes.saturating_add(8);
+                    if bytes > MAX_CTL_SELECTION_BYTES || columns == 0 {
+                        return false;
+                    }
+                    let start_col = (if range.is_block || line == range.start.line.0 {
+                        range.start.column.0
+                    } else {
+                        0
+                    })
+                    // Alacritty includes the leading wide character when a
+                    // selection starts on its spacer. Count that whole cell,
+                    // including any combining marks, before allocation.
+                    .saturating_sub(1)
+                    .min(columns - 1);
+                    let end_col = if range.is_block || line == range.end.line.0 {
+                        range.end.column.0
+                    } else {
+                        columns - 1
+                    }
+                    .min(columns - 1);
+                    if start_col > end_col {
+                        continue;
+                    }
+                    for column in start_col..=end_col {
+                        let cell = &term.grid()[kettle_core::Point::new(
+                            kettle_core::Line(line),
+                            kettle_core::Column(column),
+                        )];
+                        bytes = bytes.saturating_add(cell.c.len_utf8());
+                        for mark in cell.zerowidth().into_iter().flatten() {
+                            bytes = bytes.saturating_add(mark.len_utf8());
+                        }
+                        if bytes > MAX_CTL_SELECTION_BYTES {
+                            return false;
+                        }
+                    }
+                }
+                true
+            });
+        let (selection, selection_truncated) = if include_selection && selection_fits {
+            term.selection_to_string()
+                .map(cap_ctl_selection)
+                .map(|(text, truncated)| (Some(text), truncated))
+                .unwrap_or((None, false))
+        } else {
+            (None, include_selection && range.is_some())
         };
+        let selection_present = term.selection.is_some();
+        let selection_range = range.as_ref().map(|range| {
+            serde_json::json!({
+                "start": [range.start.line.0, range.start.column.0],
+                "end": [range.end.line.0, range.end.column.0],
+                "block": range.is_block,
+            })
+        });
+
+        // Account for every cell before `screen_text` reserves and fills its
+        // complete snapshot String. Each visited cell consumes at least one
+        // byte, so the scan itself is bounded by the same byte budget.
+        let columns = term.columns();
+        let rows = term.screen_lines();
+        let take = scrollback
+            .min(term.grid().history_size())
+            .min(MAX_CTL_SCROLLBACK_LINES);
+        let display_adjust = if take == 0 {
+            term.grid().display_offset() as i32
+        } else {
+            0
+        };
+        let mut screen_bytes = 0usize;
+        let mut screen_fits = columns > 0;
+        'screen: for row in -(take as i32)..rows as i32 {
+            screen_bytes = screen_bytes.saturating_add(1);
+            for column in 0..columns {
+                let cell = &term.grid()[kettle_core::Point::new(
+                    kettle_core::Line(row - display_adjust),
+                    kettle_core::Column(column),
+                )];
+                screen_bytes = screen_bytes.saturating_add(cell.c.len_utf8());
+                for mark in cell.zerowidth().into_iter().flatten() {
+                    screen_bytes = screen_bytes.saturating_add(mark.len_utf8());
+                }
+                if screen_bytes > MAX_CTL_SCREEN_SNAPSHOT_BYTES {
+                    screen_fits = false;
+                    break 'screen;
+                }
+            }
+        }
+        if !screen_fits {
+            return Response::err(
+                req.id,
+                ec::RESPONSE_TOO_LARGE,
+                "screen snapshot exceeds the control byte budget",
+            );
+        }
+        // Materialize under the same lock used for the byte preflight so PTY
+        // output cannot race a small checked grid into an oversized snapshot.
+        let s = kettle_core::term::screen_text_of(&term, scrollback);
+        drop(term);
         let snapshot = ctl_snapshot("screen", &s.text);
         if page
             .snapshot
@@ -14091,20 +14261,28 @@ impl App {
                 "screen changed between pages; restart without cursor/snapshot",
             );
         }
-        let lines: Vec<&str> = s.text.split_inclusive('\n').collect();
-        let total = lines.len();
+        let total = s.text.split_inclusive('\n').count();
         let start = page.offset.min(total);
         let desired_end = start.saturating_add(page.limit).min(total);
         let mut end = start;
         let mut text = String::new();
         let mut text_truncated = false;
-        while end < desired_end {
-            let line = lines[end];
+        for line in s
+            .text
+            .split_inclusive('\n')
+            .skip(start)
+            .take(desired_end - start)
+        {
             if !text.is_empty() && text.len().saturating_add(line.len()) > MAX_CTL_TEXT_PAGE_BYTES {
                 break;
             }
             if text.is_empty() && line.len() > MAX_CTL_TEXT_PAGE_BYTES {
-                (text, text_truncated) = cap_utf8_bytes(line.to_string(), MAX_CTL_TEXT_PAGE_BYTES);
+                let mut byte_end = MAX_CTL_TEXT_PAGE_BYTES;
+                while !line.is_char_boundary(byte_end) {
+                    byte_end -= 1;
+                }
+                text.push_str(&line[..byte_end]);
+                text_truncated = true;
                 end += 1;
                 break;
             }
@@ -14143,7 +14321,11 @@ impl App {
         ws: &mut WindowState,
         req: &kettle_ctl::protocol::Request,
     ) -> kettle_ctl::protocol::Response {
-        use kettle_ctl::protocol::{Response, error_codes as ec};
+        use kettle_ctl::protocol::{PageRequest, Response, error_codes as ec};
+        let page = match PageRequest::from_params(&req.params) {
+            Ok(page) => page,
+            Err(message) => return Response::err(req.id, ec::BAD_PARAMS, message),
+        };
         let pane = match self.ctl_resolve_pane(ws, &req.params) {
             Ok(p) => p,
             Err((code, message)) => return Response::err(req.id, code, message),
@@ -14154,6 +14336,21 @@ impl App {
         let Ok(t) = p.term.term.lock() else {
             return Response::err(req.id, ec::INTERNAL, "could not read the grid");
         };
+        use kettle_core::Dimensions as _;
+        let Some(cell_count) = t.columns().checked_mul(t.screen_lines()) else {
+            return Response::err(
+                req.id,
+                ec::RESPONSE_TOO_LARGE,
+                "visible grid dimensions overflow the control snapshot budget",
+            );
+        };
+        if cell_count > MAX_CTL_COLLECTION_ITEMS {
+            return Response::err(
+                req.id,
+                ec::RESPONSE_TOO_LARGE,
+                "visible grid exceeds the control snapshot budget",
+            );
+        }
         let mut snap = PaneSnapshot::default();
         snap.capture(&t);
         drop(t);
@@ -14180,7 +14377,7 @@ impl App {
                 "underline_color": sc.underline_color.is_some(),
             }));
         }
-        let mut response = ctl_page_values(req, "cells", cells);
+        let mut response = ctl_page_values_with_page(req, "cells", cells, page);
         if let Some(result) = response.result.as_object_mut() {
             result.insert("pane".into(), pane.into());
             result.insert("cols".into(), snap.columns.into());
@@ -15573,25 +15770,10 @@ impl App {
                 "missing 'keys' array of key tokens (e.g. [\"escape\",\"ctrl+c\"])",
             );
         };
-        if keys.is_empty() {
-            return Response::err(req.id, ec::BAD_PARAMS, "'keys' is empty");
-        }
-        let mut parsed = Vec::with_capacity(keys.len());
-        for k in keys {
-            let Some(tok) = k.as_str() else {
-                return Response::err(req.id, ec::BAD_PARAMS, "non-string entry in 'keys'");
-            };
-            match parse_send_key(tok) {
-                Some(p) => parsed.push(p),
-                None => {
-                    return Response::err(
-                        req.id,
-                        ec::BAD_PARAMS,
-                        format!("unrecognized key token '{tok}'"),
-                    );
-                }
-            }
-        }
+        let parsed = match parse_ctl_send_key_batch(keys) {
+            Ok(parsed) => parsed,
+            Err(message) => return Response::err(req.id, ec::BAD_PARAMS, message),
+        };
         let Some(p) = Self::ctl_pane_ref(ws, &self.windows, pane) else {
             return Response::err(req.id, ec::NO_SUCH_PANE, "pane vanished");
         };
@@ -15613,7 +15795,9 @@ impl App {
                 } else {
                     apply_bs_del_binding(&self.cfg, key, *mods, b)
                 };
-                bytes.extend_from_slice(&b);
+                if let Err(message) = extend_ctl_send_key_bytes(&mut bytes, &b) {
+                    return Response::err(req.id, ec::BAD_PARAMS, message);
+                }
             }
         }
         // The per-pane read-only toggle blocks agents
@@ -15662,12 +15846,34 @@ impl App {
             .ok_or_else(|| (ec::NO_SUCH_PANE, "no focused pane".to_string()))
     }
 
+    /// Validate the complete window/tab/pane inventory before any control
+    /// method allocates a JSON collection or walks pane layout trees.
+    fn ctl_window_inventory_size(&self, ws: &WindowState) -> Option<usize> {
+        ctl_bounded_sum(
+            self.all_windows(ws)
+                .flat_map(|window| [1, window.mux.tabs.len(), window.mux.panes.len()]),
+            MAX_CTL_COLLECTION_ITEMS,
+        )
+    }
+
     /// C8 (multi-window): every window — the checked-out one plus the map —
-    /// ordered by seq, for the ctl read paths.
-    fn all_windows<'a>(&'a self, ws: &'a WindowState) -> Vec<&'a WindowState> {
-        let mut v: Vec<&WindowState> = std::iter::once(ws).chain(self.windows.values()).collect();
-        v.sort_by_key(|w| w.seq);
-        v
+    /// ordered by seq, for the ctl read paths. The iterator avoids the former
+    /// enumerate-all/sort allocation before the control-plane cap was checked.
+    fn all_windows<'a>(
+        &'a self,
+        ws: &'a WindowState,
+    ) -> impl Iterator<Item = &'a WindowState> + 'a {
+        use std::ops::Bound::{Excluded, Unbounded};
+
+        self.windows
+            .range(..ws.seq)
+            .map(|(_, window)| window)
+            .chain(std::iter::once(ws))
+            .chain(
+                self.windows
+                    .range((Excluded(ws.seq), Unbounded))
+                    .map(|(_, window)| window),
+            )
     }
 
     /// C8 (multi-window): borrow a pane wherever it lives — the checked-out
@@ -17864,6 +18070,45 @@ fn apply_bs_del_binding(cfg: &Config, key: &Key, mods: ModifiersState, bytes: Ve
     } else {
         bytes
     }
+}
+
+fn parse_ctl_send_key_batch(
+    keys: &[serde_json::Value],
+) -> std::result::Result<Vec<(ModifiersState, Key)>, String> {
+    if keys.is_empty() || keys.len() > MAX_CTL_SEND_KEYS {
+        return Err(format!(
+            "'keys' must contain 1..={MAX_CTL_SEND_KEYS} entries"
+        ));
+    }
+    let mut parsed = Vec::with_capacity(keys.len());
+    for value in keys {
+        let Some(token) = value.as_str() else {
+            return Err("non-string entry in 'keys'".into());
+        };
+        if token.is_empty() || token.len() > MAX_CTL_SEND_KEY_TOKEN_BYTES {
+            return Err(format!(
+                "key tokens must be 1..={MAX_CTL_SEND_KEY_TOKEN_BYTES} bytes"
+            ));
+        }
+        let Some(key) = parse_send_key(token) else {
+            return Err(format!("unrecognized key token '{token}'"));
+        };
+        parsed.push(key);
+    }
+    Ok(parsed)
+}
+
+fn extend_ctl_send_key_bytes(
+    bytes: &mut Vec<u8>,
+    encoded: &[u8],
+) -> std::result::Result<(), String> {
+    if encoded.len() > MAX_CTL_SEND_KEY_BYTES.saturating_sub(bytes.len()) {
+        return Err(format!(
+            "encoded key sequence exceeds {MAX_CTL_SEND_KEY_BYTES} bytes"
+        ));
+    }
+    bytes.extend_from_slice(encoded);
+    Ok(())
 }
 
 /// v2.20.0 (agent plane): parse one `send_keys` token — `"escape"`,
@@ -24697,6 +24942,25 @@ mod tests {
         );
     }
 
+    #[test]
+    fn control_inventory_limit_stops_enumeration_at_the_first_overage() {
+        let pulled = std::cell::Cell::new(0usize);
+        let counts = std::iter::from_fn(|| {
+            pulled.set(pulled.get() + 1);
+            Some(super::MAX_CTL_COLLECTION_ITEMS + 1)
+        });
+        assert_eq!(
+            super::ctl_bounded_sum(counts, super::MAX_CTL_COLLECTION_ITEMS),
+            None
+        );
+        assert_eq!(
+            pulled.get(),
+            1,
+            "the collection cap must stop the producer, not just reject after collection"
+        );
+        assert_eq!(super::ctl_bounded_sum([2, 3, 5], 10), Some(10));
+    }
+
     /// Startup drift guard: the window is hidden only while renderer init runs,
     /// then revealed for every visible startup state. `window_state = hidden`
     /// still stays hidden.
@@ -25263,6 +25527,27 @@ mod tests {
         assert_eq!(parse_ui_key("up"), None);
         assert_eq!(parse_ui_key("page_down"), None);
         assert_eq!(parse_ui_key("insert"), None);
+    }
+
+    #[test]
+    fn send_keys_caps_batch_tokens_and_encoded_bytes_before_growth() {
+        let oversized = vec![serde_json::json!("a"); super::MAX_CTL_SEND_KEYS + 1];
+        assert!(
+            super::parse_ctl_send_key_batch(&oversized)
+                .unwrap_err()
+                .contains("must contain")
+        );
+        assert!(
+            super::parse_ctl_send_key_batch(&[serde_json::json!(
+                "x".repeat(super::MAX_CTL_SEND_KEY_TOKEN_BYTES + 1)
+            )])
+            .unwrap_err()
+            .contains("key tokens")
+        );
+
+        let mut bytes = vec![b'x'; super::MAX_CTL_SEND_KEY_BYTES];
+        assert!(super::extend_ctl_send_key_bytes(&mut bytes, b"y").is_err());
+        assert_eq!(bytes.len(), super::MAX_CTL_SEND_KEY_BYTES);
     }
 
     /// v2.20.0 (agent plane): the encoded bytes must match what a human
