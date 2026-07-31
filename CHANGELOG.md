@@ -7,6 +7,17 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 ## [Unreleased]
 
   ### Fixed
+  - `kettle exec --timeout` now keeps its deadline and MCP cancellation
+    enforceable while draining output after the child exits. If stdout is still
+    stalled at the deadline, Kettle abandons output the downstream consumer
+    cannot accept and returns the child's collected exit code, or 124 if no
+    status was available; cancellation always wins with 130. Ordinary
+    completion remains lossless, but stdout-worker acknowledgements and final
+    flush/join are polled from the lifecycle loop instead of blocking it.
+    Abandoning output now says so on stderr. Because the exit status in that
+    case is the child's own, a caller reading only the status could otherwise
+    not tell a fully delivered run from one whose tail was dropped because its
+    own reader had stalled.
   - The release workflow's asset verification never ran, and the release never
     published itself. It read the release through
     `GET /releases/tags/{tag}`, which only finds *published* releases, so the
@@ -181,7 +192,8 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
     boundary rather than end to end. Windows zero-byte pipe progress is normalized
     to `WouldBlock`, and complete-message callers retain partial progress
     through bounded retries instead of silently dropping the unwritten suffix.
-  - **A stalled `kettle exec` stdout consumer no longer defeats `--timeout`.**
+  - **A stalled `kettle exec` stdout consumer no longer defeats `--timeout`
+    while the child is still running.**
     Output was written synchronously on the lifecycle thread, so the slice
     limits bounded how many bytes were drained per turn but not how long one
     `write` could block. An automation client that opened the pipe and stopped
@@ -193,6 +205,9 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
     backpressure reach the child instead of parking. Normal completion drains
     and joins losslessly, while timeout and cancellation abandon unaccepted
     output rather than block teardown. The same run now exits 124 in 1.106 s.
+    This did not cover a child that had already exited while its trailing output
+    remained stuck; that narrower lifecycle gap is corrected under
+    `[Unreleased]`.
   - Headless `kettle exec` now omits DA1 extension `52`, matching its deliberate
     lack of a clipboard-write sink instead of advertising OSC 52 writes that
     would be discarded.

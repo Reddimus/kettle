@@ -510,6 +510,11 @@ use a bounded best-effort sender and may drop under plugin backpressure;
 recording and `kettle exec` use lossless delivery. `kettle exec` pairs that
 policy with a four-slot queue, so a slow stdout pipe blocks the PTY reader before
 it takes the terminal lock and bounds memory without creating a lock cycle.
+Rendered stdout commands cross a second four-slot queue to a dedicated writer,
+keeping blocking OS writes off the lifecycle thread. The lifecycle counts
+admitted commands and polls their completion plus the final flush/join; timeout
+and cancellation therefore remain observable after child exit, while ordinary
+completion still drains losslessly.
 Its independent PTY writer arbiter gives the bounded 64-message terminal-reply
 lane priority over forwarded stdin and incremental Unix VEOF injection. Reply
 admission and the arbiter's final reply recheck plus one nonblocking VEOF

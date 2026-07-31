@@ -534,7 +534,8 @@ enum AgentServerArg {
 enum Cmd {
     /// Run a command under a real PTY, headlessly, and stream its output to
     /// stdout (the non-interactive counterpart to the GUI). Propagates the
-    /// child's exit code; 124 on `--timeout`, 125 on an internal error.
+    /// child's exit code; 124 when `--timeout` expires before a status is
+    /// collected, 125 on an internal error.
     Exec(ExecArgs),
     /// Drive a running kettle's agent control server: call a method (e.g.
     /// `list_panes`, `read_screen`, `screenshot`, `send_text`, `run_command`) or stream
@@ -610,7 +611,8 @@ struct ExecArgs {
     /// Working directory for the child (default: inherit).
     #[arg(short = 'd', long = "cwd", value_name = "DIR")]
     cwd: Option<std::path::PathBuf>,
-    /// Kill the child and exit 124 after this many seconds (finite, ≥ 0).
+    /// Stop at this deadline; preserve a collected child status, else exit 124
+    /// (finite seconds, ≥ 0).
     #[arg(long, value_name = "SECS")]
     timeout: Option<f64>,
     /// Strip ANSI escape sequences — emit plain text (good for assertions).
