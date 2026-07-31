@@ -14,7 +14,8 @@ use serde_json::Value;
 
 use crate::discovery;
 use crate::protocol::{
-    Event, MAX_LINE_BYTES, MAX_RESPONSE_LINE_BYTES, PROTOCOL_VERSION, Request, Response,
+    BoundedJsonError, Event, MAX_LINE_BYTES, MAX_RESPONSE_LINE_BYTES, PROTOCOL_VERSION, Request,
+    Response,
 };
 use crate::transport::{self, CtlStream};
 
@@ -64,6 +65,7 @@ pub struct Client {
     writer: CtlStream,
     reader: CtlStream,
     read_buffer: Vec<u8>,
+    read_scan_offset: usize,
     queued_events: VecDeque<(Event, usize)>,
     queued_event_bytes: usize,
     next_id: u64,
@@ -86,6 +88,7 @@ impl Client {
             writer: stream,
             reader,
             read_buffer: Vec::new(),
+            read_scan_offset: 0,
             queued_events: VecDeque::new(),
             queued_event_bytes: 0,
             next_id: 1,
@@ -225,13 +228,17 @@ impl Client {
             method: method.to_string(),
             params,
         };
-        let line = serde_json::to_string(&req).map_err(|e| CtlError::Protocol(e.to_string()))?;
-        if line.len() > MAX_LINE_BYTES {
-            return Err(CtlError::Protocol(format!(
-                "request line exceeds {MAX_LINE_BYTES} bytes"
-            )));
-        }
-        let mut frame = line.into_bytes();
+        let mut frame = match crate::protocol::to_json_vec_bounded(&req, MAX_LINE_BYTES) {
+            Ok(frame) => frame,
+            Err(BoundedJsonError::Limit { .. }) => {
+                return Err(CtlError::Protocol(format!(
+                    "request line exceeds {MAX_LINE_BYTES} bytes"
+                )));
+            }
+            Err(BoundedJsonError::Serialize(error)) => {
+                return Err(CtlError::Protocol(error.to_string()));
+            }
+        };
         frame.push(b'\n');
         self.writer
             .write_all_until(&frame, deadline, cancelled)
@@ -352,11 +359,14 @@ impl Client {
             if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
                 return Err(CtlError::TimedOut);
             }
-            if let Some(newline) = self.read_buffer.iter().position(|byte| *byte == b'\n') {
+            if let Some(newline) =
+                crate::protocol::find_newline(&self.read_buffer, &mut self.read_scan_offset)
+            {
                 if newline > MAX_RESPONSE_LINE_BYTES {
                     return Err(line_too_large());
                 }
                 let mut bytes: Vec<u8> = self.read_buffer.drain(..=newline).collect();
+                self.read_scan_offset = 0;
                 bytes.pop();
                 if bytes.last() == Some(&b'\r') {
                     bytes.pop();
@@ -384,7 +394,12 @@ impl Client {
             }
 
             let mut chunk = [0u8; 8192];
-            let read = self.reader.read(&mut chunk)?;
+            let remaining = (MAX_RESPONSE_LINE_BYTES + 1).saturating_sub(self.read_buffer.len());
+            if remaining == 0 {
+                return Err(line_too_large());
+            }
+            let read_len = remaining.min(chunk.len());
+            let read = self.reader.read(&mut chunk[..read_len])?;
             if read == 0 {
                 if self.read_buffer.is_empty() {
                     return Ok(None);
@@ -547,11 +562,17 @@ mod tests {
     fn client_stalled(hold: Duration) -> Client {
         let (listener, endpoint) = test_listener("stalled");
         let ep = endpoint.clone();
+        let (accepted, wait_for_accept) = std::sync::mpsc::sync_channel(0);
         std::thread::spawn(move || {
             let _conn = listener.accept().expect("accept");
+            accepted.send(()).expect("signal accepted stalled client");
             std::thread::sleep(hold);
         });
-        Client::connect_endpoint(&ep).expect("connect")
+        let client = Client::connect_endpoint(&ep).expect("connect");
+        wait_for_accept
+            .recv_timeout(Duration::from_secs(1))
+            .expect("server accepted stalled client");
+        client
     }
 
     use crate::discovery::{self, RegistryEntry};

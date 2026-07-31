@@ -389,7 +389,10 @@ claude mcp add kettle -- kettle mcp   # register kettle as MCP tools for Claude 
   (`send_keys`) and wait for screen conditions (`wait_for`)**, run commands —
   enough to drive interactive TUIs (vim, htop, tmux) end-to-end. The server is
   **off by default**; `read-only` reads, `full` also sends/runs. Local IPC only
-  (Unix socket / Windows named pipe, current-user).
+  (Unix socket / Windows named pipe, mutually checked current-user). Once
+  enabled, any process running as that OS user gets the selected mode across
+  every Kettle window in the process; there is no per-client consent prompt or
+  pairing token.
 - Search diagnostics use a separate `dispatch_ui_key` method, so an agent can
   exercise Kettle's open search bar without sending those keys to the pane's
   PTY. The `ui_geometry.search` object reports control rectangles, mode and

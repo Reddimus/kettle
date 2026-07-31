@@ -27,6 +27,9 @@ use serde::{Deserialize, Serialize};
 /// corrupt same-user file cannot force an unbounded allocation during window
 /// creation.
 const MAX_PRESENCE_ENTRY_BYTES: usize = 4 * 1024;
+/// Presence is one tiny record per live Kettle window. Stop a polluted
+/// same-user directory from turning window creation into unbounded work.
+const MAX_PRESENCE_DIR_ENTRIES: usize = 1024;
 
 /// One live window's accent claim.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -138,8 +141,8 @@ impl PresenceGuard {
         if !replacement.is_valid() {
             return;
         }
-        if let Ok(json) = serde_json::to_vec(&replacement)
-            && json.len() <= MAX_PRESENCE_ENTRY_BYTES
+        if let Ok(json) =
+            crate::protocol::to_json_vec_bounded(&replacement, MAX_PRESENCE_ENTRY_BYTES)
             && kettle_state::atomic_replace(
                 &self.path,
                 &json,
@@ -166,10 +169,7 @@ pub fn claim(dir: &Path, entry: PresenceEntry) -> Option<PresenceGuard> {
     }
     ensure_private_dir(dir).ok()?;
     let path = entry_path(dir, entry.pid, entry.win);
-    let json = serde_json::to_vec(&entry).ok()?;
-    if json.len() > MAX_PRESENCE_ENTRY_BYTES {
-        return None;
-    }
+    let json = crate::protocol::to_json_vec_bounded(&entry, MAX_PRESENCE_ENTRY_BYTES).ok()?;
     kettle_state::atomic_replace(&path, &json, kettle_state::AtomicWriteOptions::PRIVATE).ok()?;
     Some(PresenceGuard { path, entry })
 }
@@ -184,7 +184,7 @@ pub fn live_entries(dir: &Path) -> Vec<PresenceEntry> {
     let Ok(rd) = std::fs::read_dir(dir) else {
         return out;
     };
-    for ent in rd.flatten() {
+    for ent in rd.take(MAX_PRESENCE_DIR_ENTRIES).flatten() {
         let path = ent.path();
         if path.extension().and_then(|e| e.to_str()) != Some("json") {
             continue;
