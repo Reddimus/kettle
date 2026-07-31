@@ -2,6 +2,7 @@
 # Smoke the Linux installers without touching the user's real ~/.local install.
 
 set -euo pipefail
+export PATH="$HOME/.cargo/bin:$PATH"
 
 ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
 cd "$ROOT"
@@ -107,6 +108,10 @@ assert_installed_prefix() {
   [ -x "${prefix}/bin/kettle" ] || fail "missing installed binary in ${prefix}"
   [ -x "${prefix}/share/kettle/install.sh" ] \
     || fail "missing saved uninstall helper in ${prefix}"
+  [ -x "${prefix}/share/kettle/install-unix.py" ] \
+    || fail "missing saved no-follow installer helper in ${prefix}"
+  [ -f "${prefix}/share/kettle/install-files.json" ] \
+    || fail "missing install provenance manifest in ${prefix}"
   [ -f "${prefix}/share/kettle/install.json" ] \
     || fail "missing self-update ownership marker in ${prefix}"
   grep -q '"managed_by": "kettle-installer"' "${prefix}/share/kettle/install.json" \
@@ -131,6 +136,10 @@ assert_uninstalled_prefix() {
   [ ! -e "${prefix}/share/applications/kettle.desktop" ] \
     || fail "desktop entry survived uninstall"
   [ ! -e "${prefix}/share/kettle/install.sh" ] || fail "helper survived uninstall"
+  [ ! -e "${prefix}/share/kettle/install-unix.py" ] \
+    || fail "no-follow helper survived uninstall"
+  [ ! -e "${prefix}/share/kettle/install-files.json" ] \
+    || fail "install provenance survived uninstall"
   [ ! -e "${prefix}/share/kettle/install-real.sh" ] \
     || fail "online real helper survived uninstall"
   [ ! -e "${prefix}/share/kettle/install.json" ] \
@@ -138,6 +147,8 @@ assert_uninstalled_prefix() {
 }
 
 direct_prefix="${tmp_root}/direct"
+mkdir -p "${direct_prefix}/unrelated"
+printf '%s' 'unrelated prefix content' > "${direct_prefix}/unrelated/must-survive.txt"
 ./scripts/install.sh --skip-build "--prefix=${direct_prefix}" > "${tmp_root}/direct-install.out"
 grep -q "To uninstall: ${direct_prefix}/share/kettle/install.sh --uninstall" \
   "${tmp_root}/direct-install.out" \
@@ -145,13 +156,37 @@ grep -q "To uninstall: ${direct_prefix}/share/kettle/install.sh --uninstall" \
 assert_installed_prefix "$direct_prefix" "local-dev"
 "${direct_prefix}/share/kettle/install.sh" --uninstall > "${tmp_root}/direct-uninstall.out"
 assert_uninstalled_prefix "$direct_prefix"
+[ "$(cat "${direct_prefix}/unrelated/must-survive.txt")" = 'unrelated prefix content' ] \
+  || fail "installer removed unrelated shared-prefix content"
 echo "linux-installer check: direct custom-prefix install/uninstall OK"
+
+# Reproduce the audited traversal: replace the recorded share/kettle directory
+# with a symlink to an unrelated tree. The hardened uninstaller must refuse
+# before removing any recorded path, and the victim must remain byte-for-byte.
+attack_prefix="${tmp_root}/symlink-attack"
+victim="${tmp_root}/victim"
+mkdir -p "${victim}/shell-integration"
+printf '%s' 'must survive' > "${victim}/shell-integration/sentinel.txt"
+./scripts/install.sh --skip-build "--prefix=${attack_prefix}" >/dev/null
+mv -- "${attack_prefix}/share/kettle" "${attack_prefix}/share/kettle-recorded"
+ln -s "${victim}" "${attack_prefix}/share/kettle"
+if ./scripts/install.sh --uninstall "--prefix=${attack_prefix}" \
+    >"${tmp_root}/symlink-uninstall.out" 2>"${tmp_root}/symlink-uninstall.err"; then
+  fail "uninstaller followed or accepted a replacement share/kettle symlink"
+fi
+[ -f "${victim}/shell-integration/sentinel.txt" ] \
+  || fail "uninstaller deleted through the replacement share/kettle symlink"
+[ "$(cat "${victim}/shell-integration/sentinel.txt")" = 'must survive' ] \
+  || fail "uninstaller changed the symlink victim sentinel"
+[ -x "${attack_prefix}/bin/kettle" ] \
+  || fail "uninstaller mutated recorded files before symlink preflight failed"
+echo "linux-installer check: symlink-traversal victim survived (uninstall refused)"
 
 symlink_target="${tmp_root}/symlink target"
 symlink_record="${tmp_root}/symlink records"
 mkdir -p "${symlink_target}"
 ln -s "${symlink_target}" "${symlink_record}"
-if ./scripts/install.sh "--prefix=${tmp_root}/must-refuse-symlink" \
+if ./scripts/install.sh --skip-build "--prefix=${tmp_root}/must-refuse-symlink" \
     "--record-dir=${symlink_record}" >/dev/null 2>&1; then
   fail "installer accepted a symlink as the recording directory"
 fi
@@ -181,6 +216,7 @@ bundle="${tmp_root}/bundle"
 mkdir -p "${bundle}/packaging"
 cp "${normal_binary}" "${bundle}/kettle"
 cp scripts/install.sh "${bundle}/install.sh"
+cp scripts/install-unix.py "${bundle}/install-unix.py"
 cp -R packaging/linux "${bundle}/packaging/linux"
 cp -R shell-integration "${bundle}/shell-integration"
 
@@ -232,6 +268,12 @@ online_prefix="${tmp_root}/online"
 if ! KETTLE_VERSION="$tag" KETTLE_PREFIX="$online_prefix" \
     sh scripts/install-online.sh \
       > "${tmp_root}/online-install.out" 2> "${tmp_root}/online-install.err"; then
+  if grep -Fq \
+      'release lacks the hardened install-unix.py helper; refusing a legacy path-based install' \
+      "${tmp_root}/online-install.err"; then
+    echo "linux-installer check: online published-release install/uninstall NOT RUN: ${tag} predates hardened provenance; legacy refusal verified"
+    exit 0
+  fi
   cat "${tmp_root}/online-install.out"
   cat "${tmp_root}/online-install.err" >&2
   fail "online installer failed"
@@ -257,8 +299,8 @@ if grep -q '^To uninstall: ./scripts/install.sh --uninstall$' \
   fail "online installer leaked the old bundled uninstall hint"
 fi
 assert_installed_prefix "$online_prefix" "stable"
-[ -x "${online_prefix}/share/kettle/install-real.sh" ] \
-  || fail "online installer did not save real bundled helper"
+[ ! -e "${online_prefix}/share/kettle/install-real.sh" ] \
+  || fail "online installer rewrote the provenance-managed helper"
 "${online_prefix}/share/kettle/install.sh" --uninstall > "${tmp_root}/online-uninstall.out"
 assert_uninstalled_prefix "$online_prefix"
 echo "linux-installer check: online published-release install/uninstall OK"

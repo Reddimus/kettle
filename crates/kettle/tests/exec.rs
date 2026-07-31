@@ -9,7 +9,7 @@
 //! Soft-skips when no PTY is available in the sandbox (mirrors kettle-core's
 //! teardown tests) so CI without a console doesn't red the suite.
 
-use std::io::{Read, Write};
+use std::io::{BufRead, Read, Write};
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
@@ -286,6 +286,42 @@ fn private_test_scratch_root() -> PathBuf {
 const ECHO: [&str; 3] = ["cmd", "/c", "echo"];
 #[cfg(unix)]
 const ECHO: [&str; 1] = ["echo"];
+const CWD_SPAWN_MARKER_ENV: &str = "KETTLE_EXEC_CWD_SPAWN_MARKER";
+
+#[test]
+fn cwd_spawn_marker_helper() {
+    let Some(marker) = std::env::var_os(CWD_SPAWN_MARKER_ENV) else {
+        return;
+    };
+    std::fs::write(marker, b"spawned").expect("write cwd spawn marker");
+}
+
+#[test]
+fn exec_rejects_an_explicit_missing_cwd_before_spawn() {
+    let scratch = tempfile::tempdir_in(private_test_scratch_root())
+        .expect("create invalid-cwd scratch directory");
+    let missing = scratch.path().join("missing-directory");
+    let marker = scratch.path().join("child-spawned");
+    let helper = std::env::current_exe().expect("resolve integration-test helper");
+    let (code, out, err) = run_exec_with_env(
+        &["--cwd", missing.to_str().unwrap()],
+        &[
+            helper.to_str().expect("integration-test path is UTF-8"),
+            "--exact",
+            "cwd_spawn_marker_helper",
+            "--nocapture",
+            "--test-threads=1",
+        ],
+        None,
+        &[(CWD_SPAWN_MARKER_ENV, marker.to_str().unwrap())],
+    );
+    assert_eq!(code, 125, "stdout={out:?}; stderr={err:?}");
+    assert!(
+        err.contains("kettle exec: invalid --cwd:") && err.contains("missing-directory"),
+        "missing explicit-cwd diagnostic: {err:?}"
+    );
+    assert!(!marker.exists(), "invalid --cwd still spawned the child");
+}
 
 #[test]
 fn exec_streams_stdout_and_exits_zero() {
@@ -340,6 +376,8 @@ const STDOUT_FLOOD_MARKER_ENV: &str = "KETTLE_EXEC_STDOUT_FLOOD_MARKER";
 const STDOUT_FLOOD_EXEC_TIMEOUT: &str = "8.0";
 const STDOUT_FLOOD_READY_BUDGET: Duration = Duration::from_secs(4);
 const STDOUT_FLOOD_POST_READY_BOUND: Duration = Duration::from_secs(12);
+const STDOUT_FAILURE_PID_ENV: &str = "KETTLE_EXEC_STDOUT_FAILURE_PID";
+const OUTPUT_DELIVERY_EXIT_CODE: i32 = 74;
 
 #[cfg(target_os = "linux")]
 const STDOUT_BURST_PID_ENV: &str = "KETTLE_EXEC_STDOUT_BURST_PID";
@@ -442,6 +480,36 @@ fn linux_process_has_exited(pid: u32) -> bool {
     matches!(after_comm.as_bytes().first(), Some(b'Z' | b'X' | b'x'))
 }
 
+#[cfg(windows)]
+fn windows_process_has_exited(pid: u32) -> bool {
+    use windows_sys::Win32::Foundation::{CloseHandle, WAIT_OBJECT_0};
+    use windows_sys::Win32::System::Threading::{
+        OpenProcess, PROCESS_SYNCHRONIZE, WaitForSingleObject,
+    };
+
+    // SAFETY: the fixture published its positive process id. The returned
+    // synchronization-only handle is closed before returning.
+    let process = unsafe { OpenProcess(PROCESS_SYNCHRONIZE, 0, pid) };
+    if process.is_null() {
+        return true;
+    }
+    let exited = unsafe { WaitForSingleObject(process, 0) } == WAIT_OBJECT_0;
+    unsafe { CloseHandle(process) };
+    exited
+}
+
+#[cfg(any(windows, target_os = "linux"))]
+fn stdout_failure_child_has_exited(pid: u32) -> bool {
+    #[cfg(windows)]
+    {
+        windows_process_has_exited(pid)
+    }
+    #[cfg(target_os = "linux")]
+    {
+        linux_process_has_exited(pid)
+    }
+}
+
 #[test]
 fn stdout_flood_helper() {
     let Some(marker) = std::env::var_os(STDOUT_FLOOD_MARKER_ENV) else {
@@ -455,6 +523,120 @@ fn stdout_flood_helper() {
         stdout.write_all(&block).expect("write stdout-flood block");
         stdout.flush().expect("flush stdout-flood block");
     }
+}
+
+#[cfg(any(windows, target_os = "linux"))]
+#[test]
+fn stdout_until_killed_helper() {
+    let Some(pid_path) = std::env::var_os(STDOUT_FAILURE_PID_ENV) else {
+        return;
+    };
+    std::fs::write(pid_path, std::process::id().to_string())
+        .expect("publish stdout-failure helper pid");
+    let mut stdout = std::io::stdout().lock();
+    writeln!(stdout, "STDOUT_FAILURE_HELPER_READY").unwrap();
+    stdout.flush().unwrap();
+    let block = [b'x'; 8192];
+    loop {
+        stdout.write_all(&block).unwrap();
+        stdout.flush().unwrap();
+    }
+}
+
+#[cfg(any(windows, target_os = "linux"))]
+#[test]
+fn exec_reports_a_broken_stdout_and_reaps_the_child() {
+    let scratch = tempfile::tempdir_in(private_test_scratch_root())
+        .expect("create stdout-failure scratch directory");
+    let pid_path = scratch.path().join("child.pid");
+    let helper = std::env::current_exe().expect("resolve integration-test helper");
+    let mut cmd = kettle();
+    cmd.args([
+        "exec",
+        "--",
+        helper.to_str().expect("integration-test path is UTF-8"),
+        "--exact",
+        "stdout_until_killed_helper",
+        "--nocapture",
+        "--test-threads=1",
+    ]);
+    cmd.env(STDOUT_FAILURE_PID_ENV, &pid_path);
+    cmd.stdin(Stdio::null());
+    cmd.stdout(Stdio::piped());
+    cmd.stderr(Stdio::piped());
+    let mut child = cmd.spawn().expect("spawn stdout-failure exec");
+    let stdout = child.stdout.take().expect("piped stdout");
+    let mut stdout = std::io::BufReader::new(stdout);
+    let mut prefix = String::new();
+    let ready_deadline = Instant::now() + Duration::from_secs(5);
+    while !pid_path.exists() && Instant::now() < ready_deadline {
+        let mut line = String::new();
+        if stdout.read_line(&mut line).expect("read helper readiness") == 0 {
+            break;
+        }
+        prefix.push_str(&line);
+    }
+
+    // Closing the only read handle makes the next real stdout write fail with
+    // BrokenPipe/ERROR_BROKEN_PIPE. This is distinct from a merely stalled
+    // reader, which the deadline tests below exercise.
+    drop(stdout);
+    let watchdog = Instant::now() + Duration::from_secs(10);
+    let (status, watchdog_killed) = loop {
+        if let Some(status) = child.try_wait().expect("poll stdout-failure exec") {
+            break (status, false);
+        }
+        if Instant::now() >= watchdog {
+            child.kill().expect("kill hung stdout-failure exec");
+            break (
+                child.wait().expect("wait for killed stdout-failure exec"),
+                true,
+            );
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    let mut err = String::new();
+    child
+        .stderr
+        .take()
+        .unwrap()
+        .read_to_string(&mut err)
+        .unwrap();
+    let code = status.code().unwrap_or(-1);
+    if no_pty(code, &err) {
+        eprintln!("skipping exec_reports_a_broken_stdout_and_reaps_the_child: no PTY");
+        return;
+    }
+    assert!(
+        pid_path.exists(),
+        "helper never became ready; prefix={prefix:?}; stderr={err:?}"
+    );
+    assert!(
+        !watchdog_killed,
+        "broken stdout hung Kettle; stderr={err:?}"
+    );
+    assert_eq!(
+        code, OUTPUT_DELIVERY_EXIT_CODE,
+        "status={status:?}; stderr={err:?}"
+    );
+    assert!(
+        err.contains("kettle exec: stdout delivery failed:"),
+        "missing stdout failure diagnostic: {err:?}"
+    );
+
+    let pid = std::fs::read_to_string(&pid_path)
+        .unwrap()
+        .trim()
+        .parse::<u32>()
+        .unwrap();
+    let reap_deadline = Instant::now() + Duration::from_secs(2);
+    while !stdout_failure_child_has_exited(pid) && Instant::now() < reap_deadline {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(
+        stdout_failure_child_has_exited(pid),
+        "stdout-producing child {pid} survived delivery failure"
+    );
 }
 
 #[cfg(target_os = "linux")]
@@ -594,6 +776,10 @@ fn exec_timeout_survives_an_unread_stdout_pipe() {
         status.code(),
         Some(124),
         "stdout-backpressured timeout must exit 124; stderr={err:?}"
+    );
+    assert!(
+        err.contains("stdout was not fully delivered before the run stopped"),
+        "timeout must retain the abandoned-output warning: {err:?}"
     );
     assert!(
         elapsed_after_ready < STDOUT_FLOOD_POST_READY_BOUND,
@@ -753,6 +939,10 @@ fn exec_timeout_bounds_stalled_output_after_child_exit() {
         Some(STDOUT_BURST_CHILD_EXIT_CODE),
         "a collected child status must win when only trailing output reaches \
          the deadline; stderr={err:?}"
+    );
+    assert!(
+        err.contains("stdout was not fully delivered before the run stopped"),
+        "post-exit deadline must retain the abandoned-output warning: {err:?}"
     );
     assert!(
         elapsed_after_child_exit < STDOUT_BURST_POST_EXIT_BOUND,

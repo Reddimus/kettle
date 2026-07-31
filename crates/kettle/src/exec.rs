@@ -31,7 +31,7 @@
 //! headless"). It reuses `kettle_render`'s pure VT-reply helpers only.
 
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
@@ -39,7 +39,7 @@ use std::time::{Duration, Instant};
 use crossbeam_channel::{Receiver, Sender};
 use kettle_core::{
     CursorShape, PtyEofProgress, PtyGeometry, PtyOutputSender, PtyStdin, TermEvent, Terminal,
-    TerminalCapabilities, Waker,
+    TerminalCapabilities, Waker, WorkingDirectoryPolicy,
 };
 
 /// How long to keep draining output after the child exits before we stop and
@@ -69,10 +69,35 @@ const EVENT_SLICE_MESSAGES: usize = 256;
 /// Exit code for `--timeout` expiry when no child status was collected
 /// (coreutils `timeout(1)` convention).
 pub const EXIT_TIMEOUT: i32 = 124;
+/// Exit code when stdout cannot accept the complete child stream (`EX_IOERR`).
+pub const EXIT_OUTPUT_DELIVERY: i32 = 74;
 /// Exit code for an internal kettle error (spawn failure, no PTY, bad args).
 pub const EXIT_INTERNAL: i32 = 125;
 /// Internal exit status when an MCP request cancels a running headless child.
 pub const EXIT_CANCELLED: i32 = 130;
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct OutputDeliveryError(String);
+
+impl OutputDeliveryError {
+    fn unexpected(message: impl Into<String>) -> Self {
+        Self(message.into())
+    }
+}
+
+impl From<std::io::Error> for OutputDeliveryError {
+    fn from(error: std::io::Error) -> Self {
+        Self(error.to_string())
+    }
+}
+
+impl std::fmt::Display for OutputDeliveryError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+
+type OutputResult<T> = Result<T, OutputDeliveryError>;
 
 #[derive(Clone, Copy)]
 enum LifecycleStop {
@@ -307,23 +332,23 @@ fn drain_output_slice(
     receiver: &Receiver<Vec<u8>>,
     recorder: &mut Option<kettle_core::record::Recorder>,
     output: &mut dyn ExecOutput,
-) -> bool {
+) -> OutputResult<bool> {
     let mut bytes_drained = 0usize;
     for _ in 0..OUTPUT_SLICE_MESSAGES {
         if bytes_drained >= OUTPUT_SLICE_BYTES {
             break;
         }
-        if !output.ready() {
-            return true;
+        if !output.ready()? {
+            return Ok(true);
         }
         let Ok(bytes) = receiver.try_recv() else {
-            return false;
+            return Ok(false);
         };
         bytes_drained = bytes_drained.saturating_add(bytes.len());
         record_chunk(recorder, &bytes);
-        output.output(bytes);
+        output.output(bytes)?;
     }
-    !receiver.is_empty() || !output.ready()
+    Ok(!receiver.is_empty() || !output.ready()?)
 }
 
 /// Preserve the audit trace during bounded teardown after stdout has stopped
@@ -345,6 +370,34 @@ fn drain_recording_slice(
         bytes_drained = bytes_drained.saturating_add(bytes.len());
         record_chunk(recorder, &bytes);
     }
+}
+
+fn stop_after_output_failure(
+    error: OutputDeliveryError,
+    term: &Terminal,
+    process_tree: &ExecProcessTree,
+    raw_output: &Receiver<Vec<u8>>,
+    recorder: &mut Option<kettle_core::record::Recorder>,
+    output: &mut dyn ExecOutput,
+    started: Instant,
+) -> i32 {
+    let _ = writeln!(
+        std::io::stderr(),
+        "kettle exec: stdout delivery failed: {error}"
+    );
+    process_tree.terminate(term);
+    let _ = wait_for_exit_code(term);
+    std::thread::sleep(SETTLE);
+    drain_recording_slice(raw_output, recorder);
+    if let Some(mut recorder) = recorder.take() {
+        recorder.finish();
+    }
+    let _ = output.finish(
+        EXIT_OUTPUT_DELIVERY,
+        started.elapsed(),
+        OutputFinish::AbandonPending,
+    );
+    EXIT_OUTPUT_DELIVERY
 }
 
 /// Drain one bounded semantic-event slice and report whether work remains.
@@ -386,6 +439,14 @@ fn run_exec_engine(
     opts.cols = opts.cols.clamp(1, u16::MAX);
     opts.rows = opts.rows.clamp(1, u16::MAX);
 
+    let cwd = match validate_exec_cwd(opts.cwd.as_deref()) {
+        Ok(cwd) => cwd,
+        Err(error) => {
+            let _ = writeln!(std::io::stderr(), "kettle exec: invalid --cwd: {error}");
+            return EXIT_INTERNAL;
+        }
+    };
+
     let (tx, rx): (Sender<TermEvent>, Receiver<TermEvent>) =
         crossbeam_channel::bounded(PTY_EVENT_QUEUE_DEPTH);
     let (otx, orx): (Sender<Vec<u8>>, Receiver<Vec<u8>>) = crossbeam_channel::bounded(4);
@@ -394,7 +455,6 @@ fn run_exec_engine(
     let pty_reply_gate = Arc::new(Mutex::new(()));
     let (stdin_done_tx, stdin_done_rx) = crossbeam_channel::unbounded::<StdinPumpResult>();
     let waker: Waker = std::sync::Arc::new(|| {});
-    let cwd = opts.cwd.as_ref().and_then(|p| p.to_str());
 
     // Recording is an explicit audit request for `kettle exec`. Establish it
     // before the PTY exists and fail closed if the path cannot be secured; a
@@ -414,7 +474,7 @@ fn run_exec_engine(
         None => None,
     };
 
-    let term = match Terminal::new_with_env_and_output_geometry_and_capabilities(
+    let term = match Terminal::new_with_env_and_output_geometry_capabilities_and_cwd_policy(
         &opts.argv,
         cwd,
         // Modest scrollback — exec output streams out immediately, the grid is
@@ -435,6 +495,10 @@ fn run_exec_engine(
         // Headless exec has no clipboard sink. Do not advertise DA1 extension
         // 52 when OSC 52 writes would be deliberately ignored.
         TerminalCapabilities { osc52_copy: false },
+        // An explicit automation cwd is a contract. Passing it to the OS even
+        // after the preflight closes the deletion race: spawn fails instead of
+        // silently falling back to HOME if the directory vanishes.
+        WorkingDirectoryPolicy::RejectInvalidExplicit,
         tx,
         waker,
         Some(PtyOutputSender::lossless(otx)),
@@ -486,9 +550,27 @@ fn run_exec_engine(
         drop(stdin_tx);
     }
 
-    output.start(opts.cols, opts.rows);
-
     let started = Instant::now();
+    macro_rules! output_or_stop {
+        ($operation:expr) => {
+            match $operation {
+                Ok(value) => value,
+                Err(error) => {
+                    return stop_after_output_failure(
+                        error,
+                        &term,
+                        &process_tree,
+                        &orx,
+                        &mut recorder,
+                        output,
+                        started,
+                    );
+                }
+            }
+        };
+    }
+    output_or_stop!(output.start(opts.cols, opts.rows));
+
     let mut child_gone_at: Option<Instant> = None;
     let mut child_exit_code: Option<i32> = None;
     let mut completion_code: Option<i32> = None;
@@ -544,7 +626,7 @@ fn run_exec_engine(
             if let Some(mut recorder) = recorder.take() {
                 recorder.finish();
             }
-            output.finish(code, started.elapsed(), OutputFinish::AbandonPending);
+            let _ = output.finish(code, started.elapsed(), OutputFinish::AbandonPending);
             log::debug!("kettle exec bounded stop teardown finished");
             return code;
         }
@@ -553,8 +635,8 @@ fn run_exec_engine(
         // never join the stdout worker on this lifecycle thread: its final
         // write/flush can become blocked after the child has exited.
         if let Some(code) = completion_code {
-            let _ = output.ready();
-            if output.completion_ready() {
+            let _ = output_or_stop!(output.ready());
+            if output_or_stop!(output.completion_ready()) {
                 return code;
             }
             std::thread::sleep(Duration::from_millis(8));
@@ -575,7 +657,7 @@ fn run_exec_engine(
 
         // Drain output first, but keep the slice finite. A continuously
         // refilled queue must not hide timeout/cancellation indefinitely.
-        let output_backlog = drain_output_slice(&orx, &mut recorder, output);
+        let output_backlog = output_or_stop!(drain_output_slice(&orx, &mut recorder, output));
         if trace_lifecycle {
             log::debug!("kettle exec lifecycle output slice returned: backlog={output_backlog}");
         }
@@ -607,11 +689,24 @@ fn run_exec_engine(
                 }
             }
         };
-        let event_backlog = if output.ready() {
+        let mut output_failure = None;
+        let event_output_ready = match output.ready() {
+            Ok(ready) => ready,
+            Err(error) => {
+                output_failure = Some(error);
+                false
+            }
+        };
+        let event_backlog = if event_output_ready {
             drain_event_slice_until(&rx, |ev| {
                 match ev {
                     TermEvent::PtyWrite(s) => queue_reply(s.as_bytes()),
-                    TermEvent::Title(t) => output.title(t),
+                    TermEvent::Title(t) => {
+                        if let Err(error) = output.title(t) {
+                            output_failure = Some(error);
+                            return false;
+                        }
+                    }
                     TermEvent::TextAreaSizeRequest(fmt) => {
                         let (pixel_width, pixel_height) = term.pty_pixel_size();
                         let reply = kettle_render::reply_for_text_area_size(
@@ -645,11 +740,28 @@ fn run_exec_engine(
                     }
                     _ => {}
                 }
-                output.ready()
+                match output.ready() {
+                    Ok(ready) => ready,
+                    Err(error) => {
+                        output_failure = Some(error);
+                        false
+                    }
+                }
             })
         } else {
             !rx.is_empty()
         };
+        if let Some(error) = output_failure {
+            return stop_after_output_failure(
+                error,
+                &term,
+                &process_tree,
+                &orx,
+                &mut recorder,
+                output,
+                started,
+            );
+        }
         if trace_lifecycle {
             log::debug!("kettle exec lifecycle event slice returned: backlog={event_backlog}");
         }
@@ -710,11 +822,11 @@ fn run_exec_engine(
             process_tree.terminate(&term);
             let _ = wait_for_exit_code(&term);
             std::thread::sleep(SETTLE);
-            let _ = drain_output_slice(&orx, &mut recorder, output);
+            let _ = output_or_stop!(drain_output_slice(&orx, &mut recorder, output));
             if let Some(mut recorder) = recorder.take() {
                 recorder.finish();
             }
-            output.finish(
+            let _ = output.finish(
                 EXIT_INTERNAL,
                 started.elapsed(),
                 OutputFinish::AbandonPending,
@@ -735,11 +847,11 @@ fn run_exec_engine(
                 process_tree.terminate(&term);
                 let _ = wait_for_exit_code(&term);
                 std::thread::sleep(SETTLE);
-                let _ = drain_output_slice(&orx, &mut recorder, output);
+                let _ = output_or_stop!(drain_output_slice(&orx, &mut recorder, output));
                 if let Some(mut recorder) = recorder.take() {
                     recorder.finish();
                 }
-                output.finish(
+                let _ = output.finish(
                     EXIT_INTERNAL,
                     started.elapsed(),
                     OutputFinish::AbandonPending,
@@ -776,13 +888,16 @@ fn run_exec_engine(
                 // Final drain in case something landed in the settle window.
                 // `drained` also waits for every command already admitted to
                 // the stdout worker; an empty raw channel alone is insufficient.
-                let final_output_backlog = drain_output_slice(&orx, &mut recorder, output);
-                if !final_output_backlog && orx.is_empty() && output.drained() {
+                let final_output_backlog =
+                    output_or_stop!(drain_output_slice(&orx, &mut recorder, output));
+                if !final_output_backlog && orx.is_empty() && output_or_stop!(output.drained()) {
                     if let Some(mut r) = recorder.take() {
                         r.finish();
                     }
                     let code = child_exit_code.unwrap_or(EXIT_INTERNAL);
-                    output.finish(code, started.elapsed(), OutputFinish::Complete);
+                    output_or_stop!(
+                        output.finish(code, started.elapsed(), OutputFinish::Complete,)
+                    );
                     completion_code = Some(code);
                     // Give cancellation/deadline one final turn before
                     // returning, even when a direct in-memory sink finished
@@ -792,7 +907,7 @@ fn run_exec_engine(
             }
         }
 
-        let output_blocked = !output.ready();
+        let output_blocked = !output_or_stop!(output.ready());
         if (output_backlog || event_backlog) && !output_blocked {
             // Preserve throughput under a real backlog without paying the idle
             // polling delay, now that lifecycle checks have had a turn.
@@ -801,6 +916,21 @@ fn run_exec_engine(
         }
         std::thread::sleep(Duration::from_millis(8));
     }
+}
+
+fn validate_exec_cwd(cwd: Option<&Path>) -> Result<Option<&str>, String> {
+    let Some(cwd) = cwd else {
+        return Ok(None);
+    };
+    let metadata = cwd
+        .metadata()
+        .map_err(|error| format!("{}: {error}", cwd.display()))?;
+    if !metadata.is_dir() {
+        return Err(format!("{} is not a directory", cwd.display()));
+    }
+    cwd.to_str()
+        .map(Some)
+        .ok_or_else(|| format!("{} is not valid UTF-8", cwd.display()))
 }
 
 /// Stop the complete command tree for timeout/cancellation. Killing only the
@@ -1115,20 +1245,20 @@ enum OutputFinish {
 
 trait ExecOutput {
     /// Try to publish the one lifecycle-owned pending command.
-    fn ready(&mut self) -> bool;
+    fn ready(&mut self) -> OutputResult<bool>;
     /// Whether every command admitted before this call has completed.
-    fn drained(&mut self) -> bool {
+    fn drained(&mut self) -> OutputResult<bool> {
         self.ready()
     }
     /// Whether a previously requested complete finish has flushed and joined.
     /// Direct sinks finish synchronously; worker-backed sinks override this.
-    fn completion_ready(&mut self) -> bool {
-        true
+    fn completion_ready(&mut self) -> OutputResult<bool> {
+        Ok(true)
     }
-    fn start(&mut self, cols: u16, rows: u16);
-    fn output(&mut self, bytes: Vec<u8>);
-    fn title(&mut self, title: String);
-    fn finish(&mut self, code: i32, duration: Duration, mode: OutputFinish);
+    fn start(&mut self, cols: u16, rows: u16) -> OutputResult<()>;
+    fn output(&mut self, bytes: Vec<u8>) -> OutputResult<()>;
+    fn title(&mut self, title: String) -> OutputResult<()>;
+    fn finish(&mut self, code: i32, duration: Duration, mode: OutputFinish) -> OutputResult<()>;
 }
 
 struct DirectOutput<'a> {
@@ -1146,24 +1276,28 @@ impl<'a> DirectOutput<'a> {
 }
 
 impl ExecOutput for DirectOutput<'_> {
-    fn ready(&mut self) -> bool {
-        true
+    fn ready(&mut self) -> OutputResult<bool> {
+        Ok(true)
     }
 
-    fn start(&mut self, cols: u16, rows: u16) {
-        self.outputter.start(self.sink, cols, rows);
+    fn start(&mut self, cols: u16, rows: u16) -> OutputResult<()> {
+        self.outputter
+            .start(self.sink, cols, rows)
+            .map_err(Into::into)
     }
 
-    fn output(&mut self, bytes: Vec<u8>) {
-        self.outputter.output(self.sink, &bytes);
+    fn output(&mut self, bytes: Vec<u8>) -> OutputResult<()> {
+        self.outputter.output(self.sink, &bytes).map_err(Into::into)
     }
 
-    fn title(&mut self, title: String) {
-        self.outputter.title(self.sink, &title);
+    fn title(&mut self, title: String) -> OutputResult<()> {
+        self.outputter.title(self.sink, &title).map_err(Into::into)
     }
 
-    fn finish(&mut self, code: i32, duration: Duration, _mode: OutputFinish) {
-        self.outputter.finish(self.sink, code, duration);
+    fn finish(&mut self, code: i32, duration: Duration, _mode: OutputFinish) -> OutputResult<()> {
+        self.outputter
+            .finish(self.sink, code, duration)
+            .map_err(Into::into)
     }
 }
 
@@ -1185,42 +1319,124 @@ struct WorkerOutput {
     outstanding: Arc<AtomicUsize>,
     completion_started: bool,
     worker: Option<std::thread::JoinHandle<()>>,
+    outcome_rx: Receiver<OutputResult<()>>,
+    outcome: Option<OutputResult<()>>,
 }
+
+/// `main` restores the conventional Unix SIGPIPE disposition for ordinary CLI
+/// writes. The exec stdout worker is different: it must observe `EPIPE`, report
+/// exit 74, and reap the PTY child instead of letting the signal kill Kettle.
+#[cfg(unix)]
+fn block_sigpipe_for_current_thread() -> std::io::Result<()> {
+    // SAFETY: sigemptyset/sigaddset initialize and mutate only this local set;
+    // pthread_sigmask applies it to the calling writer thread.
+    unsafe {
+        let mut signals: libc::sigset_t = std::mem::zeroed();
+        if libc::sigemptyset(&mut signals) != 0 || libc::sigaddset(&mut signals, libc::SIGPIPE) != 0
+        {
+            return Err(std::io::Error::last_os_error());
+        }
+        let error = libc::pthread_sigmask(libc::SIG_BLOCK, &signals, std::ptr::null_mut());
+        if error == 0 {
+            Ok(())
+        } else {
+            Err(std::io::Error::from_raw_os_error(error))
+        }
+    }
+}
+
+#[cfg(not(unix))]
+fn block_sigpipe_for_current_thread() -> std::io::Result<()> {
+    Ok(())
+}
+
+#[cfg(unix)]
+fn consume_pending_sigpipe(error: &std::io::Error) {
+    if error.kind() != std::io::ErrorKind::BrokenPipe {
+        return;
+    }
+    // A blocked synchronous SIGPIPE remains pending after write returns EPIPE.
+    // Consume it before this thread exits; otherwise pthread teardown can make
+    // the default disposition observable after the lifecycle already chose 74.
+    // SAFETY: all pointers refer to initialized local signal/timespec values,
+    // and SIGPIPE is blocked on this thread before any output write occurs.
+    unsafe {
+        let mut signals: libc::sigset_t = std::mem::zeroed();
+        if libc::sigemptyset(&mut signals) != 0 || libc::sigaddset(&mut signals, libc::SIGPIPE) != 0
+        {
+            return;
+        }
+        let timeout = libc::timespec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        };
+        loop {
+            let signal = libc::sigtimedwait(&signals, std::ptr::null_mut(), &timeout);
+            if signal == libc::SIGPIPE {
+                return;
+            }
+            if signal == -1
+                && std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted
+            {
+                continue;
+            }
+            return;
+        }
+    }
+}
+
+#[cfg(not(unix))]
+fn consume_pending_sigpipe(_error: &std::io::Error) {}
 
 impl WorkerOutput {
     fn spawn(mode: OutputMode, mut sink: impl Write + Send + 'static) -> std::io::Result<Self> {
         let (sender, receiver) = crossbeam_channel::bounded(OUTPUT_WRITER_QUEUE_DEPTH);
+        let (outcome_tx, outcome_rx) = crossbeam_channel::bounded(1);
         let outstanding = Arc::new(AtomicUsize::new(0));
         let worker_outstanding = Arc::clone(&outstanding);
         let worker = std::thread::Builder::new()
             .name("kettle-stdout-writer".into())
             .spawn(move || {
-                let mut outputter = Outputter::new(mode);
-                while let Ok(command) = receiver.recv() {
-                    let finished = match command {
-                        OutputCommand::Start { cols, rows } => {
-                            outputter.start(&mut sink, cols, rows);
-                            false
+                let outcome = match block_sigpipe_for_current_thread() {
+                    Err(error) => Err(error.into()),
+                    Ok(()) => {
+                        let mut outputter = Outputter::new(mode);
+                        loop {
+                            let command = match receiver.recv() {
+                                Ok(command) => command,
+                                Err(_) => {
+                                    break Err(OutputDeliveryError::unexpected(
+                                        "stdout writer command channel closed before completion",
+                                    ));
+                                }
+                            };
+                            let (finished, result) = match command {
+                                OutputCommand::Start { cols, rows } => {
+                                    (false, outputter.start(&mut sink, cols, rows))
+                                }
+                                OutputCommand::Output(bytes) => {
+                                    (false, outputter.output(&mut sink, &bytes))
+                                }
+                                OutputCommand::Title(title) => {
+                                    (false, outputter.title(&mut sink, &title))
+                                }
+                                OutputCommand::Finish { code, duration } => {
+                                    (true, outputter.finish(&mut sink, code, duration))
+                                }
+                            };
+                            let previous = worker_outstanding.fetch_sub(1, Ordering::AcqRel);
+                            debug_assert!(previous != 0, "stdout command was not tracked");
+                            if let Err(error) = result {
+                                consume_pending_sigpipe(&error);
+                                break Err(error.into());
+                            }
+                            if finished {
+                                break Ok(());
+                            }
                         }
-                        OutputCommand::Output(bytes) => {
-                            outputter.output(&mut sink, &bytes);
-                            false
-                        }
-                        OutputCommand::Title(title) => {
-                            outputter.title(&mut sink, &title);
-                            false
-                        }
-                        OutputCommand::Finish { code, duration } => {
-                            outputter.finish(&mut sink, code, duration);
-                            true
-                        }
-                    };
-                    let previous = worker_outstanding.fetch_sub(1, Ordering::AcqRel);
-                    debug_assert!(previous != 0, "stdout command was not tracked");
-                    if finished {
-                        break;
                     }
-                }
+                };
+                let _ = outcome_tx.send(outcome);
             })?;
         Ok(Self {
             mode,
@@ -1229,51 +1445,88 @@ impl WorkerOutput {
             outstanding,
             completion_started: false,
             worker: Some(worker),
+            outcome_rx,
+            outcome: None,
         })
     }
 
-    fn dispatch(&mut self, command: OutputCommand) -> bool {
+    fn poll_worker_outcome(&mut self) -> OutputResult<bool> {
+        if self.outcome.is_none() {
+            match self.outcome_rx.try_recv() {
+                Ok(outcome) => self.outcome = Some(outcome),
+                Err(crossbeam_channel::TryRecvError::Empty) => {}
+                Err(crossbeam_channel::TryRecvError::Disconnected) => {
+                    self.outcome = Some(Err(OutputDeliveryError::unexpected(
+                        "stdout writer stopped without reporting an outcome",
+                    )));
+                }
+            }
+        }
+        match self.outcome.as_ref() {
+            Some(Ok(())) => Ok(true),
+            Some(Err(error)) => Err(error.clone()),
+            None => Ok(false),
+        }
+    }
+
+    fn dispatch(&mut self, command: OutputCommand) -> OutputResult<bool> {
         debug_assert!(self.pending.is_none());
+        if self.poll_worker_outcome()? {
+            return Err(OutputDeliveryError::unexpected(
+                "stdout writer completed before accepting all output",
+            ));
+        }
         let Some(sender) = self.sender.as_ref() else {
-            return true;
+            return Err(OutputDeliveryError::unexpected(
+                "stdout writer is no longer available",
+            ));
         };
         self.outstanding.fetch_add(1, Ordering::AcqRel);
         match sender.try_send(command) {
-            Ok(()) => true,
+            Ok(()) => Ok(true),
             Err(crossbeam_channel::TrySendError::Full(command)) => {
                 self.outstanding.fetch_sub(1, Ordering::AcqRel);
                 self.pending = Some(command);
-                false
+                Ok(false)
             }
             Err(crossbeam_channel::TrySendError::Disconnected(_)) => {
                 self.outstanding.fetch_sub(1, Ordering::AcqRel);
-                log::error!("kettle exec stdout writer stopped unexpectedly");
-                true
+                match self.poll_worker_outcome() {
+                    Err(error) => Err(error),
+                    _ => Err(OutputDeliveryError::unexpected(
+                        "stdout writer stopped before accepting all output",
+                    )),
+                }
             }
         }
     }
 
-    fn try_dispatch(&mut self, command: OutputCommand) {
-        let _ = self.dispatch(command);
+    fn enqueue(&mut self, command: OutputCommand) -> OutputResult<()> {
+        let _ = self.dispatch(command)?;
+        Ok(())
     }
 
-    fn finish_complete(&mut self, code: i32, duration: Duration) {
+    fn finish_complete(&mut self, code: i32, duration: Duration) -> OutputResult<()> {
         debug_assert!(self.pending.is_none());
         debug_assert!(!self.completion_started);
         self.completion_started = true;
-        self.try_dispatch(OutputCommand::Finish { code, duration });
+        self.enqueue(OutputCommand::Finish { code, duration })
     }
 
-    fn finish_abandoning_pending(&mut self, code: i32, duration: Duration) {
-        if !self.completion_started && self.pending.is_none() {
-            self.try_dispatch(OutputCommand::Finish { code, duration });
-        }
+    fn finish_abandoning_pending(&mut self, code: i32, duration: Duration) -> OutputResult<()> {
+        let dispatch_result = if !self.completion_started && self.pending.is_none() {
+            self.enqueue(OutputCommand::Finish { code, duration })
+        } else {
+            self.poll_worker_outcome().map(|_| ())
+        };
 
         // Say so on stderr rather than only in a debug log. The exit code here
         // is the child's own when it was collected, so a caller that reads only
         // the status cannot otherwise tell a fully delivered run from one whose
         // tail was dropped because the caller's own reader stalled.
-        if self.pending.is_some() || self.outstanding.load(Ordering::Acquire) != 0 {
+        if dispatch_result.is_ok()
+            && (self.pending.is_some() || self.outstanding.load(Ordering::Acquire) != 0)
+        {
             let _ = writeln!(
                 std::io::stderr(),
                 "kettle exec: stdout was not fully delivered before the run stopped; \
@@ -1293,34 +1546,44 @@ impl WorkerOutput {
         self.pending = None;
         drop(self.sender.take());
         drop(self.worker.take());
+        dispatch_result
     }
 }
 
 impl ExecOutput for WorkerOutput {
-    fn ready(&mut self) -> bool {
+    fn ready(&mut self) -> OutputResult<bool> {
+        if self.poll_worker_outcome()? {
+            return if self.completion_started {
+                Ok(true)
+            } else {
+                Err(OutputDeliveryError::unexpected(
+                    "stdout writer completed before the output stream",
+                ))
+            };
+        }
         let Some(command) = self.pending.take() else {
-            return true;
+            return Ok(true);
         };
         self.dispatch(command)
     }
 
-    fn drained(&mut self) -> bool {
-        if !self.ready() {
-            return false;
+    fn drained(&mut self) -> OutputResult<bool> {
+        if !self.ready()? {
+            return Ok(false);
         }
-        self.outstanding.load(Ordering::Acquire) == 0
-            || self
-                .worker
-                .as_ref()
-                .is_none_or(|worker| worker.is_finished())
+        let _ = self.poll_worker_outcome()?;
+        Ok(self.outstanding.load(Ordering::Acquire) == 0)
     }
 
-    fn completion_ready(&mut self) -> bool {
+    fn completion_ready(&mut self) -> OutputResult<bool> {
+        if !self.poll_worker_outcome()? {
+            return Ok(false);
+        }
         let Some(worker) = self.worker.as_ref() else {
-            return true;
+            return Ok(true);
         };
         if !worker.is_finished() {
-            return false;
+            return Ok(false);
         }
         drop(self.sender.take());
         if self
@@ -1328,28 +1591,32 @@ impl ExecOutput for WorkerOutput {
             .take()
             .is_some_and(|worker| worker.join().is_err())
         {
-            log::error!("kettle exec stdout writer panicked");
+            return Err(OutputDeliveryError::unexpected(
+                "stdout writer panicked after reporting completion",
+            ));
         }
-        true
+        Ok(true)
     }
 
-    fn start(&mut self, cols: u16, rows: u16) {
+    fn start(&mut self, cols: u16, rows: u16) -> OutputResult<()> {
         if self.mode == OutputMode::Json {
-            self.try_dispatch(OutputCommand::Start { cols, rows });
+            self.enqueue(OutputCommand::Start { cols, rows })?;
         }
+        Ok(())
     }
 
-    fn output(&mut self, bytes: Vec<u8>) {
-        self.try_dispatch(OutputCommand::Output(bytes));
+    fn output(&mut self, bytes: Vec<u8>) -> OutputResult<()> {
+        self.enqueue(OutputCommand::Output(bytes))
     }
 
-    fn title(&mut self, title: String) {
+    fn title(&mut self, title: String) -> OutputResult<()> {
         if self.mode == OutputMode::Json {
-            self.try_dispatch(OutputCommand::Title(title));
+            self.enqueue(OutputCommand::Title(title))?;
         }
+        Ok(())
     }
 
-    fn finish(&mut self, code: i32, duration: Duration, mode: OutputFinish) {
+    fn finish(&mut self, code: i32, duration: Duration, mode: OutputFinish) -> OutputResult<()> {
         match mode {
             OutputFinish::Complete => self.finish_complete(code, duration),
             OutputFinish::AbandonPending => self.finish_abandoning_pending(code, duration),
@@ -1377,48 +1644,51 @@ impl Outputter {
         }
     }
 
-    fn start(&mut self, sink: &mut dyn Write, cols: u16, rows: u16) {
+    fn start(&mut self, sink: &mut dyn Write, cols: u16, rows: u16) -> std::io::Result<()> {
         if self.mode == OutputMode::Json {
             let v = serde_json::json!({"v":1,"event":"start","cols":cols,"rows":rows});
-            let _ = writeln!(sink, "{v}");
-            let _ = sink.flush();
+            writeln!(sink, "{v}")?;
+            sink.flush()?;
         }
+        Ok(())
     }
 
-    fn output(&mut self, sink: &mut dyn Write, bytes: &[u8]) {
+    fn output(&mut self, sink: &mut dyn Write, bytes: &[u8]) -> std::io::Result<()> {
         match self.mode {
             OutputMode::Raw => {
-                let _ = sink.write_all(bytes);
-                let _ = sink.flush();
+                sink.write_all(bytes)?;
+                sink.flush()?;
             }
             OutputMode::StripAnsi => {
                 self.scratch.clear();
                 self.stripper.push(bytes, &mut self.scratch);
-                let _ = sink.write_all(&self.scratch);
-                let _ = sink.flush();
+                sink.write_all(&self.scratch)?;
+                sink.flush()?;
             }
             OutputMode::Json => {
                 let mut data = String::new();
                 push_utf8_streaming(&mut self.utf8_carry, bytes, &mut data);
                 if data.is_empty() {
-                    return; // only an incomplete sequence so far — wait for more
+                    return Ok(()); // only an incomplete sequence so far — wait for more
                 }
                 let v = serde_json::json!({"v":1,"event":"output","data":data});
-                let _ = writeln!(sink, "{v}");
-                let _ = sink.flush();
+                writeln!(sink, "{v}")?;
+                sink.flush()?;
             }
         }
+        Ok(())
     }
 
-    fn title(&mut self, sink: &mut dyn Write, title: &str) {
+    fn title(&mut self, sink: &mut dyn Write, title: &str) -> std::io::Result<()> {
         if self.mode == OutputMode::Json {
             let v = serde_json::json!({"v":1,"event":"title","data":title});
-            let _ = writeln!(sink, "{v}");
-            let _ = sink.flush();
+            writeln!(sink, "{v}")?;
+            sink.flush()?;
         }
+        Ok(())
     }
 
-    fn finish(&mut self, sink: &mut dyn Write, code: i32, dur: Duration) {
+    fn finish(&mut self, sink: &mut dyn Write, code: i32, dur: Duration) -> std::io::Result<()> {
         if self.mode == OutputMode::Json {
             // v2.27.0 (audit): flush any trailing incomplete UTF-8 sequence
             // lossily before the exit event, so a stream that ends mid-codepoint
@@ -1427,14 +1697,14 @@ impl Outputter {
                 let data = String::from_utf8_lossy(&self.utf8_carry).into_owned();
                 self.utf8_carry.clear();
                 let v = serde_json::json!({"v":1,"event":"output","data":data});
-                let _ = writeln!(sink, "{v}");
+                writeln!(sink, "{v}")?;
             }
             let v = serde_json::json!({
                 "v":1,"event":"exit","code":code,"duration_ms":dur.as_millis() as u64
             });
-            let _ = writeln!(sink, "{v}");
+            writeln!(sink, "{v}")?;
         }
-        let _ = sink.flush();
+        sink.flush()
     }
 }
 
@@ -1842,9 +2112,9 @@ mod tests {
         let mut sink = Vec::new();
         let mut output = DirectOutput::new(OutputMode::Raw, &mut sink);
 
-        assert!(drain_output_slice(&receiver, &mut recorder, &mut output));
+        assert!(drain_output_slice(&receiver, &mut recorder, &mut output).unwrap());
         assert_eq!(receiver.len(), 1);
-        assert!(!drain_output_slice(&receiver, &mut recorder, &mut output));
+        assert!(!drain_output_slice(&receiver, &mut recorder, &mut output).unwrap());
         drop(output);
         assert_eq!(sink.len(), OUTPUT_SLICE_MESSAGES + 1);
     }
@@ -1860,7 +2130,7 @@ mod tests {
         let mut sink = Vec::new();
         let mut output = DirectOutput::new(OutputMode::Raw, &mut sink);
 
-        assert!(drain_output_slice(&receiver, &mut recorder, &mut output));
+        assert!(drain_output_slice(&receiver, &mut recorder, &mut output).unwrap());
         drop(output);
         assert_eq!(sink.len(), chunk_len * 2);
         assert_eq!(receiver.len(), 1);
@@ -1888,23 +2158,31 @@ mod tests {
 
     #[cfg(any(unix, windows))]
     impl ExecOutput for StopBeforeReadinessOutput {
-        fn ready(&mut self) -> bool {
+        fn ready(&mut self) -> OutputResult<bool> {
             panic!("output readiness ran before an imposed lifecycle stop");
         }
 
-        fn start(&mut self, _cols: u16, _rows: u16) {}
+        fn start(&mut self, _cols: u16, _rows: u16) -> OutputResult<()> {
+            Ok(())
+        }
 
-        fn output(&mut self, _bytes: Vec<u8>) {
+        fn output(&mut self, _bytes: Vec<u8>) -> OutputResult<()> {
             panic!("output was emitted before an imposed lifecycle stop");
         }
 
-        fn title(&mut self, _title: String) {
+        fn title(&mut self, _title: String) -> OutputResult<()> {
             panic!("a title was emitted before an imposed lifecycle stop");
         }
 
-        fn finish(&mut self, code: i32, _duration: Duration, mode: OutputFinish) {
+        fn finish(
+            &mut self,
+            code: i32,
+            _duration: Duration,
+            mode: OutputFinish,
+        ) -> OutputResult<()> {
             assert!(matches!(mode, OutputFinish::AbandonPending));
             self.finished = Some(code);
+            Ok(())
         }
     }
 
@@ -2390,9 +2668,81 @@ mod tests {
         // Without a PTY (None probe, empty-ish), exercise the Outputter start.
         let mut o = Outputter::new(OutputMode::Json);
         let mut sink = Vec::new();
-        o.start(&mut sink, 80, 24);
+        o.start(&mut sink, 80, 24).unwrap();
         let s = String::from_utf8(sink).unwrap();
         assert!(s.contains("\"event\":\"start\""), "got: {s}");
         assert!(s.contains("\"cols\":80"));
+    }
+
+    struct ErrorSink {
+        fail_write: bool,
+        fail_flush: bool,
+    }
+
+    impl Write for ErrorSink {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            if self.fail_write {
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::BrokenPipe,
+                    "test write failure",
+                ))
+            } else {
+                Ok(bytes.len())
+            }
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            if self.fail_flush {
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::StorageFull,
+                    "test flush failure",
+                ))
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    #[test]
+    fn outputter_propagates_write_and_flush_failures() {
+        for mode in [OutputMode::Raw, OutputMode::StripAnsi, OutputMode::Json] {
+            let mut outputter = Outputter::new(mode);
+            let mut sink = ErrorSink {
+                fail_write: true,
+                fail_flush: false,
+            };
+            assert_eq!(
+                outputter.output(&mut sink, b"data").unwrap_err().kind(),
+                std::io::ErrorKind::BrokenPipe
+            );
+        }
+
+        let mut outputter = Outputter::new(OutputMode::Json);
+        let mut sink = ErrorSink {
+            fail_write: false,
+            fail_flush: true,
+        };
+        assert_eq!(
+            outputter
+                .finish(&mut sink, 0, Duration::ZERO)
+                .unwrap_err()
+                .kind(),
+            std::io::ErrorKind::StorageFull
+        );
+    }
+
+    #[test]
+    fn explicit_exec_cwd_validation_rejects_missing_paths_and_files() {
+        let temp = tempfile::tempdir().unwrap();
+        let missing = temp.path().join("missing");
+        assert!(validate_exec_cwd(Some(&missing)).is_err());
+
+        let file = temp.path().join("file");
+        std::fs::write(&file, b"not a directory").unwrap();
+        assert!(validate_exec_cwd(Some(&file)).is_err());
+        assert_eq!(
+            validate_exec_cwd(Some(temp.path())).unwrap(),
+            temp.path().to_str()
+        );
     }
 }
