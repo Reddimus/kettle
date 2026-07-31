@@ -50,8 +50,12 @@ const MAX_EVENT_BYTES: usize = 64 * 1024;
 /// A request connection must complete a non-empty frame at least this often.
 /// Long-running methods use their own documented deadlines once dispatched.
 const REQUEST_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
-/// Once the first byte of a frame arrives, slow-drip input has this absolute
-/// budget to deliver its newline. Individual bytes do not extend it.
+/// Once the server starts waiting for the rest of a partial frame, slow-drip
+/// input has this absolute budget to deliver its newline. Individual bytes do
+/// not extend it. The budget measures time spent waiting on the client, so it
+/// is armed at the wait and cleared when the frame completes: a request the
+/// server answers slowly — `wait_for` blocks its own connection thread by
+/// design — must not spend the budget belonging to a pipelined successor.
 const REQUEST_FRAME_TIMEOUT: Duration = Duration::from_secs(5);
 /// Every server response/event write is cancelled at this deadline so a peer
 /// which stopped reading cannot pin a connection worker.
@@ -435,7 +439,12 @@ fn connection_loop(
             }
             let line: Vec<u8> = acc.drain(..=pos).collect();
             scan_offset = 0;
-            frame_deadline = (!acc.is_empty()).then(|| Instant::now() + policy.frame_assembly);
+            // This frame is complete, so it owes nothing more. Any pipelined
+            // remainder is armed where the server actually starts waiting for
+            // the rest of it, not here: answering this request can take as long
+            // as `wait_for` needs, and charging that to the next frame would
+            // disconnect a well-behaved client for the server's own work.
+            frame_deadline = None;
             let trimmed = match std::str::from_utf8(&line) {
                 Ok(line) => line.trim_end(),
                 Err(error) => {
@@ -565,6 +574,14 @@ fn connection_loop(
             let _ = write_response_line(&mut conn, &resp, policy.write);
             break;
         }
+        // Arm the assembly budget where the server begins waiting on the
+        // client, and only once per frame: `is_none` means a drip of one byte
+        // per interval cannot keep pushing the deadline out. A frame that
+        // completes clears it above, so each partial frame gets exactly one
+        // budget measured from when we started waiting for its remainder.
+        if !acc.is_empty() && frame_deadline.is_none() {
+            frame_deadline = Some(Instant::now() + policy.frame_assembly);
+        }
         let read_deadline = frame_deadline
             .map(|deadline| deadline.min(idle_deadline))
             .unwrap_or(idle_deadline);
@@ -589,12 +606,9 @@ fn connection_loop(
         let read_len = remaining.min(buf.len());
         match conn.read(&mut buf[..read_len]) {
             Ok(0) | Err(_) => break,
-            Ok(n) => {
-                if acc.is_empty() {
-                    frame_deadline = Some(Instant::now() + policy.frame_assembly);
-                }
-                acc.extend_from_slice(&buf[..n]);
-            }
+            // The budget is armed before the wait above, so arriving bytes
+            // never refresh it — that is what bounds a slow drip.
+            Ok(n) => acc.extend_from_slice(&buf[..n]),
         }
     }
     let _ = tx.send(CtlServerMsg::Disconnect { conn_id });
@@ -1106,6 +1120,93 @@ mod tests {
         assert_eq!(disconnected.len(), MAX_CONNECTIONS);
         prove_fresh_request_is_served(&endpoint, &rx);
         drop(stalled);
+    }
+
+    /// The frame budget bounds time the server spends *waiting on the client*,
+    /// which is not the same as wall-clock since the bytes arrived. A client is
+    /// allowed to pipeline the head of its next request behind one the server
+    /// answers slowly — `wait_for` deliberately blocks its own connection
+    /// thread — and those pipelined bytes must not have their budget consumed
+    /// by the server's own work. Anchoring the next frame at true arrival time
+    /// instead would disconnect a well-behaved client the instant a legitimate
+    /// long request outlived the assembly budget.
+    #[test]
+    fn a_slow_reply_does_not_consume_the_next_frames_budget() {
+        let policy = ConnectionPolicy {
+            request_idle: Duration::from_secs(5),
+            frame_assembly: Duration::from_millis(200),
+            write: Duration::from_secs(1),
+            response_wait: Duration::from_secs(5),
+            subscriber_keepalive: Duration::from_secs(5),
+        };
+        let (endpoint, rx) = start_test_accept_loop("pipelined-behind-slow", policy);
+        let mut client =
+            kettle_ctl::transport::connect(&endpoint).expect("connect pipelining peer");
+        let (conn_id, _) = recv_new_conn(&rx, Duration::from_secs(1));
+
+        // One write: a complete request, plus the first byte of the next one.
+        client
+            .write_all_until(
+                b"{\"v\":1,\"id\":1,\"method\":\"get_state\",\"params\":{}}\n{",
+                Instant::now() + Duration::from_secs(1),
+                None,
+            )
+            .expect("send request with a pipelined partial frame");
+
+        let reply = loop {
+            match rx.recv_timeout(Duration::from_secs(2)) {
+                Ok(CtlServerMsg::Request {
+                    conn_id: request_conn,
+                    req,
+                    reply,
+                    ..
+                }) if request_conn == conn_id => {
+                    assert_eq!(req.id, 1);
+                    break reply;
+                }
+                Ok(CtlServerMsg::Disconnect { conn_id: gone }) if gone == conn_id => {
+                    panic!("peer was dropped before its first request was dispatched")
+                }
+                Ok(_) => {}
+                Err(error) => panic!("first request was not dispatched: {error}"),
+            }
+        };
+
+        // Answer well after the assembly budget would have expired, as a real
+        // `wait_for` does. The pipelined `{` arrived before this delay began.
+        std::thread::sleep(Duration::from_millis(600));
+        reply
+            .send(Response::ok(1, serde_json::json!({"served": true})))
+            .expect("reply to the slow request");
+
+        // Finish the second frame. It must still be accepted.
+        client
+            .write_all_until(
+                b"\"v\":1,\"id\":2,\"method\":\"get_state\",\"params\":{}}\n",
+                Instant::now() + Duration::from_secs(1),
+                None,
+            )
+            .expect("complete the pipelined frame");
+
+        loop {
+            match rx.recv_timeout(Duration::from_secs(2)) {
+                Ok(CtlServerMsg::Request {
+                    conn_id: request_conn,
+                    req,
+                    reply,
+                    ..
+                }) if request_conn == conn_id => {
+                    assert_eq!(req.id, 2, "the pipelined request must be the one served");
+                    let _ = reply.send(Response::ok(2, serde_json::json!({"served": true})));
+                    break;
+                }
+                Ok(CtlServerMsg::Disconnect { conn_id: gone }) if gone == conn_id => {
+                    panic!("a slow reply consumed the pipelined frame's assembly budget")
+                }
+                Ok(_) => {}
+                Err(error) => panic!("pipelined request was not dispatched: {error}"),
+            }
+        }
     }
 
     #[test]
