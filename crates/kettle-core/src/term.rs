@@ -865,6 +865,17 @@ impl Default for TerminalCapabilities {
     }
 }
 
+/// How an explicitly supplied child working directory is handled.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum WorkingDirectoryPolicy {
+    /// Interactive panes recover a stale saved directory by starting in HOME.
+    #[default]
+    FallbackToHome,
+    /// Automation must pass the explicit path to the OS unchanged so a stale
+    /// or invalid directory fails the spawn instead of relocating the command.
+    RejectInvalidExplicit,
+}
+
 impl PtyGeometry {
     pub fn new(columns: usize, rows: usize, pixel_width: u16, pixel_height: u16) -> Self {
         Self {
@@ -3575,6 +3586,54 @@ impl Terminal {
         waker: Waker,
         output_tx: Option<PtyOutputSender>,
     ) -> Result<Terminal> {
+        Self::new_with_env_and_output_geometry_capabilities_and_cwd_policy(
+            argv,
+            cwd,
+            scrollback,
+            scrollback_bytes,
+            geometry,
+            cursor_blink,
+            cursor_shape,
+            word_delimiters,
+            term_env,
+            colorterm_env,
+            extra_env,
+            login_shell,
+            shell_integration,
+            capabilities,
+            WorkingDirectoryPolicy::FallbackToHome,
+            event_tx,
+            waker,
+            output_tx,
+        )
+    }
+
+    /// Spawn with exact geometry, capabilities, and explicit cwd semantics.
+    ///
+    /// Headless automation uses [`WorkingDirectoryPolicy::RejectInvalidExplicit`]
+    /// so the OS rejects a path that disappears after validation. Interactive
+    /// panes retain the recovery behavior of the compatibility constructors.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_env_and_output_geometry_capabilities_and_cwd_policy(
+        argv: &[String],
+        cwd: Option<&str>,
+        scrollback: usize,
+        scrollback_bytes: usize,
+        geometry: PtyGeometry,
+        cursor_blink: bool,
+        cursor_shape: CursorShape,
+        word_delimiters: Option<&str>,
+        term_env: &str,
+        colorterm_env: &str,
+        extra_env: &[(String, String)],
+        login_shell: bool,
+        shell_integration: bool,
+        capabilities: TerminalCapabilities,
+        cwd_policy: WorkingDirectoryPolicy,
+        event_tx: crossbeam_channel::Sender<TermEvent>,
+        waker: Waker,
+        output_tx: Option<PtyOutputSender>,
+    ) -> Result<Terminal> {
         let cols = geometry.columns;
         let rows = geometry.rows;
         let pty = portable_pty::native_pty_system();
@@ -3668,6 +3727,8 @@ impl Terminal {
             child_wslenv(&std::env::var("WSLENV").unwrap_or_default(), extra_env),
         );
         match cwd {
+            Some(d) if cwd_policy == WorkingDirectoryPolicy::RejectInvalidExplicit => cmd.cwd(d),
+            None if cwd_policy == WorkingDirectoryPolicy::RejectInvalidExplicit => {}
             Some(d) if std::path::Path::new(d).is_dir() => cmd.cwd(d),
             _ => {
                 // Recorded cwd is missing or no longer on disk (e.g.,

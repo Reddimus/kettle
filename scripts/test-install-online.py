@@ -183,6 +183,7 @@ exit 2
         variant: str = "safe",
         *,
         include_manifest: bool = False,
+        include_helper: bool = True,
     ) -> Path:
         archive_path = self.root / self.asset
         binary_mode = 0o4755 if variant == "setuid" else 0o755
@@ -192,20 +193,8 @@ if [ "${1-}" = "--version" ]; then
   echo "kettle 1.3.4"
 fi
 """
-        install = b"""#!/bin/sh
-set -eu
-prefix=
-for argument in "$@"; do
-  case "$argument" in
-    --prefix=*) prefix=${argument#--prefix=} ;;
-  esac
-done
-[ -n "$prefix" ]
-mkdir -p "$prefix/bin"
-cp "$(dirname "$0")/kettle" "$prefix/bin/kettle"
-chmod 755 "$prefix/bin/kettle"
-echo "fixture install complete"
-"""
+        install = (ROOT / "scripts" / "install.sh").read_bytes()
+        helper = (ROOT / "scripts" / "install-unix.py").read_bytes()
         with tarfile.open(
             archive_path,
             "w:gz",
@@ -224,6 +213,39 @@ echo "fixture install complete"
                 data=install,
                 mode=0o755,
             )
+            if include_helper:
+                self._add(
+                    archive,
+                    "kettle/install-unix.py",
+                    data=helper,
+                    mode=0o755,
+                )
+            self._add(
+                archive,
+                "kettle/packaging/",
+                mode=0o755,
+                kind=tarfile.DIRTYPE,
+            )
+            self._add(
+                archive,
+                "kettle/packaging/linux/",
+                mode=0o755,
+                kind=tarfile.DIRTYPE,
+            )
+            self._add(
+                archive,
+                "kettle/shell-integration/",
+                mode=0o755,
+                kind=tarfile.DIRTYPE,
+            )
+            for relative_root in ("packaging/linux", "shell-integration"):
+                for source in sorted((ROOT / relative_root).iterdir()):
+                    if source.is_file():
+                        self._add(
+                            archive,
+                            f"kettle/{relative_root}/{source.name}",
+                            data=source.read_bytes(),
+                        )
             if include_manifest:
                 self._add(
                     archive,
@@ -352,7 +374,7 @@ echo "fixture install complete"
             timeout=30,
         )
 
-    def test_safe_legacy_archive_installs_only_after_bounded_checksum(self):
+    def test_safe_checksum_only_archive_installs_after_bounded_checksum(self):
         result = self._run(self._archive())
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("same-origin checksum only", result.stdout)
@@ -368,6 +390,15 @@ echo "fixture install complete"
         self.assertIn("--speed-time 30", calls)
         self.assertIn("--max-filesize 268435456", calls)
         self.assertIn("--max-filesize 1024", calls)
+
+    def test_authenticated_archive_without_hardened_helper_is_refused(self):
+        result = self._run(self._archive(include_helper=False))
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn(
+            "release lacks the hardened install-unix.py helper",
+            result.stderr,
+        )
+        self.assertFalse((self.root / "prefix").exists())
 
     def test_safe_modern_archive_uses_signed_manifest_and_inner_manifest(self):
         result = self._run(

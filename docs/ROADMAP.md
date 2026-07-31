@@ -1497,7 +1497,7 @@ breakdown.
       points, control surface OFF by default: `kettle exec -- <argv…>`
       (headless one-shot under a real PTY; propagates the child exit
       code — 124 when `--timeout` expires before a status is collected,
-      125 on an internal error — with
+      74 on stdout delivery failure, 125 on an internal error — with
       `--strip-ansi` / `--json` / `--record` output modes); the control
       server + `kettle ctl` (`agent-server = off|read-only|full`,
       local-IPC only — a Unix socket `0600` / Windows named pipe;
