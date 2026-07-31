@@ -668,10 +668,30 @@ jobs:
           # one that sees drafts. Addressing a draft by tag returns 404, so a
           # re-run of this job would otherwise fail to notice its own leftover
           # draft and then fail again trying to recreate it.
+          #
+          # The tag reaches jq through the environment rather than string
+          # interpolation: a tag carrying a quote or backslash would otherwise
+          # be spliced into the filter itself.
           find_release() {
-            gh api --paginate "repos/${GITHUB_REPOSITORY}/releases" \
-              --jq "map(select(.tag_name == \"${tag}\")) | .[0] | \
-                    if . == null then empty else \"\(.id) \(.draft)\" end"
+            RELEASE_TAG="$tag" gh api --paginate "repos/${GITHUB_REPOSITORY}/releases" \
+              --jq 'map(select(.tag_name == env.RELEASE_TAG)) | .[0] |
+                    if . == null then empty else "\(.id) \(.draft)" end'
+          }
+
+          # A newly created release is not always in the list endpoint's
+          # response immediately, so poll rather than demanding it on the first
+          # read — the point of this whole step is to stop losing to GitHub's
+          # eventual consistency, not to lose to it somewhere new.
+          await_release() {
+            for attempt in 1 2 3 4 5 6 7 8 9 10; do
+              found=$(find_release)
+              if [ -n "$found" ]; then
+                printf '%s' "$found"
+                return 0
+              fi
+              sleep 3
+            done
+            return 1
           }
 
           existing=$(find_release)
@@ -684,9 +704,8 @@ jobs:
             fi
           else
             gh release create "$tag" --verify-tag --draft --generate-notes --title "$tag"
-            existing=$(find_release)
-            if [ -z "$existing" ]; then
-              echo "::error::created release $tag but could not resolve its id"
+            if ! existing=$(await_release); then
+              echo "::error::created release $tag but it never appeared in the release list"
               exit 1
             fi
             release_id=${existing%% *}
