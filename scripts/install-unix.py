@@ -206,9 +206,14 @@ def _open_source(path: str) -> int:
     finally:
         os.close(parent_fd)
     metadata = os.fstat(handle)
-    if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
+    # Cargo may hardlink a finished artifact into target/release. That is safe
+    # for this read-only, descriptor-anchored source: the copied bytes are
+    # checked against their expected size and digest before publication. The
+    # single-link invariant belongs to managed destinations that may be
+    # replaced or removed, not to a source that is only read.
+    if not stat.S_ISREG(metadata.st_mode):
         os.close(handle)
-        _fail(f"installer source is not a single-link regular file: {path}")
+        _fail(f"installer source is not a regular file: {path}")
     if metadata.st_size < 0 or metadata.st_size > MAX_FILE_BYTES:
         os.close(handle)
         _fail(f"installer source exceeds its safety limit: {path}")

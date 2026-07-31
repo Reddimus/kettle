@@ -1350,7 +1350,7 @@ fn block_sigpipe_for_current_thread() -> std::io::Result<()> {
     Ok(())
 }
 
-#[cfg(unix)]
+#[cfg(any(target_os = "linux", target_os = "android"))]
 fn consume_pending_sigpipe(error: &std::io::Error) {
     if error.kind() != std::io::ErrorKind::BrokenPipe {
         return;
@@ -1381,6 +1381,39 @@ fn consume_pending_sigpipe(error: &std::io::Error) {
                 continue;
             }
             return;
+        }
+    }
+}
+
+#[cfg(all(unix, not(any(target_os = "linux", target_os = "android"))))]
+fn consume_pending_sigpipe(error: &std::io::Error) {
+    if error.kind() != std::io::ErrorKind::BrokenPipe {
+        return;
+    }
+    // macOS and the BSDs do not expose sigtimedwait. Check the blocked set
+    // first so a synthetic BrokenPipe cannot make sigwait block forever, then
+    // synchronously consume a real pending SIGPIPE before this thread exits.
+    // SAFETY: all pointers refer to initialized local signal sets/values, and
+    // SIGPIPE is blocked on this thread before any output write occurs.
+    unsafe {
+        let mut signals: libc::sigset_t = std::mem::zeroed();
+        if libc::sigemptyset(&mut signals) != 0 || libc::sigaddset(&mut signals, libc::SIGPIPE) != 0
+        {
+            return;
+        }
+        let mut pending: libc::sigset_t = std::mem::zeroed();
+        if libc::sigpending(&mut pending) != 0 || libc::sigismember(&pending, libc::SIGPIPE) != 1 {
+            return;
+        }
+        let mut signal = 0;
+        loop {
+            let wait_error = libc::sigwait(&signals, &mut signal);
+            if wait_error == 0 {
+                return;
+            }
+            if wait_error != libc::EINTR {
+                return;
+            }
         }
     }
 }

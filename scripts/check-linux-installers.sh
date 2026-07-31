@@ -22,11 +22,19 @@ fi
 tmp_root=$(mktemp -d /tmp/kettle-install-smoke.XXXXXX)
 normal_binary="${tmp_root}/kettle-release"
 cp target/release/kettle "${normal_binary}"
+cargo_hardlink_alias="target/release/.kettle-installer-hardlink-smoke.$$"
 cleanup() {
+  rm -f -- "${cargo_hardlink_alias}"
   cp "${normal_binary}" target/release/kettle 2>/dev/null || true
   rm -rf "${tmp_root}"
 }
 trap cleanup EXIT INT TERM
+
+# Keep the alias beside the binary: WSL may place /tmp and the checkout on
+# different filesystems, while hardlinks necessarily stay within one device.
+ln -- target/release/kettle "${cargo_hardlink_alias}"
+[ "$(stat -c '%h' target/release/kettle)" -gt 1 ] \
+  || fail "could not reproduce Cargo's hardlinked release artifact"
 
 if ./scripts/install.sh --skip-build --record-dir= > /dev/null 2>&1; then
   fail "installer accepted an empty development recording directory"
@@ -158,7 +166,29 @@ assert_installed_prefix "$direct_prefix" "local-dev"
 assert_uninstalled_prefix "$direct_prefix"
 [ "$(cat "${direct_prefix}/unrelated/must-survive.txt")" = 'unrelated prefix content' ] \
   || fail "installer removed unrelated shared-prefix content"
+echo "linux-installer check: hardlinked Cargo source accepted"
 echo "linux-installer check: direct custom-prefix install/uninstall OK"
+
+# The source may be hardlinked because it is only read. A managed destination
+# is different: reject an alias before upgrade or uninstall can replace/remove
+# any recorded path.
+hardlink_prefix="${tmp_root}/destination-hardlink"
+managed_hardlink_alias="${tmp_root}/managed-kettle-hardlink"
+./scripts/install.sh --skip-build "--prefix=${hardlink_prefix}" >/dev/null
+ln -- "${hardlink_prefix}/bin/kettle" "${managed_hardlink_alias}"
+if ./scripts/install.sh --skip-build "--prefix=${hardlink_prefix}" \
+    >"${tmp_root}/hardlink-upgrade.out" 2>"${tmp_root}/hardlink-upgrade.err"; then
+  fail "installer accepted a hardlinked managed destination"
+fi
+grep -Fq 'recorded install file changed identity: bin/kettle' \
+  "${tmp_root}/hardlink-upgrade.err" \
+  || fail "hardlinked managed destination failed for the wrong reason"
+[ -f "${managed_hardlink_alias}" ] \
+  || fail "installer removed the managed destination hardlink alias"
+rm -- "${managed_hardlink_alias}"
+"${hardlink_prefix}/share/kettle/install.sh" --uninstall >/dev/null
+assert_uninstalled_prefix "$hardlink_prefix"
+echo "linux-installer check: hardlinked managed destination refused"
 
 # Reproduce the audited traversal: replace the recorded share/kettle directory
 # with a symlink to an unrelated tree. The hardened uninstaller must refuse

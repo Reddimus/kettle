@@ -9,7 +9,9 @@
 //! Soft-skips when no PTY is available in the sandbox (mirrors kettle-core's
 //! teardown tests) so CI without a console doesn't red the suite.
 
-use std::io::{BufRead, Read, Write};
+#[cfg(any(windows, target_os = "linux"))]
+use std::io::BufRead;
+use std::io::{Read, Write};
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
@@ -376,7 +378,9 @@ const STDOUT_FLOOD_MARKER_ENV: &str = "KETTLE_EXEC_STDOUT_FLOOD_MARKER";
 const STDOUT_FLOOD_EXEC_TIMEOUT: &str = "8.0";
 const STDOUT_FLOOD_READY_BUDGET: Duration = Duration::from_secs(4);
 const STDOUT_FLOOD_POST_READY_BOUND: Duration = Duration::from_secs(12);
+#[cfg(any(windows, target_os = "linux"))]
 const STDOUT_FAILURE_PID_ENV: &str = "KETTLE_EXEC_STDOUT_FAILURE_PID";
+#[cfg(any(windows, target_os = "linux"))]
 const OUTPUT_DELIVERY_EXIT_CODE: i32 = 74;
 
 #[cfg(target_os = "linux")]

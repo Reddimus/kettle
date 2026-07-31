@@ -731,19 +731,6 @@ namespace KettleInstaller
             }
         }
 
-        private static SecurityIdentifier CurrentTokenOwnerSid()
-        {
-            using (WindowsIdentity identity = WindowsIdentity.GetCurrent())
-            {
-                if (identity.Owner == null)
-                {
-                    throw new IOException(
-                        "The installer process has no Windows token owner SID.");
-                }
-                return identity.Owner;
-            }
-        }
-
         private static SecurityIdentifier[] PrivateDirectoryTrustees()
         {
             SecurityIdentifier current = CurrentUserSid();
@@ -970,7 +957,7 @@ namespace KettleInstaller
             }
         }
 
-        private static void RequireCurrentTokenOwner(
+        private static void RequireCurrentUserTemporaryOwner(
             SafeFileHandle handle,
             string path)
         {
@@ -980,8 +967,11 @@ namespace KettleInstaller
                     OWNER_SECURITY_INFORMATION,
                     path),
                 0);
+            // ProtectedObjectSddl assigns the user SID explicitly. An elevated
+            // token may instead name Administrators as its default owner, so
+            // that token field is not the identity this installer created.
             if (descriptor.Owner == null ||
-                !descriptor.Owner.Equals(CurrentTokenOwnerSid()))
+                !descriptor.Owner.Equals(CurrentUserSid()))
             {
                 throw new UnauthorizedAccessException(
                     "Installer temporary file has an untrusted owner: " +
@@ -2267,7 +2257,7 @@ namespace KettleInstaller
                         "Installer temporary path is not a bounded, " +
                         "single-link ordinary file: " + path);
                 }
-                RequireCurrentTokenOwner(handle, path);
+                RequireCurrentUserTemporaryOwner(handle, path);
                 IntPtr disposition = Marshal.AllocHGlobal(4);
                 try
                 {
