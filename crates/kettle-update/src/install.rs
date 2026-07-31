@@ -21,11 +21,11 @@ use serde::{Deserialize, Serialize};
 #[cfg(any(windows, target_os = "linux"))]
 use sha2::{Digest as _, Sha256};
 
-use crate::feed::{
-    AvailableUpdate, FeedClient, UpdateError, require_strict_upgrade, reverify_available_update,
-};
+use crate::feed::{AvailableUpdate, FeedClient, UpdateError};
 #[cfg(windows)]
 use crate::feed::{MAX_ARTIFACT_BYTES, SignedManifest};
+#[cfg(any(windows, target_os = "linux"))]
+use crate::feed::{require_strict_upgrade, reverify_available_update};
 use crate::{UPDATE_PUBLIC_KEY, current_target};
 
 const MARKER_SCHEMA: u32 = 1;

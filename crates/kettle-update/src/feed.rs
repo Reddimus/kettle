@@ -361,6 +361,7 @@ fn evaluate_manifest(
     }))
 }
 
+#[cfg(any(windows, target_os = "linux"))]
 pub(crate) fn reverify_available_update(
     update: &AvailableUpdate,
     public_key: &[u8; 32],
@@ -395,6 +396,7 @@ pub(crate) fn reverify_available_update(
     Ok(manifest)
 }
 
+#[cfg(any(windows, target_os = "linux"))]
 pub(crate) fn require_strict_upgrade(
     candidate: &Version,
     installed: &Version,
@@ -793,6 +795,7 @@ mod tests {
         ));
     }
 
+    #[cfg(any(windows, target_os = "linux"))]
     #[test]
     fn pending_update_versions_must_be_strictly_newer() {
         let installed = Version::new(2, 45, 0);
