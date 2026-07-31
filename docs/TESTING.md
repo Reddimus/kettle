@@ -351,15 +351,21 @@ discipline here.
   real macOS runner because AF_UNIX full-buffer behavior cannot be claimed from
   Linux alone.
 
-- **kettle-update archive boundary**: Linux tests hash and extract one bounded
-  in-memory archive buffer, overwrite the former download path between those
-  operations, and prove only verified bytes reach staging. Hash mismatch,
-  entry count, unpacked bytes, path, link/special/sparse-file, mode, and
-  package-manifest failures remain fail-closed. The
-  `package_manifest_is_mandatory_from_v2_36_onward` regression proves a
-  pre-v2.36 signed archive may omit the inner manifest, v2.36.0 and newer may
-  not, and a valid modern manifest is accepted. Any manifest that is present is
-  verified. Windows separately exercises its mandatory archive range lock.
+- **kettle-update archive boundary**: Linux and Windows tests parse one bounded,
+  digest-verified archive into immutable member buffers, destroy or overwrite
+  the former archive storage, and prove transaction publication still consumes
+  only the verified bytes. Hash mismatch, entry count, unpacked bytes, path,
+  link/special/sparse-file, mode, and exact package-manifest failures remain
+  fail-closed. Windows separately proves a held archive blocks overwrite and
+  rename, a forged pending capsule with correct local archive/helper hashes but
+  no valid Ed25519 signature is rejected, and a correctly authenticated pending
+  version cannot downgrade the installed version. Timestamp regressions cover
+  expired/future signed metadata and strict RFC 3339 parsing. Post-update
+  integration tests require the installed script to match the verified archive
+  bytes and retain it against replacement through execution. Transaction tests
+  prove rollback preserves a post-update conflicting write and its recovery
+  evidence, while committed last-known-good bytes remain until the target
+  version reaches managed startup.
 
 - **kettle-core VT conformance** (150+ tests): drives the *real*
   vte + alacritty_terminal path used by the PTY reader and asserts
@@ -1200,7 +1206,8 @@ name the shape of bug each pass caught.
   proves atomic publication replaces the managed directory entry without
   overwriting the unrelated backing file. The smoke additionally exercises an
   exact interrupted stage/journal/hash-bound backup, a post-commit orphan
-  backup, a real schema-2 pending record with its stage/helper/file identities,
+  backup, a real schema-3 pending capsule with archive/helper, signed-asset, and
+  package-manifest identities,
   rejection of legacy-schema and unknown-field pending records, the narrowly
   supported legacy binary-backup names, and rejection of a near-miss backup
   name. It proves uninstall can finish after its first updater artifact has

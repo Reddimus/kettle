@@ -109,24 +109,34 @@ time-indeterminate candidates fail closed. PID reuse therefore delays
 reclamation rather than risking a live sibling.
 
 `kettle-update` composes those primitives into one managed-install
-transaction. Windows names stage/helper/backup/quarantine state from one exact
-decimal PID-and-epoch-nanoseconds id, admits only the release root plus four
-named shell-integration leaves, and caps the expanded state at 128 entries and
-512 MiB. Each schema-2 backup has an id-bound marker and must exactly match the
-journal's `existed=true` paths, sizes, and hashes before rollback or cleanup.
+transaction. Windows names archive/helper/backup/quarantine state from one
+exact decimal PID-and-epoch-nanoseconds id. Its schema-3 pending capsule carries
+the exact signed release document and signature, selected asset digest, inner
+package manifest, and retained archive/helper identities. The helper rechecks
+that capsule against the compiled Ed25519 key and freshness window after taking
+the update and running locks, reads the actually installed version from the
+held PE version resource, and accepts only a strict upgrade.
+
+Both platforms parse the digest-verified archive directly and materialize its
+manifest-verified members into immutable byte buffers; transaction publication
+never returns to an extracted pathname. The release grammar is capped at 128
+entries and 512 MiB. Each schema-2 backup has an id-bound marker and must exactly
+match the journal's `existed=true` paths, sizes, and hashes before rollback or
+cleanup. Rollback also compares each live destination with the recorded
+replacement fingerprint and preserves later writes on conflict. A committed
+journal retains the last-known-good bytes until a process at the target version
+reaches the managed startup checkpoint.
+
 Linux retains the open descriptor-relative parent until each destination
 snapshot leaf is opened; a `/proc/self/fd/...` capability can therefore never
 be converted into a dangling path that misclassifies an existing file as new.
-The lock order is update then running; the helper releases running then update
-after durable commit and pending-record removal, before asking the saved
-installer to refresh OS integration. The PowerShell installer implements the
-same byte-range and sharing contract while retaining non-reparse directory
-handles from the drive root through the prefix, so validation and leaf-only
-mutation cannot be redirected through an exchanged ancestor.
-After extraction, both supported updater paths verify any inner package
-manifest that is present. Signed release archives from v2.36.0 onward must
-contain that manifest; older archives may omit it for compatibility, but do
-not bypass verification when one is present.
+The Windows lock order is update then running; the helper releases running then
+update after durable commit and pending-record removal, before asking a fully
+qualified system PowerShell to execute the exact archive-verified `install.ps1`
+while a no-write/no-delete handle remains held. The PowerShell installer
+implements the same byte-range and sharing contract while retaining non-reparse
+directory handles from the drive root through the prefix, so validation and
+leaf-only mutation cannot be redirected through an exchanged ancestor.
 
 Managed-recording retention also deletes through these primitives. It keeps
 the candidate locked while `kettle-state` proves the path still identifies the

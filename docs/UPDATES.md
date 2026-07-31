@@ -17,8 +17,8 @@ the updater's exit code; the Start Menu points directly at no-console
 There is intentionally no `-u` shorthand: short flags are easy to trigger by
 mistake and are difficult to reserve permanently. Updates never restart running
 windows. Linux commits the replacement immediately and existing processes keep
-their mapped image. Windows stages the verified release and applies it from a
-helper only after every Kettle process has exited.
+their mapped image. Windows retains the authenticated archive and applies it
+from a helper only after every Kettle process has exited.
 
 > **Windows bootstrap for v2.35:** releases before v2.35 did not include the
 > out-of-process helper/run-lock protocol and could not reliably replace a
@@ -48,33 +48,48 @@ Refusing those channels prevents the stable updater from replacing a
 source-built binary or rewriting its launcher. Only an extracted release
 tarball or the online installer writes a `stable` marker.
 
-On Windows, the updater writes a schema-2 bounded pending record inside the
-installer-owned prefix containing the target version, the copied helper's
-size/SHA-256, and the size/SHA-256 of every extracted file, then starts that
-uniquely named helper. Verification retains root-down directory and file handles
-for the helper, stage root, optional shell directory, and every staged leaf
-through helper launch or transaction consumption, so a rename cannot substitute
-an object after validation. The transaction id is exactly a canonical decimal
+On Windows, the updater writes a schema-3 bounded pending capsule inside the
+installer-owned prefix. It contains the exact signed release manifest and
+detached Ed25519 signature, selected asset identity and digest, exact inner
+package manifest, target version, retained archive identity, and copied-helper
+identity. Local helper/archive hashes are only object-retention checks; they are
+not an authenticity boundary. Before it can delay startup or launch, and again
+inside the helper after the update and running locks are held, Kettle verifies
+the signature with its compiled public key, checks manifest freshness, proves
+the selected version and asset match the signed document, and requires a strict
+upgrade. The helper obtains the actually installed version from the held
+`kettle.exe` Windows version resource, so a stale pending capsule cannot
+downgrade a newer manually installed binary.
+
+The archive is one ordinary, single-link file named from the transaction id.
+The helper retains a no-write/no-delete-sharing handle while it rechecks the
+signed size and SHA-256, parses the ZIP directly from that handle, and
+materializes each manifest-verified member into immutable memory. Transaction
+replacement consumes only those verified byte buffers; it never reopens an
+extracted staging pathname. The transaction id is exactly a canonical decimal
 staging-process `u32` PID, a hyphen, and canonical decimal Unix-epoch
-nanoseconds bounded to `u128`; a valid transaction's stage, helper, backup
+nanoseconds bounded to `u128`; a valid transaction's archive, helper, backup
 marker, journal, pending record, and quarantine evidence must agree on that id
 (unparseable pending evidence receives a fresh bounded quarantine id).
-The saved PowerShell uninstaller understands this same schema-2 record and
-validates its exact field set, scalar types, counters, hashes, managed relative
-paths, and aggregate byte limit. It does not require a named helper or stage to
-remain present after controlled removal or a crash; any extant object still
-passes the independent managed-tree checks before it can be deleted.
+The saved PowerShell uninstaller understands this same schema-3 record and
+validates its exact field set, nested signed-asset and package identities,
+scalar types, counters, hashes, managed relative paths, and aggregate byte
+limit. It does not require a named helper or archive to remain present after
+controlled removal or a crash; any extant object still passes the independent
+managed-tree checks before it can be deleted.
 The install prefix must be a dedicated directory named `kettle`; the installer
 rejects shared or broad prefixes and validates the managed tree and transaction
 ACL before recovery or mutation. Every managed Kettle process
 holds a shared run lock; the helper takes it exclusively, also waits until the
-installed `.exe` and `.com` are no longer mapped, re-verifies the staged files,
-and then commits the transaction. The helper acquires the update lock before
+installed `.exe` and `.com` are no longer mapped, authenticates and consumes the
+retained archive, and then commits the transaction. The helper acquires the update lock before
 the running lock, releases the running lock and then the update lock after the
 commit and pending-record removal are durable, and only then launches the saved
-installer's integration refresh. A launch that sees pending state starts the
-helper and exits rather than prolonging the old version. Failed attempts retain
-the pending record, staged files, and a bounded error message for the next
+installer's integration refresh. That launch uses a fully qualified system
+PowerShell path and keeps the exact manifest-verified `install.ps1` object
+retained against writes and replacement for the entire child process. A launch
+that sees valid pending state starts the helper and exits rather than prolonging
+the old version. Failed attempts retain the pending record, archive, helper, and a bounded error message for the next
 launch to retry. Automatic retry stops after three failed helper attempts. An
 actual transaction attempt resets the independent handoff-timeout counter.
 Timeouts waiting for still-running Kettle processes do not consume transaction
@@ -125,40 +140,56 @@ Each stable release publishes `kettle-update-manifest.json` and a detached
 Ed25519 signature. Kettle embeds only the dedicated public key. Before parsing
 or using metadata it verifies the signature over a domain-separated payload.
 The signed manifest binds each supported target to an exact archive name, byte
-length, and SHA-256 digest.
+length, and SHA-256 digest. It also binds the stable version/tag and an RFC 3339
+publication time. A manifest more than 90 days old or more than 24 hours in the
+future is rejected, and installation always requires the candidate version to
+be strictly newer than the running or actually installed version. A previously
+valid signed document therefore cannot be replayed indefinitely or used for a
+downgrade.
 
 Downloads are capped at 256 MiB. On Linux, the downloader reserves one buffer
 from the signed artifact size, rejects allocation failure explicitly, hashes
-that exact buffer, and extracts through a `Cursor` over the same bytes. No
-writable archive inode exists between verification and extraction. Windows
-uses one exclusively range-locked temporary-file handle for download,
-verification, and extraction. Extraction accepts at most 128 entries and 512
-MiB of actual output. Absolute paths, traversal, duplicates and case aliases,
+that exact buffer, and parses the tar stream from a `Cursor` over the same
+bytes. On Windows, the updater downloads to one private archive handle that
+denies write/delete sharing, then retains that handle through digest checking
+and ZIP parsing. Both paths copy accepted members into immutable in-memory
+buffers and the transaction applies those buffers directly. No writable
+archive or extracted pathname exists between verification and application.
+Archive parsing accepts at most 128 entries and 512 MiB of actual output.
+Absolute paths, traversal, duplicates and case aliases,
 file/directory prefix conflicts, encrypted entries, links, special/sparse
 files, Windows device names, and declared/actual size mismatches are rejected.
 Updates acquire an install-prefix lock and atomically replace each destination
 on its own filesystem.
 
-Linux and Windows update archives from v2.36 onward contain
+Linux and Windows update archives contain
 `kettle-package-manifest.json`. Kettle binds its product/version/target and
-every extracted regular file to an exact relative path, size, SHA-256, and Unix
-mode where applicable before staging is accepted. Release CI generates this
+every regular file to an exact relative path, size, SHA-256, and Unix mode where
+applicable before any replacement is accepted. On Windows, the pending capsule
+also stores the exact package-manifest bytes and the helper requires the held
+archive's embedded copy to match them byte for byte. Release CI generates this
 inner manifest before packaging, then extracts the final downloaded artifact
 and verifies it again with `scripts/package-manifest.py` before signing or
 publication. The macOS `.app` is not installed by Kettle's self-updater and does
 not use this inner manifest.
-
-The verifier remains backward-compatible with release archives before v2.36
-that do not contain this inner package manifest; the signed feed's archive size
-and SHA-256 remain mandatory in either case.
 
 The schema-2 transaction journal records a transaction id, target version,
 durable phase (`prepared`, `applying`, `rolling_back`, or `committed`), and each
 destination's previous/replacement size and SHA-256. Recovery verifies backup
 integrity, an id-bound marker, and the exact absence of unjournaled backup files
 or directories, then checkpoints every restored entry, so a second interruption
-simply resumes rollback. A durably committed journal is cleaned without
-reverting the new files. The journal is deleted and its parent synced before
+simply resumes rollback. Before restoring or deleting a destination, recovery
+requires its current size and SHA-256 to equal the replacement fingerprint in
+the journal. If another writer changed it after the update, rollback stops with
+an explicit conflict and preserves the destination, journal, and backup for
+manual resolution. A `prepared` entry also recognizes the exact prior
+fingerprint, covering a crash before publication without treating it as a
+conflict.
+
+A durable commit retains the journal and last-known-good backup. They are
+discarded only after a process running at least the target version reaches the
+managed startup checkpoint; an older binary or a loader/start failure cannot
+confirm the transaction. The journal is then deleted and its parent synced before
 exact leaf-by-leaf backup cleanup, so recovery never points at data it already
 removed. A crash after that durable boundary can leave only a bounded,
 marker-bound orphan backup; startup removes it under the update lock and refuses
