@@ -6,7 +6,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 pub use kettle_vt::kitty::{AnimationState, current_frame};
-pub use kettle_vt::{ImageData, Placed};
+pub use kettle_vt::{ImageData, Placed, PlacementParams};
 
 /// Pixel-space sub-rectangle sampled by one image placement. The renderer
 /// validates it against the referenced image before producing UV coordinates.
@@ -18,18 +18,48 @@ pub struct ImageSourceRect {
     pub height: u32,
 }
 
+/// Normalized vertical range retained from a placement's source rectangle.
+///
+/// Margin scrolling can permanently discard part of an image at a fractional
+/// pixel boundary. Keeping the range normalized lets the renderer crop UVs
+/// exactly without allocating a replacement texture or rounding to pixels.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ImageSourceCrop {
+    pub top: f32,
+    pub bottom: f32,
+}
+
 #[derive(Clone)]
 pub struct Placement {
-    /// Absolute line = `history_size_at_insert + cursor_viewport_line`.
-    pub abs_line: i64,
+    /// Monotonic document-row id derived from the grid's `history_origin`.
+    ///
+    /// A capped scrollback ring reuses its relative line numbers, so storing
+    /// only `history_size + cursor_line` would eventually attach an old image
+    /// to unrelated replacement text.
+    pub abs_line: u64,
     pub col: usize,
     pub cell_cols: usize,
     pub cell_rows: usize,
+    /// Destination offset within the first cell, in cell units.
+    pub x_offset_cells: f32,
+    pub y_offset_cells: f32,
+    /// Exact rendered destination extent in cell units. This can be
+    /// fractional when Kitty preserves the source aspect ratio.
+    pub display_cols: f32,
+    pub display_rows: f32,
     pub img: ImageData,
     /// Optional source pixels within `img`; `None` samples the full image.
     pub source_rect: Option<ImageSourceRect>,
+    /// Permanent normalized vertical crop within `source_rect` (or the full
+    /// image when `source_rect` is `None`).
+    pub source_crop: Option<ImageSourceCrop>,
     /// kitty image id (for deletion); `None` for Sixel/iTerm2.
     pub id: Option<u32>,
+    /// Kitty placement id (`p=`); zero is anonymous.
+    pub placement_id: u32,
+    /// Raw Kitty placement geometry. Retained so display/DPI changes can
+    /// recompute crop, offsets, and destination size from protocol intent.
+    pub kitty_params: Option<PlacementParams>,
     /// z-index; images are drawn in ascending z order.
     pub z: i32,
 }
@@ -41,13 +71,15 @@ pub type Images = Arc<Mutex<Vec<Placement>>>;
 #[derive(Clone)]
 pub struct VirtualEntry {
     pub img: ImageData,
+    pub placement_id: u32,
     pub cols: u32,
     pub rows: u32,
     pub z: i32,
 }
 
-/// Per-terminal registry of virtual images, keyed by kitty image id.
-pub type Virtuals = Arc<Mutex<HashMap<u32, VirtualEntry>>>;
+/// Per-terminal registry of virtual placements, keyed by
+/// `(kitty image id, kitty placement id)`.
+pub type Virtuals = Arc<Mutex<HashMap<(u32, u32), VirtualEntry>>>;
 
 /// A kitty relative placement: the child image plus its parent reference
 /// and `(h, v)` cell offset. Render-time position = the parent's origin
@@ -59,6 +91,8 @@ pub struct RelEntry {
     pub parent_placement: u32,
     pub h: i32,
     pub v: i32,
+    pub z: i32,
+    pub params: PlacementParams,
 }
 
 /// Per-terminal registry of relative placements, keyed by
@@ -68,9 +102,17 @@ pub type Relatives = Arc<Mutex<HashMap<(u32, u32), RelEntry>>>;
 /// The on-screen origin of a relative placement: its parent placement's
 /// top-left cell `(min_abs, min_col)` offset by `(h, v)` cells (positive =
 /// right / down), clamped to the grid origin. Pure — fully unit tested.
-pub fn relative_origin(min_abs: i64, min_col: usize, h: i32, v: i32) -> (i64, usize) {
-    let abs = (min_abs + v as i64).max(0);
-    let col = (min_col as i64 + h as i64).max(0) as usize;
+pub fn relative_origin(min_abs: u64, min_col: usize, h: i32, v: i32) -> (u64, usize) {
+    let abs = if v < 0 {
+        min_abs.saturating_sub(v.unsigned_abs() as u64)
+    } else {
+        min_abs.saturating_add(v as u64)
+    };
+    let col = if h < 0 {
+        min_col.saturating_sub(h.unsigned_abs() as usize)
+    } else {
+        min_col.saturating_add(h as usize)
+    };
     (abs, col)
 }
 
@@ -83,9 +125,9 @@ pub fn relative_origin(min_abs: i64, min_col: usize, h: i32, v: i32) -> (i64, us
 pub fn resolve_chain(
     parent: u32,
     rels: &HashMap<u32, (u32, i32, i32)>,
-    origins: &HashMap<u32, (i64, usize)>,
+    origins: &HashMap<u32, (u64, usize)>,
     max_depth: u32,
-) -> Option<(i64, usize)> {
+) -> Option<(u64, usize)> {
     if let Some(&o) = origins.get(&parent) {
         return Some(o);
     }
@@ -131,9 +173,14 @@ impl AnimEntry {
 pub type Animations = Arc<Mutex<HashMap<u32, AnimEntry>>>;
 
 /// Drop placements that have scrolled far above the retained history.
-pub fn prune(images: &Images, oldest_abs: i64) {
+pub fn prune(images: &Images, oldest_abs: u64) {
     if let Ok(mut v) = images.lock() {
-        v.retain(|p| p.abs_line + p.cell_rows as i64 >= oldest_abs);
+        v.retain(|p| {
+            p.cell_rows != 0
+                && p.abs_line
+                    .checked_add(p.cell_rows as u64)
+                    .is_none_or(|end| end > oldest_abs)
+        });
         let limit = kettle_vt::GraphicsLimits::default().placements;
         if v.len() > limit {
             let drop = v.len() - limit;
@@ -197,7 +244,7 @@ mod tests {
     #[test]
     fn resolve_chain_walks_and_bounds_depth() {
         // Image 1 has a concrete origin (a real/placeholder placement).
-        let origins = HashMap::from([(1u32, (100i64, 10usize))]);
+        let origins = HashMap::from([(1u32, (100u64, 10usize))]);
         // 2 → relative to 1 (+1,+1); 3 → relative to 2 (+2,0).
         let rels = HashMap::from([(2u32, (1u32, 1, 1)), (3u32, (2u32, 2, 0))]);
         // Direct concrete parent.
@@ -227,13 +274,20 @@ mod tests {
         let images = Arc::new(Mutex::new(
             (0..=limit)
                 .map(|i| Placement {
-                    abs_line: i as i64,
+                    abs_line: i as u64,
                     col: 0,
                     cell_cols: 1,
                     cell_rows: 1,
+                    x_offset_cells: 0.0,
+                    y_offset_cells: 0.0,
+                    display_cols: 1.0,
+                    display_rows: 1.0,
                     img: img.clone(),
                     source_rect: None,
+                    source_crop: None,
                     id: None,
+                    placement_id: 0,
+                    kitty_params: None,
                     z: 0,
                 })
                 .collect(),
@@ -242,5 +296,72 @@ mod tests {
         let images = images.lock().unwrap();
         assert_eq!(images.len(), limit);
         assert_eq!(images[0].abs_line, 1, "oldest placement is evicted first");
+    }
+
+    #[test]
+    fn prune_uses_monotonic_rows_and_an_exclusive_placement_end() {
+        let img = px(1);
+        let images = Arc::new(Mutex::new(vec![
+            Placement {
+                abs_line: 40,
+                col: 0,
+                cell_cols: 1,
+                cell_rows: 2,
+                x_offset_cells: 0.0,
+                y_offset_cells: 0.0,
+                display_cols: 1.0,
+                display_rows: 2.0,
+                img: img.clone(),
+                source_rect: None,
+                source_crop: None,
+                id: Some(1),
+                placement_id: 0,
+                kitty_params: None,
+                z: 0,
+            },
+            Placement {
+                abs_line: 42,
+                col: 0,
+                cell_cols: 1,
+                cell_rows: 1,
+                x_offset_cells: 0.0,
+                y_offset_cells: 0.0,
+                display_cols: 1.0,
+                display_rows: 1.0,
+                img,
+                source_rect: None,
+                source_crop: None,
+                id: Some(2),
+                placement_id: 0,
+                kitty_params: None,
+                z: 0,
+            },
+            Placement {
+                abs_line: u64::MAX,
+                col: 0,
+                cell_cols: 1,
+                cell_rows: 1,
+                x_offset_cells: 0.0,
+                y_offset_cells: 0.0,
+                display_cols: 1.0,
+                display_rows: 1.0,
+                img: px(3),
+                source_rect: None,
+                source_crop: None,
+                id: Some(3),
+                placement_id: 0,
+                kitty_params: None,
+                z: 0,
+            },
+        ]));
+
+        prune(&images, 42);
+
+        let images = images.lock().unwrap();
+        assert_eq!(images.len(), 2);
+        assert_eq!(images[0].id, Some(2));
+        assert_eq!(images[0].abs_line, 42);
+        assert_eq!(images[1].id, Some(3));
+        assert_eq!(images[1].abs_line, u64::MAX);
     }
 }

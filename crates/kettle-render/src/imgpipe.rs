@@ -5,12 +5,18 @@
 use std::collections::HashMap;
 
 use bytemuck::{Pod, Zeroable};
-use kettle_core::{GraphicsBudget, GraphicsReservation, ImageData, ImageSourceRect};
+use kettle_core::{
+    GraphicsBudget, GraphicsReservation, ImageData, ImageSourceCrop, ImageSourceRect,
+};
 
 pub(crate) struct ImageItem {
     rect: [f32; 4],
     image: ImageData,
     source_rect: Option<ImageSourceRect>,
+    source_crop: Option<ImageSourceCrop>,
+    /// Optional destination clip in physical surface pixels. Inline terminal
+    /// images use the owning pane's grid viewport; wallpapers stay unclipped.
+    clip_rect: Option<[f32; 4]>,
 }
 
 impl ImageItem {
@@ -19,21 +25,24 @@ impl ImageItem {
             rect: [x, y, width, height],
             image,
             source_rect: None,
+            source_crop: None,
+            clip_rect: None,
         }
     }
 
     pub(crate) fn placement(
-        x: f32,
-        y: f32,
-        width: f32,
-        height: f32,
+        rect: [f32; 4],
         image: ImageData,
         source_rect: Option<ImageSourceRect>,
+        source_crop: Option<ImageSourceCrop>,
+        clip_rect: [f32; 4],
     ) -> Self {
         Self {
-            rect: [x, y, width, height],
+            rect,
             image,
             source_rect,
+            source_crop,
+            clip_rect: Some(clip_rect),
         }
     }
 }
@@ -130,29 +139,117 @@ fn rgba_pixel_bytes(width: u32, height: u32) -> Option<usize> {
 fn source_uv(
     image: &ImageData,
     source_rect: Option<ImageSourceRect>,
+    source_crop: Option<ImageSourceCrop>,
 ) -> Option<([f32; 2], [f32; 2])> {
     if image.width == 0 || image.height == 0 {
         return None;
     }
-    let Some(source) = source_rect else {
-        return Some(([0.0, 0.0], [1.0, 1.0]));
+    let (uv_origin, uv_size) = if let Some(source) = source_rect {
+        let x1 = source.x.checked_add(source.width)?;
+        let y1 = source.y.checked_add(source.height)?;
+        if source.width == 0 || source.height == 0 || x1 > image.width || y1 > image.height {
+            return None;
+        }
+
+        // Sample sub-rect edges at pixel centers. A cropped texture would clamp
+        // there; doing the same in the shared parent texture prevents linear
+        // filtering from bleeding adjacent placeholder tiles into one another.
+        let image_w = image.width as f32;
+        let image_h = image.height as f32;
+        let u0 = (source.x as f32 + 0.5) / image_w;
+        let v0 = (source.y as f32 + 0.5) / image_h;
+        let u1 = (x1 as f32 - 0.5) / image_w;
+        let v1 = (y1 as f32 - 0.5) / image_h;
+        ([u0, v0], [u1 - u0, v1 - v0])
+    } else {
+        ([0.0, 0.0], [1.0, 1.0])
     };
-    let x1 = source.x.checked_add(source.width)?;
-    let y1 = source.y.checked_add(source.height)?;
-    if source.width == 0 || source.height == 0 || x1 > image.width || y1 > image.height {
+    let Some(crop) = source_crop else {
+        return Some((uv_origin, uv_size));
+    };
+    if !crop.top.is_finite()
+        || !crop.bottom.is_finite()
+        || crop.top < 0.0
+        || crop.bottom > 1.0
+        || crop.top >= crop.bottom
+    {
+        return None;
+    }
+    Some((
+        [uv_origin[0], uv_origin[1] + uv_size[1] * crop.top],
+        [uv_size[0], uv_size[1] * (crop.bottom - crop.top)],
+    ))
+}
+
+/// Build one image instance, clipping its destination and UVs together.
+///
+/// Clipping on the CPU keeps each pane's images in the existing globally
+/// batched draw list without relying on mutable render-pass scissor state.
+/// Adjusting the UVs by the same normalized fractions is essential: clamping
+/// only the destination would squash the entire source into the visible slice.
+fn clipped_instance(
+    rect: [f32; 4],
+    uv_origin: [f32; 2],
+    uv_size: [f32; 2],
+    clip_rect: Option<[f32; 4]>,
+) -> Option<Inst> {
+    if !rect
+        .into_iter()
+        .chain(uv_origin)
+        .chain(uv_size)
+        .all(f32::is_finite)
+        || rect[2] <= 0.0
+        || rect[3] <= 0.0
+    {
         return None;
     }
 
-    // Sample sub-rect edges at pixel centers. A cropped texture would clamp
-    // there; doing the same in the shared parent texture prevents linear
-    // filtering from bleeding adjacent placeholder tiles into one another.
-    let image_w = image.width as f32;
-    let image_h = image.height as f32;
-    let u0 = (source.x as f32 + 0.5) / image_w;
-    let v0 = (source.y as f32 + 0.5) / image_h;
-    let u1 = (x1 as f32 - 0.5) / image_w;
-    let v1 = (y1 as f32 - 0.5) / image_h;
-    Some(([u0, v0], [u1 - u0, v1 - v0]))
+    let Some(clip) = clip_rect else {
+        return Some(Inst {
+            pos: [rect[0], rect[1]],
+            size: [rect[2], rect[3]],
+            uv_origin,
+            uv_size,
+        });
+    };
+    if !clip.into_iter().all(f32::is_finite) || clip[2] <= 0.0 || clip[3] <= 0.0 {
+        return None;
+    }
+
+    let rect_end = [rect[0] + rect[2], rect[1] + rect[3]];
+    let clip_end = [clip[0] + clip[2], clip[1] + clip[3]];
+    if !rect_end.into_iter().chain(clip_end).all(f32::is_finite) {
+        return None;
+    }
+    let x0 = rect[0].max(clip[0]);
+    let y0 = rect[1].max(clip[1]);
+    let x1 = rect_end[0].min(clip_end[0]);
+    let y1 = rect_end[1].min(clip_end[1]);
+    if x1 <= x0 || y1 <= y0 {
+        return None;
+    }
+
+    let u0 = (x0 - rect[0]) / rect[2];
+    let v0 = (y0 - rect[1]) / rect[3];
+    let u1 = (x1 - rect[0]) / rect[2];
+    let v1 = (y1 - rect[1]) / rect[3];
+    let instance = Inst {
+        pos: [x0, y0],
+        size: [x1 - x0, y1 - y0],
+        uv_origin: [
+            uv_origin[0] + uv_size[0] * u0,
+            uv_origin[1] + uv_size[1] * v0,
+        ],
+        uv_size: [uv_size[0] * (u1 - u0), uv_size[1] * (v1 - v0)],
+    };
+    instance
+        .pos
+        .into_iter()
+        .chain(instance.size)
+        .chain(instance.uv_origin)
+        .chain(instance.uv_size)
+        .all(f32::is_finite)
+        .then_some(instance)
 }
 
 fn capped_instance_count(requested: usize, max_instances: usize) -> usize {
@@ -540,21 +637,20 @@ impl ImagePipeline {
         let mut insts = Vec::with_capacity(item_count);
         for (i, item) in items.iter().take(item_count).enumerate() {
             // Push the instance for every item so buffer slot `i` stays aligned
-            // with the enumerate index stored in `draws`; only record a draw for
-            // images that produced a texture (an oversized image is
-            // skipped rather than aborting the renderer).
-            let uv = source_uv(&item.image, item.source_rect);
-            let (uv_origin, uv_size) = uv.unwrap_or(([0.0; 2], [0.0; 2]));
-            insts.push(Inst {
-                pos: [item.rect[0], item.rect[1]],
-                size: [item.rect[2], item.rect[3]],
-                uv_origin,
-                uv_size,
-            });
-            if uv.is_none() {
+            // with the enumerate index stored in `draws`. Invalid or wholly
+            // clipped items receive a zero-sized slot and no draw.
+            let uv = source_uv(&item.image, item.source_rect, item.source_crop);
+            let Some((uv_origin, uv_size)) = uv else {
+                insts.push(Inst::zeroed());
                 log::warn!("skipping image placement with an invalid source rectangle");
                 continue;
-            }
+            };
+            let Some(instance) = clipped_instance(item.rect, uv_origin, uv_size, item.clip_rect)
+            else {
+                insts.push(Inst::zeroed());
+                continue;
+            };
+            insts.push(instance);
             if let Some(key) = self.ensure_texture(device, queue, &item.image) {
                 record_draw(&mut self.draws, key, i as u32);
             }
@@ -593,7 +689,7 @@ impl ImagePipeline {
 
 #[cfg(test)]
 mod aba_guard_tests {
-    use kettle_core::{ImageData, ImageSourceRect};
+    use kettle_core::{ImageData, ImageSourceCrop, ImageSourceRect};
 
     /// Drift guard (ABA fix). The image cache keys textures
     /// by the rgba `Arc`'s raw pointer; it MUST hold an `Arc` clone
@@ -652,7 +748,10 @@ mod aba_guard_tests {
     #[test]
     fn source_rect_uses_pixel_centers_and_rejects_out_of_bounds() {
         let image = ImageData::new(4, 2, vec![0; 4 * 2 * 4]).expect("test image");
-        assert_eq!(super::source_uv(&image, None), Some(([0.0; 2], [1.0; 2])));
+        assert_eq!(
+            super::source_uv(&image, None, None),
+            Some(([0.0; 2], [1.0; 2]))
+        );
         assert_eq!(
             super::source_uv(
                 &image,
@@ -661,9 +760,48 @@ mod aba_guard_tests {
                     y: 0,
                     width: 2,
                     height: 2,
-                })
+                }),
+                None,
             ),
             Some(([0.625, 0.25], [0.25, 0.5]))
+        );
+        assert_eq!(
+            super::source_uv(
+                &image,
+                None,
+                Some(ImageSourceCrop {
+                    top: 0.25,
+                    bottom: 0.75,
+                }),
+            ),
+            Some(([0.0, 0.25], [1.0, 0.5]))
+        );
+        assert_eq!(
+            super::source_uv(
+                &image,
+                Some(ImageSourceRect {
+                    x: 2,
+                    y: 0,
+                    width: 2,
+                    height: 2,
+                }),
+                Some(ImageSourceCrop {
+                    top: 0.25,
+                    bottom: 0.75,
+                }),
+            ),
+            Some(([0.625, 0.375], [0.25, 0.25]))
+        );
+        assert_eq!(
+            super::source_uv(
+                &image,
+                None,
+                Some(ImageSourceCrop {
+                    top: 0.75,
+                    bottom: 0.25,
+                }),
+            ),
+            None
         );
         assert_eq!(
             super::source_uv(
@@ -673,10 +811,67 @@ mod aba_guard_tests {
                     y: 0,
                     width: 1,
                     height: 1,
-                })
+                }),
+                None,
             ),
             None
         );
+    }
+
+    #[test]
+    fn pane_clip_crops_destination_and_uvs_without_squashing() {
+        let inst = super::clipped_instance(
+            [-4.0, -8.0, 16.0, 16.0],
+            [0.0, 0.0],
+            [1.0, 1.0],
+            Some([0.0, 0.0, 8.0, 4.0]),
+        )
+        .expect("partially visible image");
+        assert_eq!(inst.pos, [0.0, 0.0]);
+        assert_eq!(inst.size, [8.0, 4.0]);
+        assert_eq!(inst.uv_origin, [0.25, 0.5]);
+        assert_eq!(inst.uv_size, [0.5, 0.25]);
+    }
+
+    #[test]
+    fn pane_clip_rejects_fully_outside_or_degenerate_destinations() {
+        assert!(
+            super::clipped_instance(
+                [-20.0, 0.0, 4.0, 4.0],
+                [0.0; 2],
+                [1.0; 2],
+                Some([0.0, 0.0, 10.0, 10.0])
+            )
+            .is_none()
+        );
+        assert!(
+            super::clipped_instance(
+                [0.0, 0.0, 0.0, 4.0],
+                [0.0; 2],
+                [1.0; 2],
+                Some([0.0, 0.0, 10.0, 10.0])
+            )
+            .is_none()
+        );
+        assert!(
+            super::clipped_instance(
+                [f32::MAX, 0.0, f32::MAX, 4.0],
+                [0.0; 2],
+                [1.0; 2],
+                Some([0.0, 0.0, 10.0, 10.0])
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn wallpaper_without_clip_preserves_destination_and_uvs() {
+        let inst = super::clipped_instance([-2.0, 3.0, 8.0, 9.0], [0.1, 0.2], [0.6, 0.7], None)
+            .expect("valid wallpaper");
+        assert_eq!(inst.pos, [-2.0, 3.0]);
+        assert_eq!(inst.size, [8.0, 9.0]);
+        assert_eq!(inst.uv_origin, [0.1, 0.2]);
+        assert_eq!(inst.uv_size, [0.6, 0.7]);
     }
 
     #[test]

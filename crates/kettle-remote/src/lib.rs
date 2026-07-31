@@ -217,6 +217,8 @@ pub struct RemoteScanner {
     #[cfg(target_os = "linux")]
     use_procfs: bool,
     index: std::collections::HashMap<u32, Vec<u32>>,
+    detect_queue: std::collections::VecDeque<u32>,
+    detect_visited: std::collections::HashSet<u32>,
 }
 
 impl Default for RemoteScanner {
@@ -234,6 +236,8 @@ impl RemoteScanner {
             #[cfg(target_os = "linux")]
             use_procfs: false,
             index: std::collections::HashMap::new(),
+            detect_queue: std::collections::VecDeque::new(),
+            detect_visited: std::collections::HashSet::new(),
         }
     }
 
@@ -251,29 +255,50 @@ impl RemoteScanner {
 
     /// Refresh the process snapshot for the pane roots that will be queried.
     ///
-    /// Linux walks only those roots' `/proc/<pid>/task/<pid>/children` trees.
-    /// That keeps a focused cursor blink from synchronously rereading every
-    /// process and thread on the machine. Platforms without that rooted procfs
-    /// interface retain the cross-platform sysinfo snapshot.
-    pub fn refresh_roots(&mut self, roots: &[u32]) {
+    /// Linux walks only those roots' bounded `/proc/<pid>/task/*/children`
+    /// trees, including children created by non-leader threads. That avoids an
+    /// OS-wide process walk. Platforms without that rooted procfs interface
+    /// retain the cross-platform sysinfo snapshot.
+    pub fn refresh_roots(&mut self, roots: &[u32]) -> bool {
         #[cfg(target_os = "linux")]
         {
-            self.procfs.refresh_roots(roots);
+            let complete = self.procfs.refresh_roots(roots);
             self.index = build_children_index(&self.procfs);
             self.use_procfs = true;
+            complete
         }
         #[cfg(not(target_os = "linux"))]
         {
             let _ = roots;
             self.refresh();
+            true
         }
     }
 
     /// Resolve the remote context for the pane rooted at `child_pid`, using the
     /// index built by the last [`refresh`](Self::refresh). No OS walk, no map
     /// rebuild — safe to call once per pane.
-    pub fn detect_root(&self, child_pid: u32) -> Option<RemoteContext> {
-        detect_root_in_index(child_pid, self.tree(), &self.index)
+    pub fn detect_root(&mut self, child_pid: u32) -> Option<RemoteContext> {
+        self.detect_queue.clear();
+        self.detect_visited.clear();
+        self.detect_visited.reserve(self.index.len());
+
+        #[cfg(target_os = "linux")]
+        let tree: &dyn ProcessTree = if self.use_procfs {
+            &self.procfs
+        } else {
+            &self.sys
+        };
+        #[cfg(not(target_os = "linux"))]
+        let tree: &dyn ProcessTree = &self.sys;
+
+        detect_root_in_index_with_scratch(
+            child_pid,
+            tree,
+            &self.index,
+            &mut self.detect_queue,
+            &mut self.detect_visited,
+        )
     }
 
     /// The deepest known-shell descendant of the pane rooted at
@@ -315,23 +340,171 @@ impl RemoteScanner {
     }
 }
 
+/// One pane root submitted to the background remote-context scanner.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RemoteProbeTarget {
+    pub pid: u32,
+    /// False for launch shapes whose host cwd is meaningless (for example
+    /// `wsl.exe` or `ssh.exe`).
+    pub allow_native_cwd: bool,
+}
+
+/// Remote and native-cwd state resolved from one consistent process snapshot.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RemoteProbe {
+    pub remote: Option<RemoteContext>,
+    pub native_cwd: Option<String>,
+    pub foreground_shell: Option<ShellLaunch>,
+}
+
+/// Latest complete background scan.
+#[derive(Debug, Clone)]
+pub struct RemoteProbeSnapshot {
+    pub probes: std::sync::Arc<std::collections::HashMap<u32, RemoteProbe>>,
+}
+
+/// Coalescing, bounded background owner for [`RemoteScanner`].
+///
+/// Process enumeration and procfs reads never run on the window event loop.
+/// Submitting replaces any queued roots with the newest set and emits at most
+/// one wake token. Results likewise replace an unconsumed older snapshot.
+/// A Linux scan that reaches its byte/node/task/deadline ceiling is not
+/// published, so a partial hostile subtree cannot erase the last good UI state.
+pub struct RemoteScanWorker {
+    pending: std::sync::Arc<std::sync::Mutex<Option<Vec<RemoteProbeTarget>>>>,
+    latest: std::sync::Arc<std::sync::Mutex<Option<RemoteProbeSnapshot>>>,
+    wake: std::sync::mpsc::SyncSender<()>,
+}
+
+impl RemoteScanWorker {
+    pub fn spawn() -> std::io::Result<Self> {
+        Self::spawn_with_notifier(|| {})
+    }
+
+    pub fn spawn_with_notifier(notify: impl Fn() + Send + 'static) -> std::io::Result<Self> {
+        let pending = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let latest = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let (wake, wakes) = std::sync::mpsc::sync_channel(1);
+        let worker_pending = pending.clone();
+        let worker_latest = latest.clone();
+        std::thread::Builder::new()
+            .name("kettle-remote-scan".into())
+            .spawn(move || {
+                let mut scanner = RemoteScanner::new();
+                let mut roots = Vec::new();
+                while wakes.recv().is_ok() {
+                    loop {
+                        let Some(mut targets) = worker_pending
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                            .take()
+                        else {
+                            break;
+                        };
+                        normalize_probe_targets(&mut targets);
+                        roots.clear();
+                        roots.extend(targets.iter().map(|target| target.pid));
+                        if !scanner.refresh_roots(&roots) {
+                            continue;
+                        }
+                        let mut probes = std::collections::HashMap::with_capacity(targets.len());
+                        for target in targets {
+                            let remote = scanner.detect_root(target.pid);
+                            let foreground_shell = scanner.foreground_shell(target.pid);
+                            let nested_wsl = foreground_shell.as_ref().is_some_and(|shell| {
+                                shell
+                                    .argv
+                                    .first()
+                                    .is_some_and(|argv0| argv0_basename(argv0) == "wsl")
+                            });
+                            let native_cwd =
+                                if target.allow_native_cwd && remote.is_none() && !nested_wsl {
+                                    scanner.foreground_cwd(target.pid)
+                                } else {
+                                    None
+                                };
+                            probes.insert(
+                                target.pid,
+                                RemoteProbe {
+                                    remote,
+                                    native_cwd,
+                                    foreground_shell,
+                                },
+                            );
+                        }
+                        let probes = std::sync::Arc::new(probes);
+                        *worker_latest
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner) =
+                            Some(RemoteProbeSnapshot { probes });
+                        notify();
+                    }
+                }
+            })?;
+        Ok(Self {
+            pending,
+            latest,
+            wake,
+        })
+    }
+
+    pub fn submit(&self, mut targets: Vec<RemoteProbeTarget>) {
+        normalize_probe_targets(&mut targets);
+        *self
+            .pending
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(targets);
+        let _ = self.wake.try_send(());
+    }
+
+    pub fn take_latest(&self) -> Option<RemoteProbeSnapshot> {
+        self.latest
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+    }
+}
+
+fn normalize_probe_targets(targets: &mut Vec<RemoteProbeTarget>) {
+    targets.sort_unstable_by_key(|target| target.pid);
+    let mut write = 0_usize;
+    for read in 0..targets.len() {
+        if write != 0 && targets[write - 1].pid == targets[read].pid {
+            targets[write - 1].allow_native_cwd &= targets[read].allow_native_cwd;
+        } else {
+            targets.swap(write, read);
+            write += 1;
+        }
+    }
+    targets.truncate(write.min(MAX_REMOTE_PROBE_TARGETS));
+}
+
 #[cfg(target_os = "linux")]
 const MAX_PROC_FILE_BYTES: u64 = 1 << 20;
+const MAX_REMOTE_PROBE_TARGETS: usize = 4096;
 #[cfg(target_os = "linux")]
-const MAX_PROC_TREE_NODES: usize = 4096;
+const MAX_PROC_TREE_NODES: usize = MAX_REMOTE_PROBE_TARGETS;
+#[cfg(target_os = "linux")]
+const MAX_PROC_TASKS_PER_PROCESS: usize = 1024;
+#[cfg(target_os = "linux")]
+const MAX_PROC_TASK_FILE_READS: usize = 1024;
+#[cfg(target_os = "linux")]
+const MAX_PROC_SCAN_DURATION: std::time::Duration = std::time::Duration::from_millis(25);
+#[cfg(any(target_os = "linux", test))]
+const MAX_PROC_ARGS_PER_PROCESS: usize = 256;
+#[cfg(any(target_os = "linux", test))]
+const MAX_PROC_ARG_DECODED_BYTES: usize = 64 * 1024;
 /// Audit (robustness): aggregate ceiling, in bytes, on ALL `cmdline` +
 /// `children` file content read across a single [`LinuxProcessTree::refresh_from`]
 /// walk. `MAX_PROC_FILE_BYTES` only bounds a SINGLE file's size; without an
 /// aggregate cap, up to `MAX_PROC_TREE_NODES` (4096) descendants each near
 /// that 1 MiB per-file ceiling could retain multiple GiB in `self.entries`
-/// and cost multiple GiB of synchronous file I/O on one `refresh_roots` tick
-/// (called directly on kettle-ui's poll loop — see the doc on
-/// `LinuxProcessTree::refresh_from`). 32 MiB is generous next to any
-/// legitimate shell-argv/child-list total (a few hundred KiB in practice
-/// even for a wide process tree) while keeping the worst case bounded to
-/// tens of MiB instead of GiB.
+/// and cost multiple GiB of file I/O on one `refresh_roots` tick. Four MiB is
+/// generous next to legitimate shell argv/child-list totals while keeping a
+/// hostile pane's background scan bounded. The app consumes these snapshots
+/// asynchronously; it never performs this walk on the event-loop thread.
 #[cfg(target_os = "linux")]
-const MAX_PROC_TREE_TOTAL_BYTES: u64 = 32 * MAX_PROC_FILE_BYTES;
+const MAX_PROC_TREE_TOTAL_BYTES: u64 = 4 * MAX_PROC_FILE_BYTES;
 
 #[cfg(any(target_os = "linux", test))]
 fn parse_proc_children(bytes: &[u8]) -> impl Iterator<Item = u32> + '_ {
@@ -343,109 +516,254 @@ fn parse_proc_children(bytes: &[u8]) -> impl Iterator<Item = u32> + '_ {
 
 #[cfg(any(target_os = "linux", test))]
 fn parse_proc_argv(bytes: &[u8]) -> Vec<String> {
-    bytes
+    let mut argv = Vec::new();
+    let mut decoded_bytes = 0_usize;
+    for arg in bytes
         .split(|byte| *byte == 0)
         .filter(|arg| !arg.is_empty())
-        .map(|arg| String::from_utf8_lossy(arg).into_owned())
-        .collect()
+        .take(MAX_PROC_ARGS_PER_PROCESS)
+    {
+        let arg = String::from_utf8_lossy(arg);
+        let Some(next_decoded_bytes) = decoded_bytes.checked_add(arg.len()) else {
+            break;
+        };
+        if next_decoded_bytes > MAX_PROC_ARG_DECODED_BYTES {
+            break;
+        }
+        decoded_bytes = next_decoded_bytes;
+        argv.push(arg.into_owned());
+    }
+    argv
 }
 
 #[cfg(target_os = "linux")]
 #[derive(Default)]
 struct LinuxProcessTree {
     entries: std::collections::HashMap<u32, LinuxProcessEntry>,
+    proc_root: std::path::PathBuf,
+    bytes_read: u64,
+    task_files_read: usize,
 }
 
 #[cfg(target_os = "linux")]
 struct LinuxProcessEntry {
     parent: Option<u32>,
     argv: Option<Vec<String>>,
-    cwd: Option<String>,
 }
 
 #[cfg(target_os = "linux")]
 impl LinuxProcessTree {
-    fn refresh_roots(&mut self, roots: &[u32]) {
-        self.refresh_from(std::path::Path::new("/proc"), roots);
+    fn refresh_roots(&mut self, roots: &[u32]) -> bool {
+        self.refresh_from(std::path::Path::new("/proc"), roots)
     }
 
     /// Audit (robustness): synchronous procfs walk backing `refresh_roots`,
-    /// which kettle-ui's `poll_remote_contexts` calls directly on the UI
-    /// thread every ~200ms (no worker thread) — so both the memory this
-    /// retains and the wall-clock time this takes bound how long the whole
-    /// window can stall. `MAX_PROC_TREE_NODES` bounds node COUNT and
+    /// which kettle-ui's remote scanner worker calls at most once per
+    /// coalesced request. `MAX_PROC_TREE_NODES` bounds node COUNT and
     /// `MAX_PROC_FILE_BYTES` bounds a single file's size, but neither bounds
     /// the SUM of every node's argv/children bytes — see
     /// `MAX_PROC_TREE_TOTAL_BYTES`, which this walk now also enforces:
     /// once the running total reaches that ceiling, further `cmdline`/
     /// `children` reads are skipped for the rest of the walk (the node
-    /// itself, and its already-known parent/cwd, are still recorded — only
-    /// the potentially-large file payloads are dropped), so a pathological
-    /// or hostile descendant subtree can no longer balloon this to
-    /// multiple GiB of retained memory or synchronous I/O.
-    fn refresh_from(&mut self, proc_root: &std::path::Path, roots: &[u32]) {
+    /// itself and its already-known parent are still recorded — only the
+    /// potentially-large file payloads are dropped). Cwd is read on demand
+    /// for the selected foreground process instead of being retained for
+    /// every entry, so a pathological or hostile descendant subtree can no
+    /// longer balloon this to multiple GiB of retained memory or synchronous
+    /// I/O.
+    fn refresh_from(&mut self, proc_root: &std::path::Path, roots: &[u32]) -> bool {
         use std::collections::{HashSet, VecDeque};
 
+        let deadline = std::time::Instant::now() + MAX_PROC_SCAN_DURATION;
         self.entries.clear();
+        self.proc_root.clear();
+        self.proc_root.push(proc_root);
         let mut queue: VecDeque<_> = roots.iter().copied().map(|pid| (pid, None)).collect();
-        let mut visited = HashSet::with_capacity(roots.len());
+        let mut scheduled: HashSet<_> = roots.iter().copied().collect();
         let mut total_bytes: u64 = 0;
+        let mut task_files_read = 0_usize;
+        let mut complete = true;
         while let Some((pid, parent)) = queue.pop_front() {
-            if self.entries.len() >= MAX_PROC_TREE_NODES || !visited.insert(pid) {
+            if std::time::Instant::now() >= deadline {
+                complete = false;
+                break;
+            }
+            if self.entries.len() >= MAX_PROC_TREE_NODES {
+                complete = false;
                 continue;
             }
             let process_dir = proc_root.join(pid.to_string());
-            let argv = if total_bytes < MAX_PROC_TREE_TOTAL_BYTES {
-                read_proc_file_bounded(&process_dir.join("cmdline")).map(|b| {
-                    total_bytes += b.len() as u64;
-                    parse_proc_argv(&b)
-                })
-            } else {
-                None
+            let argv = match read_proc_file_charged(&process_dir.join("cmdline"), &mut total_bytes)
+            {
+                ProcFileRead::Complete(bytes) => Some(parse_proc_argv(&bytes)),
+                ProcFileRead::Unavailable => None,
+                ProcFileRead::Incomplete => {
+                    complete = false;
+                    None
+                }
             };
-            let cwd = std::fs::read_link(process_dir.join("cwd"))
-                .ok()
-                .map(|path| path.to_string_lossy().into_owned());
-            let children = if total_bytes < MAX_PROC_TREE_TOTAL_BYTES {
-                read_proc_file_bounded(
-                    &process_dir
-                        .join("task")
-                        .join(pid.to_string())
-                        .join("children"),
-                )
-                .inspect(|b| {
-                    total_bytes += b.len() as u64;
-                })
-            } else {
-                None
-            };
-            if argv.is_none() && cwd.is_none() && children.is_none() {
-                continue;
-            }
-            if let Some(children) = &children {
-                for child in parse_proc_children(children) {
-                    if queue.len() + self.entries.len() >= MAX_PROC_TREE_NODES {
-                        break;
+            let task_dir = process_dir.join("task");
+            let mut child_metadata_read = false;
+            // Always inspect the leader task first so a process with more than
+            // the per-process task cap still preserves the conventional edge.
+            let (read, within_limits) = read_proc_task_children(
+                &task_dir,
+                pid,
+                pid,
+                &mut total_bytes,
+                &mut task_files_read,
+                &mut scheduled,
+                &mut queue,
+                deadline,
+            );
+            child_metadata_read |= read;
+            complete &= within_limits;
+            if task_files_read < MAX_PROC_TASK_FILE_READS
+                && total_bytes < MAX_PROC_TREE_TOTAL_BYTES
+                && std::time::Instant::now() < deadline
+            {
+                match std::fs::read_dir(&task_dir) {
+                    Ok(tasks) => {
+                        for (task_entries, task) in tasks.enumerate() {
+                            let task = match task {
+                                Ok(task) => task,
+                                Err(_) => {
+                                    complete = false;
+                                    break;
+                                }
+                            };
+                            if task_entries >= MAX_PROC_TASKS_PER_PROCESS {
+                                complete = false;
+                                break;
+                            }
+                            let Some(task_pid) = task
+                                .file_name()
+                                .to_str()
+                                .and_then(|name| name.parse::<u32>().ok())
+                            else {
+                                continue;
+                            };
+                            if task_pid != pid {
+                                let (read, within_limits) = read_proc_task_children(
+                                    &task_dir,
+                                    task_pid,
+                                    pid,
+                                    &mut total_bytes,
+                                    &mut task_files_read,
+                                    &mut scheduled,
+                                    &mut queue,
+                                    deadline,
+                                );
+                                child_metadata_read |= read;
+                                complete &= within_limits;
+                            }
+                            if task_files_read >= MAX_PROC_TASK_FILE_READS
+                                || total_bytes >= MAX_PROC_TREE_TOTAL_BYTES
+                                || std::time::Instant::now() >= deadline
+                            {
+                                complete = false;
+                                break;
+                            }
+                        }
                     }
-                    queue.push_back((child, Some(pid)));
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(_) => complete = false,
                 }
             }
-            self.entries
-                .insert(pid, LinuxProcessEntry { parent, argv, cwd });
+            // A descendant already named by its parent's bounded `children`
+            // file remains useful process-tree structure even when its own
+            // metadata disappeared or the aggregate byte budget is spent.
+            // Only an unreadable requested root has no authenticated edge to
+            // retain.
+            if argv.is_none() && !child_metadata_read && parent.is_none() {
+                continue;
+            }
+            self.entries.insert(pid, LinuxProcessEntry { parent, argv });
         }
+        self.bytes_read = total_bytes;
+        self.task_files_read = task_files_read;
+        complete
     }
 }
 
 #[cfg(target_os = "linux")]
-fn read_proc_file_bounded(path: &std::path::Path) -> Option<Vec<u8>> {
+#[allow(clippy::too_many_arguments)]
+fn read_proc_task_children(
+    task_dir: &std::path::Path,
+    task_pid: u32,
+    parent_pid: u32,
+    total_bytes: &mut u64,
+    task_files_read: &mut usize,
+    scheduled: &mut std::collections::HashSet<u32>,
+    queue: &mut std::collections::VecDeque<(u32, Option<u32>)>,
+    deadline: std::time::Instant,
+) -> (bool, bool) {
+    if *task_files_read >= MAX_PROC_TASK_FILE_READS
+        || *total_bytes >= MAX_PROC_TREE_TOTAL_BYTES
+        || std::time::Instant::now() >= deadline
+    {
+        return (false, false);
+    }
+    *task_files_read += 1;
+    let path = task_dir.join(task_pid.to_string()).join("children");
+    let bytes = match read_proc_file_charged(&path, total_bytes) {
+        ProcFileRead::Complete(bytes) => bytes,
+        ProcFileRead::Unavailable => return (false, true),
+        ProcFileRead::Incomplete => return (false, false),
+    };
+    let mut complete = true;
+    for child in parse_proc_children(&bytes) {
+        if scheduled.len() >= MAX_PROC_TREE_NODES {
+            complete = false;
+            break;
+        }
+        if scheduled.insert(child) {
+            queue.push_back((child, Some(parent_pid)));
+        }
+    }
+    (true, complete)
+}
+
+#[cfg(target_os = "linux")]
+enum ProcFileRead {
+    Complete(Vec<u8>),
+    /// The proc entry disappeared or could not be opened before any bytes were
+    /// consumed. Process exit/permission races are normal and do not make the
+    /// rest of the snapshot internally partial.
+    Unavailable,
+    /// The read reached a byte ceiling or failed after opening. Publishing
+    /// this scan could erase state based on truncated evidence.
+    Incomplete,
+}
+
+#[cfg(target_os = "linux")]
+fn read_proc_file_charged(path: &std::path::Path, total_bytes: &mut u64) -> ProcFileRead {
     use std::io::Read;
 
-    let file = std::fs::File::open(path).ok()?;
-    let mut bytes = Vec::new();
-    file.take(MAX_PROC_FILE_BYTES + 1)
-        .read_to_end(&mut bytes)
-        .ok()?;
-    (bytes.len() as u64 <= MAX_PROC_FILE_BYTES).then_some(bytes)
+    let remaining = MAX_PROC_TREE_TOTAL_BYTES.saturating_sub(*total_bytes);
+    let limit = remaining.min(MAX_PROC_FILE_BYTES);
+    if limit == 0 {
+        return ProcFileRead::Incomplete;
+    }
+    let file = match std::fs::File::open(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return ProcFileRead::Unavailable;
+        }
+        Err(_) => return ProcFileRead::Incomplete,
+    };
+    let mut bytes = Vec::with_capacity(usize::try_from(limit.min(8192)).unwrap_or(8192));
+    let mut reader = file.take(limit);
+    let result = reader.read_to_end(&mut bytes);
+    *total_bytes = total_bytes.saturating_add(bytes.len() as u64);
+    if result.is_err() || bytes.len() as u64 == limit {
+        // Reaching the limit does not prove EOF without reading another byte.
+        // Reject the unproven/truncated file and charge every byte already
+        // consumed to the aggregate budget.
+        ProcFileRead::Incomplete
+    } else {
+        ProcFileRead::Complete(bytes)
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -461,7 +779,10 @@ impl ProcessTree for LinuxProcessTree {
     }
 
     fn cwd_of(&self, pid: u32) -> Option<String> {
-        self.entries.get(&pid)?.cwd.clone()
+        self.entries.get(&pid)?;
+        std::fs::read_link(self.proc_root.join(pid.to_string()).join("cwd"))
+            .ok()
+            .map(|path| path.to_string_lossy().into_owned())
     }
 
     fn all_pids(&self) -> Vec<u32> {
@@ -531,14 +852,30 @@ fn detect_root_in_index<T: ProcessTree + ?Sized>(
     tree: &T,
     children_by_parent: &std::collections::HashMap<u32, Vec<u32>>,
 ) -> Option<RemoteContext> {
-    let pids_len = children_by_parent.len();
+    let mut queue = std::collections::VecDeque::new();
+    let mut visited = std::collections::HashSet::with_capacity(children_by_parent.len());
+    detect_root_in_index_with_scratch(
+        child_pid,
+        tree,
+        children_by_parent,
+        &mut queue,
+        &mut visited,
+    )
+}
+
+fn detect_root_in_index_with_scratch<T: ProcessTree + ?Sized>(
+    child_pid: u32,
+    tree: &T,
+    children_by_parent: &std::collections::HashMap<u32, Vec<u32>>,
+    queue: &mut std::collections::VecDeque<u32>,
+    visited: &mut std::collections::HashSet<u32>,
+) -> Option<RemoteContext> {
+    queue.clear();
+    visited.clear();
     // BFS from child_pid; closer processes checked first. Loop bound: each pid is
     // enqueued ≤ 1 time (a Pid only has one parent, and `visited` dedupes), so
     // termination is guaranteed even on a cyclic children_by_parent (which
     // shouldn't happen but the bound protects against a future fixture bug).
-    let mut queue: std::collections::VecDeque<u32> = std::collections::VecDeque::new();
-    let mut visited: std::collections::HashSet<u32> =
-        std::collections::HashSet::with_capacity(pids_len);
     // Seed depth 0: the pane root pid itself, so a directly-launched remote
     // client (no shell in between) is considered before its descendants.
     if visited.insert(child_pid) {
@@ -724,6 +1061,7 @@ fn find_foreground_shell_in_index<T: ProcessTree + ?Sized>(
 ) -> Option<ShellLaunch> {
     let mut queue: std::collections::VecDeque<(u32, u32)> = std::collections::VecDeque::new();
     let mut visited: std::collections::HashSet<u32> = std::collections::HashSet::new();
+    visited.insert(child_pid);
     if let Some(initial) = children_by_parent.get(&child_pid) {
         for &pid in initial {
             if visited.insert(pid) {
@@ -788,18 +1126,13 @@ fn deepest_descendant_in_index(
     // children means we've reached the deepest node of a linear chain.
     let mut node = root;
     let mut deepest: Option<u32> = None;
-    let mut visited: std::collections::HashSet<u32> = std::collections::HashSet::new();
-    visited.insert(root);
-    loop {
+    for _ in 0..=children_by_parent.len() {
         match children_by_parent.get(&node).map(Vec::as_slice) {
             // Linear step: descend to the sole child.
             Some([only]) => {
                 // Defensive against a cyclic fixture/index (a pid can normally
                 // have only one parent, so this should never fire): stop rather
                 // than loop forever.
-                if !visited.insert(*only) {
-                    break;
-                }
                 deepest = Some(*only);
                 node = *only;
             }
@@ -809,7 +1142,13 @@ fn deepest_descendant_in_index(
             None => break,
         }
     }
-    deepest
+    // If a malformed index cycles for more steps than it contains nodes, the
+    // foreground is not trustworthy.
+    if children_by_parent.get(&node).is_some() {
+        None
+    } else {
+        deepest
+    }
 }
 
 /// One-shot [`find_foreground_shell_in_index`] over a fresh snapshot
@@ -1371,6 +1710,15 @@ mod tests {
             parse_proc_argv(b"ssh\0alice@host\0bad-\xff\0\0"),
             ["ssh", "alice@host", "bad-\u{fffd}"]
         );
+
+        let nul_dense = [b'x', 0]
+            .into_iter()
+            .cycle()
+            .take((MAX_PROC_ARGS_PER_PROCESS + 100) * 2)
+            .collect::<Vec<_>>();
+        assert_eq!(parse_proc_argv(&nul_dense).len(), MAX_PROC_ARGS_PER_PROCESS);
+        let oversized_decoded = vec![b'x'; MAX_PROC_ARG_DECODED_BYTES + 1];
+        assert!(parse_proc_argv(&oversized_decoded).is_empty());
     }
 
     #[cfg(target_os = "linux")]
@@ -1402,12 +1750,19 @@ mod tests {
         make_process(99, b"docker\0exec\0unrelated\0sh\0", b"");
 
         let mut tree = LinuxProcessTree::default();
-        tree.refresh_from(&root, &[10]);
+        assert!(tree.refresh_from(&root, &[10]));
         let index = build_children_index(&tree);
         assert_eq!(tree.all_pids().len(), 2);
         assert!(!tree.all_pids().contains(&99));
         assert_eq!(tree.parent_of(20), Some(10));
         assert_eq!(tree.cwd_of(20).as_deref(), Some("/tmp"));
+        std::fs::remove_file(root.join("20").join("cwd")).unwrap();
+        symlink("/var", root.join("20").join("cwd")).unwrap();
+        assert_eq!(
+            tree.cwd_of(20).as_deref(),
+            Some("/var"),
+            "cwd is read only for the chosen foreground pid and stays live between refreshes"
+        );
         assert_eq!(
             detect_root_in_index(10, &tree, &index),
             Some(RemoteContext::Ssh {
@@ -1415,6 +1770,220 @@ mod tests {
                 user: Some("alice".into()),
             })
         );
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_proc_scanner_follows_children_owned_by_non_leader_tasks() {
+        let root = std::env::temp_dir().join(format!(
+            "kettle-proc-tree-thread-child-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let root_dir = root.join("10");
+        std::fs::create_dir_all(root_dir.join("task/10")).unwrap();
+        std::fs::create_dir_all(root_dir.join("task/11")).unwrap();
+        std::fs::write(root_dir.join("cmdline"), b"bash\0").unwrap();
+        std::fs::write(root_dir.join("task/10/children"), b"").unwrap();
+        std::fs::write(root_dir.join("task/11/children"), b"20\n").unwrap();
+        let child_dir = root.join("20");
+        std::fs::create_dir_all(child_dir.join("task/20")).unwrap();
+        std::fs::write(child_dir.join("cmdline"), b"ssh\0threaded.example\0").unwrap();
+        std::fs::write(child_dir.join("task/20/children"), b"").unwrap();
+
+        let mut tree = LinuxProcessTree::default();
+        assert!(tree.refresh_from(&root, &[10]));
+        let index = build_children_index(&tree);
+        assert_eq!(tree.parent_of(20), Some(10));
+        assert_eq!(
+            detect_root_in_index(10, &tree, &index),
+            Some(RemoteContext::Ssh {
+                host: "threaded.example".into(),
+                user: None,
+            })
+        );
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_proc_scanner_charges_oversized_files_to_the_aggregate_budget() {
+        let root = std::env::temp_dir().join(format!(
+            "kettle-proc-tree-oversize-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let scan_root = 10_u32;
+        let root_dir = root.join(scan_root.to_string());
+        std::fs::create_dir_all(root_dir.join("task").join(scan_root.to_string())).unwrap();
+        let children = (20_u32..40)
+            .map(|pid| pid.to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
+        std::fs::write(root_dir.join("cmdline"), b"bash\0").unwrap();
+        std::fs::write(
+            root_dir
+                .join("task")
+                .join(scan_root.to_string())
+                .join("children"),
+            children,
+        )
+        .unwrap();
+        let oversized = vec![b'x'; MAX_PROC_FILE_BYTES as usize + 1];
+        for pid in 20_u32..40 {
+            let process_dir = root.join(pid.to_string());
+            std::fs::create_dir_all(process_dir.join("task").join(pid.to_string())).unwrap();
+            std::fs::write(process_dir.join("cmdline"), &oversized).unwrap();
+            std::fs::write(
+                process_dir
+                    .join("task")
+                    .join(pid.to_string())
+                    .join("children"),
+                b"",
+            )
+            .unwrap();
+        }
+
+        let mut tree = LinuxProcessTree::default();
+        assert!(!tree.refresh_from(&root, &[scan_root]));
+        assert_eq!(tree.bytes_read, MAX_PROC_TREE_TOTAL_BYTES);
+        assert!(
+            tree.task_files_read <= MAX_PROC_TASK_FILE_READS,
+            "task-file reads must retain their independent operation bound"
+        );
+        assert!(
+            (20_u32..40).all(|pid| tree.argv_of(pid).is_none()),
+            "oversized argv must never be parsed or retained"
+        );
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_proc_scanner_marks_single_oversized_metadata_files_incomplete() {
+        for oversized_children in [false, true] {
+            let root = std::env::temp_dir().join(format!(
+                "kettle-proc-single-oversize-{}-{}-{}",
+                std::process::id(),
+                oversized_children,
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ));
+            let process_dir = root.join("10");
+            std::fs::create_dir_all(process_dir.join("task/10")).unwrap();
+            let oversized = vec![b'x'; MAX_PROC_FILE_BYTES as usize + 1];
+            std::fs::write(
+                process_dir.join("cmdline"),
+                if oversized_children {
+                    b"bash\0".as_slice()
+                } else {
+                    &oversized
+                },
+            )
+            .unwrap();
+            std::fs::write(
+                process_dir.join("task/10/children"),
+                if oversized_children {
+                    &oversized
+                } else {
+                    b"".as_slice()
+                },
+            )
+            .unwrap();
+
+            let mut tree = LinuxProcessTree::default();
+            assert!(
+                !tree.refresh_from(&root, &[10]),
+                "oversized {} must prevent publishing a partial scan",
+                if oversized_children {
+                    "children"
+                } else {
+                    "cmdline"
+                }
+            );
+
+            std::fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_proc_scanner_does_not_publish_an_unreadable_task_topology() {
+        let root = std::env::temp_dir().join(format!(
+            "kettle-proc-bad-task-dir-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let process_dir = root.join("10");
+        std::fs::create_dir_all(&process_dir).unwrap();
+        std::fs::write(process_dir.join("cmdline"), b"bash\0").unwrap();
+        std::fs::write(process_dir.join("task"), b"not a directory").unwrap();
+
+        let mut tree = LinuxProcessTree::default();
+        assert!(!tree.refresh_from(&root, &[10]));
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_proc_task_reads_stop_at_the_operation_budget_even_for_empty_files() {
+        let root = std::env::temp_dir().join(format!(
+            "kettle-proc-task-budget-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let mut total_bytes = 0_u64;
+        let mut task_files_read = 0_usize;
+        let mut scheduled = std::collections::HashSet::new();
+        let mut queue = std::collections::VecDeque::new();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+
+        for task_pid in 1..=MAX_PROC_TASK_FILE_READS as u32 {
+            let (_, within_limits) = read_proc_task_children(
+                &root,
+                task_pid,
+                1,
+                &mut total_bytes,
+                &mut task_files_read,
+                &mut scheduled,
+                &mut queue,
+                deadline,
+            );
+            assert!(within_limits);
+        }
+        let (_, within_limits) = read_proc_task_children(
+            &root,
+            u32::MAX,
+            1,
+            &mut total_bytes,
+            &mut task_files_read,
+            &mut scheduled,
+            &mut queue,
+            deadline,
+        );
+        assert!(!within_limits);
+        assert_eq!(task_files_read, MAX_PROC_TASK_FILE_READS);
+        assert_eq!(total_bytes, 0);
 
         std::fs::remove_dir_all(root).unwrap();
     }
@@ -1427,8 +1996,9 @@ mod tests {
     /// in aggregate, even though each individually passes the per-file
     /// cap) and assert the walk stops accumulating argv bytes well before
     /// the naive `N * per-file-cap` total, while still recording every
-    /// descendant's parent/cwd (structure survives the budget; only the
-    /// large payloads are dropped).
+    /// descendant's parent (structure survives the budget; only the large
+    /// payloads are dropped). Cwd remains available through its on-demand
+    /// procfs read.
     #[cfg(target_os = "linux")]
     #[test]
     fn linux_proc_scanner_caps_aggregate_argv_bytes_across_the_whole_walk() {
@@ -1473,10 +2043,10 @@ mod tests {
         symlink("/tmp", root_dir.join("cwd")).unwrap();
 
         let mut tree = LinuxProcessTree::default();
-        tree.refresh_from(&root, &[scan_root]);
+        assert!(!tree.refresh_from(&root, &[scan_root]));
 
-        // Structure (parent + cwd) survives for every descendant regardless
-        // of the aggregate budget.
+        // Structure survives for every descendant regardless of the aggregate
+        // budget, and cwd remains available through an on-demand read.
         for pid in 1..=N {
             assert_eq!(tree.parent_of(pid), Some(scan_root));
             assert_eq!(tree.cwd_of(pid).as_deref(), Some("/tmp"));
@@ -2313,6 +2883,21 @@ mod tests {
         );
     }
 
+    #[test]
+    fn deepest_descendant_rejects_a_cyclic_index() {
+        let index = std::collections::HashMap::from([(10, vec![11]), (11, vec![10])]);
+        assert_eq!(deepest_descendant_in_index(10, &index), None);
+    }
+
+    #[test]
+    fn foreground_shell_does_not_reselect_the_root_through_a_cycle() {
+        let mut tree = MockProcessTree::new();
+        tree.add(10, Some(11), &["bash"]);
+        tree.add(11, Some(10), &["sleep", "1"]);
+        let index = build_children_index(&tree);
+        assert_eq!(find_foreground_shell_in_index(10, &tree, &index), None);
+    }
+
     /// v2.29.1: end-to-end check that the sysinfo-backed native cwd read actually
     /// works on this Windows host — spawns a real `pwsh`, `Set-Location`s it to a
     /// known dir, and reads that dir back via `RemoteScanner::foreground_cwd`.
@@ -2606,6 +3191,81 @@ mod tests {
             None,
             "plain local shell → no remote context"
         );
+    }
+
+    #[test]
+    fn shared_index_detection_reuses_and_resets_bfs_scratch() {
+        let mut tree = MockProcessTree::new();
+        tree.add(100, None, &["bash"]);
+        tree.add(200, Some(100), &["ssh", "alice@a.example"]);
+        tree.add(300, None, &["fish"]);
+        let index = build_children_index(&tree);
+        let mut queue = std::collections::VecDeque::from([999]);
+        let mut visited = std::collections::HashSet::from([999]);
+
+        assert_eq!(
+            detect_root_in_index_with_scratch(100, &tree, &index, &mut queue, &mut visited,),
+            Some(RemoteContext::Ssh {
+                host: "a.example".into(),
+                user: Some("alice".into()),
+            })
+        );
+        assert!(!visited.contains(&999));
+
+        assert_eq!(
+            detect_root_in_index_with_scratch(300, &tree, &index, &mut queue, &mut visited,),
+            None
+        );
+        assert_eq!(visited, std::collections::HashSet::from([300]));
+        assert!(queue.is_empty());
+    }
+
+    #[test]
+    fn background_probe_targets_are_bounded_deduplicated_and_fail_closed() {
+        let mut targets = (1..=(MAX_REMOTE_PROBE_TARGETS as u32 + 10))
+            .map(|pid| RemoteProbeTarget {
+                pid,
+                allow_native_cwd: true,
+            })
+            .collect::<Vec<_>>();
+        targets.push(RemoteProbeTarget {
+            pid: 7,
+            allow_native_cwd: false,
+        });
+        targets.reverse();
+        normalize_probe_targets(&mut targets);
+
+        assert_eq!(targets.len(), MAX_REMOTE_PROBE_TARGETS);
+        assert!(targets.windows(2).all(|pair| pair[0].pid < pair[1].pid));
+        assert_eq!(
+            targets.iter().find(|target| target.pid == 7),
+            Some(&RemoteProbeTarget {
+                pid: 7,
+                allow_native_cwd: false,
+            })
+        );
+    }
+
+    #[test]
+    fn background_probe_worker_returns_a_current_process_snapshot() {
+        let worker = RemoteScanWorker::spawn().unwrap();
+        let pid = std::process::id();
+        worker.submit(vec![RemoteProbeTarget {
+            pid,
+            allow_native_cwd: false,
+        }]);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            if let Some(snapshot) = worker.take_latest() {
+                assert!(snapshot.probes.contains_key(&pid));
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "background remote scan did not publish within five seconds"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
     }
 
     /// Drift guard: `ssh-with-credentials` wrappers

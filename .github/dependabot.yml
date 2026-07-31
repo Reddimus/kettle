@@ -7,6 +7,12 @@ updates:
   # `[workspace.dependencies]` and every per-crate Cargo.toml in `crates/`.
   - package-ecosystem: cargo
     directory: "/"
+    # Vendored manifests are immutable upstream snapshots plus reviewed local
+    # patches. Updating them independently would invalidate provenance and can
+    # silently drop Kettle fixes. Refresh vendor/Cargo.lock only as part of an
+    # intentional vendor-source update.
+    exclude-paths:
+      - "vendor/**"
     schedule:
       interval: weekly
       day: monday

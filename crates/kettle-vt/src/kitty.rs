@@ -26,7 +26,7 @@ use std::io::Read;
 use base64::Engine;
 
 use crate::graphics_limits::{GraphicsBudget, GraphicsReservation};
-use crate::image::{ImageData, Placed, rgba_bytes};
+use crate::image::{ImageData, Placed, PlacementParams, rgba_bytes};
 
 // All byte/count ceilings come from `GraphicsLimits`; keeping one source of
 // truth prevents the extractor, decoder, and renderer envelopes from drifting.
@@ -91,6 +91,7 @@ impl Acc {
 /// rectangle and displayed later via Unicode placeholder cells.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct VirtualPlacement {
+    pub placement_id: u32,
     pub cols: u32,
     pub rows: u32,
     pub z: i32,
@@ -108,6 +109,55 @@ pub struct RelativePlacement {
     pub parent_placement: u32,
     pub h: i32,
     pub v: i32,
+    pub z: i32,
+    pub params: PlacementParams,
+}
+
+/// Placement selector carried from the kitty decoder to the terminal core.
+///
+/// Coordinates are the protocol's one-based cell coordinates. Image-number
+/// selectors are resolved to an image id in [`KittyState`] before crossing
+/// this boundary, because only the decoder owns image creation order.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DeleteTarget {
+    /// `d=a|A` (and an omitted `d=`): physical placements still visible on
+    /// the active screen. Virtual placements are deliberately excluded.
+    Visible,
+    /// `d=i|I` or resolved `d=n|N`.
+    Image { id: u32, placement_id: Option<u32> },
+    /// `d=c|C`.
+    Cursor,
+    /// `d=p|P`.
+    Cell { x: u32, y: u32 },
+    /// `d=q|Q`.
+    CellAtZ { x: u32, y: u32, z: i32 },
+    /// `d=r|R`.
+    IdRange { first: u32, last: u32 },
+    /// `d=x|X`.
+    Column { x: u32 },
+    /// `d=y|Y`.
+    Row { y: u32 },
+    /// `d=z|Z`.
+    ZIndex { z: i32 },
+}
+
+/// Fully parsed kitty image-deletion request.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Delete {
+    pub target: DeleteTarget,
+    /// Uppercase selector: free image data once no placement references it.
+    pub free_data: bool,
+    /// Stored ids explicitly selected even when they currently have no
+    /// placement (`I`, `N`, and `R` need this special case).
+    pub free_candidates: Vec<u32>,
+}
+
+/// Stable identity of a named kitty placement. Anonymous (`p=0`) placements
+/// intentionally share the zero id, matching the protocol's delete behavior.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct PlacementKey {
+    pub image_id: u32,
+    pub placement_id: u32,
 }
 
 /// One animation frame of an image (`a=f`). `img` is the *fully composed*
@@ -219,14 +269,12 @@ pub fn current_frame(gaps: &[i32], st: &AnimationState, elapsed_ms: u128) -> usi
 pub enum KittyOut {
     None,
     Place(Placed),
-    Delete {
-        all: bool,
-        id: Option<u32>,
-    },
+    Delete(Delete),
     /// A virtual placement was (re)registered for image `id`; nothing is
     /// drawn now — the renderer composites it where placeholder cells appear.
     Virtual {
         id: u32,
+        placement: u32,
     },
     /// An animation frame was transmitted or the animation control state
     /// changed for image `id`; nothing is drawn at the cursor — the caller
@@ -248,7 +296,11 @@ pub enum KittyOut {
 pub struct KittyState {
     in_flight: HashMap<u32, Acc>,
     store: HashMap<u32, ImageData>,
-    virtual_placements: HashMap<u32, VirtualPlacement>,
+    /// Client image number and creation serial, keyed by resolved image id.
+    image_numbers: HashMap<u32, (u32, u64)>,
+    next_image_serial: u64,
+    next_generated_id: u32,
+    virtual_placements: HashMap<(u32, u32), VirtualPlacement>,
     /// The single in-flight `a=f` frame transmission (`id`, accumulator).
     /// Continuation chunks omit `i=`, so a slot — not an id map — is right;
     /// the protocol only allows one transmission in flight at a time.
@@ -273,6 +325,9 @@ impl KittyState {
         Self {
             in_flight: HashMap::new(),
             store: HashMap::new(),
+            image_numbers: HashMap::new(),
+            next_image_serial: 0,
+            next_generated_id: u32::MAX,
             virtual_placements: HashMap::new(),
             frame_in_flight: None,
             frames: HashMap::new(),
@@ -294,14 +349,18 @@ impl KittyState {
             return KittyOut::None;
         }
         let kv = parse_control(control);
-        let id = kv.get("i").and_then(|v| v.parse().ok()).unwrap_or(0u32);
-        // Continuation chunks carry only `m` (no `a`); route them to the
-        // frame accumulator if a frame — and only a frame — is in flight.
+        let explicit_id = kv.get("i").and_then(|v| v.parse::<u32>().ok());
+        let image_number = kv.get("I").and_then(|v| v.parse::<u32>().ok());
+        // Continuation chunks carry only `m` (no `a`, `i`, or `I`); route
+        // them to the active frame accumulator first.
         let action = match kv.get("a") {
             Some(a) => a.as_str(),
-            // Continuation chunks carry only `m`; route to the frame
-            // accumulator when a frame — and only a frame — is in flight.
-            None if self.frame_in_flight.is_some() && !self.in_flight.contains_key(&id) => "f",
+            None if self.frame_in_flight.is_some()
+                && explicit_id.is_none()
+                && image_number.is_none() =>
+            {
+                "f"
+            }
             None => "t",
         };
         let z = kv.get("z").and_then(|v| v.parse().ok()).unwrap_or(0i32);
@@ -311,66 +370,171 @@ impl KittyState {
 
         // Control-only ops are never chunked.
         if action == "d" {
-            let target = kv.get("d").map(|s| s.as_str()).unwrap_or("a");
-            // Audit (v2.26.0): only a delete-ALL drops every image, so only it
-            // may abort every in-flight (chunked) transmission. A *targeted*
-            // delete (`d=i` / `d=f`) interleaved between another image's chunks
-            // must discard only THIS id's accumulators — the old unconditional
-            // `in_flight.clear()` silently corrupted the unrelated transmit.
-            let delete_all = !target.eq_ignore_ascii_case("i") && !target.eq_ignore_ascii_case("f");
-            if delete_all {
-                self.in_flight.clear();
-                self.frame_in_flight = None;
-            } else if id != 0 {
-                self.in_flight.remove(&id);
-                if self
-                    .frame_in_flight
-                    .as_ref()
-                    .is_some_and(|(fid, _)| *fid == id)
-                {
-                    self.frame_in_flight = None;
-                }
+            // The protocol requires *every* delete command to abort a partial
+            // upload, even when the delete selector targets another image.
+            self.in_flight.clear();
+            self.frame_in_flight = None;
+
+            if explicit_id.is_some() && image_number.is_some() {
+                return KittyOut::None;
             }
-            // `d=f|F`: delete only the animation frames/state, keep the image.
-            if target.eq_ignore_ascii_case("f") {
-                if id != 0 {
-                    self.frames.remove(&id);
-                    self.anim.remove(&id);
-                } else {
-                    self.frames.clear();
-                    self.anim.clear();
+
+            let selector = kv
+                .get("d")
+                .and_then(|value| value.as_bytes().first().copied())
+                .unwrap_or(b'a');
+            // `d=f|F`: delete one animation frame (`r=`, default root).
+            if matches!(selector, b'f' | b'F') {
+                let Some(id) = explicit_id.or_else(|| {
+                    image_number.and_then(|number| self.newest_image_with_number(number))
+                }) else {
+                    // Kitty rejects frame deletion without an image id/number.
+                    return KittyOut::None;
+                };
+                if !self.store.contains_key(&id) {
+                    return KittyOut::None;
                 }
-                // Surface an (now-empty) snapshot so the caller drops it.
+                let extra_count = self.frames.get(&id).map_or(0, Vec::len);
+                if extra_count == 0 {
+                    if selector == b'F' {
+                        // With only the root frame, uppercase F deletes the
+                        // image itself (and therefore all its placements).
+                        let delete = Delete {
+                            target: DeleteTarget::Image {
+                                id,
+                                placement_id: None,
+                            },
+                            free_data: true,
+                            free_candidates: vec![id],
+                        };
+                        self.apply_nonspatial_delete(&delete);
+                        return KittyOut::Delete(delete);
+                    }
+                    return KittyOut::None;
+                }
+
+                let requested = dim("r").unwrap_or(0);
+                let frame_number = if requested == 0 {
+                    1
+                } else {
+                    requested.min(extra_count as u32 + 1)
+                };
+                let removed_index = frame_number as usize - 1;
+                if removed_index == 0 {
+                    let promoted = match self.frames.get_mut(&id) {
+                        Some(frames) if !frames.is_empty() => frames.remove(0),
+                        _ => return KittyOut::None,
+                    };
+                    self.store.insert(id, promoted.img);
+                    self.anim.entry(id).or_default().root_gap = promoted.gap_ms;
+                } else if let Some(frames) = self.frames.get_mut(&id) {
+                    frames.remove(removed_index - 1);
+                }
+                if self.frames.get(&id).is_some_and(Vec::is_empty) {
+                    self.frames.remove(&id);
+                }
+
+                if let Some(state) = self.anim.get_mut(&id) {
+                    let current_index = state.current.saturating_sub(1) as usize;
+                    let last_index = extra_count - 1;
+                    let current_index = if current_index > last_index {
+                        last_index
+                    } else if removed_index < current_index {
+                        current_index - 1
+                    } else {
+                        current_index
+                    };
+                    state.current = current_index as u32 + 1;
+                }
                 return KittyOut::Animate { id };
             }
-            return match target {
-                "i" | "I" => {
-                    self.store.remove(&id);
-                    self.virtual_placements.remove(&id);
-                    self.frames.remove(&id);
-                    self.anim.remove(&id);
-                    // A placement group dies with its parent: drop this
-                    // image's relatives and any placement parented to it.
-                    self.rel
-                        .retain(|&(img, _), r| img != id && r.parent_img != id);
-                    KittyOut::Delete {
-                        all: false,
-                        id: Some(id),
-                    }
+
+            let placement_id = dim("p").filter(|&value| value != 0);
+            let free_data = selector.is_ascii_uppercase();
+            let target = match selector.to_ascii_lowercase() {
+                b'a' => DeleteTarget::Visible,
+                b'i' => {
+                    let Some(id) = explicit_id else {
+                        return KittyOut::None;
+                    };
+                    DeleteTarget::Image { id, placement_id }
                 }
-                _ => {
-                    self.store.clear();
-                    self.virtual_placements.clear();
-                    self.frames.clear();
-                    self.anim.clear();
-                    self.rel.clear();
-                    KittyOut::Delete {
-                        all: true,
-                        id: None,
-                    }
+                b'n' => {
+                    let Some(id) =
+                        image_number.and_then(|number| self.newest_image_with_number(number))
+                    else {
+                        return KittyOut::None;
+                    };
+                    DeleteTarget::Image { id, placement_id }
                 }
+                b'c' => DeleteTarget::Cursor,
+                b'p' => DeleteTarget::Cell {
+                    x: dim("x").unwrap_or(0),
+                    y: dim("y").unwrap_or(0),
+                },
+                b'q' => DeleteTarget::CellAtZ {
+                    x: dim("x").unwrap_or(0),
+                    y: dim("y").unwrap_or(0),
+                    z,
+                },
+                b'r' => DeleteTarget::IdRange {
+                    first: dim("x").unwrap_or(0),
+                    last: dim("y").unwrap_or(0),
+                },
+                b'x' => DeleteTarget::Column {
+                    x: dim("x").unwrap_or(0),
+                },
+                b'y' => DeleteTarget::Row {
+                    y: dim("y").unwrap_or(0),
+                },
+                b'z' => DeleteTarget::ZIndex { z },
+                _ => return KittyOut::None,
             };
+
+            let free_candidates = if free_data {
+                match target {
+                    DeleteTarget::Image { id, .. } => vec![id],
+                    DeleteTarget::IdRange { first, last } => self
+                        .store
+                        .keys()
+                        .copied()
+                        .filter(|id| first <= *id && *id <= last)
+                        .collect(),
+                    _ => Vec::new(),
+                }
+            } else {
+                Vec::new()
+            };
+            let delete = Delete {
+                target,
+                free_data,
+                free_candidates,
+            };
+            self.apply_nonspatial_delete(&delete);
+            return KittyOut::Delete(delete);
         }
+
+        // `i` and `I` are mutually exclusive for every graphics command.
+        if explicit_id.is_some() && image_number.is_some() {
+            return KittyOut::None;
+        }
+
+        let id = match (explicit_id, image_number) {
+            (Some(id), None) => id,
+            (None, Some(number)) if matches!(action, "t" | "T" | "q") => self
+                .in_flight_id_for_number(number)
+                .unwrap_or_else(|| self.allocate_generated_id()),
+            (None, Some(number)) => self.newest_image_with_number(number).unwrap_or(0),
+            (None, None) if action == "f" => self
+                .frame_in_flight
+                .as_ref()
+                .map(|(id, _)| *id)
+                .unwrap_or(0),
+            (None, None) if self.in_flight.len() == 1 => {
+                self.in_flight.keys().next().copied().unwrap_or(0)
+            }
+            _ => 0,
+        };
         if action == "a" {
             // Animation control. Record state for the renderer playback loop.
             // Gate the entry on the saturation cap. Updates to an
@@ -607,24 +771,27 @@ impl KittyState {
             // `a=p,U=1` registers a virtual placement (shown later via
             // placeholder text); plain `a=p` puts the image at the cursor.
             if virt {
+                let placement = dim("p").unwrap_or(0);
+                let key = (id, placement);
                 // Saturation gate. Updates to an already-tracked
                 // id are always allowed (no growth); brand-new ids past the
                 // cap are dropped so an attacker can't grow the placement
                 // map by firing `a=p,U=1,i=N` for many distinct N.
-                if !self.virtual_placements.contains_key(&id)
+                if !self.virtual_placements.contains_key(&key)
                     && self.placement_state_len() >= self.budget.limits().placements
                 {
                     return KittyOut::None;
                 }
                 self.virtual_placements.insert(
-                    id,
+                    key,
                     VirtualPlacement {
+                        placement_id: placement,
                         cols: dim("c").unwrap_or(0),
                         rows: dim("r").unwrap_or(0),
                         z,
                     },
                 );
-                return KittyOut::Virtual { id };
+                return KittyOut::Virtual { id, placement };
             }
             // `P=` (parent image id) ⇒ a relative placement: recorded and
             // positioned from the parent at render time, not at the cursor.
@@ -646,6 +813,8 @@ impl KittyState {
                         parent_placement: dim("Q").unwrap_or(0),
                         h: geti("H").unwrap_or(0),
                         v: geti("V").unwrap_or(0),
+                        z,
+                        params: placement_params(&kv),
                     },
                 );
                 return KittyOut::Relative { id, placement };
@@ -654,7 +823,9 @@ impl KittyState {
                 Some(img) => KittyOut::Place(Placed {
                     img: img.clone(),
                     id: Some(id),
+                    placement_id: dim("p").unwrap_or(0),
                     z,
+                    params: Some(placement_params(&kv)),
                 }),
                 None => KittyOut::None,
             };
@@ -709,31 +880,44 @@ impl KittyState {
             // by completing distinct `i=` transmissions.
             if self.store.contains_key(&id) || self.store.len() < self.budget.limits().placements {
                 self.store.insert(id, img.clone());
+                self.next_image_serial = self.next_image_serial.wrapping_add(1);
+                if let Some(number) = first.get("I").and_then(|v| v.parse::<u32>().ok()) {
+                    self.image_numbers
+                        .insert(id, (number, self.next_image_serial));
+                } else {
+                    self.image_numbers.remove(&id);
+                }
             }
         }
         // `U=1` (possibly combined with `a=T`): store + register a virtual
         // placement, but draw nothing at the cursor.
         if first.get("U").map(|v| v == "1").unwrap_or(false) {
             let fz = first.get("z").and_then(|v| v.parse().ok()).unwrap_or(z);
+            let placement = first
+                .get("p")
+                .and_then(|v| v.parse::<u32>().ok())
+                .unwrap_or(0);
+            let key = (id, placement);
             // Saturation gate (same shape as the standalone
             // `a=p,U=1` path above). The store-side gate above doesn't
             // imply this one — store and virtual_placements are independent
             // maps, and `U=1` on an existing-id update would silently grow
             // virtual_placements without it.
-            if !self.virtual_placements.contains_key(&id)
+            if !self.virtual_placements.contains_key(&key)
                 && self.placement_state_len() >= self.budget.limits().placements
             {
                 return KittyOut::None;
             }
             self.virtual_placements.insert(
-                id,
+                key,
                 VirtualPlacement {
+                    placement_id: placement,
                     cols: first.get("c").and_then(|v| v.parse().ok()).unwrap_or(0),
                     rows: first.get("r").and_then(|v| v.parse().ok()).unwrap_or(0),
                     z: fz,
                 },
             );
-            return KittyOut::Virtual { id };
+            return KittyOut::Virtual { id, placement };
         }
         // `T` displays now; bare `t` only stores.
         if first.get("a").map(|s| s.as_str()).unwrap_or("t") == "T" {
@@ -741,7 +925,12 @@ impl KittyState {
             KittyOut::Place(Placed {
                 img,
                 id: (id != 0).then_some(id),
+                placement_id: first
+                    .get("p")
+                    .and_then(|v| v.parse::<u32>().ok())
+                    .unwrap_or(0),
                 z: fz,
+                params: Some(placement_params(&first)),
             })
         } else {
             KittyOut::None
@@ -753,9 +942,9 @@ impl KittyState {
         self.store.get(&id)
     }
 
-    /// The registered virtual placement for an image id, if any.
-    pub fn virtual_placement(&self, id: u32) -> Option<&VirtualPlacement> {
-        self.virtual_placements.get(&id)
+    /// A registered virtual placement for an image/placement id pair.
+    pub fn virtual_placement(&self, id: u32, placement: u32) -> Option<&VirtualPlacement> {
+        self.virtual_placements.get(&(id, placement))
     }
 
     /// Animation frames appended to an image (root frame is the base image
@@ -772,6 +961,191 @@ impl KittyState {
     /// The relative-placement relation for `(image id, placement id)`.
     pub fn relative_placement(&self, id: u32, placement: u32) -> Option<&RelativePlacement> {
         self.rel.get(&(id, placement))
+    }
+
+    /// Clear placements whose position depends on a concrete grid-row anchor.
+    ///
+    /// Physical placements are owned by `kettle-core`; this state only needs
+    /// to forget relative-placement relations. Transmitted image data,
+    /// animation frames, and Unicode virtual-placement prototypes remain
+    /// valid across text reflow.
+    pub(crate) fn clear_relative_placements(&mut self) {
+        self.rel.clear();
+    }
+
+    fn newest_image_with_number(&self, number: u32) -> Option<u32> {
+        self.image_numbers
+            .iter()
+            .filter_map(|(&id, &(candidate, serial))| {
+                (candidate == number && self.store.contains_key(&id)).then_some((serial, id))
+            })
+            .max_by_key(|&(serial, _)| serial)
+            .map(|(_, id)| id)
+    }
+
+    fn in_flight_id_for_number(&self, number: u32) -> Option<u32> {
+        self.in_flight.iter().find_map(|(&id, acc)| {
+            parse_control(&acc.control)
+                .get("I")
+                .and_then(|value| value.parse::<u32>().ok())
+                .filter(|&candidate| candidate == number)
+                .map(|_| id)
+        })
+    }
+
+    fn allocate_generated_id(&mut self) -> u32 {
+        // At most a few hundred ids can be retained by the graphics limits,
+        // so a bounded probe over the occupied set always finds a free id.
+        let probes = self
+            .store
+            .len()
+            .saturating_add(self.in_flight.len())
+            .saturating_add(2);
+        for _ in 0..probes {
+            let candidate = self.next_generated_id;
+            self.next_generated_id = self.next_generated_id.wrapping_sub(1);
+            if candidate != 0
+                && !self.store.contains_key(&candidate)
+                && !self.in_flight.contains_key(&candidate)
+            {
+                return candidate;
+            }
+        }
+        0
+    }
+
+    /// Apply the selector portions whose placement identities are known in
+    /// the decoder. Spatial selectors are completed by kettle-core and fed
+    /// back through [`Self::apply_delete_result`].
+    fn apply_nonspatial_delete(&mut self, delete: &Delete) {
+        let selected = |image_id: u32, placement_id: u32| match delete.target {
+            DeleteTarget::Image {
+                id,
+                placement_id: wanted,
+            } => image_id == id && wanted.is_none_or(|wanted| wanted == placement_id),
+            DeleteTarget::IdRange { first, last } => first <= image_id && image_id <= last,
+            _ => false,
+        };
+
+        let mut removed: Vec<PlacementKey> = self
+            .virtual_placements
+            .keys()
+            .chain(self.rel.keys())
+            .filter_map(|&(image_id, placement_id)| {
+                selected(image_id, placement_id).then_some(PlacementKey {
+                    image_id,
+                    placement_id,
+                })
+            })
+            .collect();
+        // Deleting every placement of an image/range also invalidates
+        // relatives parented to any of those placements, including parents
+        // that were ordinary (and therefore are not tracked in KittyState).
+        let parent_image_selected = |parent: u32| match delete.target {
+            DeleteTarget::Image {
+                id,
+                placement_id: None,
+            } => parent == id,
+            DeleteTarget::IdRange { first, last } => first <= parent && parent <= last,
+            _ => false,
+        };
+        removed.extend(
+            self.rel
+                .iter()
+                .filter_map(|(&(image_id, placement_id), relative)| {
+                    parent_image_selected(relative.parent_img).then_some(PlacementKey {
+                        image_id,
+                        placement_id,
+                    })
+                }),
+        );
+        self.remove_placement_keys(&removed, true);
+
+        let can_free_eagerly = matches!(
+            delete.target,
+            DeleteTarget::Image {
+                placement_id: None,
+                ..
+            } | DeleteTarget::IdRange { .. }
+        );
+        if delete.free_data && can_free_eagerly {
+            for &id in &delete.free_candidates {
+                self.free_image_data(id);
+            }
+        }
+    }
+
+    pub(crate) fn apply_delete_result(
+        &mut self,
+        removed: &[PlacementKey],
+        freed_image_ids: &[u32],
+    ) {
+        // The terminal core reports physical placements selected by cursor,
+        // cell, row/column, z-index, or visible-screen geometry. Virtual refs
+        // are excluded from all those selectors. In particular, an anonymous
+        // physical and anonymous virtual placement can both use `(id, p=0)`,
+        // so key equality must not erase the virtual ref here. Non-spatial
+        // id/range deletion already removed virtual refs eagerly above.
+        self.remove_placement_keys(removed, false);
+        for &id in freed_image_ids {
+            self.free_image_data(id);
+        }
+    }
+
+    fn remove_placement_keys(&mut self, removed: &[PlacementKey], remove_virtual: bool) {
+        if removed.is_empty() {
+            return;
+        }
+        if remove_virtual {
+            self.virtual_placements
+                .retain(|&(image_id, placement_id), _| {
+                    !removed
+                        .iter()
+                        .any(|key| key.image_id == image_id && key.placement_id == placement_id)
+                });
+        }
+
+        // Relative placements depend on a concrete parent placement. Cascade
+        // until stable so deleting a root also removes every descendant.
+        let mut removed_keys = removed.to_vec();
+        loop {
+            let before = self.rel.len();
+            let mut cascaded = Vec::new();
+            self.rel.retain(|&(image_id, placement_id), relative| {
+                let own = removed_keys
+                    .iter()
+                    .any(|key| key.image_id == image_id && key.placement_id == placement_id);
+                let parent = removed_keys.iter().any(|key| {
+                    key.image_id == relative.parent_img
+                        && (relative.parent_placement == 0
+                            || key.placement_id == relative.parent_placement)
+                });
+                if own || parent {
+                    cascaded.push(PlacementKey {
+                        image_id,
+                        placement_id,
+                    });
+                    false
+                } else {
+                    true
+                }
+            });
+            if self.rel.len() == before {
+                break;
+            }
+            removed_keys.extend(cascaded);
+        }
+    }
+
+    fn free_image_data(&mut self, id: u32) {
+        self.store.remove(&id);
+        self.image_numbers.remove(&id);
+        self.frames.remove(&id);
+        self.anim.remove(&id);
+        self.virtual_placements
+            .retain(|&(image_id, _), _| image_id != id);
+        self.rel
+            .retain(|&(image_id, _), relative| image_id != id && relative.parent_img != id);
     }
 
     /// Total bytes currently buffered across every in-flight
@@ -872,6 +1246,21 @@ fn parse_control(s: &str) -> HashMap<String, String> {
         .filter_map(|kv| kv.split_once('='))
         .map(|(k, v)| (k.trim().to_string(), v.trim().to_string()))
         .collect()
+}
+
+fn placement_params(kv: &HashMap<String, String>) -> PlacementParams {
+    let u32_value = |key: &str| kv.get(key).and_then(|value| value.parse::<u32>().ok());
+    PlacementParams {
+        source_x: u32_value("x").unwrap_or(0),
+        source_y: u32_value("y").unwrap_or(0),
+        source_width: u32_value("w").unwrap_or(0),
+        source_height: u32_value("h").unwrap_or(0),
+        columns: u32_value("c").unwrap_or(0),
+        rows: u32_value("r").unwrap_or(0),
+        cell_x_offset: u32_value("X").unwrap_or(0),
+        cell_y_offset: u32_value("Y").unwrap_or(0),
+        suppress_cursor_movement: u32_value("C") == Some(1),
+    }
 }
 
 /// Inflate a zlib (`o=z`) kitty payload, never allocating more than `cap`
@@ -1059,7 +1448,13 @@ mod tests {
         let mut k = KittyState::default();
         let out = k.feed(&format!("a=T,U=1,i=7,c=2,r=3,f=32,s=1,v=1;{PX}"));
         assert!(
-            matches!(out, KittyOut::Virtual { id: 7 }),
+            matches!(
+                out,
+                KittyOut::Virtual {
+                    id: 7,
+                    placement: 0
+                }
+            ),
             "a=T,U=1 must register a virtual placement, not draw at cursor"
         );
         assert!(
@@ -1067,8 +1462,9 @@ mod tests {
             "image still stored for later compositing"
         );
         assert_eq!(
-            k.virtual_placement(7).copied(),
+            k.virtual_placement(7, 0).copied(),
             Some(VirtualPlacement {
+                placement_id: 0,
                 cols: 2,
                 rows: 3,
                 z: 0
@@ -1086,10 +1482,17 @@ mod tests {
         ));
         // a=p,U=1 registers the virtual placement by id.
         let out = k.feed("a=p,U=1,i=8,c=4,r=1,z=5");
-        assert!(matches!(out, KittyOut::Virtual { id: 8 }));
+        assert!(matches!(
+            out,
+            KittyOut::Virtual {
+                id: 8,
+                placement: 0
+            }
+        ));
         assert_eq!(
-            k.virtual_placement(8).copied(),
+            k.virtual_placement(8, 0).copied(),
             Some(VirtualPlacement {
+                placement_id: 0,
                 cols: 4,
                 rows: 1,
                 z: 5
@@ -1106,10 +1509,10 @@ mod tests {
     fn delete_clears_virtual_placement() {
         let mut k = KittyState::default();
         k.feed(&format!("a=T,U=1,i=9,c=1,r=1,f=32,s=1,v=1;{PX}"));
-        assert!(k.virtual_placement(9).is_some());
+        assert!(k.virtual_placement(9, 0).is_some());
         k.feed("a=d,d=i,i=9");
         assert!(
-            k.virtual_placement(9).is_none(),
+            k.virtual_placement(9, 0).is_none(),
             "delete-by-id drops the virtual placement too"
         );
     }
@@ -1154,11 +1557,42 @@ mod tests {
         assert!(!a.running);
         assert_eq!(a.loops, 0);
 
-        // d=f deletes frames/anim but keeps the image.
-        k.feed("a=d,d=f,i=3");
+        // d=f deletes one frame. The default is root frame 1, so frame 2 is
+        // promoted and keeps its gap; the selected current-frame index shifts.
+        assert!(matches!(k.feed("a=d,d=f,i=3"), KittyOut::Animate { id: 3 }));
+        assert_eq!(k.frames(3).len(), 1);
+        let a = k.animation(3).copied().unwrap();
+        assert_eq!(a.root_gap, 48);
+        assert_eq!(a.current, 1);
+        assert!(k.image(3).is_some());
+
+        // An out-of-range r clamps to the last frame.
+        assert!(matches!(
+            k.feed("a=d,d=F,i=3,r=999"),
+            KittyOut::Animate { id: 3 }
+        ));
         assert!(k.frames(3).is_empty());
-        assert!(k.animation(3).is_none());
-        assert!(k.image(3).is_some(), "d=f keeps the base image");
+        assert!(
+            k.image(3).is_some(),
+            "deleting an extra frame keeps the root"
+        );
+
+        // With only a root left, lowercase is a no-op and uppercase deletes
+        // the entire image. An id/number is mandatory.
+        assert!(matches!(k.feed("a=d,d=f,i=3"), KittyOut::None));
+        assert!(matches!(k.feed("a=d,d=f"), KittyOut::None));
+        assert!(matches!(
+            k.feed("a=d,d=F,i=3"),
+            KittyOut::Delete(Delete {
+                target: DeleteTarget::Image {
+                    id: 3,
+                    placement_id: None
+                },
+                free_data: true,
+                ..
+            })
+        ));
+        assert!(k.image(3).is_none());
     }
 
     #[test]
@@ -1254,6 +1688,8 @@ mod tests {
                 parent_placement: 1,
                 h: 3,
                 v: -2,
+                z: 0,
+                params: PlacementParams::default(),
             })
         );
         // Deleting the parent image cascades: the relative is dropped.
@@ -1268,6 +1704,74 @@ mod tests {
         assert!(k.relative_placement(2, 8).is_some());
         k.feed("a=d,d=i,i=2");
         assert!(k.relative_placement(2, 8).is_none());
+    }
+
+    #[test]
+    fn reflow_clears_relative_anchors_but_preserves_virtual_prototypes() {
+        let mut k = KittyState::default();
+        k.feed(&format!("a=T,U=1,i=1,p=3,c=1,r=1,f=32,s=1,v=1;{PX}"));
+        k.feed(&format!("a=t,i=2,f=32,s=1,v=1;{PX}"));
+        k.feed("a=p,i=2,p=7,P=1,Q=3,H=1,V=1");
+        assert!(k.virtual_placement(1, 3).is_some());
+        assert!(k.relative_placement(2, 7).is_some());
+
+        k.clear_relative_placements();
+
+        assert!(k.relative_placement(2, 7).is_none());
+        assert!(k.virtual_placement(1, 3).is_some());
+        assert!(k.image(1).is_some());
+        assert!(k.image(2).is_some());
+    }
+
+    #[test]
+    fn placement_geometry_is_preserved_for_put_transmit_and_relative_commands() {
+        let expected = PlacementParams {
+            source_x: 1,
+            source_y: 2,
+            source_width: 30,
+            source_height: 40,
+            columns: 5,
+            rows: 6,
+            cell_x_offset: 7,
+            cell_y_offset: 8,
+            suppress_cursor_movement: true,
+        };
+        let controls = "x=1,y=2,w=30,h=40,c=5,r=6,X=7,Y=8,C=1";
+
+        let mut state = KittyState::default();
+        state.feed(&format!("a=t,i=1,f=32,s=1,v=1;{PX}"));
+        let put = state.feed(&format!("a=p,i=1,{controls}"));
+        assert!(matches!(
+            put,
+            KittyOut::Place(Placed {
+                params: Some(params),
+                ..
+            }) if params == expected
+        ));
+
+        let transmitted = state.feed(&format!("a=T,i=2,f=32,s=1,v=1,{controls};{PX}"));
+        assert!(matches!(
+            transmitted,
+            KittyOut::Place(Placed {
+                params: Some(params),
+                ..
+            }) if params == expected
+        ));
+
+        state.feed(&format!("a=t,i=3,f=32,s=1,v=1;{PX}"));
+        assert!(matches!(
+            state.feed(&format!("a=p,i=3,p=9,P=1,Q=0,{controls}")),
+            KittyOut::Relative {
+                id: 3,
+                placement: 9
+            }
+        ));
+        assert_eq!(
+            state
+                .relative_placement(3, 9)
+                .map(|placement| placement.params),
+            Some(expected)
+        );
     }
 
     #[test]
@@ -1415,7 +1919,7 @@ mod tests {
         assert!(k.relative_placement(overflow, 1).is_none());
         // Updating an admitted placement does not consume another slot.
         k.feed("a=p,U=1,i=1,c=2,r=2");
-        assert_eq!(k.virtual_placement(1).map(|p| p.cols), Some(2));
+        assert_eq!(k.virtual_placement(1, 0).map(|p| p.cols), Some(2));
     }
 
     /// Drift guard: chaining more than `MAX_FRAMES_PER_IMAGE`
@@ -1540,5 +2044,188 @@ mod tests {
         // dropped payload — the slot was cleared by the cap.
         let out2 = k.feed("m=0;AAAA");
         assert!(matches!(out2, KittyOut::None));
+    }
+
+    fn expect_delete(out: KittyOut) -> Delete {
+        match out {
+            KittyOut::Delete(delete) => delete,
+            _ => panic!("expected kitty delete request"),
+        }
+    }
+
+    #[test]
+    fn kitty_delete_parser_covers_every_spatial_and_id_selector() {
+        let cases = [
+            ("a=d", DeleteTarget::Visible, false),
+            ("a=d,d=A", DeleteTarget::Visible, true),
+            (
+                "a=d,d=i,i=9,p=7",
+                DeleteTarget::Image {
+                    id: 9,
+                    placement_id: Some(7),
+                },
+                false,
+            ),
+            (
+                "a=d,d=I,i=9",
+                DeleteTarget::Image {
+                    id: 9,
+                    placement_id: None,
+                },
+                true,
+            ),
+            ("a=d,d=c", DeleteTarget::Cursor, false),
+            ("a=d,d=C", DeleteTarget::Cursor, true),
+            ("a=d,d=p,x=3,y=4", DeleteTarget::Cell { x: 3, y: 4 }, false),
+            (
+                "a=d,d=Q,x=3,y=4,z=-2",
+                DeleteTarget::CellAtZ { x: 3, y: 4, z: -2 },
+                true,
+            ),
+            (
+                "a=d,d=r,x=2,y=5",
+                DeleteTarget::IdRange { first: 2, last: 5 },
+                false,
+            ),
+            (
+                "a=d,d=R,x=2,y=5",
+                DeleteTarget::IdRange { first: 2, last: 5 },
+                true,
+            ),
+            ("a=d,d=x,x=8", DeleteTarget::Column { x: 8 }, false),
+            ("a=d,d=X,x=8", DeleteTarget::Column { x: 8 }, true),
+            ("a=d,d=y,y=6", DeleteTarget::Row { y: 6 }, false),
+            ("a=d,d=Y,y=6", DeleteTarget::Row { y: 6 }, true),
+            ("a=d,d=z,z=-1", DeleteTarget::ZIndex { z: -1 }, false),
+            ("a=d,d=Z,z=-1", DeleteTarget::ZIndex { z: -1 }, true),
+        ];
+        for (command, target, free_data) in cases {
+            let mut state = KittyState::default();
+            let delete = expect_delete(state.feed(command));
+            assert_eq!(delete.target, target, "{command}");
+            assert_eq!(delete.free_data, free_data, "{command}");
+        }
+    }
+
+    #[test]
+    fn image_numbers_select_the_newest_image_and_uppercase_frees_data() {
+        let mut state = KittyState::default();
+        let first = match state.feed(&format!("a=T,I=77,f=32,s=1,v=1;{PX}")) {
+            KittyOut::Place(placed) => placed.id.expect("generated id"),
+            _ => panic!("first numbered transmission was not displayed"),
+        };
+        let second = match state.feed(&format!("a=T,I=77,f=32,s=1,v=1;{PX}")) {
+            KittyOut::Place(placed) => placed.id.expect("generated id"),
+            _ => panic!("second numbered transmission was not displayed"),
+        };
+        assert_ne!(first, second, "an image number is not a unique image id");
+        assert!(matches!(
+            state.feed("a=p,I=77"),
+            KittyOut::Place(Placed {
+                id: Some(id),
+                ..
+            }) if id == second
+        ));
+
+        let soft = expect_delete(state.feed("a=d,d=n,I=77"));
+        assert_eq!(
+            soft.target,
+            DeleteTarget::Image {
+                id: second,
+                placement_id: None
+            }
+        );
+        assert!(!soft.free_data);
+        assert!(state.image(second).is_some());
+
+        let hard = expect_delete(state.feed("a=d,d=N,I=77"));
+        assert!(hard.free_data);
+        assert!(state.image(second).is_none());
+        assert!(matches!(
+            state.feed("a=p,I=77"),
+            KittyOut::Place(Placed {
+                id: Some(id),
+                ..
+            }) if id == first
+        ));
+    }
+
+    #[test]
+    fn lowercase_delete_retains_data_uppercase_delete_frees_it() {
+        let mut state = KittyState::default();
+        state.feed(&format!("a=T,i=41,f=32,s=1,v=1;{PX}"));
+        let soft = expect_delete(state.feed("a=d,d=i,i=41"));
+        assert!(!soft.free_data);
+        assert!(state.image(41).is_some());
+        assert!(matches!(
+            state.feed("a=p,i=41,p=3"),
+            KittyOut::Place(Placed {
+                placement_id: 3,
+                ..
+            })
+        ));
+
+        let hard = expect_delete(state.feed("a=d,d=I,i=41"));
+        assert!(hard.free_data);
+        assert!(state.image(41).is_none());
+        assert!(matches!(state.feed("a=p,i=41"), KittyOut::None));
+    }
+
+    #[test]
+    fn every_delete_aborts_image_and_frame_partial_uploads() {
+        let mut state = KittyState::default();
+        state.feed(&format!("a=t,i=2,f=32,s=1,v=1;{PX}"));
+        state.feed("a=T,i=1,f=32,s=1,v=1,m=1;AQID");
+        state.feed("a=f,i=2,f=32,s=1,v=1,m=1;AQID");
+        assert_eq!(state.in_flight_len_for_test(), 1);
+        assert!(state.frame_in_flight.is_some());
+
+        expect_delete(state.feed("a=d,d=x,x=1"));
+        assert_eq!(state.in_flight_len_for_test(), 0);
+        assert!(state.frame_in_flight.is_none());
+        assert!(matches!(state.feed("i=1,m=0;BA=="), KittyOut::None));
+        assert!(state.image(1).is_none());
+        assert!(matches!(state.feed("m=0;BA=="), KittyOut::None));
+        assert!(state.frames(2).is_empty());
+    }
+
+    #[test]
+    fn named_virtual_placements_delete_independently() {
+        let mut state = KittyState::default();
+        state.feed(&format!("a=t,i=5,f=32,s=1,v=1;{PX}"));
+        state.feed("a=p,U=1,i=5,p=1,c=1,r=1");
+        state.feed("a=p,U=1,i=5,p=2,c=2,r=2");
+        assert!(state.virtual_placement(5, 1).is_some());
+        assert!(state.virtual_placement(5, 2).is_some());
+
+        expect_delete(state.feed("a=d,d=i,i=5,p=1"));
+        assert!(state.virtual_placement(5, 1).is_none());
+        assert!(state.virtual_placement(5, 2).is_some());
+        assert!(state.image(5).is_some(), "soft delete retains pixels");
+    }
+
+    #[test]
+    fn spatial_physical_delete_does_not_alias_anonymous_virtual_placement() {
+        let mut state = KittyState::default();
+        state.feed(&format!("a=t,i=5,f=32,s=1,v=1;{PX}"));
+        state.feed("a=p,U=1,i=5,p=0,c=1,r=1");
+        state.feed(&format!("a=t,i=6,f=32,s=1,v=1;{PX}"));
+        state.feed("a=p,i=6,p=7,P=5,Q=0");
+        assert!(state.virtual_placement(5, 0).is_some());
+        assert!(state.relative_placement(6, 7).is_some());
+
+        // Core selected an ordinary p=0 placement at a cursor/cell. The
+        // virtual p=0 ref is a distinct placement and spatial selectors must
+        // never remove it, while relative descendants of the physical parent
+        // still lose their ancestry.
+        state.apply_delete_result(
+            &[PlacementKey {
+                image_id: 5,
+                placement_id: 0,
+            }],
+            &[],
+        );
+        assert!(state.virtual_placement(5, 0).is_some());
+        assert!(state.relative_placement(6, 7).is_none());
     }
 }

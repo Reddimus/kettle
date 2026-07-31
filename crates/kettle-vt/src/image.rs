@@ -17,13 +17,39 @@ pub const MAX_IMAGE_DIM: u32 = 8192;
 /// inflate to this same envelope.
 pub const MAX_IMAGE_BYTES: u64 = 64 * 1024 * 1024;
 
-/// A decoded image plus placement metadata (kitty image id + z-index;
-/// Sixel/iTerm2 use `id = None`, `z = 0`).
+/// A decoded image plus placement metadata (kitty image/placement ids +
+/// z-index; Sixel/iTerm2 use `id = None`, `placement_id = 0`, `z = 0`).
 #[derive(Clone, Debug)]
 pub struct Placed {
     pub img: ImageData,
     pub id: Option<u32>,
+    /// Kitty placement id (`p=`). Zero means an anonymous placement.
+    pub placement_id: u32,
     pub z: i32,
+    /// Kitty source/destination geometry. `None` preserves the legacy
+    /// Sixel/iTerm2 placement and cursor policy.
+    pub params: Option<PlacementParams>,
+}
+
+/// Raw Kitty placement geometry, resolved against live cell/pixel dimensions
+/// by kettle-core. Keeping the protocol values allows monitor/DPI changes to
+/// recompute natural-size and one-axis-auto placements without losing intent.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct PlacementParams {
+    /// Source rectangle in image pixels (`x,y,w,h`); zero width/height means
+    /// "to the image edge".
+    pub source_x: u32,
+    pub source_y: u32,
+    pub source_width: u32,
+    pub source_height: u32,
+    /// Destination rectangle in cells (`c,r`); zero means auto.
+    pub columns: u32,
+    pub rows: u32,
+    /// Pixel offset within the first destination cell (`X,Y`).
+    pub cell_x_offset: u32,
+    pub cell_y_offset: u32,
+    /// Kitty `C=1`: do not move the application cursor after placement.
+    pub suppress_cursor_movement: bool,
 }
 
 impl Placed {
@@ -31,7 +57,9 @@ impl Placed {
         Placed {
             img,
             id: None,
+            placement_id: 0,
             z: 0,
+            params: None,
         }
     }
 }

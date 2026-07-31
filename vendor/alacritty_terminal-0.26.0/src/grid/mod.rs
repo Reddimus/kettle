@@ -135,6 +135,17 @@ pub struct Grid<T> {
 
     /// Maximum number of lines in history.
     max_scroll_limit: usize,
+
+    /// Number of document rows irreversibly removed before the current
+    /// scrollback buffer.
+    ///
+    /// Grid-relative history coordinates are reused once the history limit is
+    /// full. Consumers which retain semantic anchors (for example OSC 133
+    /// prompt marks) need this monotonically increasing origin to distinguish
+    /// a surviving row from unrelated content which later occupies the same
+    /// `Line`.
+    #[cfg_attr(feature = "serde", serde(skip))]
+    history_origin: u64,
 }
 
 impl<T: GridCell + Default + PartialEq> Grid<T> {
@@ -147,6 +158,7 @@ impl<T: GridCell + Default + PartialEq> Grid<T> {
             cursor: Cursor::default(),
             lines,
             columns,
+            history_origin: 0,
         }
     }
 
@@ -154,7 +166,9 @@ impl<T: GridCell + Default + PartialEq> Grid<T> {
     pub fn update_history(&mut self, history_size: usize) {
         let current_history_size = self.history_size();
         if current_history_size > history_size {
-            self.raw.shrink_lines(current_history_size - history_size);
+            let removed = current_history_size - history_size;
+            self.raw.shrink_lines(removed);
+            self.history_origin = self.history_origin.saturating_add(removed as u64);
         }
         self.display_offset = min(self.display_offset, history_size);
         self.max_scroll_limit = history_size;
@@ -271,7 +285,11 @@ impl<T: GridCell + Default + PartialEq> Grid<T> {
         // Only rotate the entire history if the active region starts at the top.
         if region.start == 0 {
             // Create scrollback for the new lines.
+            let history_before = self.history_size();
             self.increase_scroll_limit(positions);
+            let history_added = self.history_size().saturating_sub(history_before);
+            let evicted = positions.saturating_sub(history_added);
+            self.history_origin = self.history_origin.saturating_add(evicted as u64);
 
             // Swap the lines fixed at the top to their target positions after rotation.
             //
@@ -339,6 +357,10 @@ impl<T: GridCell + Default + PartialEq> Grid<T> {
         D: PartialEq,
     {
         self.clear_history();
+        // Every visible row is reset below, so advance beyond their identifiers
+        // as well. This lets retained semantic anchors fail closed after RIS
+        // instead of aliasing freshly cleared screen rows.
+        self.history_origin = self.history_origin.saturating_add(self.lines as u64);
 
         self.saved_cursor = Cursor::default();
         self.cursor = Cursor::default();
@@ -382,7 +404,12 @@ impl<T> Grid<T> {
     #[inline]
     pub fn clear_history(&mut self) {
         // Explicitly purge all lines from history.
-        self.raw.shrink_lines(self.history_size());
+        let removed = self.history_size();
+        self.raw.shrink_lines(removed);
+        // Keep the first active-screen row's document identifier stable:
+        // before the purge it was `origin + removed`, afterwards history is
+        // empty and `origin` must therefore advance by the same amount.
+        self.history_origin = self.history_origin.saturating_add(removed as u64);
 
         // Reset display offset.
         self.display_offset = 0;
@@ -405,6 +432,13 @@ impl<T> Grid<T> {
     #[inline]
     pub fn truncate(&mut self) {
         self.raw.truncate();
+    }
+
+    /// Monotonic document-row identifier of the oldest retained history row,
+    /// or of the first active row when history is empty.
+    #[inline]
+    pub fn history_origin(&self) -> u64 {
+        self.history_origin
     }
 
     /// Iterate over all cells in the grid starting at a specific point.

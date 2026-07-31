@@ -54,6 +54,54 @@ fn scroll_up() {
     assert_eq!(grid[Line(9)].occ, 0);
 }
 
+#[test]
+fn history_origin_advances_only_when_rows_are_irreversibly_removed() {
+    let mut grid = Grid::<usize>::new(2, 1, 2);
+    let region = Line(0)..Line(2);
+
+    grid.scroll_up::<usize>(&region, 1);
+    assert_eq!(grid.history_size(), 1);
+    assert_eq!(grid.history_origin(), 0);
+
+    grid.scroll_up::<usize>(&region, 1);
+    assert_eq!(grid.history_size(), 2);
+    assert_eq!(grid.history_origin(), 0);
+
+    // At capacity, the next row reuses the oldest grid-relative coordinate.
+    // The origin distinguishes that replacement from the evicted row.
+    grid.scroll_up::<usize>(&region, 1);
+    assert_eq!(grid.history_size(), 2);
+    assert_eq!(grid.history_origin(), 1);
+
+    // Purging history preserves active-row identifiers by moving the origin
+    // forward by exactly the number of removed history rows.
+    grid.clear_history();
+    assert_eq!(grid.history_size(), 0);
+    assert_eq!(grid.history_origin(), 3);
+}
+
+#[test]
+fn history_origin_tracks_limit_reduction_and_full_reset() {
+    let mut grid = Grid::<usize>::new(3, 1, 4);
+    let region = Line(0)..Line(3);
+    for _ in 0..4 {
+        grid.scroll_up::<usize>(&region, 1);
+    }
+    assert_eq!(grid.history_size(), 4);
+
+    grid.update_history(1);
+    assert_eq!(grid.history_size(), 1);
+    assert_eq!(grid.history_origin(), 3);
+
+    grid.reset::<usize>();
+    assert_eq!(grid.history_size(), 0);
+    assert_eq!(
+        grid.history_origin(),
+        7,
+        "reset removes one history row and invalidates all three visible rows"
+    );
+}
+
 // Scroll down moves lines downward.
 #[test]
 fn scroll_down() {

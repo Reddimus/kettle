@@ -12,8 +12,8 @@ case "${1:-}" in
     cat <<'EOF'
 usage: scripts/check-package-templates.sh [--auto|--local|--require-release]
 
-  --auto             validate source templates; when v<VERSION> exists,
-                     also validate its generated package-metadata assets
+  --auto             validate source templates; when clean package inputs are
+                     checked out at v<VERSION>, also validate its assets
   --local            validate only the source templates and renderer
   --require-release  require v<VERSION> and validate its published metadata
 EOF
@@ -62,6 +62,36 @@ if ! git ls-remote --exit-code --tags "$remote" "refs/tags/${tag}" >/dev/null 2>
   exit 0
 fi
 
+if [ "$MODE" = "auto" ]; then
+  package_inputs=(
+    Cargo.toml
+    packaging/homebrew/kettle.rb.in
+    packaging/arch/PKGBUILD.in
+    scripts/render-package-templates.py
+  )
+  if ! git diff --quiet -- "${package_inputs[@]}" ||
+     ! git diff --cached --quiet -- "${package_inputs[@]}"; then
+    echo "package-template check: package inputs differ from ${tag}; skipping published-asset check"
+    exit 0
+  fi
+
+  tag_commit=$(
+    git ls-remote --tags "$remote" "refs/tags/${tag}^{}" |
+      awk 'NR == 1 { print $1 }'
+  )
+  if [ -z "$tag_commit" ]; then
+    tag_commit=$(
+      git ls-remote --tags "$remote" "refs/tags/${tag}" |
+        awk 'NR == 1 { print $1 }'
+    )
+  fi
+  head_commit=$(git rev-parse HEAD)
+  if [ "$head_commit" != "$tag_commit" ]; then
+    echo "package-template check: HEAD is not ${tag}; skipping published-asset check"
+    exit 0
+  fi
+fi
+
 command -v curl >/dev/null 2>&1 || fail "curl is required for release-asset checks"
 temporary=$(mktemp -d)
 trap 'rm -rf "$temporary"' EXIT
@@ -80,7 +110,9 @@ fetch_asset() {
 
 fetch_asset kettle.rb
 fetch_asset PKGBUILD
+fetch_asset kettle-update-manifest.json.sha256
 fetch_asset kettle-macos-universal.zip.sha256
+fetch_asset kettle-linux-aarch64.tar.gz.sha256
 fetch_asset kettle-linux-x86_64.tar.gz.sha256
 
 sidecar_hash() {
@@ -94,20 +126,30 @@ sidecar_hash() {
   printf '%s\n' "$hash"
 }
 
+published_manifest=$(sidecar_hash "$temporary/kettle-update-manifest.json.sha256" kettle-update-manifest.json)
 published_mac=$(sidecar_hash "$temporary/kettle-macos-universal.zip.sha256" kettle-macos-universal.zip)
+published_linux_aarch64=$(sidecar_hash "$temporary/kettle-linux-aarch64.tar.gz.sha256" kettle-linux-aarch64.tar.gz)
 published_linux=$(sidecar_hash "$temporary/kettle-linux-x86_64.tar.gz.sha256" kettle-linux-x86_64.tar.gz)
-formula_version=$(sed -n 's/^  version "\([^"]\+\)"/\1/p' "$temporary/kettle.rb")
-arch_version=$(sed -n 's/^pkgver=\([^[:space:]]\+\)$/\1/p' "$temporary/PKGBUILD")
-mapfile -t formula_hashes < <(
+formula_version=$(
+  sed -n 's#^  url ".*/releases/download/v\([^/"]\{1,\}\)/kettle-update-manifest\.json".*#\1#p' \
+    "$temporary/kettle.rb"
+)
+arch_version=$(sed -n 's/^pkgver=\([^[:space:]]\{1,\}\)$/\1/p' "$temporary/PKGBUILD")
+formula_hashes=()
+while IFS= read -r formula_hash; do
+  formula_hashes+=("$formula_hash")
+done < <(
   sed -n 's/^[[:space:]]*sha256 "\([0-9a-f]\{64\}\)".*/\1/p' "$temporary/kettle.rb"
 )
 arch_hash=$(sed -n "s/^sha256sums=('\([0-9a-f]\{64\}\)')$/\1/p" "$temporary/PKGBUILD")
 
 [ "$formula_version" = "$version" ] || fail "Homebrew release asset version $formula_version does not match $version"
 [ "$arch_version" = "$version" ] || fail "Arch release asset version $arch_version does not match $version"
-[ "${#formula_hashes[@]}" -eq 2 ] || fail "expected two Homebrew hashes, found ${#formula_hashes[@]}"
-[ "${formula_hashes[0]}" = "$published_mac" ] || fail "Homebrew macOS hash does not match its sidecar"
-[ "${formula_hashes[1]}" = "$published_linux" ] || fail "Homebrew Linux hash does not match its sidecar"
+[ "${#formula_hashes[@]}" -eq 4 ] || fail "expected four Homebrew hashes, found ${#formula_hashes[@]}"
+[ "${formula_hashes[0]}" = "$published_manifest" ] || fail "Homebrew manifest hash does not match its sidecar"
+[ "${formula_hashes[1]}" = "$published_mac" ] || fail "Homebrew macOS hash does not match its sidecar"
+[ "${formula_hashes[2]}" = "$published_linux_aarch64" ] || fail "Homebrew Linux aarch64 hash does not match its sidecar"
+[ "${formula_hashes[3]}" = "$published_linux" ] || fail "Homebrew Linux x86_64 hash does not match its sidecar"
 [ "$arch_hash" = "$published_linux" ] || fail "Arch hash does not match the Linux sidecar"
 
 echo "package-template check: published ${tag} metadata matches verified sidecars"

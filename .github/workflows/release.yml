@@ -22,7 +22,7 @@ jobs:
   # ~30-40 min per-OS package builds; cheap insurance.
   pretest:
     name: pretest (release gate)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     env:
       LIBGL_ALWAYS_SOFTWARE: "1"
@@ -30,6 +30,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
+          persist-credentials: false
       - name: Require a GitHub-verified annotated tag
         if: startsWith(github.ref, 'refs/tags/v')
         shell: bash
@@ -97,7 +98,7 @@ jobs:
           echo "tag, Cargo.toml, flake.nix, and CHANGELOG.md all agree on version $TAG_VER"
       - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
         with:
-          toolchain: stable
+          toolchain: 1.97.1
       - name: Linux deps
         run: |
           sudo apt-get update
@@ -107,7 +108,9 @@ jobs:
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
         with:
           key: release-pretest
-      - run: cargo test --workspace
+      - run: cargo test --locked --workspace
+      - name: Test patched vendor crates directly
+        run: cargo test --locked --manifest-path vendor/Cargo.toml --workspace
 
   package:
     name: package (${{ matrix.os }})
@@ -129,21 +132,26 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: ubuntu-latest
+          # Keep the prebuilt GNU/Linux ABI at the documented glibc 2.35
+          # floor. Building on ubuntu-24.04 would silently require glibc 2.39
+          # and strand Ubuntu 22.04 users of the one-line installer.
+          - os: ubuntu-22.04
             artifact: kettle-linux-x86_64.tar.gz
-          - os: macos-latest
+          - os: macos-15
             artifact: kettle-macos-universal.zip
-          - os: windows-latest
+          - os: windows-2022
             artifact: kettle-windows-x86_64.zip
           # ARM64 Linux (Raspberry Pi 4/5, ARM servers/VPS, ARM
           # laptops on Linux). Cross-compiled on the x86_64 ubuntu runner — the
           # ci.yml early-warning job proves this target builds. Windowing deps
           # load via dlopen, so only the GNU cross-linker is needed.
-          - os: ubuntu-latest
+          - os: ubuntu-22.04
             artifact: kettle-linux-aarch64.tar.gz
             rust_target: aarch64-unknown-linux-gnu
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       # The tag ↔ Cargo.toml ↔ flake.nix ↔ CHANGELOG
       # consistency gate moved to the `pretest` job (single Linux, runs before
       # any per-OS build) so a version mismatch blocks ALL platform builds,
@@ -151,7 +159,7 @@ jobs:
       # package leg caught it (partial-release risk). See the `pretest` job above.
       - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
         with:
-          toolchain: stable
+          toolchain: 1.97.1
       - name: Linux deps
         if: runner.os == 'Linux'
         run: |
@@ -159,11 +167,18 @@ jobs:
           sudo apt-get install -y pkg-config libfontconfig1-dev libfreetype6-dev \
             libx11-dev libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libxcb1-dev
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
-        # Key the cache per artifact so the two ubuntu-latest
+        # Key the cache per artifact so the two ubuntu-22.04
         # legs (x86_64 + aarch64) don't share one cache and thrash each other's
         # target dir — mirrors how ci.yml keys its msrv/nightly/aarch64 legs.
         with:
           shared-key: ${{ matrix.artifact }}
+      # The root workspace excludes patched upstream crates. Exercise their
+      # package-owned tests on every native release OS so a directly tagged
+      # hotfix cannot bypass the platform-specific vendor gates in ci.yml.
+      # The aarch64 cross leg is covered by the Linux-native pretest above.
+      - name: Test patched vendor crates on native release runner
+        if: matrix.rust_target == ''
+        run: cargo test --locked --manifest-path vendor/Cargo.toml --workspace
       # Build: macOS gets a real universal2 binary — the
       # artifact has been named `kettle-macos-universal.zip` since the
       # project's earliest releases, but the underlying binary was
@@ -174,8 +189,8 @@ jobs:
         if: runner.os == 'macOS'
         run: |
           rustup target add x86_64-apple-darwin aarch64-apple-darwin
-          cargo build --release --target x86_64-apple-darwin -p kettle
-          cargo build --release --target aarch64-apple-darwin -p kettle
+          cargo build --locked --release --target x86_64-apple-darwin -p kettle
+          cargo build --locked --release --target aarch64-apple-darwin -p kettle
           mkdir -p target/release
           lipo -create \
             target/x86_64-apple-darwin/release/kettle \
@@ -184,7 +199,7 @@ jobs:
           file target/release/kettle
       - name: Build (Linux / Windows)
         if: runner.os != 'macOS' && matrix.rust_target == ''
-        run: cargo build --release -p kettle
+        run: cargo build --locked --release -p kettle
 
       # ARM64 Linux cross-build. The runner is x86_64; install the
       # aarch64 std + GNU cross-linker and build for the target, then copy the
@@ -197,9 +212,32 @@ jobs:
         run: |
           sudo apt-get update && sudo apt-get install -y gcc-aarch64-linux-gnu
           rustup target add aarch64-unknown-linux-gnu
-          cargo build --release --target aarch64-unknown-linux-gnu -p kettle
+          cargo build --locked --release --target aarch64-unknown-linux-gnu -p kettle
           mkdir -p target/release
           cp target/aarch64-unknown-linux-gnu/release/kettle target/release/kettle
+
+      - name: Verify Linux glibc ABI floor
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          mapfile -t glibc_versions < <(
+            readelf --version-info target/release/kettle \
+              | grep -oE 'GLIBC_[0-9]+(\.[0-9]+)+' \
+              | sort -Vu
+          )
+          if [[ ${#glibc_versions[@]} -eq 0 ]]; then
+            echo "release binary exposes no inspectable GLIBC version requirements" >&2
+            exit 1
+          fi
+          newest=${glibc_versions[${#glibc_versions[@]}-1]}
+          allowed=GLIBC_2.35
+          if [[ $(printf '%s\n' "$newest" "$allowed" | sort -V | tail -n1) != "$allowed" ]]; then
+            echo "release binary requires $newest, newer than the $allowed floor" >&2
+            exit 1
+          fi
+          printf 'verified glibc ABI floor: newest requirement %s <= %s\n' \
+            "$newest" "$allowed"
 
       - name: Package (Linux)
         if: runner.os == 'Linux'
@@ -223,6 +261,7 @@ jobs:
           # bundled install.sh can drop it into ~/.local/share/man/man1.
           cp packaging/linux/kettle.1       dist/kettle/packaging/linux/
           install -Dm755 scripts/install.sh dist/kettle/install.sh
+          install -Dm755 scripts/install-unix.py dist/kettle/install-unix.py
           # Also ship the OSC 133 shell-integration snippets
           # so a user can read/customize them before sourcing. The same
           # bodies are embedded into the binary via include_str!,
@@ -339,16 +378,18 @@ jobs:
             ${{ matrix.artifact }}.sha256
 
   finalize:
-    name: sign and publish release
+    name: validate and sign release
     if: startsWith(github.ref, 'refs/tags/v')
     needs: [pretest, package]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     environment: release-signing
     permissions:
-      contents: write
+      contents: read
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           path: dist
@@ -368,27 +409,35 @@ jobs:
           for artifact in "${required[@]}"; do
             test -s "$artifact"
             test -s "$artifact.sha256"
-            sha256sum -c "$artifact.sha256"
+            expected_sidecar=$(mktemp)
+            printf '%s  %s\n' \
+              "$(sha256sum "$artifact" | awk '{print $1}')" \
+              "$artifact" > "$expected_sidecar"
+            if ! cmp -s "$expected_sidecar" "$artifact.sha256"; then
+              echo "::error::$artifact.sha256 is not its one exact canonical SHA-256 record"
+              rm -f "$expected_sidecar"
+              exit 1
+            fi
+            rm -f "$expected_sidecar"
           done
 
-      - name: Verify inner package manifests from final archives
+      - name: Safely extract and verify final package archives
         shell: bash
         run: |
           set -euo pipefail
           extracted=$(mktemp -d)
           trap 'rm -rf "$extracted"' EXIT
-          mkdir -p "$extracted/linux-x86_64" "$extracted/linux-aarch64" "$extracted/windows"
-          tar -xzf dist/kettle-linux-x86_64.tar.gz -C "$extracted/linux-x86_64"
-          tar -xzf dist/kettle-linux-aarch64.tar.gz -C "$extracted/linux-aarch64"
-          unzip -q dist/kettle-windows-x86_64.zip -d "$extracted/windows"
           VERSION="${GITHUB_REF_NAME#v}"
-          python3 scripts/package-manifest.py verify \
-            --root "$extracted/linux-x86_64/kettle" \
+          python3 scripts/package-manifest.py extract \
+            --archive dist/kettle-linux-x86_64.tar.gz \
+            --root "$extracted/linux-x86_64" \
             --target x86_64-unknown-linux-gnu --version "$VERSION"
-          python3 scripts/package-manifest.py verify \
-            --root "$extracted/linux-aarch64/kettle" \
+          python3 scripts/package-manifest.py extract \
+            --archive dist/kettle-linux-aarch64.tar.gz \
+            --root "$extracted/linux-aarch64" \
             --target aarch64-unknown-linux-gnu --version "$VERSION"
-          python3 scripts/package-manifest.py verify \
+          python3 scripts/package-manifest.py extract \
+            --archive dist/kettle-windows-x86_64.zip \
             --root "$extracted/windows" \
             --target x86_64-pc-windows-msvc --version "$VERSION"
 
@@ -414,19 +463,27 @@ jobs:
           key=$(mktemp)
           payload=$(mktemp)
           signature=$(mktemp)
-          trap 'rm -f "$key" "$payload" "$signature"' EXIT
+          derived_public_der=$(mktemp)
+          trusted_public_der=$(mktemp)
+          trap 'rm -f "$key" "$payload" "$signature" "$derived_public_der" "$trusted_public_der"' EXIT
           chmod 600 "$key"
           printf '%s\n' "$KETTLE_UPDATE_SIGNING_KEY_PEM" > "$key"
+          openssl pkey -in "$key" -pubout -outform DER -out "$derived_public_der"
+          openssl pkey -pubin -in packaging/update-public.pem \
+            -outform DER -out "$trusted_public_der"
+          if ! cmp -s "$derived_public_der" "$trusted_public_der"; then
+            echo "::error::release signing secret does not match packaging/update-public.pem"
+            exit 1
+          fi
+
           printf 'kettle-update-manifest-v1\0' > "$payload"
           cat dist/kettle-update-manifest.json >> "$payload"
           openssl pkeyutl -sign -rawin -inkey "$key" -in "$payload" -out "$signature"
           base64 -w 0 "$signature" > dist/kettle-update-manifest.json.sig
           printf '\n' >> dist/kettle-update-manifest.json.sig
 
-          openssl pkey -in "$key" -pubout > update-public.pem
-          openssl pkeyutl -verify -rawin -pubin -inkey update-public.pem \
+          openssl pkeyutl -verify -rawin -pubin -inkey packaging/update-public.pem \
             -in "$payload" -sigfile "$signature"
-          rm -f update-public.pem
           (
             cd dist
             sha256sum kettle-update-manifest.json > kettle-update-manifest.json.sha256
@@ -441,11 +498,163 @@ jobs:
           set -euo pipefail
           python3 scripts/render-package-templates.py \
             --version "${GITHUB_REF_NAME#v}" \
+            --release-manifest dist/kettle-update-manifest.json \
             --macos-archive dist/kettle-macos-universal.zip \
+            --linux-aarch64-archive dist/kettle-linux-aarch64.tar.gz \
             --linux-x86-64-archive dist/kettle-linux-x86_64.tar.gz \
             --output-dir dist/package-metadata
-          grep -q "^  version \"${GITHUB_REF_NAME#v}\"$" dist/package-metadata/kettle.rb
+          grep -q "/releases/download/${GITHUB_REF_NAME}/kettle-update-manifest.json" \
+            dist/package-metadata/kettle.rb
           grep -q "^pkgver=${GITHUB_REF_NAME#v}$" dist/package-metadata/PKGBUILD
+
+      - name: Stage the exact signed release set for the tokenless boundary
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: kettle-signed-release-assets
+          retention-days: 1
+          compression-level: 0
+          if-no-files-found: error
+          path: |
+            dist/kettle-linux-x86_64.tar.gz
+            dist/kettle-linux-x86_64.tar.gz.sha256
+            dist/kettle-linux-aarch64.tar.gz
+            dist/kettle-linux-aarch64.tar.gz.sha256
+            dist/kettle-windows-x86_64.zip
+            dist/kettle-windows-x86_64.zip.sha256
+            dist/kettle-macos-universal.zip
+            dist/kettle-macos-universal.zip.sha256
+            dist/kettle-update-manifest.json
+            dist/kettle-update-manifest.json.sig
+            dist/kettle-update-manifest.json.sha256
+            dist/kettle-update-manifest.json.sig.sha256
+            dist/package-metadata/kettle.rb
+            dist/package-metadata/PKGBUILD
+
+  publish:
+    name: publish verified release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [finalize]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: kettle-signed-release-assets
+          path: dist
+
+      - name: Reverify the tokenless finalized asset set
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION="${GITHUB_REF_NAME#v}"
+          python3 - <<'PY'
+          from pathlib import Path
+
+          expected = {
+              "kettle-linux-x86_64.tar.gz",
+              "kettle-linux-x86_64.tar.gz.sha256",
+              "kettle-linux-aarch64.tar.gz",
+              "kettle-linux-aarch64.tar.gz.sha256",
+              "kettle-windows-x86_64.zip",
+              "kettle-windows-x86_64.zip.sha256",
+              "kettle-macos-universal.zip",
+              "kettle-macos-universal.zip.sha256",
+              "kettle-update-manifest.json",
+              "kettle-update-manifest.json.sig",
+              "kettle-update-manifest.json.sha256",
+              "kettle-update-manifest.json.sig.sha256",
+              "package-metadata/kettle.rb",
+              "package-metadata/PKGBUILD",
+          }
+          root = Path("dist")
+          entries = list(root.rglob("*"))
+          if any(path.is_symlink() for path in entries):
+              raise SystemExit("finalized asset artifact contains a symbolic link")
+          actual = {
+              path.relative_to(root).as_posix()
+              for path in entries
+              if path.is_file()
+          }
+          if actual != expected:
+              raise SystemExit(
+                  f"finalized local asset set mismatch"
+                  f"\nexpected={expected}\nactual={actual}"
+              )
+          PY
+
+          (
+            cd dist
+            for artifact in \
+              kettle-linux-x86_64.tar.gz \
+              kettle-linux-aarch64.tar.gz \
+              kettle-windows-x86_64.zip \
+              kettle-macos-universal.zip \
+              kettle-update-manifest.json \
+              kettle-update-manifest.json.sig
+            do
+              expected_sidecar=$(mktemp)
+              printf '%s  %s\n' \
+                "$(sha256sum "$artifact" | awk '{print $1}')" \
+                "$artifact" > "$expected_sidecar"
+              cmp -s "$expected_sidecar" "$artifact.sha256" || {
+                echo "::error::$artifact.sha256 is not its canonical SHA-256 record"
+                rm -f "$expected_sidecar"
+                exit 1
+              }
+              rm -f "$expected_sidecar"
+            done
+          )
+
+          payload=$(mktemp)
+          signature=$(mktemp)
+          extracted=$(mktemp -d)
+          rendered=$(mktemp -d)
+          trap 'rm -f "$payload" "$signature"; rm -rf "$extracted" "$rendered"' EXIT
+          printf 'kettle-update-manifest-v1\0' > "$payload"
+          cat dist/kettle-update-manifest.json >> "$payload"
+          base64 -d dist/kettle-update-manifest.json.sig > "$signature"
+          test "$(wc -c < "$signature")" -eq 64
+          openssl pkeyutl -verify -rawin -pubin \
+            -inkey packaging/update-public.pem \
+            -in "$payload" -sigfile "$signature"
+
+          # The update feed intentionally covers the three self-updater
+          # platforms. macOS is independently bound by its canonical sidecar
+          # and the regenerated Homebrew metadata below.
+          python3 scripts/make-update-manifest.py \
+            --verify-existing dist/kettle-update-manifest.json \
+            --tag "$GITHUB_REF_NAME" \
+            --asset "x86_64-pc-windows-msvc=dist/kettle-windows-x86_64.zip" \
+            --asset "x86_64-unknown-linux-gnu=dist/kettle-linux-x86_64.tar.gz" \
+            --asset "aarch64-unknown-linux-gnu=dist/kettle-linux-aarch64.tar.gz"
+
+          python3 scripts/package-manifest.py extract \
+            --archive dist/kettle-linux-x86_64.tar.gz \
+            --root "$extracted/linux-x86_64" \
+            --target x86_64-unknown-linux-gnu --version "$VERSION"
+          python3 scripts/package-manifest.py extract \
+            --archive dist/kettle-linux-aarch64.tar.gz \
+            --root "$extracted/linux-aarch64" \
+            --target aarch64-unknown-linux-gnu --version "$VERSION"
+          python3 scripts/package-manifest.py extract \
+            --archive dist/kettle-windows-x86_64.zip \
+            --root "$extracted/windows" \
+            --target x86_64-pc-windows-msvc --version "$VERSION"
+
+          python3 scripts/render-package-templates.py \
+            --version "$VERSION" \
+            --release-manifest dist/kettle-update-manifest.json \
+            --macos-archive dist/kettle-macos-universal.zip \
+            --linux-aarch64-archive dist/kettle-linux-aarch64.tar.gz \
+            --linux-x86-64-archive dist/kettle-linux-x86_64.tar.gz \
+            --output-dir "$rendered"
+          cmp -s "$rendered/kettle.rb" dist/package-metadata/kettle.rb
+          cmp -s "$rendered/PKGBUILD" dist/package-metadata/PKGBUILD
 
       - name: Upload a complete draft, verify it, then publish once
         shell: bash
@@ -454,14 +663,53 @@ jobs:
         run: |
           set -euo pipefail
           tag="$GITHUB_REF_NAME"
-          if gh release view "$tag" >/dev/null 2>&1; then
-            draft=$(gh release view "$tag" --json isDraft --jq '.isDraft')
-            if [ "$draft" != true ]; then
+          release_assets_json=$(mktemp)
+          trap 'rm -f "$release_assets_json"' EXIT
+          # Every lookup here goes through the list endpoint, which is the only
+          # one that sees drafts. Addressing a draft by tag returns 404, so a
+          # re-run of this job would otherwise fail to notice its own leftover
+          # draft and then fail again trying to recreate it.
+          #
+          # The tag reaches jq through the environment rather than string
+          # interpolation: a tag carrying a quote or backslash would otherwise
+          # be spliced into the filter itself.
+          find_release() {
+            RELEASE_TAG="$tag" gh api --paginate "repos/${GITHUB_REPOSITORY}/releases" \
+              --jq 'map(select(.tag_name == env.RELEASE_TAG)) | .[0] |
+                    if . == null then empty else "\(.id) \(.draft)" end'
+          }
+
+          # A newly created release is not always in the list endpoint's
+          # response immediately, so poll rather than demanding it on the first
+          # read — the point of this whole step is to stop losing to GitHub's
+          # eventual consistency, not to lose to it somewhere new.
+          await_release() {
+            for attempt in 1 2 3 4 5 6 7 8 9 10; do
+              found=$(find_release)
+              if [ -n "$found" ]; then
+                printf '%s' "$found"
+                return 0
+              fi
+              sleep 3
+            done
+            return 1
+          }
+
+          existing=$(find_release)
+          if [ -n "$existing" ]; then
+            release_id=${existing%% *}
+            is_draft=${existing##* }
+            if [ "$is_draft" != true ]; then
               echo "::error::release $tag already exists and is public"
               exit 1
             fi
           else
             gh release create "$tag" --verify-tag --draft --generate-notes --title "$tag"
+            if ! existing=$(await_release); then
+              echo "::error::created release $tag but it never appeared in the release list"
+              exit 1
+            fi
+            release_id=${existing%% *}
           fi
 
           files=(
@@ -491,29 +739,29 @@ jobs:
             sleep 5
           done
 
-          gh release view "$tag" --json assets > release-assets.json
-          python3 - <<'PY'
-          import json
-          from pathlib import Path
-
-          expected = {path.name: path.stat().st_size for path in map(Path, [
-              "dist/kettle-linux-x86_64.tar.gz",
-              "dist/kettle-linux-x86_64.tar.gz.sha256",
-              "dist/kettle-linux-aarch64.tar.gz",
-              "dist/kettle-linux-aarch64.tar.gz.sha256",
-              "dist/kettle-windows-x86_64.zip",
-              "dist/kettle-windows-x86_64.zip.sha256",
-              "dist/kettle-macos-universal.zip",
-              "dist/kettle-macos-universal.zip.sha256",
-              "dist/kettle-update-manifest.json",
-              "dist/kettle-update-manifest.json.sig",
-              "dist/kettle-update-manifest.json.sha256",
-              "dist/kettle-update-manifest.json.sig.sha256",
-              "dist/package-metadata/kettle.rb",
-              "dist/package-metadata/PKGBUILD",
-          ])}
-          actual = {asset["name"]: asset["size"] for asset in json.load(open("release-assets.json"))["assets"]}
-          if actual != expected:
-              raise SystemExit(f"release asset mismatch\nexpected={expected}\nactual={actual}")
-          PY
-          gh release edit "$tag" --draft=false --latest
+          verified=
+          for attempt in 1 2 3 4 5; do
+            gh api "repos/${GITHUB_REPOSITORY}/releases/${release_id}" \
+              > "$release_assets_json"
+            verify_args=()
+            for file in "${files[@]}"; do
+              verify_args+=(--asset "$file")
+            done
+            if python3 scripts/verify-release-assets.py \
+              --api-json "$release_assets_json" --tag "$tag" \
+              "${verify_args[@]}"
+            then
+              verified=1
+              break
+            fi
+            if [ "$attempt" = 5 ]; then
+              echo "::error::uploaded release assets did not converge to the exact local size and SHA-256 set"
+              exit 1
+            fi
+            sleep 5
+          done
+          test "$verified" = 1
+          # Publish by id for the same reason, so the transition cannot depend
+          # on GitHub having associated the tag with a still-draft release.
+          gh api -X PATCH "repos/${GITHUB_REPOSITORY}/releases/${release_id}" \
+            -F draft=false -f make_latest=true >/dev/null

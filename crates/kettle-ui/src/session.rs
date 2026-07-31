@@ -6,6 +6,14 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
+pub(crate) const MAX_RESTORE_WINDOWS: usize = 16;
+pub(crate) const MAX_RESTORE_PANES: usize = 256;
+pub(crate) const MAX_RESTORE_TOTAL_SURFACE_PIXELS: u64 = 64 * 1024 * 1024;
+const MIN_RESTORE_WINDOW_WIDTH: u32 = 160;
+const MIN_RESTORE_WINDOW_HEIGHT: u32 = 120;
+const MAX_RESTORE_SURFACE_DIMENSION: u32 = 8192;
+const MAX_RESTORE_SURFACE_PIXELS: u64 = 32 * 1024 * 1024;
+
 #[derive(Serialize, Deserialize, Clone)]
 pub enum SNode {
     Leaf {
@@ -38,11 +46,68 @@ impl SNode {
     /// crafted-but-small `session.json`. serde_json's default
     /// 128-level recursion limit already bounds nesting depth, so this is a
     /// simple (non-recursive-overflow) count.
+    #[cfg(test)]
     pub fn leaf_count(&self) -> usize {
-        match self {
-            SNode::Leaf { .. } => 1,
-            SNode::Split { a, b, .. } => a.leaf_count() + b.leaf_count(),
+        self.bounded_leaf_count(usize::MAX).unwrap_or(usize::MAX)
+    }
+
+    /// Count leaves without walking or allocating beyond `limit`. This is the
+    /// restore preflight primitive: a crafted serialized tree is rejected
+    /// before rectangle allocation or PTY spawn.
+    pub(crate) fn bounded_leaf_count(&self, limit: usize) -> Option<usize> {
+        let mut leaves = 0usize;
+        let mut pending = vec![self];
+        while let Some(node) = pending.pop() {
+            match node {
+                SNode::Leaf { .. } => {
+                    leaves = leaves.checked_add(1)?;
+                    if leaves > limit {
+                        return None;
+                    }
+                }
+                SNode::Split { a, b, .. } => {
+                    pending.push(b);
+                    pending.push(a);
+                }
+            }
         }
+        Some(leaves)
+    }
+
+    /// Saved-tree leaf rectangles in the same DFS order `Mux::restore` spawns
+    /// them. This lets the UI compute each child PTY's exact initial geometry
+    /// from the live surface before the process observes its first winsize.
+    pub(crate) fn leaf_rects(&self, rect: (f32, f32, f32, f32)) -> Vec<(f32, f32, f32, f32)> {
+        fn walk(node: &SNode, rect: (f32, f32, f32, f32), out: &mut Vec<(f32, f32, f32, f32)>) {
+            match node {
+                SNode::Leaf { .. } => out.push(rect),
+                SNode::Split {
+                    vertical,
+                    ratio,
+                    a,
+                    b,
+                } => {
+                    let (x, y, width, height) = rect;
+                    let ratio = ratio.clamp(0.05, 0.95);
+                    if *vertical {
+                        let first_height = (height * ratio).round();
+                        walk(a, (x, y, width, first_height), out);
+                        walk(b, (x, y + first_height, width, height - first_height), out);
+                    } else {
+                        let first_width = (width * ratio).round();
+                        walk(a, (x, y, first_width, height), out);
+                        walk(b, (x + first_width, y, width - first_width, height), out);
+                    }
+                }
+            }
+        }
+
+        let Some(leaves) = self.bounded_leaf_count(MAX_RESTORE_PANES) else {
+            return Vec::new();
+        };
+        let mut rectangles = Vec::with_capacity(leaves);
+        walk(self, rect, &mut rectangles);
+        rectangles
     }
 }
 
@@ -114,6 +179,48 @@ pub struct Session {
     /// `windows_normalized` falls back to the legacy top-level fields.
     #[serde(default)]
     pub windows: Vec<SWindow>,
+}
+
+/// Borrowed, preflight-approved restore input. Keeping this borrowed avoids
+/// cloning a potentially large serialized structure before its global window
+/// and pane fan-out has been validated.
+#[derive(Clone, Copy)]
+pub(crate) struct RestoreWindowRef<'a> {
+    pub tabs: &'a [STab],
+    pub active: usize,
+    pub geometry: Option<SGeometry>,
+}
+
+pub(crate) fn validated_restore_surface_geometries(
+    windows: &[RestoreWindowRef<'_>],
+    monitors: &[(i32, i32, u32, u32)],
+    default_size: (u32, u32),
+) -> Result<Vec<Option<SGeometry>>, String> {
+    let mut total_pixels = 0u64;
+    let mut geometries = Vec::with_capacity(windows.len());
+    for (index, window) in windows.iter().enumerate() {
+        let raw = window.geometry.unwrap_or(SGeometry {
+            x: 0,
+            y: 0,
+            w: default_size.0,
+            h: default_size.1,
+        });
+        let clamped = clamp_geometry_to_monitors(raw, monitors);
+        let pixels = u64::from(clamped.w)
+            .checked_mul(u64::from(clamped.h))
+            .ok_or_else(|| format!("restored window {index} surface area overflowed"))?;
+        total_pixels = total_pixels
+            .checked_add(pixels)
+            .ok_or_else(|| "aggregate restored surface area overflowed".to_string())?;
+        if total_pixels > MAX_RESTORE_TOTAL_SURFACE_PIXELS {
+            return Err(format!(
+                "restored windows require {total_pixels} surface pixels, exceeding the \
+                 {MAX_RESTORE_TOTAL_SURFACE_PIXELS}-pixel aggregate cap"
+            ));
+        }
+        geometries.push(window.geometry.map(|_| clamped));
+    }
+    Ok(geometries)
 }
 
 /// Sanitize a user-supplied layout name (from
@@ -251,27 +358,87 @@ impl Session {
         self.tabs.is_empty() && self.windows.iter().all(|w| w.tabs.is_empty())
     }
 
+    /// Validate the entire restore fan-out before any window, renderer, split
+    /// rectangle, or PTY is created. Limits are global across all serialized
+    /// windows; rejecting the whole restore avoids attacker-controlled partial
+    /// state and repeated spawn/reap work.
+    pub(crate) fn validated_restore_windows(&self) -> Result<Vec<RestoreWindowRef<'_>>, String> {
+        fn push<'a>(
+            restore: &mut Vec<RestoreWindowRef<'a>>,
+            total_panes: &mut usize,
+            window: RestoreWindowRef<'a>,
+        ) -> Result<(), String> {
+            if window.tabs.is_empty() {
+                return Ok(());
+            }
+            if restore.len() >= MAX_RESTORE_WINDOWS {
+                return Err(format!(
+                    "session requests more than {MAX_RESTORE_WINDOWS} non-empty windows"
+                ));
+            }
+            for tab in window.tabs {
+                let remaining = MAX_RESTORE_PANES.saturating_sub(*total_panes);
+                let leaves = tab.root.bounded_leaf_count(remaining).ok_or_else(|| {
+                    format!(
+                        "session requests more than {MAX_RESTORE_PANES} panes across all windows"
+                    )
+                })?;
+                *total_panes = total_panes
+                    .checked_add(leaves)
+                    .ok_or_else(|| "session pane count overflowed".to_string())?;
+            }
+            restore.push(window);
+            Ok(())
+        }
+
+        let mut restore = Vec::new();
+        let mut total_panes = 0usize;
+        if self.windows.is_empty() {
+            push(
+                &mut restore,
+                &mut total_panes,
+                RestoreWindowRef {
+                    tabs: &self.tabs,
+                    active: self.active,
+                    geometry: None,
+                },
+            )?;
+        } else {
+            for window in &self.windows {
+                push(
+                    &mut restore,
+                    &mut total_panes,
+                    RestoreWindowRef {
+                        tabs: &window.tabs,
+                        active: window.active,
+                        geometry: window.geometry,
+                    },
+                )?;
+            }
+        }
+        Ok(restore)
+    }
+
     /// C7: the session's windows in restore order, whatever vintage the file
     /// is. A v2 file returns its (non-empty) `windows` entries; a legacy
     /// single-window file becomes one geometry-less `SWindow` from the
     /// top-level fields. Empty-tab windows are dropped — nothing to restore.
+    #[cfg(test)]
     pub fn windows_normalized(&self) -> Vec<SWindow> {
-        if !self.windows.is_empty() {
-            return self
-                .windows
-                .iter()
-                .filter(|w| !w.tabs.is_empty())
-                .cloned()
-                .collect();
+        match self.validated_restore_windows() {
+            Ok(windows) => windows
+                .into_iter()
+                .map(|window| SWindow {
+                    tabs: window.tabs.to_vec(),
+                    active: window.active,
+                    geometry: window.geometry,
+                })
+                .collect(),
+            Err(error) => {
+                log::warn!("session restore rejected during preflight: {error}");
+                Vec::new()
+            }
         }
-        if self.tabs.is_empty() {
-            return Vec::new();
-        }
-        vec![SWindow {
-            tabs: self.tabs.clone(),
-            active: self.active,
-            geometry: None,
-        }]
     }
 }
 
@@ -285,29 +452,87 @@ pub(crate) fn clamp_geometry_to_monitors(
     g: SGeometry,
     monitors: &[(i32, i32, u32, u32)],
 ) -> SGeometry {
-    if monitors.is_empty() {
-        return g;
+    let valid_monitors: Vec<_> = monitors
+        .iter()
+        .copied()
+        .filter(|(_, _, width, height)| *width > 0 && *height > 0)
+        .collect();
+    let (max_width, max_height, max_area) = if valid_monitors.is_empty() {
+        (
+            MAX_RESTORE_SURFACE_DIMENSION,
+            MAX_RESTORE_SURFACE_DIMENSION,
+            MAX_RESTORE_SURFACE_PIXELS,
+        )
+    } else {
+        let max_width = valid_monitors
+            .iter()
+            .map(|(_, _, width, _)| *width)
+            .max()
+            .unwrap_or(MIN_RESTORE_WINDOW_WIDTH)
+            .clamp(MIN_RESTORE_WINDOW_WIDTH, MAX_RESTORE_SURFACE_DIMENSION);
+        let max_height = valid_monitors
+            .iter()
+            .map(|(_, _, _, height)| *height)
+            .max()
+            .unwrap_or(MIN_RESTORE_WINDOW_HEIGHT)
+            .clamp(MIN_RESTORE_WINDOW_HEIGHT, MAX_RESTORE_SURFACE_DIMENSION);
+        let max_area = valid_monitors
+            .iter()
+            .map(|(_, _, width, height)| u64::from(*width) * u64::from(*height))
+            .max()
+            .unwrap_or(MAX_RESTORE_SURFACE_PIXELS)
+            .min(MAX_RESTORE_SURFACE_PIXELS);
+        (max_width, max_height, max_area)
+    };
+    let mut sanitized = SGeometry {
+        w: g.w.clamp(MIN_RESTORE_WINDOW_WIDTH, max_width),
+        h: g.h.clamp(MIN_RESTORE_WINDOW_HEIGHT, max_height),
+        ..g
+    };
+    let area = u64::from(sanitized.w) * u64::from(sanitized.h);
+    if area > max_area {
+        let scale = (max_area as f64 / area as f64).sqrt();
+        sanitized.w = ((f64::from(sanitized.w) * scale).floor() as u32)
+            .clamp(MIN_RESTORE_WINDOW_WIDTH, max_width);
+        sanitized.h = ((f64::from(sanitized.h) * scale).floor() as u32)
+            .clamp(MIN_RESTORE_WINDOW_HEIGHT, max_height);
+        while u64::from(sanitized.w) * u64::from(sanitized.h) > max_area {
+            if sanitized.w >= sanitized.h && sanitized.w > MIN_RESTORE_WINDOW_WIDTH {
+                sanitized.w -= 1;
+            } else if sanitized.h > MIN_RESTORE_WINDOW_HEIGHT {
+                sanitized.h -= 1;
+            } else {
+                break;
+            }
+        }
     }
+    if valid_monitors.is_empty() {
+        return sanitized;
+    }
+
     // The grabbable strip: the window's top 30px, inset 50px from each side
     // (so "barely off-screen left" still counts as reachable if 50px of the
     // titlebar shows).
-    let strip_l = g.x + 50;
-    let strip_r = g.x + g.w as i32 - 50;
-    let strip_t = g.y;
-    let strip_b = g.y + 30;
-    let visible = monitors.iter().any(|&(mx, my, mw, mh)| {
-        let (mr, mb) = (mx + mw as i32, my + mh as i32);
+    let strip_l = i64::from(sanitized.x) + 50;
+    let strip_r = i64::from(sanitized.x) + i64::from(sanitized.w) - 50;
+    let strip_t = i64::from(sanitized.y);
+    let strip_b = i64::from(sanitized.y) + 30;
+    let visible = valid_monitors.iter().any(|&(mx, my, mw, mh)| {
+        let (mx, my) = (i64::from(mx), i64::from(my));
+        let (mr, mb) = (mx + i64::from(mw), my + i64::from(mh));
         strip_l < mr && strip_r > mx && strip_t < mb && strip_b > my
     });
     if visible {
-        return g;
+        return sanitized;
     }
-    let (mx, my, mw, mh) = monitors[0];
-    SGeometry {
-        x: g.x.clamp(mx, (mx + mw as i32 - 100).max(mx)),
-        y: g.y.clamp(my, (my + mh as i32 - 100).max(my)),
-        ..g
-    }
+    let (mx, my, mw, mh) = valid_monitors[0];
+    let (mx, my) = (i64::from(mx), i64::from(my));
+    let max_x = (mx + i64::from(mw) - 100).max(mx);
+    let max_y = (my + i64::from(mh) - 100).max(my);
+    let clamp_i32 = |value: i64| value.clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32;
+    sanitized.x = clamp_i32(i64::from(sanitized.x).clamp(mx, max_x));
+    sanitized.y = clamp_i32(i64::from(sanitized.y).clamp(my, max_y));
+    sanitized
 }
 
 /// Durable private save. The shared state writer stages the complete JSON in
@@ -461,6 +686,37 @@ fn stash_oversize_session(path: &std::path::Path, size: u64, limit: u64) {
 mod tests {
     use super::*;
 
+    fn leaf_node() -> SNode {
+        SNode::Leaf {
+            cwd: None,
+            cmd: Vec::new(),
+            group: None,
+        }
+    }
+
+    fn tree_with_leaves(count: usize) -> SNode {
+        assert!(count > 0);
+        if count == 1 {
+            return leaf_node();
+        }
+        let left = count / 2;
+        SNode::Split {
+            vertical: count.is_multiple_of(2),
+            ratio: 0.5,
+            a: Box::new(tree_with_leaves(left)),
+            b: Box::new(tree_with_leaves(count - left)),
+        }
+    }
+
+    fn tab_with_leaves(count: usize) -> STab {
+        STab {
+            root: tree_with_leaves(count),
+            focus: 0,
+            title_override: None,
+            zoomed: false,
+        }
+    }
+
     /// `leaf_count` bounds the restore PTY fan-out, so it
     /// must count every leaf across an arbitrarily nested split tree.
     #[test]
@@ -483,6 +739,35 @@ mod tests {
             }),
         };
         assert_eq!(tree.leaf_count(), 3);
+    }
+
+    #[test]
+    fn saved_leaf_rects_match_mux_rounding_and_dfs_spawn_order() {
+        let leaf = || SNode::Leaf {
+            cwd: None,
+            cmd: Vec::new(),
+            group: None,
+        };
+        let tree = SNode::Split {
+            vertical: false,
+            ratio: 0.5,
+            a: Box::new(leaf()),
+            b: Box::new(SNode::Split {
+                vertical: true,
+                ratio: 0.4,
+                a: Box::new(leaf()),
+                b: Box::new(leaf()),
+            }),
+        };
+
+        assert_eq!(
+            tree.leaf_rects((0.0, 0.0, 101.0, 51.0)),
+            vec![
+                (0.0, 0.0, 51.0, 51.0),
+                (51.0, 0.0, 50.0, 20.0),
+                (51.0, 20.0, 50.0, 31.0),
+            ]
+        );
     }
 
     /// Drift guard (security). `sanitize_layout_name` is
@@ -913,6 +1198,100 @@ mod tests {
     }
 
     #[test]
+    fn restore_preflight_enforces_global_window_and_pane_caps() {
+        let exact = Session {
+            windows: (0..MAX_RESTORE_WINDOWS)
+                .map(|_| SWindow {
+                    tabs: vec![tab_with_leaves(MAX_RESTORE_PANES / MAX_RESTORE_WINDOWS)],
+                    active: 0,
+                    geometry: None,
+                })
+                .collect(),
+            ..Session::default()
+        };
+        let validated = exact
+            .validated_restore_windows()
+            .expect("exact global limits must restore");
+        assert_eq!(validated.len(), MAX_RESTORE_WINDOWS);
+
+        let too_many_windows = Session {
+            windows: (0..=MAX_RESTORE_WINDOWS)
+                .map(|_| SWindow {
+                    tabs: vec![tab_with_leaves(1)],
+                    active: 0,
+                    geometry: None,
+                })
+                .collect(),
+            ..Session::default()
+        };
+        assert!(
+            too_many_windows.validated_restore_windows().is_err(),
+            "window fan-out must be rejected before any window is cloned or opened"
+        );
+
+        let too_many_panes = Session {
+            windows: vec![SWindow {
+                tabs: vec![tab_with_leaves(MAX_RESTORE_PANES + 1)],
+                active: 0,
+                geometry: None,
+            }],
+            ..Session::default()
+        };
+        assert!(
+            too_many_panes.validated_restore_windows().is_err(),
+            "pane fan-out must be global and checked before leaf_rects allocation"
+        );
+        assert!(
+            too_many_panes.windows[0].tabs[0]
+                .root
+                .leaf_rects((0.0, 0.0, 800.0, 600.0))
+                .is_empty(),
+            "leaf_rects must independently refuse over-cap allocations"
+        );
+    }
+
+    #[test]
+    fn restore_surface_preflight_enforces_aggregate_gpu_budget() {
+        let window = |geometry| SWindow {
+            tabs: vec![tab_with_leaves(1)],
+            active: 0,
+            geometry: Some(geometry),
+        };
+        let four_k = SGeometry {
+            x: 0,
+            y: 0,
+            w: 3840,
+            h: 2160,
+        };
+        let oversized = Session {
+            windows: (0..MAX_RESTORE_WINDOWS).map(|_| window(four_k)).collect(),
+            ..Session::default()
+        };
+        let windows = oversized
+            .validated_restore_windows()
+            .expect("window and pane counts are independently valid");
+        let error =
+            validated_restore_surface_geometries(&windows, &[(0, 0, 3840, 2160)], (800, 600))
+                .expect_err("sixteen 4K swapchains must exceed the aggregate budget");
+        assert!(error.contains("aggregate cap"), "{error}");
+
+        let full_hd = SGeometry {
+            w: 1920,
+            h: 1080,
+            ..four_k
+        };
+        let valid = Session {
+            windows: (0..MAX_RESTORE_WINDOWS).map(|_| window(full_hd)).collect(),
+            ..Session::default()
+        };
+        let windows = valid.validated_restore_windows().expect("valid fan-out");
+        let geometries =
+            validated_restore_surface_geometries(&windows, &[(0, 0, 1920, 1080)], (800, 600))
+                .expect("sixteen 1080p surfaces fit the aggregate budget");
+        assert_eq!(geometries, vec![Some(full_hd); MAX_RESTORE_WINDOWS]);
+    }
+
+    #[test]
     fn clamp_geometry_snaps_offscreen_windows_into_a_monitor() {
         // C7: a window saved on a now-unplugged monitor must come back
         // reachable. One 1920x1080 monitor at the origin:
@@ -955,6 +1334,58 @@ mod tests {
         assert_eq!(clamp_geometry_to_monitors(edge, &mons), edge);
         // No monitors reported (headless oddity): pass through.
         assert_eq!(clamp_geometry_to_monitors(off, &[]), off);
+    }
+
+    #[test]
+    fn clamp_geometry_handles_persisted_integer_extrema_and_zero_sizes() {
+        let monitors = [(0, 0, 1920u32, 1080u32)];
+        for geometry in [
+            SGeometry {
+                x: i32::MAX,
+                y: i32::MAX,
+                w: u32::MAX,
+                h: u32::MAX,
+            },
+            SGeometry {
+                x: i32::MIN,
+                y: i32::MIN,
+                w: 0,
+                h: 0,
+            },
+        ] {
+            let clamped = clamp_geometry_to_monitors(geometry, &monitors);
+            assert!((MIN_RESTORE_WINDOW_WIDTH..=1920).contains(&clamped.w));
+            assert!((MIN_RESTORE_WINDOW_HEIGHT..=1080).contains(&clamped.h));
+            assert!((0..=1820).contains(&clamped.x));
+            assert!((0..=980).contains(&clamped.y));
+        }
+
+        let headless = clamp_geometry_to_monitors(
+            SGeometry {
+                x: i32::MAX,
+                y: i32::MIN,
+                w: u32::MAX,
+                h: 0,
+            },
+            &[],
+        );
+        assert_eq!(headless.x, i32::MAX);
+        assert_eq!(headless.y, i32::MIN);
+        assert_eq!(headless.w, MAX_RESTORE_SURFACE_DIMENSION);
+        assert_eq!(headless.h, MIN_RESTORE_WINDOW_HEIGHT);
+
+        let extreme_monitor = [(i32::MAX - 10, i32::MIN, u32::MAX, u32::MAX)];
+        let clamped = clamp_geometry_to_monitors(
+            SGeometry {
+                x: 0,
+                y: 0,
+                w: u32::MAX,
+                h: u32::MAX,
+            },
+            &extreme_monitor,
+        );
+        assert!(clamped.w <= MAX_RESTORE_SURFACE_DIMENSION);
+        assert!(clamped.h <= MAX_RESTORE_SURFACE_DIMENSION);
     }
 
     #[test]

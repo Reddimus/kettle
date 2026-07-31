@@ -2,8 +2,8 @@
 
 Every stable GitHub release includes a ready-to-use `kettle.rb` formula. The
 source tree stores [`kettle.rb.in`](kettle.rb.in), whose version and checksums
-are deliberately unresolved until release CI has built and verified the exact
-macOS and Linux archives.
+are deliberately unresolved until release CI has built and verified the signed
+update manifest and exact macOS, Linux x86_64, and Linux aarch64 archives.
 
 There is currently no public `Reddimus/homebrew-kettle` repository. Therefore
 `brew tap reddimus/kettle` and `brew install reddimus/kettle/kettle` do not
@@ -32,23 +32,35 @@ brew tap reddimus/kettle
 brew install kettle
 ```
 
-The formula installs the macOS application bundle or Linux binary, desktop
-launcher, icons, man page, and offline documentation as appropriate.
+The formula installs the universal macOS application bundle or the
+architecture-matched Linux binary, desktop launcher, icons, man page, shell
+integration examples, and offline documentation as appropriate.
 
 ## Per-release maintenance
 
-The release finalizer computes SHA-256 directly from the verified archives and
-renders `kettle.rb` with `scripts/render-package-templates.py`. This avoids the
-invalid intermediate state where a new version points at the previous
-release's checksums. Update the tap from the newly published asset:
+The release finalizer computes SHA-256 directly from the signed update manifest
+and verified archives, then renders `kettle.rb` with
+`scripts/render-package-templates.py`. The small manifest is the formula's
+stable specification; a platform-selected Homebrew resource supplies the
+binary archive. This follows Homebrew's current rule that platform URL and
+checksum stanzas live inside a resource while also avoiding an unnecessary
+source-tree download. It also avoids the invalid intermediate state where a
+new version points at the previous release's checksums. Update the tap from the
+newly published asset:
 
 ```sh
 curl -fL https://github.com/Reddimus/kettle/releases/latest/download/kettle.rb \
   -o Formula/kettle.rb
 brew audit --strict --online kettle
+if brew list --versions kettle >/dev/null; then
+  brew reinstall kettle
+else
+  brew install kettle
+fi
 brew test kettle
 git add Formula/kettle.rb
-git commit -m "kettle $(sed -n 's/^  version \"\([^\"]*\)\"/\1/p' Formula/kettle.rb)"
+version=$(sed -n 's#^  url ".*/releases/download/v\([^/"]*\)/kettle-update-manifest\.json".*#\1#p' Formula/kettle.rb)
+git commit -m "kettle $version"
 git push
 ```
 

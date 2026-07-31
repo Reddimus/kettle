@@ -365,7 +365,17 @@ pub fn encode(
 
     if let Key::Named(n) = key {
         match n {
-            NamedKey::Enter => return Some(vec![b'\r']),
+            NamedKey::Enter => {
+                // Keep ordinary Enter byte-for-byte compatible. When the
+                // focused application has not negotiated Kitty CSI-u, use
+                // xterm modifyOtherKeys level-2 form for modified Enter so
+                // Shift/Ctrl/Alt do not collapse into a submit keystroke.
+                return Some(if modded {
+                    format!("\x1b[27;{m};13~").into_bytes()
+                } else {
+                    vec![b'\r']
+                });
+            }
             NamedKey::Backspace => {
                 // The three flavors every modern terminal emits:
                 //   plain Backspace  → DEL (0x7F)  — xterm convention,
@@ -439,11 +449,11 @@ pub fn encode(
     // Character keys.
     if let Key::Character(s) = key {
         let c = s.chars().next()?;
-        // Preserve xterm's Meta+Control form for the WSL image-paste chord.
-        // The generic Ctrl+Alt path historically treated every character as
-        // printable Meta input (ESC + `v`), losing Control. Keep this scoped to
-        // C-M-v so AltGr-produced characters on international layouts retain
-        // their existing text behavior.
+        // Preserve xterm's Meta+Control form for C-M-v. The generic Ctrl+Alt
+        // path historically treated every character as printable Meta input
+        // (ESC + `v`), losing Control. Keep this scoped to C-M-v so
+        // AltGr-produced characters on international layouts retain their
+        // existing text behavior.
         if ctrl && alt && c.eq_ignore_ascii_case(&'v') {
             return Some(vec![0x1b, 0x16]);
         }
@@ -1000,32 +1010,44 @@ pub fn paste_payload(text: &str, bracketed: bool) -> Vec<u8> {
     // shells into treating our genuine closer as "still pasted text" and never
     // leaving paste mode, swallowing further input. Alacritty/iTerm2/WezTerm all
     // strip both.
-    // Strip in a FIXPOINT loop, not a single left-to-right pass: a crafted body
-    // like `\x1b[20\x1b[201~1~` re-forms an intact `\x1b[201~` across the splice
-    // seam after one `.replace`, leaving a live closer that ends bracketed paste
-    // early and auto-runs the tail. Loop until no marker survives. The guard
-    // runs in BOTH arms: even a non-bracketed
-    // paste can carry a stray marker that the receiving app would misread.
-    let strip_markers = |s: String| -> String {
-        let mut safe = s;
-        while safe.contains("\x1b[200~") || safe.contains("\x1b[201~") {
-            safe = safe.replace("\x1b[200~", "").replace("\x1b[201~", "");
+    // A stack-style single pass reaches the same fixpoint without repeatedly
+    // rescanning and reallocating the entire clipboard. Truncation can expose a
+    // marker across a splice seam, so recheck the bounded six-byte suffix; each
+    // successful check removes six bytes and total work remains linear.
+    const START: &[u8] = b"\x1b[200~";
+    const END: &[u8] = b"\x1b[201~";
+    let mut safe = Vec::with_capacity(text.len());
+    let bytes = text.as_bytes();
+    let mut index = 0;
+    while index < bytes.len() {
+        let byte = if bytes[index] == b'\r' && bytes.get(index + 1) == Some(&b'\n') {
+            index += 2;
+            if bracketed { b'\n' } else { b'\r' }
+        } else {
+            let byte = bytes[index];
+            index += 1;
+            if !bracketed && byte == b'\n' {
+                b'\r'
+            } else {
+                byte
+            }
+        };
+        safe.push(byte);
+        while safe.ends_with(START) || safe.ends_with(END) {
+            safe.truncate(safe.len() - START.len());
         }
-        safe
-    };
+    }
     if bracketed {
-        // Preserve `\n` line endings; only normalize CRLF→LF for consistency.
-        let safe = strip_markers(text.replace("\r\n", "\n"));
+        // Preserve `\n` line endings; only normalize CRLF->LF for consistency.
         let mut v = Vec::with_capacity(safe.len() + 12);
         v.extend_from_slice(b"\x1b[200~");
-        v.extend_from_slice(safe.as_bytes());
+        v.extend_from_slice(&safe);
         v.extend_from_slice(b"\x1b[201~");
         v
     } else {
         // Normalize every newline to CR so a trailing/interior newline can't
         // auto-run a command via the shell's line discipline.
-        let body = strip_markers(text.replace("\r\n", "\r").replace('\n', "\r"));
-        body.into_bytes()
+        safe
     }
 }
 
@@ -1336,17 +1358,17 @@ mod tests {
     }
 
     #[test]
-    fn client_image_paste_chords_pass_through_to_the_pty() {
+    fn legacy_xterm_v_control_and_meta_encodings_are_preserved() {
         let key = Key::Character("v".into());
         assert_eq!(
             encode(&key, Some("v"), ModifiersState::CONTROL, TermMode::empty()),
             Some(vec![0x16]),
-            "Ctrl+V must reach Codex and Linux/WSL Claude as C-v"
+            "legacy Ctrl+V must encode as C-v"
         );
         assert_eq!(
             encode(&key, Some("v"), ModifiersState::ALT, TermMode::empty()),
             Some(vec![0x1b, b'v']),
-            "Alt+V must reach native-Windows Claude as M-v"
+            "legacy Alt+V must encode as M-v"
         );
         assert_eq!(
             encode(
@@ -1356,7 +1378,7 @@ mod tests {
                 TermMode::empty()
             ),
             Some(vec![0x1b, 0x16]),
-            "Ctrl+Alt+V must reach Codex under WSL as M-C-v"
+            "legacy Ctrl+Alt+V must encode as M-C-v"
         );
     }
 
@@ -1396,7 +1418,7 @@ mod tests {
         // A single left-to-right `.replace` pass
         // leaves a marker that re-forms across the splice seam.
         // `\x1b[20\x1b[201~1~` -> (strip inner `\x1b[201~`) -> `\x1b[201~`. The
-        // fixpoint loop must leave exactly ONE closer (the wrapper's). The old
+        // sanitizer must leave exactly ONE closer (the wrapper's). The old
         // single-pass code left two (the reconstructed one auto-runs the tail).
         let p = paste_payload("a\x1b[20\x1b[201~1~b", true);
         assert_eq!(
@@ -1409,6 +1431,33 @@ mod tests {
             q.windows(6).filter(|w| *w == b"\x1b[200~").count(),
             1,
             "overlap-reconstructed start marker must be stripped to the fixpoint"
+        );
+    }
+
+    #[test]
+    fn paste_marker_sanitizer_is_work_bounded_for_deep_nesting() {
+        // Each inner removal reveals exactly one outer marker. A repeated
+        // whole-string `.replace` implementation needs 100,000 passes over a
+        // roughly 600 KiB clipboard; the stack sanitizer consumes it once.
+        let depth = 100_000;
+        let mut nested = String::with_capacity(depth * 6 + 6);
+        for _ in 0..depth {
+            nested.push_str("\x1b[20");
+        }
+        nested.push_str("\x1b[201~");
+        for _ in 0..depth {
+            nested.push_str("1~");
+        }
+
+        assert_eq!(
+            paste_payload(&nested, false),
+            b"",
+            "deeply nested reconstructed markers must be removed"
+        );
+        assert_eq!(
+            paste_payload(&nested, true),
+            b"\x1b[200~\x1b[201~",
+            "only Kettle's bracketed-paste wrapper may remain"
         );
     }
 
@@ -1682,6 +1731,35 @@ mod tests {
             Some(b"\x1b[Z".to_vec()),
             "Shift+Tab must be back-tab CSI Z"
         );
+    }
+
+    #[test]
+    fn enter_chords_are_distinct_with_and_without_kitty_negotiation() {
+        use std::collections::HashSet;
+        use winit::keyboard::{Key, NamedKey};
+
+        let enter = Key::Named(NamedKey::Enter);
+        let modifiers = [
+            ModifiersState::empty(),
+            ModifiersState::SHIFT,
+            ModifiersState::CONTROL,
+            ModifiersState::ALT,
+        ];
+        let legacy =
+            modifiers.map(|mods| encode_key_press(&enter, mods, TermMode::empty()).unwrap());
+        assert_eq!(legacy[0], b"\r");
+        assert_eq!(legacy[1], b"\x1b[27;2;13~");
+        assert_eq!(legacy[2], b"\x1b[27;5;13~");
+        assert_eq!(legacy[3], b"\x1b[27;3;13~");
+        assert_eq!(legacy.iter().collect::<HashSet<_>>().len(), legacy.len());
+
+        let kitty_mode = TermMode::DISAMBIGUATE_ESC_CODES;
+        let kitty = modifiers.map(|mods| encode_key_press(&enter, mods, kitty_mode).unwrap());
+        assert_eq!(kitty[0], b"\r");
+        assert_eq!(kitty[1], b"\x1b[13;2u");
+        assert_eq!(kitty[2], b"\x1b[13;5u");
+        assert_eq!(kitty[3], b"\x1b[13;3u");
+        assert_eq!(kitty.iter().collect::<HashSet<_>>().len(), kitty.len());
     }
 
     #[test]

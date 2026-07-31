@@ -1,9 +1,12 @@
 # Per-pane titlebar — design
 
-> Status: **Shipped in v1.30.0** (all 10 Bucket-D titlebar phases
-> complete, closed by the `EditPaneGroup` action + `[group-name]`
-> prefix), with later refinements (theme-accent focus color, cwd-aware
-> title fitting, emoji/tofu-box glyph fixes). See `show_titlebar` /
+> Status: **Shipped in v1.30.0**, with later refinements
+> (theme-accent focus color, cwd-aware title fitting, emoji/tofu-box
+> glyph fixes, and position-aware render/input geometry). Functional
+> phases 2-10 are complete. The live split-titlebar smoke launches
+> independent top- and bottom-title windows, validates semantic/grid
+> geometry, and checks exact focused, receiving, and inactive colors in
+> captured PNGs. See `show_titlebar` /
 > `title_hide_sizetext` in `crates/kettle-config/src/lib.rs` and
 > `pane_titlebar_buffers` / `fit_pane_titlebar_title` in
 > `crates/kettle-render/src/lib.rs`. This doc is kept as the
@@ -21,7 +24,7 @@ each terminal containing:
   - The broadcast-group label (editable inline; click to assign).
   - Custom colors (transmit/receive/inactive variants).
 
-Kettle today shows ONE title bar — the global window title
+Before this work, Kettle showed ONE title bar — the global window title
 (`window-title-format`) — plus the tab-bar with per-tab activity dots.
 Per-pane titlebars surface the same info AT THE PANE level.
 
@@ -36,7 +39,7 @@ Per-pane titlebars surface the same info AT THE PANE level.
 
   2. **Render order.** Today: tab-bar (top) → panes → status-bar
      (bottom) → modals. With per-pane titlebars: each pane gets a
-     mini-bar drawn ABOVE its content rect. Three new quad
+     mini-bar drawn on its configured edge. Three new quad
      batches per pane (background, accent, icon) + one text area
      for the title. Multiplies the per-frame render cost by
      `num_panes_per_tab`.
@@ -114,15 +117,15 @@ graph TB
 | # | Scope | Status |
 |---|------|--------|
 | 1 | This doc. Design + roadmap. No code. | ✅ |
-| 2 | `Pane.titlebar_height` field on Pane (computed from cfg.title_font metrics at startup + on config reload). Subtract from pane content rect in layout math; verify grid sizes match. | pending |
-| 3 | Renderer: `build_pane_titlebar(pane, focused, group)` emits the 3-quad chrome + 1 title-text area. Wire from `build_pane`. Honors `title_hide_sizetext`. | pending |
-| 4 | Color variants: select fg/bg from `cfg.title_{transmit,receive,inactive}_{fg,bg}_color` based on focused + broadcast-group membership. | pending |
-| 5 | Hit-testing: clicks on the titlebar rect intercepted in `on_mouse_input` before pane mouse-tracking. New `PaneRegion::Titlebar` discriminator. | pending |
-| 6 | Activity dot per-pane (mirrors the existing per-tab activity dot). Reuse the existing per-pane `last_output_at` tracking; new dot quad inside the titlebar. | pending |
-| 7 | Edit-title overlay: `editing_title: Option<TitleEditState>` field; KeyboardInput handler dispatches to it before normal key encoding when active. Enter applies + clears; Esc clears. | pending |
-| 8 | Inline group label edit: same shape as Edit-title but writes to `Pane.broadcast_group`. | pending |
-| 9 | `title_at_bottom` config wired: render the titlebar BELOW the pane content rect instead of above. | pending |
-| 10 | Bottom-of-document acceptance test: launch kettle with `show-titlebar = true`, capture `--screenshot`, assert N pixel-stripes match the expected color sequence (focused vs group-member vs unfocused). | pending |
+| 2 | Derive the shared titlebar inset from live renderer cell metrics, subtract it from per-pane grid sizing, and verify the PTY and rendered grid agree. | complete |
+| 3 | Renderer: build the titlebar chrome and shaped title text for every split pane, honoring `title_hide_sizetext`. | complete |
+| 4 | Color variants: select fg/bg from `cfg.title_{transmit,receive,inactive}_{fg,bg}_color` based on focused + broadcast-group membership. | complete |
+| 5 | Hit-testing: intercept clicks in the top/bottom titlebar band before terminal mouse reporting and route title editing/focus behavior. | complete |
+| 6 | Render per-pane activity, bell, silence, read-only, and agent state in the titlebar. | complete |
+| 7 | Edit-title overlay: keyboard input is routed to `TitleEditState`; Enter applies and Esc cancels. | complete |
+| 8 | Inline group-label editing and bulk group actions update each pane's group name. | complete |
+| 9 | `title_at_bottom` config wired: render the titlebar below the pane content. Renderer cell, cursor, selection, search, hint, IME, and image projection plus UI pointer/IME geometry share the title-position-aware grid origin. | complete |
+| 10 | Live acceptance: `split-titlebar-smoke` launches real top- and bottom-title windows, validates pane/title/cwd/grid-edge geometry, and checks exact focused/receiving/inactive colors in captured PNGs. | complete |
 
 ## Architecture choices (rationale)
 
@@ -143,8 +146,11 @@ bell-state tracking generalizes).
 ### Why bottom rendering is a config knob, not a separate code path
 
 `title_at_bottom = true` swaps the titlebar's y-offset from "above
-content rect" to "below content rect". One render-position
-parameter; no code duplication.
+content rect" to "below content rect". `pane_grid_origin` is the shared
+renderer/UI coordinate invariant: only a top title contributes to the grid's
+top inset, while either position reserves the same total height. This keeps
+paint, clipping, selection/mouse hit testing, links, and native IME projection
+aligned without a second layout path.
 
 ### Why drag-to-detach isn't here
 
@@ -159,28 +165,32 @@ follows separately.
 
 End-to-end ship-criteria:
 
-```bash
-# Launch with per-pane titlebars enabled, 2 panes vertically split, both
-# in broadcast group "g1", focus on top pane:
-kettle --config <(cat <<EOF
-show-titlebar = true
-title-transmit-bg-color = #c80003
-title-receive-bg-color = #0076c9
-title-inactive-bg-color = #c0bebf
-EOF
-) &
-
-# Send a bell to the unfocused pane:
-kettle --remote-send "\\a" --pane 2
-
-# Capture + assert:
-kettle --screenshot /tmp/out.png
-python3 verify_titlebar_colors.py /tmp/out.png  # checks 3 row-stripes
+```sh
+just split-titlebar-smoke
 ```
 
-`verify_titlebar_colors.py` (a small fixture script) reads pixels at
-known y-offsets in the PNG and asserts they match the cfg colors for
-each pane's state.
+The smoke launches two real Kettle windows, one with `title-at-bottom = false`
+and one with it enabled. Each window reports an authoritative cwd plus a
+truncated shell title, creates a split, and captures an inactive frame before
+enabling tab broadcast and capturing a receiving frame. `list_panes` and
+`ui_geometry.pane_titlebars` must agree on focus, cwd, pane rectangles, the
+`cell_height + 6` titlebar height, the configured edge, and the PTY grid origin
+and row budget. A full cwd is required whenever it fits; constrained windows
+must retain the cwd leaf rather than falling back to the shell's truncated
+title.
+
+The PNG oracle checks a 3x3 patch in the first of the title label's two leading
+blank cells, which excludes title glyphs, group/bell icons, and the one-pixel
+focus accent by construction. It also checks the adjacent grid-side padding
+against the configured terminal background. Explicit colors and disabled
+unfocused dimming make the focused/transmit, receiving, and inactive samples
+exact and deterministic. Screenshots, per-state geometry, the broadcast action,
+and aggregate `analysis.json` evidence are saved beneath the diagnostic root's
+`split-titlebar-*/{top,bottom}/` directories (the default Windows root is
+owner-private). The helper self-test
+exercises both positions and both broadcast states and rejects wrong-edge and
+wrong-color fixtures; it does not replace running the live recipe on the target
+desktop.
 
 ## See also
 

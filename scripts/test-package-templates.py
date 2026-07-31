@@ -24,8 +24,12 @@ class PackageTemplateTests(unittest.TestCase):
                 str(SCRIPT),
                 "--version",
                 version,
+                "--release-manifest",
+                str(root / "manifest.json"),
                 "--macos-archive",
                 str(root / "mac.zip"),
+                "--linux-aarch64-archive",
+                str(root / "linux-aarch64.tar.gz"),
                 "--linux-x86-64-archive",
                 str(root / "linux.tar.gz"),
                 "--output-dir",
@@ -39,9 +43,13 @@ class PackageTemplateTests(unittest.TestCase):
     def test_renders_exact_archive_hashes_deterministically(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
+            manifest = b'{"schema_version":1}\n'
             macos = b"macos release archive\n"
+            linux_aarch64 = b"linux aarch64 release archive\n"
             linux = b"linux release archive\n"
+            (root / "manifest.json").write_bytes(manifest)
             (root / "mac.zip").write_bytes(macos)
+            (root / "linux-aarch64.tar.gz").write_bytes(linux_aarch64)
             (root / "linux.tar.gz").write_bytes(linux)
 
             first = self.run_renderer(root)
@@ -50,12 +58,49 @@ class PackageTemplateTests(unittest.TestCase):
             pkgbuild = (root / "out" / "PKGBUILD").read_text(encoding="utf-8")
             first_bytes = (formula.encode(), pkgbuild.encode())
 
-            self.assertIn('version "9.8.7"', formula)
-            self.assertIn(hashlib.sha256(macos).hexdigest(), formula)
-            self.assertIn(hashlib.sha256(linux).hexdigest(), formula)
+            self.assertIn(
+                '  url "https://github.com/Reddimus/kettle/releases/download/'
+                'v9.8.7/kettle-update-manifest.json",\n'
+                "      using: :nounzip\n"
+                f'  sha256 "{hashlib.sha256(manifest).hexdigest()}"',
+                formula,
+            )
+            self.assertIn(
+                '      url "https://github.com/Reddimus/kettle/releases/download/'
+                'v9.8.7/kettle-macos-universal.zip"\n'
+                f'      sha256 "{hashlib.sha256(macos).hexdigest()}"',
+                formula,
+            )
+            self.assertIn(
+                '        url "https://github.com/Reddimus/kettle/releases/download/'
+                'v9.8.7/kettle-linux-aarch64.tar.gz"\n'
+                f'        sha256 "{hashlib.sha256(linux_aarch64).hexdigest()}"',
+                formula,
+            )
+            self.assertIn(
+                '        url "https://github.com/Reddimus/kettle/releases/download/'
+                'v9.8.7/kettle-linux-x86_64.tar.gz"\n'
+                f'        sha256 "{hashlib.sha256(linux).hexdigest()}"',
+                formula,
+            )
             self.assertIn("pkgver=9.8.7", pkgbuild)
             self.assertIn(hashlib.sha256(linux).hexdigest(), pkgbuild)
             self.assertNotIn("@VERSION@", formula + pkgbuild)
+            self.assertIn(
+                '    share_dir = prefix/"share"\n'
+                '    resource("binary").stage do\n'
+                "      if OS.mac?",
+                formula,
+            )
+            self.assertNotIn('\n      share = prefix/"share"\n', formula)
+            self.assertIn(
+                '(share_dir/"doc/kettle").install "#{doc_dir}/#{f}"',
+                formula,
+            )
+            self.assertIn(
+                '(share_dir/"doc/kettle").install "#{doc_dir}/shell-integration"',
+                formula,
+            )
 
             second = self.run_renderer(root)
             self.assertEqual(second.returncode, 0, second.stderr)
@@ -65,7 +110,9 @@ class PackageTemplateTests(unittest.TestCase):
     def test_rejects_non_stable_version(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
+            (root / "manifest.json").write_bytes(b"{}\n")
             (root / "mac.zip").write_bytes(b"mac")
+            (root / "linux-aarch64.tar.gz").write_bytes(b"linux-aarch64")
             (root / "linux.tar.gz").write_bytes(b"linux")
             result = self.run_renderer(root, "9.8.7-rc.1")
             self.assertNotEqual(result.returncode, 0)

@@ -40,8 +40,16 @@ permissions:
 
 jobs:
   cargo-deny:
-    name: cargo deny check
+    name: cargo deny check (${{ matrix.workspace.name }})
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        workspace:
+          - name: product
+            manifest: ./Cargo.toml
+          - name: vendor-validation
+            manifest: ./vendor/Cargo.toml
     # Timeout budget: cargo-deny scans Cargo.lock for license/
     # source/banned-crate violations; ~3 min real time. 10 min is 3×
     # headroom for the action's vendored binary download.
@@ -60,3 +68,4 @@ jobs:
           # two workflows opening duplicate tracking issues on the
           # same advisory.
           command: check licenses sources bans
+          manifest-path: ${{ matrix.workspace.manifest }}

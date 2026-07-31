@@ -2,7 +2,7 @@
 use std::fs;
 #[cfg(any(windows, target_os = "linux"))]
 use std::fs::File;
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "linux"))]
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use std::fs::OpenOptions;
 #[cfg(any(windows, target_os = "linux"))]
 use std::io::Read;
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "linux"))]
 use std::io::Seek;
 #[cfg(any(windows, target_os = "linux"))]
 use std::path::Component;
@@ -21,8 +21,17 @@ use serde::{Deserialize, Serialize};
 #[cfg(any(windows, target_os = "linux"))]
 use sha2::{Digest as _, Sha256};
 
-use crate::current_target;
 use crate::feed::{AvailableUpdate, FeedClient, UpdateError};
+#[cfg(windows)]
+use crate::feed::{MAX_ARTIFACT_BYTES, SignedManifest};
+#[cfg(any(windows, target_os = "linux"))]
+use crate::feed::{require_strict_upgrade, reverify_available_update};
+// Every use of the compiled verification key sits behind the same platform gate
+// as the authenticated install paths themselves, so macOS — which has no managed
+// install — would otherwise import it unused and trip `-D unused-imports`.
+#[cfg(any(windows, target_os = "linux"))]
+use crate::UPDATE_PUBLIC_KEY;
+use crate::current_target;
 
 const MARKER_SCHEMA: u32 = 1;
 #[cfg(any(windows, target_os = "linux"))]
@@ -33,8 +42,12 @@ const MAX_ARCHIVE_ENTRIES: usize = 128;
 const MAX_UNPACKED_BYTES: u64 = 512 * 1024 * 1024;
 #[cfg(any(windows, target_os = "linux"))]
 const PACKAGE_MANIFEST_FILE: &str = "kettle-package-manifest.json";
+#[cfg(target_os = "linux")]
+const UNIX_INSTALL_PROVENANCE_FILE: &str = "share/kettle/install-files.json";
+#[cfg(any(windows, target_os = "linux"))]
+const MAX_PACKAGE_MANIFEST_BYTES: usize = 256 * 1024;
 #[cfg(windows)]
-const PENDING_SCHEMA: u32 = 1;
+const PENDING_SCHEMA: u32 = 3;
 #[cfg(windows)]
 const PENDING_FILE: &str = ".kettle-update-pending.json";
 #[cfg(windows)]
@@ -42,9 +55,17 @@ const RUNNING_LOCK_FILE: &str = ".kettle-running.lock";
 #[cfg(windows)]
 const MAX_PENDING_ATTEMPTS: u32 = 3;
 #[cfg(windows)]
+const MAX_HANDOFF_TIMEOUTS: u32 = 3;
+#[cfg(windows)]
+const HANDOFF_TIMEOUT_GRACE_NANOS: u128 = 5 * 60 * 1_000_000_000;
+#[cfg(windows)]
 const FAILED_PENDING_PREFIX: &str = ".kettle-update-failed-";
 #[cfg(windows)]
 const MAX_PENDING_RECORD_BYTES: usize = 1024 * 1024;
+#[cfg(windows)]
+const MAX_FAILED_PENDING_TRANSACTIONS: usize = 8;
+#[cfg(any(windows, target_os = "linux"))]
+const BACKUP_MARKER_FILE: &str = ".kettle-update-backup.json";
 #[cfg(windows)]
 const WINDOWS_ALLOWED_ROOTS: &[&str] = &[
     "kettle.exe",
@@ -68,6 +89,37 @@ struct InstallMarker {
     channel: String,
     target: String,
     version: String,
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+struct UnixInstallProvenance {
+    schema: u32,
+    product: String,
+    managed_by: String,
+    prefix: String,
+    owner_uid: u32,
+    files: Vec<UnixInstallFile>,
+    directories: Vec<UnixInstallDirectory>,
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+struct UnixInstallFile {
+    path: String,
+    size: u64,
+    sha256: String,
+    mode: u32,
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+struct UnixInstallDirectory {
+    path: String,
+    mode: u32,
 }
 
 #[derive(Debug, Clone)]
@@ -116,7 +168,7 @@ pub enum ProcessStart {
 }
 
 #[cfg(windows)]
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 struct PendingUpdate {
     schema: u32,
@@ -124,21 +176,37 @@ struct PendingUpdate {
     target: String,
     transaction_id: String,
     target_version: String,
-    staging_dir: String,
+    archive: String,
+    archive_size: u64,
+    archive_sha256: String,
+    release_manifest: String,
+    release_signature: String,
+    asset: crate::ManifestAsset,
+    package_manifest: String,
     helper: String,
-    files: Vec<PendingFile>,
+    helper_size: u64,
+    helper_sha256: String,
     attempts: u32,
+    #[serde(default)]
+    handoff_timeouts: u32,
     #[serde(default)]
     last_error: Option<String>,
 }
 
-#[cfg(windows)]
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg(any(windows, target_os = "linux"))]
+#[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
-struct PendingFile {
-    path: String,
-    size: u64,
-    sha256: String,
+struct BackupMarker {
+    schema: u32,
+    product: String,
+    transaction_id: String,
+}
+
+#[cfg(windows)]
+struct VerifiedWindowsHelper {
+    path: PathBuf,
+    _parent: AnchoredParent,
+    _file: File,
 }
 
 #[cfg(windows)]
@@ -154,6 +222,18 @@ enum PendingStartInspection {
 
 #[cfg(windows)]
 fn inspect_pending_start(prefix: &Path) -> Option<PendingStartInspection> {
+    let installed = semver::Version::parse(env!("CARGO_PKG_VERSION"))
+        .expect("the crate package version is valid semver");
+    inspect_pending_start_with(prefix, &UPDATE_PUBLIC_KEY, SystemTime::now(), &installed)
+}
+
+#[cfg(windows)]
+fn inspect_pending_start_with(
+    prefix: &Path,
+    public_key: &[u8; 32],
+    now: SystemTime,
+    installed: &semver::Version,
+) -> Option<PendingStartInspection> {
     let path = prefix.join(PENDING_FILE);
     let metadata = match fs::symlink_metadata(&path) {
         Ok(metadata) => metadata,
@@ -165,20 +245,37 @@ fn inspect_pending_start(prefix: &Path) -> Option<PendingStartInspection> {
             });
         }
     };
-    let fingerprint = pending_file_fingerprint(&path).ok();
     if !metadata.file_type().is_file() {
         return Some(PendingStartInspection::Failed {
-            fingerprint,
+            fingerprint: None,
             reason: "the pending update record is not a regular file".into(),
         });
     }
-    match load_pending(prefix) {
+    let fingerprint = pending_file_fingerprint(&path).ok();
+    match load_pending(prefix).and_then(|pending| {
+        authenticate_pending_upgrade(&pending, public_key, now, installed)?;
+        Ok(pending)
+    }) {
         Ok(pending) if pending.attempts >= MAX_PENDING_ATTEMPTS => {
             Some(PendingStartInspection::Failed {
                 fingerprint,
                 reason: format!(
                     "the staged update failed {} times{}",
                     pending.attempts,
+                    pending
+                        .last_error
+                        .as_deref()
+                        .map(|error| format!(": {error}"))
+                        .unwrap_or_default()
+                ),
+            })
+        }
+        Ok(pending) if pending.handoff_timeouts >= MAX_HANDOFF_TIMEOUTS => {
+            Some(PendingStartInspection::Failed {
+                fingerprint,
+                reason: format!(
+                    "the staged update could not take over from a still-running Kettle process {} times{}",
+                    pending.handoff_timeouts,
                     pending
                         .last_error
                         .as_deref()
@@ -197,30 +294,30 @@ fn inspect_pending_start(prefix: &Path) -> Option<PendingStartInspection> {
 
 #[cfg(windows)]
 fn pending_file_fingerprint(path: &Path) -> Result<String, UpdateError> {
-    let metadata = fs::symlink_metadata(path)?;
-    let kind = if metadata.file_type().is_file() {
-        "file"
-    } else if metadata.file_type().is_symlink() {
-        "symlink"
-    } else if metadata.file_type().is_dir() {
-        "directory"
-    } else {
-        "other"
-    };
+    let (mut file, _) = open_transaction_snapshot(path)?;
+    pending_file_fingerprint_from_open(&mut file)
+}
+
+#[cfg(windows)]
+fn pending_file_fingerprint_from_open(file: &mut File) -> Result<String, UpdateError> {
+    let metadata = file.metadata()?;
     let modified = metadata
         .modified()
         .ok()
         .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
         .map_or(0, |duration| duration.as_nanos());
-    let mut identity = format!("{kind}:{}:{modified}:", metadata.len());
-    if metadata.file_type().is_file() {
-        let mut file = File::open(path)?;
-        let mut bytes = Vec::new();
-        std::io::Read::by_ref(&mut file)
-            .take(MAX_PENDING_RECORD_BYTES as u64 + 1)
-            .read_to_end(&mut bytes)?;
-        identity.push_str(&sha256_bytes(&bytes));
+    let mut identity = format!("file:{}:{modified}:", metadata.len());
+    file.rewind()?;
+    let mut bytes = Vec::new();
+    std::io::Read::by_ref(file)
+        .take(MAX_PENDING_RECORD_BYTES as u64 + 1)
+        .read_to_end(&mut bytes)?;
+    if bytes.len() > MAX_PENDING_RECORD_BYTES {
+        return Err(UpdateError::Transaction(
+            "pending record exceeds the safety limit".into(),
+        ));
     }
+    identity.push_str(&sha256_bytes(&bytes));
     Ok(identity)
 }
 
@@ -275,20 +372,29 @@ fn try_quarantine_pending(
     else {
         return Ok(None);
     };
-    let pending_path = prefix.join(PENDING_FILE);
-    let current = match pending_file_fingerprint(&pending_path) {
-        Ok(fingerprint) => fingerprint,
+    let mut pending = match open_windows_held_file(prefix, Path::new(PENDING_FILE)) {
+        Ok(pending) => pending,
         Err(UpdateError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
             return Ok(None);
         }
         Err(error) => return Err(error),
     };
+    let current = pending_file_fingerprint_from_open(&mut pending.file)?;
     if current != expected_fingerprint {
         return Ok(None);
     }
-    let suffix = unique_suffix();
+    let suffix = load_pending(prefix)
+        .ok()
+        .map(|pending| pending.transaction_id)
+        .unwrap_or_else(unique_suffix);
+    prune_failed_pending_records(prefix, MAX_FAILED_PENDING_TRANSACTIONS.saturating_sub(1))?;
     let quarantined = prefix.join(format!("{FAILED_PENDING_PREFIX}{suffix}.json"));
-    fs::rename(&pending_path, &quarantined)?;
+    let quarantine_name = quarantined
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| UpdateError::Transaction("invalid quarantine file name".into()))?;
+    rename_windows_held_file(&pending, quarantine_name)?;
+    drop(pending);
     if let Err(error) = atomic_write(
         &prefix.join(format!("{FAILED_PENDING_PREFIX}{suffix}.txt")),
         format!("{reason}\n").as_bytes(),
@@ -308,8 +414,52 @@ fn try_quarantine_pending(
     Ok(Some(quarantined))
 }
 
+#[cfg(windows)]
+fn failed_pending_record_name(name: &str) -> Option<(&str, &str)> {
+    let suffix = name.strip_prefix(FAILED_PENDING_PREFIX)?;
+    let (transaction_id, extension) = suffix.rsplit_once('.')?;
+    if is_transaction_id(transaction_id) && matches!(extension, "json" | "txt") {
+        Some((transaction_id, extension))
+    } else {
+        None
+    }
+}
+
+#[cfg(windows)]
+fn prune_failed_pending_records(
+    prefix: &Path,
+    keep_transactions: usize,
+) -> Result<(), UpdateError> {
+    let mut transactions: std::collections::BTreeMap<(u128, u32), (String, Vec<WindowsHeldFile>)> =
+        std::collections::BTreeMap::new();
+    for entry in fs::read_dir(prefix)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        if let Some((transaction_id, _)) = failed_pending_record_name(name) {
+            let held = open_windows_held_file(prefix, Path::new(name))?;
+            let (process_id, epoch_nanos) = transaction_id_parts(transaction_id)
+                .expect("failed_pending_record_name accepted a noncanonical transaction id");
+            transactions
+                .entry((epoch_nanos, process_id))
+                .or_insert_with(|| (transaction_id.to_string(), Vec::new()))
+                .1
+                .push(held);
+        }
+    }
+    let remove = transactions.len().saturating_sub(keep_transactions);
+    for (_, (_, files)) in transactions.into_iter().take(remove) {
+        for held in files {
+            mark_windows_handle_for_deletion(&held.file)?;
+        }
+    }
+    Ok(())
+}
+
 #[cfg(any(windows, target_os = "linux"))]
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 struct PackageManifest {
     schema: u32,
@@ -320,7 +470,7 @@ struct PackageManifest {
 }
 
 #[cfg(any(windows, target_os = "linux"))]
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 struct PackageFile {
     path: String,
@@ -328,6 +478,140 @@ struct PackageFile {
     sha256: String,
     /// Portable Unix permission bits. Windows packages use `null`.
     mode: Option<u32>,
+}
+
+#[cfg(any(windows, target_os = "linux"))]
+struct VerifiedPackageFile {
+    relative: PathBuf,
+    bytes: Vec<u8>,
+    mode: Option<u32>,
+}
+
+#[cfg(any(windows, target_os = "linux"))]
+struct VerifiedPackage {
+    files: Vec<VerifiedPackageFile>,
+    #[cfg(windows)]
+    package_manifest: Vec<u8>,
+}
+
+#[cfg(any(windows, target_os = "linux"))]
+impl VerifiedPackage {
+    fn from_files(
+        files: Vec<VerifiedPackageFile>,
+        update: &AvailableUpdate,
+        expected_package_manifest: Option<&[u8]>,
+    ) -> Result<Self, UpdateError> {
+        if files.is_empty() || files.len() > MAX_ARCHIVE_ENTRIES {
+            return Err(UpdateError::UnsafeArchive(
+                "release package has an invalid file count".into(),
+            ));
+        }
+        let package_manifest = files
+            .iter()
+            .find(|file| file.relative == Path::new(PACKAGE_MANIFEST_FILE))
+            .map(|file| file.bytes.clone())
+            .ok_or_else(|| UpdateError::MissingArchiveFile(PACKAGE_MANIFEST_FILE.into()))?;
+        if package_manifest.is_empty() || package_manifest.len() > MAX_PACKAGE_MANIFEST_BYTES {
+            return Err(UpdateError::UnsafeArchive(
+                "package manifest is empty or exceeds its safety limit".into(),
+            ));
+        }
+        if expected_package_manifest.is_some_and(|expected| expected != package_manifest) {
+            return Err(UpdateError::UnsafeArchive(
+                "package manifest does not match the authenticated pending capsule".into(),
+            ));
+        }
+        let manifest: PackageManifest = serde_json::from_slice(&package_manifest)?;
+        if manifest.schema != 1
+            || manifest.product != "kettle"
+            || current_target() != Some(manifest.target.as_str())
+            || manifest.version != update.version.to_string()
+            || manifest.files.is_empty()
+            || manifest.files.len() >= MAX_ARCHIVE_ENTRIES
+        {
+            return Err(UpdateError::UnsafeArchive(
+                "package manifest identity failed validation".into(),
+            ));
+        }
+
+        let mut declared = std::collections::HashMap::new();
+        for file in manifest.files {
+            let path = Path::new(&file.path);
+            validate_archive_path(path)?;
+            let spelling = file.path.clone();
+            let folded = spelling.to_ascii_lowercase();
+            if folded == PACKAGE_MANIFEST_FILE.to_ascii_lowercase()
+                || !is_sha256(&file.sha256)
+                || declared.insert(folded, (spelling, file)).is_some()
+            {
+                return Err(UpdateError::UnsafeArchive(
+                    "package manifest contains an invalid, duplicate, or self entry".into(),
+                ));
+            }
+        }
+
+        let mut actual_count = 0_usize;
+        let mut actual_total = 0_u64;
+        let mut actual_paths = std::collections::HashSet::new();
+        for actual in &files {
+            validate_archive_path(&actual.relative)?;
+            let spelling = relative_to_string(&actual.relative)?;
+            if !actual_paths.insert(spelling.to_ascii_lowercase()) {
+                return Err(UpdateError::UnsafeArchive(format!(
+                    "package contains a duplicate or case-aliased file {spelling}"
+                )));
+            }
+            if actual.relative == Path::new(PACKAGE_MANIFEST_FILE) {
+                continue;
+            }
+            let (declared_spelling, expected) = declared
+                .remove(&spelling.to_ascii_lowercase())
+                .ok_or_else(|| {
+                    UpdateError::UnsafeArchive(format!(
+                        "package contains undeclared file {spelling}"
+                    ))
+                })?;
+            if declared_spelling != spelling
+                || actual.bytes.len() as u64 != expected.size
+                || sha256_bytes(&actual.bytes) != expected.sha256
+                || actual.mode != expected.mode
+            {
+                return Err(UpdateError::UnsafeArchive(format!(
+                    "package manifest mismatch for {spelling}"
+                )));
+            }
+            actual_total = actual_total
+                .checked_add(expected.size)
+                .ok_or_else(|| UpdateError::UnsafeArchive("package size overflow".into()))?;
+            if actual_total > MAX_UNPACKED_BYTES {
+                return Err(UpdateError::UnsafeArchive(
+                    "package contents exceed the safety limit".into(),
+                ));
+            }
+            actual_count += 1;
+        }
+        if !declared.is_empty() || actual_count == 0 {
+            return Err(UpdateError::UnsafeArchive(
+                "package is missing files declared by its manifest".into(),
+            ));
+        }
+        Ok(Self {
+            files,
+            #[cfg(windows)]
+            package_manifest,
+        })
+    }
+
+    fn file(&self, relative: &Path) -> Result<&VerifiedPackageFile, UpdateError> {
+        self.files
+            .iter()
+            .find(|file| file.relative == relative)
+            .ok_or_else(|| UpdateError::MissingArchiveFile(relative.to_string_lossy().into_owned()))
+    }
+
+    fn bytes(&self, relative: &Path) -> Result<&[u8], UpdateError> {
+        self.file(relative).map(|file| file.bytes.as_slice())
+    }
 }
 
 /// The helper invocation is deliberately outside clap so it remains hidden
@@ -359,6 +643,13 @@ pub fn prepare_process_start() -> Result<ProcessStart, UpdateError> {
                 });
             }
         };
+        if let Some(_update_lock) = kettle_state::ExclusiveFileLock::try_acquire(
+            &install.prefix.join(".kettle-update.lock"),
+        )? {
+            let running_version = semver::Version::parse(env!("CARGO_PKG_VERSION"))
+                .expect("the crate package version is valid semver");
+            confirm_committed_transaction(&install.prefix, &running_version)?;
+        }
         let pending_path = install.prefix.join(PENDING_FILE);
         let mut warning = None;
         if let Some(inspection) = inspect_pending_start(&install.prefix) {
@@ -420,7 +711,23 @@ pub fn prepare_process_start() -> Result<ProcessStart, UpdateError> {
             warning,
         })
     }
-    #[cfg(not(windows))]
+    #[cfg(target_os = "linux")]
+    {
+        if let Ok(install) = detect_managed_install()
+            && let Some(_update_lock) = kettle_state::ExclusiveFileLock::try_acquire(
+                &install.prefix.join(".kettle-update.lock"),
+            )?
+        {
+            let running_version = semver::Version::parse(env!("CARGO_PKG_VERSION"))
+                .expect("the crate package version is valid semver");
+            confirm_committed_transaction(&install.prefix, &running_version)?;
+        }
+        Ok(ProcessStart::Ready {
+            guard: RunningInstallGuard {},
+            warning: None,
+        })
+    }
+    #[cfg(not(any(windows, target_os = "linux")))]
     {
         Ok(ProcessStart::Ready {
             guard: RunningInstallGuard {},
@@ -468,6 +775,210 @@ pub fn marker_json(version: &str) -> Result<String, UpdateError> {
         version: version.to_string(),
     };
     Ok(serde_json::to_string_pretty(&marker)? + "\n")
+}
+
+#[cfg(target_os = "linux")]
+fn open_trusted_linux_install_prefix(prefix: &Path) -> Result<File, UpdateError> {
+    use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+
+    if !prefix.is_absolute() || prefix == Path::new("/") {
+        return Err(UpdateError::UnmanagedInstall(
+            "Linux install prefix must be an absolute non-root path".into(),
+        ));
+    }
+    let effective_uid = unsafe { libc::geteuid() };
+    let components = prefix.components().collect::<Vec<_>>();
+    let mut directory = open_anchored_directory(Path::new("/")).map_err(|error| {
+        UpdateError::UnmanagedInstall(format!("cannot anchor Linux filesystem root: {error}"))
+    })?;
+    for (index, component) in components.iter().enumerate() {
+        match component {
+            Component::RootDir => continue,
+            Component::Normal(name) => {
+                let candidate = directory_descriptor_path(&directory).join(name);
+                let next = open_anchored_directory(&candidate).map_err(|error| {
+                    UpdateError::UnmanagedInstall(format!(
+                        "cannot safely open Linux install path component {}: {error}",
+                        prefix.display()
+                    ))
+                })?;
+                let metadata = next.metadata()?;
+                let mode = metadata.permissions().mode() & 0o7777;
+                let final_component = index == components.len() - 1;
+                let trusted_sticky_ancestor =
+                    !final_component && metadata.uid() == 0 && mode & libc::S_ISVTX != 0;
+                if metadata.uid() != 0 && metadata.uid() != effective_uid {
+                    return Err(UpdateError::UnmanagedInstall(format!(
+                        "Linux install path component has an untrusted owner: {}",
+                        prefix.display()
+                    )));
+                }
+                if mode & 0o022 != 0 && !trusted_sticky_ancestor {
+                    return Err(UpdateError::UnmanagedInstall(format!(
+                        "Linux install path component is group/other writable: {}",
+                        prefix.display()
+                    )));
+                }
+                directory = next;
+            }
+            Component::Prefix(_) | Component::CurDir | Component::ParentDir => {
+                return Err(UpdateError::UnmanagedInstall(format!(
+                    "Linux install prefix is not absolute and normalized: {}",
+                    prefix.display()
+                )));
+            }
+        }
+    }
+    Ok(directory)
+}
+
+#[cfg(target_os = "linux")]
+fn read_linux_install_provenance(prefix: &Path) -> Result<UnixInstallProvenance, UpdateError> {
+    use std::collections::HashSet;
+    use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+
+    let relative = Path::new(UNIX_INSTALL_PROVENANCE_FILE);
+    let parent = anchored_parent(prefix, relative, false).map_err(|error| {
+        UpdateError::UnmanagedInstall(format!("cannot anchor Linux install provenance: {error}"))
+    })?;
+    let path = parent.destination(relative).map_err(|error| {
+        UpdateError::UnmanagedInstall(format!("cannot resolve Linux install provenance: {error}"))
+    })?;
+    let metadata = fs::symlink_metadata(&path).map_err(|error| {
+        UpdateError::UnmanagedInstall(format!(
+            "{} is missing or unreadable ({error}); reinstall with the hardened installer",
+            prefix.join(relative).display()
+        ))
+    })?;
+    let prefix_metadata = open_trusted_linux_install_prefix(prefix)
+        .and_then(|directory| directory.metadata().map_err(UpdateError::from))
+        .map_err(|error| {
+            UpdateError::UnmanagedInstall(format!(
+                "cannot validate the Linux install prefix owner: {error}"
+            ))
+        })?;
+    if !metadata.file_type().is_file()
+        || metadata.nlink() != 1
+        || metadata.uid() != prefix_metadata.uid()
+        || metadata.permissions().mode() & 0o7777 != 0o644
+        || metadata.len() == 0
+        || metadata.len() > 1024 * 1024
+    {
+        return Err(UpdateError::UnmanagedInstall(
+            "Linux install provenance is not an owned bounded regular file".into(),
+        ));
+    }
+    let bytes = read_bounded_regular(&path, 1024 * 1024).map_err(|error| {
+        UpdateError::UnmanagedInstall(format!("cannot read Linux install provenance: {error}"))
+    })?;
+    let provenance: UnixInstallProvenance = serde_json::from_slice(&bytes).map_err(|error| {
+        UpdateError::UnmanagedInstall(format!("invalid Linux install provenance: {error}"))
+    })?;
+    let expected_prefix = prefix.to_str().ok_or_else(|| {
+        UpdateError::UnmanagedInstall("Linux install prefix is not valid UTF-8".into())
+    })?;
+    if provenance.schema != 1
+        || provenance.product != "kettle"
+        || provenance.managed_by != "kettle-installer"
+        || provenance.prefix != expected_prefix
+        || provenance.owner_uid != prefix_metadata.uid()
+        || provenance.files.is_empty()
+        || provenance.files.len() > MAX_ARCHIVE_ENTRIES
+        || provenance.directories.len() > MAX_ARCHIVE_ENTRIES
+    {
+        return Err(UpdateError::UnmanagedInstall(
+            "Linux install provenance does not identify this installation".into(),
+        ));
+    }
+
+    let mut last_file = None::<&str>;
+    let mut seen_files = HashSet::new();
+    for record in &provenance.files {
+        let relative = Path::new(&record.path);
+        if record.path == UNIX_INSTALL_PROVENANCE_FILE
+            || validate_relative(relative).is_err()
+            || record.size > MAX_UNPACKED_BYTES
+            || !is_sha256(&record.sha256)
+            || !record
+                .sha256
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+            || !matches!(record.mode, 0o644 | 0o755)
+            || last_file.is_some_and(|previous| previous >= record.path.as_str())
+            || !seen_files.insert(record.path.as_str())
+        {
+            return Err(UpdateError::UnmanagedInstall(
+                "Linux install provenance contains an invalid file record".into(),
+            ));
+        }
+        last_file = Some(record.path.as_str());
+        let parent = anchored_parent(prefix, relative, false).map_err(|error| {
+            UpdateError::UnmanagedInstall(format!(
+                "cannot anchor recorded install file {}: {error}",
+                record.path
+            ))
+        })?;
+        let anchored = parent.destination(relative)?;
+        let metadata = fs::symlink_metadata(&anchored)?;
+        if !metadata.file_type().is_file()
+            || metadata.nlink() != 1
+            || metadata.uid() != provenance.owner_uid
+            || metadata.permissions().mode() & 0o7777 != record.mode
+            || metadata.len() != record.size
+            || sha256_file(&anchored)? != record.sha256
+        {
+            return Err(UpdateError::UnmanagedInstall(format!(
+                "recorded Linux install file changed identity or content: {}",
+                record.path
+            )));
+        }
+    }
+    for required in [
+        "bin/kettle",
+        "share/applications/kettle.desktop",
+        "share/kettle/install.sh",
+        "share/kettle/install-unix.py",
+        "share/kettle/install.json",
+    ] {
+        if !seen_files.contains(required) {
+            return Err(UpdateError::UnmanagedInstall(format!(
+                "Linux install provenance is missing {required}"
+            )));
+        }
+    }
+
+    let mut last_directory = None::<&str>;
+    let mut seen_directories = HashSet::new();
+    for record in &provenance.directories {
+        let relative = Path::new(&record.path);
+        if validate_relative(relative).is_err()
+            || record.mode != 0o755
+            || last_directory.is_some_and(|previous| previous >= record.path.as_str())
+            || !seen_directories.insert(record.path.as_str())
+        {
+            return Err(UpdateError::UnmanagedInstall(
+                "Linux install provenance contains an invalid directory record".into(),
+            ));
+        }
+        last_directory = Some(record.path.as_str());
+        let probe = relative.join(".kettle-provenance-anchor");
+        let directory = anchored_parent(prefix, &probe, false).map_err(|error| {
+            UpdateError::UnmanagedInstall(format!(
+                "cannot anchor recorded install directory {}: {error}",
+                record.path
+            ))
+        })?;
+        let metadata = directory.directory.metadata()?;
+        if metadata.uid() != provenance.owner_uid
+            || metadata.permissions().mode() & 0o7777 != record.mode
+        {
+            return Err(UpdateError::UnmanagedInstall(format!(
+                "recorded Linux install directory changed identity: {}",
+                record.path
+            )));
+        }
+    }
+    Ok(provenance)
 }
 
 #[cfg(any(windows, target_os = "linux"))]
@@ -556,6 +1067,8 @@ fn detect_managed_install_at(executable: &Path) -> Result<ManagedInstall, Update
             marker.channel
         )));
     }
+    #[cfg(target_os = "linux")]
+    let _ = read_linux_install_provenance(&prefix)?;
     Ok(ManagedInstall {
         prefix,
         executable,
@@ -586,6 +1099,10 @@ fn install_update_into(
     update: &AvailableUpdate,
     install: &ManagedInstall,
 ) -> Result<InstallOutcome, UpdateError> {
+    reverify_available_update(update, &UPDATE_PUBLIC_KEY, SystemTime::now())?;
+    let running_version = semver::Version::parse(env!("CARGO_PKG_VERSION"))
+        .map_err(|error| UpdateError::InvalidCurrentVersion(error.to_string()))?;
+    require_strict_upgrade(&update.version, &running_version)?;
     let asset = update
         .asset
         .as_ref()
@@ -598,59 +1115,53 @@ fn install_update_into(
     let lock_path = install.prefix.join(".kettle-update.lock");
     let _lock = kettle_state::ExclusiveFileLock::try_acquire(&lock_path)?
         .ok_or(UpdateError::UpdateLocked)?;
+    confirm_committed_transaction(&install.prefix, &running_version)?;
     recover_transaction(&install.prefix)?;
 
     #[cfg(windows)]
-    let mut archive = tempfile::Builder::new()
-        .prefix("kettle-update-download-")
-        .tempfile()?;
-    // Windows keeps one mandatory, kernel-enforced byte-range lock from before
-    // download until extraction completes. Linux does not create a writable
-    // archive inode at all; its single bounded buffer is constructed below.
+    let transaction_id = unique_suffix();
+    #[cfg(windows)]
+    let (archive_name, mut archive) =
+        create_windows_pending_archive(&install.prefix, &transaction_id)?;
+    #[cfg(windows)]
+    let windows_result = (|| {
+        fs4::FileExt::lock(&archive)?;
+        client.download_to(update, &mut archive)?;
+        archive.flush()?;
+        archive.sync_all()?;
+        verify_sha256(&mut archive, &asset.sha256)?;
+        let package = load_windows_package(&mut archive, update, None)?;
+        let package_manifest = String::from_utf8(package.package_manifest)
+            .map_err(|error| UpdateError::UnsafeArchive(error.to_string()))?;
+        publish_windows_update(
+            &transaction_id,
+            &archive_name,
+            package_manifest,
+            install,
+            update,
+        )
+    })();
     #[cfg(windows)]
     {
-        fs4::FileExt::lock(archive.as_file())?;
-        client.download_to(update, archive.as_file_mut())?;
-        archive.as_file_mut().flush()?;
-        archive.as_file().sync_all()?;
+        if windows_result.is_err() && !install.prefix.join(PENDING_FILE).exists() {
+            let _ = mark_windows_handle_for_deletion(&archive);
+        }
+        windows_result
     }
-    // Verify and extract the exact same bytes: a mandatory locked handle on
-    // Windows, or one signed-size-bounded in-memory buffer on Linux.
-    #[cfg(windows)]
-    verify_sha256(archive.as_file_mut(), &asset.sha256)?;
+
     #[cfg(target_os = "linux")]
     let archive = {
         let bytes = client.download_bytes(update)?;
         verify_sha256_bytes(&bytes, &asset.sha256)?;
         bytes
     };
-
-    let staging = tempfile::Builder::new()
-        .prefix(".kettle-update-stage-")
-        .tempdir_in(&install.prefix)?;
-    #[cfg(windows)]
-    extract_archive(archive.as_file_mut(), staging.path())?;
     #[cfg(target_os = "linux")]
-    extract_archive(&archive, staging.path())?;
-
-    #[cfg(windows)]
-    let package_root = staging.path().to_path_buf();
-    #[cfg(target_os = "linux")]
-    let package_root = staging.path().join("kettle");
-    let package_manifest = package_root.join(PACKAGE_MANIFEST_FILE);
-    if package_manifest.is_file() {
-        verify_package_manifest(&package_root, update)?;
-    }
-
-    #[cfg(windows)]
-    {
-        stage_windows_update(staging, install, update)
-    }
+    let package = load_linux_package(&archive, update)?;
 
     #[cfg(target_os = "linux")]
     {
         let mut transaction = Transaction::begin(&install.prefix, &update.version.to_string())?;
-        let result = apply_staged_update(&mut transaction, staging.path(), install, update);
+        let result = apply_verified_linux_update(&mut transaction, &package, install, update);
         match result {
             Ok(()) => transaction.commit()?,
             Err(error) => {
@@ -673,38 +1184,51 @@ fn install_update_into(
 }
 
 #[cfg(windows)]
-fn stage_windows_update(
-    staging: tempfile::TempDir,
+fn publish_windows_update(
+    transaction_id: &str,
+    archive_name: &str,
+    package_manifest: String,
     install: &ManagedInstall,
     update: &AvailableUpdate,
 ) -> Result<InstallOutcome, UpdateError> {
     if install.prefix.join(PENDING_FILE).exists() {
         return Err(UpdateError::UpdateLocked);
     }
-    validate_windows_staging(staging.path())?;
-    let files = pending_files(staging.path())?;
-    let staging_path = staging.keep();
-    let transaction_id = unique_suffix();
     let helper_name = format!(".kettle-update-helper-{transaction_id}.exe");
     let helper_path = install.prefix.join(&helper_name);
 
     let result = (|| {
         copy_file_new_durable(&install.executable, &helper_path)?;
-        let staging_dir = staging_path
-            .file_name()
-            .and_then(|name| name.to_str())
-            .ok_or_else(|| UpdateError::Transaction("invalid staging directory name".into()))?
-            .to_string();
+        let (mut helper_file, _) = open_transaction_snapshot(&helper_path)?;
+        let helper_size = helper_file.metadata()?.len();
+        let helper_sha256 = sha256_open_file(&mut helper_file)?;
+        drop(helper_file);
+        let signed = update
+            .signed_manifest
+            .as_ref()
+            .ok_or(UpdateError::UnauthenticatedRelease)?;
+        let asset = update
+            .asset
+            .as_ref()
+            .ok_or(UpdateError::UnsupportedPlatform)?;
         let pending = PendingUpdate {
             schema: PENDING_SCHEMA,
             product: "kettle".into(),
             target: current_target().unwrap_or_default().into(),
-            transaction_id: transaction_id.clone(),
+            transaction_id: transaction_id.to_string(),
             target_version: update.version.to_string(),
-            staging_dir,
+            archive: archive_name.to_string(),
+            archive_size: asset.size,
+            archive_sha256: asset.sha256.clone(),
+            release_manifest: signed.manifest.clone(),
+            release_signature: signed.signature.clone(),
+            asset: asset.clone(),
+            package_manifest,
             helper: helper_name,
-            files,
+            helper_size,
+            helper_sha256,
             attempts: 0,
+            handoff_timeouts: 0,
             last_error: None,
         };
         persist_pending(&install.prefix, &pending)?;
@@ -716,7 +1240,6 @@ fn stage_windows_update(
         // to remove immediately.
         if !install.prefix.join(PENDING_FILE).exists() {
             let _ = fs::remove_file(&helper_path);
-            let _ = remove_staging_dir_checked(&install.prefix, &staging_path);
         }
         return Err(error);
     }
@@ -724,76 +1247,195 @@ fn stage_windows_update(
     Ok(InstallOutcome {
         version: update.version.clone(),
         executable: install.executable.clone(),
-        disposition: InstallDisposition::Staged { transaction_id },
+        disposition: InstallDisposition::Staged {
+            transaction_id: transaction_id.to_string(),
+        },
     })
 }
 
-#[cfg(windows)]
+#[cfg(all(windows, test))]
 fn validate_windows_staging(staging: &Path) -> Result<(), UpdateError> {
+    validate_partial_windows_staging(staging)?;
     require_file(&staging.join("kettle.exe"), "kettle.exe")?;
     require_file(&staging.join("kettle.com"), "kettle.com")?;
     require_file(&staging.join("install.ps1"), "install.ps1")?;
-    for source in collect_files(staging)? {
+    Ok(())
+}
+
+#[cfg(all(windows, test))]
+fn validate_partial_windows_staging(staging: &Path) -> Result<Vec<PathBuf>, UpdateError> {
+    validate_windows_payload_tree(staging)?;
+    let files = collect_files(staging)?;
+    if files.len() > MAX_ARCHIVE_ENTRIES {
+        return Err(UpdateError::UnsafeArchive(format!(
+            "Windows release contains more than {MAX_ARCHIVE_ENTRIES} files"
+        )));
+    }
+    let mut total = 0_u64;
+    for source in &files {
         let relative = source.strip_prefix(staging).map_err(|_| {
             UpdateError::UnsafeArchive(format!("escaped staging: {}", source.display()))
         })?;
         validate_archive_path(relative)?;
-        let root = relative
-            .components()
-            .next()
-            .and_then(|component| match component {
-                Component::Normal(value) => value.to_str(),
-                _ => None,
-            })
-            .ok_or_else(|| UpdateError::UnsafeArchive(relative.display().to_string()))?;
-        if !WINDOWS_ALLOWED_ROOTS.contains(&root) {
+        if !is_allowed_windows_payload_path(relative) {
             return Err(UpdateError::UnsafeArchive(format!(
                 "unexpected release file {}",
                 relative.display()
             )));
         }
-    }
-    Ok(())
-}
-
-#[cfg(windows)]
-fn pending_files(staging: &Path) -> Result<Vec<PendingFile>, UpdateError> {
-    let mut files = Vec::new();
-    let mut total = 0_u64;
-    for file in collect_files(staging)? {
-        let relative = file
-            .strip_prefix(staging)
-            .map_err(|_| UpdateError::UnsafeArchive(file.display().to_string()))?;
-        let size = fs::metadata(&file)?.len();
         total = total
-            .checked_add(size)
+            .checked_add(source.metadata()?.len())
             .ok_or_else(|| UpdateError::UnsafeArchive("staged size overflow".into()))?;
         if total > MAX_UNPACKED_BYTES {
             return Err(UpdateError::UnsafeArchive(
                 "staged data exceeds the safety limit".into(),
             ));
         }
-        files.push(PendingFile {
-            path: relative_to_string(relative)?,
-            size,
-            sha256: sha256_file(&file)?,
-        });
     }
-    files.sort_by(|left, right| left.path.cmp(&right.path));
     Ok(files)
+}
+
+#[cfg(all(windows, test))]
+fn validate_windows_payload_tree(staging: &Path) -> Result<(), UpdateError> {
+    let root_metadata = fs::symlink_metadata(staging)?;
+    {
+        use std::os::windows::fs::MetadataExt as _;
+        use windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT;
+        if !root_metadata.file_type().is_dir()
+            || root_metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+        {
+            return Err(UpdateError::UnsafeArchive(format!(
+                "staging root is not a real directory: {}",
+                staging.display()
+            )));
+        }
+    }
+    for entry in fs::read_dir(staging)? {
+        let entry = entry?;
+        let name = entry
+            .file_name()
+            .into_string()
+            .map_err(|_| UpdateError::UnsafeArchive(entry.path().display().to_string()))?;
+        let metadata = fs::symlink_metadata(entry.path())?;
+        {
+            use std::os::windows::fs::MetadataExt as _;
+            use windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT;
+            if metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+                return Err(UpdateError::UnsafeArchive(
+                    entry.path().display().to_string(),
+                ));
+            }
+        }
+        if metadata.file_type().is_file() {
+            if !is_allowed_windows_payload_path(Path::new(&name)) {
+                return Err(UpdateError::UnsafeArchive(format!(
+                    "unexpected release file {}",
+                    entry.path().display()
+                )));
+            }
+            continue;
+        }
+        if !metadata.file_type().is_dir() || name != "shell-integration" {
+            return Err(UpdateError::UnsafeArchive(format!(
+                "unexpected release directory {}",
+                entry.path().display()
+            )));
+        }
+        for shell_entry in fs::read_dir(entry.path())? {
+            let shell_entry = shell_entry?;
+            let relative = Path::new("shell-integration").join(shell_entry.file_name());
+            let metadata = fs::symlink_metadata(shell_entry.path())?;
+            {
+                use std::os::windows::fs::MetadataExt as _;
+                use windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT;
+                if metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+                    return Err(UpdateError::UnsafeArchive(
+                        shell_entry.path().display().to_string(),
+                    ));
+                }
+            }
+            if !metadata.file_type().is_file() || !is_allowed_windows_payload_path(&relative) {
+                return Err(UpdateError::UnsafeArchive(format!(
+                    "unexpected release file {}",
+                    shell_entry.path().display()
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn is_allowed_windows_payload_path(relative: &Path) -> bool {
+    let components = relative
+        .components()
+        .filter_map(|component| match component {
+            Component::Normal(value) => value.to_str(),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    match components.as_slice() {
+        [root] => WINDOWS_ALLOWED_ROOTS.contains(root) && *root != "shell-integration",
+        ["shell-integration", shell] => {
+            matches!(
+                *shell,
+                "kettle.bash" | "kettle.fish" | "kettle.ps1" | "kettle.zsh"
+            )
+        }
+        _ => false,
+    }
+}
+
+#[cfg(windows)]
+fn create_windows_pending_archive(
+    prefix: &Path,
+    transaction_id: &str,
+) -> Result<(String, File), UpdateError> {
+    use std::os::windows::fs::OpenOptionsExt as _;
+    use windows_sys::Win32::Foundation::{GENERIC_READ, GENERIC_WRITE};
+    use windows_sys::Win32::Storage::FileSystem::{
+        DELETE, FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_READ,
+    };
+
+    if !is_transaction_id(transaction_id) {
+        return Err(UpdateError::Transaction(
+            "refusing to create an archive for an invalid transaction id".into(),
+        ));
+    }
+    let name = format!(".kettle-update-archive-{transaction_id}.zip");
+    let relative = Path::new(&name);
+    let (_parent, path) = anchored_destination(prefix, relative, false)?;
+    let mut options = OpenOptions::new();
+    options
+        .read(true)
+        .write(true)
+        .access_mode(GENERIC_READ | GENERIC_WRITE | DELETE)
+        .share_mode(FILE_SHARE_READ)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+        .create_new(true);
+    let file = options.open(path)?;
+    kettle_state::restrict_private_file(&file)?;
+    Ok((name, file))
 }
 
 #[cfg(windows)]
 fn copy_file_new_durable(source: &Path, destination: &Path) -> Result<(), UpdateError> {
-    let mut source = File::open(source)?;
-    let mut destination = OpenOptions::new()
-        .create_new(true)
-        .write(true)
-        .read(true)
-        .open(destination)?;
-    std::io::copy(&mut source, &mut destination)?;
-    destination.flush()?;
-    destination.sync_all()?;
+    let (mut source, _) = open_transaction_snapshot(source)?;
+    let mut destination_file = kettle_state::create_private_file_new(destination)?;
+    let result = (|| {
+        std::io::copy(&mut source, &mut destination_file)?;
+        destination_file.flush()?;
+        destination_file.sync_all()?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = kettle_state::remove_open_private_file(destination_file, destination);
+        return result;
+    }
+    drop(destination_file);
+    if let Some(parent) = destination.parent() {
+        sync_parent(parent)?;
+    }
     Ok(())
 }
 
@@ -819,71 +1461,127 @@ fn load_pending(prefix: &Path) -> Result<PendingUpdate, UpdateError> {
 
 #[cfg(windows)]
 fn validate_pending(prefix: &Path, pending: &PendingUpdate) -> Result<(), UpdateError> {
-    let valid_id = !pending.transaction_id.is_empty()
-        && pending
-            .transaction_id
-            .bytes()
-            .all(|byte| byte.is_ascii_digit() || byte == b'-');
     if pending.schema != PENDING_SCHEMA
         || pending.product != "kettle"
         || current_target() != Some(pending.target.as_str())
-        || !valid_id
+        || !is_transaction_id(&pending.transaction_id)
         || semver::Version::parse(&pending.target_version).is_err()
+        || pending.archive != format!(".kettle-update-archive-{}.zip", pending.transaction_id)
+        || pending.archive_size == 0
+        || pending.archive_size > MAX_ARTIFACT_BYTES
+        || !is_sha256(&pending.archive_sha256)
+        || pending.release_manifest.is_empty()
+        || pending.release_manifest.len() > 128 * 1024
+        || pending.release_signature.is_empty()
+        || pending.release_signature.len() > 1024
+        || pending.package_manifest.is_empty()
+        || pending.package_manifest.len() > MAX_PACKAGE_MANIFEST_BYTES
+        || pending.asset.target != pending.target
+        || pending.asset.size != pending.archive_size
+        || pending.asset.sha256 != pending.archive_sha256
         || pending.helper != format!(".kettle-update-helper-{}.exe", pending.transaction_id)
-        || !pending.staging_dir.starts_with(".kettle-update-stage-")
-        || pending.staging_dir.contains(['/', '\\'])
-        || pending.files.is_empty()
-        || pending.files.len() > MAX_ARCHIVE_ENTRIES
+        || pending.helper_size == 0
+        || pending.helper_size > MAX_UNPACKED_BYTES
+        || !is_sha256(&pending.helper_sha256)
     {
         return Err(UpdateError::Transaction(
             "pending update record failed validation".into(),
         ));
     }
-    if prefix.join(&pending.staging_dir).parent() != Some(prefix)
+    if prefix.join(&pending.archive).parent() != Some(prefix)
         || prefix.join(&pending.helper).parent() != Some(prefix)
-        || !prefix.join(&pending.staging_dir).is_dir()
+        || !prefix.join(&pending.archive).is_file()
         || !prefix.join(&pending.helper).is_file()
     {
         return Err(UpdateError::Transaction(
             "pending update artifacts are missing or outside the install prefix".into(),
         ));
     }
-    let mut seen = std::collections::HashSet::new();
-    let mut total = 0_u64;
-    for file in &pending.files {
-        validate_archive_path(Path::new(&file.path))?;
-        if !seen.insert(file.path.to_ascii_lowercase())
-            || !is_sha256(&file.sha256)
-            || file.size > MAX_UNPACKED_BYTES
-        {
-            return Err(UpdateError::Transaction(format!(
-                "invalid pending file record {}",
-                file.path
-            )));
-        }
-        total = total
-            .checked_add(file.size)
-            .ok_or_else(|| UpdateError::Transaction("pending file size overflow".into()))?;
-        if total > MAX_UNPACKED_BYTES {
-            return Err(UpdateError::Transaction(
-                "pending files exceed the safety limit".into(),
-            ));
-        }
+    let package: PackageManifest = serde_json::from_str(&pending.package_manifest)
+        .map_err(|error| UpdateError::Transaction(format!("invalid package manifest: {error}")))?;
+    if package.schema != 1
+        || package.product != "kettle"
+        || package.target != pending.target
+        || package.version != pending.target_version
+        || package.files.is_empty()
+        || package.files.len() >= MAX_ARCHIVE_ENTRIES
+    {
+        return Err(UpdateError::Transaction(
+            "pending package manifest identity failed validation".into(),
+        ));
     }
     Ok(())
 }
 
 #[cfg(windows)]
-fn verify_pending_staging(prefix: &Path, pending: &PendingUpdate) -> Result<PathBuf, UpdateError> {
-    let staging = prefix.join(&pending.staging_dir);
-    validate_windows_staging(&staging)?;
-    let actual = pending_files(&staging)?;
-    if actual != pending.files {
+fn authenticate_pending_release(
+    pending: &PendingUpdate,
+    public_key: &[u8; 32],
+    now: SystemTime,
+) -> Result<AvailableUpdate, UpdateError> {
+    let version = semver::Version::parse(&pending.target_version)
+        .map_err(|error| UpdateError::Transaction(error.to_string()))?;
+    let update = AvailableUpdate {
+        version,
+        tag: format!("v{}", pending.target_version),
+        release_url: String::new(),
+        download_url: None,
+        asset: Some(pending.asset.clone()),
+        signed_manifest: Some(SignedManifest {
+            manifest: pending.release_manifest.clone(),
+            signature: pending.release_signature.clone(),
+        }),
+    };
+    reverify_available_update(&update, public_key, now)?;
+    Ok(update)
+}
+
+#[cfg(windows)]
+fn authenticate_pending_upgrade(
+    pending: &PendingUpdate,
+    public_key: &[u8; 32],
+    now: SystemTime,
+    installed: &semver::Version,
+) -> Result<AvailableUpdate, UpdateError> {
+    let update = authenticate_pending_release(pending, public_key, now)?;
+    require_strict_upgrade(&update.version, installed)?;
+    Ok(update)
+}
+
+#[cfg(windows)]
+fn verify_pending_helper(
+    prefix: &Path,
+    pending: &PendingUpdate,
+) -> Result<VerifiedWindowsHelper, UpdateError> {
+    let relative = Path::new(&pending.helper);
+    let (parent, path) = anchored_destination(prefix, relative, false)?;
+    let (mut file, _) = open_transaction_snapshot(&path)?;
+    if file.metadata()?.len() != pending.helper_size
+        || sha256_open_file(&mut file)? != pending.helper_sha256
+    {
         return Err(UpdateError::Transaction(
-            "staged update files changed after verification".into(),
+            "pending update helper changed after publication".into(),
         ));
     }
-    Ok(staging)
+    Ok(VerifiedWindowsHelper {
+        path,
+        _parent: parent,
+        _file: file,
+    })
+}
+
+#[cfg(windows)]
+fn verify_pending_archive(
+    prefix: &Path,
+    pending: &PendingUpdate,
+) -> Result<WindowsHeldFile, UpdateError> {
+    let mut archive = open_windows_held_file(prefix, Path::new(&pending.archive))?;
+    if archive.file.metadata()?.len() != pending.archive_size
+        || sha256_open_file(&mut archive.file)? != pending.archive_sha256
+    {
+        return Err(UpdateError::HashMismatch);
+    }
+    Ok(archive)
 }
 
 #[cfg(windows)]
@@ -891,7 +1589,11 @@ fn spawn_pending_helper(prefix: &Path) -> Result<(), UpdateError> {
     use std::os::windows::process::CommandExt as _;
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
     let pending = load_pending(prefix)?;
-    std::process::Command::new(prefix.join(pending.helper))
+    let installed = semver::Version::parse(env!("CARGO_PKG_VERSION"))
+        .expect("the crate package version is valid semver");
+    authenticate_pending_upgrade(&pending, &UPDATE_PUBLIC_KEY, SystemTime::now(), &installed)?;
+    let helper = verify_pending_helper(prefix, &pending)?;
+    std::process::Command::new(&helper.path)
         .arg("--kettle-apply-pending-update")
         .creation_flags(CREATE_NO_WINDOW)
         .spawn()
@@ -956,7 +1658,11 @@ fn run_pending_update_helper_inner_with_timeout(
             // We still hold the update lock, which every pending-file writer
             // in this module acquires first, so it is safe to record the
             // failure here even without the running lock.
-            record_pending_failure_before_running_lock(&update_lock, prefix, &timeout_error);
+            record_pending_handoff_timeout_before_running_lock(
+                &update_lock,
+                prefix,
+                &timeout_error,
+            );
             return Err(timeout_error);
         }
         Err(error) => return Err(error.into()),
@@ -965,6 +1671,19 @@ fn run_pending_update_helper_inner_with_timeout(
     if !prefix.join(PENDING_FILE).is_file() {
         return Ok(());
     }
+    let helper_pending = load_pending(prefix)?;
+    let verified_helper = verify_pending_helper(prefix, &helper_pending)?;
+    let (current_helper_file, _) = open_transaction_snapshot(helper)?;
+    if !same_transaction_file_identity(&verified_helper._file, &current_helper_file)? {
+        return Err(UpdateError::Transaction(
+            "running pending helper does not match the authenticated helper identity".into(),
+        ));
+    }
+    let install = ManagedInstall {
+        prefix: prefix.to_path_buf(),
+        executable: prefix.join("kettle.exe"),
+        marker_path: prefix.join(".kettle-install.json"),
+    };
     let result = (|| {
         let pending = begin_pending_attempt(prefix, helper)?;
         wait_for_windows_update_targets(prefix)?;
@@ -977,24 +1696,34 @@ fn run_pending_update_helper_inner_with_timeout(
             ));
         }
 
+        let installed_version = installed_windows_version(&install.executable)?;
+        confirm_committed_transaction(prefix, &installed_version)?;
         recover_transaction(prefix)?;
-        let staging = verify_pending_staging(prefix, &pending)?;
-        let version = semver::Version::parse(&pending.target_version)
-            .map_err(|error| UpdateError::Transaction(error.to_string()))?;
-        let update = AvailableUpdate {
-            version: version.clone(),
-            tag: format!("v{version}"),
-            release_url: String::new(),
-            download_url: None,
-            asset: None,
-        };
-        let install = ManagedInstall {
-            prefix: prefix.to_path_buf(),
-            executable: prefix.join("kettle.exe"),
-            marker_path: prefix.join(".kettle-install.json"),
-        };
-        let mut transaction = Transaction::begin(prefix, &pending.target_version)?;
-        if let Err(error) = apply_staged_update(&mut transaction, &staging, &install, &update) {
+        let backup = prefix.join(format!(".kettle-update-backup-{}", pending.transaction_id));
+        if backup.exists() {
+            remove_orphan_windows_backup_checked(prefix, &backup)?;
+        }
+        let update = authenticate_pending_upgrade(
+            &pending,
+            &UPDATE_PUBLIC_KEY,
+            SystemTime::now(),
+            &installed_version,
+        )?;
+        let mut archive = verify_pending_archive(prefix, &pending)?;
+        let package = load_windows_package(
+            &mut archive.file,
+            &update,
+            Some(pending.package_manifest.as_bytes()),
+        )?;
+        let integration_script = package.bytes(Path::new("install.ps1"))?.to_vec();
+        let mut transaction = Transaction::begin_with_transaction_id(
+            prefix,
+            &pending.target_version,
+            &pending.transaction_id,
+        )?;
+        if let Err(error) =
+            apply_verified_windows_update(&mut transaction, &package, &install, &update)
+        {
             if let Err(rollback) = transaction.rollback() {
                 return Err(UpdateError::Transaction(format!(
                     "{error}; rollback also failed: {rollback}"
@@ -1004,15 +1733,36 @@ fn run_pending_update_helper_inner_with_timeout(
         }
         transaction.commit()?;
 
-        remove_journal_first(prefix, &prefix.join(PENDING_FILE))?;
-        refresh_platform_integration(&install);
-        let _ = remove_staging_dir_checked(prefix, &staging);
-        Ok(())
+        remove_pending_record_checked(prefix, &pending)?;
+        mark_windows_handle_for_deletion(&archive.file)?;
+        Ok(integration_script)
     })();
-    if let Err(error) = &result {
-        record_pending_failure(&running_lock, prefix, error);
-    }
-    result
+    let integration_script = match result {
+        Ok(script) => script,
+        Err(error) => {
+            record_pending_failure(&running_lock, prefix, &error);
+            return Err(error);
+        }
+    };
+    // The saved installer acquires the same update -> running lock pair before
+    // inspecting or changing managed state. Release in reverse order only
+    // after the commit and pending-record removal are durable, otherwise the
+    // synchronous integration refresh deadlocks behind this helper.
+    release_windows_update_locks_then(running_lock, update_lock, || {
+        refresh_platform_integration(&install, &integration_script);
+    });
+    Ok(())
+}
+
+#[cfg(windows)]
+fn release_windows_update_locks_then<T>(
+    running_lock: kettle_state::ExclusiveFileLock,
+    update_lock: kettle_state::ExclusiveFileLock,
+    action: impl FnOnce() -> T,
+) -> T {
+    drop(running_lock);
+    drop(update_lock);
+    action()
 }
 
 #[cfg(windows)]
@@ -1029,6 +1779,7 @@ fn begin_pending_attempt(prefix: &Path, helper: &Path) -> Result<PendingUpdate, 
         )));
     }
     pending.attempts = pending.attempts.saturating_add(1);
+    pending.handoff_timeouts = 0;
     pending.last_error = None;
     persist_pending(prefix, &pending)?;
     Ok(pending)
@@ -1069,6 +1820,76 @@ fn wait_for_windows_update_targets(prefix: &Path) -> Result<(), UpdateError> {
 }
 
 #[cfg(windows)]
+fn installed_windows_version(path: &Path) -> Result<semver::Version, UpdateError> {
+    use std::os::windows::ffi::OsStrExt as _;
+    use windows_sys::Win32::Storage::FileSystem::{
+        GetFileVersionInfoSizeW, GetFileVersionInfoW, VS_FIXEDFILEINFO, VerQueryValueW,
+    };
+
+    // This no-write/no-delete-sharing snapshot keeps the path bound to the
+    // exact installed image while version.dll opens it for its read-only query.
+    let (_installed, _) = open_transaction_snapshot(path)?;
+    let mut wide = path.as_os_str().encode_wide().collect::<Vec<_>>();
+    wide.push(0);
+    let mut ignored = 0_u32;
+    // SAFETY: `wide` is NUL terminated and `ignored` is writable for the call.
+    let size = unsafe { GetFileVersionInfoSizeW(wide.as_ptr(), &mut ignored) };
+    if size == 0 || size > 1024 * 1024 {
+        return Err(UpdateError::Transaction(format!(
+            "installed executable has no bounded Windows version resource: {}",
+            path.display()
+        )));
+    }
+    let mut bytes = vec![0_u8; size as usize];
+    // SAFETY: the output buffer has exactly `size` writable bytes.
+    if unsafe { GetFileVersionInfoW(wide.as_ptr(), 0, size, bytes.as_mut_ptr().cast()) } == 0 {
+        return Err(std::io::Error::last_os_error().into());
+    }
+    let root = [b'\\' as u16, 0];
+    let mut value = std::ptr::null_mut();
+    let mut value_len = 0_u32;
+    // SAFETY: version.dll owns pointers into `bytes`, which remains alive;
+    // `root` is the documented NUL-terminated root sub-block name.
+    if unsafe {
+        VerQueryValueW(
+            bytes.as_ptr().cast(),
+            root.as_ptr(),
+            &mut value,
+            &mut value_len,
+        )
+    } == 0
+        || value.is_null()
+        || value_len < std::mem::size_of::<VS_FIXEDFILEINFO>() as u32
+    {
+        return Err(UpdateError::Transaction(format!(
+            "installed executable has no fixed Windows version identity: {}",
+            path.display()
+        )));
+    }
+    // SAFETY: VerQueryValueW returned at least one complete fixed-info value.
+    let fixed = unsafe { &*value.cast::<VS_FIXEDFILEINFO>() };
+    version_from_fixed_file_info(fixed)
+}
+
+#[cfg(windows)]
+fn version_from_fixed_file_info(
+    fixed: &windows_sys::Win32::Storage::FileSystem::VS_FIXEDFILEINFO,
+) -> Result<semver::Version, UpdateError> {
+    use windows_sys::Win32::Storage::FileSystem::VS_FFI_SIGNATURE;
+
+    if fixed.dwSignature != VS_FFI_SIGNATURE as u32 || fixed.dwProductVersionLS & 0xffff != 0 {
+        return Err(UpdateError::Transaction(
+            "installed executable has an invalid Kettle version resource".into(),
+        ));
+    }
+    Ok(semver::Version::new(
+        u64::from(fixed.dwProductVersionMS >> 16),
+        u64::from(fixed.dwProductVersionMS & 0xffff),
+        u64::from(fixed.dwProductVersionLS >> 16),
+    ))
+}
+
+#[cfg(windows)]
 fn record_pending_failure(
     _running_lock: &kettle_state::ExclusiveFileLock,
     prefix: &Path,
@@ -1086,12 +1907,31 @@ fn record_pending_failure(
 /// live binary swap in `apply_staged_update`, which does not touch the
 /// pending record.
 #[cfg(windows)]
-fn record_pending_failure_before_running_lock(
+fn record_pending_handoff_timeout_before_running_lock(
     _update_lock: &kettle_state::ExclusiveFileLock,
     prefix: &Path,
     error: &UpdateError,
 ) {
-    record_pending_failure_locked(prefix, error);
+    record_pending_handoff_timeout_locked(prefix, error, current_epoch_nanos());
+}
+
+#[cfg(windows)]
+fn record_pending_handoff_timeout_locked(
+    prefix: &Path,
+    error: &UpdateError,
+    now_epoch_nanos: u128,
+) {
+    let Ok(mut pending) = load_pending(prefix) else {
+        return;
+    };
+    let transaction_epoch = transaction_id_parts(&pending.transaction_id)
+        .map(|(_, epoch_nanos)| epoch_nanos)
+        .unwrap_or(now_epoch_nanos);
+    if now_epoch_nanos.saturating_sub(transaction_epoch) >= HANDOFF_TIMEOUT_GRACE_NANOS {
+        pending.handoff_timeouts = pending.handoff_timeouts.saturating_add(1);
+    }
+    pending.last_error = Some(error.to_string().chars().take(4096).collect());
+    let _ = persist_pending(prefix, &pending);
 }
 
 #[cfg(windows)]
@@ -1118,38 +1958,136 @@ fn cleanup_stale_windows_update_files_if_idle(prefix: &Path) -> Result<bool, Upd
     };
     for entry in entries.flatten() {
         let name = entry.file_name().to_string_lossy().into_owned();
-        if name.starts_with(".kettle-update-helper-") && name.ends_with(".exe") {
-            let _ = fs::remove_file(entry.path());
-        } else if name.starts_with(".kettle-update-stage-") {
+        let helper_transaction = name
+            .strip_prefix(".kettle-update-helper-")
+            .and_then(|suffix| suffix.strip_suffix(".exe"));
+        let archive_transaction = name
+            .strip_prefix(".kettle-update-archive-")
+            .and_then(|suffix| suffix.strip_suffix(".zip"));
+        let staging_transaction = name.strip_prefix(".kettle-update-stage-");
+        if helper_transaction.is_some_and(is_transaction_id)
+            || archive_transaction.is_some_and(is_transaction_id)
+        {
+            if let Ok(held) = open_windows_held_file(prefix, Path::new(&name)) {
+                let _ = mark_windows_handle_for_deletion(&held.file);
+            }
+        } else if staging_transaction.is_some_and(is_transaction_id) {
             let _ = remove_staging_dir_checked(prefix, &entry.path());
+        } else if !prefix.join(".kettle-update-journal.json").exists()
+            && name
+                .strip_prefix(".kettle-update-backup-")
+                .is_some_and(is_transaction_id)
+        {
+            let _ = remove_orphan_windows_backup_checked(prefix, &entry.path());
         }
     }
+    prune_failed_pending_records(prefix, MAX_FAILED_PENDING_TRANSACTIONS)?;
     Ok(true)
 }
 
 #[cfg(windows)]
-fn remove_staging_dir_checked(prefix: &Path, staging: &Path) -> Result<(), UpdateError> {
-    if staging.parent() != Some(prefix)
-        || !staging
+fn is_allowed_windows_backup_path(relative: &Path) -> bool {
+    relative == Path::new(BACKUP_MARKER_FILE)
+        || relative == Path::new(".kettle-install.json")
+        || is_allowed_windows_payload_path(relative)
+}
+
+#[cfg(windows)]
+fn remove_orphan_windows_backup_checked(
+    prefix: &Path,
+    backup_dir: &Path,
+) -> Result<(), UpdateError> {
+    let transaction_id = backup_dir
+        .file_name()
+        .and_then(|name| name.to_str())
+        .and_then(|name| name.strip_prefix(".kettle-update-backup-"))
+        .filter(|value| is_transaction_id(value))
+        .ok_or_else(|| {
+            UpdateError::Transaction(format!(
+                "refusing to remove untrusted backup path {}",
+                backup_dir.display()
+            ))
+        })?;
+    if backup_dir.parent() != Some(prefix) {
+        return Err(UpdateError::Transaction(
+            "orphan backup escaped the install prefix".into(),
+        ));
+    }
+    let root_relative = PathBuf::from(
+        backup_dir
             .file_name()
-            .and_then(|name| name.to_str())
-            .is_some_and(|name| name.starts_with(".kettle-update-stage-"))
+            .ok_or_else(|| UpdateError::Transaction("backup path has no name".into()))?,
+    );
+    let mut tree = hold_windows_two_level_tree(prefix, &root_relative)?;
+    let marker_file = tree
+        .files
+        .iter_mut()
+        .find(|(relative, _)| relative == Path::new(BACKUP_MARKER_FILE))
+        .ok_or_else(|| UpdateError::Transaction("orphan backup has no marker".into()))?;
+    let marker: BackupMarker =
+        serde_json::from_slice(&read_windows_held_file(&mut marker_file.1, 4096)?)?;
+    if marker.schema != JOURNAL_SCHEMA
+        || marker.product != "kettle"
+        || marker.transaction_id != transaction_id
     {
+        return Err(UpdateError::Transaction(
+            "orphan backup marker does not match its directory".into(),
+        ));
+    }
+    for (relative, _) in &tree.files {
+        if !is_allowed_windows_backup_path(relative) {
+            return Err(UpdateError::Transaction(format!(
+                "orphan backup contains an unmanaged file {}",
+                relative.display()
+            )));
+        }
+    }
+    tree.delete()?;
+    sync_parent(prefix)
+}
+
+#[cfg(windows)]
+fn remove_staging_dir_checked(prefix: &Path, staging: &Path) -> Result<(), UpdateError> {
+    let transaction_id = staging
+        .file_name()
+        .and_then(|name| name.to_str())
+        .and_then(|name| name.strip_prefix(".kettle-update-stage-"));
+    if staging.parent() != Some(prefix) || !transaction_id.is_some_and(is_transaction_id) {
         return Err(UpdateError::Transaction(format!(
             "refusing to remove untrusted staging path {}",
             staging.display()
         )));
     }
-    match fs::remove_dir_all(staging) {
-        Ok(()) => Ok(()),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(error.into()),
+    if !staging.exists() {
+        return Ok(());
     }
+    let root_relative = PathBuf::from(
+        staging
+            .file_name()
+            .ok_or_else(|| UpdateError::Transaction("staging path has no name".into()))?,
+    );
+    let tree = hold_windows_two_level_tree(prefix, &root_relative)?;
+    for (relative, _) in &tree.files {
+        if !is_allowed_windows_payload_path(relative) {
+            return Err(UpdateError::Transaction(format!(
+                "staging cleanup found an unmanaged file {}",
+                relative.display()
+            )));
+        }
+    }
+    tree.delete()?;
+    sync_parent(prefix)
 }
 
 #[cfg(any(windows, target_os = "linux"))]
 fn sha256_file(path: &Path) -> Result<String, UpdateError> {
     let mut file = File::open(path)?;
+    sha256_open_file(&mut file)
+}
+
+#[cfg(any(windows, target_os = "linux"))]
+fn sha256_open_file(file: &mut File) -> Result<String, UpdateError> {
+    file.rewind()?;
     let mut hash = Sha256::new();
     let mut buffer = [0_u8; 64 * 1024];
     loop {
@@ -1190,7 +2128,24 @@ fn verify_sha256_bytes(bytes: &[u8], expected: &str) -> Result<(), UpdateError> 
     Ok(())
 }
 
-#[cfg(any(windows, target_os = "linux"))]
+#[cfg(all(any(windows, target_os = "linux"), test))]
+fn verify_required_package_manifest(
+    root: &Path,
+    update: &AvailableUpdate,
+) -> Result<(), UpdateError> {
+    let manifest_path = root.join(PACKAGE_MANIFEST_FILE);
+    if manifest_path.is_file() {
+        return verify_package_manifest(root, update);
+    }
+    if update.version >= semver::Version::new(2, 36, 0) {
+        return Err(UpdateError::UnsafeArchive(format!(
+            "{PACKAGE_MANIFEST_FILE} is required for release archives from v2.36.0 onward"
+        )));
+    }
+    Ok(())
+}
+
+#[cfg(all(any(windows, target_os = "linux"), test))]
 fn verify_package_manifest(root: &Path, update: &AvailableUpdate) -> Result<(), UpdateError> {
     let manifest_path = root.join(PACKAGE_MANIFEST_FILE);
     let bytes = read_bounded_regular(&manifest_path, 256 * 1024).map_err(|error| {
@@ -1276,37 +2231,23 @@ fn verify_package_manifest(root: &Path, update: &AvailableUpdate) -> Result<(), 
     Ok(())
 }
 
-#[cfg(all(any(windows, target_os = "linux"), unix))]
+#[cfg(all(any(windows, target_os = "linux"), unix, test))]
 fn package_mode(metadata: &fs::Metadata) -> Option<u32> {
     use std::os::unix::fs::PermissionsExt as _;
     Some(metadata.permissions().mode() & 0o777)
 }
 
-#[cfg(all(any(windows, target_os = "linux"), not(unix)))]
+#[cfg(all(any(windows, target_os = "linux"), not(unix), test))]
 fn package_mode(_metadata: &fs::Metadata) -> Option<u32> {
     None
 }
 
-#[cfg(any(windows, test))]
-fn zip_unix_mode_is_safe(mode: Option<u32>, is_dir: bool) -> bool {
-    let Some(mode) = mode else {
-        return true;
-    };
-    match mode & 0o170000 {
-        // Some ZIP creators store only permission bits, without a file type.
-        0 => true,
-        0o040000 => is_dir,
-        0o100000 => !is_dir,
-        _ => false,
-    }
-}
-
-/// Extracts from the already-open `archive` handle (the same one
-/// [`verify_sha256`] hashed) instead of re-opening its path, so nothing can
-/// substitute the archive's bytes between verification and extraction. See
-/// [`verify_sha256`] for the TOCTOU this closes.
 #[cfg(windows)]
-fn extract_archive(archive: &mut File, destination: &Path) -> Result<(), UpdateError> {
+fn load_windows_package(
+    archive: &mut File,
+    update: &AvailableUpdate,
+    expected_package_manifest: Option<&[u8]>,
+) -> Result<VerifiedPackage, UpdateError> {
     archive.rewind()?;
     let mut zip = zip::ZipArchive::new(&mut *archive)?;
     if zip.len() > MAX_ARCHIVE_ENTRIES {
@@ -1314,6 +2255,7 @@ fn extract_archive(archive: &mut File, destination: &Path) -> Result<(), UpdateE
     }
     let mut total = 0_u64;
     let mut seen = ArchivePaths::default();
+    let mut files = Vec::new();
     for index in 0..zip.len() {
         let mut entry = zip.by_index(index)?;
         let enclosed = entry
@@ -1344,32 +2286,34 @@ fn extract_archive(archive: &mut File, destination: &Path) -> Result<(), UpdateE
                 "unpacked data exceeds the safety limit".into(),
             ));
         }
-        let output = destination.join(&enclosed);
         if is_dir {
-            if declared_size != 0 {
+            if declared_size != 0 || enclosed != Path::new("shell-integration") {
                 return Err(UpdateError::UnsafeArchive(format!(
-                    "directory has data: {}",
+                    "unexpected release directory {}",
                     enclosed.display()
                 )));
             }
-            fs::create_dir_all(&output)?;
             continue;
         }
-        if !entry.is_file() {
+        if !entry.is_file() || !is_allowed_windows_payload_path(&enclosed) {
             return Err(UpdateError::UnsafeArchive(format!(
-                "non-file entry {}",
+                "unexpected release file {}",
                 enclosed.display()
             )));
         }
-        if let Some(parent) = output.parent() {
-            fs::create_dir_all(parent)?;
-        }
-        let mut file = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(output)?;
+        let capacity = usize::try_from(declared_size)
+            .map_err(|_| UpdateError::UnsafeArchive("entry is too large".into()))?;
+        let mut bytes = Vec::new();
+        bytes.try_reserve_exact(capacity).map_err(|error| {
+            UpdateError::Io(std::io::Error::other(format!(
+                "could not reserve {capacity} bytes for {}: {error}",
+                enclosed.display()
+            )))
+        })?;
         let remaining = MAX_UNPACKED_BYTES - total;
-        let actual = std::io::copy(&mut entry.by_ref().take(remaining + 1), &mut file)?;
+        let actual = std::io::Read::by_ref(&mut entry)
+            .take(remaining.saturating_add(1))
+            .read_to_end(&mut bytes)? as u64;
         if actual != declared_size {
             return Err(UpdateError::UnsafeArchive(format!(
                 "entry size mismatch for {} (declared {declared_size}, extracted {actual})",
@@ -1377,15 +2321,148 @@ fn extract_archive(archive: &mut File, destination: &Path) -> Result<(), UpdateE
             )));
         }
         total = next_total;
-        file.sync_all()?;
+        files.push(VerifiedPackageFile {
+            relative: enclosed,
+            bytes,
+            mode: None,
+        });
     }
-    Ok(())
+    for mandatory in ["kettle.exe", "kettle.com", "install.ps1"] {
+        if !files
+            .iter()
+            .any(|file| file.relative == Path::new(mandatory))
+        {
+            return Err(UpdateError::MissingArchiveFile(mandatory.into()));
+        }
+    }
+    VerifiedPackage::from_files(files, update, expected_package_manifest)
+}
+
+#[cfg(target_os = "linux")]
+fn load_linux_package(
+    archive: &[u8],
+    update: &AvailableUpdate,
+) -> Result<VerifiedPackage, UpdateError> {
+    let decoder = flate2::read::GzDecoder::new(std::io::Cursor::new(archive));
+    let mut tar = tar::Archive::new(decoder);
+    let mut count = 0_usize;
+    let mut total = 0_u64;
+    let mut seen = ArchivePaths::default();
+    let mut files = Vec::new();
+    for entry in tar.entries()? {
+        count += 1;
+        if count > MAX_ARCHIVE_ENTRIES {
+            return Err(UpdateError::UnsafeArchive("too many entries".into()));
+        }
+        let mut entry = entry?;
+        let path = entry.path()?.into_owned();
+        validate_archive_path(&path)?;
+        if path.components().next() != Some(Component::Normal("kettle".as_ref())) {
+            return Err(UpdateError::UnsafeArchive(format!(
+                "entry is outside the kettle root: {}",
+                path.display()
+            )));
+        }
+        let entry_type = entry.header().entry_type();
+        if !entry_type.is_file() && !entry_type.is_dir() {
+            return Err(UpdateError::UnsafeArchive(format!(
+                "links and special files are forbidden: {}",
+                path.display()
+            )));
+        }
+        if let Some(extensions) = entry.pax_extensions()? {
+            for extension in extensions {
+                let extension = extension?;
+                let key = extension.key_bytes();
+                if key.starts_with(b"GNU.sparse.") || key == b"SCHILY.realsize" {
+                    return Err(UpdateError::UnsafeArchive(format!(
+                        "sparse files are forbidden: {}",
+                        path.display()
+                    )));
+                }
+            }
+        }
+        seen.insert(&path, entry_type.is_dir())?;
+        let mode = entry.header().mode()?;
+        if mode & !0o777 != 0 {
+            return Err(UpdateError::UnsafeArchive(format!(
+                "special permission bits are forbidden: {}",
+                path.display()
+            )));
+        }
+        let declared_size = entry.size();
+        let next_total = total
+            .checked_add(declared_size)
+            .ok_or_else(|| UpdateError::UnsafeArchive("unpacked size overflow".into()))?;
+        if next_total > MAX_UNPACKED_BYTES {
+            return Err(UpdateError::UnsafeArchive(
+                "unpacked data exceeds the safety limit".into(),
+            ));
+        }
+        if entry_type.is_dir() {
+            if declared_size != 0 {
+                return Err(UpdateError::UnsafeArchive(format!(
+                    "directory has data: {}",
+                    path.display()
+                )));
+            }
+            continue;
+        }
+        let relative = path.strip_prefix("kettle").map_err(|_| {
+            UpdateError::UnsafeArchive(format!("invalid release root: {}", path.display()))
+        })?;
+        if relative.as_os_str().is_empty() {
+            return Err(UpdateError::UnsafeArchive(
+                "the kettle archive root cannot be a file".into(),
+            ));
+        }
+        let capacity = usize::try_from(declared_size)
+            .map_err(|_| UpdateError::UnsafeArchive("entry is too large".into()))?;
+        let mut bytes = Vec::new();
+        bytes.try_reserve_exact(capacity).map_err(|error| {
+            UpdateError::Io(std::io::Error::other(format!(
+                "could not reserve {capacity} bytes for {}: {error}",
+                path.display()
+            )))
+        })?;
+        let remaining = MAX_UNPACKED_BYTES - total;
+        let actual = std::io::Read::by_ref(&mut entry)
+            .take(remaining.saturating_add(1))
+            .read_to_end(&mut bytes)? as u64;
+        if actual != declared_size {
+            return Err(UpdateError::UnsafeArchive(format!(
+                "entry size mismatch for {} (declared {declared_size}, extracted {actual})",
+                path.display()
+            )));
+        }
+        total = next_total;
+        files.push(VerifiedPackageFile {
+            relative: relative.to_path_buf(),
+            bytes,
+            mode: Some(mode),
+        });
+    }
+    VerifiedPackage::from_files(files, update, None)
+}
+
+#[cfg(any(windows, test))]
+fn zip_unix_mode_is_safe(mode: Option<u32>, is_dir: bool) -> bool {
+    let Some(mode) = mode else {
+        return true;
+    };
+    match mode & 0o170000 {
+        // Some ZIP creators store only permission bits, without a file type.
+        0 => true,
+        0o040000 => is_dir,
+        0o100000 => !is_dir,
+        _ => false,
+    }
 }
 
 /// Extracts from the same bounded in-memory bytes hashed by
 /// [`verify_sha256_bytes`]. No writable archive inode exists between
 /// verification and extraction.
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", test))]
 fn extract_archive(archive: &[u8], destination: &Path) -> Result<(), UpdateError> {
     let decoder = flate2::read::GzDecoder::new(std::io::Cursor::new(archive));
     let mut tar = tar::Archive::new(decoder);
@@ -1569,6 +2646,51 @@ impl ArchivePaths {
 }
 
 #[cfg(windows)]
+fn apply_verified_windows_update(
+    transaction: &mut Transaction,
+    package: &VerifiedPackage,
+    install: &ManagedInstall,
+    update: &AvailableUpdate,
+) -> Result<(), UpdateError> {
+    for mandatory in ["kettle.exe", "kettle.com", "install.ps1"] {
+        if !package
+            .files
+            .iter()
+            .any(|file| file.relative == Path::new(mandatory))
+        {
+            return Err(UpdateError::MissingArchiveFile(mandatory.into()));
+        }
+    }
+    let mut destinations = package
+        .files
+        .iter()
+        .filter(|file| file.relative != Path::new("kettle.exe"))
+        .map(|file| file.relative.clone())
+        .collect::<Vec<_>>();
+    destinations.push(PathBuf::from("kettle.exe"));
+    destinations.push(PathBuf::from(".kettle-install.json"));
+    transaction.preflight_destinations(&destinations)?;
+
+    let support_files = package
+        .files
+        .iter()
+        .filter(|file| file.relative != Path::new("kettle.exe"))
+        .map(|file| file.relative.clone())
+        .collect::<Vec<_>>();
+    for relative in support_files {
+        let bytes = package.bytes(&relative)?;
+        transaction.install_bytes(&relative, bytes, None)?;
+    }
+    let binary = package.bytes(Path::new("kettle.exe"))?;
+    transaction.install_bytes(Path::new("kettle.exe"), binary, None)?;
+    let marker = marker_json(&update.version.to_string())?;
+    transaction.install_bytes(Path::new(".kettle-install.json"), marker.as_bytes(), None)?;
+    transaction.finish_preflight()?;
+    debug_assert_eq!(install.executable, install.prefix.join("kettle.exe"));
+    Ok(())
+}
+
+#[cfg(all(windows, test))]
 fn apply_staged_update(
     transaction: &mut Transaction,
     staging: &Path,
@@ -1581,19 +2703,24 @@ fn apply_staged_update(
     require_file(&staging.join("install.ps1"), "install.ps1")?;
 
     let files = collect_files(staging)?;
+    let mut destinations = files
+        .iter()
+        .filter(|path| *path != &binary)
+        .map(|source| {
+            source
+                .strip_prefix(staging)
+                .map(Path::to_path_buf)
+                .map_err(|_| UpdateError::UnsafeArchive(source.display().to_string()))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    destinations.push(PathBuf::from("kettle.exe"));
+    destinations.push(PathBuf::from(".kettle-install.json"));
+    transaction.preflight_destinations(&destinations)?;
     for source in files.iter().filter(|path| *path != &binary) {
         let relative = source.strip_prefix(staging).map_err(|_| {
             UpdateError::UnsafeArchive(format!("escaped staging: {}", source.display()))
         })?;
-        let root = relative
-            .components()
-            .next()
-            .and_then(|component| match component {
-                Component::Normal(value) => value.to_str(),
-                _ => None,
-            })
-            .ok_or_else(|| UpdateError::UnsafeArchive(relative.display().to_string()))?;
-        if !WINDOWS_ALLOWED_ROOTS.contains(&root) {
+        if !is_allowed_windows_payload_path(relative) {
             return Err(UpdateError::UnsafeArchive(format!(
                 "unexpected release file {}",
                 relative.display()
@@ -1604,22 +2731,20 @@ fn apply_staged_update(
     transaction.install(Path::new("kettle.exe"), &binary, None)?;
     let marker = marker_json(&update.version.to_string())?;
     transaction.install_bytes(Path::new(".kettle-install.json"), marker.as_bytes(), None)?;
+    transaction.finish_preflight()?;
     debug_assert_eq!(install.executable, install.prefix.join("kettle.exe"));
     Ok(())
 }
 
 #[cfg(target_os = "linux")]
-fn apply_staged_update(
+fn apply_verified_linux_update(
     transaction: &mut Transaction,
-    staging: &Path,
+    package: &VerifiedPackage,
     install: &ManagedInstall,
     update: &AvailableUpdate,
 ) -> Result<(), UpdateError> {
-    let root = staging.join("kettle");
-    let binary = root.join("kettle");
-    require_file(&binary, "kettle/kettle")?;
-    require_file(&root.join("install.sh"), "kettle/install.sh")?;
-
+    package.file(Path::new("kettle"))?;
+    package.file(Path::new("install.sh"))?;
     let map = [
         ("install.sh", "share/kettle/install.sh", 0o755),
         ("LICENSE", "share/doc/kettle/LICENSE", 0o644),
@@ -1673,6 +2798,181 @@ fn apply_staged_update(
         ),
         ("packaging/linux/kettle.1", "share/man/man1/kettle.1", 0o644),
     ];
+    let shell_files = package
+        .files
+        .iter()
+        .filter(|file| file.relative.starts_with("shell-integration"))
+        .collect::<Vec<_>>();
+    let mut destinations = map
+        .iter()
+        .map(|(_, destination, _)| PathBuf::from(destination))
+        .collect::<Vec<_>>();
+    for source in &shell_files {
+        let relative = source
+            .relative
+            .strip_prefix("shell-integration")
+            .map_err(|_| UpdateError::UnsafeArchive(source.relative.display().to_string()))?;
+        validate_archive_path(relative)?;
+        destinations.push(Path::new("share/kettle/shell-integration").join(relative));
+    }
+    destinations.push(PathBuf::from("bin/kettle"));
+    destinations.push(PathBuf::from("share/kettle/install.json"));
+    transaction.preflight_destinations(&destinations)?;
+
+    for (source, destination, mode) in map {
+        let bytes = package.bytes(Path::new(source))?;
+        if destination.ends_with("kettle.desktop") {
+            let desktop = render_linux_desktop_bytes(bytes, &install.prefix)?;
+            transaction.install_bytes(Path::new(destination), desktop.as_bytes(), Some(mode))?;
+        } else {
+            transaction.install_bytes(Path::new(destination), bytes, Some(mode))?;
+        }
+    }
+    for source in shell_files {
+        let relative = source
+            .relative
+            .strip_prefix("shell-integration")
+            .map_err(|_| UpdateError::UnsafeArchive(source.relative.display().to_string()))?;
+        transaction.install_bytes(
+            &Path::new("share/kettle/shell-integration").join(relative),
+            &source.bytes,
+            Some(0o644),
+        )?;
+    }
+    transaction.install_bytes(
+        Path::new("bin/kettle"),
+        package.bytes(Path::new("kettle"))?,
+        Some(0o755),
+    )?;
+    let marker = marker_json(&update.version.to_string())?;
+    transaction.install_bytes(
+        Path::new("share/kettle/install.json"),
+        marker.as_bytes(),
+        Some(0o644),
+    )?;
+    transaction.finish_preflight()?;
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn render_linux_desktop_bytes(source: &[u8], prefix: &Path) -> Result<String, UpdateError> {
+    let text = std::str::from_utf8(source).map_err(|error| {
+        UpdateError::UnsafeArchive(format!("desktop template is not UTF-8: {error}"))
+    })?;
+    render_linux_desktop_text(text, prefix)
+}
+
+#[cfg(all(target_os = "linux", test))]
+fn apply_staged_update(
+    transaction: &mut Transaction,
+    staging: &Path,
+    install: &ManagedInstall,
+    update: &AvailableUpdate,
+) -> Result<(), UpdateError> {
+    use std::collections::BTreeMap;
+    use std::os::unix::fs::MetadataExt as _;
+
+    let root = staging.join("kettle");
+    let binary = root.join("kettle");
+    require_file(&binary, "kettle/kettle")?;
+    require_file(&root.join("install.sh"), "kettle/install.sh")?;
+    require_file(&root.join("install-unix.py"), "kettle/install-unix.py")?;
+    let previous_provenance = read_linux_install_provenance(&install.prefix)?;
+
+    let map = [
+        ("install.sh", "share/kettle/install.sh", 0o755),
+        ("install-unix.py", "share/kettle/install-unix.py", 0o755),
+        ("LICENSE", "share/doc/kettle/LICENSE", 0o644),
+        ("NOTICE", "share/doc/kettle/NOTICE", 0o644),
+        ("README.md", "share/doc/kettle/README.md", 0o644),
+        ("CHANGELOG.md", "share/doc/kettle/CHANGELOG.md", 0o644),
+        (
+            "packaging/linux/kettle.desktop",
+            "share/applications/kettle.desktop",
+            0o644,
+        ),
+        (
+            "packaging/linux/kettle.svg",
+            "share/icons/hicolor/scalable/apps/kettle.svg",
+            0o644,
+        ),
+        (
+            "packaging/linux/kettle-16.png",
+            "share/icons/hicolor/16x16/apps/kettle.png",
+            0o644,
+        ),
+        (
+            "packaging/linux/kettle-24.png",
+            "share/icons/hicolor/24x24/apps/kettle.png",
+            0o644,
+        ),
+        (
+            "packaging/linux/kettle-32.png",
+            "share/icons/hicolor/32x32/apps/kettle.png",
+            0o644,
+        ),
+        (
+            "packaging/linux/kettle-48.png",
+            "share/icons/hicolor/48x48/apps/kettle.png",
+            0o644,
+        ),
+        (
+            "packaging/linux/kettle-64.png",
+            "share/icons/hicolor/64x64/apps/kettle.png",
+            0o644,
+        ),
+        (
+            "packaging/linux/kettle-128.png",
+            "share/icons/hicolor/128x128/apps/kettle.png",
+            0o644,
+        ),
+        (
+            "packaging/linux/kettle-256.png",
+            "share/icons/hicolor/256x256/apps/kettle.png",
+            0o644,
+        ),
+        ("packaging/linux/kettle.1", "share/man/man1/kettle.1", 0o644),
+    ];
+    let shell_root = root.join("shell-integration");
+    let shell_sources = collect_files(&shell_root)?;
+    let mut destinations = map
+        .iter()
+        .map(|(_, destination, _)| PathBuf::from(destination))
+        .collect::<Vec<_>>();
+    for source in &shell_sources {
+        let relative = source
+            .strip_prefix(&shell_root)
+            .map_err(|_| UpdateError::UnsafeArchive(source.display().to_string()))?;
+        destinations.push(Path::new("share/kettle/shell-integration").join(relative));
+    }
+    destinations.push(PathBuf::from("bin/kettle"));
+    destinations.push(PathBuf::from("share/kettle/install.json"));
+    destinations.push(PathBuf::from(UNIX_INSTALL_PROVENANCE_FILE));
+
+    let mut owned_directories = previous_provenance
+        .directories
+        .into_iter()
+        .map(|record| (record.path, record.mode))
+        .collect::<BTreeMap<_, _>>();
+    for destination in &destinations {
+        let mut relative = PathBuf::new();
+        if let Some(parent) = destination.parent() {
+            for component in parent.components() {
+                let Component::Normal(name) = component else {
+                    return Err(UpdateError::Transaction(format!(
+                        "unsafe Linux provenance directory {}",
+                        destination.display()
+                    )));
+                };
+                relative.push(name);
+                if !install.prefix.join(&relative).try_exists()? {
+                    owned_directories.insert(relative_to_string(&relative)?, 0o755);
+                }
+            }
+        }
+    }
+    transaction.preflight_destinations(&destinations)?;
+    let mut provenance_files = Vec::with_capacity(destinations.len() - 1);
     for (source, destination, mode) in map {
         let source = root.join(source);
         require_file(
@@ -1685,12 +2985,23 @@ fn apply_staged_update(
         if destination.ends_with("kettle.desktop") {
             let desktop = render_linux_desktop(&source, &install.prefix)?;
             transaction.install_bytes(Path::new(destination), desktop.as_bytes(), Some(mode))?;
+            provenance_files.push(UnixInstallFile {
+                path: destination.to_string(),
+                size: desktop.len() as u64,
+                sha256: sha256_bytes(desktop.as_bytes()),
+                mode,
+            });
         } else {
             transaction.install(Path::new(destination), &source, Some(mode))?;
+            provenance_files.push(UnixInstallFile {
+                path: destination.to_string(),
+                size: source.metadata()?.len(),
+                sha256: sha256_file(&source)?,
+                mode,
+            });
         }
     }
-    let shell_root = root.join("shell-integration");
-    for source in collect_files(&shell_root)? {
+    for source in shell_sources {
         let relative = source
             .strip_prefix(&shell_root)
             .map_err(|_| UpdateError::UnsafeArchive(source.display().to_string()))?;
@@ -1699,20 +3010,91 @@ fn apply_staged_update(
             &source,
             Some(0o644),
         )?;
+        let destination = Path::new("share/kettle/shell-integration").join(relative);
+        provenance_files.push(UnixInstallFile {
+            path: relative_to_string(&destination)?,
+            size: source.metadata()?.len(),
+            sha256: sha256_file(&source)?,
+            mode: 0o644,
+        });
     }
     transaction.install(Path::new("bin/kettle"), &binary, Some(0o755))?;
+    provenance_files.push(UnixInstallFile {
+        path: "bin/kettle".into(),
+        size: binary.metadata()?.len(),
+        sha256: sha256_file(&binary)?,
+        mode: 0o755,
+    });
     let marker = marker_json(&update.version.to_string())?;
     transaction.install_bytes(
         Path::new("share/kettle/install.json"),
         marker.as_bytes(),
         Some(0o644),
     )?;
+    provenance_files.push(UnixInstallFile {
+        path: "share/kettle/install.json".into(),
+        size: marker.len() as u64,
+        sha256: sha256_bytes(marker.as_bytes()),
+        mode: 0o644,
+    });
+    provenance_files.sort_by(|left, right| left.path.cmp(&right.path));
+    if provenance_files.len() > MAX_ARCHIVE_ENTRIES {
+        return Err(UpdateError::Transaction(
+            "Linux install provenance exceeds its file limit".into(),
+        ));
+    }
+    let prefix = install.prefix.to_str().ok_or_else(|| {
+        UpdateError::Transaction("Linux install prefix is not valid UTF-8".into())
+    })?;
+    // Enforce the reader's bounds here, before writing. `read_linux_install_provenance`
+    // refuses a record whose file or directory count exceeds MAX_ARCHIVE_ENTRIES, so
+    // writing past it would produce provenance this installer can never read back —
+    // and since upgrade and uninstall both require a readable record first, the
+    // install would be permanently stranded by its own success.
+    if provenance_files.len() > MAX_ARCHIVE_ENTRIES || owned_directories.len() > MAX_ARCHIVE_ENTRIES
+    {
+        return Err(UpdateError::UnmanagedInstall(format!(
+            "refusing to record Linux install provenance with {} files and {} \
+             directories; the readable maximum is {MAX_ARCHIVE_ENTRIES} each",
+            provenance_files.len(),
+            owned_directories.len()
+        )));
+    }
+    let provenance = UnixInstallProvenance {
+        schema: 1,
+        product: "kettle".into(),
+        managed_by: "kettle-installer".into(),
+        prefix: prefix.into(),
+        owner_uid: install.prefix.metadata()?.uid(),
+        files: provenance_files,
+        directories: owned_directories
+            .into_iter()
+            .map(|(path, mode)| UnixInstallDirectory { path, mode })
+            .collect(),
+    };
+    let provenance = serde_json::to_string_pretty(&provenance)? + "\n";
+    if provenance.len() > 1024 * 1024 {
+        return Err(UpdateError::Transaction(
+            "Linux install provenance exceeds its byte limit".into(),
+        ));
+    }
+    transaction.install_bytes(
+        Path::new(UNIX_INSTALL_PROVENANCE_FILE),
+        provenance.as_bytes(),
+        Some(0o644),
+    )?;
+    transaction.finish_preflight()?;
     Ok(())
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", test))]
 fn render_linux_desktop(source: &Path, prefix: &Path) -> Result<String, UpdateError> {
     let text = fs::read_to_string(source)?;
+    render_linux_desktop_text(&text, prefix)
+}
+
+#[cfg(target_os = "linux")]
+fn render_linux_desktop_text(text: &str, prefix: &Path) -> Result<String, UpdateError> {
     let executable = prefix.join("bin/kettle");
     // Match scripts/install.sh's known-good absolute PNG contract. Keeping one
     // user-local icon format avoids SVG loader/theme variance when GNOME Shell
@@ -1807,7 +3189,7 @@ fn desktop_exec_argument(path: &Path) -> Result<String, UpdateError> {
     Ok(quoted)
 }
 
-#[cfg(any(windows, target_os = "linux"))]
+#[cfg(all(any(windows, target_os = "linux"), test))]
 fn require_file(path: &Path, label: impl std::fmt::Display) -> Result<(), UpdateError> {
     if !path.is_file() {
         return Err(UpdateError::MissingArchiveFile(label.to_string()));
@@ -1827,6 +3209,19 @@ fn collect_files(root: &Path) -> Result<Vec<PathBuf>, UpdateError> {
         entries.sort_by_key(|entry| entry.file_name());
         for entry in entries {
             let kind = entry.file_type()?;
+            #[cfg(windows)]
+            {
+                use std::os::windows::fs::MetadataExt as _;
+                use windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT;
+                if fs::symlink_metadata(entry.path())?.file_attributes()
+                    & FILE_ATTRIBUTE_REPARSE_POINT
+                    != 0
+                {
+                    return Err(UpdateError::UnsafeArchive(
+                        entry.path().display().to_string(),
+                    ));
+                }
+            }
             if kind.is_dir() {
                 pending.push(entry.path());
             } else if kind.is_file() {
@@ -1862,7 +3257,7 @@ enum JournalEntryState {
 }
 
 #[cfg(any(windows, target_os = "linux"))]
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 struct Journal {
     schema: u32,
@@ -1874,7 +3269,7 @@ struct Journal {
 }
 
 #[cfg(any(windows, target_os = "linux"))]
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 struct JournalEntry {
     relative: String,
@@ -1892,7 +3287,7 @@ struct JournalEntry {
 /// replacing the binary. Retain a narrow recovery reader so upgrading does not
 /// strand an otherwise recoverable installation.
 #[cfg(any(windows, target_os = "linux"))]
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 struct LegacyJournal {
     schema: u32,
@@ -1901,7 +3296,7 @@ struct LegacyJournal {
 }
 
 #[cfg(any(windows, target_os = "linux"))]
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 struct LegacyJournalEntry {
     relative: String,
@@ -1978,8 +3373,11 @@ fn anchored_parent(
                 Err(UpdateError::Io(error))
                     if create_missing && error.kind() == std::io::ErrorKind::NotFound =>
                 {
+                    use std::os::unix::fs::PermissionsExt as _;
+
                     match fs::create_dir(&candidate) {
                         Ok(()) => {
+                            fs::set_permissions(&candidate, fs::Permissions::from_mode(0o755))?;
                             // Persist each new directory entry before a journal
                             // can refer to content below it.
                             directory.sync_all()?;
@@ -2010,6 +3408,388 @@ impl AnchoredParent {
         })?;
         Ok(directory_descriptor_path(&self.directory).join(name))
     }
+}
+
+#[cfg(windows)]
+struct WindowsHeldFile {
+    _parent: AnchoredParent,
+    file: File,
+    path: PathBuf,
+}
+
+#[cfg(windows)]
+struct WindowsHeldDirectory {
+    _parent: AnchoredParent,
+    directory: File,
+    path: PathBuf,
+}
+
+#[cfg(windows)]
+fn open_cleanup_anchored_directory(path: &Path) -> Result<File, UpdateError> {
+    use std::os::windows::fs::{MetadataExt as _, OpenOptionsExt as _};
+    use windows_sys::Win32::Storage::FileSystem::{
+        FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
+        FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
+    };
+
+    let mut options = OpenOptions::new();
+    options
+        .read(true)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT);
+    let directory = options.open(path)?;
+    let metadata = directory.metadata()?;
+    if !metadata.file_type().is_dir()
+        || metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+    {
+        return Err(UpdateError::Transaction(format!(
+            "cleanup ancestor is not a real directory: {}",
+            path.display()
+        )));
+    }
+    Ok(directory)
+}
+
+#[cfg(windows)]
+fn cleanup_anchored_destination(
+    prefix: &Path,
+    relative: &Path,
+) -> Result<(AnchoredParent, PathBuf), UpdateError> {
+    validate_relative(relative)?;
+    let prefix = std::path::absolute(prefix)?;
+    let mut path = PathBuf::new();
+    let mut directories = Vec::new();
+    for component in prefix.components() {
+        match component {
+            Component::Prefix(_) => path.push(component.as_os_str()),
+            Component::RootDir | Component::Normal(_) => {
+                path.push(component.as_os_str());
+                directories.push(open_cleanup_anchored_directory(&path)?);
+            }
+            Component::CurDir | Component::ParentDir => {
+                return Err(UpdateError::Transaction(format!(
+                    "cleanup prefix is not absolute and normalized: {}",
+                    prefix.display()
+                )));
+            }
+        }
+    }
+    if let Some(parent) = relative.parent() {
+        for component in parent.components() {
+            let Component::Normal(name) = component else {
+                return Err(UpdateError::Transaction("unsafe cleanup path".into()));
+            };
+            path.push(name);
+            directories.push(open_cleanup_anchored_directory(&path)?);
+        }
+    }
+    let parent = AnchoredParent {
+        _directories: directories,
+        path,
+    };
+    let destination = parent.destination(relative)?;
+    Ok((parent, destination))
+}
+
+#[cfg(windows)]
+fn open_windows_held_file(prefix: &Path, relative: &Path) -> Result<WindowsHeldFile, UpdateError> {
+    use std::os::windows::fs::OpenOptionsExt as _;
+    use windows_sys::Win32::Foundation::GENERIC_READ;
+    use windows_sys::Win32::Storage::FileSystem::{
+        DELETE, FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_READ,
+    };
+
+    let (parent, path) = cleanup_anchored_destination(prefix, relative)?;
+    let mut options = OpenOptions::new();
+    options
+        .access_mode(GENERIC_READ | DELETE)
+        .share_mode(FILE_SHARE_READ)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
+    let file = options.open(&path)?;
+    let metadata = file.metadata()?;
+    {
+        use std::os::windows::fs::MetadataExt as _;
+        use windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT;
+        if !metadata.file_type().is_file()
+            || metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+            || windows_file_information(&file)?.nNumberOfLinks != 1
+        {
+            return Err(UpdateError::Transaction(format!(
+                "cleanup target is not a single-link ordinary file: {}",
+                path.display()
+            )));
+        }
+    }
+    Ok(WindowsHeldFile {
+        _parent: parent,
+        file,
+        path,
+    })
+}
+
+#[cfg(windows)]
+fn open_windows_held_directory(
+    prefix: &Path,
+    relative: &Path,
+) -> Result<WindowsHeldDirectory, UpdateError> {
+    use std::os::windows::fs::{MetadataExt as _, OpenOptionsExt as _};
+    use windows_sys::Win32::Storage::FileSystem::{
+        DELETE, FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_BACKUP_SEMANTICS,
+        FILE_FLAG_OPEN_REPARSE_POINT, FILE_LIST_DIRECTORY, FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE,
+        FILE_SHARE_READ, FILE_SHARE_WRITE,
+    };
+
+    let (parent, path) = cleanup_anchored_destination(prefix, relative)?;
+    let mut options = OpenOptions::new();
+    options
+        .access_mode(FILE_LIST_DIRECTORY | FILE_READ_ATTRIBUTES | DELETE)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT);
+    let directory = options.open(&path)?;
+    let metadata = directory.metadata()?;
+    if !metadata.file_type().is_dir()
+        || metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+    {
+        return Err(UpdateError::Transaction(format!(
+            "cleanup target is not a real directory: {}",
+            path.display()
+        )));
+    }
+    Ok(WindowsHeldDirectory {
+        _parent: parent,
+        directory,
+        path,
+    })
+}
+
+#[cfg(windows)]
+fn mark_windows_handle_for_deletion(file: &File) -> Result<(), UpdateError> {
+    use std::os::windows::io::AsRawHandle as _;
+    use windows_sys::Win32::Foundation::HANDLE;
+    use windows_sys::Win32::Storage::FileSystem::{
+        FILE_DISPOSITION_INFO, FileDispositionInfo, SetFileInformationByHandle,
+    };
+
+    let disposition = FILE_DISPOSITION_INFO { DeleteFile: true };
+    // SAFETY: the held handle was opened with DELETE and `disposition` exactly
+    // matches the FileDispositionInfo contract.
+    if unsafe {
+        SetFileInformationByHandle(
+            file.as_raw_handle() as HANDLE,
+            FileDispositionInfo,
+            std::ptr::addr_of!(disposition).cast(),
+            std::mem::size_of::<FILE_DISPOSITION_INFO>() as u32,
+        )
+    } == 0
+    {
+        return Err(std::io::Error::last_os_error().into());
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn rename_windows_held_file(
+    held: &WindowsHeldFile,
+    destination_name: &str,
+) -> Result<(), UpdateError> {
+    use std::os::windows::ffi::OsStrExt as _;
+    use std::os::windows::io::AsRawHandle as _;
+    use windows_sys::Win32::Foundation::HANDLE;
+    use windows_sys::Win32::Storage::FileSystem::{
+        FILE_RENAME_INFO, FileRenameInfo, SetFileInformationByHandle,
+    };
+
+    if destination_name.is_empty()
+        || destination_name.contains(['/', '\\'])
+        || destination_name.encode_utf16().any(|unit| unit == 0)
+    {
+        return Err(UpdateError::Transaction(
+            "invalid held-file rename destination".into(),
+        ));
+    }
+    let destination = held._parent.path.join(destination_name);
+    let name = destination.as_os_str().encode_wide().collect::<Vec<_>>();
+    let name_bytes = name
+        .len()
+        .checked_mul(std::mem::size_of::<u16>())
+        .ok_or_else(|| UpdateError::Transaction("rename destination is too long".into()))?;
+    let total_bytes = std::mem::size_of::<FILE_RENAME_INFO>()
+        .checked_add(name_bytes)
+        .ok_or_else(|| UpdateError::Transaction("rename destination is too long".into()))?;
+    let mut storage = vec![0_u64; total_bytes.div_ceil(std::mem::size_of::<u64>())];
+    let info = storage.as_mut_ptr().cast::<FILE_RENAME_INFO>();
+    // SAFETY: `storage` is aligned, zeroed, and sized for the fixed header plus
+    // every UTF-16 unit. Both handles remain owned for the call.
+    unsafe {
+        (*info).Anonymous.ReplaceIfExists = false;
+        (*info).RootDirectory = std::ptr::null_mut();
+        (*info).FileNameLength = u32::try_from(name_bytes)
+            .map_err(|_| UpdateError::Transaction("rename destination is too long".into()))?;
+        std::ptr::copy_nonoverlapping(
+            name.as_ptr(),
+            std::ptr::addr_of_mut!((*info).FileName).cast::<u16>(),
+            name.len(),
+        );
+        if SetFileInformationByHandle(
+            held.file.as_raw_handle() as HANDLE,
+            FileRenameInfo,
+            info.cast(),
+            u32::try_from(total_bytes)
+                .map_err(|_| UpdateError::Transaction("rename buffer is too large".into()))?,
+        ) == 0
+        {
+            return Err(std::io::Error::last_os_error().into());
+        }
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+struct WindowsHeldTree {
+    root: WindowsHeldDirectory,
+    nested: Option<WindowsHeldDirectory>,
+    files: Vec<(PathBuf, WindowsHeldFile)>,
+}
+
+#[cfg(windows)]
+impl WindowsHeldTree {
+    fn delete(self) -> Result<(), UpdateError> {
+        for (_, held) in &self.files {
+            mark_windows_handle_for_deletion(&held.file)?;
+        }
+        drop(self.files);
+        if let Some(nested) = self.nested {
+            mark_windows_handle_for_deletion(&nested.directory)?;
+            drop(nested);
+        }
+        mark_windows_handle_for_deletion(&self.root.directory)?;
+        drop(self.root);
+        Ok(())
+    }
+}
+
+#[cfg(windows)]
+fn hold_windows_two_level_tree(
+    prefix: &Path,
+    root_relative: &Path,
+) -> Result<WindowsHeldTree, UpdateError> {
+    let root = open_windows_held_directory(prefix, root_relative)?;
+    let mut nested = None;
+    let mut files = Vec::new();
+    let mut entries = 0_usize;
+    let mut total = 0_u64;
+    for entry in fs::read_dir(&root.path)? {
+        let entry = entry?;
+        let name = entry.file_name().into_string().map_err(|_| {
+            UpdateError::Transaction(format!(
+                "managed cleanup tree contains a non-UTF-8 name: {}",
+                entry.path().display()
+            ))
+        })?;
+        let metadata = fs::symlink_metadata(entry.path())?;
+        entries = entries.saturating_add(1);
+        if entries > MAX_ARCHIVE_ENTRIES {
+            return Err(UpdateError::Transaction(
+                "managed cleanup tree exceeds the entry limit".into(),
+            ));
+        }
+        if metadata.file_type().is_dir() {
+            if name != "shell-integration" || nested.is_some() {
+                return Err(UpdateError::Transaction(format!(
+                    "managed cleanup tree contains an unexpected directory {}",
+                    entry.path().display()
+                )));
+            }
+            let nested_relative = root_relative.join("shell-integration");
+            let held_nested = open_windows_held_directory(prefix, &nested_relative)?;
+            let nested_root = held_nested._parent._directories.last().ok_or_else(|| {
+                UpdateError::Transaction("nested cleanup directory has no root anchor".into())
+            })?;
+            if !same_transaction_file_identity(&root.directory, nested_root)? {
+                return Err(UpdateError::Transaction(
+                    "cleanup root changed while its nested directory was opened".into(),
+                ));
+            }
+            for shell_entry in fs::read_dir(&held_nested.path)? {
+                let shell_entry = shell_entry?;
+                entries = entries.saturating_add(1);
+                if entries > MAX_ARCHIVE_ENTRIES {
+                    return Err(UpdateError::Transaction(
+                        "managed cleanup tree exceeds the entry limit".into(),
+                    ));
+                }
+                let relative = Path::new("shell-integration").join(shell_entry.file_name());
+                let full_relative = root_relative.join(&relative);
+                let held = open_windows_held_file(prefix, &full_relative)?;
+                let file_parent = held._parent._directories.last().ok_or_else(|| {
+                    UpdateError::Transaction("nested cleanup file has no parent anchor".into())
+                })?;
+                if !same_transaction_file_identity(&held_nested.directory, file_parent)? {
+                    return Err(UpdateError::Transaction(
+                        "nested cleanup directory changed while a file was opened".into(),
+                    ));
+                }
+                total = total
+                    .checked_add(held.file.metadata()?.len())
+                    .ok_or_else(|| {
+                        UpdateError::Transaction("managed cleanup size overflow".into())
+                    })?;
+                if total > MAX_UNPACKED_BYTES {
+                    return Err(UpdateError::Transaction(
+                        "managed cleanup tree exceeds the size limit".into(),
+                    ));
+                }
+                files.push((relative, held));
+            }
+            nested = Some(held_nested);
+        } else {
+            let relative = PathBuf::from(name);
+            let full_relative = root_relative.join(&relative);
+            let held = open_windows_held_file(prefix, &full_relative)?;
+            let file_parent = held._parent._directories.last().ok_or_else(|| {
+                UpdateError::Transaction("cleanup file has no root anchor".into())
+            })?;
+            if !same_transaction_file_identity(&root.directory, file_parent)? {
+                return Err(UpdateError::Transaction(
+                    "cleanup root changed while a file was opened".into(),
+                ));
+            }
+            total = total
+                .checked_add(held.file.metadata()?.len())
+                .ok_or_else(|| UpdateError::Transaction("managed cleanup size overflow".into()))?;
+            if total > MAX_UNPACKED_BYTES {
+                return Err(UpdateError::Transaction(
+                    "managed cleanup tree exceeds the size limit".into(),
+                ));
+            }
+            files.push((relative, held));
+        }
+    }
+    files.sort_by(|left, right| left.0.cmp(&right.0));
+    Ok(WindowsHeldTree {
+        root,
+        nested,
+        files,
+    })
+}
+
+#[cfg(windows)]
+fn read_windows_held_file(
+    held: &mut WindowsHeldFile,
+    limit: usize,
+) -> Result<Vec<u8>, UpdateError> {
+    held.file.rewind()?;
+    let mut bytes = Vec::new();
+    std::io::Read::by_ref(&mut held.file)
+        .take(limit as u64 + 1)
+        .read_to_end(&mut bytes)?;
+    if bytes.len() > limit {
+        return Err(UpdateError::Transaction(format!(
+            "held cleanup file exceeds its limit: {}",
+            held.path.display()
+        )));
+    }
+    Ok(bytes)
 }
 
 #[cfg(windows)]
@@ -2045,13 +3825,35 @@ fn anchored_parent(
     create_missing: bool,
 ) -> Result<AnchoredParent, UpdateError> {
     validate_relative(relative)?;
-    let mut path = prefix.to_path_buf();
-    let mut directories = vec![open_anchored_directory(prefix).map_err(|error| {
-        UpdateError::Transaction(format!(
-            "cannot anchor install prefix {}: {error}",
+    let prefix = std::path::absolute(prefix)?;
+    let mut path = PathBuf::new();
+    let mut directories = Vec::new();
+    for component in prefix.components() {
+        match component {
+            Component::Prefix(_) => path.push(component.as_os_str()),
+            Component::RootDir | Component::Normal(_) => {
+                path.push(component.as_os_str());
+                directories.push(open_anchored_directory(&path).map_err(|error| {
+                    UpdateError::Transaction(format!(
+                        "cannot anchor install path component {}: {error}",
+                        path.display()
+                    ))
+                })?);
+            }
+            Component::CurDir | Component::ParentDir => {
+                return Err(UpdateError::Transaction(format!(
+                    "install prefix is not absolute and normalized: {}",
+                    prefix.display()
+                )));
+            }
+        }
+    }
+    if directories.is_empty() {
+        return Err(UpdateError::Transaction(format!(
+            "install prefix has no anchored directory components: {}",
             prefix.display()
-        ))
-    })?];
+        )));
+    }
     if let Some(parent) = relative.parent() {
         for component in parent.components() {
             let Component::Normal(name) = component else {
@@ -2167,7 +3969,7 @@ fn read_bounded_regular(path: &Path, limit: usize) -> Result<Vec<u8>, UpdateErro
 
 #[cfg(any(windows, target_os = "linux"))]
 fn read_transaction_file(path: &Path) -> Result<(Vec<u8>, Option<u32>), UpdateError> {
-    let mut file = open_regular_nofollow(path)?;
+    let (mut file, mode) = open_transaction_snapshot(path)?;
     let metadata = file.metadata()?;
     let mut bytes =
         Vec::with_capacity(usize::try_from(metadata.len().min(64 * 1024)).unwrap_or(64 * 1024));
@@ -2180,6 +3982,76 @@ fn read_transaction_file(path: &Path) -> Result<(Vec<u8>, Option<u32>), UpdateEr
             path.display()
         )));
     }
+    Ok((bytes, mode))
+}
+
+#[cfg(any(windows, target_os = "linux"))]
+fn open_transaction_snapshot(path: &Path) -> Result<(File, Option<u32>), UpdateError> {
+    let mut options = OpenOptions::new();
+    options.read(true);
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.custom_flags(libc::O_NOFOLLOW);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt as _;
+        use windows_sys::Win32::Storage::FileSystem::{
+            FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_READ,
+        };
+        options
+            .share_mode(FILE_SHARE_READ)
+            .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
+    }
+    let file = match options.open(path) {
+        Ok(file) => file,
+        Err(error) => {
+            #[cfg(target_os = "linux")]
+            if error.raw_os_error() == Some(libc::ELOOP) {
+                return Err(UpdateError::Transaction(format!(
+                    "refusing transaction snapshot of non-regular file: {}",
+                    path.display()
+                )));
+            }
+            return Err(error.into());
+        }
+    };
+    let metadata = file.metadata()?;
+    if !metadata.file_type().is_file() {
+        return Err(UpdateError::Transaction(format!(
+            "refusing transaction snapshot of non-regular file: {}",
+            path.display()
+        )));
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt as _;
+        use windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT;
+        if metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+            return Err(UpdateError::Transaction(format!(
+                "transaction snapshot is a reparse point: {}",
+                path.display()
+            )));
+        }
+        let information = windows_file_information(&file)?;
+        if information.nNumberOfLinks != 1 {
+            return Err(UpdateError::Transaction(format!(
+                "transaction snapshot is not a single-link file: {}",
+                path.display()
+            )));
+        }
+    }
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::unix::fs::MetadataExt as _;
+        if metadata.nlink() != 1 {
+            return Err(UpdateError::Transaction(format!(
+                "transaction snapshot is not a single-link file: {}",
+                path.display()
+            )));
+        }
+    }
     #[cfg(unix)]
     let mode = {
         use std::os::unix::fs::PermissionsExt as _;
@@ -2187,7 +4059,161 @@ fn read_transaction_file(path: &Path) -> Result<(Vec<u8>, Option<u32>), UpdateEr
     };
     #[cfg(not(unix))]
     let mode = None;
-    Ok((bytes, mode))
+    Ok((file, mode))
+}
+
+#[cfg(any(windows, target_os = "linux"))]
+fn snapshot_transaction_destination(
+    prefix: &Path,
+    relative: &Path,
+) -> Result<PreflightDestination, UpdateError> {
+    if let Err(error) = fs::symlink_metadata(prefix.join(relative)) {
+        if error.kind() == std::io::ErrorKind::NotFound {
+            return Ok(PreflightDestination {
+                file: None,
+                previous_unix_mode: None,
+            });
+        }
+        return Err(error.into());
+    }
+    // Keep the anchored parent alive while opening the descriptor-relative
+    // leaf. On Linux `destination` is `/proc/self/fd/<parent>/name`; dropping
+    // the handle inside this match arm makes that path immediately dangling
+    // and misclassifies every existing destination as absent.
+    let (destination_parent, destination) = match anchored_destination(prefix, relative, false) {
+        Ok(anchored) => anchored,
+        Err(UpdateError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(PreflightDestination {
+                file: None,
+                previous_unix_mode: None,
+            });
+        }
+        Err(error) => return Err(error),
+    };
+    let snapshot = match open_transaction_snapshot(&destination) {
+        Ok((file, previous_unix_mode)) => Ok(PreflightDestination {
+            file: Some(file),
+            previous_unix_mode,
+        }),
+        Err(UpdateError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
+            Ok(PreflightDestination {
+                file: None,
+                previous_unix_mode: None,
+            })
+        }
+        Err(error) => Err(error),
+    };
+    drop(destination_parent);
+    snapshot
+}
+
+#[cfg(any(windows, target_os = "linux"))]
+fn verify_transaction_destination_snapshot(
+    prefix: &Path,
+    relative: &Path,
+    snapshot: &PreflightDestination,
+) -> Result<(), UpdateError> {
+    let current = snapshot_transaction_destination(prefix, relative)?;
+    match (&snapshot.file, &current.file) {
+        (None, None) => Ok(()),
+        (Some(expected), Some(current)) if same_transaction_file_identity(expected, current)? => {
+            Ok(())
+        }
+        _ => Err(UpdateError::Transaction(format!(
+            "transaction destination changed after preflight: {}",
+            relative.display()
+        ))),
+    }
+}
+
+#[cfg(windows)]
+fn windows_file_information(
+    file: &File,
+) -> Result<windows_sys::Win32::Storage::FileSystem::BY_HANDLE_FILE_INFORMATION, UpdateError> {
+    use std::os::windows::io::AsRawHandle as _;
+    use windows_sys::Win32::Foundation::HANDLE;
+    use windows_sys::Win32::Storage::FileSystem::GetFileInformationByHandle;
+
+    let mut information = unsafe { std::mem::zeroed() };
+    // SAFETY: `file` owns a valid handle and `information` is writable for the
+    // exact structure required by GetFileInformationByHandle.
+    if unsafe {
+        GetFileInformationByHandle(
+            file.as_raw_handle() as HANDLE,
+            std::ptr::addr_of_mut!(information),
+        )
+    } == 0
+    {
+        return Err(std::io::Error::last_os_error().into());
+    }
+    Ok(information)
+}
+
+#[cfg(any(windows, target_os = "linux"))]
+fn same_transaction_file_identity(left: &File, right: &File) -> Result<bool, UpdateError> {
+    #[cfg(windows)]
+    {
+        let left = windows_file_information(left)?;
+        let right = windows_file_information(right)?;
+        Ok(left.dwVolumeSerialNumber == right.dwVolumeSerialNumber
+            && left.nFileIndexHigh == right.nFileIndexHigh
+            && left.nFileIndexLow == right.nFileIndexLow)
+    }
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::unix::fs::MetadataExt as _;
+        let left = left.metadata()?;
+        let right = right.metadata()?;
+        Ok(left.dev() == right.dev() && left.ino() == right.ino())
+    }
+}
+
+#[cfg(any(windows, target_os = "linux"))]
+fn stream_transaction_backup(
+    source: &mut File,
+    destination: &Path,
+) -> Result<(u64, String), UpdateError> {
+    source.rewind()?;
+    let expected_size = source.metadata()?.len();
+    let mut backup = kettle_state::create_private_file_new(destination)?;
+    let result = (|| {
+        let mut hash = Sha256::new();
+        let mut total = 0_u64;
+        let mut buffer = [0_u8; 64 * 1024];
+        loop {
+            let count = source.read(&mut buffer)?;
+            if count == 0 {
+                break;
+            }
+            total = total
+                .checked_add(count as u64)
+                .ok_or_else(|| UpdateError::Transaction("backup size overflow".into()))?;
+            if total > MAX_UNPACKED_BYTES {
+                return Err(UpdateError::Transaction(
+                    "backup exceeds the safety limit".into(),
+                ));
+            }
+            hash.update(&buffer[..count]);
+            backup.write_all(&buffer[..count])?;
+        }
+        if total != expected_size {
+            return Err(UpdateError::Transaction(
+                "transaction source changed while it was backed up".into(),
+            ));
+        }
+        backup.flush()?;
+        backup.sync_all()?;
+        Ok((total, hex::encode(hash.finalize())))
+    })();
+    if result.is_err() {
+        let _ = kettle_state::remove_open_private_file(backup, destination);
+        return result;
+    }
+    drop(backup);
+    if let Some(parent) = destination.parent() {
+        sync_parent(parent)?;
+    }
+    result
 }
 
 #[cfg(any(windows, target_os = "linux"))]
@@ -2196,15 +4222,36 @@ struct Transaction {
     journal_path: PathBuf,
     backup_dir: PathBuf,
     journal: Journal,
+    preflight: Option<std::collections::HashMap<String, PreflightDestination>>,
+}
+
+#[cfg(any(windows, target_os = "linux"))]
+struct PreflightDestination {
+    file: Option<File>,
+    previous_unix_mode: Option<u32>,
 }
 
 #[cfg(any(windows, target_os = "linux"))]
 impl Transaction {
+    #[cfg(any(target_os = "linux", test))]
     fn begin(prefix: &Path, target_version: &str) -> Result<Self, UpdateError> {
+        Self::begin_with_transaction_id(prefix, target_version, &unique_suffix())
+    }
+
+    fn begin_with_transaction_id(
+        prefix: &Path,
+        target_version: &str,
+        transaction_id: &str,
+    ) -> Result<Self, UpdateError> {
         semver::Version::parse(target_version).map_err(|error| {
             UpdateError::Transaction(format!("invalid transaction target version: {error}"))
         })?;
-        let suffix = unique_suffix();
+        if !is_transaction_id(transaction_id) {
+            return Err(UpdateError::Transaction(
+                "invalid update transaction id".into(),
+            ));
+        }
+        let suffix = transaction_id.to_string();
         let backup_name = format!(".kettle-update-backup-{suffix}");
         let backup_dir = prefix.join(&backup_name);
         let journal_path = prefix.join(".kettle-update-journal.json");
@@ -2217,6 +4264,19 @@ impl Transaction {
         fs::create_dir(&backup_dir)?;
         set_private_directory(&backup_dir)?;
         sync_parent(prefix)?;
+        let backup_marker = BackupMarker {
+            schema: JOURNAL_SCHEMA,
+            product: "kettle".into(),
+            transaction_id: suffix.clone(),
+        };
+        if let Err(error) = atomic_write(
+            &backup_dir.join(BACKUP_MARKER_FILE),
+            &serde_json::to_vec_pretty(&backup_marker)?,
+            Some(0o600),
+        ) {
+            let _ = remove_new_backup_dir_checked(prefix, &backup_dir);
+            return Err(error);
+        }
         let mut transaction = Self {
             prefix: prefix.to_path_buf(),
             journal_path,
@@ -2229,14 +4289,73 @@ impl Transaction {
                 backup_dir: backup_name,
                 entries: Vec::new(),
             },
+            preflight: None,
         };
         if let Err(error) = transaction.persist_journal() {
-            let _ = remove_dir_all_checked(prefix, &transaction.backup_dir);
+            let _ = remove_new_backup_dir_checked(prefix, &transaction.backup_dir);
             return Err(error);
         }
         Ok(transaction)
     }
 
+    fn preflight_destinations(&mut self, destinations: &[PathBuf]) -> Result<(), UpdateError> {
+        if self.journal.phase != JournalPhase::Prepared
+            || !self.journal.entries.is_empty()
+            || self.preflight.is_some()
+            || destinations.len() > MAX_ARCHIVE_ENTRIES
+        {
+            return Err(UpdateError::Transaction(
+                "transaction destination preflight was requested in an invalid state".into(),
+            ));
+        }
+        let mut snapshots = std::collections::HashMap::new();
+        let mut previous_count = 0_usize;
+        let mut previous_bytes = 0_u64;
+        for relative in destinations {
+            validate_relative(relative)?;
+            let key = relative_to_string(relative)?.to_ascii_lowercase();
+            if snapshots.contains_key(&key) {
+                return Err(UpdateError::Transaction(format!(
+                    "duplicate preflight destination {}",
+                    relative.display()
+                )));
+            }
+            let snapshot = snapshot_transaction_destination(&self.prefix, relative)?;
+            if let Some(file) = snapshot.file.as_ref() {
+                previous_count = previous_count.saturating_add(1);
+                previous_bytes = previous_bytes
+                    .checked_add(file.metadata()?.len())
+                    .ok_or_else(|| {
+                        UpdateError::Transaction("preflight backup size overflow".into())
+                    })?;
+                if previous_count > MAX_ARCHIVE_ENTRIES.saturating_sub(1)
+                    || previous_bytes > MAX_UNPACKED_BYTES
+                {
+                    return Err(UpdateError::Transaction(
+                        "existing transaction backup set exceeds the safety quota".into(),
+                    ));
+                }
+            }
+            snapshots.insert(key, snapshot);
+        }
+        self.preflight = Some(snapshots);
+        Ok(())
+    }
+
+    fn finish_preflight(&self) -> Result<(), UpdateError> {
+        if self
+            .preflight
+            .as_ref()
+            .is_some_and(|preflight| !preflight.is_empty())
+        {
+            return Err(UpdateError::Transaction(
+                "transaction did not consume every preflight destination".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    #[cfg(test)]
     fn install(
         &mut self,
         relative: &Path,
@@ -2254,6 +4373,16 @@ impl Transaction {
         bytes: &[u8],
         unix_mode: Option<u32>,
     ) -> Result<(), UpdateError> {
+        self.install_bytes_with_post_publish(relative, bytes, unix_mode, || Ok(()))
+    }
+
+    fn install_bytes_with_post_publish(
+        &mut self,
+        relative: &Path,
+        bytes: &[u8],
+        unix_mode: Option<u32>,
+        post_publish: impl FnOnce() -> Result<(), UpdateError>,
+    ) -> Result<(), UpdateError> {
         validate_relative(relative)?;
         let relative_string = relative_to_string(relative)?;
         if self
@@ -2266,35 +4395,43 @@ impl Transaction {
                 "duplicate install destination {relative_string}"
             )));
         }
+        if bytes.len() as u64 > MAX_UNPACKED_BYTES
+            || self.journal.entries.len() >= MAX_ARCHIVE_ENTRIES
+        {
+            return Err(UpdateError::Transaction(
+                "transaction replacement exceeds the safety quota".into(),
+            ));
+        }
         let (_destination_parent, destination) =
             anchored_destination(&self.prefix, relative, true)?;
-        let metadata = match fs::symlink_metadata(&destination) {
-            Ok(metadata) => Some(metadata),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
-            Err(error) => return Err(error.into()),
-        };
-        let existed = metadata.is_some();
-        if metadata
-            .as_ref()
-            .is_some_and(|metadata| !metadata.file_type().is_file())
-        {
-            return Err(UpdateError::Transaction(format!(
-                "refusing to replace non-regular file {}",
-                destination.display()
-            )));
-        }
-        let (previous, previous_unix_mode) = if existed {
-            let (bytes, mode) = read_transaction_file(&destination)?;
-            (Some(bytes), mode)
+        let key = relative_string.to_ascii_lowercase();
+        let mut snapshot = if let Some(preflight) = self.preflight.as_mut() {
+            preflight.remove(&key).ok_or_else(|| {
+                UpdateError::Transaction(format!(
+                    "destination {} was not included in transaction preflight",
+                    relative.display()
+                ))
+            })?
         } else {
-            (None, None)
+            snapshot_transaction_destination(&self.prefix, relative)?
         };
-        if let Some(previous) = previous.as_deref() {
+        verify_transaction_destination_snapshot(&self.prefix, relative, &snapshot)?;
+        let existed = snapshot.file.is_some();
+        let previous_unix_mode = snapshot.previous_unix_mode;
+        let (previous_size, previous_sha256) = if let Some(previous) = snapshot.file.as_mut() {
             let backup_relative = Path::new(&self.journal.backup_dir).join(relative);
             let (_backup_parent, backup) =
                 anchored_destination(&self.prefix, &backup_relative, true)?;
-            atomic_write(&backup, previous, Some(0o600))?;
-        }
+            let (size, sha256) = stream_transaction_backup(previous, &backup)?;
+            (Some(size), Some(sha256))
+        } else {
+            (None, None)
+        };
+        // The snapshot's no-write/no-delete handle protected the exact previous
+        // object through quota validation and backup. Drop it only after the
+        // durable backup exists; atomic_replace performs its own anchored
+        // destination identity checks for the publication itself.
+        drop(snapshot);
         if self.journal.phase == JournalPhase::Prepared {
             self.journal.phase = JournalPhase::Applying;
         }
@@ -2302,14 +4439,18 @@ impl Transaction {
             relative: relative_string,
             existed,
             previous_unix_mode,
-            previous_size: previous.as_ref().map(|bytes| bytes.len() as u64),
-            previous_sha256: previous.as_deref().map(sha256_bytes),
+            previous_size,
+            previous_sha256,
             replacement_size: bytes.len() as u64,
             replacement_sha256: sha256_bytes(bytes),
             state: JournalEntryState::Prepared,
         });
         self.persist_journal()?;
         atomic_write(&destination, bytes, unix_mode)?;
+        // A process can be terminated after the durable publication but
+        // before the Installed journal state is persisted. Keep this seam
+        // explicit so the crash boundary remains regression-testable.
+        post_publish()?;
         self.journal
             .entries
             .last_mut()
@@ -2333,8 +4474,10 @@ impl Transaction {
 
     fn commit(mut self) -> Result<(), UpdateError> {
         self.journal.phase = JournalPhase::Committed;
-        self.persist_journal()?;
-        self.finish_cleanup()
+        // Keep the journal and backups until a process running the installed
+        // target reaches `prepare_process_start`. A loader/startup failure then
+        // leaves the last-known-good bytes available for explicit recovery.
+        self.persist_journal()
     }
 
     fn restore_entries(&mut self) -> Result<(), UpdateError> {
@@ -2350,12 +4493,53 @@ impl Transaction {
     }
 
     fn finish_cleanup(&mut self) -> Result<(), UpdateError> {
-        remove_journal_first(&self.prefix, &self.journal_path)?;
+        validate_backup_tree(&self.prefix, &self.backup_dir, &self.journal)?;
+        remove_schema2_journal_checked(&self.prefix, &self.journal_path, &self.journal)?;
         // Once the journal is gone, the transaction is durably committed (or
         // rolled back). A crash during backup cleanup can leave harmless stale
         // data, but can no longer leave a journal that points at missing data.
-        remove_dir_all_checked(&self.prefix, &self.backup_dir)
+        remove_validated_backup_tree(&self.prefix, &self.backup_dir, &self.journal)
     }
+}
+
+#[cfg(any(windows, target_os = "linux"))]
+fn confirm_committed_transaction(
+    prefix: &Path,
+    running_version: &semver::Version,
+) -> Result<bool, UpdateError> {
+    let journal_path = prefix.join(".kettle-update-journal.json");
+    let bytes = match read_bounded_regular(&journal_path, 1024 * 1024) {
+        Ok(bytes) => bytes,
+        Err(UpdateError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(false);
+        }
+        Err(error) => return Err(error),
+    };
+    let header: serde_json::Value = serde_json::from_slice(&bytes)?;
+    if header.get("schema").and_then(serde_json::Value::as_u64) != Some(u64::from(JOURNAL_SCHEMA)) {
+        return Ok(false);
+    }
+    let journal: Journal = serde_json::from_slice(&bytes)?;
+    validate_journal(&journal)?;
+    if journal.phase != JournalPhase::Committed {
+        return Ok(false);
+    }
+    let target = semver::Version::parse(&journal.target_version)
+        .map_err(|error| UpdateError::Transaction(error.to_string()))?;
+    if running_version < &target {
+        return Ok(false);
+    }
+    let backup_dir = prefix.join(&journal.backup_dir);
+    validate_backup_tree(prefix, &backup_dir, &journal)?;
+    let mut transaction = Transaction {
+        prefix: prefix.to_path_buf(),
+        journal_path,
+        backup_dir,
+        journal,
+        preflight: None,
+    };
+    transaction.finish_cleanup()?;
+    Ok(true)
 }
 
 #[cfg(any(windows, target_os = "linux"))]
@@ -2376,9 +4560,11 @@ fn recover_transaction(prefix: &Path) -> Result<(), UpdateError> {
     if schema == 1 {
         let journal: LegacyJournal = serde_json::from_slice(&bytes)?;
         validate_legacy_journal(&journal)?;
+        let backup_dir = prefix.join(&journal.backup_dir);
+        validate_legacy_backup_tree(prefix, &backup_dir, &journal)?;
         rollback_legacy_journal(prefix, &journal)?;
-        remove_journal_first(prefix, &journal_path)?;
-        return remove_dir_all_checked(prefix, &prefix.join(&journal.backup_dir));
+        remove_legacy_journal_checked(prefix, &journal_path, &journal)?;
+        return remove_validated_legacy_backup_tree(prefix, &backup_dir, &journal);
     }
     if schema != u64::from(JOURNAL_SCHEMA) {
         return Err(UpdateError::Transaction(format!(
@@ -2388,14 +4574,19 @@ fn recover_transaction(prefix: &Path) -> Result<(), UpdateError> {
     let journal: Journal = serde_json::from_slice(&bytes)?;
     validate_journal(&journal)?;
     let backup_dir = prefix.join(&journal.backup_dir);
+    validate_backup_tree(prefix, &backup_dir, &journal)?;
     let mut transaction = Transaction {
         prefix: prefix.to_path_buf(),
         journal_path,
         backup_dir,
         journal,
+        preflight: None,
     };
     if transaction.journal.phase == JournalPhase::Committed {
-        transaction.finish_cleanup()
+        Err(UpdateError::Transaction(format!(
+            "committed update {} is awaiting startup confirmation before its last-known-good backup is discarded",
+            transaction.journal.target_version
+        )))
     } else {
         transaction.rollback()
     }
@@ -2409,6 +4600,9 @@ fn restore_entry(
 ) -> Result<(), UpdateError> {
     let relative = Path::new(&entry.relative);
     validate_relative(relative)?;
+    if !rollback_entry_requires_restore(prefix, relative, entry)? {
+        return Ok(());
+    }
     let (_destination_parent, destination) = anchored_destination(prefix, relative, true)?;
     if entry.existed {
         let backup_root = backup_dir.strip_prefix(prefix).map_err(|_| {
@@ -2453,6 +4647,46 @@ fn restore_entry(
 }
 
 #[cfg(any(windows, target_os = "linux"))]
+fn rollback_entry_requires_restore(
+    prefix: &Path,
+    relative: &Path,
+    entry: &JournalEntry,
+) -> Result<bool, UpdateError> {
+    let mut current = snapshot_transaction_destination(prefix, relative)?;
+    let replacement_matches = current.file.as_mut().is_some_and(|file| {
+        file.metadata()
+            .is_ok_and(|metadata| metadata.len() == entry.replacement_size)
+            && sha256_open_file(file).is_ok_and(|hash| hash == entry.replacement_sha256)
+    });
+    if replacement_matches {
+        return Ok(true);
+    }
+    if entry.state == JournalEntryState::Prepared {
+        let previous_matches = match (
+            current.file.as_mut(),
+            entry.previous_size,
+            entry.previous_sha256.as_deref(),
+        ) {
+            (None, None, None) if !entry.existed => true,
+            (Some(file), Some(size), Some(hash)) if entry.existed => {
+                file.metadata().is_ok_and(|metadata| metadata.len() == size)
+                    && sha256_open_file(file).is_ok_and(|current| current == hash)
+            }
+            _ => false,
+        };
+        if previous_matches {
+            // A crash can leave the write-ahead entry prepared before its
+            // publication. The previous object is already the desired result.
+            return Ok(false);
+        }
+    }
+    Err(UpdateError::Transaction(format!(
+        "rollback conflict for {}: current bytes are not the replacement recorded by the update",
+        relative.display()
+    )))
+}
+
+#[cfg(any(windows, target_os = "linux"))]
 fn rollback_legacy_journal(prefix: &Path, journal: &LegacyJournal) -> Result<(), UpdateError> {
     for entry in journal.entries.iter().rev() {
         let relative = Path::new(&entry.relative);
@@ -2493,11 +4727,7 @@ fn rollback_legacy_journal(prefix: &Path, journal: &LegacyJournal) -> Result<(),
 #[cfg(any(windows, target_os = "linux"))]
 fn validate_journal(journal: &Journal) -> Result<(), UpdateError> {
     if journal.schema != JOURNAL_SCHEMA
-        || journal.transaction_id.is_empty()
-        || !journal
-            .transaction_id
-            .bytes()
-            .all(|byte| byte.is_ascii_digit() || byte == b'-')
+        || !is_transaction_id(&journal.transaction_id)
         || journal.backup_dir != format!(".kettle-update-backup-{}", journal.transaction_id)
         || semver::Version::parse(&journal.target_version).is_err()
         || journal.entries.len() > MAX_ARCHIVE_ENTRIES
@@ -2507,7 +4737,9 @@ fn validate_journal(journal: &Journal) -> Result<(), UpdateError> {
         ));
     }
     let mut destinations = std::collections::HashSet::new();
-    let mut total = 0_u64;
+    let mut replacement_total = 0_u64;
+    let mut backup_total = 0_u64;
+    let mut backup_count = 0_usize;
     for entry in &journal.entries {
         let relative = Path::new(&entry.relative);
         validate_relative(relative)?;
@@ -2527,16 +4759,263 @@ fn validate_journal(journal: &Journal) -> Result<(), UpdateError> {
                 entry.relative
             )));
         }
-        total = total
+        replacement_total = replacement_total
             .checked_add(entry.replacement_size)
             .ok_or_else(|| UpdateError::Transaction("journal size overflow".into()))?;
-        if total > MAX_UNPACKED_BYTES {
+        if replacement_total > MAX_UNPACKED_BYTES {
             return Err(UpdateError::Transaction(
                 "journal replacement data exceeds the safety limit".into(),
             ));
         }
+        if let Some(previous_size) = entry.previous_size {
+            backup_count = backup_count.saturating_add(1);
+            backup_total = backup_total
+                .checked_add(previous_size)
+                .ok_or_else(|| UpdateError::Transaction("journal backup size overflow".into()))?;
+            if backup_count > MAX_ARCHIVE_ENTRIES.saturating_sub(1)
+                || backup_total > MAX_UNPACKED_BYTES
+            {
+                return Err(UpdateError::Transaction(
+                    "journal backup data exceeds the safety limit".into(),
+                ));
+            }
+        }
     }
     Ok(())
+}
+
+#[cfg(any(windows, target_os = "linux"))]
+fn validate_backup_tree(
+    prefix: &Path,
+    backup_dir: &Path,
+    journal: &Journal,
+) -> Result<(), UpdateError> {
+    if backup_dir.parent() != Some(prefix)
+        || backup_dir.file_name().and_then(|name| name.to_str())
+            != Some(journal.backup_dir.as_str())
+    {
+        return Err(UpdateError::Transaction(
+            "backup directory does not match the update journal".into(),
+        ));
+    }
+    let marker_path = backup_dir.join(BACKUP_MARKER_FILE);
+    let marker: BackupMarker = serde_json::from_slice(&read_bounded_regular(&marker_path, 4096)?)?;
+    if marker.schema != JOURNAL_SCHEMA
+        || marker.product != "kettle"
+        || marker.transaction_id != journal.transaction_id
+    {
+        return Err(UpdateError::Transaction(
+            "backup marker does not match the update journal".into(),
+        ));
+    }
+
+    let mut expected = std::collections::HashMap::new();
+    expected.insert(
+        BACKUP_MARKER_FILE.to_ascii_lowercase(),
+        (None::<u64>, None::<String>),
+    );
+    for entry in journal.entries.iter().filter(|entry| entry.existed) {
+        let size = entry.previous_size.ok_or_else(|| {
+            UpdateError::Transaction(format!(
+                "backup entry {} has no previous size",
+                entry.relative
+            ))
+        })?;
+        let hash = entry.previous_sha256.clone().ok_or_else(|| {
+            UpdateError::Transaction(format!(
+                "backup entry {} has no previous hash",
+                entry.relative
+            ))
+        })?;
+        expected.insert(
+            entry.relative.to_ascii_lowercase(),
+            (Some(size), Some(hash)),
+        );
+    }
+
+    let mut directories = vec![backup_dir.to_path_buf()];
+    while let Some(directory) = directories.pop() {
+        for entry in fs::read_dir(&directory)? {
+            let entry = entry?;
+            let metadata = fs::symlink_metadata(entry.path())?;
+            #[cfg(windows)]
+            {
+                use std::os::windows::fs::MetadataExt as _;
+                use windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT;
+                if metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+                    return Err(UpdateError::Transaction(format!(
+                        "backup tree contains a reparse point: {}",
+                        entry.path().display()
+                    )));
+                }
+            }
+            if metadata.file_type().is_dir() {
+                let entry_path = entry.path();
+                let relative = entry_path.strip_prefix(backup_dir).map_err(|_| {
+                    UpdateError::Transaction("backup directory escaped its root".into())
+                })?;
+                let prefix = format!("{}/", relative_to_string(relative)?.to_ascii_lowercase());
+                if !expected.keys().any(|path| path.starts_with(&prefix)) {
+                    return Err(UpdateError::Transaction(format!(
+                        "backup tree contains an unjournaled directory {}",
+                        entry.path().display()
+                    )));
+                }
+                directories.push(entry.path());
+            } else if !metadata.file_type().is_file() {
+                return Err(UpdateError::Transaction(format!(
+                    "backup tree contains a non-regular entry {}",
+                    entry.path().display()
+                )));
+            }
+        }
+    }
+
+    let files = collect_files(backup_dir)?;
+    if files.len() != expected.len() || files.len() > MAX_ARCHIVE_ENTRIES {
+        return Err(UpdateError::Transaction(
+            "backup tree does not exactly cover the update journal".into(),
+        ));
+    }
+    let mut seen = std::collections::HashSet::new();
+    let mut total = 0_u64;
+    for file in files {
+        let relative = file.strip_prefix(backup_dir).map_err(|_| {
+            UpdateError::Transaction(format!("backup escaped its root: {}", file.display()))
+        })?;
+        let relative = relative_to_string(relative)?;
+        let key = relative.to_ascii_lowercase();
+        let Some((expected_size, expected_hash)) = expected.get(&key) else {
+            return Err(UpdateError::Transaction(format!(
+                "backup tree contains an unjournaled file {relative}"
+            )));
+        };
+        if !seen.insert(key) {
+            return Err(UpdateError::Transaction(
+                "backup tree contains a case-aliased duplicate".into(),
+            ));
+        }
+        let size = file.metadata()?.len();
+        total = total
+            .checked_add(size)
+            .ok_or_else(|| UpdateError::Transaction("backup size overflow".into()))?;
+        if total > MAX_UNPACKED_BYTES {
+            return Err(UpdateError::Transaction(
+                "backup tree exceeds the safety limit".into(),
+            ));
+        }
+        if let Some(expected_size) = expected_size
+            && (size != *expected_size
+                || expected_hash.as_deref() != Some(sha256_file(&file)?.as_str()))
+        {
+            return Err(UpdateError::Transaction(format!(
+                "backup integrity check failed for {}",
+                file.display()
+            )));
+        }
+    }
+    Ok(())
+}
+
+#[cfg(any(windows, target_os = "linux"))]
+fn remove_validated_backup_tree(
+    prefix: &Path,
+    backup_dir: &Path,
+    journal: &Journal,
+) -> Result<(), UpdateError> {
+    let backup_root = backup_dir.strip_prefix(prefix).map_err(|_| {
+        UpdateError::Transaction("backup directory escaped the install prefix".into())
+    })?;
+    #[cfg(windows)]
+    {
+        let mut tree = hold_windows_two_level_tree(prefix, backup_root)?;
+        let mut expected = journal
+            .entries
+            .iter()
+            .filter(|entry| entry.existed)
+            .map(|entry| {
+                (
+                    entry.relative.to_ascii_lowercase(),
+                    (
+                        entry.relative.as_str(),
+                        entry.previous_size,
+                        entry.previous_sha256.as_deref(),
+                    ),
+                )
+            })
+            .collect::<std::collections::HashMap<_, _>>();
+        expected.insert(
+            BACKUP_MARKER_FILE.to_ascii_lowercase(),
+            (BACKUP_MARKER_FILE, None, None),
+        );
+        if tree.files.len() != expected.len() {
+            return Err(UpdateError::Transaction(
+                "backup tree changed before cleanup".into(),
+            ));
+        }
+        let mut seen = std::collections::HashSet::new();
+        for (relative, held) in &mut tree.files {
+            let spelling = relative_to_string(relative)?;
+            let key = spelling.to_ascii_lowercase();
+            let Some((expected_spelling, expected_size, expected_hash)) = expected.get(&key) else {
+                return Err(UpdateError::Transaction(format!(
+                    "backup tree gained an unmanaged file before cleanup: {spelling}"
+                )));
+            };
+            if spelling != *expected_spelling || !seen.insert(key) {
+                return Err(UpdateError::Transaction(
+                    "backup tree changed spelling before cleanup".into(),
+                ));
+            }
+            if let Some(size) = expected_size {
+                let hash_matches = match expected_hash {
+                    Some(hash) => sha256_open_file(&mut held.file)? == *hash,
+                    None => false,
+                };
+                if held.file.metadata()?.len() != *size || !hash_matches {
+                    return Err(UpdateError::Transaction(format!(
+                        "backup integrity check failed before cleanup for {}",
+                        held.path.display()
+                    )));
+                }
+            }
+        }
+        tree.delete()?;
+        sync_parent(prefix)
+    }
+    #[cfg(not(windows))]
+    {
+        let mut directories = std::collections::BTreeSet::new();
+        for entry in journal.entries.iter().filter(|entry| entry.existed) {
+            let relative = Path::new(&entry.relative);
+            let backup_relative = backup_root.join(relative);
+            let (_parent, backup) = anchored_destination(prefix, &backup_relative, false)?;
+            match fs::remove_file(&backup) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error.into()),
+            }
+            let mut parent = relative.parent();
+            while let Some(path) = parent {
+                if path.as_os_str().is_empty() {
+                    break;
+                }
+                directories.insert(path.to_path_buf());
+                parent = path.parent();
+            }
+        }
+        for relative in directories.into_iter().rev() {
+            let path = backup_dir.join(relative);
+            match fs::remove_dir(&path) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error.into()),
+            }
+        }
+        fs::remove_file(backup_dir.join(BACKUP_MARKER_FILE))?;
+        fs::remove_dir(backup_dir)?;
+        sync_parent(prefix)
+    }
 }
 
 #[cfg(any(windows, target_os = "linux"))]
@@ -2563,7 +5042,275 @@ fn validate_legacy_journal(journal: &LegacyJournal) -> Result<(), UpdateError> {
 }
 
 #[cfg(any(windows, target_os = "linux"))]
-fn remove_journal_first(prefix: &Path, journal_path: &Path) -> Result<(), UpdateError> {
+fn validate_legacy_backup_tree(
+    prefix: &Path,
+    backup_dir: &Path,
+    journal: &LegacyJournal,
+) -> Result<(), UpdateError> {
+    if backup_dir.parent() != Some(prefix)
+        || backup_dir.file_name().and_then(|name| name.to_str())
+            != Some(journal.backup_dir.as_str())
+    {
+        return Err(UpdateError::Transaction(
+            "legacy backup directory escaped the install prefix".into(),
+        ));
+    }
+    let expected = journal
+        .entries
+        .iter()
+        .filter(|entry| entry.existed)
+        .map(|entry| {
+            let relative = Path::new(&entry.relative);
+            validate_relative(relative)?;
+            Ok((entry.relative.to_ascii_lowercase(), entry.relative.as_str()))
+        })
+        .collect::<Result<std::collections::HashMap<_, _>, UpdateError>>()?;
+    if expected.len() > MAX_ARCHIVE_ENTRIES {
+        return Err(UpdateError::Transaction(
+            "legacy backup exceeds the entry limit".into(),
+        ));
+    }
+
+    let mut pending = vec![backup_dir.to_path_buf()];
+    let mut seen = std::collections::HashSet::new();
+    let mut total = 0_u64;
+    while let Some(directory) = pending.pop() {
+        let metadata = fs::symlink_metadata(&directory)?;
+        if !metadata.file_type().is_dir() {
+            return Err(UpdateError::Transaction(format!(
+                "legacy backup contains a non-directory ancestor {}",
+                directory.display()
+            )));
+        }
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::MetadataExt as _;
+            use windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT;
+            if metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+                return Err(UpdateError::Transaction(format!(
+                    "legacy backup contains a reparse point {}",
+                    directory.display()
+                )));
+            }
+        }
+        for entry in fs::read_dir(&directory)? {
+            let entry = entry?;
+            let path = entry.path();
+            let metadata = fs::symlink_metadata(&path)?;
+            #[cfg(windows)]
+            {
+                use std::os::windows::fs::MetadataExt as _;
+                use windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT;
+                if metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+                    return Err(UpdateError::Transaction(format!(
+                        "legacy backup contains a reparse point {}",
+                        path.display()
+                    )));
+                }
+            }
+            let relative = path.strip_prefix(backup_dir).map_err(|_| {
+                UpdateError::Transaction("legacy backup entry escaped its root".into())
+            })?;
+            let relative_string = relative_to_string(relative)?;
+            let key = relative_string.to_ascii_lowercase();
+            if metadata.file_type().is_dir() {
+                let prefix = format!("{key}/");
+                if !expected
+                    .keys()
+                    .any(|candidate| candidate.starts_with(&prefix))
+                {
+                    return Err(UpdateError::Transaction(format!(
+                        "legacy backup contains an unjournaled directory {}",
+                        path.display()
+                    )));
+                }
+                pending.push(path);
+            } else if metadata.file_type().is_file() {
+                let Some(expected_spelling) = expected.get(&key) else {
+                    return Err(UpdateError::Transaction(format!(
+                        "legacy backup contains an unjournaled file {}",
+                        path.display()
+                    )));
+                };
+                if *expected_spelling != relative_string || !seen.insert(key) {
+                    return Err(UpdateError::Transaction(format!(
+                        "legacy backup contains a case alias or duplicate {}",
+                        path.display()
+                    )));
+                }
+                total = total.checked_add(metadata.len()).ok_or_else(|| {
+                    UpdateError::Transaction("legacy backup size overflow".into())
+                })?;
+                if total > MAX_UNPACKED_BYTES {
+                    return Err(UpdateError::Transaction(
+                        "legacy backup exceeds the size limit".into(),
+                    ));
+                }
+            } else {
+                return Err(UpdateError::Transaction(format!(
+                    "legacy backup contains a non-regular entry {}",
+                    path.display()
+                )));
+            }
+        }
+    }
+    if seen.len() != expected.len() {
+        return Err(UpdateError::Transaction(
+            "legacy backup does not exactly cover its journal".into(),
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(any(windows, target_os = "linux"))]
+fn remove_validated_legacy_backup_tree(
+    prefix: &Path,
+    backup_dir: &Path,
+    journal: &LegacyJournal,
+) -> Result<(), UpdateError> {
+    #[cfg(windows)]
+    {
+        let root_relative = backup_dir.strip_prefix(prefix).map_err(|_| {
+            UpdateError::Transaction("legacy backup directory escaped the install prefix".into())
+        })?;
+        let tree = hold_windows_two_level_tree(prefix, root_relative)?;
+        let expected = journal
+            .entries
+            .iter()
+            .filter(|entry| entry.existed)
+            .map(|entry| (entry.relative.to_ascii_lowercase(), entry.relative.as_str()))
+            .collect::<std::collections::HashMap<_, _>>();
+        if tree.files.len() != expected.len() {
+            return Err(UpdateError::Transaction(
+                "legacy backup tree changed before cleanup".into(),
+            ));
+        }
+        let mut seen = std::collections::HashSet::new();
+        for (relative, _) in &tree.files {
+            let spelling = relative_to_string(relative)?;
+            let key = spelling.to_ascii_lowercase();
+            if expected.get(&key).copied() != Some(spelling.as_str()) || !seen.insert(key) {
+                return Err(UpdateError::Transaction(
+                    "legacy backup tree changed before cleanup".into(),
+                ));
+            }
+        }
+        tree.delete()?;
+        sync_parent(prefix)
+    }
+    #[cfg(not(windows))]
+    {
+        let mut directories = std::collections::BTreeSet::new();
+        for entry in journal.entries.iter().filter(|entry| entry.existed) {
+            let relative = Path::new(&entry.relative);
+            let backup = backup_dir.join(relative);
+            match fs::remove_file(&backup) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error.into()),
+            }
+            let mut parent = relative.parent();
+            while let Some(path) = parent {
+                if path.as_os_str().is_empty() {
+                    break;
+                }
+                directories.insert(path.to_path_buf());
+                parent = path.parent();
+            }
+        }
+        for relative in directories.into_iter().rev() {
+            match fs::remove_dir(backup_dir.join(relative)) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error.into()),
+            }
+        }
+        fs::remove_dir(backup_dir)?;
+        sync_parent(prefix)
+    }
+}
+
+#[cfg(windows)]
+fn remove_held_json_checked<T>(prefix: &Path, path: &Path, expected: &T) -> Result<(), UpdateError>
+where
+    T: serde::de::DeserializeOwned + PartialEq,
+{
+    if path.parent() != Some(prefix) {
+        return Err(UpdateError::Transaction(format!(
+            "state file escaped the install prefix: {}",
+            path.display()
+        )));
+    }
+    let relative = Path::new(
+        path.file_name()
+            .ok_or_else(|| UpdateError::Transaction("state file has no name".into()))?,
+    );
+    let mut held = match open_windows_held_file(prefix, relative) {
+        Ok(held) => held,
+        Err(UpdateError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(());
+        }
+        Err(error) => return Err(error),
+    };
+    let actual: T = serde_json::from_slice(&read_windows_held_file(
+        &mut held,
+        MAX_PENDING_RECORD_BYTES,
+    )?)?;
+    if &actual != expected {
+        return Err(UpdateError::Transaction(format!(
+            "state file changed before deletion: {}",
+            path.display()
+        )));
+    }
+    mark_windows_handle_for_deletion(&held.file)?;
+    drop(held);
+    sync_parent(prefix)
+}
+
+#[cfg(windows)]
+fn remove_pending_record_checked(
+    prefix: &Path,
+    pending: &PendingUpdate,
+) -> Result<(), UpdateError> {
+    remove_held_json_checked(prefix, &prefix.join(PENDING_FILE), pending)
+}
+
+#[cfg(any(windows, target_os = "linux"))]
+fn remove_schema2_journal_checked(
+    prefix: &Path,
+    journal_path: &Path,
+    journal: &Journal,
+) -> Result<(), UpdateError> {
+    #[cfg(windows)]
+    {
+        remove_held_json_checked(prefix, journal_path, journal)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = journal;
+        remove_journal_path(prefix, journal_path)
+    }
+}
+
+#[cfg(any(windows, target_os = "linux"))]
+fn remove_legacy_journal_checked(
+    prefix: &Path,
+    journal_path: &Path,
+    journal: &LegacyJournal,
+) -> Result<(), UpdateError> {
+    #[cfg(windows)]
+    {
+        remove_held_json_checked(prefix, journal_path, journal)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = journal;
+        remove_journal_path(prefix, journal_path)
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn remove_journal_path(prefix: &Path, journal_path: &Path) -> Result<(), UpdateError> {
     match fs::remove_file(journal_path) {
         Ok(()) => sync_parent(prefix),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
@@ -2662,22 +5409,104 @@ fn sync_parent(_parent: &Path) -> Result<(), UpdateError> {
 }
 
 #[cfg(any(windows, target_os = "linux"))]
-fn remove_dir_all_checked(prefix: &Path, path: &Path) -> Result<(), UpdateError> {
-    if path.parent() != Some(prefix)
-        || !path
-            .file_name()
-            .and_then(|name| name.to_str())
-            .is_some_and(|name| name.starts_with(".kettle-update-backup-"))
-    {
+fn remove_new_backup_dir_checked(prefix: &Path, path: &Path) -> Result<(), UpdateError> {
+    let transaction_id = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .and_then(|name| name.strip_prefix(".kettle-update-backup-"));
+    if path.parent() != Some(prefix) || !transaction_id.is_some_and(is_transaction_id) {
         return Err(UpdateError::Transaction(format!(
             "refusing to remove untrusted path {}",
             path.display()
         )));
     }
-    match fs::remove_dir_all(path) {
-        Ok(()) => Ok(()),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(e) => Err(e.into()),
+    #[cfg(windows)]
+    {
+        let root_relative = PathBuf::from(
+            path.file_name()
+                .ok_or_else(|| UpdateError::Transaction("backup path has no name".into()))?,
+        );
+        let mut tree = match hold_windows_two_level_tree(prefix, &root_relative) {
+            Ok(tree) => tree,
+            Err(UpdateError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(());
+            }
+            Err(error) => return Err(error),
+        };
+        if tree.nested.is_some() || tree.files.len() > 1 {
+            return Err(UpdateError::Transaction(
+                "new backup contains unexpected cleanup state".into(),
+            ));
+        }
+        if let Some((relative, marker)) = tree.files.first_mut() {
+            if relative != Path::new(BACKUP_MARKER_FILE) {
+                return Err(UpdateError::Transaction(format!(
+                    "new backup contains unexpected cleanup state: {}",
+                    marker.path.display()
+                )));
+            }
+            let marker_value: BackupMarker =
+                serde_json::from_slice(&read_windows_held_file(marker, 4096)?)?;
+            if marker_value.schema != JOURNAL_SCHEMA
+                || marker_value.product != "kettle"
+                || Some(marker_value.transaction_id.as_str()) != transaction_id
+            {
+                return Err(UpdateError::Transaction(
+                    "new backup marker does not match its directory".into(),
+                ));
+            }
+        }
+        tree.delete()?;
+        sync_parent(prefix)
+    }
+    #[cfg(not(windows))]
+    {
+        let metadata = match fs::symlink_metadata(path) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(error.into()),
+        };
+        if !metadata.file_type().is_dir() {
+            return Err(UpdateError::Transaction(format!(
+                "new backup path is not a real directory: {}",
+                path.display()
+            )));
+        }
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::MetadataExt as _;
+            use windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT;
+            if metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+                return Err(UpdateError::Transaction(format!(
+                    "new backup path is a reparse point: {}",
+                    path.display()
+                )));
+            }
+        }
+        for entry in fs::read_dir(path)? {
+            let entry = entry?;
+            let metadata = fs::symlink_metadata(entry.path())?;
+            #[cfg(windows)]
+            {
+                use std::os::windows::fs::MetadataExt as _;
+                use windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT;
+                if metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+                    return Err(UpdateError::Transaction(format!(
+                        "new backup cleanup entry is a reparse point: {}",
+                        entry.path().display()
+                    )));
+                }
+            }
+            if entry.file_name() != BACKUP_MARKER_FILE || !metadata.file_type().is_file() {
+                return Err(UpdateError::Transaction(format!(
+                    "new backup contains unexpected cleanup state: {}",
+                    entry.path().display()
+                )));
+            }
+            fs::remove_file(entry.path())?;
+        }
+        fs::remove_dir(path)?;
+        sync_parent(prefix)
     }
 }
 
@@ -2694,10 +5523,38 @@ fn unique_suffix() -> String {
 }
 
 #[cfg(windows)]
-fn refresh_platform_integration(install: &ManagedInstall) {
+fn current_epoch_nanos() -> u128 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or(0)
+}
+
+#[cfg(any(windows, target_os = "linux"))]
+fn is_transaction_id(value: &str) -> bool {
+    transaction_id_parts(value).is_some()
+}
+
+#[cfg(any(windows, target_os = "linux"))]
+fn transaction_id_parts(value: &str) -> Option<(u32, u128)> {
+    let (process_id, epoch_nanos) = value.split_once('-')?;
+    let process_id_value = process_id.parse::<u32>().ok()?;
+    let epoch_nanos_value = epoch_nanos.parse::<u128>().ok()?;
+    (process_id_value.to_string() == process_id && epoch_nanos_value.to_string() == epoch_nanos)
+        .then_some((process_id_value, epoch_nanos_value))
+}
+
+#[cfg(windows)]
+fn refresh_platform_integration(install: &ManagedInstall, verified_script: &[u8]) {
     use std::os::windows::process::CommandExt as _;
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
     let script = install.prefix.join("install.ps1");
+    let Ok(retained_script) = retain_verified_integration_script(&script, verified_script) else {
+        log::warn!(
+            "could not retain the verified post-update integration script; skipping integration refresh"
+        );
+        return;
+    };
     let Some(powershell) = system_powershell_path() else {
         log::warn!(
             "could not resolve a fully-qualified PowerShell path; skipping the post-update integration refresh"
@@ -2706,10 +5563,29 @@ fn refresh_platform_integration(install: &ManagedInstall) {
     };
     let _ = std::process::Command::new(powershell)
         .args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-File"])
-        .arg(script)
+        .arg(&script)
         .arg("-RefreshIntegration")
+        .arg("-Prefix")
+        .arg(&install.prefix)
         .creation_flags(CREATE_NO_WINDOW)
         .status();
+    drop(retained_script);
+}
+
+#[cfg(windows)]
+fn retain_verified_integration_script(
+    script: &Path,
+    verified_script: &[u8],
+) -> Result<File, UpdateError> {
+    let (mut retained, _) = open_transaction_snapshot(script)?;
+    if retained.metadata()?.len() != verified_script.len() as u64
+        || sha256_open_file(&mut retained)? != sha256_bytes(verified_script)
+    {
+        return Err(UpdateError::Transaction(
+            "installed integration script does not match the verified update bytes".into(),
+        ));
+    }
+    Ok(retained)
 }
 
 /// Resolves `powershell.exe` by a fixed, fully-qualified system path instead
@@ -2719,25 +5595,23 @@ fn refresh_platform_integration(install: &ManagedInstall) {
 /// attacker able to write into either (a much weaker position than
 /// compromising this process's environment) could otherwise have this
 /// authenticated self-update step execute an arbitrary planted binary.
-/// `%SystemRoot%`/`%windir%` are set by Windows for every process and are
-/// the standard way to name the system directory without new API bindings;
-/// resolving through them and confirming the target file actually exists is
-/// still strictly safer than an unqualified `Command::new("powershell.exe")`.
+/// The kernel-reported system directory is not derived from PATH, the current
+/// directory, or caller-controlled environment variables.
 #[cfg(windows)]
 fn system_powershell_path() -> Option<PathBuf> {
-    for variable in ["SystemRoot", "windir"] {
-        if let Some(root) = std::env::var_os(variable) {
-            let root = PathBuf::from(root);
-            if root.is_absolute() {
-                let candidate = root.join(r"System32\WindowsPowerShell\v1.0\powershell.exe");
-                if candidate.is_file() {
-                    return Some(candidate);
-                }
-            }
-        }
+    use std::os::windows::ffi::OsStringExt as _;
+    use windows_sys::Win32::System::SystemInformation::GetSystemDirectoryW;
+
+    let mut buffer = vec![0_u16; 32_768];
+    // SAFETY: `buffer` is writable for its full reported u32 length.
+    let length = unsafe { GetSystemDirectoryW(buffer.as_mut_ptr(), buffer.len() as u32) } as usize;
+    if length == 0 || length >= buffer.len() {
+        return None;
     }
-    let fallback = PathBuf::from(r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe");
-    fallback.is_file().then_some(fallback)
+    buffer.truncate(length);
+    let system = PathBuf::from(std::ffi::OsString::from_wide(&buffer));
+    let candidate = system.join(r"WindowsPowerShell\v1.0\powershell.exe");
+    candidate.is_file().then_some(candidate)
 }
 
 #[cfg(target_os = "linux")]
@@ -2791,6 +5665,11 @@ mod tests {
     use super::*;
 
     #[cfg(windows)]
+    use base64::Engine as _;
+    #[cfg(windows)]
+    use ed25519_dalek::{Signer as _, SigningKey};
+
+    #[cfg(windows)]
     fn test_tempdir() -> tempfile::TempDir {
         let base = std::env::var_os("LOCALAPPDATA")
             .or_else(|| std::env::var_os("USERPROFILE"))
@@ -2824,7 +5703,76 @@ mod tests {
                 sha256: "0".repeat(64),
             }),
             download_url: Some("https://example.invalid/archive".into()),
+            signed_manifest: None,
         }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn seed_linux_install_provenance(prefix: &Path) {
+        use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+
+        for (relative, contents, mode) in [
+            ("bin/kettle", b"fixture".as_slice(), 0o755),
+            (
+                "share/applications/kettle.desktop",
+                b"[Desktop Entry]\nExec=fixture\n".as_slice(),
+                0o644,
+            ),
+            ("share/kettle/install.sh", b"#!/bin/sh\n".as_slice(), 0o755),
+            (
+                "share/kettle/install-unix.py",
+                b"#!/usr/bin/env python3\n".as_slice(),
+                0o755,
+            ),
+            // Listed in `paths` below, so create it here too: leaving it to the
+            // caller makes this helper panic in `set_permissions` the first time
+            // it is reused by a test that does not already seed the file.
+            ("share/kettle/install.json", b"{}\n".as_slice(), 0o644),
+        ] {
+            let path = prefix.join(relative);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            if !path.exists() {
+                fs::write(&path, contents).unwrap();
+            }
+            fs::set_permissions(&path, fs::Permissions::from_mode(mode)).unwrap();
+        }
+        let paths = [
+            ("bin/kettle", 0o755),
+            ("share/applications/kettle.desktop", 0o644),
+            ("share/kettle/install.sh", 0o755),
+            ("share/kettle/install-unix.py", 0o755),
+            ("share/kettle/install.json", 0o644),
+        ];
+        let mut files = paths
+            .into_iter()
+            .map(|(relative, mode)| {
+                let path = prefix.join(relative);
+                fs::set_permissions(&path, fs::Permissions::from_mode(mode)).unwrap();
+                UnixInstallFile {
+                    path: relative.into(),
+                    size: path.metadata().unwrap().len(),
+                    sha256: sha256_file(&path).unwrap(),
+                    mode,
+                }
+            })
+            .collect::<Vec<_>>();
+        files.sort_by(|left, right| left.path.cmp(&right.path));
+        let provenance = UnixInstallProvenance {
+            schema: 1,
+            product: "kettle".into(),
+            managed_by: "kettle-installer".into(),
+            prefix: prefix.canonicalize().unwrap().to_str().unwrap().into(),
+            owner_uid: prefix.metadata().unwrap().uid(),
+            files,
+            directories: Vec::new(),
+        };
+        let path = prefix.join(UNIX_INSTALL_PROVENANCE_FILE);
+        fs::write(
+            &path,
+            serde_json::to_string_pretty(&provenance).unwrap() + "\n",
+        )
+        .unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
     }
 
     #[test]
@@ -2867,6 +5815,8 @@ mod tests {
         let mut marker: InstallMarker =
             serde_json::from_str(&marker_json("2.35.0").unwrap()).unwrap();
         fs::write(&marker_path, serde_json::to_vec(&marker).unwrap()).unwrap();
+        #[cfg(target_os = "linux")]
+        seed_linux_install_provenance(&prefix);
         let detected = detect_managed_install_at(&executable).unwrap();
         assert_eq!(detected.prefix, prefix.canonicalize().unwrap());
 
@@ -2877,6 +5827,22 @@ mod tests {
             assert!(error.to_string().contains("local development install"));
             assert!(error.to_string().contains("rebuild and reinstall"));
         }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn managed_install_prefix_rejects_group_or_other_write_access() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let root = test_tempdir();
+        let prefix = root.path().join("kettle");
+        fs::create_dir(&prefix).unwrap();
+        fs::set_permissions(&prefix, fs::Permissions::from_mode(0o775)).unwrap();
+        let error = open_trusted_linux_install_prefix(&prefix).unwrap_err();
+        assert!(error.to_string().contains("group/other writable"));
+
+        fs::set_permissions(&prefix, fs::Permissions::from_mode(0o755)).unwrap();
+        open_trusted_linux_install_prefix(&prefix).unwrap();
     }
 
     #[cfg(not(any(windows, target_os = "linux")))]
@@ -2907,6 +5873,87 @@ mod tests {
             );
         }
         assert!(validate_archive_path(Path::new("kettle/shell-integration/kettle.ps1")).is_ok());
+    }
+
+    #[cfg(any(windows, target_os = "linux"))]
+    #[test]
+    fn transaction_ids_are_exact_pid_and_epoch_decimal_pairs() {
+        for valid in [
+            "0-0",
+            "123-456",
+            "4294967295-340282366920938463463374607431768211455",
+        ] {
+            assert!(is_transaction_id(valid), "rejected {valid}");
+        }
+        for invalid in [
+            "",
+            "123",
+            "-456",
+            "123-",
+            "123-456-789",
+            "pid-456",
+            "123-nanos",
+            "00-0",
+            "0-00",
+            "4294967296-1",
+            "1-340282366920938463463374607431768211456",
+            "123_456",
+            " 123-456",
+        ] {
+            assert!(!is_transaction_id(invalid), "accepted {invalid}");
+        }
+
+        let root = test_tempdir();
+        let transaction =
+            Transaction::begin_with_transaction_id(root.path(), "99.0.0", "123-456").unwrap();
+        assert_eq!(
+            transaction
+                .backup_dir
+                .file_name()
+                .and_then(|name| name.to_str()),
+            Some(".kettle-update-backup-123-456")
+        );
+        transaction.commit().unwrap();
+    }
+
+    #[cfg(any(windows, target_os = "linux"))]
+    #[test]
+    fn new_backup_cleanup_preserves_unexpected_state() {
+        let root = test_tempdir();
+        let backup = root.path().join(".kettle-update-backup-123-456");
+        fs::create_dir(&backup).unwrap();
+        let sentinel = backup.join("user-data");
+        fs::write(&sentinel, b"must survive").unwrap();
+
+        let error = remove_new_backup_dir_checked(root.path(), &backup).unwrap_err();
+        assert!(error.to_string().contains("unexpected cleanup state"));
+        assert_eq!(fs::read(sentinel).unwrap(), b"must survive");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_payload_paths_are_an_exact_two_level_grammar() {
+        for valid in [
+            "kettle.exe",
+            "README.md",
+            "kettle-package-manifest.json",
+            "shell-integration/kettle.bash",
+            "shell-integration/kettle.fish",
+            "shell-integration/kettle.ps1",
+            "shell-integration/kettle.zsh",
+        ] {
+            assert!(is_allowed_windows_payload_path(Path::new(valid)));
+        }
+        for invalid in [
+            "KETTLE.EXE",
+            ".kettle-install.json",
+            "shell-integration",
+            "shell-integration/extra.ps1",
+            "shell-integration/nested/kettle.ps1",
+            "docs/README.md",
+        ] {
+            assert!(!is_allowed_windows_payload_path(Path::new(invalid)));
+        }
     }
 
     #[cfg(any(windows, target_os = "linux"))]
@@ -2969,6 +6016,31 @@ mod tests {
 
     #[cfg(any(windows, target_os = "linux"))]
     #[test]
+    fn package_manifest_is_mandatory_from_v2_36_onward() {
+        let root = test_tempdir();
+        let mut update = fake_update();
+
+        update.version = semver::Version::new(2, 35, 99);
+        verify_required_package_manifest(root.path(), &update)
+            .expect("legacy signed archives remain compatible without an inner manifest");
+
+        update.version = semver::Version::new(2, 36, 0);
+        let error = verify_required_package_manifest(root.path(), &update).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("required for release archives from v2.36.0 onward"),
+            "unexpected missing-manifest error: {error}"
+        );
+
+        fs::write(root.path().join("kettle.exe"), b"binary").unwrap();
+        write_test_package_manifest(root.path(), "2.36.0");
+        verify_required_package_manifest(root.path(), &update)
+            .expect("a valid v2.36 package manifest is accepted");
+    }
+
+    #[cfg(any(windows, target_os = "linux"))]
+    #[test]
     fn package_manifest_requires_exact_hash_size_mode_and_file_set() {
         let root = test_tempdir();
         fs::create_dir(root.path().join("shell-integration")).unwrap();
@@ -3019,6 +6091,36 @@ mod tests {
 
     #[cfg(any(windows, target_os = "linux"))]
     #[test]
+    fn rollback_refuses_to_overwrite_content_changed_after_update() {
+        let root = test_tempdir();
+        let destination = root.path().join("value");
+        fs::write(&destination, b"last-known-good").unwrap();
+        let mut transaction = Transaction::begin(root.path(), "99.0.0").unwrap();
+        transaction
+            .install_bytes(Path::new("value"), b"update replacement", None)
+            .unwrap();
+        fs::write(&destination, b"content written after update").unwrap();
+
+        let error = transaction.rollback().unwrap_err();
+
+        assert!(error.to_string().contains("rollback conflict"));
+        assert_eq!(
+            fs::read(&destination).unwrap(),
+            b"content written after update",
+            "conflict-aware rollback must preserve later content"
+        );
+        assert!(root.path().join(".kettle-update-journal.json").is_file());
+        assert!(fs::read_dir(root.path()).unwrap().any(|entry| {
+            entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".kettle-update-backup-")
+        }));
+    }
+
+    #[cfg(any(windows, target_os = "linux"))]
+    #[test]
     fn interrupted_transaction_recovers_from_journal() {
         let root = test_tempdir();
         fs::write(root.path().join("value"), b"before").unwrap();
@@ -3032,9 +6134,64 @@ mod tests {
         assert_eq!(fs::read(root.path().join("value")).unwrap(), b"before");
     }
 
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn published_executable_has_final_mode_before_installed_journal_state() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let root = test_tempdir();
+        let executable = root.path().join("kettle");
+        fs::write(&executable, b"before").unwrap();
+        fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
+        assert!(
+            snapshot_transaction_destination(root.path(), Path::new("kettle"))
+                .unwrap()
+                .file
+                .is_some()
+        );
+
+        let mut tx = Transaction::begin(root.path(), "99.0.0").unwrap();
+        assert!(
+            snapshot_transaction_destination(root.path(), Path::new("kettle"))
+                .unwrap()
+                .file
+                .is_some()
+        );
+        let error = tx
+            .install_bytes_with_post_publish(Path::new("kettle"), b"after", Some(0o755), || {
+                Err(UpdateError::Transaction("simulated process stop".into()))
+            })
+            .unwrap_err();
+
+        assert!(error.to_string().contains("simulated process stop"));
+        assert_eq!(fs::read(&executable).unwrap(), b"after");
+        assert_eq!(
+            fs::metadata(&executable).unwrap().permissions().mode() & 0o777,
+            0o755,
+            "the published inode must never expose the private staging mode"
+        );
+        assert_eq!(
+            tx.journal.entries.last().unwrap().state,
+            JournalEntryState::Prepared,
+            "the simulated stop occurs before Installed is persisted"
+        );
+        assert!(
+            tx.journal.entries.last().unwrap().existed,
+            "the pre-publication backup records the replaced executable"
+        );
+
+        std::mem::forget(tx);
+        recover_transaction(root.path()).unwrap();
+        assert_eq!(fs::read(&executable).unwrap(), b"before");
+        assert_eq!(
+            fs::metadata(&executable).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+    }
+
     #[cfg(any(windows, target_os = "linux"))]
     #[test]
-    fn committed_transaction_recovery_keeps_new_files_and_only_cleans_state() {
+    fn committed_transaction_keeps_last_known_good_until_target_starts() {
         let root = test_tempdir();
         fs::write(root.path().join("value"), b"before").unwrap();
         {
@@ -3045,7 +6202,20 @@ mod tests {
             tx.persist_journal().unwrap();
             std::mem::forget(tx);
         }
-        recover_transaction(root.path()).unwrap();
+        let error = recover_transaction(root.path()).unwrap_err();
+        assert!(error.to_string().contains("awaiting startup confirmation"));
+        assert!(root.path().join(".kettle-update-journal.json").is_file());
+        assert!(fs::read_dir(root.path()).unwrap().any(|entry| {
+            entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".kettle-update-backup-")
+        }));
+
+        assert!(
+            confirm_committed_transaction(root.path(), &semver::Version::new(99, 0, 0),).unwrap()
+        );
         assert_eq!(fs::read(root.path().join("value")).unwrap(), b"after");
         assert!(!root.path().join(".kettle-update-journal.json").exists());
         assert!(fs::read_dir(root.path()).unwrap().all(|entry| {
@@ -3100,6 +6270,63 @@ mod tests {
         assert!(root.path().join(".kettle-update-journal.json").is_file());
         assert!(backup.is_file());
         assert_eq!(fs::read(root.path().join("value")).unwrap(), b"after");
+    }
+
+    #[cfg(any(windows, target_os = "linux"))]
+    #[test]
+    fn unjournaled_backup_file_stops_recovery_without_deleting_evidence() {
+        let root = test_tempdir();
+        fs::write(root.path().join("value"), b"before").unwrap();
+        let backup_dir;
+        {
+            let mut tx = Transaction::begin(root.path(), "99.0.0").unwrap();
+            tx.install_bytes(Path::new("value"), b"after", None)
+                .unwrap();
+            backup_dir = tx.backup_dir.clone();
+            std::mem::forget(tx);
+        }
+        fs::write(backup_dir.join("unjournaled"), b"evidence").unwrap();
+
+        let error = recover_transaction(root.path()).unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("does not exactly cover the update journal")
+                || error.to_string().contains("unjournaled")
+        );
+        assert!(root.path().join(".kettle-update-journal.json").is_file());
+        assert!(backup_dir.join("unjournaled").is_file());
+        assert_eq!(fs::read(root.path().join("value")).unwrap(), b"after");
+    }
+
+    #[cfg(any(windows, target_os = "linux"))]
+    #[test]
+    fn transaction_preflight_rejects_aggregate_backup_quota_before_destination_mutation() {
+        let root = test_tempdir();
+        let first = root.path().join("first");
+        let second = root.path().join("second");
+        File::create(&first)
+            .unwrap()
+            .set_len(MAX_UNPACKED_BYTES / 2 + 1)
+            .unwrap();
+        File::create(&second)
+            .unwrap()
+            .set_len(MAX_UNPACKED_BYTES / 2 + 1)
+            .unwrap();
+        let first_size = first.metadata().unwrap().len();
+        let second_size = second.metadata().unwrap().len();
+        let mut tx = Transaction::begin(root.path(), "99.0.0").unwrap();
+
+        let error = tx
+            .preflight_destinations(&[PathBuf::from("first"), PathBuf::from("second")])
+            .unwrap_err();
+
+        assert!(error.to_string().contains("backup set exceeds"));
+        assert_eq!(first.metadata().unwrap().len(), first_size);
+        assert_eq!(second.metadata().unwrap().len(), second_size);
+        assert!(tx.journal.entries.is_empty());
+        tx.rollback().unwrap();
     }
 
     #[cfg(any(windows, target_os = "linux"))]
@@ -3182,6 +6409,7 @@ mod tests {
                 .to_string()
                 .contains("Too many levels of symbolic links")
                 || error.to_string().contains("install path component")
+                || error.to_string().contains("rollback conflict")
         );
         assert!(!outside.path().join("kettle/value").exists());
         assert!(root.path().join(".kettle-update-journal.json").is_file());
@@ -3215,6 +6443,41 @@ mod tests {
         assert_eq!(fs::read(root.path().join("value")).unwrap(), b"before");
         assert!(!backup.exists());
         assert!(!root.path().join(".kettle-update-journal.json").exists());
+    }
+
+    #[cfg(any(windows, target_os = "linux"))]
+    #[test]
+    fn legacy_recovery_preserves_an_unjournaled_sentinel_without_mutating_destination() {
+        let root = test_tempdir();
+        let backup_name = ".kettle-update-backup-legacy";
+        let backup = root.path().join(backup_name);
+        fs::create_dir(&backup).unwrap();
+        fs::write(backup.join("value"), b"before").unwrap();
+        let sentinel = backup.join("user-evidence");
+        fs::write(&sentinel, b"must survive").unwrap();
+        fs::write(root.path().join("value"), b"after").unwrap();
+        let journal = LegacyJournal {
+            schema: 1,
+            backup_dir: backup_name.into(),
+            entries: vec![LegacyJournalEntry {
+                relative: "value".into(),
+                existed: true,
+                previous_unix_mode: None,
+            }],
+        };
+        atomic_write(
+            &root.path().join(".kettle-update-journal.json"),
+            &serde_json::to_vec(&journal).unwrap(),
+            Some(0o600),
+        )
+        .unwrap();
+
+        let error = recover_transaction(root.path()).unwrap_err();
+
+        assert!(error.to_string().contains("unjournaled"));
+        assert_eq!(fs::read(root.path().join("value")).unwrap(), b"after");
+        assert_eq!(fs::read(&sentinel).unwrap(), b"must survive");
+        assert!(root.path().join(".kettle-update-journal.json").is_file());
     }
 
     #[cfg(windows)]
@@ -3257,6 +6520,107 @@ mod tests {
     }
 
     #[cfg(target_os = "linux")]
+    fn test_linux_package_tar(version: &str) -> Vec<u8> {
+        let payloads = [
+            ("kettle", b"verified-binary".as_slice(), 0o755),
+            ("install.sh", b"verified-installer".as_slice(), 0o755),
+            ("LICENSE", b"license".as_slice(), 0o644),
+            ("NOTICE", b"notice".as_slice(), 0o644),
+            ("README.md", b"readme".as_slice(), 0o644),
+            ("CHANGELOG.md", b"changes".as_slice(), 0o644),
+            (
+                "packaging/linux/kettle.desktop",
+                b"[Desktop Entry]\nType=Application\nName=Kettle\nTerminal=false\nExec=kettle\nTryExec=kettle\nIcon=kettle\n"
+                    .as_slice(),
+                0o644,
+            ),
+            ("packaging/linux/kettle.svg", b"svg".as_slice(), 0o644),
+            ("packaging/linux/kettle-16.png", b"16".as_slice(), 0o644),
+            ("packaging/linux/kettle-24.png", b"24".as_slice(), 0o644),
+            ("packaging/linux/kettle-32.png", b"32".as_slice(), 0o644),
+            ("packaging/linux/kettle-48.png", b"48".as_slice(), 0o644),
+            ("packaging/linux/kettle-64.png", b"64".as_slice(), 0o644),
+            ("packaging/linux/kettle-128.png", b"128".as_slice(), 0o644),
+            ("packaging/linux/kettle-256.png", b"256".as_slice(), 0o644),
+            ("packaging/linux/kettle.1", b"man".as_slice(), 0o644),
+            (
+                "shell-integration/kettle.bash",
+                b"shell integration".as_slice(),
+                0o644,
+            ),
+        ];
+        let package_manifest = serde_json::to_vec(&PackageManifest {
+            schema: 1,
+            product: "kettle".into(),
+            target: current_target().unwrap().into(),
+            version: version.into(),
+            files: payloads
+                .iter()
+                .map(|(path, bytes, mode)| PackageFile {
+                    path: (*path).into(),
+                    size: bytes.len() as u64,
+                    sha256: sha256_bytes(bytes),
+                    mode: Some(*mode),
+                })
+                .collect(),
+        })
+        .unwrap();
+        let encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        let mut archive = tar::Builder::new(encoder);
+        for (path, bytes, mode) in payloads {
+            let mut header = tar::Header::new_gnu();
+            header.set_mode(mode);
+            header.set_size(bytes.len() as u64);
+            header.set_cksum();
+            archive
+                .append_data(&mut header, format!("kettle/{path}"), bytes)
+                .unwrap();
+        }
+        let mut header = tar::Header::new_gnu();
+        header.set_mode(0o644);
+        header.set_size(package_manifest.len() as u64);
+        header.set_cksum();
+        archive
+            .append_data(
+                &mut header,
+                format!("kettle/{PACKAGE_MANIFEST_FILE}"),
+                package_manifest.as_slice(),
+            )
+            .unwrap();
+        archive.into_inner().unwrap().finish().unwrap()
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_transaction_applies_bytes_from_verified_archive_memory() {
+        let root = test_tempdir();
+        let mut archive = test_linux_package_tar("99.0.0");
+        let package = load_linux_package(&archive, &fake_update()).unwrap();
+        archive.fill(0);
+
+        let prefix = root.path().join("install");
+        fs::create_dir_all(prefix.join("bin")).unwrap();
+        fs::write(prefix.join("bin/kettle"), b"old-binary").unwrap();
+        let install = ManagedInstall {
+            prefix: prefix.clone(),
+            executable: prefix.join("bin/kettle"),
+            marker_path: prefix.join("share/kettle/install.json"),
+        };
+        let mut transaction = Transaction::begin(&prefix, "99.0.0").unwrap();
+        apply_verified_linux_update(&mut transaction, &package, &install, &fake_update()).unwrap();
+
+        assert_eq!(
+            fs::read(prefix.join("bin/kettle")).unwrap(),
+            b"verified-binary"
+        );
+        assert_eq!(
+            fs::read(prefix.join("share/kettle/install.sh")).unwrap(),
+            b"verified-installer"
+        );
+        transaction.rollback().unwrap();
+    }
+
+    #[cfg(target_os = "linux")]
     #[test]
     fn staged_linux_release_populates_installer_layout() {
         let root = test_tempdir();
@@ -3266,9 +6630,17 @@ mod tests {
         fs::create_dir_all(stage.join("shell-integration")).unwrap();
         fs::create_dir_all(prefix.join("bin")).unwrap();
         fs::write(prefix.join("bin/kettle"), b"old-binary").unwrap();
+        fs::create_dir_all(prefix.join("share/kettle")).unwrap();
+        fs::write(
+            prefix.join("share/kettle/install.json"),
+            marker_json("2.35.0").unwrap(),
+        )
+        .unwrap();
+        seed_linux_install_provenance(&prefix);
         for (relative, body) in [
             ("kettle", "new-binary"),
             ("install.sh", "install"),
+            ("install-unix.py", "helper"),
             ("LICENSE", "license"),
             ("NOTICE", "notice"),
             ("README.md", "readme"),
@@ -3349,6 +6721,15 @@ mod tests {
             );
         }
         assert!(prefix.join("share/kettle/install.json").is_file());
+        assert!(prefix.join("share/kettle/install-unix.py").is_file());
+        let provenance = read_linux_install_provenance(&prefix).unwrap();
+        assert!(
+            provenance
+                .files
+                .iter()
+                .any(|record| record.path == "bin/kettle"
+                    && record.sha256 == sha256_bytes(b"new-binary"))
+        );
     }
 
     #[cfg(target_os = "linux")]
@@ -3715,10 +7096,10 @@ mod tests {
     #[test]
     fn windows_stale_cleanup_does_not_race_active_update_preparation() {
         let root = test_tempdir();
-        let stage = root.path().join(".kettle-update-stage-in-progress");
-        let helper = root.path().join(".kettle-update-helper-in-progress.exe");
+        let stage = root.path().join(".kettle-update-stage-123-456");
+        let helper = root.path().join(".kettle-update-helper-123-456.exe");
         fs::create_dir(&stage).unwrap();
-        fs::write(stage.join("payload"), b"still preparing").unwrap();
+        fs::write(stage.join("README.md"), b"still preparing").unwrap();
         fs::write(&helper, b"helper").unwrap();
 
         let update_lock =
@@ -3735,31 +7116,513 @@ mod tests {
     }
 
     #[cfg(windows)]
+    #[test]
+    fn windows_stale_cleanup_preserves_an_unmanaged_exact_named_stage() {
+        let root = test_tempdir();
+        let stage = root.path().join(".kettle-update-stage-123-456");
+        fs::create_dir(&stage).unwrap();
+        let sentinel = stage.join("user-data.txt");
+        fs::write(&sentinel, b"must survive").unwrap();
+
+        assert!(cleanup_stale_windows_update_files_if_idle(root.path()).unwrap());
+        assert_eq!(fs::read(sentinel).unwrap(), b"must survive");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_stale_cleanup_removes_only_bounded_marked_orphan_backups() {
+        let root = test_tempdir();
+        let valid = root.path().join(".kettle-update-backup-123-456");
+        fs::create_dir(&valid).unwrap();
+        fs::write(valid.join("README.md"), b"old readme").unwrap();
+        fs::write(
+            valid.join(BACKUP_MARKER_FILE),
+            serde_json::to_vec(&BackupMarker {
+                schema: JOURNAL_SCHEMA,
+                product: "kettle".into(),
+                transaction_id: "123-456".into(),
+            })
+            .unwrap(),
+        )
+        .unwrap();
+        assert!(cleanup_stale_windows_update_files_if_idle(root.path()).unwrap());
+        assert!(!valid.exists());
+
+        let invalid = root.path().join(".kettle-update-backup-789-1000");
+        fs::create_dir(&invalid).unwrap();
+        fs::write(invalid.join("unmanaged"), b"must survive").unwrap();
+        fs::write(
+            invalid.join(BACKUP_MARKER_FILE),
+            serde_json::to_vec(&BackupMarker {
+                schema: JOURNAL_SCHEMA,
+                product: "kettle".into(),
+                transaction_id: "789-1000".into(),
+            })
+            .unwrap(),
+        )
+        .unwrap();
+        assert!(cleanup_stale_windows_update_files_if_idle(root.path()).unwrap());
+        assert!(invalid.join("unmanaged").is_file());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_pending_archive_name_is_bound_to_its_transaction_id() {
+        let root = test_tempdir();
+        let (name, archive) = create_windows_pending_archive(root.path(), "123-456").unwrap();
+        assert_eq!(name, ".kettle-update-archive-123-456.zip");
+        let path = root.path().join(name);
+        assert!(fs::rename(&path, root.path().join("swapped.zip")).is_err());
+        mark_windows_handle_for_deletion(&archive).unwrap();
+        drop(archive);
+        assert!(!path.exists());
+        assert!(create_windows_pending_archive(root.path(), "not-exact").is_err());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_staging_rejects_unmanaged_shell_and_nested_files() {
+        let root = test_tempdir();
+        for relative in [
+            "kettle.exe",
+            "kettle.com",
+            "install.ps1",
+            "shell-integration/kettle.ps1",
+        ] {
+            let path = root.path().join(relative);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, b"fixture").unwrap();
+        }
+        fs::write(
+            root.path().join("shell-integration/unmanaged.ps1"),
+            b"fixture",
+        )
+        .unwrap();
+        let error = validate_windows_staging(root.path()).unwrap_err();
+        assert!(error.to_string().contains("unexpected release file"));
+
+        fs::remove_file(root.path().join("shell-integration/unmanaged.ps1")).unwrap();
+        fs::create_dir(root.path().join("shell-integration/nested")).unwrap();
+        fs::write(
+            root.path().join("shell-integration/nested/kettle.ps1"),
+            b"fixture",
+        )
+        .unwrap();
+        let error = validate_windows_staging(root.path()).unwrap_err();
+        assert!(error.to_string().contains("unexpected release file"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn post_commit_action_runs_after_running_then_update_lock_release() {
+        let root = test_tempdir();
+        let update_path = root.path().join(".kettle-update.lock");
+        let running_path = root.path().join(RUNNING_LOCK_FILE);
+        let update_lock = kettle_state::ExclusiveFileLock::acquire(&update_path).unwrap();
+        let running_lock = kettle_state::ExclusiveFileLock::acquire(&running_path).unwrap();
+
+        release_windows_update_locks_then(running_lock, update_lock, || {
+            let update = kettle_state::ExclusiveFileLock::try_acquire(&update_path).unwrap();
+            let running = kettle_state::ExclusiveFileLock::try_acquire(&running_path).unwrap();
+            assert!(update.is_some(), "update lock remained held");
+            assert!(running.is_some(), "running lock remained held");
+        });
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn failed_pending_quarantine_is_bounded_by_transaction() {
+        let root = test_tempdir();
+        for index in 0..12 {
+            for extension in ["json", "txt"] {
+                fs::write(
+                    root.path()
+                        .join(format!("{FAILED_PENDING_PREFIX}{index}-1000.{extension}")),
+                    b"evidence",
+                )
+                .unwrap();
+            }
+        }
+        prune_failed_pending_records(root.path(), MAX_FAILED_PENDING_TRANSACTIONS).unwrap();
+        let transactions = fs::read_dir(root.path())
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter_map(|entry| {
+                let name = entry.file_name();
+                let name = name.to_str()?;
+                failed_pending_record_name(name).map(|(transaction, _)| transaction.to_string())
+            })
+            .collect::<std::collections::HashSet<_>>();
+        assert_eq!(transactions.len(), MAX_FAILED_PENDING_TRANSACTIONS);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn failed_pending_pruning_orders_by_epoch_then_process_id() {
+        let root = test_tempdir();
+        for transaction in ["9999-1", "1-2", "1-3", "2-3"] {
+            fs::write(
+                root.path()
+                    .join(format!("{FAILED_PENDING_PREFIX}{transaction}.json")),
+                b"evidence",
+            )
+            .unwrap();
+        }
+
+        prune_failed_pending_records(root.path(), 2).unwrap();
+
+        assert!(
+            !root
+                .path()
+                .join(format!("{FAILED_PENDING_PREFIX}9999-1.json"))
+                .exists()
+        );
+        assert!(
+            !root
+                .path()
+                .join(format!("{FAILED_PENDING_PREFIX}1-2.json"))
+                .exists()
+        );
+        assert!(
+            root.path()
+                .join(format!("{FAILED_PENDING_PREFIX}1-3.json"))
+                .is_file()
+        );
+        assert!(
+            root.path()
+                .join(format!("{FAILED_PENDING_PREFIX}2-3.json"))
+                .is_file()
+        );
+    }
+
+    #[cfg(windows)]
+    const PENDING_TEST_SECRET: [u8; 32] = [19; 32];
+
+    #[cfg(windows)]
+    fn pending_test_key() -> [u8; 32] {
+        SigningKey::from_bytes(&PENDING_TEST_SECRET)
+            .verifying_key()
+            .to_bytes()
+    }
+
+    #[cfg(windows)]
+    fn pending_test_now() -> SystemTime {
+        UNIX_EPOCH + std::time::Duration::from_secs(1_785_456_000)
+    }
+
+    #[cfg(windows)]
+    fn test_windows_package_zip(version: &str) -> Vec<u8> {
+        let payloads = [
+            ("kettle.exe", b"verified-gui".as_slice()),
+            ("kettle.com", b"verified-console".as_slice()),
+            ("install.ps1", b"verified-installer".as_slice()),
+            ("README.md", b"verified-readme".as_slice()),
+        ];
+        let manifest = PackageManifest {
+            schema: 1,
+            product: "kettle".into(),
+            target: current_target().unwrap().into(),
+            version: version.into(),
+            files: payloads
+                .iter()
+                .map(|(path, bytes)| PackageFile {
+                    path: (*path).into(),
+                    size: bytes.len() as u64,
+                    sha256: sha256_bytes(bytes),
+                    mode: None,
+                })
+                .collect(),
+        };
+        let manifest = serde_json::to_vec(&manifest).unwrap();
+        let mut writer = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        let options = zip::write::SimpleFileOptions::default();
+        for (path, bytes) in payloads {
+            writer.start_file(path, options).unwrap();
+            writer.write_all(bytes).unwrap();
+        }
+        writer.start_file(PACKAGE_MANIFEST_FILE, options).unwrap();
+        writer.write_all(&manifest).unwrap();
+        writer.finish().unwrap().into_inner()
+    }
+
+    #[cfg(windows)]
     fn seed_windows_pending(prefix: &Path, attempts: u32) -> PendingUpdate {
         fs::create_dir_all(prefix).unwrap();
         let transaction_id = "123-456";
-        let staging_dir = ".kettle-update-stage-test";
+        let archive = format!(".kettle-update-archive-{transaction_id}.zip");
         let helper = format!(".kettle-update-helper-{transaction_id}.exe");
-        let stage = prefix.join(staging_dir);
-        fs::create_dir(&stage).unwrap();
-        fs::write(stage.join("kettle.exe"), b"new-gui").unwrap();
-        fs::write(stage.join("kettle.com"), b"new-console").unwrap();
-        fs::write(stage.join("install.ps1"), b"install").unwrap();
+        let archive_bytes = b"retained signed archive fixture";
+        fs::write(prefix.join(&archive), archive_bytes).unwrap();
         fs::copy(std::env::current_exe().unwrap(), prefix.join(&helper)).unwrap();
+        let helper_size = fs::metadata(prefix.join(&helper)).unwrap().len();
+        let helper_sha256 = sha256_file(&prefix.join(&helper)).unwrap();
+        let archive_sha256 = sha256_bytes(archive_bytes);
+        let asset = crate::ManifestAsset {
+            target: current_target().unwrap().into(),
+            name: "kettle-windows-x86_64.zip".into(),
+            size: archive_bytes.len() as u64,
+            sha256: archive_sha256.clone(),
+        };
+        let release = crate::Manifest {
+            schema: 1,
+            product: "kettle".into(),
+            channel: "stable".into(),
+            version: "99.0.0".into(),
+            tag: "v99.0.0".into(),
+            published_at: "2026-07-31T00:00:00Z".into(),
+            assets: vec![asset.clone()],
+        };
+        let release_manifest = serde_json::to_string(&release).unwrap();
+        let mut signed = crate::SIGNING_CONTEXT.to_vec();
+        signed.extend_from_slice(release_manifest.as_bytes());
+        let release_signature = base64::engine::general_purpose::STANDARD.encode(
+            SigningKey::from_bytes(&PENDING_TEST_SECRET)
+                .sign(&signed)
+                .to_bytes(),
+        );
+        let package_manifest = serde_json::to_string(&PackageManifest {
+            schema: 1,
+            product: "kettle".into(),
+            target: current_target().unwrap().into(),
+            version: "99.0.0".into(),
+            files: vec![PackageFile {
+                path: "kettle.exe".into(),
+                size: 1,
+                sha256: "0".repeat(64),
+                mode: None,
+            }],
+        })
+        .unwrap();
         let pending = PendingUpdate {
             schema: PENDING_SCHEMA,
             product: "kettle".into(),
             target: current_target().unwrap().into(),
             transaction_id: transaction_id.into(),
             target_version: "99.0.0".into(),
-            staging_dir: staging_dir.into(),
+            archive,
+            archive_size: archive_bytes.len() as u64,
+            archive_sha256,
+            release_manifest,
+            release_signature,
+            asset,
+            package_manifest,
             helper,
-            files: pending_files(&stage).unwrap(),
+            helper_size,
+            helper_sha256,
             attempts,
+            handoff_timeouts: 0,
             last_error: Some("fixture failure".into()),
         };
         persist_pending(prefix, &pending).unwrap();
         pending
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_verified_helper_and_archive_retain_every_consumed_identity() {
+        let root = test_tempdir();
+        let pending = seed_windows_pending(root.path(), 0);
+        let helper = verify_pending_helper(root.path(), &pending).unwrap();
+        let archive = verify_pending_archive(root.path(), &pending).unwrap();
+
+        assert!(
+            fs::rename(
+                root.path().join(&pending.helper),
+                root.path().join("swapped-helper.exe")
+            )
+            .is_err()
+        );
+        assert!(
+            fs::rename(
+                root.path().join(&pending.archive),
+                root.path().join("swapped-archive.zip")
+            )
+            .is_err()
+        );
+
+        drop(archive);
+        drop(helper);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn forged_pending_record_with_correct_local_hashes_is_rejected() {
+        let root = test_tempdir();
+        let mut pending = seed_windows_pending(root.path(), 0);
+        verify_pending_helper(root.path(), &pending).unwrap();
+        verify_pending_archive(root.path(), &pending).unwrap();
+        pending.release_signature = base64::engine::general_purpose::STANDARD.encode([0_u8; 64]);
+        persist_pending(root.path(), &pending).unwrap();
+
+        let inspection = inspect_pending_start_with(
+            root.path(),
+            &pending_test_key(),
+            pending_test_now(),
+            &semver::Version::new(2, 43, 0),
+        )
+        .unwrap();
+        assert!(matches!(
+            inspection,
+            PendingStartInspection::Failed { reason, .. }
+                if reason.contains("signature is invalid")
+        ));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn authenticated_pending_update_cannot_downgrade_installed_version() {
+        let root = test_tempdir();
+        seed_windows_pending(root.path(), 0);
+
+        let inspection = inspect_pending_start_with(
+            root.path(),
+            &pending_test_key(),
+            pending_test_now(),
+            &semver::Version::new(100, 0, 0),
+        )
+        .unwrap();
+        assert!(matches!(
+            inspection,
+            PendingStartInspection::Failed { reason, .. }
+                if reason.contains("refusing to replace installed Kettle 100.0.0 with 99.0.0")
+        ));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn installed_version_comes_from_the_executable_fixed_version_resource() {
+        use windows_sys::Win32::Storage::FileSystem::{VS_FFI_SIGNATURE, VS_FIXEDFILEINFO};
+
+        let mut fixed = unsafe { std::mem::zeroed::<VS_FIXEDFILEINFO>() };
+        fixed.dwSignature = VS_FFI_SIGNATURE as u32;
+        fixed.dwProductVersionMS = (2 << 16) | 45;
+        fixed.dwProductVersionLS = 7 << 16;
+        assert_eq!(
+            version_from_fixed_file_info(&fixed).unwrap(),
+            semver::Version::new(2, 45, 7)
+        );
+        fixed.dwProductVersionLS |= 1;
+        assert!(version_from_fixed_file_info(&fixed).is_err());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn verified_archive_bytes_are_the_bytes_the_transaction_applies() {
+        let root = test_tempdir();
+        let archive_path = root.path().join("release.zip");
+        fs::write(&archive_path, test_windows_package_zip("99.0.0")).unwrap();
+        let mut archive = File::open(&archive_path).unwrap();
+        let package = load_windows_package(&mut archive, &fake_update(), None).unwrap();
+        drop(archive);
+        fs::write(&archive_path, b"attacker replacement").unwrap();
+
+        let prefix = root.path().join("install");
+        fs::create_dir(&prefix).unwrap();
+        fs::write(prefix.join("kettle.exe"), b"old-gui").unwrap();
+        let install = ManagedInstall {
+            prefix: prefix.clone(),
+            executable: prefix.join("kettle.exe"),
+            marker_path: prefix.join(".kettle-install.json"),
+        };
+        let mut transaction = Transaction::begin(&prefix, "99.0.0").unwrap();
+        apply_verified_windows_update(&mut transaction, &package, &install, &fake_update())
+            .unwrap();
+
+        assert_eq!(
+            fs::read(prefix.join("kettle.exe")).unwrap(),
+            b"verified-gui"
+        );
+        assert_eq!(
+            fs::read(prefix.join("install.ps1")).unwrap(),
+            b"verified-installer"
+        );
+        transaction.rollback().unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn post_update_integration_script_is_retained_from_verified_bytes() {
+        let root = test_tempdir();
+        let script = root.path().join("install.ps1");
+        fs::write(&script, b"verified script").unwrap();
+        assert!(retain_verified_integration_script(&script, b"other script").is_err());
+
+        let retained = retain_verified_integration_script(&script, b"verified script").unwrap();
+        assert!(fs::write(&script, b"attacker script").is_err());
+        assert!(fs::rename(&script, root.path().join("swapped.ps1")).is_err());
+        drop(retained);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn pending_handoff_timeouts_have_a_grace_budget_and_reset_on_attempt() {
+        let root = test_tempdir();
+        let pending = seed_windows_pending(root.path(), 0);
+        let timeout = UpdateError::Transaction("still running".into());
+        let transaction_epoch = transaction_id_parts(&pending.transaction_id).unwrap().1;
+
+        record_pending_handoff_timeout_locked(
+            root.path(),
+            &timeout,
+            transaction_epoch + HANDOFF_TIMEOUT_GRACE_NANOS - 1,
+        );
+        assert_eq!(load_pending(root.path()).unwrap().handoff_timeouts, 0);
+        for offset in 0..MAX_HANDOFF_TIMEOUTS {
+            record_pending_handoff_timeout_locked(
+                root.path(),
+                &timeout,
+                transaction_epoch + HANDOFF_TIMEOUT_GRACE_NANOS + u128::from(offset),
+            );
+        }
+        let recorded = load_pending(root.path()).unwrap();
+        assert_eq!(recorded.handoff_timeouts, MAX_HANDOFF_TIMEOUTS);
+        assert!(
+            recorded
+                .last_error
+                .as_deref()
+                .is_some_and(|error| error.contains("still running"))
+        );
+        assert!(matches!(
+            inspect_pending_start_with(
+                root.path(),
+                &pending_test_key(),
+                pending_test_now(),
+                &semver::Version::new(2, 43, 0),
+            ),
+            Some(PendingStartInspection::Failed { reason, .. })
+                if reason.contains("still-running") && reason.contains("3 times")
+        ));
+
+        let helper = root.path().join(&pending.helper).canonicalize().unwrap();
+        let started = begin_pending_attempt(root.path(), &helper).unwrap();
+        assert_eq!(started.handoff_timeouts, 0);
+        assert!(started.last_error.is_none());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn nonregular_pending_state_is_never_quarantined_into_managed_evidence() {
+        let root = test_tempdir();
+        fs::create_dir(root.path().join(PENDING_FILE)).unwrap();
+
+        let PendingStartInspection::Failed {
+            fingerprint,
+            reason,
+        } = inspect_pending_start(root.path()).unwrap()
+        else {
+            panic!("a directory at the pending path must fail safely");
+        };
+        assert!(fingerprint.is_none());
+        let warning = quarantine_pending_warning(root.path(), &fingerprint, reason);
+        assert!(warning.contains("Evidence remains"));
+        assert!(root.path().join(PENDING_FILE).is_dir());
+        assert!(!fs::read_dir(root.path()).unwrap().any(|entry| {
+            entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .starts_with(FAILED_PENDING_PREFIX)
+        }));
     }
 
     #[cfg(windows)]
@@ -3790,7 +7653,13 @@ mod tests {
         let PendingStartInspection::Failed {
             fingerprint,
             reason,
-        } = inspect_pending_start(exhausted.path()).unwrap()
+        } = inspect_pending_start_with(
+            exhausted.path(),
+            &pending_test_key(),
+            pending_test_now(),
+            &semver::Version::new(2, 43, 0),
+        )
+        .unwrap()
         else {
             panic!("attempt limit must stop automatic helper retries");
         };

@@ -80,6 +80,7 @@ version = "0.2.0"
 
 [dependencies.vte]
 version = "0.15.0"
+path = "../vte-0.15.0"
 features = [
     "std",
     "ansi",

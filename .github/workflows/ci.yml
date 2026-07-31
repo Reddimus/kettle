@@ -55,6 +55,25 @@ jobs:
       - run: cargo build --workspace --all-targets
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace
+      - name: Vendored parser patches — unit, doctest, clippy
+        # vte and alacritty_terminal are excluded from the product workspace,
+        # so the root commands above compile their public dependency surfaces
+        # but do not run package-owned tests. One Linux leg is sufficient for
+        # their platform-independent synchronized-output/graphics journals.
+        if: runner.os == 'Linux'
+        run: |
+          cargo test --locked --manifest-path vendor/Cargo.toml --target-dir target/vendor-check -p vte --features ansi
+          cargo clippy --locked --manifest-path vendor/Cargo.toml --target-dir target/vendor-check -p vte --all-targets --features ansi -- -D warnings
+          cargo test --locked --manifest-path vendor/Cargo.toml --target-dir target/vendor-check -p alacritty_terminal
+          cargo clippy --locked --manifest-path vendor/Cargo.toml --target-dir target/vendor-check -p alacritty_terminal --all-targets -- -D warnings
+      - name: Vendored portable-pty patch — native unit, doctest, clippy
+        # Linux covers the retained Unix package surface. Windows is required:
+        # it alone compiles and executes the PIPE_NOWAIT ConPTY regression.
+        # macOS would duplicate the Unix package check without adding a cfg.
+        if: runner.os == 'Linux' || runner.os == 'Windows'
+        run: |
+          cargo test --locked --manifest-path vendor/Cargo.toml --target-dir target/vendor-check -p portable-pty
+          cargo clippy --locked --manifest-path vendor/Cargo.toml --target-dir target/vendor-check -p portable-pty --all-targets -- -D warnings
       - name: Live UI helper self-test (Windows)
         if: runner.os == 'Windows'
         run: python scripts/check-live-ui-smoke.py self-test
@@ -132,15 +151,22 @@ jobs:
       - name: Package template lockstep
         # Release CI renders Homebrew and AUR metadata only after it has the
         # verified archives. This guard tests that renderer and, when the
-        # current tag is public, checks the rendered assets against sidecars.
+        # checked-out commit is its public tag, checks the rendered assets
+        # against sidecars.
         if: runner.os == 'Linux'
         run: scripts/check-package-templates.sh
       - name: Signed update manifest generator
         if: runner.os == 'Linux'
         run: python3 scripts/test-update-manifest.py
+      - name: Exact draft-release asset verifier
+        if: runner.os == 'Linux'
+        run: python3 scripts/test-verify-release-assets.py
       - name: Inner package manifest generator and verifier
         if: runner.os == 'Linux'
         run: python3 scripts/test-package-manifest.py
+      - name: Hardened online installer fixtures
+        if: runner.os == 'Linux'
+        run: python3 scripts/test-install-online.py
       - name: Rustdoc (Linux, warnings denied)
         # rustdoc has its own warning class (broken
         # intra-doc-links, missing docs on public items, malformed
@@ -200,6 +226,13 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: scripts/check-windows-installer.ps1
+      - name: Windows installer smoke (Windows PowerShell 5.1)
+        # Keep the inbox engine covered separately: install.ps1 intentionally
+        # supports 5.1 as well as PowerShell 7, and their .NET/encoding
+        # behavior is not identical.
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: .\scripts\check-windows-installer.ps1
       - name: GPU render smokes (Windows)
         # The --gpu-info / --screenshot-menu / --screenshot smokes below
         # (Linux/macOS) are bash scripts guarded `if: runner.os != 'Windows'`,
@@ -603,6 +636,31 @@ jobs:
             | grep -qE 'k\.cfg$'
         shell: bash
 
+  perf-self-tests:
+    name: performance self-tests (${{ matrix.name }})
+    runs-on: windows-2022
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: PowerShell 7
+            runtime: ps7
+          - name: Windows PowerShell 5.1
+            runtime: ps5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Run GUI-free performance harness self-tests (PowerShell 7)
+        if: matrix.runtime == 'ps7'
+        shell: pwsh
+        run: scripts/perf/self-test.ps1
+      - name: Run GUI-free performance harness self-tests (Windows PowerShell 5.1)
+        if: matrix.runtime == 'ps5'
+        shell: powershell
+        run: scripts/perf/self-test.ps1
+
   # Verify the declared workspace MSRV (`rust-version = "1.89"` in
   # Cargo.toml) actually still builds. Without this job we
   # only know `stable` works — a user on the declared floor (e.g. a
@@ -662,17 +720,8 @@ jobs:
     env:
       LIBGL_ALWAYS_SOFTWARE: "1"
     steps:
-      # Align with the other workflows on `actions/checkout@v6`.
-      # This nightly job originally landed with @v4 (matching the era's
-      # default); a later Dependabot bump moved the rest of the
-      # repo to @v6 (PRs #1-#3), and a follow-up fix caught release.yml's
-      # pretest job, which had the same @v4 pin. This is the last @v4
-      # holdout. Node 20
-      # actions are deprecated on the GitHub runner image; checkout@v4
-      # was producing a "Node.js 20 actions are deprecated" annotation
-      # on every nightly run, and the runtime is scheduled to be
-      # removed from the runner on 2026-09-16. Upgrade now, before the
-      # nightly job starts hard-failing.
+      # Keep the early-warning job on the same pinned checkout release as
+      # every required workflow.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
         with:

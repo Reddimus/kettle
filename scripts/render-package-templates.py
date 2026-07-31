@@ -23,12 +23,20 @@ def sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
-def render(template: Path, replacements: dict[str, str]) -> str:
+def render(
+    template: Path,
+    replacements: dict[str, str],
+    *,
+    expected_counts: dict[str, int] | None = None,
+) -> str:
     text = template.read_text(encoding="utf-8")
     for token, value in replacements.items():
+        expected = (expected_counts or {}).get(token, 1)
         count = text.count(token)
-        if count != 1:
-            raise ValueError(f"{template}: expected one {token}, found {count}")
+        if count != expected:
+            raise ValueError(
+                f"{template}: expected {expected} occurrences of {token}, found {count}"
+            )
         text = text.replace(token, value)
 
     unresolved = sorted(set(UNRESOLVED_RE.findall(text)))
@@ -59,7 +67,9 @@ def parse_args() -> argparse.Namespace:
     repo_root = Path(__file__).resolve().parent.parent
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--version", required=True)
+    parser.add_argument("--release-manifest", required=True, type=Path)
     parser.add_argument("--macos-archive", required=True, type=Path)
+    parser.add_argument("--linux-aarch64-archive", required=True, type=Path)
     parser.add_argument("--linux-x86-64-archive", required=True, type=Path)
     parser.add_argument("--output-dir", required=True, type=Path)
     parser.add_argument("--template-root", type=Path, default=repo_root / "packaging")
@@ -71,18 +81,31 @@ def main() -> None:
     if VERSION_RE.fullmatch(args.version) is None:
         raise SystemExit(f"invalid stable version: {args.version!r}")
 
-    for archive in (args.macos_archive, args.linux_x86_64_archive):
-        if not archive.is_file():
-            raise SystemExit(f"archive not found: {archive}")
+    for release_input in (
+        args.release_manifest,
+        args.macos_archive,
+        args.linux_aarch64_archive,
+        args.linux_x86_64_archive,
+    ):
+        if not release_input.is_file():
+            raise SystemExit(f"release input not found: {release_input}")
 
+    release_manifest_hash = sha256_file(args.release_manifest)
     macos_hash = sha256_file(args.macos_archive)
+    linux_aarch64_hash = sha256_file(args.linux_aarch64_archive)
     linux_hash = sha256_file(args.linux_x86_64_archive)
     common = {"@VERSION@": args.version, "@LINUX_X86_64_SHA256@": linux_hash}
 
     try:
         formula = render(
             args.template_root / "homebrew" / "kettle.rb.in",
-            {**common, "@MACOS_SHA256@": macos_hash},
+            {
+                **common,
+                "@RELEASE_MANIFEST_SHA256@": release_manifest_hash,
+                "@MACOS_SHA256@": macos_hash,
+                "@LINUX_AARCH64_SHA256@": linux_aarch64_hash,
+            },
+            expected_counts={"@VERSION@": 4},
         )
         pkgbuild = render(args.template_root / "arch" / "PKGBUILD.in", common)
     except (OSError, UnicodeError, ValueError) as error:

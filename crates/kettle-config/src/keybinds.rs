@@ -217,8 +217,7 @@ pub enum Action {
     /// Closes the last Bucket-D plugin gap
     /// (`launcher.py` → layout overlay).
     OpenLayoutPicker,
-    /// Terminator parity (`key_send_newline` /
-    /// Shift+Return). Writes a literal `\n` to the focused
+    /// Terminator parity (`key_send_newline`). Writes a literal `\n` to the focused
     /// pane's PTY. Mostly useful for inserting a newline into a
     /// shell line-editor that's otherwise consuming Enter
     /// (e.g. multi-line readline prompts that submit on Enter
@@ -1438,7 +1437,7 @@ mod tests {
     }
 
     #[test]
-    fn client_owned_image_paste_chords_are_not_terminal_bindings() {
+    fn unbound_v_modifier_chords_remain_available_to_child() {
         let defaults = defaults();
         assert!(!defaults.contains_key(&Trigger::new(Mods::CTRL, Key::Char('v'))));
         assert!(!defaults.contains_key(&Trigger::new(Mods::ALT, Key::Char('v'))));
@@ -1446,7 +1445,7 @@ mod tests {
         assert_eq!(
             defaults.get(&Trigger::new(Mods::CTRL | Mods::SHIFT, Key::Char('v'))),
             Some(&Action::Paste),
-            "Kettle's own text paste remains Ctrl+Shift+V"
+            "Kettle's own paste action remains Ctrl+Shift+V"
         );
     }
 

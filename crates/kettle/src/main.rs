@@ -125,6 +125,10 @@ mod update_cli;
 /// - `kettle 0.1.0` — non-git build; concat with an empty string
 ///   leaves the version pristine.
 const KETTLE_VERSION: &str = concat!(env!("CARGO_PKG_VERSION"), env!("KETTLE_GIT_SHA"));
+/// `sysexits.h`'s temporary-failure status. A staged Windows update cannot
+/// replace the running image until this process exits, so an argument-bearing
+/// invocation must tell automation that none of its requested work ran.
+const EXIT_PENDING_UPDATE_TEMPORARY_FAILURE: i32 = 75;
 
 #[derive(Parser, Debug)]
 #[command(
@@ -334,20 +338,16 @@ struct Cli {
     #[arg(long, value_name = "MODE", verbatim_doc_comment)]
     agent_server: Option<AgentServerArg>,
 
-    /// Restore a tab from a JSON handoff file written by another
-    /// kettle process. Used by Action::MoveTabToNewWindow on
-    /// platforms without SCM_RIGHTS (Windows + Wayland) — the
-    /// source process serializes the tab + passes the path;
-    /// the target reads + reconstructs. Running shells stay in
-    /// the source window (live PTY-fd transfer needs SCM_RIGHTS).
+    /// Deprecated receive-only compatibility for a JSON tab handoff written by
+    /// an older Kettle process. Current tab tear-off moves the live tab,
+    /// running programs, PTY, and scrollback in-process. The legacy handoff file
+    /// is consumed once and deleted.
     #[arg(long, value_name = "PATH", verbatim_doc_comment)]
     tab_handoff: Option<std::path::PathBuf>,
 
-    /// Receive a tab handoff via SCM_RIGHTS over the named file
-    /// descriptor. Used by Action::MoveTabToNewWindow on Linux +
-    /// macOS where SCM_RIGHTS is available — preserves live
-    /// running shells across the window move (vs the file-handoff
-    /// path which restarts shells). Unix-only.
+    /// Deprecated receive-only compatibility for an SCM_RIGHTS tab handoff
+    /// written by an older Kettle process. Current tab tear-off moves the live
+    /// tab in-process. Unix-only.
     #[arg(long, value_name = "FD", verbatim_doc_comment)]
     tab_handoff_fd: Option<i32>,
 
@@ -458,12 +458,24 @@ struct Cli {
     /// external scripts to drive an already-open kettle without
     /// launching a new window (kitty `@ send-text` parity). Example:
     ///
-    ///   kettle --remote-send 'ls -la\n'
+    ///   # Bash / zsh (ANSI-C quoting supplies an actual newline):
+    ///   kettle --remote-send $'ls -la\n'
+    ///
+    ///   # PowerShell:
+    ///   kettle --remote-send "ls -la`n"
     ///
     /// The receiving kettle window must have been launched with
     /// the same `--remote-file PATH` (or both omit it to use the
     /// default path). The text is written to the focused pane of
     /// the most-recently-launched kettle that's watching the file.
+    /// TEXT is transported exactly after shell argument parsing; Kettle
+    /// does not reinterpret backslash escapes. Current senders use a
+    /// reversible JSON-string frame, while receivers retain the legacy
+    /// lossy `send-text` line format for direct writers.
+    /// The shared spool is capped at 1 MiB; a send that would exceed
+    /// its remaining capacity fails without changing queued commands.
+    /// A receiver claims at most 1,024 operations as one batch and
+    /// rejects an over-limit batch before dispatching any prefix.
     /// Multi-window arbitration is "last writer wins" for now;
     /// per-window socket addressing is a planned follow-up.
     #[arg(long, value_name = "TEXT", verbatim_doc_comment)]
@@ -526,7 +538,8 @@ enum AgentServerArg {
 enum Cmd {
     /// Run a command under a real PTY, headlessly, and stream its output to
     /// stdout (the non-interactive counterpart to the GUI). Propagates the
-    /// child's exit code; 124 on `--timeout`, 125 on an internal error.
+    /// child's exit code; 124 when `--timeout` expires before a status is
+    /// collected, 74 on stdout delivery failure, 125 on an internal error.
     Exec(ExecArgs),
     /// Drive a running kettle's agent control server: call a method (e.g.
     /// `list_panes`, `read_screen`, `screenshot`, `send_text`, `run_command`) or stream
@@ -599,10 +612,12 @@ struct ExecArgs {
     /// Terminal height in rows (default: probe the console, else 24).
     #[arg(long)]
     rows: Option<u16>,
-    /// Working directory for the child (default: inherit).
+    /// Working directory for the child (default: inherit). An explicit path
+    /// must exist and be a directory; otherwise the child is not started.
     #[arg(short = 'd', long = "cwd", value_name = "DIR")]
     cwd: Option<std::path::PathBuf>,
-    /// Kill the child and exit 124 after this many seconds (finite, ≥ 0).
+    /// Stop at this deadline; preserve a collected child status, else exit 124
+    /// (finite seconds, ≥ 0).
     #[arg(long, value_name = "SECS")]
     timeout: Option<f64>,
     /// Strip ANSI escape sequences — emit plain text (good for assertions).
@@ -647,6 +662,13 @@ fn init_logging() {
     tracing_subscriber::fmt()
         .with_env_filter(filter)
         .with_target(true)
+        // Diagnostics belong on stderr. `tracing_subscriber`'s default writer
+        // is stdout, which for `kettle exec` is the machine-readable data
+        // channel: one `warn!` would splice a log line into byte-exact child
+        // output, or between the NDJSON records agent callers parse. The ANSI
+        // decision below already assumed stderr, so the writer had simply
+        // drifted from the intent.
+        .with_writer(std::io::stderr)
         .with_ansi(std::io::stderr().is_terminal())
         .init();
 }
@@ -655,6 +677,14 @@ fn is_bare_gui_argv(args: impl IntoIterator) -> bool {
     let mut args = args.into_iter();
     let _program = args.next();
     args.next().is_none()
+}
+
+fn pending_update_exit_code(bare_gui_launch: bool) -> i32 {
+    if bare_gui_launch {
+        0
+    } else {
+        EXIT_PENDING_UPDATE_TEMPORARY_FAILURE
+    }
 }
 
 /// Compute where a crash report is written, in addition to
@@ -963,6 +993,7 @@ fn main() -> anyhow::Result<()> {
             }
         });
     }
+    let bare_gui_launch = is_bare_gui_argv(std::env::args_os());
     let (_running_install_guard, startup_update_warning) =
         match kettle_update::prepare_process_start()? {
             kettle_update::ProcessStart::Ready { guard, warning } => (guard, warning),
@@ -970,11 +1001,18 @@ fn main() -> anyhow::Result<()> {
                 eprintln!(
                     "A verified Kettle update is waiting for running windows to close; exiting this old build."
                 );
+                let code = pending_update_exit_code(bare_gui_launch);
+                if code != 0 {
+                    eprintln!(
+                        "No requested command ran; retry after the other Kettle windows close \
+                         (temporary failure, exit {code})."
+                    );
+                }
                 // Do not unwind and drop the shared installation lock. The
                 // helper may replace kettle.exe only after the OS has fully
                 // terminated this process and released the handle.
                 let _guard = guard;
-                std::process::exit(0);
+                std::process::exit(code);
             }
         };
     if let Some(warning) = startup_update_warning {
@@ -996,7 +1034,6 @@ fn main() -> anyhow::Result<()> {
     // the user has bumped logging (`RUST_LOG=info kettle …`); on the
     // default filter it stays out of the way.
     log::info!("kettle {KETTLE_VERSION} starting");
-    let bare_gui_launch = is_bare_gui_argv(std::env::args_os());
     let cli = Cli::parse();
 
     // Agent-first: subcommands are self-contained non-GUI entry
@@ -1621,32 +1658,23 @@ fn main() -> anyhow::Result<()> {
             .clone()
             .or_else(default_remote_file)
             .ok_or_else(|| anyhow::anyhow!("could not resolve default remote-file path"))?;
-        let mut f = open_remote_command_file(&path)?;
-        use std::io::Write;
-        f.write_all(b"toggle-window\n")?;
+        append_remote_command(&path, b"toggle-window\n")?;
         return Ok(());
     }
 
     // Remote-control SENDER side. When `--remote-send TEXT`
-    // is set, append TEXT (with trailing newline if missing) to the
+    // is set, append one versioned, JSON-framed command to the
     // remote-command file and exit without launching a window. The
-    // running kettle that's watching the file picks up the line and
-    // dispatches `send-text <REST>` to its focused pane.
+    // running kettle that's watching the file decodes the JSON string and
+    // dispatches its exact bytes to the focused pane.
     if let Some(text) = cli.remote_send.as_deref() {
         let path = cli
             .remote_file
             .clone()
             .or_else(default_remote_file)
             .ok_or_else(|| anyhow::anyhow!("could not resolve default remote-file path"))?;
-        // Each line is one command: `send-text <TEXT>\n`. Escape any
-        // embedded newlines as `\\n` so a multi-line payload doesn't
-        // get re-parsed as multiple commands. The receiver decodes
-        // `\\n` back to `\n` before writing to the PTY.
-        let encoded = text.replace('\n', "\\n");
-        let line = format!("send-text {encoded}\n");
-        let mut f = open_remote_command_file(&path)?;
-        use std::io::Write;
-        f.write_all(line.as_bytes())?;
+        let command = encode_remote_send_command(text)?;
+        append_remote_command(&path, &command)?;
         return Ok(());
     }
 
@@ -1768,6 +1796,82 @@ fn main() -> anyhow::Result<()> {
 /// `Config::default_path`.
 fn default_remote_file() -> Option<std::path::PathBuf> {
     kettle_config::Config::default_path().and_then(|p| p.parent().map(|d| d.join("remote.cmd")))
+}
+
+/// Encode one `--remote-send` payload as a single reversible spool line.
+///
+/// JSON string framing keeps control characters and literal backslash escapes
+/// distinct. The receiver continues to accept the legacy `send-text` verb for
+/// existing direct writers, but new CLI senders always emit this versioned
+/// form.
+fn encode_remote_send_command(text: &str) -> serde_json::Result<Vec<u8>> {
+    let payload = serde_json::to_string(text)?;
+    let mut command = Vec::with_capacity("send-text-json ".len() + payload.len() + 1);
+    command.extend_from_slice(b"send-text-json ");
+    command.extend_from_slice(payload.as_bytes());
+    command.push(b'\n');
+    Ok(command)
+}
+
+/// A remote-file append normally holds its lock for one small `write_all`.
+/// Two seconds gives a receiver or another sender ample time to finish while
+/// still making a suspended/stuck holder fail with an actionable timeout
+/// instead of hanging a global-hotkey invocation indefinitely.
+const REMOTE_COMMAND_LOCK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+
+fn remote_command_size_error(
+    path: &std::path::Path,
+    existing_len: u64,
+    append_len: u64,
+) -> std::io::Error {
+    std::io::Error::new(
+        std::io::ErrorKind::InvalidInput,
+        format!(
+            "remote-command append at {} would exceed the {}-byte spool cap \
+             ({existing_len} existing + {append_len} new bytes)",
+            path.display(),
+            kettle_state::MAX_REMOTE_COMMAND_BYTES,
+        ),
+    )
+}
+
+fn append_remote_command(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
+    append_remote_command_with_timeout(path, bytes, REMOTE_COMMAND_LOCK_TIMEOUT)
+}
+
+fn append_remote_command_with_timeout(
+    path: &std::path::Path,
+    bytes: &[u8],
+    timeout: std::time::Duration,
+) -> std::io::Result<()> {
+    use std::io::Write as _;
+
+    let append_len =
+        u64::try_from(bytes.len()).map_err(|_| remote_command_size_error(path, 0, u64::MAX))?;
+    if append_len > kettle_state::MAX_REMOTE_COMMAND_BYTES {
+        return Err(remote_command_size_error(path, 0, append_len));
+    }
+
+    let lock_path = kettle_state::remote_command_lock_path(path);
+    let _lock =
+        kettle_state::ExclusiveFileLock::acquire_timeout(&lock_path, timeout).map_err(|error| {
+            std::io::Error::new(
+                error.kind(),
+                format!(
+                    "acquire remote-command lock at {}: {error}",
+                    lock_path.display()
+                ),
+            )
+        })?;
+    let mut file = open_remote_command_file(path)?;
+    let existing_len = file.metadata()?.len();
+    if existing_len
+        .checked_add(append_len)
+        .is_none_or(|total| total > kettle_state::MAX_REMOTE_COMMAND_BYTES)
+    {
+        return Err(remote_command_size_error(path, existing_len, append_len));
+    }
+    file.write_all(bytes)
 }
 
 /// Open (creating if needed) the remote-command file that `--toggle` and
@@ -1984,7 +2088,9 @@ mod window_state_flag_tests {
 
 #[cfg(test)]
 mod activation_cli_tests {
-    use super::{Cli, is_bare_gui_argv};
+    use super::{
+        Cli, EXIT_PENDING_UPDATE_TEMPORARY_FAILURE, is_bare_gui_argv, pending_update_exit_code,
+    };
     use clap::Parser as _;
 
     #[test]
@@ -1993,6 +2099,27 @@ mod activation_cli_tests {
         assert!(!is_bare_gui_argv(["kettle", "--new-process"]));
         assert!(!is_bare_gui_argv(["kettle", "-d", "/tmp"]));
         assert!(!is_bare_gui_argv(["kettle", "--version"]));
+    }
+
+    #[test]
+    fn pending_update_is_truthful_for_argument_bearing_invocations() {
+        assert_eq!(pending_update_exit_code(true), 0);
+        assert_eq!(
+            pending_update_exit_code(false),
+            EXIT_PENDING_UPDATE_TEMPORARY_FAILURE
+        );
+        for argv in [
+            vec!["kettle", "exec", "--", "cargo", "test"],
+            vec!["kettle", "mcp"],
+            vec!["kettle", "--check-config"],
+            vec!["kettle", "--help"],
+            vec!["kettle", "--version"],
+        ] {
+            assert_eq!(
+                pending_update_exit_code(is_bare_gui_argv(argv)),
+                EXIT_PENDING_UPDATE_TEMPORARY_FAILURE
+            );
+        }
     }
 
     #[test]
@@ -2179,8 +2306,143 @@ mod crash_log_tests {
 
 #[cfg(test)]
 mod tests {
-    use super::{Cli, config_path_problem, extra_check_config_lines, format_ssh_hosts};
+    use super::{
+        Cli, append_remote_command, append_remote_command_with_timeout, config_path_problem,
+        encode_remote_send_command, extra_check_config_lines, format_ssh_hosts,
+    };
     use clap::Parser;
+
+    fn remote_test_tempdir() -> tempfile::TempDir {
+        #[cfg(windows)]
+        {
+            let base = std::env::var_os("LOCALAPPDATA")
+                .or_else(|| std::env::var_os("USERPROFILE"))
+                .expect("Windows tests require LOCALAPPDATA or USERPROFILE");
+            tempfile::Builder::new()
+                .prefix("kettle-remote-lock-test-")
+                .tempdir_in(base)
+                .expect("create private remote-lock test directory")
+        }
+        #[cfg(not(windows))]
+        {
+            tempfile::Builder::new()
+                .prefix("kettle-remote-lock-test-")
+                .tempdir()
+                .expect("create private remote-lock test directory")
+        }
+    }
+
+    #[test]
+    fn remote_command_append_uses_the_shared_bounded_lock() {
+        let dir = remote_test_tempdir();
+        let path = dir.path().join("remote.cmd");
+        let lock_path = kettle_state::remote_command_lock_path(&path);
+        let holder = kettle_state::ExclusiveFileLock::acquire(&lock_path).unwrap();
+
+        let started = std::time::Instant::now();
+        let error = append_remote_command_with_timeout(
+            &path,
+            b"send-text blocked\n",
+            std::time::Duration::from_millis(50),
+        )
+        .expect_err("a held receiver lock must bound and reject the append");
+        assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
+        assert!(started.elapsed() < std::time::Duration::from_secs(1));
+        assert!(
+            !path.exists(),
+            "a timed-out sender must not mutate the command spool"
+        );
+
+        drop(holder);
+        append_remote_command(&path, b"send-text first\n").unwrap();
+        append_remote_command(&path, b"toggle-window\n").unwrap();
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            b"send-text first\ntoggle-window\n",
+            "each complete command must append while holding the shared lock"
+        );
+    }
+
+    #[test]
+    fn remote_send_json_framing_round_trips_adversarial_text_exactly() {
+        let text = "literal \\n; actual LF follows\nCR follows\rNUL follows\0toggle-window\nnew-tab\n\
+             send-text injected";
+        let command = encode_remote_send_command(text).unwrap();
+
+        assert_eq!(
+            command.iter().filter(|byte| **byte == b'\n').count(),
+            1,
+            "JSON framing must keep the whole payload on one physical spool line"
+        );
+        assert!(
+            !command[..command.len() - 1]
+                .iter()
+                .any(|byte| matches!(*byte, b'\r' | b'\0')),
+            "JSON framing must escape CR and NUL control bytes"
+        );
+        let payload = command
+            .strip_prefix(b"send-text-json ")
+            .and_then(|bytes| bytes.strip_suffix(b"\n"))
+            .expect("versioned command envelope");
+        assert_eq!(serde_json::from_slice::<String>(payload).unwrap(), text);
+        assert!(
+            payload.windows(3).any(|window| window == br"\\n"),
+            "a literal backslash+n must retain an escaped backslash"
+        );
+        assert!(
+            payload.windows(2).any(|window| window == br"\n"),
+            "an actual LF must use the JSON newline escape"
+        );
+        assert!(
+            payload.windows(6).any(|window| window == br"\u0000"),
+            "NUL must be represented without placing a raw NUL in the spool"
+        );
+    }
+
+    #[test]
+    fn remote_command_append_accepts_the_exact_spool_limit() {
+        let dir = remote_test_tempdir();
+        let path = dir.path().join("remote.cmd");
+        let prefix = b"send-text ";
+        append_remote_command(&path, prefix).unwrap();
+
+        let remaining =
+            usize::try_from(kettle_state::MAX_REMOTE_COMMAND_BYTES).unwrap() - prefix.len();
+        append_remote_command(&path, &vec![b'x'; remaining]).unwrap();
+
+        let bytes = std::fs::read(&path).unwrap();
+        assert_eq!(bytes.len() as u64, kettle_state::MAX_REMOTE_COMMAND_BYTES);
+        assert_eq!(&bytes[..prefix.len()], prefix);
+        assert!(bytes[prefix.len()..].iter().all(|byte| *byte == b'x'));
+    }
+
+    #[test]
+    fn remote_command_append_rejects_over_limit_without_mutation() {
+        let dir = remote_test_tempdir();
+        let path = dir.path().join("remote.cmd");
+        let cap = usize::try_from(kettle_state::MAX_REMOTE_COMMAND_BYTES).unwrap();
+        let exact = vec![b'q'; cap];
+        append_remote_command(&path, &exact).unwrap();
+
+        let error = append_remote_command(&path, b"x")
+            .expect_err("an append beyond the shared spool cap must fail");
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            exact,
+            "rejecting aggregate growth must preserve every previously queued byte"
+        );
+
+        let absent = dir.path().join("oversize.cmd");
+        let oversized = vec![b'z'; cap + 1];
+        let error = append_remote_command(&absent, &oversized)
+            .expect_err("one oversized command must fail before creating its spool");
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+        assert!(
+            !absent.exists(),
+            "per-command rejection must not create or mutate the spool"
+        );
+    }
 
     /// Windows GUI-subsystem drift guard (supersedes the guards for earlier
     /// console-handling approaches).
@@ -2600,7 +2862,8 @@ mod tests {
     /// `--<long>` flag and must not leak internal `cycle N` refs. An earlier
     /// version of the page was missing `--check-update` + `--write-default-config`
     /// and carried cycle parentheticals precisely because the only man-page
-    /// guard checked keybinds, not flags. Walk the clap CLI and pin both.
+    /// guard checked keybinds, not flags. Walk the complete clap command tree
+    /// (including every subcommand) and pin both.
     #[test]
     fn man_page_documents_every_flag_without_cycle_refs() {
         use clap::CommandFactory;
@@ -2618,24 +2881,40 @@ mod tests {
         // documented in the man page (see docs/RECORDING.md), so they are no
         // longer excluded here.
         let allow_missing: &[&str] = &["tab-handoff", "tab-handoff-fd", "exec"];
-        let cmd = Cli::command();
-        let missing: Vec<String> = cmd
-            .get_arguments()
-            .filter_map(|arg| arg.get_long())
-            .filter(|long| !allow_missing.contains(long))
-            .filter(|long| {
+        fn collect_missing_flags(
+            cmd: &clap::Command,
+            path: &str,
+            man: &str,
+            allow_missing: &[&str],
+            missing: &mut Vec<String>,
+        ) {
+            for long in cmd
+                .get_arguments()
+                .filter_map(|arg| arg.get_long())
+                .filter(|long| !allow_missing.contains(long))
+            {
                 // troff escapes the leading `--` as `\-\-`; internal hyphens may
                 // be plain (`\-\-config-path`) or escaped (`\-\-write\-default\-
                 // config`). Accept either, plus the bare `--flag` used in examples.
                 let prefix_escaped = format!("\\-\\-{long}");
                 let all_escaped = format!("\\-\\-{}", long.replace('-', "\\-"));
                 let plain = format!("--{long}");
-                !man.contains(&prefix_escaped)
+                if !man.contains(&prefix_escaped)
                     && !man.contains(&all_escaped)
                     && !man.contains(&plain)
-            })
-            .map(|l| format!("--{l}"))
-            .collect();
+                {
+                    missing.push(format!("{path} --{long}"));
+                }
+            }
+            for subcommand in cmd.get_subcommands() {
+                let child_path = format!("{path} {}", subcommand.get_name());
+                collect_missing_flags(subcommand, &child_path, man, allow_missing, missing);
+            }
+        }
+
+        let cmd = Cli::command();
+        let mut missing = Vec::new();
+        collect_missing_flags(&cmd, "kettle", &man, allow_missing, &mut missing);
         assert!(
             missing.is_empty(),
             "man page (packaging/linux/kettle.1) is missing flags: {missing:?}"

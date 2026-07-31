@@ -7,6 +7,54 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 ## [Unreleased]
 
   ### Fixed
+  - A `kettle exec` run whose consumer closed the pipe could die from `SIGPIPE`
+    instead of reporting the exit code it had already chosen. The stdout worker
+    blocks `SIGPIPE` for itself, so a broken pipe correctly surfaced as `EPIPE`,
+    was reported on stderr, and became exit 74 — but the worker wrote through
+    the process-global `std::io::stdout()`, and bytes the failed write left in
+    that shared buffer were retried by the runtime's exit-time flush on the main
+    thread, where `SIGPIPE` is back at its default fatal disposition. The signal
+    then killed Kettle and discarded the code, so callers saw a signal death
+    with no status at all. Whether bytes remained buffered was a timing race, so
+    the failure was intermittent. The child stream now goes to a descriptor of
+    exec's own and never enters that shared buffer; a broken stdout
+    additionally makes the chosen exit code final. Streaming also stops paying
+    for a process-wide lock and a second copy of every byte.
+  - Diagnostics no longer contaminate `kettle exec`'s output.
+    `tracing_subscriber`'s default writer is stdout, so a single warning could
+    splice a log line into byte-exact child output, or between the NDJSON
+    records agent callers parse. Logging now writes to stderr, which the
+    adjacent ANSI-detection had already assumed.
+  - `kettle exec --timeout` now keeps its deadline and MCP cancellation
+    enforceable while draining output after the child exits. If stdout is still
+    stalled at the deadline, Kettle abandons output the downstream consumer
+    cannot accept and returns the child's collected exit code, or 124 if no
+    status was available; cancellation always wins with 130. Ordinary
+    completion remains lossless, but stdout-worker acknowledgements and final
+    flush/join are polled from the lifecycle loop instead of blocking it.
+    Abandoning output now says so on stderr. Because the exit status in that
+    case is the child's own, a caller reading only the status could otherwise
+    not tell a fully delivered run from one whose tail was dropped because its
+    own reader had stalled.
+  - The release workflow's asset verification never ran, and the release never
+    published itself. It read the release through
+    `GET /releases/tags/{tag}`, which only finds *published* releases, so the
+    draft it had just created returned 404 — and under `set -e` the step died
+    there, before `verify-release-assets.py` could compare uploaded sizes and
+    SHA-256 records against the local set. v2.43.0's assets were therefore
+    uploaded, left unverified by the gate, and stranded as a draft until
+    published by hand. Every lookup now goes through the list endpoint, which is
+    the only one that sees drafts, and the release id it returns addresses the
+    verification read and the final publish. A re-run also recognizes its own
+    leftover draft instead of failing to recreate it.
+
+## [2.43.0] — 2026-07-28
+
+  ### Fixed
+  - Updated Wayland protocol code generation to `wayland-scanner` 0.31.11 and
+    `quick-xml` 0.41.0, removing both current RustSec denial-of-service
+    advisories for `quick-xml` instead of retaining the former build-time
+    exception.
   - `gpu-backend` now applies without requiring a physical GPU pin, explicit
     low/high power preference wins across backend ranks, detected software
     adapters remain valid device pins, and unavailable portable backend
@@ -24,7 +72,72 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
     capped per-window deadline backoff, invisible windows keep repairs armed
     without GPU wakeups, `Lost` recreates only the affected wgpu surface on the
     healthy shared device, and non-device render errors rebuild that renderer's
-    retained resources on a separate capped backoff.
+    retained resources on a separate capped backoff. Process-wide device
+    recovery now preserves every window's live font/cell scale, resolved
+    accent, and queued screenshot completion across failed adapter attempts,
+    then reflows each rebuilt surface at its current monitor size and DPI.
+    Paint wakeups also honor the complete occluded/minimized/invisible
+    predicate, retaining damage without futile redraw loops until restore.
+    Output transport remains wakeable only when an opt-in recorder/Lua
+    sidechannel needs event-loop service.
+  - PTY output, inline images, animation updates, progress, and notifications
+    now publish through one generation-ordered per-pane wake gate. The gate
+    remains closed for the complete deferred-frame interval, stale queued wakes
+    rearm and resample without losing racing output, and the paint state machine
+    cannot enter its presenting phase until every visibility, recovery, and
+    renderer-availability guard has passed. Hidden and recovering windows keep
+    paint wakeups quiescent while still servicing opt-in recorder/Lua output
+    sidechannels, so their bounded queues cannot stall PTY parsing.
+  - DA1 capability code `52` now follows the live OSC 52 write policy and
+    platform clipboard availability. Kettle continues to advertise its sixel
+    decoder, but no longer tells Neovim, tmux, or other probers that clipboard
+    writes are available when `osc52 = off`/`paste` or the host has no clipboard;
+    live config reloads update existing panes without restarting their PTYs.
+  - OSC 52 target `p`/`s` now reads and writes Linux PRIMARY instead of silently
+    using the regular clipboard. Failed PRIMARY queries return an empty
+    protocol reply rather than falling back across clipboard targets; Windows
+    and macOS retain their single clipboard channel.
+  - Atomic replacement now applies and syncs the final Unix mode and preserved
+    permissions on the staged inode before publication. A power loss between
+    publishing an updated executable and checkpointing its journal can no
+    longer strand the installed binary at the private staging mode `0600`.
+    Exact same-destination staging files orphaned by a hard-killed writer are
+    reclaimed only when their canonical creator PID is definitively dead and
+    their opened object proves owner-private, ordinary, single-link identity;
+    cleanup is bounded and preserves live, malformed, linked, or nonregular
+    lookalikes. Its asynchronous scheduler now distinguishes in-flight work
+    from a bounded, expiring completion cache, retries after saturation or
+    worker failure, and evicts old keys instead of permanently disabling
+    cleanup after 256 distinct destinations.
+  - Linux updater destination snapshots now retain their anchored parent handle
+    until the descriptor-relative leaf is open. Existing files are no longer
+    misclassified as absent through a dangling `/proc/self/fd/...` path, so
+    rollback reliably backs up and restores the prior executable and mode.
+  - Failure to create a pane's blocking PTY pump thread is now logged and closes
+    the pane through its normal exit event. Thread exhaustion can no longer
+    leave a parser waiting forever on a channel whose sender was never created.
+    Pane teardown also moves child kill/reap and native master destruction onto
+    that detached lifecycle path: Windows `ClosePseudoConsole` can wait for
+    conout drainage, so destroying it on the UI thread could still freeze pane
+    close even without joining the reader. Before the detached close starts,
+    the blocking pump now switches to direct discard/drain mode and can escape
+    a full bounded parser handoff; the reader stop is published only after the
+    native close returns. This prevents pre-Windows 11 24H2
+    `ClosePseudoConsole` from stranding the reaper behind undrained output while
+    retaining prompt UI-side Drop. Teardown-worker exhaustion fails open by
+    logging and retaining the handles rather than entering an unbounded
+    platform close on the event thread.
+  - Mixed-DPI monitor moves no longer reflow the grid twice. Kettle applies the
+    new glyph scale immediately but coalesces `ScaleFactorChanged` with the
+    following nonzero physical resize before resizing PTYs; a one-shot
+    event-loop fallback covers backends without that resize and remains pending
+    while minimized or while the renderer/GPU is recovering.
+  - PTY size changes now carry one versioned transaction containing both the
+    grid and the exact text-area pixel extent derived from fractional cell
+    metrics. Spawn, restore, tab, split, duplicate, SSH, undo, and live resize
+    paths share it; failed native resizes remain retryable, and Windows clamps
+    ConPTY's signed 16-bit grid without making synchronous calls for pixel-only
+    changes.
   - **Agent `send_keys` now matches negotiated Kitty keyboard input.**
     Synthetic `Shift` chords retain their modifier in CSI-u (so
     `ctrl+shift+c` is no longer reported as `ctrl+c`), and synthetic
@@ -44,6 +157,101 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
     an echoed launch command cannot satisfy a live-state wait. tmux smokes use
     a cryptographically random private socket, resolve Bash inside the selected
     target, and register checked cleanup for success and failure paths.
+    Windows Git Bash probes resolve npm clients to adjacent `.cmd` launchers
+    through `cmd.exe`, and their self-test rejects unusable extensionless
+    shadows. Live Windows diagnostics and copied Neovim state now use
+    unpredictable `%LOCALAPPDATA%\kettle` trees with protected current-user and
+    SYSTEM-only DACLs and no reparse-point ancestry. The tab-bar visual probe
+    accepts the intentional last-tab width reserved for the new-tab/menu
+    buttons and waits for title geometry to stabilize before pixel comparison.
+  - **Unix `kettle exec` keeps terminal replies alive after piped stdin EOF.**
+    The stdin pump no longer closes the bidirectional PTY master and silently
+    discards later DA, DSR, Kitty-keyboard, color, or clipboard replies.
+    Canonical children receive their live configured VEOF sequence; raw-mode,
+    disabled-VEOF, and uninspectable states preserve the reply channel and fail
+    explicitly instead of injecting a guessed byte. Stdin-pump thread
+    exhaustion now fails the command before continuing, and a parent-stdin read
+    error ends forwarding explicitly without presenting partial input as EOF.
+    Record-boundary planning follows live `IGNCR`/`ICRNL`/`INLCR`, VEOF, VEOL,
+    VEOL2, host-specific VWERASE, and `EXTPROC` settings while bounding retained
+    canonical-record state at 64 KiB; oversized records conservatively receive
+    two VEOF characters, while `EXTPROC` refuses guessed EOF injection. A
+    dedicated bounded writer arbiter now handles terminal replies whether or
+    not stdin is forwarded, so a child that floods queries without reading
+    their replies cannot block timeout/cancellation. VEOF injection advances
+    one byte per lowest-priority arbiter step. Reply admission and the final
+    reply recheck plus one nonblocking VEOF attempt share a short ordering gate,
+    so an admitted protocol reply cannot be overtaken by an EOF write based on
+    a stale empty-channel observation; the gate is released before any yield or
+    retry. This intentionally makes no impossible claim that a future query can
+    overtake a VEOF byte already accepted by the kernel. The parser's
+    semantic-event channel is bounded at 1024 and fails the command explicitly
+    on overflow. Native PTY regressions cover empty,
+    line-terminated, and unterminated input,
+    read-until-EOF, ordered DSR/DA1/Kitty replies, raw/`EXTPROC` no-injection,
+    Linux N_TTY VWERASE, query floods with and without piped stdin, and normal
+    child exit.
+    Unix also permits only one live nonblocking stdin-arbiter lease per PTY.
+    Duplicated descriptors share their open-file status flags, so overlapping
+    handles can no longer restore `O_NONBLOCK` beneath each other; setup failure
+    releases the reservation, exact restoration makes it reusable, and a
+    restoration failure latches future acquisition closed.
+  - **Windows ConPTY input backpressure no longer traps the PTY writer.**
+    Kettle opts only its caller-side anonymous-pipe writer into `PIPE_NOWAIT`
+    and advances it in bounded 1 KiB steps; the synchronous handle required by
+    `CreatePseudoConsole` is unchanged. A child that stops reading can no
+    longer park protocol replies, timeout, cancellation, or pane shutdown
+    behind one blocking user-input write. Two native tests split that claim:
+    one drives an anonymous pipe to real zero progress at the Windows boundary,
+    and one requires a finite `kettle exec` timeout and close after a child
+    query while the writer path is loaded. Neither forces the ConPTY input
+    queue itself to refuse a write — ConPTY buffers input without a bound a
+    test can exhaust, so the zero-progress guarantee is proven at the pipe
+    boundary rather than end to end. Windows zero-byte pipe progress is normalized
+    to `WouldBlock`, and complete-message callers retain partial progress
+    through bounded retries instead of silently dropping the unwritten suffix.
+  - **A stalled `kettle exec` stdout consumer no longer defeats `--timeout`
+    while the child is still running.**
+    Output was written synchronously on the lifecycle thread, so the slice
+    limits bounded how many bytes were drained per turn but not how long one
+    `write` could block. An automation client that opened the pipe and stopped
+    reading held the lifecycle loop before its timeout check and suppressed
+    timeout, cancellation, and child reaping indefinitely — measured still
+    running 4.59 s into a `--timeout 1` run, and 5.008 s with 65 424 bytes
+    buffered under the regression. Stdout now belongs to a bounded worker; when
+    its queue fills, the lifecycle loop stops draining PTY output and lets
+    backpressure reach the child instead of parking. Normal completion drains
+    and joins losslessly, while timeout and cancellation abandon unaccepted
+    output rather than block teardown. The same run now exits 124 in 1.106 s.
+    This did not cover a child that had already exited while its trailing output
+    remained stuck; that narrower lifecycle gap is corrected under
+    `[Unreleased]`.
+  - Headless `kettle exec` now omits DA1 extension `52`, matching its deliberate
+    lack of a clipboard-write sink instead of advertising OSC 52 writes that
+    would be discarded.
+  - Pasted screenshots now enforce the advertised 256 MiB live aggregate
+    against the final encoded PNG bytes, not only the total observed before an
+    encode. Source RGBA is capped too, and an over-budget or failed encode
+    removes its partial file through the creating handle. Successful PNGs keep
+    a path-pinned identity handle through shutdown. An empty bootstrap
+    establishes the held private directory before any screenshot bytes are
+    encoded; Unix creates every real PNG with `openat` beneath that descriptor,
+    while Windows pins the directory name. Cleanup never recursively follows a
+    replaced directory: Unix child operations resolve from the held descriptor,
+    while Windows identity-transitions to a DELETE handle; final empty-directory
+    removal compares volume/file IDs on Windows and owner/mode/device/inode on
+    Unix. Those Unix child operations are genuinely descriptor-relative on every
+    platform — `openat`, `fdopendir`, `fstatat`, and `unlinkat` — rather than
+    reached by joining a child name onto `/proc/self/fd/<n>`. Only Linux
+    resolves such a path: Darwin's `/dev/fd/<n>` names the open file
+    description itself and cannot be traversed into, so the shortcut would have
+    returned `ENOENT` for every save, reopen, and removal on macOS.
+    Crash sweeping moved off the startup/UI thread, has independent
+    time/attempt/removal/entry caps, and requires an exact creator/session name,
+    a `0001.png` through `0064.png` child name, more than 24 hours of age, a
+    definitively dead PID, and only verified private, non-reparse, single-link
+    regular children. Long-running sibling sessions, PID reuse, malformed
+    names, hard links, and unknown entries fail closed.
   - **Private files are now fail-closed on Windows.** State, lock, recording,
     remote-command, terminal-log, diagnostic, pasted-image, screenshot, and
     crash files receive a protected current-user DACL in the creating
@@ -59,9 +267,160 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
     file into place instead of publishing under a legacy destination DACL and
     tightening it afterward. A privacy failure therefore cannot leave newly
     written state visible despite returning an error.
+  - The Windows installer/uninstaller now accepts only a dedicated `kettle`
+    prefix, validates bounded product and prefix markers, rejects protected
+    roots, Win32 device aliases, invalid/control characters, wildcards,
+    alternate streams, trailing aliases, and reparse points. Upgrades publish
+    ordinary files atomically beneath retained no-delete directory handles;
+    uninstall accepts one exact bounded managed tree and removes only named
+    leaves plus empty directories, never recursively traversing an install
+    path. Ownership JSON requires exact keys, scalar types, and no duplicates.
+    A moved or edited helper can no longer redirect uninstall toward an
+    unrelated directory.
+  - Windows package installation now preflights and journals the complete
+    payload, stages and backs up every managed file before publication, rolls
+    back every completed publication on failure, and recovers an interrupted
+    transaction on the next run. Stable zip installs require an exact package
+    manifest, saved helpers preserve their existing stable/local-development
+    channel, and prefixes must remain on one fixed physical volume rather than
+    a network, removable, or `SUBST` mapping. PowerShell profile integration
+    retains the original file identity while publishing and preserves supported
+    DACLs, attributes, timestamps, encoding, BOM, and newline form; alternate
+    streams, special storage attributes, hard links, and ambiguous managed
+    markers fail before package mutation. Installed-version discovery no longer
+    uses a predictable temporary path or unbounded redirected output: stdout
+    and stderr share a 4 KiB limit and the child has a 15-second deadline.
+  - Windows pending updates now bind the copied helper as well as every staged
+    file by size and SHA-256 and retain the complete root-down object handle
+    chain through launch and consumption. Cleanup marks only revalidated held
+    objects for deletion, legacy-journal recovery requires an exact journaled
+    tree, backup capacity is checked in aggregate before destination mutation,
+    and copies use bounded streaming buffers. A five-minute grace and bounded
+    handoff-timeout counter prevent a permanently held run lock from trapping
+    every future launch; nonregular pending paths are never adopted as
+    quarantine evidence. Self-update also now rejects a v2.36.0-or-newer
+    release archive that omits its mandatory inner package manifest instead of
+    silently accepting it under the pre-v2.36 compatibility path.
+    The saved PowerShell uninstaller now recognizes that same schema-2 pending
+    record, validates its exact typed and bounded helper/file identities, and
+    tolerates a named artifact already disappearing during controlled removal
+    or crash recovery. A legitimate staged update therefore no longer blocks
+    uninstall, while schema-1, unknown-field, and unmanaged-path records still
+    fail closed.
   - The Windows remote-command watcher now creates, reads, bounds-checks, and
     truncates its command file through verified no-reparse handles, so a path
     swap cannot redirect command data to another file.
+  - Pane input now crosses a bounded, two-lane worker instead of writing from
+    the window thread. User input and terminal protocol replies have separate
+    message/byte budgets; replies preempt bulk user data at bounded write
+    boundaries. Every enqueue reports `queued`, `read_only`, `backpressured`,
+    `oversize`, or `failed`: control RPCs map those outcomes to distinct
+    protocol errors, while local input surfaces a throttled notification and a
+    failed transport closes the pane. Local clipboard/PRIMARY/drop pastes over
+    4 MiB are rejected visibly rather than silently truncated.
+  - Lua side effects now retain one process-wide ordered FIFO across startup
+    and every event hook. The queue is capped at 1,024 commands and 8 MiB of
+    pending `send_text` data, processes at most 16 commands/1 MiB per event-loop
+    turn, and retries an unchanged backpressured head on a 10–250 ms deadline.
+    A send latches its pane on first attempt so a focus change cannot reroute
+    delayed text. Lua side-effect calls now return whether the first bounded
+    queue admitted them; the 1 MiB per-send and aggregate limits remain
+    fail-soft with warnings, and admission is not a promise of PTY delivery.
+    Lua registries now expose the same boolean admission contract, accept only
+    the nine events Kettle can emit, and bound callbacks, menu items, URL
+    handlers, labels, handler names, and patterns before copying Lua strings
+    into Rust-owned storage.
+  - Legacy `remote.cmd` transport now uses one shared advisory lock for sender
+    append and receiver claim, with a 1 MiB aggregate cap and deadline retries
+    for lock contention or pane backpressure. Claimed batches are capped at
+    1,024 operations and rejected whole on overflow; unknown-line diagnostics
+    are coalesced. New `--remote-send` writers use one reversible
+    `send-text-json <JSON_STRING>` line, preserving literal backslash+n, LF,
+    CR, NUL, and command-looking text exactly; malformed frames are counted
+    without logging payloads, and the legacy lossy `send-text` receiver remains
+    compatible with direct writers. A claimed batch is truncated before
+    ordered in-memory dispatch, making the file transport explicitly
+    at-most-once; callers that need an acknowledged result should use
+    `kettle ctl`, whose response distinguishes read-only, busy, bad-parameter,
+    and failed-transport outcomes.
+  - Scrollback vi mode now delegates cursor motion, viewport following,
+    selection, reflow, and history eviction to the native
+    `alacritty_terminal` vi state. The UI owns only pane/modal routing and
+    visual-mode intent, preventing a second cursor/selection model from
+    drifting from the terminal grid.
+  - OSC 133 prompt marks now use monotonic grid row identities built from the
+    vendored grid's `history_origin`. Ring eviction, scrollback-limit changes,
+    reset, and reflow can no longer retarget a saved prompt mark to unrelated
+    text; prompt navigation prunes only genuinely evicted rows and ignores the
+    alternate screen.
+  - Inline and placeholder image placements now use that same monotonic
+    document-row domain instead of reusable capped-history coordinates.
+    Evicted half-open placement spans are pruned after normal parsing,
+    synchronized-update timeout flushes, and history-changing resize; renderer
+    snapshots carry the origin; and scrolled placeholder cells no longer apply
+    `display_offset` twice. Native vi selections are now removed from internal
+    state once their complete range leaves retained history, so menus and the
+    control API cannot report an unmaterializable stale selection.
+  - Sixel, Kitty, and iTerm2 graphics now follow the active terminal screen
+    buffer. Mode 47 preserves alternate graphics on entry and exit; mode 1047
+    preserves them on entry and clears them on exit; mode 1049 saves/restores
+    the cursor, clears alternate graphics on entry, and preserves them on exit.
+    Kitty image ids, virtual placements, animations, relatives, and partial
+    uploads are isolated between buffers. ED 2 clears only the active buffer
+    and RIS clears both. An authoritative engine-owned, ordered 256-event
+    journal reports these committed mutations and page-region scrolls; adjacent
+    compatible scrolls coalesce without losing their full document-row delta,
+    and overflow clears both graphics buffers before resynchronizing to the
+    engine's active screen.
+  - DEC 2026 synchronized updates now keep text and inline graphics in exact
+    wire order. A bounded, out-of-band VTE marker defers Sixel, Kitty, and
+    iTerm2 controls before their decoders can mutate state, then replays each
+    control against the cursor and screen buffer active at that byte offset.
+    Plain terminal bytes and concurrent row, pixel, or DPI resizes now share
+    the graphics ordering gate, so resize cannot split a committed text scroll
+    from its corresponding graphics-journal mutation.
+    Natural close, timeout, EOF, and nested synchronized regions publish one
+    atomic result; no graphics mutation or redraw becomes visible mid-region.
+    Marker overflow or an inconsistent marker sequence fails closed by clearing
+    both graphics buffers before resynchronizing to the engine's active screen.
+  - Inline graphics now follow partial DECSTBM scrolling. Placements wholly
+    inside the page margins move with text and permanently crop both their
+    destination and source range when the move crosses a margin; placements
+    already crossing a margin stay fixed. Full-screen/top-anchored scrolling
+    retains exact document ids even when many engine scrolls coalesce. Cropped
+    Kitty fragments retain their original placement parameters and composed
+    source range, so natural-size and one-axis-auto geometry can follow a later
+    monitor/DPI change without restoring discarded pixels or moving the
+    post-scroll anchor.
+  - Column reflow now fails safe for inline graphics: regular and relative
+    placements are cleared instead of being attached to guessed replacement
+    rows, while Kitty Unicode-placeholder prototypes and animations survive
+    because their locations remain owned by reflowed grid cells.
+  - Inline image instances are now CPU-clipped to the intersection of the pane
+    interior and exact terminal grid. Destination and source UV rectangles are
+    cropped by the same fractions, so negative or oversized placements cannot
+    bleed into padding, pane titlebars, borders, sibling panes, or window
+    chrome without squashing the visible pixels. Fully outside, degenerate, or
+    non-finite placements are skipped, including every placement in a zero-line
+    viewport. Wallpaper remains intentionally unclipped, and zero-sized skipped
+    slots preserve indexed same-texture batching.
+  - Bottom-positioned pane titlebars no longer leave the terminal grid shifted
+    down by one title strip or clip the final rows early. Grid and legacy text,
+    cursor/selection, links, search hints/highlights, inline images, IME paint,
+    pointer hit testing, mouse reporting, and the native IME anchor now share
+    one title-position-aware grid origin.
+  - Session restore now preflights the complete workspace before creating
+    native windows, renderers, or PTYs. Restore is limited to 16 non-empty
+    windows, 256 panes, 32 Mi pixels per surface, and 64 Mi pixels in
+    aggregate; saved geometry is clamped to the live monitor layout and applied
+    before the first restored window is revealed.
+  - Kitty graphics deletion now implements visible, image/placement, cursor,
+    cell, cell-plus-z, id-range, column, row, z-index, and frame selectors with
+    lowercase retain-data versus uppercase free-data semantics. A delete is
+    applied before later APCs from the same PTY read, so delete-and-replace is
+    ordered. Placement rendering now honors source crop (`x/y/w/h`),
+    destination cells (`c/r`), pixel offsets (`X/Y`), aspect-preserving
+    one-axis sizing, and `C=1` cursor suppression across DPI changes.
   - Managed-recording retention now removes the exact locked private file
     instead of resolving its pathname again. Windows marks the verified kernel
     object for deletion through a reopened handle; Unix unlinks the verified
@@ -71,6 +430,25 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
     Unix control connections also keep a stable nonblocking mode and serialize
     cloned deadline-aware writers without exposing transient `O_NONBLOCK`
     changes to readers.
+  - Linux release binaries now build on Ubuntu 22.04 and a release-workflow
+    `readelf` gate rejects requirements newer than glibc 2.35. The documented
+    one-line installer floor therefore matches the published binary ABI instead
+    of silently inheriting glibc 2.39 from the packaging runner.
+  - Windows performance evidence now requires one exact physical connection
+    per resolved monitor. Miracast and indirect outputs are rejected, WMI and
+    CCD identities cannot be mixed, same-model monitors are distinguished by
+    instance identity, and the scorer independently reconstructs the signed
+    monitor/connection mapping.
+  - Public performance evidence now tokenizes numeric and Boolean
+    display-routing identifiers, hardware IDs, and EDID fingerprints before
+    scalar passthrough. Tokens use an unpublished cryptographically random
+    per-bundle HMAC key, so low-entropy connector identifiers cannot be
+    recovered by enumerating values against the published run id. The public
+    evidence index is schema 2. Credential-like property names are normalized
+    across casing and separator variants and redact scalar, object, and array
+    values before generic hash handling. Publication accepts only the reviewed
+    fixed benchmark filenames, preventing an unexpected JSON leaf from
+    disclosing credential or user text through its name.
 
   ### Changed
   - GPU backend selection is deterministic and shared by live rendering,
@@ -79,11 +457,27 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
     unavailable; macOS prefers Metal and Linux prefers Vulkan. Live instances
     retain winit's event-loop-owned display handle required for the Linux
     Wayland GLES fallback without retaining a closed window.
+  - `just split-titlebar-smoke` now exercises real top- and bottom-title
+    windows, checks title-position-aware grid edges, and verifies exact
+    configured focused/transmit, receiving, and inactive colors in PNG
+    interiors selected outside text, icon, and pane-accent pixels.
   - `just agent-tui-smoke` and Windows `just agent-tui-wsl-smoke` now build and
     run the exact current-checkout release executable reported by Cargo,
     honoring `CARGO_TARGET_DIR`, configured target triples, and the platform
     executable suffix instead of assuming `target/release` or exercising a
     stale `kettle` from `PATH`.
+  - Agent-client compatibility documentation now distinguishes terminal input
+    transport from client-owned image attachment. Local smokes cover
+    version/help and terminal primitives, not interactive composer shortcuts;
+    Kettle's temporary-PNG path paste and Codex's help-verified `--image` /
+    `-i` initial-attachment option are the documented stable fallbacks.
+  - tmux SIXEL guidance and live coverage now require tmux 3.4 or newer plus a
+    build that actually advertises DA1 feature code `4`; tmux 3.6's
+    `#{sixel_support}` value is cross-checked when available. The live smoke
+    declares the outer `sixel` feature only after that check, verifies runtime
+    pixel cell geometry, and distinguishes a rendered 24x12 image from tmux's
+    zero-geometry `SIXEL IMAGE (WxH)` fallback without reporting skips as
+    passes.
 
   ### Performance
   - Context-menu highlight redraws now reuse the last validated pane snapshots
@@ -97,6 +491,186 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
     frame's quad batches, but reuses all retained text vertices. Stable
     block-cursor glyph vertices are retained too and are refreshed on glyph,
     geometry, style, font, or shared-atlas damage.
+  - Full UI-only frames no longer lock every pane to compare scrollback depth.
+    Tab activity and `scroll-on-output` use the PTY reader's lock-free output
+    generation, which also detects in-place and alternate-screen output that
+    the former history-growth proxy missed. The grid lock is now taken only
+    when `scroll-on-output` is enabled and output actually changed.
+  - Remote-context polling now coalesces all panes/windows through one bounded
+    background scanner; process enumeration never blocks the event loop and
+    idle windows receive explicit title/redraw delivery. Linux follows every
+    bounded task's child edges, reuses BFS scratch, reads cwd only for the
+    selected local foreground pid, and enforces byte/node/task/argv/time caps.
+    Partial scans do not replace the last complete state; direct/nested remote
+    clients suppress host cwd, and Split/Duplicate uses the cached foreground
+    shell rather than scanning on the input path.
+  - Context-menu width now uses Unicode display columns and truncates only at
+    grapheme boundaries. Rendering, pointer hit-testing, and agent geometry
+    reporting share the same clamped panel dimensions, and partially clipped
+    bottom rows remain non-interactive. Scroll indicators now disappear when
+    the visible suffix actually reaches the final row.
+  - Context-menu pointer hit-testing now streams row kinds without allocating a
+    temporary vector, and wheel-scroll clamping finds the final fitting suffix
+    in one reverse pass. Both paths remain linear even for the 512-entry theme
+    submenu.
+
+  ### Added
+  - Expanded the Windows performance harness from four terminals to Kettle,
+    Windows Terminal, Alacritty, WezTerm, Rio, and Tabby. Executable discovery
+    is centralized; every probe records binary, version, configuration, run,
+    schedule, and source/build provenance.
+  - Added explicit `release` and `smoke` harness modes. Release mode pins all
+    probes and sample counts and rejects skips, unidentified displays, custom
+    Kettle config, or non-release toolchains. Manifest-only smoke records
+    discovery and topology without presenting it as live benchmark evidence.
+  - Added shared immutable release acquisition and scoring contracts. Release
+    evidence now pins terminal order, seed, menu block size, cooldown, window
+    geometry, transition count, and every score threshold; producer and scorer
+    reject caller deviations independently.
+  - Added an append-only Windows comparator campaign. Official asset URLs,
+    archive and expanded-tree identities, versions, executable
+    bytes/hashes/signatures, and confirmed/advisory roles are reviewed in one
+    tracked manifest. Setup is networked only before measurement; release runs
+    revalidate it offline, retain every confirmed-tree file handle, reject
+    executable overrides, and bind both schema-4 manifests to the same
+    campaign. Windows Terminal additionally requires the exact installed Appx
+    identity. Release acquisition resolves and read-leases that package's real
+    `WindowsTerminal.exe`; the ambient `wt.exe` app-execution alias is accepted
+    only in smoke mode, so a shadow launcher or unrelated running host cannot
+    satisfy release evidence.
+  - Added run-local isolated configs for Kettle, Alacritty, WezTerm, Rio, and
+    Tabby with a common font, palette, scrollback, padding, opacity, cursor, and
+    disabled effects/update/telemetry settings. Windows Terminal is recorded as
+    advisory because it has no supported per-launch settings-file switch.
+  - Added deterministic seeded Williams-balanced schedules for startup,
+    idle/fresh-memory, latency blocks, and throughput rounds.
+  - Added a controlled startup-ready protocol: an atomic GO marker, flushed
+    truecolor paint, `CSI 5 n` → `CSI 0 n` parser round trip, atomic READY
+    marker, and validated painted ROI now define the startup boundary.
+    Process-tree attribution is deferred until after that endpoint and recorded
+    separately so CIM latency cannot inflate startup.
+  - Added a locked, unpredictable throughput GO capability. Workloads cannot
+    begin before the exact attributed window is sized and focused, and each
+    observation retains client-pixel, console-cell, and handshake evidence.
+  - Added high-DPI context-menu latency probes for both the common 1280×800
+    comparator window and a native-display window derived from the active
+    monitor. Both capture only the context-menu ROI over 200 blocked samples.
+  - Added a two-screen physical-monitor transition probe that measures
+    capturable `ui_geometry` recovery with Kettle's context menu closed and
+    open and invalidates results if topology changes.
+  - Added continuous Windows `DisplaySettingsChanged` monitoring plus signed
+    topology snapshots at every probe boundary. A switch-away-and-back is now
+    retained as an invalidating event even when start and end displays match.
+  - Added raw paired release statistics: deterministic 10,000-resample 90%
+    bootstrap intervals, practical margins, Theil-Sen/peak-to-peak drift gates,
+    confirmed isolated-peer policy, strict per-round throughput margins, and
+    mandatory matched current-versus-baseline non-inferiority. The deterministic
+    bootstrap hot loop uses a pinned in-memory C# kernel with cross-engine
+    fixtures that preserve the prior algorithm byte-for-byte.
+  - Added JSON-only evidence sanitization. Public bundles replace local paths,
+    commands, monitor serials, and device identifiers with bundle-secret HMAC
+    tokens and never copy raw logs, `.dat`, screenshots, or artifact
+    directories.
+    Flat bounded staging, retained identity checks, reparse rejection, exact
+    cleanup, and atomic publication prevent path-swap escape.
+  - Added complete GUI-free performance-harness integration fixtures under
+    PowerShell 7 and Windows PowerShell 5.1, including positive schema-4
+    release evidence and tampered baseline/provenance/geometry cases.
+  - Added bounded no-follow evidence snapshots with strict BOM-free UTF-8,
+    JSON depth/node/byte limits, duplicate-key rejection, retained identity
+    locks, and deterministic hashes. Release runs also hash and read-lock every
+    production harness script and require current/baseline harness identity.
+  - Replaced the predictable throughput sample-file handoff with a bounded,
+    nonce-authenticated, current-user named-pipe protocol with finite timeouts
+    and client-process ancestry validation.
+  - Added a committed Nix flake lock and always-on PR/main CI that checks the
+    locked flake and builds the x86_64 Linux package.
+  - Added a locked validation-only workspace for every patched vendored crate.
+    Local strict validation and native CI now run their retained unit targets,
+    doctests, warnings-denied clippy, RustSec audit, and cargo-deny policy
+    directly; Dependabot excludes immutable vendored snapshots so updates
+    cannot silently discard reviewed local fixes.
+
+  ### Benchmark, packaging, and release hardening
+  - The Windows installer smoke no longer aborts before reaching any product
+    logic when it is started from a PowerShell 7 session. Windows PowerShell
+    cannot load PowerShell 7's .NET-Core build of the modules whose names it
+    shares, and the inherited `PSModulePath` put those roots ahead of the system
+    one, so autoloading `Microsoft.PowerShell.Security` for `Get-Acl` failed
+    outright. The check now keeps only module roots its own edition can load.
+  - The Windows `.ico` packaging smoke now runs. Its recipe body was inline
+    PowerShell, and a plain `just` recipe evaluates each line in a separate
+    shell, so the variable holding the icon path was already gone by the line
+    that read it — the check failed on every Windows invocation and took the
+    full local gate down with it. The ICONDIR parsing moved to
+    `scripts/check-windows-ico.ps1`, matching how every other Windows recipe
+    here calls a script, with the resolution floor as a parameter.
+  - Windows performance runs now retain a unique active `WmiMonitorID` as the
+    preferred physical-display identity and use a versioned, fail-closed CCD
+    fallback when WMI is absent or ambiguous. The fallback reads only the exact
+    registry EDID named by the active device-interface path, validates every
+    block plus CCD manufacturer/product agreement, rejects ambiguity and
+    tampering, and never searches stale monitor instances by model.
+  - Homebrew's macOS install now writes bundled documentation through a
+    platform-independent share path instead of a Linux-only local variable.
+  - Nix outputs no longer apply Linux-only libraries and `patchelf` fixups on
+    Darwin, advertise the x86_64 Darwin platform dropped by nixpkgs unstable,
+    or omit the shell/process tools required by sandboxed PTY tests.
+  - Nix Linux packages now include winit's dynamically loaded Xcursor and
+    XInput2 libraries without replacing Nix's glibc/libgcc RUNPATH. A
+    clean-environment Xvfb and Mesa software-Vulkan launch check verifies the
+    installed binary creates a visible rendered window.
+  - Nix Linux packages now install the Desktop Entry, scalable and raster
+    hicolor icons, man page, and all shell-integration snippets beneath
+    `$out/share`; Darwin outputs remain free of Linux desktop assets. A
+    derivation-level content gate byte-compares the complete installed share
+    tree with its checked-in sources.
+  - Windows comparator discovery now recognizes Rio's current Winget MSI
+    layout (`Program Files\Rio\rio.exe`) as well as its legacy `bin` layout.
+  - Performance runs now force a separate Kettle process and stop attributing
+    unrelated Windows Terminal tabs to one benchmark window's memory/idle CPU.
+    Workload child processes are also excluded from fresh and post-flood
+    terminal-tree memory/CPU accounting.
+  - Windows benchmark input/capture now opts into per-monitor-v2 DPI awareness,
+    keeping physical Kettle geometry, pointer targets, and PrintWindow pixels
+    aligned on scaled 4K/5K displays. Startup and menu polling use bounded ROIs
+    rather than transferring a full high-resolution frame on every poll.
+  - Throughput now measures console-write start through the terminal's DSR
+    parser-drain response. Writer acceptance remains diagnostic and cannot make
+    a backlogged terminal look faster.
+  - Release scoring now fails closed on missing/inconsistent raw samples,
+    censored evidence beyond policy, uncertain bootstrap intervals, drift,
+    altered payloads, non-UTF-8 output, dirty/unknown source identity, changed
+    configs, unstable display topology, or incomplete native-display and
+    monitor-transition evidence. Tabby's command probes retain their bounded
+    native confirmation and byte-verified, read-locked one-use wrapper.
+  - Public-evidence publication now retains the exact staging object through
+    its handle-relative rename, revalidates the exact flat set, alternate data
+    streams, and hashes after the move, and rolls the same object back if any
+    post-publication invariant fails.
+  - Release signing now rejects a secret whose Ed25519 public key differs from
+    the checked-in production trust root and verifies the manifest with that
+    pinned key, preventing a misconfigured or rotated secret from publishing
+    updates that every shipped client would reject.
+  - Release archives are now reopened and validated through one bounded,
+    manifest-aware extractor in the protected finalizer. It rejects link,
+    device, sparse, PAX override, traversal, alias, prefix-conflict,
+    permission, count, and expanded-size hazards without a raw `tar` or
+    `Expand-Archive` pass, and the manifest generator shares the updater's
+    256 MiB artifact ceiling.
+  - The Linux one-line installer now bounds every response, requires
+    Ed25519 verification for modern releases without a checksum downgrade,
+    binds the canonical manifest target/name/size/hash tuple, and preflights
+    the authenticated archive before extracting only regular files and
+    directories into a private root. Legacy releases without an exact
+    same-origin checksum are refused rather than executed unauthenticated.
+  - Release builds now use pinned runner images, an exact Rust toolchain, and
+    `--locked` Cargo commands. The protected signer is read-only and hands its
+    exact finalized set to a separate publisher that has no signing secret.
+    Before publication that job re-verifies the signature, canonical
+    sidecars, archives, package metadata, draft identity/state, and the exact
+    14 local byte lengths and streamed SHA-256 digests reported by GitHub,
+    closing the prior shared-credential and name-and-size-only gaps.
 
 ## [2.42.0] — 2026-07-24
 
@@ -785,11 +1359,11 @@ follow-ups — are tracked in
     policy is `off|notify|auto`, and interrupted transactions roll back. Windows
     installs include a console launcher so bare `kettle` commands wait for
     prompts and propagate exit codes without adding a console to Start launches.
-  - **Codex and Claude Code clipboard-image chords are explicitly preserved.**
-    `Ctrl+V` reaches native Codex and Linux/WSL Claude as `C-v`; `Ctrl+Alt+V`
-    reaches Codex under WSL as `M-C-v`; `Alt+V` reaches native Windows Claude as
-    `M-v`. Kettle keeps `Ctrl+Shift+V` for its own text paste and documents tmux
-    precedence and WSL clipboard fallback behavior.
+  - **Unbound application shortcuts remain available to PTY clients.** Kettle
+    keeps `Ctrl+Shift+V` for its own paste action; other `V` modifier
+    combinations are encoded through the active terminal keyboard mode instead
+    of being intercepted by default bindings. This guarantees input transport,
+    not a particular client's version- or platform-specific attachment action.
 
 ## [2.34.4] — 2026-07-09
 

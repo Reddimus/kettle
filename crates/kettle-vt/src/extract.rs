@@ -3,8 +3,8 @@
 //! image support. Everything else passes through byte-for-byte so the terminal
 //! engine still sees correct cursor/scroll behavior.
 
-use crate::image::{ImageData, Placed};
-use crate::kitty::{KittyOut, KittyState};
+use crate::image::{ImageData, Placed, PlacementParams};
+use crate::kitty::{Delete, KittyOut, KittyState, PlacementKey};
 use crate::{GraphicsBudget, GraphicsReservation};
 use crate::{iterm, sixel};
 
@@ -21,19 +21,34 @@ pub enum PromptKind {
     CommandEnd(Option<i32>),
 }
 
+/// Graphics-protocol storage follows the terminal's two screen buffers.
+///
+/// Kitty image ids, virtual placements, animations, and partial uploads are
+/// isolated between the primary and alternate screens. This is deliberately
+/// independent of the text parser: [`Extractor::enter_alternate_screen`] and
+/// [`Extractor::leave_alternate_screen`] are called by the terminal core after
+/// it observes the corresponding buffer transition.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GraphicsScreen {
+    Primary,
+    Alternate,
+}
+
 #[derive(Debug)]
 pub enum Chunk {
     /// Bytes to forward to the terminal engine unchanged.
     Pass(Vec<u8>),
     /// A decoded image to place at the current cursor position.
     Image(Placed),
-    /// kitty `a=d`: delete images (all, or by image id).
-    DeleteImages { all: bool, id: Option<u32> },
+    /// Kitty `a=d`: delete placements selected by id, number, cursor/cell,
+    /// range, column, row, or z-index.
+    DeleteImages(Delete),
     /// kitty `U=1` virtual placement: store the image + its `cols`×`rows`
     /// box by id; it is drawn later wherever `U+10EEEE` placeholder cells
     /// reference this id (not at the cursor).
     VirtualImage {
         id: u32,
+        placement: u32,
         img: ImageData,
         cols: u32,
         rows: u32,
@@ -50,6 +65,8 @@ pub enum Chunk {
         parent_placement: u32,
         h: i32,
         v: i32,
+        z: i32,
+        params: PlacementParams,
     },
     /// kitty animation snapshot for image `id`: the full display sequence
     /// (`imgs[0]` = base/root frame) with each frame's gap in ms and the
@@ -62,6 +79,9 @@ pub enum Chunk {
         gaps: Vec<i32>,
         state: crate::kitty::AnimationState,
     },
+    /// A complete graphics control string held for an out-of-band DEC 2026
+    /// marker. It has not mutated any graphics-protocol store yet.
+    DeferredGraphics(DeferredGraphics),
     /// A shell-integration mark at the current cursor line.
     Prompt(PromptKind),
     /// Working-directory report (OSC 7), absolute path.
@@ -72,6 +92,26 @@ pub enum Chunk {
     /// Protocol desktop notification (`OSC 9 ; message` or
     /// `OSC 777 ; notify ; title ; body`).
     Notification { title: String, body: String },
+}
+
+/// One process-budgeted graphics control string deferred by DEC 2026.
+pub struct DeferredGraphics {
+    bytes: Vec<u8>,
+    _reservation: GraphicsReservation,
+}
+
+impl DeferredGraphics {
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.bytes
+    }
+}
+
+impl std::fmt::Debug for DeferredGraphics {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DeferredGraphics")
+            .field("bytes", &self.bytes.len())
+            .finish_non_exhaustive()
+    }
 }
 
 /// OSC 9;4 taskbar-progress state. PowerShell 7 `Write-Progress` (with
@@ -102,12 +142,25 @@ const MAX_NOTIFY_FIELD_BYTES: usize = 8 << 10;
 /// terminator without immediately exposing the rejected payload downstream.
 const MAX_SEQ_RESYNC_BYTES: usize = 64 * 1024;
 
-#[derive(PartialEq)]
+#[derive(Clone, Copy, PartialEq)]
 enum Mode {
     Pass,
     Dcs,
     Apc,
     Osc,
+}
+
+fn is_graphics_sequence(mode: Mode, seq: &[u8]) -> bool {
+    match mode {
+        Mode::Dcs => seq.iter().position(|&byte| byte == b'q').is_some_and(|q| {
+            seq[..q]
+                .iter()
+                .all(|byte| byte.is_ascii_digit() || *byte == b';')
+        }),
+        Mode::Apc => seq.first() == Some(&b'G'),
+        Mode::Osc => seq.starts_with(b"1337;File="),
+        Mode::Pass => false,
+    }
 }
 
 pub struct Extractor {
@@ -119,7 +172,10 @@ pub struct Extractor {
     /// The terminator that ended the current sequence was a BEL (`0x07`),
     /// not `ESC \`; preserved so pass-through bytes echo exactly.
     term_bel: bool,
-    kitty: KittyState,
+    kitty_primary: KittyState,
+    kitty_alternate: KittyState,
+    graphics_screen: GraphicsScreen,
+    defer_graphics: bool,
     budget: GraphicsBudget,
     seq_reservation: Option<GraphicsReservation>,
     discarding_seq: bool,
@@ -159,13 +215,94 @@ impl Extractor {
             esc_pending: false,
             st_pending: false,
             term_bel: false,
-            kitty: KittyState::new(budget.clone()),
+            kitty_primary: KittyState::new(budget.clone()),
+            kitty_alternate: KittyState::new(budget.clone()),
+            graphics_screen: GraphicsScreen::Primary,
+            defer_graphics: false,
             budget,
             seq_reservation: None,
             discarding_seq: false,
             discard_remaining: 0,
             seq_tail: [0; 3],
             seq_tail_len: 0,
+        }
+    }
+
+    /// Complete a kitty deletion after the terminal core has resolved spatial
+    /// placement selectors and uppercase data-lifetime semantics.
+    pub fn apply_kitty_delete_result(&mut self, removed: &[PlacementKey], freed_image_ids: &[u32]) {
+        self.kitty_mut()
+            .apply_delete_result(removed, freed_image_ids);
+    }
+
+    /// Enter the alternate screen, optionally clearing its stored graphics.
+    ///
+    /// DECSET 47 and 1047 preserve the alternate buffer on entry. DECSET 1049
+    /// clears it before switching, and Kitty requires images to follow that
+    /// text-buffer boundary while preserving primary-screen graphics.
+    pub fn enter_alternate_screen(&mut self, clear: bool) {
+        if clear {
+            self.kitty_alternate = KittyState::new(self.budget.clone());
+        }
+        self.graphics_screen = GraphicsScreen::Alternate;
+    }
+
+    /// Return to the primary screen, optionally clearing alternate graphics.
+    ///
+    /// DECRST 47 and 1049 preserve the alternate buffer. DECRST 1047 clears it
+    /// before returning to the primary buffer, while 1049 defers its clear to
+    /// the next entry so its contents remain available for selection.
+    pub fn leave_alternate_screen(&mut self, clear: bool) {
+        if clear {
+            self.kitty_alternate = KittyState::new(self.budget.clone());
+        }
+        self.graphics_screen = GraphicsScreen::Primary;
+    }
+
+    /// Clear every graphics-protocol object in the active screen.
+    ///
+    /// This is the cache-clearing behavior required for ED 2. Primary and
+    /// alternate stores remain isolated.
+    pub fn clear_active_graphics(&mut self) {
+        let replacement = KittyState::new(self.budget.clone());
+        match self.graphics_screen {
+            GraphicsScreen::Primary => self.kitty_primary = replacement,
+            GraphicsScreen::Alternate => self.kitty_alternate = replacement,
+        }
+    }
+
+    /// Reset graphics in both screen buffers, as required by RIS.
+    pub fn reset_all_graphics(&mut self) {
+        self.kitty_primary = KittyState::new(self.budget.clone());
+        self.kitty_alternate = KittyState::new(self.budget.clone());
+        self.graphics_screen = GraphicsScreen::Primary;
+    }
+
+    /// Drop placement relations whose document-row anchors cannot survive a
+    /// column reflow, while retaining transmitted image data and Unicode
+    /// virtual-placement prototypes.
+    pub fn clear_reflowed_regular_placements(&mut self) {
+        self.kitty_primary.clear_relative_placements();
+        self.kitty_alternate.clear_relative_placements();
+    }
+
+    /// Defer complete graphics strings without parsing or mutating their
+    /// buffer-local stores.
+    pub fn set_graphics_deferred(&mut self, deferred: bool) {
+        self.defer_graphics = deferred;
+    }
+
+    fn kitty(&self) -> &KittyState {
+        match self.graphics_screen {
+            GraphicsScreen::Primary => &self.kitty_primary,
+            GraphicsScreen::Alternate => &self.kitty_alternate,
+        }
+    }
+
+    fn kitty_mut(&mut self) -> &mut KittyState {
+        match self.graphics_screen {
+            GraphicsScreen::Primary => &mut self.kitty_primary,
+            GraphicsScreen::Alternate => &mut self.kitty_alternate,
         }
     }
 
@@ -181,7 +318,27 @@ impl Extractor {
     /// byte-identical to the old loop, including ESC / ESC-\ split across
     /// `feed` calls.
     pub fn feed(&mut self, input: &[u8]) -> Vec<Chunk> {
-        let mut out: Vec<Chunk> = Vec::new();
+        let mut collected = Vec::new();
+        self.feed_with(input, |_, chunk| collected.push(chunk));
+        collected
+    }
+
+    /// Feed bytes and handle each completed chunk before parsing the next
+    /// control sequence.
+    ///
+    /// This streaming form is required when a handler feeds state back into
+    /// the extractor. In particular, kitty uppercase deletion depends on the
+    /// terminal core's placement registry; applying that result before the
+    /// next APC preserves wire order when delete and re-place/re-transmit
+    /// commands arrive in one PTY read.
+    pub fn feed_with<F>(&mut self, input: &[u8], mut handle: F)
+    where
+        F: FnMut(&mut Self, Chunk),
+    {
+        // `finish_seq` and `flush_pass` each emit at most one chunk. Reusing a
+        // tiny staging Vec keeps their established, heavily-tested parsing
+        // paths intact while still handing chunks off at sequence boundaries.
+        let mut out: Vec<Chunk> = Vec::with_capacity(1);
         let mut i = 0usize;
         while i < input.len() {
             match self.mode {
@@ -234,6 +391,7 @@ impl Extractor {
                             i += 1;
                             self.term_bel = false;
                             self.finish_seq(&mut out);
+                            self.handle_pending_chunks(&mut out, &mut handle);
                             continue;
                         }
                         if self.discarding_seq {
@@ -317,9 +475,19 @@ impl Extractor {
                     }
                 }
             }
+            self.handle_pending_chunks(&mut out, &mut handle);
         }
         self.flush_pass(&mut out);
-        out
+        self.handle_pending_chunks(&mut out, &mut handle);
+    }
+
+    fn handle_pending_chunks<F>(&mut self, out: &mut Vec<Chunk>, handle: &mut F)
+    where
+        F: FnMut(&mut Self, Chunk),
+    {
+        for chunk in out.drain(..) {
+            handle(self, chunk);
+        }
     }
 
     fn flush_pass(&mut self, out: &mut Vec<Chunk>) {
@@ -553,15 +721,63 @@ impl Extractor {
             seq[0] = b'2';
         }
 
+        if self.defer_graphics && is_graphics_sequence(mode, &seq) {
+            let terminator_len = if self.term_bel && mode == Mode::Osc {
+                1
+            } else {
+                2
+            };
+            let Some(raw_len) = seq
+                .len()
+                .checked_add(2)
+                .and_then(|len| len.checked_add(terminator_len))
+            else {
+                return;
+            };
+            let mut reservation = match _seq_reservation {
+                Some(reservation) => reservation,
+                None => {
+                    let Some(reservation) = self.budget.reserve_transient_cpu(raw_len) else {
+                        return;
+                    };
+                    reservation
+                }
+            };
+            if !reservation.try_grow_to(raw_len)
+                || seq.try_reserve_exact(2 + terminator_len).is_err()
+            {
+                return;
+            }
+            let payload_len = seq.len();
+            seq.resize(raw_len, 0);
+            seq.copy_within(0..payload_len, 2);
+            seq[0] = 0x1b;
+            seq[1] = match mode {
+                Mode::Dcs => b'P',
+                Mode::Apc => b'_',
+                Mode::Osc => b']',
+                Mode::Pass => return,
+            };
+            if terminator_len == 1 {
+                seq[raw_len - 1] = 0x07;
+            } else {
+                seq[raw_len - 2] = 0x1b;
+                seq[raw_len - 1] = b'\\';
+            }
+            out.push(Chunk::DeferredGraphics(DeferredGraphics {
+                bytes: seq,
+                _reservation: reservation,
+            }));
+            return;
+        }
+
         enum R {
             None,
             Img(Placed),
-            Del {
-                all: bool,
-                id: Option<u32>,
-            },
+            Del(Delete),
             Virtual {
                 id: u32,
+                placement: u32,
                 img: ImageData,
                 cols: u32,
                 rows: u32,
@@ -581,6 +797,8 @@ impl Extractor {
                 parent_placement: u32,
                 h: i32,
                 v: i32,
+                z: i32,
+                params: PlacementParams,
             },
         }
 
@@ -610,16 +828,20 @@ impl Extractor {
                     let Some(body) = std::str::from_utf8(&seq[1..]).ok() else {
                         return;
                     };
-                    match self.kitty.feed(body) {
+                    match self.kitty_mut().feed(body) {
                         KittyOut::Place(p) => R::Img(p),
-                        KittyOut::Delete { all, id } => R::Del { all, id },
+                        KittyOut::Delete(delete) => R::Del(delete),
                         // Virtual placements draw nothing at the cursor; the
                         // stored image + box are surfaced so the renderer can
                         // composite them where placeholder cells appear.
-                        KittyOut::Virtual { id } => {
-                            match (self.kitty.image(id), self.kitty.virtual_placement(id)) {
+                        KittyOut::Virtual { id, placement } => {
+                            match (
+                                self.kitty().image(id),
+                                self.kitty().virtual_placement(id, placement),
+                            ) {
                                 (Some(img), Some(vp)) => R::Virtual {
                                     id,
+                                    placement,
                                     img: img.clone(),
                                     cols: vp.cols,
                                     rows: vp.rows,
@@ -631,12 +853,12 @@ impl Extractor {
                         // Snapshot the full display sequence: base/root
                         // image first, then each transmitted frame, with the
                         // root gap from the control state.
-                        KittyOut::Animate { id } => match self.kitty.image(id) {
+                        KittyOut::Animate { id } => match self.kitty().image(id) {
                             Some(base) => {
-                                let st = self.kitty.animation(id).copied().unwrap_or_default();
+                                let st = self.kitty().animation(id).copied().unwrap_or_default();
                                 let mut imgs = vec![base.clone()];
                                 let mut gaps = vec![st.root_gap];
-                                for f in self.kitty.frames(id) {
+                                for f in self.kitty().frames(id) {
                                     imgs.push(f.img.clone());
                                     gaps.push(f.gap_ms);
                                 }
@@ -654,8 +876,8 @@ impl Extractor {
                         // on-screen position from the parent placement.
                         KittyOut::Relative { id, placement } => {
                             match (
-                                self.kitty.image(id),
-                                self.kitty.relative_placement(id, placement),
+                                self.kitty().image(id),
+                                self.kitty().relative_placement(id, placement),
                             ) {
                                 (Some(img), Some(rp)) => R::Rel {
                                     id,
@@ -665,6 +887,8 @@ impl Extractor {
                                     parent_placement: rp.parent_placement,
                                     h: rp.h,
                                     v: rp.v,
+                                    z: rp.z,
+                                    params: rp.params,
                                 },
                                 _ => R::None,
                             }
@@ -696,15 +920,17 @@ impl Extractor {
 
         match result {
             R::Img(data) => out.push(Chunk::Image(data)),
-            R::Del { all, id } => out.push(Chunk::DeleteImages { all, id }),
+            R::Del(delete) => out.push(Chunk::DeleteImages(delete)),
             R::Virtual {
                 id,
+                placement,
                 img,
                 cols,
                 rows,
                 z,
             } => out.push(Chunk::VirtualImage {
                 id,
+                placement,
                 img,
                 cols,
                 rows,
@@ -729,6 +955,8 @@ impl Extractor {
                 parent_placement,
                 h,
                 v,
+                z,
+                params,
             } => out.push(Chunk::RelativePlacement {
                 id,
                 placement,
@@ -737,6 +965,8 @@ impl Extractor {
                 parent_placement,
                 h,
                 v,
+                z,
+                params,
             }),
             R::None => {
                 // Not an image (or unsupported): forward verbatim, terminator
@@ -1021,6 +1251,7 @@ fn parse_prompt(rest: &[u8]) -> Option<PromptKind> {
 #[cfg(test)]
 mod tests {
     use super::{Chunk, Extractor, PromptKind};
+    use crate::kitty::PlacementKey;
     use base64::Engine;
 
     fn png(w: u32, h: u32) -> Vec<u8> {
@@ -1041,6 +1272,95 @@ mod tests {
         match &out[0] {
             Chunk::Pass(b) => assert_eq!(b, b"hello world"),
             other => panic!("expected Pass, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn streaming_feed_applies_delete_before_later_apcs_in_the_same_read() {
+        let mut ex = Extractor::isolated();
+        ex.feed(b"\x1b_Ga=t,i=7,f=32,s=1,v=1;AQIDBA==\x1b\\");
+
+        let input = concat!(
+            "\x1b_Ga=d,d=I,i=7,p=9\x1b\\",
+            "\x1b_Ga=p,i=7,p=10\x1b\\",
+            "\x1b_Ga=t,i=7,f=32,s=1,v=1;AQIDBA==\x1b\\",
+            "\x1b_Ga=p,i=7,p=11\x1b\\",
+        );
+        let mut chunks = Vec::new();
+        ex.feed_with(input.as_bytes(), |extractor, chunk| {
+            if matches!(chunk, Chunk::DeleteImages(_)) {
+                extractor.apply_kitty_delete_result(
+                    &[PlacementKey {
+                        image_id: 7,
+                        placement_id: 9,
+                    }],
+                    &[7],
+                );
+            }
+            chunks.push(chunk);
+        });
+
+        let placements = chunks
+            .iter()
+            .filter_map(|chunk| match chunk {
+                Chunk::Image(placed) => Some(placed.placement_id),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            placements,
+            vec![11],
+            "the old data must be unavailable immediately, while data transmitted after deletion survives"
+        );
+    }
+
+    #[test]
+    fn deferred_graphics_preserve_wire_bytes_without_mutating_kitty_state() {
+        const TRANSMIT: &[u8] = b"\x1b_Ga=t,i=7,f=32,s=1,v=1;AQIDBA==\x1b\\";
+        const PUT: &[u8] = b"\x1b_Ga=p,i=7,p=9\x1b\\";
+
+        let mut ex = Extractor::isolated();
+        ex.set_graphics_deferred(true);
+        let deferred = ex.feed(TRANSMIT);
+        assert_eq!(deferred.len(), 1);
+        let raw = match &deferred[0] {
+            Chunk::DeferredGraphics(graphics) => graphics.as_bytes(),
+            other => panic!("expected deferred kitty APC, got {other:?}"),
+        };
+        assert_eq!(raw, TRANSMIT);
+
+        ex.set_graphics_deferred(false);
+        assert!(
+            !ex.feed(PUT)
+                .iter()
+                .any(|chunk| matches!(chunk, Chunk::Image(_))),
+            "deferring the transmit must not populate the active kitty store"
+        );
+
+        ex.feed(raw);
+        assert!(
+            ex.feed(PUT)
+                .iter()
+                .any(|chunk| matches!(chunk, Chunk::Image(placed) if placed.id == Some(7) && placed.placement_id == 9)),
+            "replaying the deferred bytes must mutate kitty state at that exact point"
+        );
+    }
+
+    #[test]
+    fn all_supported_graphics_controls_defer_with_exact_terminators() {
+        for raw in [
+            &b"\x1bPq~\x1b\\"[..],
+            &b"\x1b_Ga=d,d=A\x1b\\"[..],
+            &b"\x1b]1337;File=inline=1:AAAA\x07"[..],
+        ] {
+            let mut ex = Extractor::isolated();
+            ex.set_graphics_deferred(true);
+            let chunks = ex.feed(raw);
+            assert_eq!(chunks.len(), 1, "unexpected chunks for {raw:?}");
+            match &chunks[0] {
+                Chunk::DeferredGraphics(graphics) => assert_eq!(graphics.as_bytes(), raw),
+                other => panic!("expected deferred graphics for {raw:?}, got {other:?}"),
+            }
         }
     }
 

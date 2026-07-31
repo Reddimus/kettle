@@ -1,3 +1,6 @@
+# typed: strict
+# frozen_string_literal: true
+
 # Homebrew formula template for kettle.
 #
 # The release finalizer renders this file as the `kettle.rb` release asset
@@ -16,29 +19,20 @@
 #         brew install kettle
 #
 # Per-release maintenance is automatic. `render-package-templates.py`
-# computes both digests from the verified archives and replaces the three
+# computes every digest from the verified release inputs and replaces the five
 # tokens below. `brew livecheck kettle` still flags tap-repository drift.
 #
 # This file is a template — it does NOT live in a tap repo yet.
 # See `packaging/homebrew/README.md` for the full setup walkthrough.
 
+# Formula for Kettle's signed release manifest and platform binary archives.
 class Kettle < Formula
   desc "Fast, cross-platform, GPU-accelerated terminal emulator written in Rust"
   homepage "https://github.com/Reddimus/kettle"
+  url "https://github.com/Reddimus/kettle/releases/download/v@VERSION@/kettle-update-manifest.json",
+      using: :nounzip
+  sha256 "@RELEASE_MANIFEST_SHA256@"
   license "MIT"
-  version "@VERSION@"
-
-  on_macos do
-    # macOS ships the universal2 .app bundle — same binary covers
-    # arm64 and x86_64. No need to split by architecture.
-    url "https://github.com/Reddimus/kettle/releases/download/v#{version}/kettle-macos-universal.zip"
-    sha256 "@MACOS_SHA256@"
-  end
-
-  on_linux do
-    url "https://github.com/Reddimus/kettle/releases/download/v#{version}/kettle-linux-x86_64.tar.gz"
-    sha256 "@LINUX_X86_64_SHA256@"
-  end
 
   livecheck do
     # `latest_release` follows the same `/releases/latest` redirect
@@ -49,46 +43,70 @@ class Kettle < Formula
     strategy :github_latest
   end
 
-  def install
-    if OS.mac?
-      # The macOS zip contains `kettle.app` at the root.
-      prefix.install "kettle.app"
-      # Symlink the binary inside the .app into bin/ so `kettle` on
-      # the user's PATH works after `brew install`. `write_exec_script`
-      # would also work but `bin.install_symlink` is the canonical
-      # pattern for .app-wrapped CLIs on Homebrew (matches the
-      # `macvim`, `ghostty`, etc. formulae).
-      bin.install_symlink prefix/"kettle.app/Contents/MacOS/kettle"
-    else
-      # The Linux tarball extracts to a `kettle/` directory with
-      # the binary + LICENSE + NOTICE + README + CHANGELOG +
-      # packaging assets at the root.
-      bin.install "kettle/kettle"
-      # Install the man page so `man kettle` works after install.
-      if File.exist?("kettle/packaging/linux/kettle.1")
-        man1.install "kettle/packaging/linux/kettle.1"
+  resource "binary" do
+    on_macos do
+      # macOS ships the universal2 .app bundle — same binary covers
+      # arm64 and x86_64. No need to split by architecture.
+      url "https://github.com/Reddimus/kettle/releases/download/v@VERSION@/kettle-macos-universal.zip"
+      sha256 "@MACOS_SHA256@"
+    end
+
+    on_linux do
+      on_arm do
+        url "https://github.com/Reddimus/kettle/releases/download/v@VERSION@/kettle-linux-aarch64.tar.gz"
+        sha256 "@LINUX_AARCH64_SHA256@"
       end
-      # Keep the XDG launcher + icons so a `brew install`-ed kettle
-      # also shows up in GNOME Activities / Ubuntu Super-key search
-      # on Homebrew-on-Linux users (Linuxbrew). Same paths
-      # `install.sh` writes to.
-      share = prefix/"share"
-      (share/"applications").install "kettle/packaging/linux/kettle.desktop"
-      (share/"icons/hicolor/scalable/apps").install "kettle/packaging/linux/kettle.svg"
-      Dir.glob("kettle/packaging/linux/kettle-*.png").each do |png|
-        # png filename is e.g. `kettle-256.png` — extract the size.
-        size = png[/kettle-(\d+)\.png/, 1]
-        (share/"icons/hicolor/#{size}x#{size}/apps").install(png => "kettle.png")
+
+      on_intel do
+        url "https://github.com/Reddimus/kettle/releases/download/v@VERSION@/kettle-linux-x86_64.tar.gz"
+        sha256 "@LINUX_X86_64_SHA256@"
       end
     end
-    # Per-platform docs that ship in the release archives (LICENSE,
-    # NOTICE, README, CHANGELOG, shell-integration/) — drop them
-    # under share/doc so users have an offline reference.
-    doc_dir = OS.mac? ? "kettle.app/Contents/Resources" : "kettle"
-    %w[LICENSE NOTICE README.md CHANGELOG.md].each do |f|
-      next unless File.exist?("#{doc_dir}/#{f}")
+  end
 
-      (share/"doc/kettle").install "#{doc_dir}/#{f}"
+  def install
+    share_dir = prefix/"share"
+    resource("binary").stage do
+      if OS.mac?
+        # Homebrew stages a single-root archive from inside that root, so the
+        # current directory is the extracted `kettle.app` bundle.
+        prefix.install Pathname.pwd
+        # Symlink the binary inside the .app into bin/ so `kettle` on
+        # the user's PATH works after `brew install`. `write_exec_script`
+        # would also work but `bin.install_symlink` is the canonical
+        # pattern for .app-wrapped CLIs on Homebrew (matches the
+        # `macvim`, `ghostty`, etc. formulae).
+        bin.install_symlink prefix/"kettle.app/Contents/MacOS/kettle"
+      else
+        # Homebrew stages the Linux archive from inside its single `kettle/`
+        # root, alongside the binary and packaging assets.
+        bin.install "kettle"
+        # Install the man page so `man kettle` works after install.
+        man1.install "packaging/linux/kettle.1" if File.exist?("packaging/linux/kettle.1")
+        # Keep the XDG launcher + icons so a `brew install`-ed kettle
+        # also shows up in GNOME Activities / Ubuntu Super-key search
+        # on Homebrew-on-Linux users (Linuxbrew). Same paths
+        # `install.sh` writes to.
+        (share_dir/"applications").install "packaging/linux/kettle.desktop"
+        (share_dir/"icons/hicolor/scalable/apps").install "packaging/linux/kettle.svg"
+        Dir.glob("packaging/linux/kettle-*.png").each do |png|
+          # png filename is e.g. `kettle-256.png` — extract the size.
+          size = png[/kettle-(\d+)\.png/, 1]
+          (share_dir/"icons/hicolor/#{size}x#{size}/apps").install(png => "kettle.png")
+        end
+      end
+      # Per-platform docs that ship in the release archives (LICENSE,
+      # NOTICE, README, CHANGELOG, shell-integration/) — drop them
+      # under share/doc so users have an offline reference.
+      doc_dir = OS.mac? ? "Contents/Resources" : "."
+      %w[LICENSE NOTICE README.md CHANGELOG.md].each do |f|
+        next unless File.exist?("#{doc_dir}/#{f}")
+
+        (share_dir/"doc/kettle").install "#{doc_dir}/#{f}"
+      end
+      if File.directory?("#{doc_dir}/shell-integration")
+        (share_dir/"doc/kettle").install "#{doc_dir}/shell-integration"
+      end
     end
   end
 

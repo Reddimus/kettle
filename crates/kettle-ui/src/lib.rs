@@ -10,7 +10,7 @@
 //!   keyboard protocol, F-keys, named-key triggers, bracketed-paste payload
 //!   construction, OSC 52 clamp).
 //! - `mux` — tab/split tree, pane focus, broadcast input
-//!   (`broadcast_write` / `broadcast_paste` / `broadcast_scroll_to_bottom`),
+//!   (`broadcast_write_with_scroll` / `broadcast_paste`),
 //!   session snapshot/restore wiring, SSH-tab spawning.
 //! - `session` — atomic save + corruption-backup of the tab/split tree to
 //!   `<config-dir>/session.json`.

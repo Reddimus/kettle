@@ -25,9 +25,9 @@ use alacritty_terminal::Term;
 use alacritty_terminal::grid::Dimensions;
 use alacritty_terminal::index::{Column, Line, Point};
 use alacritty_terminal::selection::SelectionRange;
-use alacritty_terminal::term::RenderableCursor;
 use alacritty_terminal::term::cell::Flags;
 use alacritty_terminal::term::color::Colors as TermColors;
+use alacritty_terminal::term::{RenderableCursor, TermMode};
 use alacritty_terminal::vte::ansi::{Color as AnsiColor, CursorShape};
 use kettle_core::EventProxy;
 
@@ -92,6 +92,8 @@ pub struct PaneSnapshot {
     /// Viewport cells in `display_iter` order (row-major, all columns).
     pub cells: Vec<SnapCell>,
     pub cursor: RenderableCursor,
+    /// Whether `cursor` is alacritty_terminal's scrollback-aware vi cursor.
+    pub vi_mode: bool,
     /// DEC cursor blink state captured with the cursor so UI-only redraws do
     /// not need to reacquire the terminal lock just to build the overlay.
     pub cursor_blinking: bool,
@@ -103,6 +105,8 @@ pub struct PaneSnapshot {
     pub display_offset: usize,
     pub columns: usize,
     pub screen_lines: usize,
+    /// Monotonic document-row id of the oldest retained grid row.
+    pub history_origin: u64,
     pub history_size: usize,
 }
 
@@ -114,12 +118,14 @@ impl Default for PaneSnapshot {
                 shape: CursorShape::Hidden,
                 point: Point::new(Line(0), Column(0)),
             },
+            vi_mode: false,
             cursor_blinking: false,
             selection: None,
             colors: TermColors::default(),
             display_offset: 0,
             columns: 0,
             screen_lines: 0,
+            history_origin: 0,
             history_size: 0,
         }
     }
@@ -135,11 +141,13 @@ impl PaneSnapshot {
         let grid = term.grid();
         self.columns = grid.columns();
         self.screen_lines = grid.screen_lines();
+        self.history_origin = grid.history_origin();
         self.history_size = grid.history_size();
 
         let content = term.renderable_content();
         self.display_offset = content.display_offset;
         self.cursor = content.cursor;
+        self.vi_mode = content.mode.contains(TermMode::VI);
         self.cursor_blinking = term.cursor_style().blinking;
         self.selection = content.selection;
         self.colors = *content.colors;
@@ -201,10 +209,25 @@ mod tests {
     }
 
     fn test_term(cols: usize, rows: usize) -> (Term<EventProxy>, Processor) {
+        test_term_with_history(cols, rows, TermConfig::default().scrolling_history)
+    }
+
+    fn test_term_with_history(
+        cols: usize,
+        rows: usize,
+        scrolling_history: usize,
+    ) -> (Term<EventProxy>, Processor) {
         let (tx, _rx) = crossbeam_channel::unbounded();
         let waker: Waker = std::sync::Arc::new(|| {});
         let proxy = EventProxy::new(tx, waker);
-        let term = Term::new(TermConfig::default(), &Size { cols, rows }, proxy);
+        let term = Term::new(
+            TermConfig {
+                scrolling_history,
+                ..TermConfig::default()
+            },
+            &Size { cols, rows },
+            proxy,
+        );
         (term, Processor::new())
     }
 
@@ -259,5 +282,19 @@ mod tests {
         proc.advance(&mut term, b"\x1b[?12l");
         snap.capture(&term);
         assert!(!snap.cursor_blinking);
+    }
+
+    #[test]
+    fn capture_carries_monotonic_history_origin_after_ring_eviction() {
+        let (mut term, mut proc) = test_term_with_history(8, 2, 2);
+        proc.advance(&mut term, b"0\r\n1\r\n2\r\n3\r\n4\r\n5");
+        assert_eq!(term.grid().history_size(), 2);
+        assert!(term.grid().history_origin() > 0);
+
+        let mut snap = PaneSnapshot::default();
+        snap.capture(&term);
+
+        assert_eq!(snap.history_origin, term.grid().history_origin());
+        assert_eq!(snap.history_size, 2);
     }
 }

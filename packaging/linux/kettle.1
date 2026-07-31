@@ -1,7 +1,7 @@
 .\" kettle.1 - manual page for kettle terminal emulator
 .\" Format: man-pages macros. Render preview: `man -l packaging/linux/kettle.1`
 .\" Render to text: `groff -man -Tutf8 packaging/linux/kettle.1 | less`
-.TH KETTLE 1 "2026-07-14" "kettle" "User Commands"
+.TH KETTLE 1 "2026-07-26" "kettle" "User Commands"
 .
 .SH NAME
 kettle \- fast, cross-platform, GPU-accelerated terminal emulator
@@ -23,6 +23,9 @@ kettle \- fast, cross-platform, GPU-accelerated terminal emulator
 .br
 .B kettle mcp
 .RI [ \-\-self\-test ]
+.br
+.B kettle update
+.RI [ \-\-yes ]
 .
 .SH DESCRIPTION
 .B kettle
@@ -45,7 +48,7 @@ multiple tabs with drag-to-reorder, live tear-off into a new
 window (running programs move untouched), + activity / silence /
 bell indicators, inline images (sixel, kitty graphics, iTerm2
 inline image protocols), OSC 8 hyperlinks, OSC 133
-shell-integration jump-to-prompt, ligatures, infinite scrollback,
+shell-integration jump-to-prompt, ligatures, byte- and line-bounded scrollback,
 fuzzy-search overlays (command palette, themes, SSH-host
 launcher), strict-regex scrollback search, undo close tab, duplicate tab/pane, per-window accent
 colors, and broadcast / group-input mode.
@@ -99,9 +102,9 @@ Validate the resolved config and print every effective setting +
 diagnostic lines for unknown keys / malformed values.
 .TP
 .B \-\-print-default-config
-Print every option with its default value, in the Ghostty-style
-.RI """ key " = " value """
-format. Useful as a starting point for
+Print the fully commented starter config embedded from
+.BR docs/kettle.example.config .
+Uncomment only the settings to override. Useful as a starting point for
 .IR ~/.config/kettle/config .
 .TP
 .B \-\-gpu-info
@@ -125,10 +128,7 @@ by trigger.
 .B \-\-list-ssh-hosts
 Print every
 .BR ssh-host
-declaration in the config + every freeform host kettle has cached
-from prior
-.B Ctrl+Shift+S
-launcher use.
+declaration in the resolved config, sorted by name.
 .TP
 .B \-\-list-layouts
 Print every saved layout name
@@ -244,9 +244,23 @@ Unix-only.
 Send
 .I TEXT
 to the running kettle's focused pane via the file-based IPC.
+TEXT is transported exactly after shell argument parsing; Kettle does not
+reinterpret backslash escapes. Use shell-native quoting to include control
+characters, for example
+.B "kettle \-\-remote\-send $'printf ready\\n'"
+in Bash or zsh.
+Current senders use a reversible
+.B send-text-json
+JSON-string frame; receivers retain the legacy, lossy
+.B send-text
+line format for direct writers.
 Cross-platform (no D-Bus needed). Pair with
 .B \-\-remote\-file
 to address a non-default kettle instance.
+The private spool is locked and capped at 1 MiB; an append that
+would cross the cap fails without changing commands already queued.
+A receiver accepts at most 1,024 operations per claimed batch and rejects an
+over-limit batch before dispatching any prefix.
 .TP
 .BI \-\-remote\-file \ PATH
 Override the IPC drop path used by
@@ -426,11 +440,14 @@ working directory, default inherit),
 started; a recording error exits with status 125 instead of running unaudited.
 Capture is output-only and stops on a complete asciicast event boundary before
 512 MiB; a later write failure stops the trace without killing the child.
-Piped or redirected stdin is forwarded to the child on Unix and WSL. An
-interactive terminal stdin is left attached to the caller, and native Windows
-ConPTY stdin forwarding remains disabled.
+Piped or redirected stdin bytes are forwarded to the child. An interactive
+terminal stdin is left attached to the caller. Unix and WSL signal a safely
+tracked canonical EOF without closing the bidirectional PTY master. Windows
+ConPTY has no safe input half-close: delimiter-driven input works, but a child
+that waits for EOF must use its own delimiter or
+.BR \-\-timeout .
 .TP
-.B kettle ctl \fIMETHOD\fR \fR[\fB\-\-pane \fIN\fR] [\fB\-\-json \fIJSON\fR] [\fB\-\-text \fITEXT\fR] [\fB\-\-keys \fIKEYS\fR] [\fB\-\-pid \fIPID\fR] [\fB\-\-raw\fR]
+.B kettle ctl \fIMETHOD\fR \fR[\fB\-\-pane \fIN\fR] [\fB\-\-json \fIJSON\fR] [\fB\-\-text \fITEXT\fR] [\fB\-\-keys \fIKEYS\fR] [\fB\-\-regex \fIREGEX\fR] [\fB\-\-pid \fIPID\fR] [\fB\-\-raw\fR]
 Drive a running kettle's agent control server.
 .I METHOD
 is one of
@@ -449,12 +466,17 @@ passes method parameters as a JSON object;
 is the text for
 .B send_text
 or the command line for
-.BR run_command ;
+.BR run_command ,
+or the literal substring for
+.BR wait_for ;
 .B \-\-keys
 is a comma-separated token list for
 .B send_keys
 or
 .BR dispatch_ui_key ;
+.B \-\-regex
+is an alternative or additional regular expression for
+.BR wait_for ;
 .B \-\-pid
 selects a specific kettle (else the newest running server); and
 .B \-\-raw
