@@ -26,7 +26,12 @@ use crate::feed::{AvailableUpdate, FeedClient, UpdateError};
 use crate::feed::{MAX_ARTIFACT_BYTES, SignedManifest};
 #[cfg(any(windows, target_os = "linux"))]
 use crate::feed::{require_strict_upgrade, reverify_available_update};
-use crate::{UPDATE_PUBLIC_KEY, current_target};
+// Every use of the compiled verification key sits behind the same platform gate
+// as the authenticated install paths themselves, so macOS — which has no managed
+// install — would otherwise import it unused and trip `-D unused-imports`.
+#[cfg(any(windows, target_os = "linux"))]
+use crate::UPDATE_PUBLIC_KEY;
+use crate::current_target;
 
 const MARKER_SCHEMA: u32 = 1;
 #[cfg(any(windows, target_os = "linux"))]
