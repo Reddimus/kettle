@@ -40,6 +40,97 @@ pub const MAX_PAGE_ITEMS: usize = 4096;
 /// grids and multi-window sessions are bounded.
 pub const DEFAULT_PAGE_ITEMS: usize = 1024;
 
+/// Error returned when JSON encoding either exceeds its byte budget or the
+/// value itself cannot be serialized.
+#[derive(Debug)]
+pub enum BoundedJsonError {
+    /// Encoding crossed the caller-provided byte limit. The writer stops
+    /// before retaining any byte beyond that limit.
+    Limit { max_bytes: usize },
+    /// The value could not be encoded for a reason unrelated to the limit.
+    Serialize(serde_json::Error),
+}
+
+impl std::fmt::Display for BoundedJsonError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Limit { max_bytes } => {
+                write!(formatter, "JSON encoding exceeds {max_bytes} bytes")
+            }
+            Self::Serialize(error) => error.fmt(formatter),
+        }
+    }
+}
+
+impl std::error::Error for BoundedJsonError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Limit { .. } => None,
+            Self::Serialize(error) => Some(error),
+        }
+    }
+}
+
+/// Encode JSON while enforcing `max_bytes` during serialization. Unlike
+/// `serde_json::to_vec(...); if len > max`, this never retains an oversized
+/// duplicate of an attacker-influenced value before rejecting it.
+pub fn to_json_vec_bounded<T: Serialize + ?Sized>(
+    value: &T,
+    max_bytes: usize,
+) -> Result<Vec<u8>, BoundedJsonError> {
+    struct BoundedWriter {
+        bytes: Vec<u8>,
+        max_bytes: usize,
+        exceeded: bool,
+    }
+
+    impl std::io::Write for BoundedWriter {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            if bytes.len() > self.max_bytes.saturating_sub(self.bytes.len()) {
+                self.exceeded = true;
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "bounded JSON writer limit reached",
+                ));
+            }
+            self.bytes.extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    let mut writer = BoundedWriter {
+        bytes: Vec::with_capacity(max_bytes.min(4096)),
+        max_bytes,
+        exceeded: false,
+    };
+    if let Err(error) = serde_json::to_writer(&mut writer, value) {
+        return if writer.exceeded {
+            Err(BoundedJsonError::Limit { max_bytes })
+        } else {
+            Err(BoundedJsonError::Serialize(error))
+        };
+    }
+    Ok(writer.bytes)
+}
+
+/// Find the first newline which has not already been examined. When no
+/// delimiter is present, `scanned` advances to `bytes.len()`, so appending and
+/// retrying examines each byte once instead of rescanning the entire frame.
+pub fn find_newline(bytes: &[u8], scanned: &mut usize) -> Option<usize> {
+    let start = (*scanned).min(bytes.len());
+    match bytes[start..].iter().position(|byte| *byte == b'\n') {
+        Some(relative) => Some(start + relative),
+        None => {
+            *scanned = bytes.len();
+            None
+        }
+    }
+}
+
 /// Authorization class for a control method.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Capability {
@@ -494,5 +585,28 @@ mod tests {
         let s = serde_json::to_string(&ev).unwrap();
         assert!(s.contains(r#""event":"output""#));
         assert!(s.contains(r#""pane":3"#));
+    }
+
+    #[test]
+    fn bounded_json_stops_at_the_limit_instead_of_allocating_then_checking() {
+        let exact = serde_json::json!({"value": "abcd"});
+        let encoded = serde_json::to_vec(&exact).unwrap();
+        assert_eq!(to_json_vec_bounded(&exact, encoded.len()).unwrap(), encoded);
+        assert!(matches!(
+            to_json_vec_bounded(&exact, encoded.len() - 1),
+            Err(BoundedJsonError::Limit { max_bytes }) if max_bytes == encoded.len() - 1
+        ));
+    }
+
+    #[test]
+    fn newline_scan_resumes_at_the_first_unexamined_byte() {
+        let mut bytes = b"delimiter-free".to_vec();
+        let mut scanned = 0;
+        assert_eq!(find_newline(&bytes, &mut scanned), None);
+        assert_eq!(scanned, bytes.len());
+
+        let old_len = bytes.len();
+        bytes.extend_from_slice(b" tail\nnext");
+        assert_eq!(find_newline(&bytes, &mut scanned), Some(old_len + 5));
     }
 }

@@ -354,10 +354,21 @@ discipline here.
   `send-text` coverage, and treat malformed JSON only as coalesced unknown
   lines.
 
-- **kettle-ctl transport**: the split-handle loopback runs on every native CI
-  OS. Unix additionally asserts the shared open-file description remains
-  stably nonblocking while a cloned reader retains blocking semantics; stalled
-  peers prove deadline and cancellation exits. These regressions must run on a
+- **kettle-ctl transport and server liveness**: the split-handle loopback and
+  same-user kernel credential path run on every native CI OS. A deterministic
+  failed-identity injection proves clients reject before sending protocol
+  bytes. Stalled readers prove deadline and cancellation exits from both a
+  client handle and an accepted server handle with an 8 MiB write. Windows
+  therefore exercises the formerly synchronous server-side arm on a real
+  overlapped named-pipe handle. Unix additionally asserts the shared open-file
+  description remains stably nonblocking while a cloned reader retains
+  blocking semantics. Control-server regressions occupy all eight slots with
+  idle peers, slow-drip an incomplete frame, and stop reading a subscribed
+  stream; each waits for reclamation and then completes an independent fresh
+  request. Activation starts an incomplete client in its own worker and proves
+  a second launch is activated without waiting for that worker's deadline.
+  Bounded-JSON, incremental newline scan-offset, lazy inventory-stop, and key
+  batch/byte tests pin cap-before-work behavior. These regressions must run on a
   real macOS runner because AF_UNIX full-buffer behavior cannot be claimed from
   Linux alone.
 
@@ -1123,8 +1134,9 @@ These need a real display and are run by hand (or on real hardware):
     notification, initialization-time ping, notification silence, malformed or
     unknown tool envelopes, encoded-response truncation, 1 MiB/768 KiB framing
     limits, queue saturation, duplicate ids, and cancellation. `kettle-ctl`
-    loopback tests separately pin response deadlines, cancellation, strict
-    frame/id validation, and preservation of events that precede a response.
+    loopback tests separately pin response deadlines, cancellation,
+    authenticated peers, strict frame/id validation, concurrent activation,
+    and preservation of events that precede a response.
   - **Live MCP**: `claude --mcp-config .mcp.json --strict-mcp-config -p "use
     kettle_run to echo a marker"` — Claude Code drives the MCP tools end-to-end.
   - **Live renderer/UI diagnostics**: on a Linux desktop run

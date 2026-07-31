@@ -21,6 +21,7 @@ const MAX_RECORDING_KEY_BYTES: usize = 128;
 const IO_TIMEOUT: Duration = Duration::from_secs(5);
 const PRIMARY_STARTUP_WAIT: Duration = Duration::from_secs(5);
 const PRIMARY_RETRY_DELAY: Duration = Duration::from_millis(25);
+const MAX_ACTIVE_CLIENTS: usize = 16;
 
 /// Properties that must match before a bare launch can join a primary.
 ///
@@ -217,7 +218,15 @@ fn try_become_primary(
 /// become primary instead of leaving a dead endpoint advertised.
 pub fn spawn_server(
     handle: PrimaryHandle,
-    handler: impl Fn(ActivationRequest) -> bool + Send + 'static,
+    handler: impl Fn(ActivationRequest) -> bool + Send + Sync + 'static,
+) -> io::Result<()> {
+    spawn_server_inner(handle, Arc::new(handler), Arc::new(|| {}))
+}
+
+fn spawn_server_inner(
+    handle: PrimaryHandle,
+    handler: Arc<dyn Fn(ActivationRequest) -> bool + Send + Sync>,
+    worker_started: Arc<dyn Fn() + Send + Sync>,
 ) -> io::Result<()> {
     let primary = handle
         .0
@@ -227,13 +236,18 @@ pub fn spawn_server(
         .ok_or_else(|| io::Error::new(io::ErrorKind::AlreadyExists, "primary already consumed"))?;
     std::thread::Builder::new()
         .name("kettle-activation".to_string())
-        .spawn(move || server_loop(primary, handler))?;
+        .spawn(move || server_loop(primary, handler, worker_started))?;
     Ok(())
 }
 
-fn server_loop(primary: Primary, handler: impl Fn(ActivationRequest) -> bool) {
+fn server_loop(
+    primary: Primary,
+    handler: Arc<dyn Fn(ActivationRequest) -> bool + Send + Sync>,
+    worker_started: Arc<dyn Fn() + Send + Sync>,
+) {
+    let active = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     loop {
-        let mut stream = match primary.listener.accept() {
+        let stream = match primary.listener.accept() {
             Ok(stream) => stream,
             Err(error) => {
                 log::warn!("Kettle activation accept failed: {error}");
@@ -251,28 +265,55 @@ fn server_loop(primary: Primary, handler: impl Fn(ActivationRequest) -> bool) {
                 continue;
             }
         }
-        let request = match read_json_frame::<ActivationRequest>(&mut stream, IO_TIMEOUT) {
-            Ok(request) if request.is_valid() => request,
-            Ok(_) => continue,
-            Err(error) => {
-                log::warn!("invalid Kettle activation request: {error}");
-                continue;
-            }
-        };
-        let status = if request.identity != primary.identity {
-            ResponseStatus::Incompatible
-        } else if handler(request) {
-            ResponseStatus::Activated
-        } else {
-            ResponseStatus::Busy
-        };
-        let response = ActivationResponse {
-            v: PROTOCOL_VERSION,
-            status,
-        };
-        if let Err(error) = write_json_frame(&mut stream, &response, IO_TIMEOUT) {
-            log::warn!("Kettle activation response failed: {error}");
+        if active.load(std::sync::atomic::Ordering::Relaxed) >= MAX_ACTIVE_CLIENTS {
+            log::warn!("Kettle activation client cap ({MAX_ACTIVE_CLIENTS}) reached");
+            continue;
         }
+        active.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let identity = primary.identity.clone();
+        let handler = handler.clone();
+        let worker_started = worker_started.clone();
+        let active_for_worker = active.clone();
+        let spawn = std::thread::Builder::new()
+            .name("kettle-activation-client".to_string())
+            .spawn(move || {
+                worker_started();
+                handle_client(stream, &identity, handler.as_ref());
+                active_for_worker.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+            });
+        if let Err(error) = spawn {
+            active.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+            log::warn!("cannot spawn Kettle activation worker: {error}");
+        }
+    }
+}
+
+fn handle_client(
+    mut stream: CtlStream,
+    identity: &LaunchIdentity,
+    handler: &(dyn Fn(ActivationRequest) -> bool + Send + Sync),
+) {
+    let request = match read_json_frame::<ActivationRequest>(&mut stream, IO_TIMEOUT) {
+        Ok(request) if request.is_valid() => request,
+        Ok(_) => return,
+        Err(error) => {
+            log::warn!("invalid Kettle activation request: {error}");
+            return;
+        }
+    };
+    let status = if request.identity != *identity {
+        ResponseStatus::Incompatible
+    } else if handler(request) {
+        ResponseStatus::Activated
+    } else {
+        ResponseStatus::Busy
+    };
+    let response = ActivationResponse {
+        v: PROTOCOL_VERSION,
+        status,
+    };
+    if let Err(error) = write_json_frame(&mut stream, &response, IO_TIMEOUT) {
+        log::warn!("Kettle activation response failed: {error}");
     }
 }
 
@@ -294,14 +335,19 @@ fn write_json_frame<T: Serialize>(
     value: &T,
     timeout: Duration,
 ) -> io::Result<()> {
-    let mut bytes = serde_json::to_vec(value).map_err(io::Error::other)?;
+    let mut bytes = match crate::protocol::to_json_vec_bounded(value, MAX_FRAME_BYTES - 1) {
+        Ok(bytes) => bytes,
+        Err(crate::protocol::BoundedJsonError::Limit { .. }) => {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "activation frame exceeds 8 KiB",
+            ));
+        }
+        Err(crate::protocol::BoundedJsonError::Serialize(error)) => {
+            return Err(io::Error::other(error));
+        }
+    };
     bytes.push(b'\n');
-    if bytes.len() > MAX_FRAME_BYTES {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "activation frame exceeds 8 KiB",
-        ));
-    }
     stream.write_all_until(&bytes, Instant::now() + timeout, None)
 }
 
@@ -311,6 +357,7 @@ fn read_json_frame<T: for<'de> Deserialize<'de>>(
 ) -> io::Result<T> {
     let deadline = Instant::now() + timeout;
     let mut bytes = Vec::with_capacity(512);
+    let mut scan_offset = 0;
     let mut chunk = [0u8; 1024];
     loop {
         let remaining = deadline.saturating_duration_since(Instant::now());
@@ -320,7 +367,15 @@ fn read_json_frame<T: for<'de> Deserialize<'de>>(
                 "activation frame timed out",
             ));
         }
-        let read = stream.read(&mut chunk)?;
+        let remaining = (MAX_FRAME_BYTES + 1).saturating_sub(bytes.len());
+        if remaining == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "activation frame exceeds 8 KiB",
+            ));
+        }
+        let read_len = remaining.min(chunk.len());
+        let read = stream.read(&mut chunk[..read_len])?;
         if read == 0 {
             return Err(io::Error::new(
                 io::ErrorKind::UnexpectedEof,
@@ -334,7 +389,7 @@ fn read_json_frame<T: for<'de> Deserialize<'de>>(
                 "activation frame exceeds 8 KiB",
             ));
         }
-        if let Some(newline) = bytes.iter().position(|byte| *byte == b'\n') {
+        if let Some(newline) = crate::protocol::find_newline(&bytes, &mut scan_offset) {
             if newline + 1 != bytes.len() {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidData,
@@ -491,6 +546,43 @@ mod tests {
             activate_or_elect_at(request(Some("dir:aaaa")), &paths).unwrap(),
             ActivationOutcome::Standalone
         ));
+    }
+
+    #[test]
+    fn stalled_activation_peer_does_not_block_the_next_launch() {
+        let (_dir, paths) = test_paths("concurrent-stalled-peer");
+        let first = activate_or_elect_at(request(None), &paths).unwrap();
+        let ActivationOutcome::Primary(primary) = first else {
+            panic!("first launch must become primary");
+        };
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        spawn_server_inner(
+            primary,
+            Arc::new(|_| true),
+            Arc::new(move || {
+                let _ = started_tx.send(());
+            }),
+        )
+        .unwrap();
+
+        let mut stalled = transport::connect(&paths.endpoint).expect("connect stalled peer");
+        started_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("stalled peer reached its own worker");
+        stalled
+            .write_all_until(b"{", Instant::now() + Duration::from_secs(1), None)
+            .expect("send incomplete frame");
+
+        let started = Instant::now();
+        assert_eq!(
+            request_activation(&paths.endpoint, &request(None)).unwrap(),
+            ResponseStatus::Activated
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "a stalled peer delayed an independent activation for {:?}",
+            started.elapsed()
+        );
     }
 
     #[cfg(unix)]

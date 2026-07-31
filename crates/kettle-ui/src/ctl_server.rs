@@ -4,9 +4,9 @@
 //! thread binds the kettle-ctl transport (Unix socket / Windows named pipe),
 //! registers a discovery entry, and spawns ONE thread per connection. That
 //! thread reads NDJSON requests and writes responses/events on the SAME handle,
-//! never concurrently — a hard requirement on Windows, where writing to a
-//! named-pipe handle while a `try_clone`d sibling has a blocking read pending
-//! fails cross-process with ERROR_NO_DATA. So each connection is sequential:
+//! never concurrently. Keeping one sequential protocol owner prevents response
+//! and event frames from interleaving; the transport itself now supports
+//! deadline-bearing overlapped writes on both Windows pipe ends:
 //!
 //!   - request → the App dispatches it on the main thread (the only place
 //!     `self.mux` is touched) and sends the [`Response`] back over a per-request
@@ -22,10 +22,11 @@
 //! docs/AGENT.md.
 
 use std::collections::{HashMap, HashSet};
-use std::io::{Read, Write};
+use std::io::Read;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, Instant};
 
 use crossbeam_channel::{Receiver, Sender};
 use kettle_config::AgentServer;
@@ -45,6 +46,44 @@ const EVENT_CHANNEL_CAP: usize = EVENT_QUEUE_CAP + 1;
 /// Tighter than the wire response cap so a full subscriber queue remains
 /// bounded to roughly 16 MiB rather than hundreds of MiB.
 const MAX_EVENT_BYTES: usize = 64 * 1024;
+
+/// A request connection must complete a non-empty frame at least this often.
+/// Long-running methods use their own documented deadlines once dispatched.
+const REQUEST_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
+/// Once the server starts waiting for the rest of a partial frame, slow-drip
+/// input has this absolute budget to deliver its newline. Individual bytes do
+/// not extend it. The budget measures time spent waiting on the client, so it
+/// is armed at the wait and cleared when the frame completes: a request the
+/// server answers slowly — `wait_for` blocks its own connection thread by
+/// design — must not spend the budget belonging to a pipelined successor.
+const REQUEST_FRAME_TIMEOUT: Duration = Duration::from_secs(5);
+/// Every server response/event write is cancelled at this deadline so a peer
+/// which stopped reading cannot pin a connection worker.
+const SERVER_WRITE_TIMEOUT: Duration = Duration::from_secs(5);
+/// UI-dispatched methods normally reply immediately; `run_command` is allowed
+/// up to 600 seconds, so give it a small teardown margin but never let a lost
+/// reply sender pin a slot forever.
+const SERVER_RESPONSE_TIMEOUT: Duration = Duration::from_secs(610);
+/// Subscribers are intentionally long-lived. A periodic bounded write both
+/// keeps the stream observable and eventually backpressures an unread peer.
+const SUBSCRIBER_KEEPALIVE: Duration = Duration::from_secs(20);
+
+#[derive(Clone, Copy)]
+struct ConnectionPolicy {
+    request_idle: Duration,
+    frame_assembly: Duration,
+    write: Duration,
+    response_wait: Duration,
+    subscriber_keepalive: Duration,
+}
+
+const DEFAULT_CONNECTION_POLICY: ConnectionPolicy = ConnectionPolicy {
+    request_idle: REQUEST_IDLE_TIMEOUT,
+    frame_assembly: REQUEST_FRAME_TIMEOUT,
+    write: SERVER_WRITE_TIMEOUT,
+    response_wait: SERVER_RESPONSE_TIMEOUT,
+    subscriber_keepalive: SUBSCRIBER_KEEPALIVE,
+};
 
 /// A reply channel for one request (a 1-slot oneshot).
 pub type ReplyTx = Sender<Response>;
@@ -135,7 +174,7 @@ impl CtlServer {
         let (tx, rx) = crossbeam_channel::unbounded::<CtlServerMsg>();
         let accept = match std::thread::Builder::new()
             .name("kettle-ctl-accept".into())
-            .spawn(move || accept_loop(listener, tx, wake))
+            .spawn(move || accept_loop(listener, tx, wake, DEFAULT_CONNECTION_POLICY))
         {
             Ok(accept) => accept,
             Err(error) => {
@@ -231,8 +270,8 @@ impl CtlServer {
     /// Broadcast an event to every subscribed connection. Overflowing a slow
     /// connection's queue drops the event for it + sends a one-line `lag` notice.
     pub fn broadcast(&self, ev: &Event) {
-        let outgoing = match serde_json::to_vec(ev) {
-            Ok(bytes) if bytes.len() <= MAX_EVENT_BYTES => ev.clone(),
+        let outgoing = match kettle_ctl::protocol::to_json_vec_bounded(ev, MAX_EVENT_BYTES) {
+            Ok(_) => ev.clone(),
             _ => Event::new(
                 "lag",
                 ev.pane,
@@ -278,7 +317,12 @@ impl Drop for CtlServer {
 /// atomic counter enforces `MAX_CONNECTIONS` at the source — an over-cap
 /// connection is closed immediately (the socket/pipe handle dropped) rather
 /// than spawning a live thread that would sit idle holding the endpoint.
-fn accept_loop(listener: CtlListener, tx: Sender<CtlServerMsg>, wake: Arc<dyn Fn() + Send + Sync>) {
+fn accept_loop(
+    listener: CtlListener,
+    tx: Sender<CtlServerMsg>,
+    wake: Arc<dyn Fn() + Send + Sync>,
+    policy: ConnectionPolicy,
+) {
     static NEXT_ID: AtomicU64 = AtomicU64::new(1);
     let active = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let mut consecutive_errors = 0u32;
@@ -333,7 +377,7 @@ fn accept_loop(listener: CtlListener, tx: Sender<CtlServerMsg>, wake: Arc<dyn Fn
                     active_dec.fetch_sub(1, Ordering::Relaxed);
                     return;
                 }
-                connection_loop(conn, conn_id, ctx, cwake, event_rx);
+                connection_loop(conn, conn_id, ctx, cwake, event_rx, policy);
                 active_dec.fetch_sub(1, Ordering::Relaxed);
             });
         finish_worker_spawn(spawned, conn_id, event_tx, &tx, &wake, start_tx, &active);
@@ -366,22 +410,41 @@ fn finish_worker_spawn(
 }
 
 /// One connection, one thread: read requests + write responses/events on the
-/// SAME handle, sequentially (never a concurrent read+write — the Windows
-/// named-pipe ERROR_NO_DATA constraint). A `subscribe` request flips the
-/// connection into event-only streaming.
+/// SAME handle, sequentially so frames cannot interleave. A `subscribe`
+/// request flips the connection into event-only streaming.
 fn connection_loop(
     mut conn: CtlStream,
     conn_id: u64,
     tx: Sender<CtlServerMsg>,
     wake: Arc<dyn Fn() + Send + Sync>,
     event_rx: Receiver<Event>,
+    policy: ConnectionPolicy,
 ) {
-    let mut acc: Vec<u8> = Vec::new();
+    let mut acc: Vec<u8> = Vec::with_capacity(4096);
+    let mut scan_offset = 0;
     let mut buf = [0u8; 4096];
+    let mut idle_deadline = Instant::now() + policy.request_idle;
+    let mut frame_deadline: Option<Instant> = None;
     'outer: loop {
         // Extract a complete line if we have one.
-        if let Some(pos) = acc.iter().position(|&b| b == b'\n') {
+        if let Some(pos) = kettle_ctl::protocol::find_newline(&acc, &mut scan_offset) {
+            if pos > kettle_ctl::protocol::MAX_LINE_BYTES {
+                let response = Response::err(
+                    0,
+                    kettle_ctl::protocol::error_codes::BAD_REQUEST,
+                    "request line exceeds 1 MiB",
+                );
+                let _ = write_response_line(&mut conn, &response, policy.write);
+                break;
+            }
             let line: Vec<u8> = acc.drain(..=pos).collect();
+            scan_offset = 0;
+            // This frame is complete, so it owes nothing more. Any pipelined
+            // remainder is armed where the server actually starts waiting for
+            // the rest of it, not here: answering this request can take as long
+            // as `wait_for` needs, and charging that to the next frame would
+            // disconnect a well-behaved client for the server's own work.
+            frame_deadline = None;
             let trimmed = match std::str::from_utf8(&line) {
                 Ok(line) => line.trim_end(),
                 Err(error) => {
@@ -390,9 +453,10 @@ fn connection_loop(
                         kettle_ctl::protocol::error_codes::BAD_REQUEST,
                         format!("request line is not UTF-8: {error}"),
                     );
-                    if write_response_line(&mut conn, &response).is_err() {
+                    if write_response_line(&mut conn, &response, policy.write).is_err() {
                         break;
                     }
+                    idle_deadline = Instant::now() + policy.request_idle;
                     continue;
                 }
             };
@@ -413,9 +477,10 @@ fn connection_loop(
                         .is_some_and(|method| method.execution() == Execution::Connection) =>
                 {
                     let resp = wait_for_poll(&mut conn, &tx, &wake, conn_id, &req);
-                    if write_response_line(&mut conn, &resp).is_err() {
+                    if write_response_line(&mut conn, &resp, policy.write).is_err() {
                         break 'outer;
                     }
+                    idle_deadline = Instant::now() + policy.request_idle;
                     continue;
                 }
                 Ok(req) => {
@@ -448,10 +513,14 @@ fn connection_loop(
             // send `Disconnect` (so the App drops the `PendingRun` + clears the
             // badge) and end the connection; the trailing `Disconnect` at loop
             // exit is a harmless no-op (`remove_conn` ignores an absent id).
+            let response_deadline = Instant::now() + policy.response_wait;
             let resp = loop {
-                match rrx.recv_timeout(std::time::Duration::from_millis(200)) {
+                match rrx.recv_timeout(Duration::from_millis(200)) {
                     Ok(resp) => break resp,
                     Err(crossbeam_channel::RecvTimeoutError::Timeout) => {
+                        if Instant::now() >= response_deadline {
+                            break 'outer;
+                        }
                         if conn.peer_disconnected() {
                             let _ = tx.send(CtlServerMsg::Disconnect { conn_id });
                             wake();
@@ -462,9 +531,10 @@ fn connection_loop(
                     Err(crossbeam_channel::RecvTimeoutError::Disconnected) => break 'outer,
                 }
             };
-            if write_response_line(&mut conn, &resp).is_err() {
+            if write_response_line(&mut conn, &resp, policy.write).is_err() {
                 break 'outer;
             }
+            idle_deadline = Instant::now() + policy.request_idle;
             if is_subscribe {
                 // Switch to event-only streaming for the rest of the
                 // connection's life (no more requests read on this handle). Use
@@ -474,15 +544,15 @@ fn connection_loop(
                 // so we disconnect (bounding the ConnState+thread leak to the
                 // timeout rather than "until the next real event").
                 loop {
-                    match event_rx.recv_timeout(std::time::Duration::from_secs(20)) {
+                    match event_rx.recv_timeout(policy.subscriber_keepalive) {
                         Ok(ev) => {
-                            if write_event_line(&mut conn, &ev).is_err() {
+                            if write_event_line(&mut conn, &ev, policy.write).is_err() {
                                 break 'outer;
                             }
                         }
                         Err(crossbeam_channel::RecvTimeoutError::Timeout) => {
                             let ping = Event::new("ping", None, serde_json::Value::Null);
-                            if write_event_line(&mut conn, &ping).is_err() {
+                            if write_event_line(&mut conn, &ping, policy.write).is_err() {
                                 break 'outer;
                             }
                         }
@@ -501,11 +571,43 @@ fn connection_loop(
                 kettle_ctl::protocol::error_codes::BAD_REQUEST,
                 "request line exceeds 1 MiB",
             );
-            let _ = write_response_line(&mut conn, &resp);
+            let _ = write_response_line(&mut conn, &resp, policy.write);
             break;
         }
-        match conn.read(&mut buf) {
+        // Arm the assembly budget where the server begins waiting on the
+        // client, and only once per frame: `is_none` means a drip of one byte
+        // per interval cannot keep pushing the deadline out. A frame that
+        // completes clears it above, so each partial frame gets exactly one
+        // budget measured from when we started waiting for its remainder.
+        if !acc.is_empty() && frame_deadline.is_none() {
+            frame_deadline = Some(Instant::now() + policy.frame_assembly);
+        }
+        let read_deadline = frame_deadline
+            .map(|deadline| deadline.min(idle_deadline))
+            .unwrap_or(idle_deadline);
+        let now = Instant::now();
+        if now >= read_deadline {
+            break;
+        }
+        match conn.wait_readable(read_deadline.saturating_duration_since(now)) {
+            Ok(true) => {}
+            Ok(false) | Err(_) => break,
+        }
+        let remaining = (kettle_ctl::protocol::MAX_LINE_BYTES + 1).saturating_sub(acc.len());
+        if remaining == 0 {
+            let resp = Response::err(
+                0,
+                kettle_ctl::protocol::error_codes::BAD_REQUEST,
+                "request line exceeds 1 MiB",
+            );
+            let _ = write_response_line(&mut conn, &resp, policy.write);
+            break;
+        }
+        let read_len = remaining.min(buf.len());
+        match conn.read(&mut buf[..read_len]) {
             Ok(0) | Err(_) => break,
+            // The budget is armed before the wait above, so arriving bytes
+            // never refresh it — that is what bounds a slow drip.
             Ok(n) => acc.extend_from_slice(&buf[..n]),
         }
     }
@@ -514,46 +616,65 @@ fn connection_loop(
 }
 
 /// Serialize and write a response within the server amplification budget.
-fn write_response_line(conn: &mut CtlStream, value: &Response) -> std::io::Result<()> {
+fn write_response_line(
+    conn: &mut CtlStream,
+    value: &Response,
+    timeout: Duration,
+) -> std::io::Result<()> {
     let line = serialized_response_line(value)?;
-    write_serialized_line(conn, &line)
+    write_serialized_line(conn, line, timeout)
 }
 
-fn serialized_response_line(value: &Response) -> std::io::Result<String> {
-    let mut line = serde_json::to_string(value).map_err(std::io::Error::other)?;
-    if line.len() > kettle_ctl::protocol::MAX_RESPONSE_LINE_BYTES {
-        line = serde_json::to_string(&Response::err(
+fn serialized_response_line(value: &Response) -> std::io::Result<Vec<u8>> {
+    use kettle_ctl::protocol::{BoundedJsonError, MAX_RESPONSE_LINE_BYTES};
+
+    match kettle_ctl::protocol::to_json_vec_bounded(value, MAX_RESPONSE_LINE_BYTES) {
+        Ok(line) => return Ok(line),
+        Err(BoundedJsonError::Serialize(error)) => return Err(std::io::Error::other(error)),
+        Err(BoundedJsonError::Limit { .. }) => {}
+    }
+    kettle_ctl::protocol::to_json_vec_bounded(
+        &Response::err(
             value.id,
             kettle_ctl::protocol::error_codes::RESPONSE_TOO_LARGE,
             format!(
                 "response exceeds {} bytes; use cursor/limit paging",
-                kettle_ctl::protocol::MAX_RESPONSE_LINE_BYTES
+                MAX_RESPONSE_LINE_BYTES
             ),
-        ))
-        .map_err(std::io::Error::other)?;
-    }
-    Ok(line)
+        ),
+        MAX_RESPONSE_LINE_BYTES,
+    )
+    .map_err(std::io::Error::other)
 }
 
 /// Events share the response budget. Oversize event payloads become a bounded
 /// lag notice rather than closing every subscriber.
-fn write_event_line(conn: &mut CtlStream, value: &Event) -> std::io::Result<()> {
-    let mut line = serde_json::to_string(value).map_err(std::io::Error::other)?;
-    if line.len() > kettle_ctl::protocol::MAX_RESPONSE_LINE_BYTES {
-        line = serde_json::to_string(&Event::new(
-            "lag",
-            value.pane,
-            serde_json::json!({"dropped": 1, "reason": "event_too_large"}),
-        ))
-        .map_err(std::io::Error::other)?;
-    }
-    write_serialized_line(conn, &line)
+fn write_event_line(conn: &mut CtlStream, value: &Event, timeout: Duration) -> std::io::Result<()> {
+    use kettle_ctl::protocol::{BoundedJsonError, MAX_RESPONSE_LINE_BYTES};
+
+    let line = match kettle_ctl::protocol::to_json_vec_bounded(value, MAX_RESPONSE_LINE_BYTES) {
+        Ok(line) => line,
+        Err(BoundedJsonError::Serialize(error)) => return Err(std::io::Error::other(error)),
+        Err(BoundedJsonError::Limit { .. }) => kettle_ctl::protocol::to_json_vec_bounded(
+            &Event::new(
+                "lag",
+                value.pane,
+                serde_json::json!({"dropped": 1, "reason": "event_too_large"}),
+            ),
+            MAX_RESPONSE_LINE_BYTES,
+        )
+        .map_err(std::io::Error::other)?,
+    };
+    write_serialized_line(conn, line, timeout)
 }
 
-fn write_serialized_line(conn: &mut CtlStream, line: &str) -> std::io::Result<()> {
-    conn.write_all(line.as_bytes())?;
-    conn.write_all(b"\n")?;
-    conn.flush()
+fn write_serialized_line(
+    conn: &mut CtlStream,
+    mut line: Vec<u8>,
+    timeout: Duration,
+) -> std::io::Result<()> {
+    line.push(b'\n');
+    conn.write_all_until(&line, Instant::now() + timeout, None)
 }
 
 /// v2.20.0 (agent plane): the `wait_for` poll loop. Runs on the CONNECTION
@@ -732,6 +853,108 @@ fn wait_for_poll(
 mod tests {
     use super::*;
 
+    fn test_endpoint(tag: &str) -> String {
+        static NEXT: AtomicU64 = AtomicU64::new(1);
+        let unique = NEXT.fetch_add(1, Ordering::Relaxed);
+        #[cfg(unix)]
+        return std::env::temp_dir()
+            .join(format!(
+                "kettle-ctl-ui-{tag}-{}-{unique}.sock",
+                std::process::id()
+            ))
+            .to_string_lossy()
+            .into_owned();
+        #[cfg(windows)]
+        return format!(
+            r"\\.\pipe\kettle-ctl-ui-{tag}-{}-{unique}",
+            std::process::id()
+        );
+    }
+
+    fn start_test_accept_loop(
+        tag: &str,
+        policy: ConnectionPolicy,
+    ) -> (String, Receiver<CtlServerMsg>) {
+        let endpoint = test_endpoint(tag);
+        let listener = CtlListener::bind(&endpoint).expect("bind test control listener");
+        let (tx, rx) = crossbeam_channel::unbounded();
+        let wake: Arc<dyn Fn() + Send + Sync> = Arc::new(|| {});
+        std::thread::spawn(move || accept_loop(listener, tx, wake, policy));
+        (endpoint, rx)
+    }
+
+    fn recv_new_conn(rx: &Receiver<CtlServerMsg>, timeout: Duration) -> (u64, Sender<Event>) {
+        let deadline = Instant::now() + timeout;
+        loop {
+            match rx.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
+                Ok(CtlServerMsg::NewConn { conn_id, event_tx }) => {
+                    return (conn_id, event_tx);
+                }
+                Ok(CtlServerMsg::Disconnect { conn_id }) => {
+                    panic!("connection {conn_id} expired before all peers were admitted");
+                }
+                Ok(_) => {}
+                Err(error) => panic!("timed out waiting for NewConn: {error}"),
+            }
+        }
+    }
+
+    fn prove_fresh_request_is_served(endpoint: &str, rx: &Receiver<CtlServerMsg>) {
+        let mut client = kettle_ctl::transport::connect(endpoint).expect("connect fresh client");
+        let (conn_id, _event_tx) = recv_new_conn(rx, Duration::from_secs(2));
+        client
+            .write_all_until(
+                br#"{"v":1,"id":77,"method":"get_state","params":{}}
+"#,
+                Instant::now() + Duration::from_secs(1),
+                None,
+            )
+            .expect("send fresh request");
+
+        let reply = loop {
+            match rx.recv_timeout(Duration::from_secs(2)) {
+                Ok(CtlServerMsg::Request {
+                    conn_id: request_conn,
+                    req,
+                    reply,
+                    ..
+                }) if request_conn == conn_id => {
+                    assert_eq!(req.id, 77);
+                    break reply;
+                }
+                Ok(_) => {}
+                Err(error) => panic!("fresh request was not dispatched: {error}"),
+            }
+        };
+        reply
+            .send(Response::ok(77, serde_json::json!({"served": true})))
+            .expect("reply to fresh request");
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let mut response = Vec::new();
+        loop {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            assert!(
+                client
+                    .wait_readable(remaining)
+                    .expect("wait for fresh response"),
+                "fresh response never became readable"
+            );
+            let mut chunk = [0u8; 128];
+            let read = client.read(&mut chunk).expect("read fresh response");
+            assert_ne!(read, 0, "fresh response closed before its newline");
+            response.extend_from_slice(&chunk[..read]);
+            if response.ends_with(b"\n") {
+                break;
+            }
+            assert!(response.len() < 512, "fresh response exceeded fixture cap");
+        }
+        let response: Response =
+            serde_json::from_slice(response.strip_suffix(b"\n").expect("response newline"))
+                .expect("parse fresh response");
+        assert!(response.ok);
+        assert_eq!(response.result["served"], true);
+    }
+
     #[test]
     fn off_mode_is_disabled_others_enabled() {
         assert!(!AgentServer::Off.is_enabled());
@@ -866,6 +1089,230 @@ mod tests {
     }
 
     #[test]
+    fn eight_idle_peers_expire_and_a_fresh_request_is_served() {
+        let policy = ConnectionPolicy {
+            request_idle: Duration::from_millis(750),
+            frame_assembly: Duration::from_millis(200),
+            write: Duration::from_millis(200),
+            response_wait: Duration::from_secs(1),
+            subscriber_keepalive: Duration::from_millis(200),
+        };
+        let (endpoint, rx) = start_test_accept_loop("idle-cap", policy);
+        let mut stalled = Vec::with_capacity(MAX_CONNECTIONS);
+        for _ in 0..MAX_CONNECTIONS {
+            stalled.push(
+                kettle_ctl::transport::connect(&endpoint).expect("connect idle control peer"),
+            );
+            recv_new_conn(&rx, Duration::from_secs(1));
+        }
+
+        let deadline = Instant::now() + Duration::from_secs(3);
+        let mut disconnected = HashSet::new();
+        while disconnected.len() < MAX_CONNECTIONS {
+            match rx.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
+                Ok(CtlServerMsg::Disconnect { conn_id }) => {
+                    disconnected.insert(conn_id);
+                }
+                Ok(_) => {}
+                Err(error) => panic!("idle slots were not reclaimed: {error}"),
+            }
+        }
+        assert_eq!(disconnected.len(), MAX_CONNECTIONS);
+        prove_fresh_request_is_served(&endpoint, &rx);
+        drop(stalled);
+    }
+
+    /// The frame budget bounds time the server spends *waiting on the client*,
+    /// which is not the same as wall-clock since the bytes arrived. A client is
+    /// allowed to pipeline the head of its next request behind one the server
+    /// answers slowly — `wait_for` deliberately blocks its own connection
+    /// thread — and those pipelined bytes must not have their budget consumed
+    /// by the server's own work. Anchoring the next frame at true arrival time
+    /// instead would disconnect a well-behaved client the instant a legitimate
+    /// long request outlived the assembly budget.
+    #[test]
+    fn a_slow_reply_does_not_consume_the_next_frames_budget() {
+        let policy = ConnectionPolicy {
+            request_idle: Duration::from_secs(5),
+            frame_assembly: Duration::from_millis(200),
+            write: Duration::from_secs(1),
+            response_wait: Duration::from_secs(5),
+            subscriber_keepalive: Duration::from_secs(5),
+        };
+        let (endpoint, rx) = start_test_accept_loop("pipelined-behind-slow", policy);
+        let mut client =
+            kettle_ctl::transport::connect(&endpoint).expect("connect pipelining peer");
+        let (conn_id, _) = recv_new_conn(&rx, Duration::from_secs(1));
+
+        // One write: a complete request, plus the first byte of the next one.
+        client
+            .write_all_until(
+                b"{\"v\":1,\"id\":1,\"method\":\"get_state\",\"params\":{}}\n{",
+                Instant::now() + Duration::from_secs(1),
+                None,
+            )
+            .expect("send request with a pipelined partial frame");
+
+        let reply = loop {
+            match rx.recv_timeout(Duration::from_secs(2)) {
+                Ok(CtlServerMsg::Request {
+                    conn_id: request_conn,
+                    req,
+                    reply,
+                    ..
+                }) if request_conn == conn_id => {
+                    assert_eq!(req.id, 1);
+                    break reply;
+                }
+                Ok(CtlServerMsg::Disconnect { conn_id: gone }) if gone == conn_id => {
+                    panic!("peer was dropped before its first request was dispatched")
+                }
+                Ok(_) => {}
+                Err(error) => panic!("first request was not dispatched: {error}"),
+            }
+        };
+
+        // Answer well after the assembly budget would have expired, as a real
+        // `wait_for` does. The pipelined `{` arrived before this delay began.
+        std::thread::sleep(Duration::from_millis(600));
+        reply
+            .send(Response::ok(1, serde_json::json!({"served": true})))
+            .expect("reply to the slow request");
+
+        // Finish the second frame. It must still be accepted.
+        client
+            .write_all_until(
+                b"\"v\":1,\"id\":2,\"method\":\"get_state\",\"params\":{}}\n",
+                Instant::now() + Duration::from_secs(1),
+                None,
+            )
+            .expect("complete the pipelined frame");
+
+        loop {
+            match rx.recv_timeout(Duration::from_secs(2)) {
+                Ok(CtlServerMsg::Request {
+                    conn_id: request_conn,
+                    req,
+                    reply,
+                    ..
+                }) if request_conn == conn_id => {
+                    assert_eq!(req.id, 2, "the pipelined request must be the one served");
+                    let _ = reply.send(Response::ok(2, serde_json::json!({"served": true})));
+                    break;
+                }
+                Ok(CtlServerMsg::Disconnect { conn_id: gone }) if gone == conn_id => {
+                    panic!("a slow reply consumed the pipelined frame's assembly budget")
+                }
+                Ok(_) => {}
+                Err(error) => panic!("pipelined request was not dispatched: {error}"),
+            }
+        }
+    }
+
+    #[test]
+    fn slow_drip_cannot_extend_the_absolute_frame_deadline() {
+        let policy = ConnectionPolicy {
+            request_idle: Duration::from_secs(2),
+            frame_assembly: Duration::from_millis(200),
+            write: Duration::from_millis(200),
+            response_wait: Duration::from_secs(1),
+            subscriber_keepalive: Duration::from_millis(200),
+        };
+        let (endpoint, rx) = start_test_accept_loop("slow-drip", policy);
+        let mut client = kettle_ctl::transport::connect(&endpoint).expect("connect slow peer");
+        let (conn_id, _) = recv_new_conn(&rx, Duration::from_secs(1));
+        let started = Instant::now();
+        for byte in b"{    " {
+            if client
+                .write_all_until(
+                    std::slice::from_ref(byte),
+                    Instant::now() + Duration::from_millis(100),
+                    None,
+                )
+                .is_err()
+            {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(60));
+        }
+        loop {
+            match rx.recv_timeout(Duration::from_secs(1)) {
+                Ok(CtlServerMsg::Disconnect {
+                    conn_id: disconnected,
+                }) if disconnected == conn_id => break,
+                Ok(_) => {}
+                Err(error) => panic!("slow-drip peer retained its slot: {error}"),
+            }
+        }
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "per-byte activity extended the frame deadline: {:?}",
+            started.elapsed()
+        );
+        prove_fresh_request_is_served(&endpoint, &rx);
+    }
+
+    #[test]
+    fn unread_subscriber_write_times_out_and_releases_its_slot() {
+        let policy = ConnectionPolicy {
+            request_idle: Duration::from_secs(1),
+            frame_assembly: Duration::from_millis(200),
+            write: Duration::from_millis(100),
+            response_wait: Duration::from_secs(1),
+            subscriber_keepalive: Duration::from_secs(1),
+        };
+        let (endpoint, rx) = start_test_accept_loop("subscriber-backpressure", policy);
+        let mut client = kettle_ctl::transport::connect(&endpoint).expect("connect subscriber");
+        let (conn_id, event_tx) = recv_new_conn(&rx, Duration::from_secs(1));
+        client
+            .write_all_until(
+                br#"{"v":1,"id":1,"method":"subscribe","params":{}}
+"#,
+                Instant::now() + Duration::from_secs(1),
+                None,
+            )
+            .expect("send subscribe request");
+        let reply = loop {
+            match rx.recv_timeout(Duration::from_secs(1)) {
+                Ok(CtlServerMsg::Request { reply, req, .. }) => {
+                    assert_eq!(req.method, "subscribe");
+                    break reply;
+                }
+                Ok(_) => {}
+                Err(error) => panic!("subscribe was not dispatched: {error}"),
+            }
+        };
+        reply
+            .send(Response::ok(1, serde_json::json!({"subscribed": true})))
+            .expect("reply to subscribe");
+
+        let payload = "x".repeat(48 * 1024);
+        for sequence in 0..EVENT_QUEUE_CAP {
+            if event_tx
+                .try_send(Event::new(
+                    "output",
+                    None,
+                    serde_json::json!({"sequence": sequence, "text": payload.as_str()}),
+                ))
+                .is_err()
+            {
+                break;
+            }
+        }
+        let deadline = Instant::now() + Duration::from_secs(3);
+        loop {
+            match rx.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
+                Ok(CtlServerMsg::Disconnect {
+                    conn_id: disconnected,
+                }) if disconnected == conn_id => break,
+                Ok(_) => {}
+                Err(error) => panic!("unread subscriber pinned its writer: {error}"),
+            }
+        }
+        prove_fresh_request_is_served(&endpoint, &rx);
+    }
+
+    #[test]
     fn oversize_response_becomes_bounded_structured_error() {
         let response = Response::ok(
             42,
@@ -873,7 +1320,7 @@ mod tests {
         );
         let line = serialized_response_line(&response).unwrap();
         assert!(line.len() <= kettle_ctl::protocol::MAX_RESPONSE_LINE_BYTES);
-        let response: Response = serde_json::from_str(&line).unwrap();
+        let response: Response = serde_json::from_slice(&line).unwrap();
         assert_eq!(response.id, 42);
         assert_eq!(
             response.error.unwrap().code,
