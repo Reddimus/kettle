@@ -1128,7 +1128,14 @@ fn exec_timeout_closes_a_saturated_conpty_after_a_query() {
     // SAFETY: release_event exclusively owns a valid event handle for the
     // duration of this call.
     let event_signaled = unsafe { SetEvent(release_event.0) };
-    let query_observed = query_rx.recv_timeout(Duration::from_secs(1));
+    // Observing the child's query is a precondition, not the behavior under
+    // test, so it must not lose a race it does not need to win. One second was
+    // enough in isolation but not inside a full-workspace run, where the
+    // helper's write, the ConPTY round trip, and this reader thread all compete
+    // for a loaded machine — the marker did arrive, just past the deadline.
+    // Five seconds still proves the query was prompt relative to the eight
+    // second `--timeout` this test actually asserts on.
+    let query_observed = query_rx.recv_timeout(Duration::from_secs(5));
 
     let (status, watchdog_killed) = loop {
         if let Some(status) = child.try_wait().expect("poll backpressured exec") {
