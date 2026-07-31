@@ -296,10 +296,12 @@ GitHub runners for every platform:
   accepted only under their exact bounded transaction grammar. The narrow
   binary-backup names left by older Kettle installers are retained during
   upgrade and removed as ordinary leaves during uninstall; arbitrary `.bak-*`
-  files are not adopted. A current schema-2 pending-update record must have the
-  exact typed product, target, version, helper, digest, counter, and bounded
-  file fields written by the Rust updater. During uninstall, those identities
-  remain valid if a named helper or stage has already disappeared in an earlier
+  files are not adopted. A current schema-3 pending-update record must have the
+  exact typed product, target, version, archive, helper, signature capsule,
+  selected asset, package manifest, digest, and counter fields written by the
+  Rust updater. Its nested asset and package file set are bounded and constrained
+  to the Windows release grammar. During uninstall, those identities remain
+  valid if a named helper or archive has already disappeared in an earlier
   removal step or after a crash; every object that still exists is validated
   independently before deletion.
 

@@ -3134,6 +3134,12 @@ function Test-KettleManagedRootFileName {
         return $true
     }
     if (
+        $Name -cmatch '^\.kettle-update-archive-(.+)\.zip$' -and
+        (Test-KettleUpdateTransactionId -Value $Matches[1])
+    ) {
+        return $true
+    }
+    if (
         $Name -cmatch '^\.kettle-update-failed-(.+)\.(?:json|txt)$' -and
         (Test-KettleUpdateTransactionId -Value $Matches[1])
     ) {
@@ -3280,6 +3286,10 @@ function Remove-KettleRustAtomicTemporarySet {
                     ) -or (
                         $destinationName -cmatch
                             '^\.kettle-update-helper-(.+)\.exe$' -and
+                        (Test-KettleUpdateTransactionId -Value $Matches[1])
+                    ) -or (
+                        $destinationName -cmatch
+                            '^\.kettle-update-archive-(.+)\.zip$' -and
                         (Test-KettleUpdateTransactionId -Value $Matches[1])
                     ) -or (
                         $destinationName -cmatch
@@ -4624,11 +4634,16 @@ function Assert-KettleManagedInstallTree {
             'target',
             'transaction_id',
             'target_version',
-            'staging_dir',
+            'archive',
+            'archive_size',
+            'archive_sha256',
+            'release_manifest',
+            'release_signature',
+            'asset',
+            'package_manifest',
             'helper',
             'helper_size',
             'helper_sha256',
-            'files',
             'attempts',
             'handoff_timeouts',
             'last_error'
@@ -4643,7 +4658,7 @@ function Assert-KettleManagedInstallTree {
                 $pending.schema -isnot [int] -and
                 $pending.schema -isnot [long]
             ) -or
-            $pending.schema -ne 2 -or
+            $pending.schema -ne 3 -or
             $pending.product -isnot [string] -or
             $pending.product -cne 'kettle' -or
             $pending.target -isnot [string] -or
@@ -4661,10 +4676,31 @@ function Assert-KettleManagedInstallTree {
                 '[0-9A-Za-z-]*[A-Za-z-][0-9A-Za-z-]*))*)?' +
                 '(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$'
             ) -or
-            $pending.staging_dir -isnot [string] -or
-            $pending.staging_dir -cne (
-                '.kettle-update-stage-' + $pending.transaction_id
+            $pending.archive -isnot [string] -or
+            $pending.archive -cne (
+                '.kettle-update-archive-' +
+                $pending.transaction_id +
+                '.zip'
             ) -or
+            (
+                $pending.archive_size -isnot [int] -and
+                $pending.archive_size -isnot [long]
+            ) -or
+            $pending.archive_size -lt 1 -or
+            $pending.archive_size -gt 268435456 -or
+            $pending.archive_sha256 -isnot [string] -or
+            $pending.archive_sha256 -cnotmatch '^[0-9a-f]{64}$' -or
+            $pending.release_manifest -isnot [string] -or
+            $pending.release_manifest.Length -lt 1 -or
+            $pending.release_manifest.Length -gt 131072 -or
+            $pending.release_manifest.IndexOf([char]0) -ge 0 -or
+            $pending.release_signature -isnot [string] -or
+            $pending.release_signature -cnotmatch '^[A-Za-z0-9+/]{86}==$' -or
+            $pending.asset -isnot [System.Management.Automation.PSCustomObject] -or
+            $pending.package_manifest -isnot [string] -or
+            $pending.package_manifest.Length -lt 1 -or
+            $pending.package_manifest.Length -gt 262144 -or
+            $pending.package_manifest.IndexOf([char]0) -ge 0 -or
             $pending.helper -isnot [string] -or
             $pending.helper -cne (
                 '.kettle-update-helper-' +
@@ -4675,13 +4711,10 @@ function Assert-KettleManagedInstallTree {
                 $pending.helper_size -isnot [int] -and
                 $pending.helper_size -isnot [long]
             ) -or
-            $pending.helper_size -lt 0 -or
+            $pending.helper_size -lt 1 -or
             $pending.helper_size -gt 536870912 -or
             $pending.helper_sha256 -isnot [string] -or
             $pending.helper_sha256 -cnotmatch '^[0-9a-fA-F]{64}$' -or
-            $pending.files -isnot [System.Array] -or
-            $pending.files.Count -lt 1 -or
-            $pending.files.Count -gt 128 -or
             (
                 $pending.attempts -isnot [int] -and
                 $pending.attempts -isnot [long]
@@ -4701,20 +4734,75 @@ function Assert-KettleManagedInstallTree {
         ) {
             throw 'The pending update record has an invalid artifact identity.'
         }
+        $assetKeys = @($pending.asset.PSObject.Properties.Name)
+        if (
+            $assetKeys.Count -ne 4 -or
+            @($assetKeys | Where-Object {
+                @('target', 'name', 'size', 'sha256') -cnotcontains $_
+            }).Count -ne 0 -or
+            $pending.asset.target -isnot [string] -or
+            $pending.asset.target -cne $pending.target -or
+            $pending.asset.name -isnot [string] -or
+            $pending.asset.name -cnotmatch (
+                '^[A-Za-z0-9][A-Za-z0-9._-]{0,250}\.zip$'
+            ) -or
+            (
+                $pending.asset.size -isnot [int] -and
+                $pending.asset.size -isnot [long]
+            ) -or
+            $pending.asset.size -ne $pending.archive_size -or
+            $pending.asset.sha256 -isnot [string] -or
+            $pending.asset.sha256 -cne $pending.archive_sha256
+        ) {
+            throw 'The pending update record contains an invalid signed asset identity.'
+        }
+        try {
+            $pendingPackage =
+                $pending.package_manifest | ConvertFrom-Json -ErrorAction Stop
+        } catch {
+            throw 'The pending update record contains an invalid package manifest.'
+        }
+        $packageKeys = @($pendingPackage.PSObject.Properties.Name)
+        if (
+            $pendingPackage -isnot [System.Management.Automation.PSCustomObject] -or
+            $packageKeys.Count -ne 5 -or
+            @($packageKeys | Where-Object {
+                @('schema', 'product', 'target', 'version', 'files') `
+                    -cnotcontains $_
+            }).Count -ne 0 -or
+            (
+                $pendingPackage.schema -isnot [int] -and
+                $pendingPackage.schema -isnot [long]
+            ) -or
+            $pendingPackage.schema -ne 1 -or
+            $pendingPackage.product -isnot [string] -or
+            $pendingPackage.product -cne 'kettle' -or
+            $pendingPackage.target -isnot [string] -or
+            $pendingPackage.target -cne $pending.target -or
+            $pendingPackage.version -isnot [string] -or
+            $pendingPackage.version -cne $pending.target_version -or
+            $pendingPackage.files -isnot [System.Array] -or
+            $pendingPackage.files.Count -lt 1 -or
+            $pendingPackage.files.Count -gt 127
+        ) {
+            throw 'The pending update record contains an invalid package identity.'
+        }
         $pendingPaths =
             New-Object 'System.Collections.Generic.HashSet[string]' (
                 [System.StringComparer]::OrdinalIgnoreCase
             )
+        $lastPendingPath = $null
         [uint64]$pendingBytes = 0
-        foreach ($record in $pending.files) {
+        foreach ($record in $pendingPackage.files) {
             $recordKeys = @($record.PSObject.Properties.Name)
             if (
                 $record -isnot [System.Management.Automation.PSCustomObject] -or
-                $recordKeys.Count -ne 3 -or
+                $recordKeys.Count -ne 4 -or
                 @($recordKeys | Where-Object {
-                    @('path', 'size', 'sha256') -cnotcontains $_
+                    @('path', 'size', 'sha256', 'mode') -cnotcontains $_
                 }).Count -ne 0 -or
                 $record.path -isnot [string] -or
+                $record.path -ceq 'kettle-package-manifest.json' -or
                 $record.path.Contains('\') -or
                 -not (Test-KettleWindowsPayloadRelativePath `
                     -Relative $record.path) -or
@@ -4726,14 +4814,23 @@ function Assert-KettleManagedInstallTree {
                 $record.size -lt 0 -or
                 $record.size -gt 536870912 -or
                 $record.sha256 -isnot [string] -or
-                $record.sha256 -cnotmatch '^[0-9a-fA-F]{64}$'
+                $record.sha256 -cnotmatch '^[0-9a-f]{64}$' -or
+                $null -ne $record.mode -or
+                (
+                    $null -ne $lastPendingPath -and
+                    [StringComparer]::Ordinal.Compare(
+                        $lastPendingPath,
+                        $record.path
+                    ) -ge 0
+                )
             ) {
                 throw 'The pending update record contains an invalid file identity.'
             }
             $pendingBytes += [uint64]$record.size
             if ($pendingBytes -gt 536870912) {
-                throw 'The pending update record exceeds its staged-byte limit.'
+                throw 'The pending update record exceeds its package-byte limit.'
             }
+            $lastPendingPath = $record.path
         }
         # Do not require the named leaves to exist here. The managed remover
         # deliberately revalidates the root after deleting each updater

@@ -1133,6 +1133,15 @@ $helperName = ".kettle-update-helper-$transactionId.exe"
 $helperPath = Join-Path $prefix $helperName
 Copy-Item -LiteralPath (Join-Path $prefix 'kettle.exe') `
     -Destination $helperPath
+$archiveName = ".kettle-update-archive-$transactionId.zip"
+$archivePath = Join-Path $prefix $archiveName
+[System.IO.File]::WriteAllBytes(
+    $archivePath,
+    [System.Text.Encoding]::UTF8.GetBytes('bounded updater archive fixture')
+)
+$archiveSize = (Get-Item -LiteralPath $archivePath).Length
+$archiveHash = (Get-FileHash -LiteralPath $archivePath `
+    -Algorithm SHA256).Hash.ToLowerInvariant()
 $pendingFiles = @(
     [ordered]@{
         path = 'README.md'
@@ -1142,6 +1151,7 @@ $pendingFiles = @(
         sha256 = (Get-FileHash -LiteralPath (
             Join-Path $stagePath 'README.md'
         ) -Algorithm SHA256).Hash.ToLowerInvariant()
+        mode = $null
     },
     [ordered]@{
         path = 'shell-integration/kettle.ps1'
@@ -1151,20 +1161,48 @@ $pendingFiles = @(
         sha256 = (Get-FileHash -LiteralPath (
             Join-Path $stageShell 'kettle.ps1'
         ) -Algorithm SHA256).Hash.ToLowerInvariant()
+        mode = $null
     }
 )
+$asset = [ordered]@{
+    target = 'x86_64-pc-windows-msvc'
+    name = 'kettle-v99.0.0-x86_64-pc-windows-msvc.zip'
+    size = $archiveSize
+    sha256 = $archiveHash
+}
+$packageManifest = [ordered]@{
+    schema = 1
+    product = 'kettle'
+    target = 'x86_64-pc-windows-msvc'
+    version = '99.0.0'
+    files = $pendingFiles
+} | ConvertTo-Json -Compress -Depth 5
+$releaseManifest = [ordered]@{
+    schema = 1
+    product = 'kettle'
+    channel = 'stable'
+    version = '99.0.0'
+    tag = 'v99.0.0'
+    published_at = '2026-07-31T00:00:00Z'
+    assets = @($asset)
+} | ConvertTo-Json -Compress -Depth 5
 $pending = [ordered]@{
-    schema = 2
+    schema = 3
     product = 'kettle'
     target = 'x86_64-pc-windows-msvc'
     transaction_id = $transactionId
     target_version = '99.0.0'
-    staging_dir = ".kettle-update-stage-$transactionId"
+    archive = $archiveName
+    archive_size = $archiveSize
+    archive_sha256 = $archiveHash
+    release_manifest = $releaseManifest
+    release_signature = [Convert]::ToBase64String((New-Object byte[] 64))
+    asset = $asset
+    package_manifest = $packageManifest
     helper = $helperName
     helper_size = (Get-Item -LiteralPath $helperPath).Length
     helper_sha256 = (Get-FileHash -LiteralPath $helperPath `
         -Algorithm SHA256).Hash.ToLowerInvariant()
-    files = $pendingFiles
     attempts = 0
     handoff_timeouts = 0
     last_error = $null
@@ -1176,7 +1214,7 @@ $pending = [ordered]@{
 )
 $pendingPath = Join-Path $prefix '.kettle-update-pending.json'
 $legacyPending = $pending | ConvertFrom-Json
-$legacyPending.schema = 1
+$legacyPending.schema = 2
 [System.IO.File]::WriteAllText(
     $pendingPath,
     ($legacyPending | ConvertTo-Json -Depth 5),
@@ -1260,7 +1298,7 @@ Set-Content -LiteralPath (
 
 & (Join-Path $prefix 'install.ps1') -RefreshIntegration `
     -IntegrationTestRoot $integrationRoot | Out-Null
-Write-Output 'windows-installer check: schema-2 pending updater tree accepted'
+Write-Output 'windows-installer check: schema-3 pending updater tree accepted'
 Remove-Item -LiteralPath (
     Join-Path $prefix '.kettle-update-journal.json'
 ) -Force
