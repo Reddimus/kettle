@@ -26,6 +26,10 @@ use windows_sys::Win32::Security::{PSECURITY_DESCRIPTOR, PSID};
 /// corrupt same-user file cannot turn discovery into an unbounded allocation.
 const MAX_REGISTRY_ENTRY_BYTES: usize = 16 * 1024;
 const MAX_VERSION_BYTES: usize = 256;
+/// A normal desktop has only a handful of live control servers. Bound the
+/// directory walk so a corrupt or hostile same-user registry cannot make
+/// every discovery attempt enumerate an arbitrarily large directory.
+const MAX_REGISTRY_DIR_ENTRIES: usize = 1024;
 
 /// A registry entry describing one running control server.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -271,12 +275,9 @@ pub fn register(dir: &std::path::Path, entry: &RegistryEntry) -> std::io::Result
         ));
     }
     let path = entry_path(dir, entry.pid);
-    let json = serde_json::to_string(entry).map_err(std::io::Error::other)?;
-    kettle_state::atomic_replace(
-        &path,
-        json.as_bytes(),
-        kettle_state::AtomicWriteOptions::PRIVATE,
-    )?;
+    let json = crate::protocol::to_json_vec_bounded(entry, MAX_REGISTRY_ENTRY_BYTES)
+        .map_err(std::io::Error::other)?;
+    kettle_state::atomic_replace(&path, &json, kettle_state::AtomicWriteOptions::PRIVATE)?;
     Ok(path)
 }
 
@@ -294,7 +295,7 @@ pub fn list(dir: &std::path::Path) -> Vec<RegistryEntry> {
     let Ok(rd) = std::fs::read_dir(dir) else {
         return out;
     };
-    for ent in rd.flatten() {
+    for ent in rd.take(MAX_REGISTRY_DIR_ENTRIES).flatten() {
         let path = ent.path();
         if path.extension().and_then(|e| e.to_str()) != Some("json") {
             continue;

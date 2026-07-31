@@ -179,11 +179,29 @@ kettle --agent-server full        # this launch only
 Modes: `off` (no server), `read-only` (read the screen / list panes / subscribe),
 `full` (also send text + run commands).
 
-The endpoint is local-only and user-private. Unix uses a `0600` domain socket,
-checks peer credentials against Kettle's effective uid, and stores atomic `0600`
-discovery records in a `0700` directory. Windows rejects remote named-pipe
-clients and uses the creator's private DACL. Discovery ignores links, unsafe
-permissions, mismatched pids, and non-v1 records.
+The endpoint is local-only and user-private. Unix uses a `0600` domain socket;
+both accepted servers and connecting clients compare peer credentials with the
+effective uid. Windows rejects remote named-pipe clients, gives every pipe an
+exact token-user owner plus a protected owner/SYSTEM/Administrators DACL, and
+then compares the connecting process or pipe owner with the exact current
+token-user SID. A client authenticates that server identity before sending any
+request bytes. Discovery ignores links, unsafe permissions, mismatched pids,
+and non-v1 records; registry and presence walks inspect at most 1,024 directory
+entries.
+
+This is intentionally a **same-OS-user trust boundary**, not per-client
+authorization. Enabling `read-only` lets any process running as that user read
+terminal contents, pane/process metadata, UI geometry, and subscribed events
+across every window in the Kettle process. Enabling `full` additionally lets
+any such process inject text, keys, and mouse input; invoke Kettle actions; run
+commands; resize windows; and write screenshots. There is no per-client prompt,
+pairing token, capability grant, or consent dialog after the server is enabled.
+That is acceptable for the documented opt-in model because same-user processes
+are trusted like the Kettle process itself. If that is too broad for a machine,
+leave the server off, use `read-only`, or run untrusted programs under a
+different OS account. A future threat model that distrusts same-user processes
+would require per-client capabilities/consent rather than another pathname or
+DACL check.
 
 Then drive it with `kettle ctl`:
 
@@ -217,14 +235,14 @@ so press Enter with `send_keys`, not a trailing `\n`.
 | `get_state` | read-only | version, pid, mode, theme, focused pane, `windows` (count), `focused_window` (seq), `window_title` |
 | `list_tabs` | read-only | every window's tabs: `window` (seq), index, title, active, pane ids |
 | `list_panes` | read-only | every window's panes: id, `window` (seq), tab, title, cwd, cols/rows, focused, argv, child_pid, agent_attached, read_only |
-| `read_screen` | read-only | visible viewport text + cursor + `cursor_visible` (DEC ?25) + history metadata + selection presence/range; `include_selection: true` adds selected text capped at 128 KiB plus `selection_truncated`; with `scrollback_lines`, returns requested history plus the active screen for command-output capture (params: `pane`, `scrollback_lines`, `include_selection`, and paging fields) |
+| `read_screen` | read-only | visible viewport text + cursor + `cursor_visible` (DEC ?25) + history metadata + selection presence/range; `include_selection: true` includes selected text only when its preflight is at most 128 KiB (otherwise it is omitted and `selection_truncated` is true); with `scrollback_lines`, returns requested history plus the active screen for command-output capture (params: `pane`, `scrollback_lines`, `include_selection`, and paging fields) |
 | `read_cells` | read-only | visible cell grid plus selected attributes (`any_underline`, underline variants, strikeout, underline-color presence) for renderer diagnostics without OCR |
 | `ui_geometry` | read-only | live window geometry: surface/content rects, renderer cell metrics, resize-overlay grid, tab-bar segment/new-tab rects, tab segment `path`/`fitted_title` diagnostics, pane titlebar rect/title/path/`fitted_title` diagnostics, open context-menu rect/rows, cursor, tab drag armed/visible state, and additive Search geometry/status/control metadata. The Search object deliberately omits its query and matched terminal text |
 | `screenshot` | full | save a live PNG (`pane`, `full_window`, `path`); filesystem writes are never allowed through read-only mode |
 | `subscribe` | read-only | switches the connection to the event stream |
 | `wait_for` | read-only | v2.20: block until the screen matches (`text` substring / `regex` / `quiet_ms` settle — AND when combined; `timeout_ms` default 30 000). Returns `{matched, elapsed_ms, polls}`; a timeout is `matched: false`, not an error. Runs on the connection thread, polling ≥50 ms — the UI is never blocked. The screen-text regex runs against per-line right-trimmed, newline-joined text — use `(?m)` end-of-line anchors rather than end-of-string |
 | `send_text` | full | type text into a pane (`pane`, `text`) |
-| `send_keys` | full | v2.20: press named keys / chords (`pane`, `keys: ["escape","ctrl+c","down","G",…]`). Tokens: key names (`escape`, `enter`, `tab`, `backspace`, `delete`, `insert`, `space`, arrows, `home`/`end`, `pageup`/`pagedown`, `f1`–`f12`), chords with `ctrl`/`alt`/`shift`/`super` (+ aliases), or single characters (case preserved). Encoded through the same path as GUI keystrokes against the pane's live modes (DECCKM- and negotiated Kitty CSI-u-aware); all tokens parse before any byte is sent |
+| `send_keys` | full | v2.20: press 1–1,024 named keys / chords (`pane`, `keys: ["escape","ctrl+c","down","G",…]`), with 64-byte tokens and a 64 KiB encoded-byte budget. Tokens: key names (`escape`, `enter`, `tab`, `backspace`, `delete`, `insert`, `space`, arrows, `home`/`end`, `pageup`/`pagedown`, `f1`–`f12`), chords with `ctrl`/`alt`/`shift`/`super` (+ aliases), or single characters (case preserved). Encoded through the same path as GUI keystrokes against the pane's live modes (DECCKM- and negotiated Kitty CSI-u-aware); all tokens parse before any byte is sent |
 | `dispatch_keybind` | full | diagnostic app-keybind dispatch (`logical`, `physical`, `mods`) using the same resolver as real window keyboard input. It does not write PTY bytes; it returns the candidate triggers, matched action, and whether a modal blocked dispatch |
 | `dispatch_ui_key` | full | press 1–64 pre-parsed key tokens (each at most 64 bytes) in the currently open supported Kettle modal. Search consumes them through its real Unicode editor/navigation path; no token is encoded or written to the PTY. All tokens validate before the first state change, and a closed modal is an error |
 | `send_mouse` | full | deterministic mouse input for diagnostics (`event`: `move`/`press`/`release`/`click`/`wheel`, window-relative `x`/`y`, `button`, `wheel_lines` **or** `wheel_delta`, optional event-local `mods`). A wheel event takes exactly one of `wheel_lines` (signed whole scroll lines, entering downstream of quantization) or `wheel_delta` (signed raw wheel detents, fractions allowed — runs the real sub-detent accumulator, so it can emulate a precision touchpad) |
@@ -247,9 +265,21 @@ error; Kettle never falls back to the focused pane/window for that request.
 `next_cursor` and `snapshot`. A `stale_snapshot` error means live terminal state
 changed between pages and the read must restart. Small results remain one page.
 `read_screen` additionally reports `text_truncated` if one pathological terminal
-line alone exceeds its 256 KiB text budget.
+line alone exceeds its 256 KiB text budget. Its complete stable-pagination
+snapshot is preflighted at 512 KiB before allocation; larger scrapes return
+`response_too_large`. Live-state collection and visible-cell capture stop at
+262,144 items before building JSON values.
 Every control request is capped at 1 MiB and every response/event at 768 KiB;
 protocol peers must send exactly `v: 1`.
+
+The control server admits at most eight peers. A request connection must send a
+non-empty frame within 30 seconds; after its first byte, the newline has an
+absolute five-second assembly deadline that byte-by-byte drips do not extend.
+Responses and events have five-second writes. UI-dispatched replies have a
+610-second ceiling (the longest `run_command` is 600 seconds), and subscribers
+receive a bounded keepalive every 20 seconds so an unread stream eventually
+backpressures and is reclaimed. These are availability limits, not permission
+boundaries.
 
 `run_command` correlates the shell's OSC 133 command-end marker to learn the
 exit code. **Without shell integration** there is no marker, so the call returns
@@ -569,13 +599,19 @@ This is also desktop-local because it opens real GUI terminal windows.
 ## Security & threat model
 
 - **Off by default.** No server, no socket, no registry entry unless you opt in.
-- **Local only.** The transport is a Unix domain socket (mode `0600`) or a
-  Windows named pipe with the default DACL (creator/owner + admins). There is
-  **no TCP** at this layer. The protection boundary is "the same local user (and
-  elevated admins)" — identical to the kettle process itself.
+- **Local only and mutually authenticated to the documented boundary.** The
+  transport is a Unix domain socket (mode `0600`) or a Windows named pipe with
+  an exact token-user owner and protected DACL. Servers verify connecting
+  process credentials; clients verify the peer uid/pipe owner before sending.
+  There is **no TCP** at this layer. The protection boundary is the exact same
+  local OS user — identical to the trust granted to that user's other
+  processes.
 - **Capability split.** `read-only` cannot send keystrokes, run commands, or
   write screenshot files; only `full` can. A single capability gate guards every
   mutating method (a drift-guard test pins this).
+- **Terminal-wide, not per-client.** Once enabled, every same-user client gets
+  the selected mode across all windows in the process without an additional
+  prompt, pairing token, or per-client capability grant.
 - **Auditable.** Every connection and every mutating method is logged. When the
   dev-record recorder is active, each agent action is annotated in the `.cast`
   trace as an `m` marker (`kettle:agent <method> conn=N`).

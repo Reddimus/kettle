@@ -179,8 +179,16 @@ Protocol v1 uses a typed method table as the authorization source of truth:
 each method declares read/mutate capability and UI/connection execution. The
 wire remains additive JSON, with exact `v: 1`, 1 MiB request and 768 KiB
 response/event bounds, and snapshot paging for large live reads. Discovery
-records are atomically replaced and private; accepted Unix connections also
-verify peer uid. The MCP bridge negotiates `2025-11-25` or `2025-06-18` and
+records are atomically replaced and private. Both sides authenticate the
+documented same-user boundary before protocol bytes flow: Unix compares peer
+credentials with the effective uid; Windows servers compare the client process
+token-user SID and clients compare the pipe object's exact owner with their own
+token-user SID. Windows pipes are created with exact token-user ownership and a
+protected owner/SYSTEM/Administrators DACL; another administrator's connection
+still fails the exact SID check. This is not a per-client consent boundary:
+every same-user process receives the selected `read-only` or terminal-wide
+`full` authority once the operator enables the server. The MCP bridge
+negotiates `2025-11-25` or `2025-06-18` and
 dispatches tool calls through a four-worker, 16-request bounded queue with
 JSON-RPC cancellation tracking. The blocking control client reads frames
 incrementally under method-aware deadlines, preserves events interleaved before
@@ -190,7 +198,22 @@ the transport restores ordinary blocking `Read`/`Write` semantics with
 `poll(2)` and serializes complete deadline-aware writes through one
 connection-wide gate. No operation toggles `O_NONBLOCK` on a shared open-file
 description, while macOS retains the fd-level nonblocking behavior required to
-make a full AF_UNIX send buffer deadline-aware.
+make a full AF_UNIX send buffer deadline-aware. Windows client and accepted
+server handles both use overlapped I/O; deadline/cancellation paths issue
+`CancelIoEx` for the exact operation and drain its completion before releasing
+the `OVERLAPPED`. Named-pipe `flush` is deliberately a no-op because
+`FlushFileBuffers` on the server end waits for the client to drain buffered
+bytes and would bypass the write deadline.
+
+The UI server caps admission at eight peers. Request inactivity is 30 seconds;
+once a frame starts, its newline has an absolute five-second deadline that
+slow-drip bytes cannot reset. Every response/event write has five seconds,
+UI-dispatched replies have 610 seconds to accommodate the 600-second
+`run_command` maximum, and subscribers get a bounded keepalive every 20
+seconds. Registry/presence walks stop after 1,024 directory entries, JSON is
+bounded during serialization, NDJSON readers preserve a scan offset, and UI
+collection/grid/screen/key limits are checked before duplicate allocation or
+enumeration.
 
 The discovery registry reserves a `kind` field — `"gui"` today — as the
 forward-compat seam for the optional `kettle-muxd` session daemon (see
@@ -230,7 +253,11 @@ state) lives in `WindowState`, while `App` keeps the process globals
 A no-argument GUI launch first uses the private activation endpoint under the
 per-user runtime/state directory. One advisory lock elects a primary; the
 endpoint accepts only a versioned `open_window` request capped at 8 KiB and
-verifies same-user peers. A capacity-32 handoff reaches the winit thread, and
+verifies same-user peers, while the connecting secondary authenticates the
+primary before sending its launch identity. Accepted clients run in independent
+workers (at most 16), and every frame read/write has a five-second deadline, so
+one incomplete or unread connection cannot serialize later launches. A
+capacity-32 handoff reaches the winit thread, and
 the secondary exits only after that thread confirms OS-window creation. A busy,
 incompatible, timed-out, or failed request falls back to a separate process so
 a launcher click is never discarded. Any explicit argument bypasses activation;

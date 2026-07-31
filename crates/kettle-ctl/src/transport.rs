@@ -7,10 +7,10 @@
 //!
 //! - **Unix:** a `UnixListener` at a filesystem path, mode `0600`.
 //! - **Windows:** a byte-mode named pipe (`\\.\pipe\kettle-ctl-<pid>`) created
-//!   with `CreateNamedPipeW` (default DACL = creator/owner + admins) and
-//!   `PIPE_UNLIMITED_INSTANCES`. Accepted server handles use synchronous I/O;
-//!   client handles use overlapped I/O so blocked writes can honor request
-//!   deadlines and cancellation.
+//!   with `CreateNamedPipeW` (protected owner/SYSTEM/admin DACL) and
+//!   `PIPE_UNLIMITED_INSTANCES`. Both accepted server handles and client
+//!   handles use overlapped I/O so blocked writes can honor deadlines and
+//!   cancellation.
 //!
 //! Hand-rolled over the `interprocess` crate (supply-chain leanness; the needed
 //! subset is small and matches the windows-sys precedent in the bin crate).
@@ -52,7 +52,7 @@ impl UnixStream {
 #[doc(hidden)]
 pub struct WindowsStream {
     file: std::fs::File,
-    overlapped: bool,
+    server_end: bool,
 }
 
 /// Shared client-connect retry policy, referenced by BOTH platform `connect`
@@ -80,9 +80,7 @@ impl Read for CtlStream {
             #[cfg(unix)]
             CtlStream::Unix(stream) => unix_blocking_read(&stream.stream, buf),
             #[cfg(windows)]
-            CtlStream::Windows(stream) if stream.overlapped => windows_io::read(&stream.file, buf),
-            #[cfg(windows)]
-            CtlStream::Windows(stream) => stream.file.read(buf),
+            CtlStream::Windows(stream) => windows_io::read(&stream.file, buf),
         }
     }
 }
@@ -99,11 +97,7 @@ impl Write for CtlStream {
                 unix_blocking_write(&stream.stream, buf)
             }
             #[cfg(windows)]
-            CtlStream::Windows(stream) if stream.overlapped => {
-                windows_io::write(&stream.file, buf, None, None)
-            }
-            #[cfg(windows)]
-            CtlStream::Windows(stream) => stream.file.write(buf),
+            CtlStream::Windows(stream) => windows_io::write(&stream.file, buf, None, None),
         }
     }
     fn flush(&mut self) -> io::Result<()> {
@@ -114,7 +108,12 @@ impl Write for CtlStream {
                 socket.flush()
             }
             #[cfg(windows)]
-            CtlStream::Windows(stream) => stream.file.flush(),
+            CtlStream::Windows(_) => {
+                // A named pipe is a byte stream, not durable storage.
+                // FlushFileBuffers on its server end waits until the client
+                // drains every buffered byte, bypassing all write deadlines.
+                Ok(())
+            }
         }
     }
 }
@@ -128,21 +127,22 @@ impl CtlStream {
             #[cfg(windows)]
             CtlStream::Windows(stream) => Ok(CtlStream::Windows(WindowsStream {
                 file: stream.file.try_clone()?,
-                overlapped: stream.overlapped,
+                server_end: stream.server_end,
             })),
         }
     }
 
     /// Write an entire protocol frame without allowing a blocked local peer to
-    /// outlive the request's deadline. On Windows, client pipe handles use
-    /// overlapped I/O so cancellation can target the exact pending operation.
+    /// outlive the request's deadline. On Windows, both accepted and client
+    /// pipe handles use overlapped I/O so cancellation can target the exact
+    /// pending operation.
     /// Unix connections are nonblocking for their entire lifetime, with
     /// blocking-compatible `Read`/`Write` wrappers for ordinary callers. A
     /// connection-wide gate keeps complete bounded writes serialized across
     /// [`try_clone`](CtlStream::try_clone) siblings without toggling flags on
     /// their shared open-file description. This retains the fd-level
     /// nonblocking behavior macOS AF_UNIX requires.
-    pub(crate) fn write_all_until(
+    pub fn write_all_until(
         &mut self,
         mut buf: &[u8],
         deadline: Instant,
@@ -190,11 +190,9 @@ impl CtlStream {
                         }
                     }
                     #[cfg(windows)]
-                    CtlStream::Windows(stream) if stream.overlapped => {
+                    CtlStream::Windows(stream) => {
                         windows_io::write(&stream.file, buf, Some(deadline), cancelled)?
                     }
-                    #[cfg(windows)]
-                    CtlStream::Windows(stream) => stream.file.write(buf)?,
                 };
                 if written == 0 {
                     return Err(io::Error::new(
@@ -216,7 +214,7 @@ impl CtlStream {
     /// elapses. This is deliberately a readiness primitive rather than a
     /// socket read timeout: the Windows transport is a named-pipe `File`, and
     /// both client implementations need the same bounded-frame behavior.
-    pub(crate) fn wait_readable(&self, timeout: std::time::Duration) -> io::Result<bool> {
+    pub fn wait_readable(&self, timeout: std::time::Duration) -> io::Result<bool> {
         match self {
             #[cfg(unix)]
             CtlStream::Unix(stream) => {
@@ -295,14 +293,14 @@ impl CtlStream {
     /// as this process. Filesystem permissions (Unix mode bits) / the pipe DACL
     /// remain the first boundary; peer credentials close the race where a
     /// socket path is inherited or passed to another local account, AND — on
-    /// Windows — the fact that the pipe's default DACL admits the whole
-    /// Builtin-Administrators group, not only the process owner. Windows'
-    /// check resolves the connected client's PID at the kernel level via
-    /// `GetNamedPipeClientProcessId` (unspoofable — this is not a PID the peer
-    /// claims over the wire) and compares that process's primary-token user
-    /// SID against this process's own. Platforms without any peer-credential
-    /// API at all would retain only the private endpoint/DACL boundary, but
-    /// every OS this crate targets has one.
+    /// Windows — the fact that the protected pipe DACL also admits the whole
+    /// Builtin-Administrators group for recovery, not only the process owner. Windows'
+    /// accepted-side check resolves the connected client's PID at the kernel
+    /// level and compares primary-token user SIDs. The client-side check reads
+    /// the pipe object's owner SID before any protocol bytes are sent. Pipe
+    /// instances are created with this process's exact token-user SID as owner,
+    /// including from an elevated process where Windows would otherwise use the
+    /// Administrators group as the default owner.
     pub fn peer_is_same_user(&self) -> io::Result<bool> {
         match self {
             #[cfg(any(target_os = "linux", target_os = "android"))]
@@ -357,9 +355,18 @@ impl CtlStream {
                     target_os = "dragonfly"
                 ))
             ))]
-            CtlStream::Unix(_) => Ok(true),
+            CtlStream::Unix(_) => Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "peer credentials are unavailable on this Unix target",
+            )),
             #[cfg(windows)]
-            CtlStream::Windows(stream) => windows_io::peer_is_same_user(&stream.file),
+            CtlStream::Windows(stream) if stream.server_end => {
+                windows_security::client_is_same_user(&stream.file)
+            }
+            #[cfg(windows)]
+            CtlStream::Windows(stream) => {
+                windows_security::pipe_owned_by_current_user(&stream.file)
+            }
         }
     }
 
@@ -594,11 +601,12 @@ mod windows_io {
     use super::*;
     use std::os::windows::io::AsRawHandle as _;
     use windows_sys::Win32::Foundation::{
-        CloseHandle, ERROR_BROKEN_PIPE, ERROR_IO_PENDING, ERROR_NOT_FOUND,
+        CloseHandle, ERROR_BROKEN_PIPE, ERROR_IO_PENDING, ERROR_NOT_FOUND, ERROR_PIPE_CONNECTED,
         ERROR_PIPE_NOT_CONNECTED, HANDLE, WAIT_FAILED, WAIT_OBJECT_0, WAIT_TIMEOUT,
     };
     use windows_sys::Win32::Storage::FileSystem::{ReadFile, WriteFile};
     use windows_sys::Win32::System::IO::{CancelIoEx, GetOverlappedResult, OVERLAPPED};
+    use windows_sys::Win32::System::Pipes::ConnectNamedPipe;
     use windows_sys::Win32::System::Threading::{CreateEventW, INFINITE, WaitForSingleObject};
 
     struct Event(HANDLE);
@@ -620,6 +628,37 @@ mod windows_io {
         fn drop(&mut self) {
             // SAFETY: Event exclusively owns this valid handle.
             unsafe { CloseHandle(self.0) };
+        }
+    }
+
+    pub(super) fn connect(handle: HANDLE) -> io::Result<()> {
+        let event = Event::new()?;
+        let mut overlapped = OVERLAPPED {
+            hEvent: event.0,
+            ..Default::default()
+        };
+        // SAFETY: `handle` is an overlapped server pipe and `overlapped` plus
+        // its event remain alive through completion.
+        let connected = unsafe { ConnectNamedPipe(handle, &mut overlapped) };
+        if connected != 0 {
+            return Ok(());
+        }
+        let error = io::Error::last_os_error();
+        match error.raw_os_error() {
+            // The client won the CreateNamedPipe -> ConnectNamedPipe race.
+            Some(code) if code == ERROR_PIPE_CONNECTED as i32 => return Ok(()),
+            Some(code) if code == ERROR_IO_PENDING as i32 => {}
+            _ => return Err(error),
+        }
+        match unsafe { WaitForSingleObject(event.0, INFINITE) } {
+            WAIT_OBJECT_0 => {
+                completed_result(handle, &mut overlapped, false)?;
+                Ok(())
+            }
+            WAIT_FAILED => Err(io::Error::last_os_error()),
+            other => Err(io::Error::other(format!(
+                "unexpected overlapped connect wait result {other}"
+            ))),
         }
     }
 
@@ -786,123 +825,197 @@ mod windows_io {
     fn duration_millis(duration: Duration) -> u32 {
         duration_millis_ceil(duration).clamp(1, u32::MAX as u128) as u32
     }
+}
 
-    /// Compare the user of the process on the other end of a connected
-    /// named-pipe instance against this process's own effective user. This is
-    /// the real enforcement [`super::CtlStream::peer_is_same_user`]'s
-    /// contract promises: the pipe's DACL alone admits SYSTEM and the whole
-    /// Builtin-Administrators group, not only the creating user, so a second
-    /// local admin account must be turned away HERE, at connection time.
-    pub(super) fn peer_is_same_user(file: &std::fs::File) -> io::Result<bool> {
-        use windows_sys::Win32::Security::{
-            EqualSid, GetTokenInformation, PSID, TOKEN_QUERY, TOKEN_USER, TokenUser,
-        };
-        use windows_sys::Win32::System::Pipes::GetNamedPipeClientProcessId;
-        use windows_sys::Win32::System::Threading::{
-            GetCurrentProcess, OpenProcess, OpenProcessToken, PROCESS_QUERY_LIMITED_INFORMATION,
-        };
+#[cfg(windows)]
+mod windows_security {
+    use super::*;
+    use std::os::windows::io::AsRawHandle as _;
+    use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, LocalFree};
+    use windows_sys::Win32::Security::Authorization::{
+        ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW,
+        GetSecurityInfo, SDDL_REVISION_1, SE_KERNEL_OBJECT,
+    };
+    use windows_sys::Win32::Security::{
+        EqualSid, GetTokenInformation, OWNER_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID,
+        TOKEN_QUERY, TOKEN_USER, TokenUser,
+    };
+    use windows_sys::Win32::System::Pipes::GetNamedPipeClientProcessId;
+    use windows_sys::Win32::System::Threading::{
+        GetCurrentProcess, OpenProcess, OpenProcessToken, PROCESS_QUERY_LIMITED_INFORMATION,
+    };
 
-        /// An owned kernel handle (a process or a token), closed on drop.
-        struct OwnedHandle(HANDLE);
+    struct OwnedHandle(HANDLE);
 
-        impl Drop for OwnedHandle {
+    impl Drop for OwnedHandle {
+        fn drop(&mut self) {
+            // SAFETY: this value exclusively owns the valid kernel handle.
+            unsafe { CloseHandle(self.0) };
+        }
+    }
+
+    struct TokenUserSid {
+        _buffer: Vec<u64>,
+        sid: PSID,
+    }
+
+    pub(super) struct LocalSecurityDescriptor(PSECURITY_DESCRIPTOR);
+
+    impl LocalSecurityDescriptor {
+        pub(super) fn as_ptr(&self) -> PSECURITY_DESCRIPTOR {
+            self.0
+        }
+    }
+
+    impl Drop for LocalSecurityDescriptor {
+        fn drop(&mut self) {
+            // SAFETY: Windows allocated this descriptor with LocalAlloc.
+            unsafe { LocalFree(self.0.cast()) };
+        }
+    }
+
+    fn token_user_sid(process: HANDLE) -> io::Result<TokenUserSid> {
+        let mut token: HANDLE = std::ptr::null_mut();
+        // SAFETY: `process` is a valid process or pseudo-handle and `token` is
+        // a valid output pointer.
+        if unsafe { OpenProcessToken(process, TOKEN_QUERY, &mut token) } == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        let token = OwnedHandle(token);
+
+        let mut len = 0u32;
+        // SAFETY: this is the documented size-query form.
+        unsafe { GetTokenInformation(token.0, TokenUser, std::ptr::null_mut(), 0, &mut len) };
+        if len == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        let words = (len as usize).div_ceil(std::mem::size_of::<u64>());
+        let mut buffer = vec![0u64; words];
+        // SAFETY: the aligned buffer contains at least `len` writable bytes.
+        if unsafe {
+            GetTokenInformation(
+                token.0,
+                TokenUser,
+                buffer.as_mut_ptr().cast(),
+                len,
+                &mut len,
+            )
+        } == 0
+        {
+            return Err(io::Error::last_os_error());
+        }
+        // SAFETY: a successful TokenUser query populated a TOKEN_USER header
+        // whose SID points into `buffer`, retained by TokenUserSid.
+        let sid = unsafe { (*buffer.as_ptr().cast::<TOKEN_USER>()).User.Sid };
+        Ok(TokenUserSid {
+            _buffer: buffer,
+            sid,
+        })
+    }
+
+    fn current_user_sid() -> io::Result<TokenUserSid> {
+        // SAFETY: GetCurrentProcess returns a valid pseudo-handle.
+        token_user_sid(unsafe { GetCurrentProcess() })
+    }
+
+    fn process_is_current_user(process: HANDLE) -> io::Result<bool> {
+        let peer = token_user_sid(process)?;
+        let current = current_user_sid()?;
+        // SAFETY: both SID pointers remain anchored in live buffers.
+        Ok(unsafe { EqualSid(peer.sid, current.sid) } != 0)
+    }
+
+    /// Build a protected named-pipe descriptor whose owner is the exact token
+    /// user, not the token's possibly group-valued default owner. This keeps an
+    /// elevated Kettle interoperable with its unelevated same-user clients
+    /// without making "owned by Administrators" acceptable provenance.
+    pub(super) fn pipe_security_descriptor() -> io::Result<LocalSecurityDescriptor> {
+        struct LocalString(windows_sys::core::PWSTR);
+
+        impl Drop for LocalString {
             fn drop(&mut self) {
-                // SAFETY: this struct exclusively owns a valid handle for its
-                // lifetime and never hands out a duplicate.
-                unsafe {
-                    CloseHandle(self.0);
-                }
+                // SAFETY: ConvertSidToStringSidW allocated this with LocalAlloc.
+                unsafe { LocalFree(self.0.cast()) };
             }
         }
 
-        /// The user SID from a process's primary token. `GetTokenInformation`
-        /// writes a `TOKEN_USER` header into `_buffer` whose `Sid` pointer
-        /// points elsewhere inside that SAME buffer, so the buffer must
-        /// outlive every use of `sid` — kept alongside it here rather than
-        /// dropped after extraction.
-        struct TokenUserSid {
-            _buffer: Vec<u64>,
-            sid: PSID,
+        let current = current_user_sid()?;
+        let mut sid_string = std::ptr::null_mut();
+        // SAFETY: `current.sid` is valid and sid_string is an output pointer.
+        if unsafe { ConvertSidToStringSidW(current.sid, &mut sid_string) } == 0 {
+            return Err(io::Error::last_os_error());
         }
-
-        fn token_user_sid(process: HANDLE) -> io::Result<TokenUserSid> {
-            let mut token: HANDLE = std::ptr::null_mut();
-            // SAFETY: `process` is a valid open process handle (or the
-            // GetCurrentProcess pseudo-handle) and `token` is a valid output
-            // pointer for the call's duration.
-            if unsafe { OpenProcessToken(process, TOKEN_QUERY, &mut token) } == 0 {
-                return Err(io::Error::last_os_error());
+        let sid_string = LocalString(sid_string);
+        let len = unsafe {
+            let mut len = 0usize;
+            while *sid_string.0.add(len) != 0 {
+                len += 1;
             }
-            let token = OwnedHandle(token);
-
-            // Discover the required buffer size first: this call is EXPECTED
-            // to fail (ERROR_INSUFFICIENT_BUFFER) and only `len` matters.
-            let mut len = 0u32;
-            // SAFETY: a null pointer with a zero length is the documented
-            // size-query form of GetTokenInformation.
-            unsafe { GetTokenInformation(token.0, TokenUser, std::ptr::null_mut(), 0, &mut len) };
-            if len == 0 {
-                return Err(io::Error::last_os_error());
-            }
-            // `Vec<u8>` only guarantees 1-byte alignment, but TOKEN_USER
-            // contains pointer-sized fields; back the buffer with `u64`s so
-            // its address is always suitably aligned for the cast below.
-            let words = (len as usize).div_ceil(std::mem::size_of::<u64>());
-            let mut buffer = vec![0u64; words];
-            let capacity = len;
-            // SAFETY: `buffer` is at least `len` bytes (rounded up) and
-            // correctly aligned to receive the TOKEN_USER header.
-            if unsafe {
-                GetTokenInformation(
-                    token.0,
-                    TokenUser,
-                    buffer.as_mut_ptr().cast(),
-                    capacity,
-                    &mut len,
-                )
-            } == 0
-            {
-                return Err(io::Error::last_os_error());
-            }
-            // SAFETY: the call above succeeded, so `buffer` now starts with a
-            // populated TOKEN_USER whose `User.Sid` is a valid PSID pointing
-            // at SID bytes elsewhere inside this same buffer.
-            let sid = unsafe { (*buffer.as_ptr().cast::<TOKEN_USER>()).User.Sid };
-            Ok(TokenUserSid {
-                _buffer: buffer,
-                sid,
-            })
+            len
+        };
+        // SAFETY: the API returned a NUL-terminated UTF-16 SID string.
+        let sid = String::from_utf16(unsafe { std::slice::from_raw_parts(sid_string.0, len) })
+            .map_err(io::Error::other)?;
+        let sddl = format!("O:{sid}D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GA;;;OW)");
+        let wide: Vec<u16> = sddl.encode_utf16().chain(std::iter::once(0)).collect();
+        let mut descriptor: PSECURITY_DESCRIPTOR = std::ptr::null_mut();
+        // SAFETY: `wide` is NUL-terminated and descriptor is a valid output.
+        if unsafe {
+            ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                wide.as_ptr(),
+                SDDL_REVISION_1,
+                &mut descriptor,
+                std::ptr::null_mut(),
+            )
+        } == 0
+        {
+            return Err(io::Error::last_os_error());
         }
+        Ok(LocalSecurityDescriptor(descriptor))
+    }
 
-        // Resolve the connected client's PID at the kernel level — NOT a
-        // value the peer supplies, so it cannot be spoofed over the pipe.
+    pub(super) fn client_is_same_user(file: &std::fs::File) -> io::Result<bool> {
         let mut client_pid = 0u32;
-        // SAFETY: `file` owns a valid, connected named-pipe server handle.
+        // SAFETY: `file` owns a connected named-pipe server handle.
         if unsafe { GetNamedPipeClientProcessId(file.as_raw_handle() as HANDLE, &mut client_pid) }
             == 0
         {
             return Err(io::Error::last_os_error());
         }
-
-        // PROCESS_QUERY_LIMITED_INFORMATION is the minimal access right that
-        // still permits OpenProcessToken; no code-injection-capable access
-        // (e.g. PROCESS_VM_*, PROCESS_TERMINATE) is requested against the peer.
-        // SAFETY: `client_pid` came from the kernel call above.
-        let client_process =
-            unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, client_pid) };
-        if client_process.is_null() {
+        // SAFETY: the PID came from the pipe kernel object.
+        let process = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, client_pid) };
+        if process.is_null() {
             return Err(io::Error::last_os_error());
         }
-        let client_process = OwnedHandle(client_process);
+        let process = OwnedHandle(process);
+        process_is_current_user(process.0)
+    }
 
-        let client_sid = token_user_sid(client_process.0)?;
-        // SAFETY: GetCurrentProcess returns a pseudo-handle valid for this
-        // process's lifetime; it requires no OpenProcess call or CloseHandle.
-        let self_sid = token_user_sid(unsafe { GetCurrentProcess() })?;
-
-        // SAFETY: both `TokenUserSid`s (and their backing buffers) are still
-        // alive here, so both `sid` pointers remain valid for this call.
-        Ok(unsafe { EqualSid(client_sid.sid, self_sid.sid) } != 0)
+    pub(super) fn pipe_owned_by_current_user(file: &std::fs::File) -> io::Result<bool> {
+        let mut owner: PSID = std::ptr::null_mut();
+        let mut descriptor: PSECURITY_DESCRIPTOR = std::ptr::null_mut();
+        // SAFETY: the client handle is valid and all output pointers live for
+        // the call. Named-pipe security descriptors are kernel-object security.
+        let status = unsafe {
+            GetSecurityInfo(
+                file.as_raw_handle() as HANDLE,
+                SE_KERNEL_OBJECT,
+                OWNER_SECURITY_INFORMATION,
+                &mut owner,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                &mut descriptor,
+            )
+        };
+        if status != 0 {
+            return Err(io::Error::from_raw_os_error(status as i32));
+        }
+        let descriptor = LocalSecurityDescriptor(descriptor);
+        let current = current_user_sid()?;
+        let matches = !owner.is_null() && unsafe { EqualSid(owner, current.sid) } != 0;
+        drop(descriptor);
+        Ok(matches)
     }
 }
 
@@ -980,20 +1093,14 @@ mod imp {
     use super::*;
     use std::cell::Cell;
     use std::os::windows::io::FromRawHandle;
-    use std::ptr;
-    use windows_sys::Win32::Foundation::{
-        CloseHandle, ERROR_PIPE_CONNECTED, GetLastError, HANDLE, INVALID_HANDLE_VALUE, LocalFree,
-    };
-    use windows_sys::Win32::Security::Authorization::{
-        ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
-    };
-    use windows_sys::Win32::Security::{PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES};
+    use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, INVALID_HANDLE_VALUE};
+    use windows_sys::Win32::Security::SECURITY_ATTRIBUTES;
     use windows_sys::Win32::Storage::FileSystem::{
-        FILE_FLAG_FIRST_PIPE_INSTANCE, PIPE_ACCESS_DUPLEX,
+        FILE_FLAG_FIRST_PIPE_INSTANCE, FILE_FLAG_OVERLAPPED, PIPE_ACCESS_DUPLEX,
     };
     use windows_sys::Win32::System::Pipes::{
-        ConnectNamedPipe, CreateNamedPipeW, DisconnectNamedPipe, PIPE_READMODE_BYTE,
-        PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_BYTE, PIPE_UNLIMITED_INSTANCES, PIPE_WAIT,
+        CreateNamedPipeW, DisconnectNamedPipe, PIPE_READMODE_BYTE, PIPE_REJECT_REMOTE_CLIENTS,
+        PIPE_TYPE_BYTE, PIPE_UNLIMITED_INSTANCES, PIPE_WAIT,
     };
 
     const PIPE_BUF: u32 = 64 * 1024;
@@ -1002,8 +1109,9 @@ mod imp {
         s.encode_utf16().chain(std::iter::once(0)).collect()
     }
 
-    /// Create one named-pipe instance for `name`. A protected DACL grants full
-    /// access only to the object owner, SYSTEM, and administrators. `first` adds
+    /// Create one overlapped named-pipe instance for `name`. Its exact owner is
+    /// the creator's token-user SID and a protected DACL grants full access to
+    /// that owner, SYSTEM, and administrators. `first` adds
     /// `FILE_FLAG_FIRST_PIPE_INSTANCE` so creating the FIRST
     /// instance FAILS (ERROR_ACCESS_DENIED) if the name is already taken — this
     /// is the squatting guard: a malicious local process that pre-created the
@@ -1011,29 +1119,16 @@ mod imp {
     /// adopt an attacker-owned instance and surfaces the error instead.
     fn create_instance(name_w: &[u16], first: bool) -> io::Result<HANDLE> {
         let open_mode = PIPE_ACCESS_DUPLEX
+            | FILE_FLAG_OVERLAPPED
             | if first {
                 FILE_FLAG_FIRST_PIPE_INSTANCE
             } else {
                 0
             };
-        let sddl = wide("D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GA;;;OW)");
-        let mut descriptor: PSECURITY_DESCRIPTOR = ptr::null_mut();
-        // SAFETY: SDDL is NUL-terminated and descriptor is a valid output
-        // pointer. LocalFree below releases the returned allocation.
-        if unsafe {
-            ConvertStringSecurityDescriptorToSecurityDescriptorW(
-                sddl.as_ptr(),
-                SDDL_REVISION_1,
-                &mut descriptor,
-                ptr::null_mut(),
-            )
-        } == 0
-        {
-            return Err(io::Error::last_os_error());
-        }
+        let descriptor = super::windows_security::pipe_security_descriptor()?;
         let attrs = SECURITY_ATTRIBUTES {
             nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
-            lpSecurityDescriptor: descriptor,
+            lpSecurityDescriptor: descriptor.as_ptr(),
             bInheritHandle: 0,
         };
         // SAFETY: `name_w` is a valid NUL-terminated wide string and attrs owns
@@ -1051,9 +1146,6 @@ mod imp {
                 &attrs,
             )
         };
-        unsafe {
-            LocalFree(descriptor);
-        }
         if h == INVALID_HANDLE_VALUE || h.is_null() {
             return Err(io::Error::last_os_error());
         }
@@ -1098,22 +1190,16 @@ mod imp {
                     handle = create_instance(&self.name_w, false)?;
                     self.pending.set(handle);
                 }
-                // Block until a client connects.
-                // SAFETY: `handle` is a valid pipe handle we own.
-                let connected = unsafe { ConnectNamedPipe(handle, ptr::null_mut()) };
-                if connected == 0 {
-                    let e = unsafe { GetLastError() };
-                    // ERROR_PIPE_CONNECTED = a client connected between create +
-                    // connect — success, not failure.
-                    if e != ERROR_PIPE_CONNECTED {
-                        // Poisoned instance: disconnect + close + recreate, retry.
-                        unsafe {
-                            DisconnectNamedPipe(handle);
-                            CloseHandle(handle);
-                        }
-                        self.pending.set(create_instance(&self.name_w, false)?);
-                        continue;
+                // Wait through an explicit OVERLAPPED operation. Passing null
+                // here on an overlapped handle can falsely report completion.
+                if super::windows_io::connect(handle).is_err() {
+                    // Poisoned instance: disconnect + close + recreate, retry.
+                    unsafe {
+                        DisconnectNamedPipe(handle);
+                        CloseHandle(handle);
                     }
+                    self.pending.set(create_instance(&self.name_w, false)?);
+                    continue;
                 }
                 // Connected. Create the NEXT pending instance; if that fails,
                 // STILL return this (valid) client and leave `pending` invalid so
@@ -1126,7 +1212,7 @@ mod imp {
                 let file = unsafe { std::fs::File::from_raw_handle(handle as *mut _) };
                 return Ok(CtlStream::Windows(WindowsStream {
                     file,
-                    overlapped: false,
+                    server_end: true,
                 }));
             }
             Err(io::Error::other("accept retries exhausted"))
@@ -1168,7 +1254,7 @@ mod imp {
                 Ok(file) => {
                     return Ok(CtlStream::Windows(WindowsStream {
                         file,
-                        overlapped: true,
+                        server_end: false,
                     }));
                 }
                 // A missing pipe = a dead server: no point retrying. (A pipe
@@ -1185,7 +1271,29 @@ mod imp {
     }
 }
 
-pub use imp::{CtlListener, connect};
+pub use imp::CtlListener;
+
+fn authenticate_connected(
+    stream: CtlStream,
+    verify: impl FnOnce(&CtlStream) -> io::Result<bool>,
+) -> io::Result<CtlStream> {
+    match verify(&stream)? {
+        true => Ok(stream),
+        false => Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "control endpoint is not owned by the current user",
+        )),
+    }
+}
+
+/// Connect to a local endpoint and authenticate its server before returning a
+/// stream to protocol code. Unix compares peer credentials; Windows verifies
+/// the pipe object's exact token-user owner SID. No request bytes are sent when
+/// this check fails.
+pub fn connect(endpoint: &str) -> io::Result<CtlStream> {
+    let stream = imp::connect(endpoint)?;
+    authenticate_connected(stream, CtlStream::peer_is_same_user)
+}
 
 #[cfg(test)]
 mod tests {
@@ -1546,6 +1654,139 @@ mod tests {
     }
 
     #[test]
+    fn client_authentication_rejects_before_protocol_bytes_are_sent() {
+        let endpoint = test_endpoint("peer-rejected");
+        let listener = CtlListener::bind(&endpoint).expect("bind");
+        let (accepted_tx, accepted_rx) = std::sync::mpsc::channel();
+        let server = std::thread::spawn(move || {
+            let mut conn = listener.accept().expect("accept");
+            accepted_tx.send(()).expect("signal accepted peer");
+            let mut byte = [0_u8; 1];
+            match conn.read(&mut byte) {
+                Ok(0) => true,
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        io::ErrorKind::BrokenPipe
+                            | io::ErrorKind::ConnectionReset
+                            | io::ErrorKind::UnexpectedEof
+                    ) =>
+                {
+                    true
+                }
+                Ok(_) | Err(_) => false,
+            }
+        });
+
+        // Use the raw platform connector so this test can inject a failed
+        // kernel identity decision deterministically on every CI user/OS.
+        let stream = imp::connect(&endpoint).expect("raw connect");
+        accepted_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("server accepted peer before rejection");
+        let result = authenticate_connected(stream, |_| Ok(false));
+        match result {
+            Err(error) => assert_eq!(error.kind(), io::ErrorKind::PermissionDenied),
+            Ok(_) => panic!("a failed server identity check must reject the stream"),
+        }
+        assert!(
+            server.join().expect("server thread"),
+            "server received protocol data before client authentication"
+        );
+    }
+
+    /// Exercise the exact arm implicated by the audit: an accepted server
+    /// handle writing more than the pipe/socket buffer to a client that never
+    /// reads. Both a deadline and cancellation must interrupt the pending I/O.
+    #[test]
+    fn accepted_server_write_observes_deadline_and_cancellation() {
+        fn run(
+            tag: &str,
+            cancelled: Option<std::sync::Arc<AtomicBool>>,
+        ) -> (io::ErrorKind, Duration) {
+            let endpoint = test_endpoint(tag);
+            let listener = CtlListener::bind(&endpoint).expect("bind");
+            let (accepted_tx, accepted_rx) = std::sync::mpsc::channel();
+            let (result_tx, result_rx) = std::sync::mpsc::channel();
+            let server_cancelled = cancelled.clone();
+            let server = std::thread::spawn(move || {
+                let mut conn = listener.accept().expect("accept");
+                #[cfg(unix)]
+                {
+                    use std::os::fd::AsRawFd as _;
+
+                    let CtlStream::Unix(socket) = &conn;
+                    let bytes: libc::c_int = 4 * 1024;
+                    // SAFETY: `socket` owns this valid fd and `bytes` is a
+                    // correctly sized SO_SNDBUF value.
+                    assert_eq!(
+                        unsafe {
+                            libc::setsockopt(
+                                socket.stream.as_raw_fd(),
+                                libc::SOL_SOCKET,
+                                libc::SO_SNDBUF,
+                                std::ptr::addr_of!(bytes).cast(),
+                                std::mem::size_of_val(&bytes) as libc::socklen_t,
+                            )
+                        },
+                        0,
+                        "shrink accepted socket send buffer"
+                    );
+                }
+                accepted_tx.send(()).expect("signal accepted");
+                let payload = vec![b'x'; 8 * 1024 * 1024];
+                let started = Instant::now();
+                let deadline = if server_cancelled.is_some() {
+                    started + Duration::from_secs(5)
+                } else {
+                    started + Duration::from_millis(40)
+                };
+                let error = conn
+                    .write_all_until(&payload, deadline, server_cancelled.as_deref())
+                    .expect_err("accepted server write must stop");
+                result_tx
+                    .send((error.kind(), started.elapsed()))
+                    .expect("send write result");
+            });
+
+            let client = connect(&endpoint).expect("connect unread client");
+            accepted_rx
+                .recv_timeout(Duration::from_secs(1))
+                .expect("server accepted unread client");
+            let canceller = cancelled.map(|flag| {
+                std::thread::spawn(move || {
+                    std::thread::sleep(Duration::from_millis(40));
+                    flag.store(true, Ordering::Release);
+                })
+            });
+            let result = result_rx
+                .recv_timeout(Duration::from_secs(2))
+                .expect("accepted write remained blocked");
+            if let Some(canceller) = canceller {
+                canceller.join().expect("canceller thread");
+            }
+            drop(client);
+            server.join().expect("server thread");
+            result
+        }
+
+        let (kind, elapsed) = run("accepted-write-timeout", None);
+        assert_eq!(kind, io::ErrorKind::TimedOut);
+        assert!(
+            elapsed < Duration::from_secs(1),
+            "deadline took {elapsed:?}"
+        );
+
+        let cancelled = std::sync::Arc::new(AtomicBool::new(false));
+        let (kind, elapsed) = run("accepted-write-cancel", Some(cancelled));
+        assert_eq!(kind, io::ErrorKind::Interrupted);
+        assert!(
+            elapsed < Duration::from_secs(1),
+            "cancellation took {elapsed:?}"
+        );
+    }
+
+    #[test]
     fn blocked_write_observes_deadline_and_cancellation() {
         fn stalled_connection(
             tag: &str,
@@ -1557,8 +1798,8 @@ mod tests {
             let endpoint = test_endpoint(tag);
             let listener = CtlListener::bind(&endpoint).expect("bind");
             let (release, released) = std::sync::mpsc::channel();
-            // A Windows client can connect before the server's synchronous
-            // ConnectNamedPipe returns. Do not let the timed-out client vanish
+            // A Windows client can connect before the server's pending
+            // ConnectNamedPipe completes. Do not let the timed-out client vanish
             // first: accept would see ERROR_NO_DATA, retry on a fresh instance,
             // and wait forever for a second client this fixture never creates.
             let (accepted, wait_for_accept) = std::sync::mpsc::channel();
