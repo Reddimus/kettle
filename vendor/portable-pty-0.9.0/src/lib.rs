@@ -95,7 +95,8 @@ pub trait MasterPty: Downcast + Send {
     fn try_clone_reader(&self) -> Result<Box<dyn std::io::Read + Send>, Error>;
     /// Obtain a writable handle; writing to it will send data to the
     /// slave end.
-    /// Dropping the writer will send EOF to the slave end.
+    /// Dropping the writer closes its handle without synthesizing terminal
+    /// input; callers that need EOF must signal it deliberately.
     /// It is invalid to take the writer more than once.
     fn take_writer(&self) -> Result<Box<dyn std::io::Write + Send>, Error>;
     /// Obtain a writer configured to return partial progress or

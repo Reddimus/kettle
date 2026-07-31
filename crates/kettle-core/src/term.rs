@@ -5557,10 +5557,11 @@ impl Drop for Terminal {
     /// the process alive with `Responding=false` for as long as it was sampled
     /// — a hang, not a panic. See `target/pty-drop-repro.txt`.)
     ///
-    /// Drop closes the writer (conin), then a detached reaper kills the child
+    /// Drop releases the input writer, then a detached reaper kills the child
     /// and closes the master (conout / pseudoconsole) while the output reader
-    /// remains live. Only after that close returns does the reaper publish the
-    /// reader stop flag and reap the child. This ordering follows the Win32
+    /// remains live. Teardown never depends on the writer synthesizing EOF.
+    /// Only after the master close returns does the reaper publish the reader
+    /// stop flag and reap the child. This ordering follows the Win32
     /// contract for pre-24H2 `ClosePseudoConsole`, which may wait indefinitely
     /// if conout is neither closed nor drained. `Drop` itself only moves owned
     /// handles to the reaper and detaches the parser handle, so the UI keeps
@@ -5571,9 +5572,10 @@ impl Drop for Terminal {
         // 1. Let the pump bypass a full parser queue and drain/discard conout
         //    directly for the remainder of teardown.
         self.drain_output.store(true, Ordering::Release);
-        // 2. Close the writer (conin / child stdin) by swapping in a discard
-        //    sink and dropping the real writer — an EOF nudge for shells that
-        //    exit on stdin close.
+        // 2. Stop accepting input by swapping in a discard sink and dropping
+        //    the writer handle. Unix closes only the duplicate descriptor and
+        //    deliberately sends no terminal input; the reaper below owns the
+        //    explicit child shutdown.
         if let Ok(mut w) = self.writer.try_lock() {
             let _ = std::mem::replace(&mut *w, Box::new(NullWrite));
         }
