@@ -47,18 +47,9 @@ shared_library!(ConPtyFuncs,
 fn load_conpty() -> ConPtyFuncs {
     // If the kernel doesn't export these functions then their system is
     // too old and we cannot run.
-    let kernel = ConPtyFuncs::open(Path::new("kernel32.dll")).expect(
+    ConPtyFuncs::open(Path::new("kernel32.dll")).expect(
         "this system does not support conpty.  Windows 10 October 2018 or newer is required",
-    );
-
-    // We prefer to use a sideloaded conpty.dll and openconsole.exe host deployed
-    // alongside the application.  We check for this after checking for kernel
-    // support so that we don't try to proceed and do something crazy.
-    if let Ok(sideloaded) = ConPtyFuncs::open(Path::new("conpty.dll")) {
-        sideloaded
-    } else {
-        kernel
-    }
+    )
 }
 
 lazy_static! {
@@ -173,5 +164,24 @@ impl PsuedoCon {
         Ok(WinChild {
             proc: Mutex::new(proc),
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn conpty_loader_uses_only_kernel32() {
+        let source = include_str!("psuedocon.rs");
+        let open_call = ["ConPtyFuncs", "::open("].concat();
+        assert_eq!(
+            source.matches(&open_call).count(),
+            1,
+            "ConPTY must have exactly one library load path"
+        );
+        let unsafe_sideload_name = ["conpty", ".dll"].concat();
+        assert!(
+            !source.contains(&unsafe_sideload_name),
+            "ConPTY must never probe a working-directory or PATH DLL"
+        );
     }
 }

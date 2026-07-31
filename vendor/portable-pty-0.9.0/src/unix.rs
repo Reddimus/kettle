@@ -383,25 +383,10 @@ impl MasterPty for UnixMasterPty {
     }
 }
 
-/// Represents the master end of a pty.
-/// EOT will be sent, and then the file descriptor will be closed when
-/// the Pty is dropped.
+/// Owns the duplicate master file descriptor used for PTY input.
+/// Dropping the writer closes only this descriptor and never synthesizes input.
 struct UnixMasterWriter {
     fd: PtyFd,
-}
-
-impl Drop for UnixMasterWriter {
-    fn drop(&mut self) {
-        let mut t: libc::termios = unsafe { std::mem::MaybeUninit::zeroed().assume_init() };
-        if unsafe { libc::tcgetattr(self.fd.0.as_raw_fd(), &mut t) } == 0 {
-            // EOF is only interpreted after a newline, so if it is set,
-            // we send a newline followed by EOF.
-            let eot = t.c_cc[libc::VEOF];
-            if eot != 0 {
-                let _ = self.fd.0.write_all(&[b'\n', eot]);
-            }
-        }
-    }
 }
 
 impl Write for UnixMasterWriter {
@@ -410,5 +395,109 @@ impl Write for UnixMasterWriter {
     }
     fn flush(&mut self) -> Result<(), io::Error> {
         self.fd.flush()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{Duration, Instant};
+
+    fn read_until(
+        reader: &mut dyn Read,
+        expected: &[u8],
+        timeout: Duration,
+    ) -> io::Result<Vec<u8>> {
+        let deadline = Instant::now() + timeout;
+        let mut output = Vec::new();
+        let mut buf = [0; 256];
+
+        loop {
+            match reader.read(&mut buf) {
+                Ok(0) => {}
+                Ok(len) => {
+                    output.extend_from_slice(&buf[..len]);
+                    if output
+                        .windows(expected.len())
+                        .any(|window| window == expected)
+                    {
+                        return Ok(output);
+                    }
+                }
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted
+                    ) => {}
+                Err(error) => return Err(error),
+            }
+
+            if Instant::now() >= deadline {
+                return Ok(output);
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    #[test]
+    fn dropping_writer_does_not_submit_partial_line() -> anyhow::Result<()> {
+        let (master, slave) = openpty(PtySize::default())?;
+        let master_fd = master.fd.as_raw_fd();
+        let flags = unsafe { libc::fcntl(master_fd, libc::F_GETFL) };
+        assert!(
+            flags >= 0,
+            "read master status flags: {}",
+            io::Error::last_os_error()
+        );
+        assert_eq!(
+            unsafe { libc::fcntl(master_fd, libc::F_SETFL, flags | libc::O_NONBLOCK) },
+            0,
+            "make test PTY nonblocking: {}",
+            io::Error::last_os_error()
+        );
+
+        let mut reader = master.try_clone_reader()?;
+        let marker =
+            std::env::temp_dir().join(format!("portable-pty-drop-writer-{}", std::process::id()));
+        let _ = std::fs::remove_file(&marker);
+        let mut command = CommandBuilder::new("/bin/sh");
+        command.args([
+            "-c",
+            "printf 'READY\\n'; IFS= read -r line; eval \"$line\"; printf 'EXECUTED:\\n'",
+        ]);
+        command.env("PTY_DROP_MARKER", marker.as_os_str());
+        let mut child = slave.spawn_command(command)?;
+        drop(slave);
+
+        let ready = read_until(&mut *reader, b"READY", Duration::from_secs(2))?;
+        assert!(
+            ready
+                .windows(b"READY".len())
+                .any(|window| window == b"READY"),
+            "test child did not become ready; output={:?}",
+            String::from_utf8_lossy(&ready)
+        );
+
+        let partial_line = b"touch \"$PTY_DROP_MARKER\"";
+        let mut writer = master.take_writer()?;
+        writer.write_all(partial_line)?;
+        drop(writer);
+
+        let after_drop = read_until(&mut *reader, b"EXECUTED:", Duration::from_millis(300))?;
+        let executed = after_drop
+            .windows(b"EXECUTED:".len())
+            .any(|window| window == b"EXECUTED:");
+        let marker_created = marker.exists();
+
+        let _ = child.kill();
+        let _ = child.wait();
+        let _ = std::fs::remove_file(&marker);
+
+        assert!(
+            !executed && !marker_created,
+            "dropping the writer executed the partial line; marker_created={marker_created}, output={:?}",
+            String::from_utf8_lossy(&after_drop)
+        );
+        Ok(())
     }
 }

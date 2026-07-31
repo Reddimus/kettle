@@ -35,7 +35,13 @@ vendor-source update that revalidates the recorded provenance and local patch.
   reports committed screen lifecycle and scroll-region mutations, coalesces
   compatible adjacent scrolls without losing the full monotonic screen delta,
   and exposes sticky overflow plus the current active screen for fail-safe
-  resynchronization.
+  resynchronization. The Windows ConPTY backend also no longer probes a bare
+  `conpty.dll`. A bare name searches the application directory, the working
+  directory, and `PATH`, which is a DLL preloading vector for a terminal
+  launched inside an untrusted project; the same probe was removed from
+  `portable-pty` for the same reason. Kettle does not use this backend — panes
+  come from `portable-pty` — but `tty` still compiles into the binary, and a
+  known preload pattern should not ship even unreferenced.
 - Excluded: the 46 MB upstream terminal reference fixture corpus and its
   explicit reference-test target. This crate is excluded from root workspace
   membership, so `cargo test --workspace` covers the patched behavior through
@@ -88,13 +94,19 @@ to route graphics controls around the text parser.
   The Windows ConPTY backend places only the caller's byte-pipe handle in
   `PIPE_NOWAIT`, so writes return partial/zero progress when conin is full. The
   synchronous handle passed to `CreatePseudoConsole` remains unchanged, as
-  required by the Windows API. Validation-only maintenance also replaces an
-  uninitialized Win32 attribute buffer with initialized storage and applies
-  behavior-preserving lint cleanups required by Kettle's warnings-denied
-  direct-package clippy gate. Five additional Unix-only cleanups apply Rust
-  1.97's suggestions for redundant imports, borrows, conversions, and
-  `Option` dereferencing. Drop those cleanups if a later upstream release
-  already carries them.
+  required by the Windows API. The ConPTY loader no longer probes a bare
+  `conpty.dll`; Kettle does not support sideloaded OpenConsole, so it resolves
+  only the system `kernel32.dll` exports and cannot execute a DLL found through
+  the application directory, working directory, or `PATH` during pane creation.
+  On Unix, dropping the master writer now closes only its duplicate descriptor
+  and never writes a newline or VEOF byte into the terminal; deliberate EOF
+  remains Kettle's live-termios `PtyStdin::try_signal_eof` path. Validation-only
+  maintenance also replaces an uninitialized Win32 attribute buffer with
+  initialized storage and applies behavior-preserving lint cleanups required by
+  Kettle's warnings-denied direct-package clippy gate. Five additional
+  Unix-only cleanups apply Rust 1.97's suggestions for redundant imports,
+  borrows, conversions, and `Option` dereferencing. Drop those cleanups if a
+  later upstream release already carries them.
 - Excluded: the crates.io package's registry marker, generated lockfile, and
   standalone examples. Their explicit target stanzas and example-only
   development dependencies are removed from the local manifest; the optional
@@ -102,7 +114,7 @@ to route graphics controls around the text parser.
   generated derive code uses it when `serde_support` is enabled. This crate is
   also excluded from root workspace membership. Kettle exercises the public
   path through its PTY regressions; run the retained package-owned native unit
-  test directly with
+  tests directly with
   `cargo test --locked --manifest-path vendor/Cargo.toml --target-dir
   target/vendor-check -p portable-pty`.
 
