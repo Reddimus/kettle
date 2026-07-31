@@ -793,6 +793,14 @@ if [ ! -x "$PACKAGE_ROOT/install.sh" ]; then
   exit 1
 fi
 
+# A remotely selected package must contain the hardened descriptor-relative
+# helper before any install path is touched. Older releases without recorded
+# provenance are intentionally not adopted by this installer.
+if [ ! -f "$PACKAGE_ROOT/install-unix.py" ] || [ -L "$PACKAGE_ROOT/install-unix.py" ]; then
+  echo "kettle install-online.sh: release lacks the hardened install-unix.py helper; refusing a legacy path-based install." >&2
+  exit 1
+fi
+
 # `--skip-build` because the tarball already ships a release binary. Invoke via
 # the script's own shebang (`#!/usr/bin/env bash`) — the bundled install.sh uses
 # `set -euo pipefail`, a Bash-ism that fails under dash (Debian/Ubuntu `sh` is
@@ -822,67 +830,24 @@ else
 fi
 sed '/^To uninstall: \.\/scripts\/install\.sh --uninstall$/d' "$INSTALL_LOG"
 
-# Stash an uninstall helper under the same prefix so the user can later
-# uninstall without re-downloading. Keep this in lockstep with KETTLE_PREFIX:
-# pre-fix, a custom-prefix install still wrote ~/.local/share/kettle/install.sh,
-# leaving the uninstall helper in the wrong tree and mutating the user's default
-# install area during an isolated/prefix install.
-#
-# Use a wrapper instead of copying install.sh directly. The tarball might come
-# from an older release whose install.sh defaults to ~/.local even when it is
-# saved under <prefix>/share/kettle; the wrapper infers <prefix> from its own
-# location and passes it explicitly. Newer install.sh versions infer this too,
-# but the wrapper keeps old release tarballs uninstallable from custom prefixes.
+# The bundled installer atomically records and publishes its own prefix-aware
+# helper. Rewriting it here would invalidate the provenance manifest and would
+# reintroduce path-based writes after the no-follow transaction completed.
 INSTALL_PREFIX="${KETTLE_PREFIX:-${HOME}/.local}"
-INSTALL_HELPER="${INSTALL_PREFIX}/share/kettle/install.sh"
-INSTALL_REAL="${INSTALL_PREFIX}/share/kettle/install-real.sh"
-mkdir -p "$(dirname "$INSTALL_HELPER")"
-cp "$PACKAGE_ROOT/install.sh" "$INSTALL_REAL"
-cat > "$INSTALL_HELPER" <<'EOF'
-#!/usr/bin/env bash
-set -euo pipefail
-SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
-PREFIX=$(cd -- "${SCRIPT_DIR}/../.." && pwd)
-UNINSTALL=0
-for arg in "$@"; do
-  if [[ "${arg}" == "--uninstall" ]]; then
-    UNINSTALL=1
-  fi
-done
-if [[ "${UNINSTALL}" -eq 1 ]]; then
-  "${SCRIPT_DIR}/install-real.sh" "--prefix=${PREFIX}" "$@"
-  rm -f "${SCRIPT_DIR}/install-real.sh" "${SCRIPT_DIR}/install.sh" "${SCRIPT_DIR}/install.json"
-  rm -rf "${SCRIPT_DIR}/shell-integration"
-  rmdir "${SCRIPT_DIR}" 2>/dev/null || true
-else
-  exec "${SCRIPT_DIR}/install-real.sh" "--prefix=${PREFIX}" "$@"
-fi
-EOF
-chmod +x "$INSTALL_HELPER"
-chmod +x "$INSTALL_REAL"
-if [ -d "$PACKAGE_ROOT/shell-integration" ]; then
-  mkdir -p "${INSTALL_PREFIX}/share/kettle/shell-integration"
-  cp "$PACKAGE_ROOT/shell-integration/"* "${INSTALL_PREFIX}/share/kettle/shell-integration/"
-  chmod 644 "${INSTALL_PREFIX}/share/kettle/shell-integration/"*
-fi
-
-# Current online installs become explicit self-update-owned layouts even when
-# the selected release predates the marker-aware bundled install.sh.
-case "$ASSET" in
-  kettle-linux-x86_64.tar.gz) UPDATE_TARGET="x86_64-unknown-linux-gnu" ;;
-  kettle-linux-aarch64.tar.gz) UPDATE_TARGET="aarch64-unknown-linux-gnu" ;;
+case "$INSTALL_PREFIX" in
+  /*) ;;
+  *) INSTALL_PREFIX="${PWD}/${INSTALL_PREFIX}" ;;
 esac
-cat > "${INSTALL_PREFIX}/share/kettle/install.json" <<EOF
-{
-  "schema": 1,
-  "product": "kettle",
-  "managed_by": "kettle-installer",
-  "channel": "stable",
-  "target": "${UPDATE_TARGET}",
-  "version": "${VERSION#v}"
-}
-EOF
-chmod 644 "${INSTALL_PREFIX}/share/kettle/install.json"
+while [ "$INSTALL_PREFIX" != "/" ] && [ "${INSTALL_PREFIX%/}" != "$INSTALL_PREFIX" ]; do
+  INSTALL_PREFIX=${INSTALL_PREFIX%/}
+done
+INSTALL_HELPER="${INSTALL_PREFIX}/share/kettle/install.sh"
+INSTALL_PROVENANCE="${INSTALL_PREFIX}/share/kettle/install-files.json"
+if [ ! -x "$INSTALL_HELPER" ] || [ -L "$INSTALL_HELPER" ] || \
+    [ ! -f "$INSTALL_PROVENANCE" ] || [ -L "$INSTALL_PROVENANCE" ]; then
+  echo "kettle install-online.sh: hardened installer did not publish its recorded uninstall state." >&2
+  exit 1
+fi
 
 echo ""
 echo "kettle ${VERSION} installed."

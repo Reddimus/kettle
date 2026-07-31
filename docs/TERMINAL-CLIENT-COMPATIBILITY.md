@@ -113,13 +113,23 @@ encoder covers alternate key codes, associated text, left/right modifiers,
 keypad keys, F13-F35, navigation, media, and volume keys. A bounded 16-entry
 mode stack prevents a client from growing terminal state indefinitely.
 
-With no negotiated Kitty flags, Kettle retains its existing xterm-compatible
-bytes exactly, including DECCKM application cursor mode, DECKPAM application
-keypad mode, xterm modified navigation keys, and the usual control codes. This
-progressive behavior matters for shells and older TUIs: enabling support does
-not force CSI-u on applications that never request it. A key press consumed by
-Kettle UI or a Kettle keybinding also suppresses its matching physical release,
-so a Kitty-aware child never receives a release for a press it did not see.
+With no negotiated Kitty flags, Kettle retains the xterm-compatible bytes for
+unmodified keys, DECCKM application cursor mode, DECKPAM application keypad
+mode, modified navigation keys, and the usual control codes. Modified Enter
+uses xterm `modifyOtherKeys` level-2 form so clients that do not negotiate Kitty
+can still distinguish multiline-input chords. Plain Enter remains `CR` in both
+modes:
+
+| Keyboard mode | Enter | Shift+Enter | Ctrl+Enter | Alt+Enter |
+|---|---|---|---|---|
+| No Kitty negotiation | `0D` | `ESC [ 27;2;13~` | `ESC [ 27;5;13~` | `ESC [ 27;3;13~` |
+| Kitty disambiguation negotiated | `0D` | `ESC [ 13;2u` | `ESC [ 13;5u` | `ESC [ 13;3u` |
+
+This progressive behavior matters for shells and older TUIs: enabling support
+does not force CSI-u on applications that never request it. A key press consumed
+by Kettle UI or a Kettle keybinding also suppresses its matching physical
+release, so a Kitty-aware child never receives a release for a press it did not
+see.
 
 Current Neovim queries CSI-u first and falls back to xterm modifyOtherKeys only
 when the terminal does not answer. Kettle's reply lets Neovim distinguish keys
@@ -143,11 +153,15 @@ See Neovim's [TUI input documentation](https://neovim.io/doc/user/tui/#tui-input
 
   ```tmux
   set -as terminal-features ',xterm-256color:RGB:clipboard:cstyle:extkeys:focus:hyperlinks:mouse:osc7:overline:strikethrough:sync:usstyle'
-  set -g extended-keys on
+  set -s extended-keys on
+  set -g allow-passthrough on
   ```
 
-  `on` preserves progressive negotiation: tmux forwards extended keys to an
-  inner application when that application requests them. tmux 3.5 or newer is
+  `extended-keys` plus the `extkeys` outer-terminal feature preserve modified
+  keys such as Shift+Enter when an inner application requests them.
+  `allow-passthrough` is also required by
+  [Claude Code's documented tmux setup](https://code.claude.com/docs/en/terminal-config)
+  for terminal notifications and progress. tmux 3.5 or newer is
   preferred because its extended-key handling was revised to request and
   preserve xterm mode 2. The options and feature names are defined in the
   [tmux manual](https://man.openbsd.org/tmux#extended-keys) and

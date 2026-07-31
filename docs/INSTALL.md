@@ -64,7 +64,7 @@ curl -fsSL https://raw.githubusercontent.com/Reddimus/kettle/main/scripts/instal
 ```
 
 System-wide install (writes to a custom prefix; needs the
-corresponding permissions):
+  corresponding permissions and Python 3):
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/Reddimus/kettle/main/scripts/install-online.sh \
@@ -82,7 +82,7 @@ supported glibc environment.
 The script accepts only an exact `vMAJOR.MINOR.PATCH`, caps the archive at
 256 MiB, and caps the signed manifest/signature separately. HTTPS-only
 redirects, finite connection/transfer/low-speed deadlines, curl's declared
-size check, a POSIX file-size resource limit, and a final byte count cover both
+  size check, a POSIX file-size resource limit, and a final byte count cover both
 known-length and chunked responses. For v2.35.0 and newer it verifies the
 Ed25519 signature, canonical product/channel/tag/target identity, signed byte
 count, and SHA-256 without permitting a checksum-only downgrade. Older
@@ -90,10 +90,24 @@ releases must provide their exact same-origin SHA-256 sidecar; checksum-less
 releases are refused. Before extraction it permits at most 128 safe regular
 files or directories under one `kettle/` root and 512 MiB unpacked, rejecting
 links, devices, aliases, unsafe permissions, and path traversal. Archives from
-v2.36.0 onward must also contain the inner package manifest; older packages
-remain compatible with their documented checksum-only policy. All work stays
-in a private `mktemp -d` cleaned on exit. Uninstall later via
-`~/.local/share/kettle/install.sh --uninstall`.
+  v2.36.0 onward must also contain the inner package manifest. The current
+  installer additionally requires the authenticated archive to contain the
+  descriptor-relative `install-unix.py` helper; legacy packages without it are
+  refused instead of falling back to path-based writes. All work stays in a
+  private `mktemp -d` cleaned on exit. Uninstall later via
+  `~/.local/share/kettle/install.sh --uninstall`.
+
+  Installation and removal walk every prefix component with no-follow directory
+  descriptors, require trusted ownership and non-group/non-other-writable modes,
+  and publish files by atomic descriptor-relative replacement. The installer
+  records each managed file's path, mode, size, and SHA-256 plus each directory
+  it created in `share/kettle/install-files.json`. Upgrade and uninstall first
+  verify the complete recorded tree, then touch only those recorded paths.
+  Unrelated files in a shared prefix such as `~/.local` or `/usr/local` are left
+  alone. A legacy install, a changed recorded file, a symlink in the path, or a
+  package-manager-owned collision has no trustworthy provenance and is refused;
+  move the old tree aside after reviewing it and install into collision-free
+  paths rather than asking the installer to guess ownership.
 
 ### From source (cloned repo)
 
@@ -155,7 +169,8 @@ Each tagged release ships prebuilt artifacts, built and packaged on real
 GitHub runners for every platform:
 
 - **Linux** — `kettle-linux-x86_64.tar.gz` (binary + `kettle.desktop` + icon
-  + `install.sh`). Extract and run `./install.sh` for the easy-install
+  + `install.sh` + the no-follow `install-unix.py` helper). Extract and run
+  `./install.sh` for the easy-install
   path above, or copy the files manually. Arch / Manjaro / EndeavourOS
   users: each release includes a ready-to-use `PKGBUILD`, rendered from
   [`packaging/arch/PKGBUILD.in`](../packaging/arch/PKGBUILD.in) after CI knows
@@ -218,13 +233,30 @@ GitHub runners for every platform:
   run `.\kettle.exe` from the extracted folder. Pass `-Prefix
   "D:\PortableApps\kettle"` to `install.ps1` for a portable install
   to a custom location (skips PATH + registry + Start menu — pure
-  copy). The prefix must be a dedicated directory named `kettle` and must be
-  new/empty or an existing Kettle-managed install; shared or broad directories
-  are rejected. The path must remain on one local fixed physical volume;
+  copy). The prefix must be a dedicated directory named `kettle`. Every new
+  permanent directory and file receives a protected, non-inheriting ACL granting
+  full control only to the initiating Windows identity, SYSTEM, and
+  Administrators. Existing roots must already have that exact owner/DACL; the
+  parent chain is also rejected if an untrusted principal such as `Users` or
+  `Everyone` can replace a component. The path must remain on one local fixed
+  physical volume;
   network/UNC, removable, `SUBST`, and other non-volume DOS-device mappings are
   rejected. Prefix components also reject Win32 device names, alternate
   streams, invalid/control characters, traversal spellings, trailing dot/space
   aliases, and reparse points.
+
+  An install made by an older Kettle installer may still inherit a writable
+  parent ACL. Review the tree, then migrate it from a trusted extracted release
+  or source checkout (never from the helper inside that writable prefix):
+
+  ```powershell
+  .\install.ps1 -Prefix "D:\PortableApps\kettle" -MigrateLegacyPermissions
+  ```
+
+  Migration is opt-in and fail-closed: it requires a trusted parent chain, the
+  current identity to own the root, and the exact bounded Kettle file/directory
+  grammar with no reparse points or unrelated entries. A normal reinstall or
+  uninstall refuses an old broad-ACL root until this migration succeeds.
 
   An extracted release is accepted as the stable channel only when its bounded
   package manifest has the exact target/version, sorted file set, sizes,
@@ -240,10 +272,10 @@ GitHub runners for every platform:
   stopped upgrade restores the complete prior package. A later invocation
   validates and recovers an interrupted transaction before deciding whether the
   prefix is a new or existing install. The transaction directory is created
-  with a protected ACL limited to its initiating Windows identity, SYSTEM, and
-  Administrators; recovery rejects a different owner, inherited or extra
-  access, and reparse points before reading the journal. Resume an interrupted
-  machine-wide install as the same Windows identity that started it.
+  with the same protected ACL as the permanent root and payload; recovery
+  rejects a different owner, inherited or extra access, and reparse points
+  before reading the journal. Resume an interrupted machine-wide install as the
+  same Windows identity that started it.
 
   Abrupt termination can leave an unpublished staging leaf. Recovery removes
   only the exact installer grammar `.kettle-install-tmp-<32 lowercase hex>`
