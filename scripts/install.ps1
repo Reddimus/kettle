@@ -957,9 +957,39 @@ namespace KettleInstaller
             }
         }
 
-        private static void RequireCurrentUserTemporaryOwner(
+        private static SecurityIdentifier CurrentTokenOwnerSid()
+        {
+            using (WindowsIdentity identity = WindowsIdentity.GetCurrent())
+            {
+                if (identity.Owner == null)
+                {
+                    throw new IOException(
+                        "The installer process has no Windows token owner SID.");
+                }
+                return identity.Owner;
+            }
+        }
+
+        // Two kinds of temporary file reach these checks, and they are owned by
+        // different principals *by construction*. Compare each against the SID
+        // its own creator caused to be set; neither rule is correct for both.
+        //
+        //   - Files this installer creates apply ProtectedObjectSddl, which
+        //     names the user SID explicitly, so an elevated token's default
+        //     owner is not the identity that created them.
+        //   - Rust atomic staging leaves (`.name.tmp.<pid>.<n>.<n>`) are created
+        //     by kettle-state with no explicit descriptor, so Windows assigns
+        //     the token's *owner* — Administrators for an elevated member. That
+        //     is also exactly what kettle-state itself requires before it will
+        //     harden them, so the two sides must agree on the same SID.
+        //
+        // Containment for the Rust leaves comes from the enclosing directory,
+        // which is locked and validated as an owner-private protected directory
+        // before any leaf is opened — not from the leaf's own owner.
+        private static void RequireTemporaryOwner(
             SafeFileHandle handle,
-            string path)
+            string path,
+            SecurityIdentifier expected)
         {
             RawSecurityDescriptor descriptor = new RawSecurityDescriptor(
                 ReadSecurityDescriptor(
@@ -967,11 +997,8 @@ namespace KettleInstaller
                     OWNER_SECURITY_INFORMATION,
                     path),
                 0);
-            // ProtectedObjectSddl assigns the user SID explicitly. An elevated
-            // token may instead name Administrators as its default owner, so
-            // that token field is not the identity this installer created.
             if (descriptor.Owner == null ||
-                !descriptor.Owner.Equals(CurrentUserSid()))
+                !descriptor.Owner.Equals(expected))
             {
                 throw new UnauthorizedAccessException(
                     "Installer temporary file has an untrusted owner: " +
@@ -2234,7 +2261,9 @@ namespace KettleInstaller
             }
         }
 
-        private static void DeleteValidatedTemporaryLeaf(string path)
+        private static void DeleteValidatedTemporaryLeaf(
+            string path,
+            SecurityIdentifier expectedOwner)
         {
             SafeFileHandle handle = OpenNoFollow(
                 path,
@@ -2257,7 +2286,7 @@ namespace KettleInstaller
                         "Installer temporary path is not a bounded, " +
                         "single-link ordinary file: " + path);
                 }
-                RequireCurrentUserTemporaryOwner(handle, path);
+                RequireTemporaryOwner(handle, path, expectedOwner);
                 IntPtr disposition = Marshal.AllocHGlobal(4);
                 try
                 {
@@ -2296,7 +2325,7 @@ namespace KettleInstaller
                     "Refusing to delete a noncanonical installer temporary file: " +
                     path);
             }
-            DeleteValidatedTemporaryLeaf(path);
+            DeleteValidatedTemporaryLeaf(path, CurrentUserSid());
         }
 
         public static void DeleteRustAtomicTemporaryLeaf(
@@ -2361,7 +2390,7 @@ namespace KettleInstaller
                     error,
                     "Cannot prove the Rust atomic temporary owner process is dead");
             }
-            DeleteValidatedTemporaryLeaf(path);
+            DeleteValidatedTemporaryLeaf(path, CurrentTokenOwnerSid());
         }
 
         public static void RemoveEmptyDirectory(string path)
