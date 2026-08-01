@@ -1028,7 +1028,7 @@ impl ExecProcessTree {
 
     fn terminate(&self, term: &Terminal) {
         let Some(root) = term.child_pid() else {
-            term.kill();
+            report_failed_termination(term.kill());
             return;
         };
 
@@ -1094,8 +1094,24 @@ impl ExecProcessTree {
         let _ = root;
 
         log::debug!("kettle exec terminating direct PTY child");
-        term.kill();
+        report_failed_termination(term.kill());
         log::debug!("kettle exec finished direct PTY child termination");
+    }
+}
+
+/// Say so when a child could not be terminated.
+///
+/// `kettle exec` is about to report a timeout and exit. If the kill genuinely
+/// failed the child is still running, which the caller — often an automation
+/// harness that will move on to the next command — needs to know. An
+/// already-exited child is not a failure and is reported as success by the
+/// layer below.
+fn report_failed_termination(outcome: std::io::Result<()>) {
+    if let Err(error) = outcome {
+        let _ = writeln!(
+            std::io::stderr(),
+            "kettle exec: could not terminate the child process; it may still be running: {error}"
+        );
     }
 }
 

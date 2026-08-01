@@ -3371,6 +3371,23 @@ mod kitty_delete_tests {
 /// Hyperlink storage is shared behind an `Arc` across the cells of one link.
 /// So the estimate understates by a bounded factor rather than an unbounded
 /// one — see `docs/CONFIG.md`, which says the same thing to users.
+/// The errno meaning "no such process", used to recognize a child that exited
+/// before the kill reached it.
+///
+/// Windows has no ESRCH; its equivalent race surfaces as access-denied on a
+/// dead handle and is normalized inside the vendored PTY layer, so a value
+/// that never matches a real Windows error is correct there.
+const fn libc_esrch() -> i32 {
+    #[cfg(unix)]
+    {
+        libc::ESRCH
+    }
+    #[cfg(not(unix))]
+    {
+        i32::MIN
+    }
+}
+
 fn scrollback_line_bytes(columns: usize) -> usize {
     const ROW_OVERHEAD_BYTES: usize = 64;
     let columns = columns.max(1);
@@ -5548,13 +5565,36 @@ impl Terminal {
             .is_some()
     }
 
-    /// Agent-first (A1): kill the child immediately (best-effort).
-    /// Used by `kettle exec --timeout` when the deadline fires. Already-exited
-    /// returns `Err` internally, which we swallow. The reader thread sees EOF
-    /// when the master closes on drop, so no extra teardown is needed here.
-    pub fn kill(&self) {
-        if let Ok(mut c) = self.child.lock() {
-            let _ = c.kill();
+    /// Agent-first (A1): kill the child immediately.
+    /// Used by `kettle exec --timeout` when the deadline fires. The reader
+    /// thread sees EOF when the master closes on drop, so no extra teardown is
+    /// needed here.
+    ///
+    /// The outcome is returned rather than swallowed. A child that had already
+    /// exited counts as success — that is what the caller wanted — but a
+    /// genuine failure to terminate means the process is still running, and a
+    /// caller about to report a timeout should be able to say so. This was
+    /// unusable before the Windows path was corrected: it reported every
+    /// successful kill as an error and every real failure as success.
+    pub fn kill(&self) -> std::io::Result<()> {
+        let outcome = match self.child.lock() {
+            Ok(mut c) => c.kill(),
+            Err(_) => {
+                return Err(std::io::Error::other(
+                    "child handle is poisoned; cannot terminate",
+                ));
+            }
+        };
+        match outcome {
+            // "It already exited" is the outcome the caller asked for, and it
+            // is the COMMON case on the timeout path: the deadline and the
+            // child finishing race every time. Unix reports that race as
+            // `ESRCH` from `kill(2)`; Windows reports it as access-denied on a
+            // dead handle and is normalized a layer below. Treating either as
+            // a failure would make `kettle exec` announce that a process may
+            // still be running precisely when it definitely is not.
+            Err(error) if error.raw_os_error() == Some(libc_esrch()) => Ok(()),
+            other => other,
         }
     }
 
@@ -5564,11 +5604,13 @@ impl Terminal {
     /// to its own process exit. `None` while the child is still running (or if
     /// the child handle is poisoned).
     ///
-    /// portable-pty 0.9 does NOT decode Unix signal death into a 128+signo code
-    /// — its `ExitStatus::exit_code()` returns the raw `wait()` status's
-    /// "success" bit, so every signal death collapses to a generic non-zero
-    /// (code `1`), not the shell's `137` for SIGKILL etc. Callers clamp to
-    /// 0..=255 on Unix before `std::process::exit` regardless.
+    /// The vendored portable-pty decodes Unix signal death into the shell's
+    /// `128 + signo`, so SIGTERM is `143` and SIGKILL is `137`. It previously
+    /// collapsed every signal death to a generic `1`, which made a killed
+    /// command indistinguishable from one that merely failed — a distinction
+    /// agent automation driving `kettle exec` depends on. The numeric signal is
+    /// retained alongside its name if a caller needs to act on it directly.
+    /// Callers clamp to 0..=255 on Unix before `std::process::exit` regardless.
     pub fn child_exit_code(&self) -> Option<u32> {
         self.child
             .lock()

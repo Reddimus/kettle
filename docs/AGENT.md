@@ -64,6 +64,11 @@ and stream its output to real stdout. Propagates the child's exit code (124 when
 `--timeout` expires before a child status is collected, 74 when stdout delivery
 fails, 125 on an internal error).
 
+On Unix a child killed by a signal reports the shell's `128 + signal`, so
+`143` is SIGTERM, `137` is SIGKILL and `130` is SIGINT. Automation can therefore
+tell a terminated command from one that merely failed — these used to collapse
+to a generic `1`, indistinguishable from the command running `exit 1`.
+
 ```sh
 kettle exec -- python -c "print(2+2)"           # → 4
 kettle exec --strip-ansi -- ls --color=always   # plain text, escapes stripped
