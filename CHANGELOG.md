@@ -6,6 +6,27 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+  ### Fixed
+  - **A command killed by a signal is no longer indistinguishable from one that
+    failed.** On Unix, `kettle exec` reported a generic `1` for every signal
+    death, so `kill -TERM` on a child looked exactly like the child running
+    `exit 1`. Automation driving `kettle exec` therefore could not tell
+    termination from ordinary failure. Signal deaths now report the shell's
+    `128 + signal` — `143` for SIGTERM, `137` for SIGKILL, `130` for SIGINT —
+    and the numeric signal is retained alongside its name for callers that need
+    to act on it directly. Ordinary exit codes are unchanged.
+  - **Windows child termination reported its outcome backwards.**
+    `TerminateProcess` returns nonzero on success, but the vendored PTY layer
+    treated nonzero as an error and zero as success. Every successful kill was
+    reported as a failure, and — the damaging direction — every genuine failure
+    was reported as success, so Kettle could wait indefinitely on a process it
+    had never terminated. A failed exit-status query was likewise reported as
+    "still running", making an unreadable process indistinguishable from a live
+    one, a failed wait was ignored entirely, and handle exhaustion aborted the
+    terminal instead of returning an error. `kettle exec` now says so on stderr
+    when a child could not be terminated, rather than exiting quietly while the
+    process survives.
+
 ## [2.44.0] — 2026-08-01
 
   ### Security

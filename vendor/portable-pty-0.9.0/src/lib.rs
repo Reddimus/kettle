@@ -180,19 +180,50 @@ pub trait SlavePty {
 pub struct ExitStatus {
     code: u32,
     signal: Option<String>,
+    signal_number: Option<i32>,
 }
+
+/// The offset shells use to express "died from signal N" as a wait status.
+///
+/// A signalled process has no exit code of its own, so every consumer that
+/// reports a single number has to choose one. `128 + N` is what POSIX shells
+/// report, so 143 means SIGTERM and 137 means SIGKILL to anyone reading it —
+/// including agent automation deciding whether a command was killed or merely
+/// failed.
+pub const SIGNAL_EXIT_CODE_BASE: u32 = 128;
 
 impl ExitStatus {
     /// Construct an ExitStatus from a process return code
     pub fn with_exit_code(code: u32) -> Self {
-        Self { code, signal: None }
+        Self {
+            code,
+            signal: None,
+            signal_number: None,
+        }
     }
 
-    /// Construct an ExitStatus from a signal name
+    /// Construct an ExitStatus from a signal number and its name.
+    ///
+    /// The code is derived rather than supplied: collapsing every signal death
+    /// to a single generic value is what made termination indistinguishable
+    /// from an ordinary failure.
+    pub fn with_signal_number(signal: i32, name: &str) -> Self {
+        Self {
+            code: SIGNAL_EXIT_CODE_BASE.saturating_add(signal.unsigned_abs()),
+            signal: Some(name.to_string()),
+            signal_number: Some(signal),
+        }
+    }
+
+    /// Construct an ExitStatus from a signal name whose number is unknown.
+    ///
+    /// Prefer [`Self::with_signal_number`]; without the number the reported
+    /// code cannot distinguish which signal ended the process.
     pub fn with_signal(signal: &str) -> Self {
         Self {
             code: 1,
             signal: Some(signal.to_string()),
+            signal_number: None,
         }
     }
 
@@ -213,6 +244,14 @@ impl ExitStatus {
     pub fn signal(&self) -> Option<&str> {
         self.signal.as_deref()
     }
+
+    /// The numeric signal that ended the process, when one did.
+    ///
+    /// Kept alongside the display name so callers can act on the signal rather
+    /// than parse a human-readable string that varies by platform and locale.
+    pub fn signal_number(&self) -> Option<i32> {
+        self.signal_number
+    }
 }
 
 impl From<std::process::ExitStatus> for ExitStatus {
@@ -222,18 +261,24 @@ impl From<std::process::ExitStatus> for ExitStatus {
             use std::os::unix::process::ExitStatusExt;
 
             if let Some(signal) = status.signal() {
+                // Keep the NUMBER bound; the display name is derived from it.
+                // Shadowing it with the name is what discarded the only piece
+                // of information a caller can act on programmatically.
                 let signame = unsafe { libc::strsignal(signal) };
-                let signal = if signame.is_null() {
+                let signal_name = if signame.is_null() {
                     format!("Signal {}", signal)
                 } else {
                     let signame = unsafe { std::ffi::CStr::from_ptr(signame) };
                     signame.to_string_lossy().to_string()
                 };
 
-                return ExitStatus {
-                    code: status.code().map(|c| c as u32).unwrap_or(1),
-                    signal: Some(signal),
-                };
+                // A signalled process has no exit code of its own, so
+                // `status.code()` is None here and the old `unwrap_or(1)` made
+                // every termination indistinguishable from an ordinary
+                // `exit 1`. Derive the shell's `128 + N` instead and keep the
+                // number, so a caller can tell SIGTERM from SIGKILL from a
+                // command that simply failed.
+                return ExitStatus::with_signal_number(signal, &signal_name);
             }
         }
 
@@ -243,7 +288,7 @@ impl From<std::process::ExitStatus> for ExitStatus {
                 .map(|c| c as u32)
                 .unwrap_or_else(|| if status.success() { 0 } else { 1 });
 
-        ExitStatus { code, signal: None }
+        ExitStatus::with_exit_code(code)
     }
 }
 
@@ -412,3 +457,65 @@ pub fn native_pty_system() -> Box<dyn PtySystem + Send> {
 pub type NativePtySystem = unix::UnixPtySystem;
 #[cfg(windows)]
 pub type NativePtySystem = win::conpty::ConPtySystem;
+
+#[cfg(test)]
+mod exit_status_tests {
+    use super::ExitStatus;
+    // Only the signal tests use the base, and those are Unix-only.
+    #[cfg(unix)]
+    use super::SIGNAL_EXIT_CODE_BASE;
+
+    /// A signalled process has no exit code of its own, and the conversion used
+    /// to fall back to a flat `1`. That made `kill -TERM` on a child
+    /// indistinguishable from the child running `exit 1` — agent automation
+    /// driving `kettle exec` could not tell termination from ordinary failure.
+    #[cfg(unix)]
+    #[test]
+    fn signal_deaths_report_the_shell_convention_and_keep_the_number() {
+        use std::os::unix::process::ExitStatusExt;
+
+        for signal in [libc::SIGTERM, libc::SIGKILL, libc::SIGINT] {
+            let native = std::process::ExitStatus::from_raw(signal);
+            let status = ExitStatus::from(native);
+
+            assert_eq!(
+                status.exit_code(),
+                SIGNAL_EXIT_CODE_BASE + signal as u32,
+                "signal {signal} must report 128 + N, not a generic failure"
+            );
+            assert_eq!(status.signal_number(), Some(signal));
+            assert!(
+                status.signal().is_some(),
+                "the human-readable name must survive alongside the number"
+            );
+            assert!(!status.success());
+        }
+    }
+
+    /// SIGTERM and SIGKILL are the two a supervisor actually distinguishes:
+    /// one is a request to stop, the other is not survivable.
+    #[cfg(unix)]
+    #[test]
+    fn sigterm_and_sigkill_are_distinguishable() {
+        use std::os::unix::process::ExitStatusExt;
+
+        let term = ExitStatus::from(std::process::ExitStatus::from_raw(libc::SIGTERM));
+        let kill = ExitStatus::from(std::process::ExitStatus::from_raw(libc::SIGKILL));
+
+        assert_eq!(term.exit_code(), 143, "SIGTERM is 128 + 15");
+        assert_eq!(kill.exit_code(), 137, "SIGKILL is 128 + 9");
+        assert_ne!(term.exit_code(), kill.exit_code());
+    }
+
+    /// Ordinary exits are untouched, including the failure code that signal
+    /// deaths used to be confused with.
+    #[test]
+    fn ordinary_exit_codes_are_unchanged() {
+        for code in [0_u32, 1, 2, 74, 124, 255] {
+            let status = ExitStatus::with_exit_code(code);
+            assert_eq!(status.exit_code(), code);
+            assert_eq!(status.signal_number(), None);
+            assert_eq!(status.success(), code == 0);
+        }
+    }
+}
