@@ -701,8 +701,19 @@ pub trait Handler {
     /// Set tab stops at every `interval`.
     fn set_tabs(&mut self, _interval: u16) {}
 
-    /// Reset terminal state.
+    /// Reset terminal state (RIS, `ESC c`). A HARD reset: it clears the
+    /// screen and the scrollback.
     fn reset_state(&mut self) {}
+
+    /// Soft terminal reset (DECSTR, `CSI ! p`).
+    ///
+    /// Deliberately NOT [`Self::reset_state`]. DECSTR restores modes, the
+    /// scrolling region, SGR, character sets, the saved cursor and the
+    /// modifier resources — it must leave the display and the scrollback
+    /// alone. Applications send it routinely (it appears in terminfo `is2` /
+    /// `rs2` strings), so routing it to the hard reset would erase a user's
+    /// scrollback whenever a program initialized the terminal.
+    fn soft_reset_state(&mut self) {}
 
     /// Reverse Index.
     ///
@@ -861,8 +872,10 @@ bitflags! {
 #[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ModifyOtherKeys {
-    /// Reset the state.
-    Reset,
+    /// Restore the resource to its initial value.
+    Restore,
+    /// Disable modified-key escapes.
+    Disable,
     /// Enables this feature except for keys with well-known behavior, e.g.,
     /// Tab, Backspace and some special control character cases which are
     /// built into the X11 library (e.g., Control-Space to make a NUL, or
@@ -1769,10 +1782,19 @@ where
                 }
             },
             ('m', [b'>']) => {
-                let mode = match (next_param_or(1) == 4).then(|| next_param_or(0)) {
-                    Some(0) => ModifyOtherKeys::Reset,
-                    Some(1) => ModifyOtherKeys::EnableExceptWellDefined,
-                    Some(2) => ModifyOtherKeys::EnableAll,
+                let resource = params_iter.next();
+                let value = params_iter.next();
+                let trailing = params_iter.next();
+                let mode = match (resource, value, trailing) {
+                    // The parser normalizes an omitted Pp to zero. The handler
+                    // exposes modifyOtherKeys only, so restoring every modifier
+                    // resource must still restore resource 4.
+                    (None, None, None) | (Some(&[0]), None, None) | (Some(&[4]), None, None) => {
+                        ModifyOtherKeys::Restore
+                    },
+                    (Some(&[4]), Some(&[0]), None) => ModifyOtherKeys::Disable,
+                    (Some(&[4]), Some(&[1]), None) => ModifyOtherKeys::EnableExceptWellDefined,
+                    (Some(&[4]), Some(&[2]), None) => ModifyOtherKeys::EnableAll,
                     _ => return unhandled!(),
                 };
                 handler.set_modify_other_keys(mode);
@@ -1794,6 +1816,10 @@ where
                 let mode = next_param_or(0);
                 handler.report_private_mode(PrivateMode::new(mode));
             },
+            // DECSTR. A SOFT reset — see `Handler::soft_reset_state`. Routing
+            // this to the hard reset would clear the screen and scrollback of
+            // any user whose program initializes the terminal.
+            ('p', [b'!']) => handler.soft_reset_state(),
             ('q', [b' ']) => {
                 // DECSCUSR (CSI Ps SP q) -- Set Cursor Style.
                 let cursor_style_id = next_param_or(0);
@@ -2198,6 +2224,74 @@ mod tests {
         fn sync_marker(&mut self, id: u64) {
             self.events.push(OrderedEvent::HandlerMarker(id));
         }
+    }
+
+    #[derive(Default)]
+    struct ModifierHandler {
+        modify_other_keys: Vec<ModifyOtherKeys>,
+        resets: usize,
+        soft_resets: usize,
+    }
+
+    impl Handler for ModifierHandler {
+        fn set_modify_other_keys(&mut self, mode: ModifyOtherKeys) {
+            self.modify_other_keys.push(mode);
+        }
+
+        fn reset_state(&mut self) {
+            self.resets += 1;
+        }
+
+        fn soft_reset_state(&mut self) {
+            self.soft_resets += 1;
+        }
+    }
+
+    #[test]
+    fn parse_modify_other_keys_distinguishes_restore_from_disable() {
+        let mut parser = Processor::<TestSyncHandler>::new();
+        let mut handler = ModifierHandler::default();
+
+        parser.advance(&mut handler, b"\x1b[>4m\x1b[>4;0m\x1b[>m\x1b[>4;1m\x1b[>4;2m");
+
+        assert_eq!(
+            handler.modify_other_keys,
+            [
+                ModifyOtherKeys::Restore,
+                ModifyOtherKeys::Disable,
+                ModifyOtherKeys::Restore,
+                ModifyOtherKeys::EnableExceptWellDefined,
+                ModifyOtherKeys::EnableAll,
+            ]
+        );
+    }
+
+    #[test]
+    fn parse_modify_other_keys_rejects_subparameters_and_higher_levels() {
+        let mut parser = Processor::<TestSyncHandler>::new();
+        let mut handler = ModifierHandler::default();
+
+        parser.advance(&mut handler, b"\x1b[>4:1m\x1b[>4;3m");
+
+        assert!(handler.modify_other_keys.is_empty());
+    }
+
+    #[test]
+    fn parse_ris_and_decstr_reach_different_resets() {
+        let mut parser = Processor::<TestSyncHandler>::new();
+        let mut handler = ModifierHandler::default();
+
+        // RIS is the hard reset.
+        parser.advance(&mut handler, b"\x1bc");
+        assert_eq!(handler.resets, 1);
+        assert_eq!(handler.soft_resets, 0);
+
+        // DECSTR must NOT reach it. Programs emit `CSI ! p` from terminfo
+        // `is2`/`rs2` while initializing, so conflating the two would erase a
+        // user's screen and scrollback on ordinary program startup.
+        parser.advance(&mut handler, b"\x1b[!p");
+        assert_eq!(handler.resets, 1, "DECSTR must not perform a hard reset");
+        assert_eq!(handler.soft_resets, 1);
     }
 
     #[test]

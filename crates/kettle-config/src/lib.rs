@@ -262,25 +262,23 @@ impl Osc52 {
     }
 }
 
-/// Policy for xterm `modifyOtherKeys` negotiation and modified Enter.
+/// Kettle's modified-Enter fallback before keyboard-protocol negotiation.
+///
+/// Xterm levels remain application-owned so enabling the fallback cannot turn
+/// Ctrl+I into a distinct sequence for clients which still expect Tab.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ModifyOtherKeysMode {
-    /// Preserve Kettle's historical modified-Enter behavior until an
-    /// application explicitly selects another xterm level.
+    /// Preserve modified Enter until an application negotiates a protocol.
     #[default]
-    Always,
-    /// Start at level zero and honor applications that negotiate level two.
-    Auto,
-    /// Keep modified Enter as carriage return even if an application requests
-    /// xterm `modifyOtherKeys`.
+    Enter,
+    /// Do not add Kettle's fallback; negotiated protocols are still honored.
     Off,
 }
 
 impl ModifyOtherKeysMode {
     pub fn as_str(self) -> &'static str {
         match self {
-            Self::Always => "always",
-            Self::Auto => "auto",
+            Self::Enter => "enter",
             Self::Off => "off",
         }
     }
@@ -1103,7 +1101,7 @@ pub struct Config {
     pub bell: BellMode,
     /// OSC 52 clipboard policy (default: writes only).
     pub osc52: Osc52,
-    /// XTerm `modifyOtherKeys` policy for modified Enter.
+    /// Kettle's modified-Enter fallback before a client negotiates key encoding.
     pub modify_other_keys: ModifyOtherKeysMode,
     /// Paste a clipboard file list (e.g. a file copied in Explorer) as a
     /// shell-quoted path (default: on). See [`PasteFiles`].
@@ -2361,7 +2359,7 @@ impl Default for Config {
             cursor_blink: true,
             bell: BellMode::Both,
             osc52: Osc52::Copy,
-            modify_other_keys: ModifyOtherKeysMode::Always,
+            modify_other_keys: ModifyOtherKeysMode::Enter,
             paste_files: PasteFiles::On,
             paste_images: PasteImages::On,
             record: RecordMode::Off,
@@ -3364,7 +3362,7 @@ impl Config {
                 ),
                 "modify-other-keys" | "modify_other_keys" => matches!(
                     v.to_ascii_lowercase().as_str(),
-                    "always" | "auto" | "off"
+                    "enter" | "off"
                 ),
                 "paste-files" => matches!(
                     v.to_ascii_lowercase().as_str(),
@@ -3873,9 +3871,8 @@ impl Config {
                 }
                 "modify-other-keys" | "modify_other_keys" => {
                     cfg.modify_other_keys = match e.value.to_ascii_lowercase().as_str() {
-                        "auto" => ModifyOtherKeysMode::Auto,
                         "off" => ModifyOtherKeysMode::Off,
-                        _ => ModifyOtherKeysMode::Always,
+                        _ => ModifyOtherKeysMode::Enter,
                     }
                 }
                 "paste-files" => {
@@ -5093,7 +5090,7 @@ allow-bold = false\n\
 bold-is-bright = true\n\
 clear-select-on-copy = true\n\
 invert-search = true\n\
-modify-other-keys = auto\n\
+modify-other-keys = enter\n\
 backspace-binding = ascii-del\n\
 delete-binding = escape-sequence\n\
 login-shell = true\n\
@@ -6417,15 +6414,11 @@ cell-height = 1.2\n";
     fn modify_other_keys_policy_parsing_validation_and_default() {
         assert_eq!(
             Config::default().modify_other_keys,
-            ModifyOtherKeysMode::Always
+            ModifyOtherKeysMode::Enter
         );
         assert_eq!(
-            Config::parse_text("modify-other-keys = always").modify_other_keys,
-            ModifyOtherKeysMode::Always
-        );
-        assert_eq!(
-            Config::parse_text("modify-other-keys = AUTO").modify_other_keys,
-            ModifyOtherKeysMode::Auto
+            Config::parse_text("modify-other-keys = ENTER").modify_other_keys,
+            ModifyOtherKeysMode::Enter
         );
         assert_eq!(
             Config::parse_text("modify_other_keys = off").modify_other_keys,
@@ -6433,9 +6426,9 @@ cell-height = 1.2\n";
         );
         assert_eq!(
             Config::parse_text("modify-other-keys = bogus").modify_other_keys,
-            ModifyOtherKeysMode::Always
+            ModifyOtherKeysMode::Enter
         );
-        assert!(Config::detect_malformed_values("modify-other-keys = auto\n").is_empty());
+        assert!(Config::detect_malformed_values("modify-other-keys = enter\n").is_empty());
         assert_eq!(
             Config::detect_malformed_values("modify-other-keys = sometimes\n").len(),
             1
@@ -7663,8 +7656,8 @@ cell-height = 1.2\n";
             ("background_type", "image"),
             ("text-renderer", "grid"),
             ("text_renderer", "grid"),
-            ("modify-other-keys", "auto"),
-            ("modify_other_keys", "auto"),
+            ("modify-other-keys", "enter"),
+            ("modify_other_keys", "enter"),
             // The three F2 background-image placement enums (+ snake_case).
             ("background-image-mode", "scale"),
             ("background_image_mode", "scale"),

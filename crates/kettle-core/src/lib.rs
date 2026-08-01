@@ -50,9 +50,7 @@ pub use alacritty_terminal::index::{Column, Line, Point, Side};
 pub use alacritty_terminal::selection::{Selection, SelectionType};
 pub use alacritty_terminal::term::{ClipboardType, TermMode, cell::Flags, viewport_to_point};
 pub use alacritty_terminal::vi_mode::ViMotion;
-pub use alacritty_terminal::vte::ansi::{
-    Color as AnsiColor, CursorShape, ModifyOtherKeys, NamedColor,
-};
+pub use alacritty_terminal::vte::ansi::{Color as AnsiColor, CursorShape, NamedColor};
 
 pub use event::{EventProxy, TermEvent, Waker};
 pub use images::{ImageData, ImageSourceCrop, ImageSourceRect, Images, Placement, PlacementParams};

@@ -8,12 +8,13 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
   ### Fixed
   - Xterm `modifyOtherKeys` negotiation now has real per-terminal state.
-    Applications can select or query levels 0, 1, and 2, terminal reset
-    restores Kettle's configured assumption, and modified Enter uses the
-    `CSI 27` form only at effective level 2. The new
-    `modify-other-keys = always|auto|off` policy defaults to `always`, preserving
-    existing CLI multiline chords until an application explicitly opts out;
-    `auto` requires negotiation and `off` keeps every Enter chord as `CR`.
+    It starts at level zero, reports only the application-selected level, and
+    applies the modifier-aware level-one/two matrix to Return, Tab, Backspace,
+    Escape, Space, and ASCII keys without gating cursor, function, or keypad
+    keys. Omitted XTMODKEYS values and both RIS and DECSTR restore the initial
+    level. The new `modify-other-keys = enter|off` setting controls only
+    Kettle's pre-negotiation modified-Enter fallback; `enter` is the default so
+    existing CLI multiline chords survive without pretending level two is on.
   - A `kettle exec` run whose consumer closed the pipe could die from `SIGPIPE`
     instead of reporting the exit code it had already chosen. The stdout worker
     blocks `SIGPIPE` for itself, so a broken pipe correctly surfaced as `EPIPE`,

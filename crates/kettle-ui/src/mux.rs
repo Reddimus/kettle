@@ -10,8 +10,7 @@ use anyhow::{Context, Result};
 use crossbeam_channel::{Receiver, Sender, TrySendError};
 use kettle_config::{Config, CursorStyle, ModifyOtherKeysMode};
 use kettle_core::{
-    CursorShape, ModifyOtherKeys, PtyGeometry, PtyOutputSender, TermEvent, Terminal,
-    TerminalCapabilities, Waker,
+    CursorShape, PtyGeometry, PtyOutputSender, TermEvent, Terminal, TerminalCapabilities, Waker,
 };
 
 /// At the PTY reader's 64 KiB maximum chunk size, this bounds lossless recorder
@@ -455,15 +454,8 @@ fn engine_cursor_shape(s: CursorStyle) -> CursorShape {
     }
 }
 
-fn engine_modify_other_keys(mode: ModifyOtherKeysMode) -> (ModifyOtherKeys, bool) {
-    match mode {
-        ModifyOtherKeysMode::Always => (ModifyOtherKeys::EnableAll, true),
-        ModifyOtherKeysMode::Auto => (ModifyOtherKeys::Reset, true),
-        // Disabling negotiation as well as the initial level keeps xterm's
-        // query reply honest: an application must not be told level two is in
-        // effect when Kettle's user policy will keep modified Enter as CR.
-        ModifyOtherKeysMode::Off => (ModifyOtherKeys::Reset, false),
-    }
+fn unnegotiated_modified_enter(mode: ModifyOtherKeysMode) -> bool {
+    mode == ModifyOtherKeysMode::Enter
 }
 
 use crate::session::{MAX_RESTORE_PANES, SNode, STab, Session};
@@ -1206,10 +1198,10 @@ impl Mux {
         }
     }
 
-    pub fn set_modify_other_keys(&mut self, mode: ModifyOtherKeysMode) {
-        let (level, enabled) = engine_modify_other_keys(mode);
+    pub fn set_unnegotiated_modified_enter(&mut self, mode: ModifyOtherKeysMode) {
+        let enabled = unnegotiated_modified_enter(mode);
         for pane in self.panes.values_mut() {
-            pane.term.set_modify_other_keys(level, enabled);
+            pane.term.set_unnegotiated_modified_enter(enabled);
         }
     }
 
@@ -1296,8 +1288,6 @@ impl Mux {
         // cfg.term / cfg.colorterm / cfg.login_shell take effect at
         // PTY spawn. The legacy `Terminal::new` shim still exists
         // for non-Mux callers (currently none in-tree).
-        let (modify_other_keys, modify_other_keys_enabled) =
-            engine_modify_other_keys(cfg.modify_other_keys);
         let term = Terminal::new_with_env_and_output_geometry_and_capabilities(
             argv,
             cwd,
@@ -1314,8 +1304,7 @@ impl Mux {
             cfg.shell_integration,
             TerminalCapabilities {
                 osc52_copy: self.osc52_copy_allowed,
-                modify_other_keys,
-                modify_other_keys_enabled,
+                unnegotiated_modified_enter: unnegotiated_modified_enter(cfg.modify_other_keys),
             },
             tx,
             waker.clone(),
@@ -4371,19 +4360,9 @@ mod node_tests {
     }
 
     #[test]
-    fn modify_other_keys_config_maps_to_engine_policy() {
-        assert_eq!(
-            engine_modify_other_keys(ModifyOtherKeysMode::Always),
-            (ModifyOtherKeys::EnableAll, true)
-        );
-        assert_eq!(
-            engine_modify_other_keys(ModifyOtherKeysMode::Auto),
-            (ModifyOtherKeys::Reset, true)
-        );
-        assert_eq!(
-            engine_modify_other_keys(ModifyOtherKeysMode::Off),
-            (ModifyOtherKeys::Reset, false)
-        );
+    fn modify_other_keys_config_controls_only_the_enter_fallback() {
+        assert!(unnegotiated_modified_enter(ModifyOtherKeysMode::Enter));
+        assert!(!unnegotiated_modified_enter(ModifyOtherKeysMode::Off));
     }
 
     #[test]
