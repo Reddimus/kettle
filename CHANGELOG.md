@@ -7,6 +7,35 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 ## [Unreleased]
 
   ### Fixed
+  - **Recording retention could delete a file Kettle never wrote.** Any name in
+    the recording directory that merely started `kettle-session-` and ended
+    `.cast` was a deletion candidate, which is far looser than what Kettle
+    generates and contradicts the documented promise that unrecognized files are
+    left alone. A file a user named `kettle-session-notes.cast` and left there
+    was deleted if it was the oldest and the budgets demanded a deletion.
+    Retention now matches the generated grammar exactly —
+    `kettle-session-<seconds>-<pid>-<counter>.cast`, all three fields non-empty
+    decimal digits. `docs/RECORDING.md` states plainly that this narrows
+    ownership without proving it, since a file matching the shape exactly is
+    still eligible.
+  - **Retention allocated in proportion to the whole recording directory.** It
+    collected every matching entry, with its path and metadata, then sorted the
+    lot — O(n) memory and O(n log n) time to enforce a 50-file target, at
+    recorder startup. A directory left to accumulate made that cost arbitrarily
+    large on a path that must stay responsive. The scan now holds only the
+    oldest batch of candidates in a bounded heap and walks forward through the
+    directory, so memory is bounded by the batch rather than by the directory.
+    Coverage is unchanged: a batch whose entries are all locked advances past
+    them instead of stopping, so an active file can never shield a newer
+    deletable one.
+  - **`cargo build -p kettle-core` failed on its own.** Per-pane session logging
+    creates its log through `kettle-state`, but that dependency was optional and
+    enabled only by the `asciicast` feature, so building the crate standalone
+    did not compile. Cargo feature unification hid it completely: other
+    workspace members enable `asciicast`, so every `--workspace` build — and
+    therefore all of CI — turned the dependency on. The dependency is now
+    required, and the gauntlet lints `kettle-core` by name so a check exists
+    that a workspace build structurally cannot substitute for.
   - **A command killed by a signal is no longer indistinguishable from one that
     failed.** On Unix, `kettle exec` reported a generic `1` for every signal
     death, so `kill -TERM` on a child looked exactly like the child running
