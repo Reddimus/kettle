@@ -7,6 +7,16 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 ## [Unreleased]
 
   ### Fixed
+  - **A pane that failed to open left its shell running.** Opening a pane
+    spawns the child first and then finishes wiring the terminal around it —
+    taking the pseudoterminal's polling descriptor, taking the non-blocking
+    writer, cloning the reader, starting the reader thread. Any of those can
+    fail, and dropping the child handle does not terminate the process it
+    represents, so the failure was reported while a live shell stayed behind
+    with no owner, no reaper, and no handle for Kettle to reach it by. On a
+    machine where one of those steps fails reliably, every attempt to open a
+    pane leaked another process, each holding its end of a pseudoconsole. The
+    child is now terminated if construction does not complete.
   - **A command killed by a signal is no longer indistinguishable from one that
     failed.** On Unix, `kettle exec` reported a generic `1` for every signal
     death, so `kill -TERM` on a child looked exactly like the child running
