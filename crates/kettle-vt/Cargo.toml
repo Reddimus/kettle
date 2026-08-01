@@ -13,7 +13,10 @@ description = "kettle: streaming VT byte extractor — kitty/Sixel/iTerm2 image 
 workspace = true
 
 [dependencies]
-base64 = "0.22.1"
+# See the note in crates/kettle-update/Cargo.toml. It matters more here: this
+# crate base64-decodes untrusted terminal payloads (kitty graphics, iTerm inline
+# images), so unsafe SIMD kernels we never call have no place in the build.
+base64 = { version = "0.23.0", default-features = false, features = ["alloc"] }
 flate2 = "1.1.9"
 # Narrow features to the formats iTerm2's inline-image
 # protocol spec actually accepts (PNG, JPEG, GIF). Default features
