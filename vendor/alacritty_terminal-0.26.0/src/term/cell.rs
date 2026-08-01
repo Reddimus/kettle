@@ -68,7 +68,10 @@ impl From<VteHyperlink> for Hyperlink {
 
 impl From<Hyperlink> for VteHyperlink {
     fn from(val: Hyperlink) -> Self {
-        VteHyperlink { id: Some(val.id().to_owned()), uri: val.uri().to_owned() }
+        VteHyperlink {
+            id: Some(val.id().to_owned()),
+            uri: val.uri().to_owned(),
+        }
     }
 }
 
@@ -87,10 +90,12 @@ impl HyperlinkInner {
         let id = match id {
             Some(id) => id.to_string(),
             None => {
-                let mut id = HYPERLINK_ID_SUFFIX.fetch_add(1, Ordering::Relaxed).to_string();
+                let mut id = HYPERLINK_ID_SUFFIX
+                    .fetch_add(1, Ordering::Relaxed)
+                    .to_string();
                 id.push_str("_alacritty");
                 id
-            },
+            }
         };
 
         Self { id, uri }
@@ -114,6 +119,15 @@ impl ResetDiscriminant<Color> for Cell {
         self.bg
     }
 }
+
+/// Maximum combining marks retained for a single cell.
+///
+/// Unicode's own answer to "how many marks can legitimately follow one base
+/// character": the Stream-Safe Text Format (UAX #15) permits no sequence of
+/// more than 30 non-starters, and text exceeding it is already outside what
+/// conforming processes must handle. Beyond that a longer run is not a grapheme
+/// a user could read — it is an unbounded allocation attached to one cell.
+pub const MAX_ZEROWIDTH_PER_CELL: usize = 30;
 
 /// Dynamically allocated cell content.
 ///
@@ -160,10 +174,23 @@ impl Cell {
     }
 
     /// Write a new zerowidth character to this cell.
+    ///
+    /// Combining marks beyond [`MAX_ZEROWIDTH_PER_CELL`] are dropped. Without a
+    /// cap a single cell grows with the whole input: a program that prints one
+    /// base glyph and then millions of combining marks, never advancing the
+    /// cursor, expands one `Vec<char>` without bound. That storage is invisible
+    /// to the per-pane `scrollback-bytes` budget, which estimates from
+    /// `size_of::<Cell>()`, so the documented ceiling is bypassed entirely and
+    /// every consumer that walks or clones the cell — rendering, selection,
+    /// screen scraping, placeholder extraction — pays for it repeatedly.
     #[inline]
     pub fn push_zerowidth(&mut self, character: char) {
         let extra = self.extra.get_or_insert(Default::default());
-        Arc::make_mut(extra).zerowidth.push(character);
+        let extra = Arc::make_mut(extra);
+        if extra.zerowidth.len() >= MAX_ZEROWIDTH_PER_CELL {
+            return;
+        }
+        extra.zerowidth.push(character);
     }
 
     /// Remove all wide char data from a cell.
@@ -250,14 +277,20 @@ impl GridCell for Cell {
 
     #[inline]
     fn reset(&mut self, template: &Self) {
-        *self = Cell { bg: template.bg, ..Cell::default() };
+        *self = Cell {
+            bg: template.bg,
+            ..Cell::default()
+        };
     }
 }
 
 impl From<Color> for Cell {
     #[inline]
     fn from(color: Color) -> Self {
-        Self { bg: color, ..Cell::default() }
+        Self {
+            bg: color,
+            ..Cell::default()
+        }
     }
 }
 
@@ -304,6 +337,51 @@ mod tests {
 
         // Ensure that cell size isn't growing by accident.
         assert!(mem::size_of::<Cell>() <= EXPECTED_CELL_SIZE);
+    }
+
+    /// One cell must not grow with the whole input. A program that prints a
+    /// base glyph and then never advances the cursor can push combining marks
+    /// forever; that storage is invisible to the per-pane `scrollback-bytes`
+    /// budget, which estimates from `size_of::<Cell>()`.
+    #[test]
+    fn zerowidth_storage_is_capped_per_cell() {
+        let mut cell = Cell {
+            c: 'a',
+            ..Cell::default()
+        };
+        for _ in 0..10_000 {
+            cell.push_zerowidth('\u{0301}');
+        }
+
+        let stored = cell.zerowidth().expect("combining marks are retained");
+        assert_eq!(
+            stored.len(),
+            super::MAX_ZEROWIDTH_PER_CELL,
+            "combining marks past the Stream-Safe limit must be dropped, \
+             not accumulated"
+        );
+        assert!(stored.iter().all(|c| *c == '\u{0301}'));
+        assert_eq!(cell.c, 'a', "the base character must be untouched");
+    }
+
+    /// Ordinary text must be entirely unaffected: real graphemes sit far below
+    /// the cap, and dropping any of them would corrupt legitimate output.
+    #[test]
+    fn realistic_combining_sequences_are_untouched() {
+        let mut cell = Cell {
+            c: 'e',
+            ..Cell::default()
+        };
+        // Acute + diaeresis + a couple more marks: deep for real text, trivial
+        // against the cap.
+        for mark in ['\u{0301}', '\u{0308}', '\u{0327}', '\u{030A}'] {
+            cell.push_zerowidth(mark);
+        }
+        assert_eq!(
+            cell.zerowidth().expect("marks retained"),
+            &['\u{0301}', '\u{0308}', '\u{0327}', '\u{030A}'],
+            "sequences within the limit must be preserved exactly"
+        );
     }
 
     #[test]

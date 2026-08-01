@@ -3357,6 +3357,20 @@ mod kitty_delete_tests {
     }
 }
 
+/// Estimated retained bytes for one scrollback line.
+///
+/// This counts the inline grid representation only. A cell can also own heap
+/// storage — combining marks, an underline color, a hyperlink — which this
+/// deliberately does not walk: doing so would mean touching every cell of every
+/// line on each budget evaluation, on the PTY reader's path.
+///
+/// That is sound only because the dynamic part is separately bounded. Combining
+/// marks are capped per cell (`MAX_ZEROWIDTH_PER_CELL`); before that cap a
+/// single cell could grow with the entire input while this estimate stayed
+/// flat, which made the configured `scrollback-bytes` ceiling meaningless.
+/// Hyperlink storage is shared behind an `Arc` across the cells of one link.
+/// So the estimate understates by a bounded factor rather than an unbounded
+/// one — see `docs/CONFIG.md`, which says the same thing to users.
 fn scrollback_line_bytes(columns: usize) -> usize {
     const ROW_OVERHEAD_BYTES: usize = 64;
     let columns = columns.max(1);
