@@ -163,6 +163,7 @@ impl PsuedoCon {
 
         Ok(WinChild {
             proc: Mutex::new(proc),
+            waiter: None,
         })
     }
 }
