@@ -219,6 +219,11 @@ impl AsyncFileWriter {
         self.request_finish();
     }
 
+    /// Recorder-only: the session log has no overload/finish protocol of
+    /// its own. Gated exactly like `mod record`, which is also built under
+    /// `cfg(test)` with the feature off, so this is absent rather than dead
+    /// code in a plain build.
+    #[cfg(any(feature = "asciicast", test))]
     pub(crate) fn stop_overloaded(&mut self) {
         self.stop_with(AsyncWriterStatus::Overloaded);
     }
@@ -228,6 +233,11 @@ impl AsyncFileWriter {
         drop(self.sender.take());
     }
 
+    /// Recorder-only: the session log has no overload/finish protocol of
+    /// its own. Gated exactly like `mod record`, which is also built under
+    /// `cfg(test)` with the feature off, so this is absent rather than dead
+    /// code in a plain build.
+    #[cfg(any(feature = "asciicast", test))]
     pub(crate) fn finish_requested(&self) -> bool {
         self.finish_requested
     }
@@ -249,6 +259,11 @@ impl AsyncFileWriter {
         true
     }
 
+    /// Recorder-only: the session log has no overload/finish protocol of
+    /// its own. Gated exactly like `mod record`, which is also built under
+    /// `cfg(test)` with the feature off, so this is absent rather than dead
+    /// code in a plain build.
+    #[cfg(any(feature = "asciicast", test))]
     pub(crate) fn finish_with_timeout(&mut self, timeout: Duration) -> bool {
         self.request_finish();
         let deadline = Instant::now() + timeout;
