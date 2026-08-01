@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use crossbeam_channel::{Receiver, Sender, TrySendError};
-use kettle_config::{Config, CursorStyle};
+use kettle_config::{Config, CursorStyle, ModifyOtherKeysMode};
 use kettle_core::{
     CursorShape, PtyGeometry, PtyOutputSender, TermEvent, Terminal, TerminalCapabilities, Waker,
 };
@@ -452,6 +452,10 @@ fn engine_cursor_shape(s: CursorStyle) -> CursorShape {
         CursorStyle::Underline => CursorShape::Underline,
         CursorStyle::Bar => CursorShape::Beam,
     }
+}
+
+fn unnegotiated_modified_enter(mode: ModifyOtherKeysMode) -> bool {
+    mode == ModifyOtherKeysMode::Enter
 }
 
 use crate::session::{MAX_RESTORE_PANES, SNode, STab, Session};
@@ -1194,6 +1198,13 @@ impl Mux {
         }
     }
 
+    pub fn set_unnegotiated_modified_enter(&mut self, mode: ModifyOtherKeysMode) {
+        let enabled = unnegotiated_modified_enter(mode);
+        for pane in self.panes.values_mut() {
+            pane.term.set_unnegotiated_modified_enter(enabled);
+        }
+    }
+
     /// Mark the active tab as just-seen by the user — clears its bell
     /// flag and updates `last_seen_at` so `classify_tab_activity` no
     /// longer reports `Output` / `Bell` on it. Call after any
@@ -1293,6 +1304,7 @@ impl Mux {
             cfg.shell_integration,
             TerminalCapabilities {
                 osc52_copy: self.osc52_copy_allowed,
+                unnegotiated_modified_enter: unnegotiated_modified_enter(cfg.modify_other_keys),
             },
             tx,
             waker.clone(),
@@ -4345,6 +4357,12 @@ mod node_tests {
             CursorShape::Underline
         );
         assert_eq!(engine_cursor_shape(CursorStyle::Bar), CursorShape::Beam);
+    }
+
+    #[test]
+    fn modify_other_keys_config_controls_only_the_enter_fallback() {
+        assert!(unnegotiated_modified_enter(ModifyOtherKeysMode::Enter));
+        assert!(!unnegotiated_modified_enter(ModifyOtherKeysMode::Off));
     }
 
     #[test]

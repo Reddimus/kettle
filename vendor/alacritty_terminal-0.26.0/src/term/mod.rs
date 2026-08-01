@@ -22,8 +22,8 @@ use crate::term::color::Colors;
 use crate::vi_mode::{ViModeCursor, ViMotion};
 use crate::vte::ansi::{
     self, Attr, CharsetIndex, Color, CursorShape, CursorStyle, Handler, Hyperlink, KeyboardModes,
-    KeyboardModesApplyBehavior, NamedColor, NamedMode, NamedPrivateMode, PrivateMode, Rgb,
-    StandardCharset,
+    KeyboardModesApplyBehavior, ModifyOtherKeys, NamedColor, NamedMode, NamedPrivateMode,
+    PrivateMode, Rgb, StandardCharset,
 };
 
 pub mod cell;
@@ -77,7 +77,22 @@ bitflags! {
         const REPORT_ALTERNATE_KEYS   = 1 << 20;
         const REPORT_ALL_KEYS_AS_ESC  = 1 << 21;
         const REPORT_ASSOCIATED_TEXT  = 1 << 22;
+        /// Effective xterm modifyOtherKeys level one.
+        ///
+        /// This is mutually exclusive with [`TermMode::MODIFY_OTHER_KEYS_2`].
+        const MODIFY_OTHER_KEYS_1     = 1 << 23;
+        /// Effective xterm modifyOtherKeys level two.
+        ///
+        /// This is mutually exclusive with [`TermMode::MODIFY_OTHER_KEYS_1`].
+        const MODIFY_OTHER_KEYS_2     = 1 << 24;
+        /// Whether a client has set, restored, disabled, or queried modifyOtherKeys.
+        const MODIFY_OTHER_KEYS_NEGOTIATED = 1 << 25;
+        /// Kettle's modified-Enter fallback before a client negotiates key encoding.
+        const UNNEGOTIATED_MODIFIED_ENTER = 1 << 26;
         const MOUSE_MODE              = Self::MOUSE_REPORT_CLICK.bits() | Self::MOUSE_MOTION.bits() | Self::MOUSE_DRAG.bits();
+        /// All effective xterm modifyOtherKeys levels.
+        const MODIFY_OTHER_KEYS       = Self::MODIFY_OTHER_KEYS_1.bits()
+                                      | Self::MODIFY_OTHER_KEYS_2.bits();
         const KITTY_KEYBOARD_PROTOCOL = Self::DISAMBIGUATE_ESC_CODES.bits()
                                       | Self::REPORT_EVENT_TYPES.bits()
                                       | Self::REPORT_ALTERNATE_KEYS.bits()
@@ -116,6 +131,22 @@ impl Default for TermMode {
             | TermMode::LINE_WRAP
             | TermMode::ALTERNATE_SCROLL
             | TermMode::URGENCY_HINTS
+    }
+}
+
+fn modify_other_keys_term_mode(mode: ModifyOtherKeys) -> TermMode {
+    match mode {
+        ModifyOtherKeys::Restore | ModifyOtherKeys::Disable => TermMode::empty(),
+        ModifyOtherKeys::EnableExceptWellDefined => TermMode::MODIFY_OTHER_KEYS_1,
+        ModifyOtherKeys::EnableAll => TermMode::MODIFY_OTHER_KEYS_2,
+    }
+}
+
+fn unnegotiated_modified_enter_term_mode(enabled: bool) -> TermMode {
+    if enabled {
+        TermMode::UNNEGOTIATED_MODIFIED_ENTER
+    } else {
+        TermMode::empty()
     }
 }
 
@@ -480,6 +511,9 @@ pub struct Config {
     /// Whether to enable kitty keyboard protocol.
     pub kitty_keyboard: bool,
 
+    /// Whether Kettle distinguishes modified Enter before keyboard negotiation.
+    pub unnegotiated_modified_enter: bool,
+
     /// OSC52 support mode.
     pub osc52: Osc52,
 }
@@ -492,6 +526,7 @@ impl Default for Config {
             default_cursor_style: Default::default(),
             vi_mode_cursor_style: Default::default(),
             kitty_keyboard: Default::default(),
+            unnegotiated_modified_enter: true,
             osc52: Default::default(),
         }
     }
@@ -552,6 +587,8 @@ impl<T> Term<T> {
 
         // Initialize terminal damage, covering the entire terminal upon launch.
         let damage = TermDamageState::new(num_cols, num_lines);
+        let mode = TermMode::default()
+            | unnegotiated_modified_enter_term_mode(config.unnegotiated_modified_enter);
 
         Term {
             inactive_grid,
@@ -573,7 +610,7 @@ impl<T> Term<T> {
             is_focused: Default::default(),
             selection: Default::default(),
             title: Default::default(),
-            mode: Default::default(),
+            mode,
             graphics_events: GraphicsEventJournal::new(),
         }
     }
@@ -677,6 +714,15 @@ impl<T> Term<T> {
             self.keyboard_mode = KeyboardModes::NO_MODE;
             self.inactive_keyboard_mode = KeyboardModes::NO_MODE;
             self.mode.remove(TermMode::KITTY_KEYBOARD_PROTOCOL);
+        }
+
+        if self.config.unnegotiated_modified_enter != old_config.unnegotiated_modified_enter {
+            // A config reload changes only Kettle's fallback; replacing the
+            // application-selected level would break an active protocol.
+            self.mode.set(
+                TermMode::UNNEGOTIATED_MODIFIED_ENTER,
+                self.config.unnegotiated_modified_enter,
+            );
         }
 
         // Damage everything on config updates.
@@ -1493,6 +1539,35 @@ impl<T: EventListener> Handler for Term<T> {
     }
 
     #[inline]
+    fn set_modify_other_keys(&mut self, mode: ModifyOtherKeys) {
+        trace!("Setting modifyOtherKeys mode to {mode:?}");
+        self.mode.remove(TermMode::MODIFY_OTHER_KEYS);
+        self.mode.insert(TermMode::MODIFY_OTHER_KEYS_NEGOTIATED);
+        self.mode.insert(modify_other_keys_term_mode(mode));
+    }
+
+    #[inline]
+    fn report_modify_other_keys(&mut self) {
+        trace!("Reporting modifyOtherKeys mode");
+        // A probing client has entered the xterm negotiation path, so Kettle's
+        // fallback must stop producing bytes outside the reported level zero.
+        self.mode.insert(TermMode::MODIFY_OTHER_KEYS_NEGOTIATED);
+        let level = if self.mode.contains(TermMode::MODIFY_OTHER_KEYS_2) {
+            2
+        } else if self.mode.contains(TermMode::MODIFY_OTHER_KEYS_1) {
+            1
+        } else {
+            0
+        };
+
+        // XTerm's ctlseqs documents XTQMODKEYS replies as an XTMODKEYS
+        // control, so keep the modifyOtherKeys resource selector before the
+        // effective value the application can restore.
+        let text = format!("\x1b[>4;{level}m");
+        self.event_proxy.send_event(Event::PtyWrite(text));
+    }
+
+    #[inline]
     fn push_keyboard_mode(&mut self, mode: KeyboardModes) {
         if !self.config.kitty_keyboard {
             return;
@@ -2078,10 +2153,28 @@ impl<T: EventListener> Handler for Term<T> {
         // Preserve vi mode across resets.
         self.mode &= TermMode::VI;
         self.mode.insert(TermMode::default());
+        self.mode.insert(unnegotiated_modified_enter_term_mode(
+            self.config.unnegotiated_modified_enter,
+        ));
 
         self.event_proxy.send_event(Event::CursorBlinkingChange);
         self.mark_fully_damaged();
         self.graphics_events.push(GraphicsEvent::Reset);
+    }
+
+    #[inline]
+    fn soft_reset_state(&mut self) {
+        // DECSTR, not RIS. It restores the modifier resources and the
+        // scrolling region; it must leave the display, the scrollback and the
+        // title alone. Programs emit `CSI ! p` from terminfo `is2`/`rs2` while
+        // initializing, so clearing here would destroy a user's scrollback
+        // whenever a program started.
+        self.mode
+            .remove(TermMode::MODIFY_OTHER_KEYS | TermMode::MODIFY_OTHER_KEYS_NEGOTIATED);
+        self.mode.insert(unnegotiated_modified_enter_term_mode(
+            self.config.unnegotiated_modified_enter,
+        ));
+        self.scroll_region = Line(0)..Line(self.screen_lines() as i32);
     }
 
     #[inline]
@@ -2767,14 +2860,171 @@ mod tests {
     use super::*;
 
     use std::mem;
+    use std::sync::{Arc, Mutex};
 
-    use crate::event::VoidListener;
+    use crate::event::{Event, EventListener, VoidListener};
     use crate::grid::{Grid, Scroll};
     use crate::index::{Column, Point, Side};
     use crate::selection::{Selection, SelectionType};
     use crate::term::cell::{Cell, Flags};
     use crate::term::test::TermSize;
-    use crate::vte::ansi::{self, CharsetIndex, Handler, StandardCharset};
+    use crate::vte::ansi::{self, CharsetIndex, Handler, Processor, StandardCharset};
+
+    #[derive(Clone, Default)]
+    struct PtyWriteListener(Arc<Mutex<Vec<String>>>);
+
+    impl PtyWriteListener {
+        fn drain(&self) -> Vec<String> {
+            mem::take(&mut *self.0.lock().unwrap())
+        }
+    }
+
+    impl EventListener for PtyWriteListener {
+        fn send_event(&self, event: Event) {
+            if let Event::PtyWrite(text) = event {
+                self.0.lock().unwrap().push(text);
+            }
+        }
+    }
+
+    #[test]
+    fn modify_other_keys_tracks_mutually_exclusive_effective_levels() {
+        let size = TermSize::new(5, 3);
+        let mut term = Term::new(Config::default(), &size, VoidListener);
+        let mut processor: Processor = Processor::new();
+
+        assert!(!term.mode().intersects(TermMode::MODIFY_OTHER_KEYS));
+        assert!(!term.mode().contains(TermMode::MODIFY_OTHER_KEYS_NEGOTIATED));
+        assert!(term.mode().contains(TermMode::UNNEGOTIATED_MODIFIED_ENTER));
+
+        processor.advance(&mut term, b"\x1b[>4;1m");
+        assert!(term.mode().contains(TermMode::MODIFY_OTHER_KEYS_1));
+        assert!(!term.mode().contains(TermMode::MODIFY_OTHER_KEYS_2));
+        assert!(term.mode().contains(TermMode::MODIFY_OTHER_KEYS_NEGOTIATED));
+
+        processor.advance(&mut term, b"\x1b[>4;2m");
+        assert!(!term.mode().contains(TermMode::MODIFY_OTHER_KEYS_1));
+        assert!(term.mode().contains(TermMode::MODIFY_OTHER_KEYS_2));
+
+        processor.advance(&mut term, b"\x1b[>4;0m");
+        assert!(!term.mode().intersects(TermMode::MODIFY_OTHER_KEYS));
+        assert!(term.mode().contains(TermMode::MODIFY_OTHER_KEYS_NEGOTIATED));
+    }
+
+    #[test]
+    fn modify_other_keys_reports_the_effective_level() {
+        let size = TermSize::new(5, 3);
+        let listener = PtyWriteListener::default();
+        let mut term = Term::new(Config::default(), &size, listener.clone());
+        let mut processor: Processor = Processor::new();
+
+        processor.advance(&mut term, b"\x1b[?4m");
+        assert_eq!(listener.drain(), ["\x1b[>4;0m"]);
+        assert!(term.mode().contains(TermMode::MODIFY_OTHER_KEYS_NEGOTIATED));
+
+        for (set, reply) in [
+            (b"\x1b[>4;0m".as_slice(), "\x1b[>4;0m"),
+            (b"\x1b[>4;1m".as_slice(), "\x1b[>4;1m"),
+            (b"\x1b[>4;2m".as_slice(), "\x1b[>4;2m"),
+        ] {
+            processor.advance(&mut term, set);
+            processor.advance(&mut term, b"\x1b[?4m");
+            assert_eq!(listener.drain(), [reply]);
+        }
+    }
+
+    #[test]
+    fn modify_other_keys_restore_and_disable_both_reach_the_initial_zero_level() {
+        let size = TermSize::new(5, 3);
+        let listener = PtyWriteListener::default();
+        let mut term = Term::new(Config::default(), &size, listener.clone());
+        let mut processor: Processor = Processor::new();
+
+        for restore in [b"\x1b[>4m".as_slice(), b"\x1b[>m".as_slice()] {
+            processor.advance(&mut term, b"\x1b[>4;2m");
+            processor.advance(&mut term, restore);
+            processor.advance(&mut term, b"\x1b[?4m");
+            assert_eq!(listener.drain(), ["\x1b[>4;0m"]);
+        }
+
+        processor.advance(&mut term, b"\x1b[>4;1m\x1b[>4;0m\x1b[?4m");
+        assert_eq!(listener.drain(), ["\x1b[>4;0m"]);
+        assert!(term.mode().contains(TermMode::MODIFY_OTHER_KEYS_NEGOTIATED));
+    }
+
+    #[test]
+    fn ris_and_decstr_restore_initial_modify_other_keys_state() {
+        let size = TermSize::new(5, 3);
+        let mut term = Term::new(Config::default(), &size, VoidListener);
+        let mut processor: Processor = Processor::new();
+
+        for reset in [b"\x1bc".as_slice(), b"\x1b[!p".as_slice()] {
+            processor.advance(&mut term, b"\x1b[>4;2m");
+            assert!(term.mode().contains(TermMode::MODIFY_OTHER_KEYS_NEGOTIATED));
+
+            processor.advance(&mut term, reset);
+            assert!(!term.mode().intersects(TermMode::MODIFY_OTHER_KEYS));
+            assert!(!term.mode().contains(TermMode::MODIFY_OTHER_KEYS_NEGOTIATED));
+            assert!(term.mode().contains(TermMode::UNNEGOTIATED_MODIFIED_ENTER));
+        }
+    }
+
+    /// DECSTR restores the modifier resources like RIS, but it is a SOFT
+    /// reset: it must not touch the screen or the scrollback. Programs emit
+    /// `CSI ! p` from terminfo `is2`/`rs2` while initializing, so a DECSTR
+    /// wired to the hard reset would erase a user's scrollback whenever a
+    /// program started — far worse than the state bug it was added to fix.
+    #[test]
+    fn decstr_restores_modifier_state_without_erasing_the_buffer() {
+        let size = TermSize::new(5, 3);
+        let mut term = Term::new(Config::default(), &size, VoidListener);
+        let mut processor: Processor = Processor::new();
+
+        processor.advance(&mut term, b"scrollback\r\nvisible");
+        let history_before = term.grid().history_size();
+        let total_before = term.grid().total_lines();
+        assert!(history_before > 0, "the fixture must produce scrollback");
+
+        processor.advance(&mut term, b"\x1b[>4;2m");
+        assert!(term.mode().contains(TermMode::MODIFY_OTHER_KEYS_2));
+
+        processor.advance(&mut term, b"\x1b[!p");
+
+        assert!(
+            !term.mode().intersects(TermMode::MODIFY_OTHER_KEYS),
+            "DECSTR must restore the negotiated level"
+        );
+        assert_eq!(
+            term.grid().history_size(),
+            history_before,
+            "DECSTR must not clear scrollback"
+        );
+        assert_eq!(
+            term.grid().total_lines(),
+            total_before,
+            "DECSTR must not resize or clear the grid"
+        );
+    }
+
+    #[test]
+    fn config_updates_only_the_unnegotiated_modified_enter_fallback() {
+        let size = TermSize::new(5, 3);
+        let mut term = Term::new(Config::default(), &size, VoidListener);
+        let mut processor: Processor = Processor::new();
+
+        processor.advance(&mut term, b"\x1b[>4;2m");
+        term.set_options(Config {
+            unnegotiated_modified_enter: false,
+            ..Config::default()
+        });
+        assert!(term.mode().contains(TermMode::MODIFY_OTHER_KEYS_2));
+        assert!(term.mode().contains(TermMode::MODIFY_OTHER_KEYS_NEGOTIATED));
+        assert!(!term.mode().contains(TermMode::UNNEGOTIATED_MODIFIED_ENTER));
+
+        term.set_options(Config::default());
+        assert!(term.mode().contains(TermMode::MODIFY_OTHER_KEYS_2));
+        assert!(term.mode().contains(TermMode::UNNEGOTIATED_MODIFIED_ENTER));
+    }
 
     #[test]
     fn selection_survives_while_scrollback_history_grows() {

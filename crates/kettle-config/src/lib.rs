@@ -262,6 +262,28 @@ impl Osc52 {
     }
 }
 
+/// Kettle's modified-Enter fallback before keyboard-protocol negotiation.
+///
+/// Xterm levels remain application-owned so enabling the fallback cannot turn
+/// Ctrl+I into a distinct sequence for clients which still expect Tab.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ModifyOtherKeysMode {
+    /// Preserve modified Enter until an application negotiates a protocol.
+    #[default]
+    Enter,
+    /// Do not add Kettle's fallback; negotiated protocols are still honored.
+    Off,
+}
+
+impl ModifyOtherKeysMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Enter => "enter",
+            Self::Off => "off",
+        }
+    }
+}
+
 /// Policy for pasting OS file references — a file copied in the file manager
 /// (`CF_HDROP` on Windows, `text/uri-list` elsewhere) — into the focused pane
 /// as a shell-quoted path. `On` (default) pastes the path(s); `Off` disables
@@ -1079,6 +1101,8 @@ pub struct Config {
     pub bell: BellMode,
     /// OSC 52 clipboard policy (default: writes only).
     pub osc52: Osc52,
+    /// Kettle's modified-Enter fallback before a client negotiates key encoding.
+    pub modify_other_keys: ModifyOtherKeysMode,
     /// Paste a clipboard file list (e.g. a file copied in Explorer) as a
     /// shell-quoted path (default: on). See [`PasteFiles`].
     pub paste_files: PasteFiles,
@@ -2335,6 +2359,7 @@ impl Default for Config {
             cursor_blink: true,
             bell: BellMode::Both,
             osc52: Osc52::Copy,
+            modify_other_keys: ModifyOtherKeysMode::Enter,
             paste_files: PasteFiles::On,
             paste_images: PasteImages::On,
             record: RecordMode::Off,
@@ -3335,6 +3360,10 @@ impl Config {
                         | "true"
                         | "copy"
                 ),
+                "modify-other-keys" | "modify_other_keys" => matches!(
+                    v.to_ascii_lowercase().as_str(),
+                    "enter" | "off"
+                ),
                 "paste-files" => matches!(
                     v.to_ascii_lowercase().as_str(),
                     "off" | "none" | "disabled" | "false" | "0" | "on" | "enabled" | "true" | "1"
@@ -3838,6 +3867,12 @@ impl Config {
                         "paste" | "read" => Osc52::Paste,
                         "both" | "all" | "true" => Osc52::Both,
                         _ => Osc52::Copy,
+                    }
+                }
+                "modify-other-keys" | "modify_other_keys" => {
+                    cfg.modify_other_keys = match e.value.to_ascii_lowercase().as_str() {
+                        "off" => ModifyOtherKeysMode::Off,
+                        _ => ModifyOtherKeysMode::Enter,
                     }
                 }
                 "paste-files" => {
@@ -5055,6 +5090,7 @@ allow-bold = false\n\
 bold-is-bright = true\n\
 clear-select-on-copy = true\n\
 invert-search = true\n\
+modify-other-keys = enter\n\
 backspace-binding = ascii-del\n\
 delete-binding = escape-sequence\n\
 login-shell = true\n\
@@ -6375,6 +6411,33 @@ cell-height = 1.2\n";
     }
 
     #[test]
+    fn modify_other_keys_policy_parsing_validation_and_default() {
+        assert_eq!(
+            Config::default().modify_other_keys,
+            ModifyOtherKeysMode::Enter
+        );
+        assert_eq!(
+            Config::parse_text("modify-other-keys = ENTER").modify_other_keys,
+            ModifyOtherKeysMode::Enter
+        );
+        assert_eq!(
+            Config::parse_text("modify_other_keys = off").modify_other_keys,
+            ModifyOtherKeysMode::Off
+        );
+        assert_eq!(
+            Config::parse_text("modify-other-keys = bogus").modify_other_keys,
+            ModifyOtherKeysMode::Enter
+        );
+        assert!(Config::detect_malformed_values("modify-other-keys = enter\n").is_empty());
+        assert_eq!(
+            Config::detect_malformed_values("modify-other-keys = sometimes\n").len(),
+            1
+        );
+        let (_, unknown) = Config::parse_collect("modify-other-keys = off\n");
+        assert!(unknown.is_empty());
+    }
+
+    #[test]
     fn paste_files_policy_parsing_and_default() {
         // On by default: copying a file in Explorer pastes its path.
         let d = Config::default().paste_files;
@@ -7593,6 +7656,8 @@ cell-height = 1.2\n";
             ("background_type", "image"),
             ("text-renderer", "grid"),
             ("text_renderer", "grid"),
+            ("modify-other-keys", "enter"),
+            ("modify_other_keys", "enter"),
             // The three F2 background-image placement enums (+ snake_case).
             ("background-image-mode", "scale"),
             ("background_image_mode", "scale"),
