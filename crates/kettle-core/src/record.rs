@@ -320,38 +320,47 @@ impl Recorder {
         }
         self.utf8_carry.extend_from_slice(bytes);
         let mut out = String::new();
-        // Decode as much valid UTF-8 as possible; loop so a chunk that contains
+        // Decode as much valid UTF-8 as possible so a chunk containing
         // [valid][invalid][valid] emits all of it, retaining only a genuinely-
         // incomplete trailing sequence for the next call.
-        loop {
-            match std::str::from_utf8(&self.utf8_carry) {
+        //
+        // Advance a cursor rather than draining per invalid run. Draining from
+        // the front shifts the entire remaining tail every time, so a hostile
+        // 64 KiB chunk of `0xff` — one invalid run per byte — cost about 65,536
+        // iterations and gigabytes of cumulative movement before a single event
+        // was written, stalling whichever thread called this: the UI, or
+        // `kettle exec`'s lifecycle. One pass now, then one move of the
+        // at-most-three-byte incomplete suffix.
+        let mut cursor = 0usize;
+        let incomplete = loop {
+            let rest = &self.utf8_carry[cursor..];
+            if rest.is_empty() {
+                break 0;
+            }
+            match std::str::from_utf8(rest) {
                 Ok(s) => {
                     out.push_str(s);
-                    self.utf8_carry.clear();
-                    break;
+                    break 0;
                 }
                 Err(e) => {
                     let valid = e.valid_up_to();
-                    // SAFETY: bytes up to `valid` are guaranteed valid UTF-8.
-                    out.push_str(unsafe {
-                        std::str::from_utf8_unchecked(&self.utf8_carry[..valid])
-                    });
+                    // SAFETY: `valid_up_to` guarantees this prefix is valid UTF-8.
+                    out.push_str(unsafe { std::str::from_utf8_unchecked(&rest[..valid]) });
                     match e.error_len() {
                         // Incomplete trailing sequence — keep it for the next chunk.
-                        None => {
-                            self.utf8_carry.drain(..valid);
-                            break;
-                        }
-                        // A genuinely-invalid run — emit one replacement, drop it,
-                        // and continue decoding the remainder.
+                        None => break rest.len() - valid,
+                        // A genuinely-invalid run — emit one replacement and
+                        // step past it.
                         Some(n) => {
                             out.push('\u{FFFD}');
-                            self.utf8_carry.drain(..valid + n);
+                            cursor += valid + n;
                         }
                     }
                 }
             }
-        }
+        };
+        let consumed = self.utf8_carry.len() - incomplete;
+        self.utf8_carry.drain(..consumed);
         if !out.is_empty() {
             self.emit("o", &out);
         }
@@ -811,6 +820,107 @@ mod tests {
         assert!(
             !joined.contains('\u{FFFD}'),
             "no replacement chars: {joined:?}"
+        );
+    }
+
+    /// A child can emit a whole PTY read of bytes that are never valid UTF-8.
+    /// Draining per invalid run made that quadratic — 64 KiB of `0xff` meant
+    /// about 65,536 tail shifts and gigabytes of movement before one event was
+    /// written, on whichever thread called this. The bound below is far looser
+    /// than the linear implementation needs and far tighter than the quadratic
+    /// one achieves, so it discriminates without being timing-fragile. The
+    /// separation was measured, not assumed — an earlier bound of this shape
+    /// passed against the quadratic code and would have been false assurance.
+    #[test]
+    fn hostile_invalid_utf8_chunk_stays_linear_and_lossless() {
+        use std::io::Read;
+        use std::time::Instant;
+
+        // Deliberately larger than a real 64 KiB PTY read. At 64 KiB the
+        // quadratic path moves ~2 GiB and takes a couple hundred milliseconds:
+        // real jank when a child sustains it, but not separable from a linear
+        // run by any bound that stays stable on a busy machine. Measured on
+        // this workspace at 1 MiB: 26 ms linear against 13.3 s quadratic, so
+        // the bound below discriminates by two orders of magnitude in both
+        // directions instead of passing whatever it is handed.
+        const CHUNK: usize = 1024 * 1024;
+        let temp = test_tempdir();
+        let path = temp.path().join("invalid.cast");
+        // Allocate the payload and open the recorder OUTSIDE the timed region:
+        // a 1 MiB allocation and a file create are noise against the thing
+        // under measurement, and they make a failure harder to read.
+        let payload = vec![0xff_u8; CHUNK];
+        let elapsed = {
+            let mut rec = super::Recorder::start(&path, 80, 24, false).expect("start");
+            let started = Instant::now();
+            rec.record_output(&payload);
+            let elapsed = started.elapsed();
+            rec.finish();
+            elapsed
+        };
+
+        let mut s = String::new();
+        std::fs::File::open(&path)
+            .unwrap()
+            .read_to_string(&mut s)
+            .unwrap();
+        let joined: String = s
+            .lines()
+            .skip(1)
+            .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+            .filter(|v| v[1] == "o")
+            .filter_map(|v| v[2].as_str().map(String::from))
+            .collect();
+
+        // Semantics are unchanged, and the trace stays valid UTF-8 rather than
+        // truncating the child's output. The rule is one replacement per
+        // invalid *run*, not per byte — a run can span several bytes. This
+        // input is the case where the two coincide: `0xff` can never begin a
+        // sequence, so `error_len()` is 1 and every byte is its own run.
+        assert_eq!(
+            joined.chars().count(),
+            CHUNK,
+            "each 0xff is its own invalid run, so each must yield one replacement"
+        );
+        assert!(
+            joined.chars().all(|c| c == '\u{FFFD}'),
+            "an all-invalid chunk must decode to replacements only"
+        );
+        assert!(
+            elapsed < std::time::Duration::from_secs(2),
+            "invalid-UTF-8 recording is not linear: {elapsed:?} for {CHUNK} bytes"
+        );
+    }
+
+    /// The cursor rewrite must not lose the one thing the drain loop got right:
+    /// an incomplete trailing sequence is carried, not replaced.
+    #[test]
+    fn invalid_runs_and_a_split_codepoint_survive_together() {
+        use std::io::Read;
+        let temp = test_tempdir();
+        let path = temp.path().join("mixed.cast");
+        {
+            let mut rec = super::Recorder::start(&path, 80, 24, false).expect("start");
+            // [valid][invalid][valid][incomplete] in one chunk, then its tail.
+            rec.record_output(&[b'a', 0xff, b'b', 0xff, 0xff, b'c', 0xE4, 0xB8]);
+            rec.record_output(&[0xAD, b'd']);
+            rec.finish();
+        }
+        let mut s = String::new();
+        std::fs::File::open(&path)
+            .unwrap()
+            .read_to_string(&mut s)
+            .unwrap();
+        let joined: String = s
+            .lines()
+            .skip(1)
+            .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+            .filter(|v| v[1] == "o")
+            .filter_map(|v| v[2].as_str().map(String::from))
+            .collect();
+        assert_eq!(
+            joined, "a\u{FFFD}b\u{FFFD}\u{FFFD}c中d",
+            "invalid runs replace one-for-one while a split codepoint reassembles"
         );
     }
 
