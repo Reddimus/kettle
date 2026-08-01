@@ -7055,7 +7055,10 @@ mod cwd_reporting_tests {
 mod placeholder_lock_order_tests {
     #[test]
     fn placeholder_tiles_reads_the_grid_before_locking_virtuals() {
-        let src = include_str!("term.rs");
+        // Normalized, like every other source guard in this file: the split
+        // patterns below embed `\n`, so a CRLF checkout would silently find
+        // nothing and fail on an unrelated-looking `expect`.
+        let src = include_str!("term.rs").replace("\r\n", "\n");
         let body = src
             .split("pub fn placeholder_tiles(&self) -> Vec<Placement> {")
             .nth(1)
@@ -7081,7 +7084,10 @@ mod placeholder_lock_order_tests {
     /// discoverable from either function.
     #[test]
     fn relative_tiles_still_documents_the_single_acquisition_order() {
-        let src = include_str!("term.rs");
+        // Normalized, like every other source guard in this file: the split
+        // patterns below embed `\n`, so a CRLF checkout would silently find
+        // nothing and fail on an unrelated-looking `expect`.
+        let src = include_str!("term.rs").replace("\r\n", "\n");
         let body = src
             .split("pub fn relative_tiles(&self) -> Vec<Placement> {")
             .nth(1)
