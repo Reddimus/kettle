@@ -1014,6 +1014,10 @@ mod tests {
         mode: SinkMode,
         entered: bool,
         fail_flush: bool,
+        /// Counted so a test can prove the worker's timed flush actually runs
+        /// while a producer keeps writing, rather than only once the stream
+        /// goes idle.
+        flushes: usize,
     }
 
     impl ControlledSink {
@@ -1025,6 +1029,7 @@ mod tests {
                         mode: SinkMode::Pass,
                         entered: false,
                         fail_flush: false,
+                        flushes: 0,
                     }),
                     Condvar::new(),
                 )),
@@ -1062,6 +1067,10 @@ mod tests {
         fn bytes(&self) -> Vec<u8> {
             self.shared.0.lock().unwrap().bytes.clone()
         }
+
+        fn flushes(&self) -> usize {
+            self.shared.0.lock().unwrap().flushes
+        }
     }
 
     impl std::io::Write for ControlledSink {
@@ -1091,6 +1100,8 @@ mod tests {
         fn flush(&mut self) -> std::io::Result<()> {
             let (state, wake) = &*self.shared;
             let mut state = state.lock().unwrap();
+            state.flushes += 1;
+            wake.notify_all();
             if state.fail_flush {
                 state.entered = true;
                 wake.notify_all();
@@ -1137,6 +1148,44 @@ mod tests {
     fn event_time_has_microsecond_precision() {
         let line = event_line(0.123456, "o", "x");
         assert!(line.starts_with("[0.123456, \"o\","), "{line}");
+    }
+
+    /// The worker's timed flush must survive a producer that never stops
+    /// writing. It did not: once the deadline passed, the computed timeout was
+    /// zero, and a zero timeout yields the ready item rather than `Timeout`, so
+    /// the flush arm was starved for as long as output kept arriving. Buffered
+    /// data then sat past the bound and a flush failure stayed invisible for
+    /// exactly as long — the opposite of what the visible-failure design is
+    /// for.
+    #[test]
+    fn timed_flush_runs_while_a_producer_keeps_writing() {
+        let sink = ControlledSink::new();
+        let mut recorder = Recorder::start_with_test_writer(
+            Box::new(sink.clone()),
+            80,
+            24,
+            false,
+            super::MAX_RECORD_BYTES,
+            PersistenceLimits::default(),
+        )
+        .unwrap();
+
+        // Write continuously for longer than the flush interval, without ever
+        // letting the queue go idle.
+        let deadline = Instant::now() + crate::persistence::DEFAULT_FLUSH_INTERVAL * 3;
+        while Instant::now() < deadline {
+            recorder.record_output(b"sustained output");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let flushes_while_busy = sink.flushes();
+
+        recorder.finish();
+        assert!(
+            flushes_while_busy > 0,
+            "the worker never flushed while output kept arriving; \
+             a busy producer starves the {:?} bound",
+            crate::persistence::DEFAULT_FLUSH_INTERVAL
+        );
     }
 
     #[test]

@@ -22,7 +22,7 @@ const DEFAULT_QUEUE_MESSAGES: usize = 128;
 const DEFAULT_QUEUE_BYTES: usize = 4 * 1024 * 1024;
 /// A silent tail must reach durable file APIs promptly, and a worker-side flush
 /// failure must become visible even when no later terminal output arrives.
-const DEFAULT_FLUSH_INTERVAL: Duration = Duration::from_millis(250);
+pub(crate) const DEFAULT_FLUSH_INTERVAL: Duration = Duration::from_millis(250);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum AsyncWriterStatus {
@@ -291,6 +291,21 @@ fn run_writer(
     let mut dirty = false;
     let mut flush_deadline = Instant::now() + DEFAULT_FLUSH_INTERVAL;
     loop {
+        // Check the deadline here rather than relying on `recv_timeout` to
+        // report it. Once the deadline has passed the computed timeout is
+        // zero, and a zero timeout does NOT yield `Timeout` while an item is
+        // ready — it yields the item. So a continuously writing producer
+        // starved the flush arm completely: buffered data sat past the bound
+        // until the stream went idle, and a flush failure (a full disk, say)
+        // stayed invisible for exactly as long, which is the opposite of what
+        // the visible-failure design is for.
+        if dirty && Instant::now() >= flush_deadline {
+            if writer.flush().is_err() {
+                set_failure(status, notifier, AsyncWriterStatus::IoError);
+                return;
+            }
+            dirty = false;
+        }
         let received = if dirty {
             receiver.recv_timeout(flush_deadline.saturating_duration_since(Instant::now()))
         } else {
