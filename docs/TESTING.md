@@ -72,6 +72,15 @@ Read test output for `no GPU adapter ... skipped` and `no PTY ...` messages.
 Those messages leave the portable suite green by design; record the missing
 coverage instead of treating the exit code alone as platform validation.
 
+The `kettle-render` tests that stand up a real GPU device hold a process-wide
+lock so only one of them runs at a time. libtest is otherwise free to run them
+in parallel, and creating and tearing down several wgpu devices at once on a
+host whose only adapter is a software or basic display driver has taken the
+whole test binary down with `STATUS_ACCESS_VIOLATION` — reported against
+`kettle-render` with no test having failed, because the fault is in the driver
+rather than in Rust. A new test that creates an adapter, device, or surface
+belongs behind the same guard.
+
 Performance-harness changes first run GUI-free fixtures under both supported
 PowerShell hosts:
 
