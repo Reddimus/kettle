@@ -877,10 +877,19 @@ impl PartialEq for RetentionCandidate {
 impl Eq for RetentionCandidate {}
 
 impl RetentionCandidate {
-    /// The ordering key, owned so a pass can carry it past the scan that
-    /// produced it. Must stay in step with [`Ord`] or the walk could revisit
-    /// or skip entries.
-    fn key(&self) -> (SystemTime, PathBuf) {
+    /// The ordering key, borrowed. Must stay in step with [`Ord`] or the walk
+    /// could revisit or skip entries.
+    ///
+    /// Borrowed because the scan compares this against the cursor once per
+    /// directory entry: cloning the path there would allocate for every entry
+    /// on every pass, which is the cost this scan exists to avoid.
+    fn key(&self) -> (SystemTime, &Path) {
+        (self.modified, self.path.as_path())
+    }
+
+    /// The same key, owned, so one pass can carry its cursor to the next.
+    /// Taken once per pass rather than once per entry.
+    fn owned_key(&self) -> (SystemTime, PathBuf) {
         (self.modified, self.path.clone())
     }
 
@@ -932,28 +941,55 @@ fn is_generated_record_name(name: &str) -> bool {
     })
 }
 
-/// How many candidates one scan holds in memory at a time.
+/// The smallest number of candidates a scan holds in memory.
 ///
 /// Retention only ever deletes from the oldest end, so only the oldest few
 /// entries are worth holding. Collecting every match and sorting the lot cost
 /// O(n) memory and O(n log n) time to enforce a 50-file target: a directory
 /// with a million matching names allocated a path and a metadata record for
 /// each, at recorder startup, on a liveness-sensitive path.
-const RETENTION_BATCH: usize = 128;
+///
+/// This is the floor rather than a fixed size because a scan too small for the
+/// overage just means more passes — see [`retention_batch_for`].
+const RETENTION_BATCH_MIN: usize = 128;
+
+/// The largest number of candidates a scan holds in memory.
+///
+/// At roughly a path plus a metadata record each, a full batch is a few hundred
+/// kilobytes — bounded regardless of how large the directory has grown, which
+/// is the entire point of scanning in batches.
+const RETENTION_BATCH_MAX: usize = 4096;
+
+/// How large the next pass should be, given what the last one measured.
+///
+/// Each pass re-reads the directory, so a batch far smaller than the overage
+/// turns one oversized directory into many full scans: clearing a 5,000-file
+/// overage 128 at a time is about 40 of them, on a startup path. Sizing the
+/// batch to the overage brings that to a handful while keeping memory bounded
+/// by [`RETENTION_BATCH_MAX`].
+///
+/// A byte-only overage produces the floor, which is the right answer: being
+/// over on bytes with few files means the files are large, so few deletions
+/// clear it.
+fn retention_batch_for(total_files: usize, max_files: usize) -> usize {
+    total_files
+        .saturating_sub(max_files)
+        .clamp(RETENTION_BATCH_MIN, RETENTION_BATCH_MAX)
+}
 
 /// One bounded pass over the recording directory.
 ///
-/// `oldest` holds at most [`RETENTION_BATCH`] candidates, oldest first. The
-/// totals cover EVERY generated cast in the directory, not just the ones held,
-/// so the caps stay exact no matter how much the scan had to discard.
+/// `oldest` holds at most the requested batch, oldest first. The totals cover
+/// EVERY generated cast in the directory, not just the ones held, so the caps
+/// stay exact no matter how much the scan had to discard.
 struct RetentionScan {
     oldest: Vec<RetentionCandidate>,
     total_bytes: u64,
     total_files: usize,
 }
 
-/// Collect the oldest [`RETENTION_BATCH`] candidates ordered strictly after
-/// `after`, plus the totals over the whole directory.
+/// Collect the oldest `batch` candidates ordered strictly after `after`, plus
+/// the totals over the whole directory.
 ///
 /// A bounded max-heap gives O(K) memory and O(n log K) time: the heap's max is
 /// the NEWEST entry held, so pushing past the bound evicts exactly the one
@@ -961,6 +997,7 @@ struct RetentionScan {
 fn scan_recording_directory(
     directory: &Path,
     after: Option<&(SystemTime, PathBuf)>,
+    batch: usize,
 ) -> std::io::Result<RetentionScan> {
     let mut oldest: std::collections::BinaryHeap<RetentionCandidate> =
         std::collections::BinaryHeap::new();
@@ -1011,11 +1048,13 @@ fn scan_recording_directory(
                 metadata.ino()
             },
         };
-        if after.is_some_and(|after| candidate.key() <= *after) {
+        // Borrowed comparison: cloning the path to build a key here would
+        // allocate once per directory entry per pass.
+        if after.is_some_and(|(modified, path)| candidate.key() <= (*modified, path.as_path())) {
             continue;
         }
         oldest.push(candidate);
-        if oldest.len() > RETENTION_BATCH {
+        if oldest.len() > batch {
             // The heap's max is the NEWEST entry held, so this drops exactly
             // the one least likely to be deleted.
             oldest.pop();
@@ -1044,10 +1083,14 @@ fn prune_recording_directory(
     let mut after: Option<(SystemTime, PathBuf)> = None;
     let mut total_bytes;
     let mut total_files;
+    // The first pass cannot know the overage, so it starts at the floor and
+    // every pass after it is sized by what the previous one measured.
+    let mut batch = RETENTION_BATCH_MIN;
     loop {
-        let scan = scan_recording_directory(directory, after.as_ref())?;
+        let scan = scan_recording_directory(directory, after.as_ref(), batch)?;
         total_bytes = scan.total_bytes;
         total_files = scan.total_files;
+        batch = retention_batch_for(total_files, max_files);
         if total_bytes <= max_bytes && total_files <= max_files {
             return Ok(());
         }
@@ -1060,7 +1103,7 @@ fn prune_recording_directory(
             if total_bytes <= max_bytes && total_files <= max_files {
                 return Ok(());
             }
-            after = Some(candidate.key());
+            after = Some(candidate.owned_key());
             let file = match kettle_state::open_existing_private_file(&candidate.path) {
                 Ok(file) => file,
                 Err(_) => continue,
@@ -1130,9 +1173,9 @@ pub fn printable_token(text: &str, raw: bool) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        RETENTION_BATCH, RecordStatus, Recorder, RecordingTarget, event_line, header_line,
-        is_generated_record_name, printable_token, prune_recording_directory,
-        scan_recording_directory, test_tempdir,
+        RETENTION_BATCH_MAX, RETENTION_BATCH_MIN, RecordStatus, Recorder, RecordingTarget,
+        event_line, header_line, is_generated_record_name, printable_token,
+        prune_recording_directory, retention_batch_for, scan_recording_directory, test_tempdir,
     };
     use crate::persistence::{MAX_PERSISTENCE_ITEM_BYTES, PersistenceLimits};
     use std::io::Write as _;
@@ -1990,7 +2033,7 @@ mod tests {
         // Names sort ascending, and the tie-break on equal mtimes is the path,
         // so the locked casts are unambiguously the oldest batch.
         let mut locked = Vec::new();
-        for index in 0..RETENTION_BATCH {
+        for index in 0..RETENTION_BATCH_MIN {
             let path = directory.join(format!("kettle-session-{index:06}-1-0.cast"));
             let mut file = kettle_state::create_private_file_new(&path).unwrap();
             file.write_all(&[b'x'; 10]).unwrap();
@@ -1998,7 +2041,7 @@ mod tests {
             locked.push((path, file));
         }
         let mut prunable = Vec::new();
-        for index in RETENTION_BATCH..RETENTION_BATCH + 10 {
+        for index in RETENTION_BATCH_MIN..RETENTION_BATCH_MIN + 10 {
             let path = directory.join(format!("kettle-session-{index:06}-1-0.cast"));
             let mut file = kettle_state::create_private_file_new(&path).unwrap();
             file.write_all(&[b'x'; 10]).unwrap();
@@ -2023,7 +2066,7 @@ mod tests {
     #[test]
     fn a_scan_holds_no_more_than_one_batch() {
         let temp = test_tempdir();
-        let total = RETENTION_BATCH + 40;
+        let total = RETENTION_BATCH_MIN + 40;
         for index in 0..total {
             let path = temp
                 .path()
@@ -2031,11 +2074,11 @@ mod tests {
             std::fs::write(path, [b'x'; 4]).unwrap();
         }
 
-        let scan = scan_recording_directory(temp.path(), None).unwrap();
+        let scan = scan_recording_directory(temp.path(), None, RETENTION_BATCH_MIN).unwrap();
 
         assert_eq!(
             scan.oldest.len(),
-            RETENTION_BATCH,
+            RETENTION_BATCH_MIN,
             "the scan must hold at most one batch"
         );
         assert_eq!(
@@ -2049,11 +2092,28 @@ mod tests {
         assert!(
             newest_held.path.ends_with(format!(
                 "kettle-session-{:06}-1-0.cast",
-                RETENTION_BATCH - 1
+                RETENTION_BATCH_MIN - 1
             )),
             "the batch must be the oldest entries, got {:?}",
             newest_held.path
         );
+    }
+
+    /// Each pass re-reads the directory, so the batch has to track the overage
+    /// or a large directory turns into many full scans on a startup path —
+    /// while still never exceeding the memory ceiling that makes batching
+    /// worthwhile in the first place.
+    #[test]
+    fn the_batch_tracks_the_overage_between_its_floor_and_ceiling() {
+        // At or under the cap there is nothing to clear, so the floor stands.
+        assert_eq!(retention_batch_for(50, 50), RETENTION_BATCH_MIN);
+        assert_eq!(retention_batch_for(10, 50), RETENTION_BATCH_MIN);
+        // A small overage still uses the floor rather than a tiny scan.
+        assert_eq!(retention_batch_for(60, 50), RETENTION_BATCH_MIN);
+        // A large overage is cleared in a handful of passes, not dozens.
+        assert_eq!(retention_batch_for(1_050, 50), 1_000);
+        // And an enormous one is capped, because bounded memory is the point.
+        assert_eq!(retention_batch_for(10_000_000, 50), RETENTION_BATCH_MAX);
     }
 
     #[test]
