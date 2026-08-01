@@ -10436,8 +10436,41 @@ mod gpu_tests {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
 
+    /// Serializes the tests that stand up a real GPU device.
+    ///
+    /// libtest runs tests in parallel, so without this several of the tests
+    /// below create wgpu instances, adapters, and devices in the same process
+    /// at the same moment. On a host whose only adapter is a software or basic
+    /// display driver — which is what the CI Windows runners have — that has
+    /// taken the whole test binary down with `STATUS_ACCESS_VIOLATION`
+    /// (`0xC0000005`), reported by cargo against `kettle-render` with no test
+    /// having failed, because the fault is inside the driver rather than in
+    /// Rust.
+    ///
+    /// The evidence is positional. libtest reports in name order, and every
+    /// observed crash stopped immediately after the last `glyphpipe::` test —
+    /// `gpu_tests` is the module that sorts next, so the process died exactly
+    /// as several threads entered device creation together. The failure does
+    /// not reproduce on a host with a real GPU driver: 175/175 pass
+    /// single-threaded and 20 consecutive parallel runs are clean.
+    ///
+    /// One device at a time costs a little wall clock and removes the whole
+    /// class. These tests have no reason to run concurrently with each other.
+    static GPU_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// Take the GPU lock, ignoring poisoning.
+    ///
+    /// A panicking GPU test must report its own failure — not turn every
+    /// later GPU test into a poisoned-mutex error that buries it.
+    fn gpu_test_guard() -> std::sync::MutexGuard<'static, ()> {
+        GPU_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
     #[test]
     fn gpu_pipelines_compile_and_render_offscreen() {
+        let _serialized = gpu_test_guard();
         match super::offscreen_selftest() {
             Ok(true) => {}
             Ok(false) => eprintln!("no GPU adapter on this host; skipped"),
@@ -10448,6 +10481,7 @@ mod gpu_tests {
     #[cfg(target_os = "windows")]
     #[test]
     fn windows_auto_prefers_dx12_without_preinitializing_vulkan() {
+        let _serialized = gpu_test_guard();
         pollster::block_on(async {
             // Exercise the real default resolver first. In particular, do not
             // construct an all-backend discovery instance just to decide
@@ -10478,6 +10512,7 @@ mod gpu_tests {
     #[cfg(target_os = "windows")]
     #[test]
     fn windows_stale_auto_pin_preserves_dx12_platform_preference() {
+        let _serialized = gpu_test_guard();
         pollster::block_on(async {
             // Keep this regression DX12-only too. A stale pin forces the
             // cross-adapter resolver, but its Auto fallback must still select
@@ -10513,6 +10548,7 @@ mod gpu_tests {
     #[cfg(target_os = "windows")]
     #[test]
     fn windows_explicit_vulkan_needs_no_gpu_pin_when_available() {
+        let _serialized = gpu_test_guard();
         pollster::block_on(async {
             // This is deliberately isolated from the default-DX12 regression
             // above and enables only Vulkan while checking availability.
@@ -10553,6 +10589,7 @@ mod gpu_tests {
     /// path emits real cell-locked glyphs.
     #[test]
     fn screenshot_grid_emits_cell_locked_glyphs() {
+        let _serialized = gpu_test_guard();
         pollster::block_on(async {
             let cfg = Config::default();
             let instance = gpu_instance();
@@ -10647,6 +10684,7 @@ mod gpu_tests {
     /// bug was reported with a zsh prompt, but the invariant is renderer-wide.
     #[test]
     fn grid_prompt_pixels_survive_cursor_blink() {
+        let _serialized = gpu_test_guard();
         let Some((off, on, cursor_rect, prompt_rects)) =
             grid_prompt_blink_frames().expect("grid prompt blink frames render")
         else {
@@ -11092,6 +11130,7 @@ mod gpu_tests {
     /// linear↔sRGB round-trip + 8-bit quantization.
     #[test]
     fn quad_pipeline_does_not_gamma_lift_on_srgb_target() {
+        let _serialized = gpu_test_guard();
         match srgb_quad_roundtrip_sample() {
             Ok(None) => eprintln!("no GPU adapter on this host; skipped"),
             Ok(Some([r, g, b])) => {

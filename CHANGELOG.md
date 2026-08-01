@@ -7,6 +7,72 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 ## [Unreleased]
 
   ### Fixed
+  - **Recording retention could delete a file Kettle never wrote.** Any name in
+    the recording directory that merely started `kettle-session-` and ended
+    `.cast` was a deletion candidate, which is far looser than what Kettle
+    generates and contradicts the documented promise that unrecognized files are
+    left alone. A file a user named `kettle-session-notes.cast` and left there
+    was deleted if it was the oldest and the budgets demanded a deletion.
+    Retention now matches the generated grammar exactly —
+    `kettle-session-<seconds>-<pid>-<counter>.cast`, all three fields non-empty
+    decimal digits. `docs/RECORDING.md` states plainly that this narrows
+    ownership without proving it, since a file matching the shape exactly is
+    still eligible.
+  - **Retention allocated in proportion to the whole recording directory.** It
+    collected every matching entry, with its path and metadata, then sorted the
+    lot — O(n) memory and O(n log n) time to enforce a 50-file target, at
+    recorder startup. A directory left to accumulate made that cost arbitrarily
+    large on a path that must stay responsive. The scan now holds only the
+    oldest batch of candidates in a bounded heap and walks forward through the
+    directory, so memory is bounded by the batch rather than by the directory.
+    Coverage is unchanged: a batch whose entries are all locked advances past
+    them instead of stopping, so an active file can never shield a newer
+    deletable one.
+  - **`cargo build -p kettle-core` failed on its own.** Per-pane session logging
+    creates its log through `kettle-state`, but that dependency was optional and
+    enabled only by the `asciicast` feature, so building the crate standalone
+    did not compile. Cargo feature unification hid it completely: other
+    workspace members enable `asciicast`, so every `--workspace` build — and
+    therefore all of CI — turned the dependency on. The dependency is now
+    required, and the gauntlet lints `kettle-core` by name so a check exists
+    that a workspace build structurally cannot substitute for.
+  - **A `PATHEXT` ending in `;` crashed Kettle while resolving a program.**
+    Resolving a command against `PATH` sliced each `PATHEXT` entry to drop its
+    leading `.`, which panics on an empty entry — and a trailing separator
+    produces exactly one, because installers append extensions without checking
+    whether a separator is already there. The same slice assumed that leading
+    `.` occupied a single byte, so an entry starting with a multi-byte character
+    panicked on a char boundary, and the entry was additionally required to be
+    UTF-8, which a Windows environment variable is never obliged to be. Any of
+    the three aborted the terminal at the moment it tried to spawn a pane.
+  - **`PATHEXT` replaced part of the requested program name instead of
+    extending it.** Resolving `foo.bar` searched for `foo.EXE`, because the
+    lookup substituted the extension rather than appending one. Windows appends
+    — `cmd` and `CreateProcess` look for `foo.bar.EXE` — so Kettle could run a
+    *different* program that merely shared the requested name's stem. Extensions
+    are now appended, matching the operating system.
+  - **The Unix passwd lookup raced with itself and could dereference NULL.**
+    Resolving the login shell and home directory used `getpwuid`, which returns
+    a pointer into a buffer shared by the whole process — so two panes opening
+    at the same moment raced, and the second lookup could overwrite the entry
+    while the first was still reading through it, leaving neither the shell nor
+    the home path trustworthy. Both fields were also read with
+    `CStr::from_ptr` and no NULL check, though a passwd entry is not obliged to
+    supply either; that is a crash rather than a missing value. The lookup now
+    uses the reentrant `getpwuid_r` into a caller-owned buffer, checks both
+    fields, and treats an empty `pw_shell` as POSIX specifies — the default
+    shell — rather than as a shell named "".
+  - **The Windows environment block was read through a misaligned pointer.**
+    Expanding a `REG_EXPAND_SZ` value reinterpreted the registry's `Vec<u8>` as
+    `*const u16` and built a slice from it, which is undefined behaviour:
+    `slice::from_raw_parts` requires alignment for its element type, and a byte
+    vector guarantees none. It also fed that buffer to
+    `ExpandEnvironmentStringsW` without a terminator, so a registry value that
+    was not NUL-terminated — or whose length was odd, since the trailing byte
+    was dropped — was read past its end, and an expansion failure silently
+    replaced the variable's value with an empty string. Values are now decoded
+    pairwise, terminated explicitly, and fall back to the unexpanded text when
+    expansion fails.
   - **A command killed by a signal is no longer indistinguishable from one that
     failed.** On Unix, `kettle exec` reported a generic `1` for every signal
     death, so `kill -TERM` on a child looked exactly like the child running

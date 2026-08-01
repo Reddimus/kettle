@@ -848,7 +848,51 @@ struct RetentionCandidate {
     inode: u64,
 }
 
+/// Ordered oldest-to-newest by modification time, with the path breaking ties
+/// so the order is total and deterministic across runs.
+///
+/// A `BinaryHeap` of these is a MAX-heap, so its top is the newest entry held —
+/// exactly the one to evict when the bounded scan overflows, and exactly the
+/// one retention is least likely to want to delete.
+impl Ord for RetentionCandidate {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.modified
+            .cmp(&other.modified)
+            .then_with(|| self.path.cmp(&other.path))
+    }
+}
+
+impl PartialOrd for RetentionCandidate {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl PartialEq for RetentionCandidate {
+    fn eq(&self, other: &Self) -> bool {
+        self.cmp(other) == std::cmp::Ordering::Equal
+    }
+}
+
+impl Eq for RetentionCandidate {}
+
 impl RetentionCandidate {
+    /// The ordering key, borrowed. Must stay in step with [`Ord`] or the walk
+    /// could revisit or skip entries.
+    ///
+    /// Borrowed because the scan compares this against the cursor once per
+    /// directory entry: cloning the path there would allocate for every entry
+    /// on every pass, which is the cost this scan exists to avoid.
+    fn key(&self) -> (SystemTime, &Path) {
+        (self.modified, self.path.as_path())
+    }
+
+    /// The same key, owned, so one pass can carry its cursor to the next.
+    /// Taken once per pass rather than once per entry.
+    fn owned_key(&self) -> (SystemTime, PathBuf) {
+        (self.modified, self.path.clone())
+    }
+
     fn matches(&self, metadata: &std::fs::Metadata) -> bool {
         #[cfg(unix)]
         {
@@ -864,12 +908,101 @@ impl RetentionCandidate {
     }
 }
 
-fn prune_recording_directory(
+/// Whether a name matches the grammar this module GENERATES, exactly.
+///
+/// Retention used to accept anything starting `kettle-session-` and ending
+/// `.cast`, which is far looser than what is produced and contradicts the
+/// promise that unrecognized files are left alone. A file a user named
+/// `kettle-session-important.cast` and left in the recording directory
+/// qualified, and if it was the oldest, private, regular and unlocked, it was
+/// deleted.
+///
+/// The generated shape is `kettle-session-<seconds>-<pid>-<sequence>.cast`, so
+/// the middle must be exactly three non-empty decimal fields.
+///
+/// This narrows ownership; it does not prove it. A file that happens to match
+/// the grammar exactly is still eligible, and only a provenance manifest could
+/// close that. `docs/RECORDING.md` states the rule in those terms rather than
+/// promising more than the code delivers.
+fn is_generated_record_name(name: &str) -> bool {
+    let Some(rest) = name.strip_prefix(DIRECTORY_RECORD_PREFIX) else {
+        return false;
+    };
+    let Some(rest) = rest.strip_suffix(DIRECTORY_RECORD_SUFFIX) else {
+        return false;
+    };
+    let mut fields = rest.split('-');
+    let parsed = [fields.next(), fields.next(), fields.next()];
+    if fields.next().is_some() {
+        return false;
+    }
+    parsed.iter().all(|field| {
+        field.is_some_and(|field| !field.is_empty() && field.bytes().all(|b| b.is_ascii_digit()))
+    })
+}
+
+/// The smallest number of candidates a scan holds in memory.
+///
+/// Retention only ever deletes from the oldest end, so only the oldest few
+/// entries are worth holding. Collecting every match and sorting the lot cost
+/// O(n) memory and O(n log n) time to enforce a 50-file target: a directory
+/// with a million matching names allocated a path and a metadata record for
+/// each, at recorder startup, on a liveness-sensitive path.
+///
+/// This is the floor rather than a fixed size because a scan too small for the
+/// overage just means more passes — see [`retention_batch_for`].
+const RETENTION_BATCH_MIN: usize = 128;
+
+/// The largest number of candidates a scan holds in memory.
+///
+/// At roughly a path plus a metadata record each, a full batch is a few hundred
+/// kilobytes — bounded regardless of how large the directory has grown, which
+/// is the entire point of scanning in batches.
+const RETENTION_BATCH_MAX: usize = 4096;
+
+/// How large the next pass should be, given what the last one measured.
+///
+/// Each pass re-reads the directory, so a batch far smaller than the overage
+/// turns one oversized directory into many full scans: clearing a 5,000-file
+/// overage 128 at a time is about 40 of them, on a startup path. Sizing the
+/// batch to the overage brings that to a handful while keeping memory bounded
+/// by [`RETENTION_BATCH_MAX`].
+///
+/// A byte-only overage produces the floor, which is the right answer: being
+/// over on bytes with few files means the files are large, so few deletions
+/// clear it.
+fn retention_batch_for(total_files: usize, max_files: usize) -> usize {
+    total_files
+        .saturating_sub(max_files)
+        .clamp(RETENTION_BATCH_MIN, RETENTION_BATCH_MAX)
+}
+
+/// One bounded pass over the recording directory.
+///
+/// `oldest` holds at most the requested batch, oldest first. The totals cover
+/// EVERY generated cast in the directory, not just the ones held, so the caps
+/// stay exact no matter how much the scan had to discard.
+struct RetentionScan {
+    oldest: Vec<RetentionCandidate>,
+    total_bytes: u64,
+    total_files: usize,
+}
+
+/// Collect the oldest `batch` candidates ordered strictly after `after`, plus
+/// the totals over the whole directory.
+///
+/// A bounded max-heap gives O(K) memory and O(n log K) time: the heap's max is
+/// the NEWEST entry held, so pushing past the bound evicts exactly the one
+/// least worth keeping.
+fn scan_recording_directory(
     directory: &Path,
-    max_bytes: u64,
-    max_files: usize,
-) -> std::io::Result<()> {
-    let mut candidates = Vec::new();
+    after: Option<&(SystemTime, PathBuf)>,
+    batch: usize,
+) -> std::io::Result<RetentionScan> {
+    let mut oldest: std::collections::BinaryHeap<RetentionCandidate> =
+        std::collections::BinaryHeap::new();
+    let mut total_bytes = 0_u64;
+    let mut total_files = 0_usize;
     for entry in std::fs::read_dir(directory)? {
         let entry = match entry {
             Ok(entry) => entry,
@@ -882,7 +1015,7 @@ fn prune_recording_directory(
         let Some(name) = name.to_str() else {
             continue;
         };
-        if !name.starts_with(DIRECTORY_RECORD_PREFIX) || !name.ends_with(DIRECTORY_RECORD_SUFFIX) {
+        if !is_generated_record_name(name) {
             continue;
         }
         let file_type = match entry.file_type() {
@@ -896,7 +1029,11 @@ fn prune_recording_directory(
             Ok(metadata) => metadata,
             Err(_) => continue,
         };
-        candidates.push(RetentionCandidate {
+        // Every generated cast counts toward the totals, including the ones
+        // already examined by an earlier pass. Only the heap is windowed.
+        total_bytes = total_bytes.saturating_add(metadata.len());
+        total_files = total_files.saturating_add(1);
+        let candidate = RetentionCandidate {
             path: entry.path(),
             size: metadata.len(),
             modified: metadata.modified().unwrap_or(UNIX_EPOCH),
@@ -910,43 +1047,90 @@ fn prune_recording_directory(
                 use std::os::unix::fs::MetadataExt as _;
                 metadata.ino()
             },
-        });
+        };
+        // Borrowed comparison: cloning the path to build a key here would
+        // allocate once per directory entry per pass.
+        if after.is_some_and(|(modified, path)| candidate.key() <= (*modified, path.as_path())) {
+            continue;
+        }
+        oldest.push(candidate);
+        if oldest.len() > batch {
+            // The heap's max is the NEWEST entry held, so this drops exactly
+            // the one least likely to be deleted.
+            oldest.pop();
+        }
     }
-    candidates.sort_by(|left, right| {
-        left.modified
-            .cmp(&right.modified)
-            .then_with(|| left.path.cmp(&right.path))
-    });
-    let mut total_bytes = candidates.iter().fold(0_u64, |total, candidate| {
-        total.saturating_add(candidate.size)
-    });
-    let mut total_files = candidates.len();
+    Ok(RetentionScan {
+        // Oldest first: `into_sorted_vec` yields ascending order under `Ord`.
+        oldest: oldest.into_sorted_vec(),
+        total_bytes,
+        total_files,
+    })
+}
 
-    for candidate in candidates {
+fn prune_recording_directory(
+    directory: &Path,
+    max_bytes: u64,
+    max_files: usize,
+) -> std::io::Result<()> {
+    // Windowing the scan must not narrow what retention is willing to examine.
+    // A candidate is skipped whenever it is locked, unreadable, or no longer
+    // the file the scan saw, and the previous code simply walked on to the next
+    // oldest — so a batch whose entries are all active has to advance past
+    // them, not stop. The cursor is the (modified, path) ordering key of the
+    // last candidate examined, so each pass considers strictly newer entries
+    // and the walk covers the whole directory in bounded memory.
+    let mut after: Option<(SystemTime, PathBuf)> = None;
+    let mut total_bytes;
+    let mut total_files;
+    // The first pass cannot know the overage, so it starts at the floor and
+    // every pass after it is sized by what the previous one measured.
+    let mut batch = RETENTION_BATCH_MIN;
+    loop {
+        let scan = scan_recording_directory(directory, after.as_ref(), batch)?;
+        total_bytes = scan.total_bytes;
+        total_files = scan.total_files;
+        batch = retention_batch_for(total_files, max_files);
         if total_bytes <= max_bytes && total_files <= max_files {
+            return Ok(());
+        }
+        if scan.oldest.is_empty() {
+            // Every generated cast has been examined and the caps are still
+            // exceeded, so the rest are active or unreadable.
             break;
         }
-        let file = match kettle_state::open_existing_private_file(&candidate.path) {
-            Ok(file) => file,
-            Err(_) => continue,
-        };
-        if ensure_regular_file(&file, &candidate.path).is_err() {
-            continue;
-        }
-        if !candidate.matches(&file.metadata()?) {
-            continue;
-        }
-        match fs4::FileExt::try_lock(&file) {
-            Ok(()) => {}
-            Err(fs4::TryLockError::WouldBlock) => continue,
-            Err(fs4::TryLockError::Error(_)) => continue,
-        }
-        // Consume the locked handle only after kettle-state has proved the
-        // path still names that exact private file. Windows deletes through
-        // the object handle; Unix unlinks relative to the verified parent.
-        if kettle_state::remove_open_private_file(file, &candidate.path).is_ok() {
-            total_bytes = total_bytes.saturating_sub(candidate.size);
-            total_files = total_files.saturating_sub(1);
+        for candidate in scan.oldest {
+            if total_bytes <= max_bytes && total_files <= max_files {
+                return Ok(());
+            }
+            after = Some(candidate.owned_key());
+            let file = match kettle_state::open_existing_private_file(&candidate.path) {
+                Ok(file) => file,
+                Err(_) => continue,
+            };
+            if ensure_regular_file(&file, &candidate.path).is_err() {
+                continue;
+            }
+            // A metadata failure here is one unreadable file, not a reason to
+            // abandon retention for every other cast in the directory.
+            let Ok(metadata) = file.metadata() else {
+                continue;
+            };
+            if !candidate.matches(&metadata) {
+                continue;
+            }
+            match fs4::FileExt::try_lock(&file) {
+                Ok(()) => {}
+                Err(fs4::TryLockError::WouldBlock) => continue,
+                Err(fs4::TryLockError::Error(_)) => continue,
+            }
+            // Consume the locked handle only after kettle-state has proved the
+            // path still names that exact private file. Windows deletes through
+            // the object handle; Unix unlinks relative to the verified parent.
+            if kettle_state::remove_open_private_file(file, &candidate.path).is_ok() {
+                total_bytes = total_bytes.saturating_sub(candidate.size);
+                total_files = total_files.saturating_sub(1);
+            }
         }
     }
     if total_bytes > max_bytes || total_files > max_files {
@@ -989,8 +1173,9 @@ pub fn printable_token(text: &str, raw: bool) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        RecordStatus, Recorder, RecordingTarget, event_line, header_line, printable_token,
-        prune_recording_directory, test_tempdir,
+        RETENTION_BATCH_MAX, RETENTION_BATCH_MIN, RecordStatus, Recorder, RecordingTarget,
+        event_line, header_line, is_generated_record_name, printable_token,
+        prune_recording_directory, retention_batch_for, scan_recording_directory, test_tempdir,
     };
     use crate::persistence::{MAX_PERSISTENCE_ITEM_BYTES, PersistenceLimits};
     use std::io::Write as _;
@@ -1770,6 +1955,165 @@ mod tests {
         assert!(owned[0].exists(), "an active Kettle cast must be preserved");
         let remaining = owned.iter().filter(|path| path.exists()).count();
         assert_eq!(remaining, 2, "oldest unlocked Kettle casts are pruned");
+    }
+
+    /// The generator emits `kettle-session-<u64>-<u32>-<u32>.cast` and nothing
+    /// else, so retention must accept exactly that and refuse everything a user
+    /// could plausibly leave in the same directory.
+    #[test]
+    fn only_the_generated_name_shape_is_eligible_for_retention() {
+        for name in [
+            "kettle-session-1718900000-4242-0.cast",
+            "kettle-session-0-0-0.cast",
+        ] {
+            assert!(is_generated_record_name(name), "{name} is generated");
+        }
+        for name in [
+            // The shape that motivated this: a user's own note file sharing
+            // the prefix and suffix, previously eligible for deletion.
+            "kettle-session-important.cast",
+            "kettle-session-backup-copy.cast",
+            // Too few fields, too many fields, and an empty field.
+            "kettle-session-1718900000-4242.cast",
+            "kettle-session-1718900000-4242-0-1.cast",
+            "kettle-session--4242-0.cast",
+            // Non-decimal fields, including signs and separators the generator
+            // cannot produce.
+            "kettle-session-1718900000-4242-0x1.cast",
+            "kettle-session--1-4242-0.cast",
+            "kettle-session-1_718_900_000-4242-0.cast",
+            // Right shape, wrong namespace or wrong extension.
+            "session-1718900000-4242-0.cast",
+            "kettle-session-1718900000-4242-0.cast.bak",
+            "kettle-session-1718900000-4242-0.log",
+        ] {
+            assert!(!is_generated_record_name(name), "{name} is not generated");
+        }
+    }
+
+    /// Retention deletes; a file it does not recognise must survive even when
+    /// it is the oldest thing present and the caps demand a deletion. Against
+    /// the previous prefix/suffix match this file was deleted.
+    #[test]
+    fn retention_never_deletes_a_user_named_cast() {
+        let temp = test_tempdir();
+        let directory = temp.path();
+        let user_file = directory.join("kettle-session-important.cast");
+        std::fs::write(&user_file, [b'u'; 4096]).unwrap();
+
+        for index in 0..3 {
+            let path = directory.join(format!("kettle-session-{index:03}-1-0.cast"));
+            let mut file = kettle_state::create_private_file_new(&path).unwrap();
+            file.write_all(&[b'x'; 10]).unwrap();
+        }
+
+        // Caps small enough that retention must delete something, and a byte
+        // cap the user's file alone blows past.
+        prune_recording_directory(directory, 15, 1).unwrap();
+
+        assert!(
+            user_file.exists(),
+            "a file retention did not generate must never be deleted"
+        );
+        assert_eq!(
+            std::fs::read(&user_file).unwrap().len(),
+            4096,
+            "the user's file must be untouched, not merely present"
+        );
+    }
+
+    /// The scan is windowed, and the window must never shrink what retention is
+    /// willing to examine. Every entry in the first batch is active here, so a
+    /// scan that stopped at the batch boundary would delete nothing at all.
+    #[test]
+    fn retention_walks_past_a_full_batch_of_active_casts() {
+        let temp = test_tempdir();
+        let directory = temp.path();
+
+        // Names sort ascending, and the tie-break on equal mtimes is the path,
+        // so the locked casts are unambiguously the oldest batch.
+        let mut locked = Vec::new();
+        for index in 0..RETENTION_BATCH_MIN {
+            let path = directory.join(format!("kettle-session-{index:06}-1-0.cast"));
+            let mut file = kettle_state::create_private_file_new(&path).unwrap();
+            file.write_all(&[b'x'; 10]).unwrap();
+            fs4::FileExt::try_lock(&file).unwrap();
+            locked.push((path, file));
+        }
+        let mut prunable = Vec::new();
+        for index in RETENTION_BATCH_MIN..RETENTION_BATCH_MIN + 10 {
+            let path = directory.join(format!("kettle-session-{index:06}-1-0.cast"));
+            let mut file = kettle_state::create_private_file_new(&path).unwrap();
+            file.write_all(&[b'x'; 10]).unwrap();
+            prunable.push(path);
+        }
+
+        prune_recording_directory(directory, u64::MAX, 1).unwrap();
+
+        for (path, _handle) in &locked {
+            assert!(path.exists(), "an active cast must be preserved: {path:?}");
+        }
+        for path in &prunable {
+            assert!(
+                !path.exists(),
+                "a prunable cast beyond the first batch must still be deleted: {path:?}"
+            );
+        }
+    }
+
+    /// The bound is the whole point: a directory far larger than the batch must
+    /// still cost O(batch) to examine, not O(directory).
+    #[test]
+    fn a_scan_holds_no_more_than_one_batch() {
+        let temp = test_tempdir();
+        let total = RETENTION_BATCH_MIN + 40;
+        for index in 0..total {
+            let path = temp
+                .path()
+                .join(format!("kettle-session-{index:06}-1-0.cast"));
+            std::fs::write(path, [b'x'; 4]).unwrap();
+        }
+
+        let scan = scan_recording_directory(temp.path(), None, RETENTION_BATCH_MIN).unwrap();
+
+        assert_eq!(
+            scan.oldest.len(),
+            RETENTION_BATCH_MIN,
+            "the scan must hold at most one batch"
+        );
+        assert_eq!(
+            scan.total_files, total,
+            "the totals must cover the whole directory even so"
+        );
+        assert_eq!(scan.total_bytes, (total * 4) as u64);
+        // Windowing must keep the OLDEST, since those are the deletion
+        // candidates — keeping an arbitrary subset would delete the wrong files.
+        let newest_held = scan.oldest.last().unwrap();
+        assert!(
+            newest_held.path.ends_with(format!(
+                "kettle-session-{:06}-1-0.cast",
+                RETENTION_BATCH_MIN - 1
+            )),
+            "the batch must be the oldest entries, got {:?}",
+            newest_held.path
+        );
+    }
+
+    /// Each pass re-reads the directory, so the batch has to track the overage
+    /// or a large directory turns into many full scans on a startup path —
+    /// while still never exceeding the memory ceiling that makes batching
+    /// worthwhile in the first place.
+    #[test]
+    fn the_batch_tracks_the_overage_between_its_floor_and_ceiling() {
+        // At or under the cap there is nothing to clear, so the floor stands.
+        assert_eq!(retention_batch_for(50, 50), RETENTION_BATCH_MIN);
+        assert_eq!(retention_batch_for(10, 50), RETENTION_BATCH_MIN);
+        // A small overage still uses the floor rather than a tiny scan.
+        assert_eq!(retention_batch_for(60, 50), RETENTION_BATCH_MIN);
+        // A large overage is cleared in a handful of passes, not dozens.
+        assert_eq!(retention_batch_for(1_050, 50), 1_000);
+        // And an enormous one is capped, because bounded memory is the point.
+        assert_eq!(retention_batch_for(10_000_000, 50), RETENTION_BATCH_MAX);
     }
 
     #[test]
