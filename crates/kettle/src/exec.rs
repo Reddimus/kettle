@@ -2690,12 +2690,22 @@ mod tests {
             OpenProcess, PROCESS_SYNCHRONIZE, WaitForSingleObject,
         };
 
+        // The child binary contains THIS test too. If its filter ever stopped
+        // matching, libtest would run the whole suite in the child, reach here,
+        // and re-exec again. Refuse to be that child.
+        if invoked_as_fixture(DESCENDANT_FIXTURE) {
+            return;
+        }
+
         let helper = std::env::current_exe().expect("resolve the unit-test binary");
         let opts = ExecOpts {
             argv: vec![
                 helper.to_string_lossy().into_owned(),
-                DESCENDANT_FIXTURE.into(),
+                // `--exact` first, then the filter, matching the integration
+                // fixtures in `tests/exec.rs`. libtest's parser does not care,
+                // but one spelling across the repo is one thing to get right.
                 "--exact".into(),
+                DESCENDANT_FIXTURE.into(),
                 "--nocapture".into(),
                 "--test-threads=1".into(),
             ],
