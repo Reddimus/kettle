@@ -10272,9 +10272,8 @@ mod teardown_tests {
     #[test]
     fn a_disarmed_guard_leaves_the_child_alone() {
         let killed = std::sync::Arc::new(AtomicBool::new(false));
-        let mut guard = SpawnedChildGuard::arm(Box::new(RecordingKiller(
-            std::sync::Arc::clone(&killed),
-        )));
+        let mut guard =
+            SpawnedChildGuard::arm(Box::new(RecordingKiller(std::sync::Arc::clone(&killed))));
         guard.disarm();
         drop(guard);
         assert!(
