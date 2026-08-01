@@ -78,6 +78,17 @@ fmt:
 clippy:
     cargo clippy --workspace --all-targets -- -D warnings
 
+# Build `kettle-core` on its own with DEFAULT features.
+#
+# A workspace build cannot see this: kettle-ui and the bin crate both enable
+# `asciicast`, so any accidental dependence on an optional dependency compiles
+# there and fails only for someone building the crate alone. That is exactly
+# how session logging came to use `kettle-state` while it was still optional.
+# Feature unification makes `--workspace` structurally unable to catch it, so
+# the check has to name the crate.
+core-default-features-check:
+    cargo clippy -p kettle-core --all-targets -- -D warnings
+
 # `cargo test --workspace` — runs the complete workspace unit and integration
 # suite. Use the command's summary for the current count.
 test:
@@ -300,6 +311,9 @@ release:
 gauntlet: live-ui-helper-selftest
     cargo fmt --all --check
     cargo clippy --workspace --all-targets -- -D warnings
+    # Feature unification hides a crate that leans on an optional dependency,
+    # so the workspace lint above structurally cannot catch it.
+    cargo clippy -p kettle-core --all-targets -- -D warnings
     cargo build --workspace --all-targets
     cargo test --workspace
     cargo doc --workspace --no-deps

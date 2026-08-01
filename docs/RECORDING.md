@@ -88,14 +88,30 @@ flushes, and final close. It buffers complete NDJSON records and rolls a failed
 batch back to the preceding committed boundary, so an early stop retains a
 replayable valid-JSON prefix rather than a partial event.
 
-Starting a managed recording prunes the new `kettle-session-*.cast` namespace
-toward budgets of 50 files and 5 GiB. Kettle removes the oldest unlocked files
-first and never removes an active file. Pre-existing `session-*.cast` files,
-unrelated files, symlinks, and unrecognized names are not managed or deleted.
-If active/unreadable files keep the managed namespace above its budget,
-recording continues and the condition is logged rather than deleting uncertain
-data. Kettle refuses a symbolic-link recording file or directory, and the Linux
+Starting a managed recording prunes the managed namespace toward budgets of 50
+files and 5 GiB. Kettle removes the oldest unlocked files first and never
+removes an active file. Pre-existing `session-*.cast` files, unrelated files,
+symlinks, and unrecognized names are not managed or deleted. If
+active/unreadable files keep the managed namespace above its budget, recording
+continues and the condition is logged rather than deleting uncertain data.
+Kettle refuses a symbolic-link recording file or directory, and the Linux
 installer refuses a symbolic-link `--record-dir`.
+
+A file is managed only when its name matches what Kettle generates *exactly*:
+`kettle-session-<seconds>-<pid>-<counter>.cast`, where all three middle fields
+are non-empty decimal digits. Sharing the prefix and the extension is not
+enough — a file you name `kettle-session-notes.cast` and leave in the recording
+directory is never a deletion candidate. Note what this does and does not
+promise: it narrows the set to names Kettle could have produced, but a file
+that matches the generated shape exactly is still eligible regardless of who
+wrote it. Keep files you care about out of the recording directory, or give
+them a name outside that shape.
+
+Retention examines the directory in bounded batches — it holds only the oldest
+candidates in memory at a time and walks forward until the budgets are met or
+every managed file has been considered. A directory with a very large number of
+recordings therefore costs bounded memory at startup, not memory proportional
+to the directory.
 
 Bare Super-key/desktop launches join the existing primary Kettle process and
 open another window in its shared recording. The activation handshake compares
