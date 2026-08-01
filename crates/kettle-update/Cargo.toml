@@ -12,7 +12,13 @@ description = "Signed release-feed verification and transactional self-update su
 workspace = true
 
 [dependencies]
-base64 = "0.22"
+# default-features = false drops 0.23's new default-on `simd-unsafe` feature:
+# hand-written core::arch AVX2/NEON kernels for both encode and decode. Kettle
+# only ever uses the scalar `general_purpose::STANDARD` engine, so the SIMD
+# engines are inert here — but this crate decodes the Ed25519 release signature,
+# and leaving the feature on would compile unsafe code onto a verification
+# boundary for no benefit. Without it base64 enforces #![forbid(unsafe_code)].
+base64 = { version = "0.23", default-features = false, features = ["alloc"] }
 ed25519-dalek = { version = "3", default-features = false, features = ["fast"] }
 flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
 fs4 = "1.1"
