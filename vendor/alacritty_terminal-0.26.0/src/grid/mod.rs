@@ -162,6 +162,18 @@ impl<T: GridCell + Default + PartialEq> Grid<T> {
         }
     }
 
+    /// Record that `count` of the oldest document rows are gone for good.
+    ///
+    /// Every site that irreversibly drops rows from the old end of the buffer
+    /// must call this. `history_origin` is what lets a consumer holding a
+    /// semantic anchor tell a surviving row from unrelated content that later
+    /// occupies the same `Line`; a discard that skips it makes those anchors
+    /// quietly wrong instead of visibly stale.
+    #[inline]
+    fn forget_oldest_rows(&mut self, count: usize) {
+        self.history_origin = self.history_origin.saturating_add(count as u64);
+    }
+
     /// Update the size of the scrollback history.
     pub fn update_history(&mut self, history_size: usize) {
         let current_history_size = self.history_size();
