@@ -39,20 +39,97 @@ impl EnvEntry {
     }
 }
 
+/// The current user's login shell and home directory, as recorded in the
+/// passwd database.
+///
+/// Either field may be absent: a passwd entry is not obliged to supply one, and
+/// the library is free to hand back a NULL pointer for it.
+#[cfg(unix)]
+#[derive(Default)]
+struct PasswdEntry {
+    shell: Option<OsString>,
+    home: Option<OsString>,
+}
+
+/// Read the current user's passwd entry through the REENTRANT interface.
+///
+/// Two defects motivated this. `getpwuid` returns a pointer into a buffer
+/// shared by the whole process, so two threads opening panes at the same moment
+/// race — the second call can overwrite the entry while the first is still
+/// reading through it, and nothing about the resulting shell or home path is
+/// then trustworthy. And both fields were dereferenced with `CStr::from_ptr`
+/// with no NULL check, which is a segfault rather than a missing value.
+///
+/// `getpwuid_r` writes into a caller-owned buffer, which removes the race; the
+/// fields are checked before they are read. Values come back as `OsString`
+/// because a path from the passwd database is not obliged to be UTF-8, and
+/// deciding what to do about that belongs to the caller.
+#[cfg(unix)]
+fn current_passwd_entry() -> PasswdEntry {
+    use std::ffi::CStr;
+    use std::os::unix::ffi::OsStrExt;
+
+    // `_SC_GETPW_R_SIZE_MAX` is advisory and may be reported as -1 ("no
+    // definite limit"), so treat any non-positive answer as unknown and grow on
+    // ERANGE instead. The ceiling stops a misbehaving libc from making this
+    // loop allocate without bound.
+    const MAX_CAPACITY: usize = 64 * 1024;
+    let mut capacity = match unsafe { libc::sysconf(libc::_SC_GETPW_R_SIZE_MAX) } {
+        reported if reported > 0 => (reported as usize).min(MAX_CAPACITY),
+        _ => 1024,
+    };
+    loop {
+        let mut buf = vec![0 as libc::c_char; capacity];
+        let mut passwd: libc::passwd = unsafe { std::mem::zeroed() };
+        let mut found: *mut libc::passwd = std::ptr::null_mut();
+        // SAFETY: `passwd` and `buf` are live and owned here, and their sizes
+        // are passed accurately. `getpwuid_r` writes only within them.
+        let rc = unsafe {
+            libc::getpwuid_r(
+                libc::getuid(),
+                &mut passwd,
+                buf.as_mut_ptr(),
+                buf.len(),
+                &mut found,
+            )
+        };
+        if rc == libc::ERANGE && capacity < MAX_CAPACITY {
+            capacity = (capacity * 2).min(MAX_CAPACITY);
+            continue;
+        }
+        // A missing user is reported as success with a null result, so both
+        // have to be checked before anything in `passwd` may be read.
+        if rc != 0 || found.is_null() {
+            return PasswdEntry::default();
+        }
+        // SAFETY: `getpwuid_r` reported success, so the string fields either
+        // point into `buf` — which outlives these reads — or are null, which is
+        // checked.
+        let field = |ptr: *const libc::c_char| -> Option<OsString> {
+            if ptr.is_null() {
+                return None;
+            }
+            Some(OsStr::from_bytes(unsafe { CStr::from_ptr(ptr) }.to_bytes()).to_os_string())
+        };
+        return PasswdEntry {
+            shell: field(passwd.pw_shell),
+            home: field(passwd.pw_dir),
+        };
+    }
+}
+
 #[cfg(unix)]
 fn get_shell() -> String {
     use nix::unistd::{access, AccessFlags};
-    use std::ffi::CStr;
-    use std::str;
 
-    let ent = unsafe { libc::getpwuid(libc::getuid()) };
-    if !ent.is_null() {
-        let shell = unsafe { CStr::from_ptr((*ent).pw_shell) };
-        match shell.to_str().map(str::to_owned) {
-            Err(err) => {
+    // POSIX gives an empty `pw_shell` the meaning "the implementation's default
+    // shell", which is what the fallback below already is.
+    if let Some(shell) = current_passwd_entry().shell.filter(|shell| !shell.is_empty()) {
+        match shell.into_string() {
+            Err(_) => {
                 log::warn!(
                     "passwd database shell could not be \
-                     represented as utf-8: {err:#}, \
+                     represented as utf-8, \
                      falling back to /bin/sh"
                 );
             }
@@ -112,24 +189,58 @@ fn get_base_env() -> BTreeMap<OsString, EnvEntry> {
         fn reg_value_to_string(value: &RegValue) -> anyhow::Result<OsString> {
             match value.vtype {
                 RegType::REG_EXPAND_SZ => {
-                    let src = unsafe {
-                        std::slice::from_raw_parts(
-                            value.bytes.as_ptr() as *const u16,
-                            value.bytes.len() / 2,
-                        )
-                    };
-                    let size =
-                        unsafe { ExpandEnvironmentStringsW(src.as_ptr(), std::ptr::null_mut(), 0) };
-                    let mut buf = vec![0u16; size as usize + 1];
-                    unsafe {
-                        ExpandEnvironmentStringsW(src.as_ptr(), buf.as_mut_ptr(), buf.len() as u32)
-                    };
-
-                    let mut buf = buf.as_slice();
-                    while let Some(0) = buf.last() {
-                        buf = &buf[0..buf.len() - 1];
+                    // `value.bytes` is a `Vec<u8>`, so its allocation is only
+                    // guaranteed to be 1-byte aligned. Reinterpreting that
+                    // pointer as `*const u16` and handing it to
+                    // `slice::from_raw_parts` is undefined behaviour — the
+                    // function requires the pointer be aligned for its element
+                    // type. It happened to work because allocators usually
+                    // return generously aligned blocks, which is exactly the
+                    // kind of accident that holds until it does not.
+                    //
+                    // Decoding pairs explicitly is both defined and no slower
+                    // in any way that matters for an environment block.
+                    let mut wide: Vec<u16> = value
+                        .bytes
+                        .chunks_exact(2)
+                        .map(|pair| u16::from_ne_bytes([pair[0], pair[1]]))
+                        .collect();
+                    // `ExpandEnvironmentStringsW` reads its input until a NUL.
+                    // The old code passed whatever the registry held, so a
+                    // value that was not NUL-terminated — or whose length was
+                    // odd, since the trailing byte was silently dropped — was
+                    // read past its end. Terminate it ourselves.
+                    while wide.last() == Some(&0) {
+                        wide.pop();
                     }
-                    Ok(OsString::from_wide(buf))
+                    let unexpanded = OsString::from_wide(&wide);
+                    wide.push(0);
+
+                    // The returned size counts the terminating NUL. Zero means
+                    // failure, which the old code turned into a one-element
+                    // buffer and then an empty string — silently replacing the
+                    // variable's value with nothing. Preferring the unexpanded
+                    // text keeps a usable value in that case.
+                    let needed =
+                        unsafe { ExpandEnvironmentStringsW(wide.as_ptr(), std::ptr::null_mut(), 0) };
+                    if needed == 0 {
+                        return Ok(unexpanded);
+                    }
+                    let mut buf = vec![0u16; needed as usize];
+                    let written = unsafe {
+                        ExpandEnvironmentStringsW(wide.as_ptr(), buf.as_mut_ptr(), buf.len() as u32)
+                    };
+                    // A second call that fails, or that wants more room than
+                    // the first call asked for (the environment can change in
+                    // between), leaves `buf` holding nothing trustworthy.
+                    if written == 0 || written as usize > buf.len() {
+                        return Ok(unexpanded);
+                    }
+                    buf.truncate(written as usize);
+                    while buf.last() == Some(&0) {
+                        buf.pop();
+                    }
+                    Ok(OsString::from_wide(&buf))
                 }
                 _ => Ok(OsString::from_reg_value(value)?),
             }
@@ -557,18 +668,53 @@ impl CommandBuilder {
             return Ok(home_dir.into());
         }
 
-        let ent = unsafe { libc::getpwuid(libc::getuid()) };
-        if ent.is_null() {
-            Ok("/".into())
-        } else {
-            use std::ffi::CStr;
-            use std::str;
-            let home = unsafe { CStr::from_ptr((*ent).pw_dir) };
-            home.to_str()
-                .map(str::to_owned)
-                .context("failed to resolve home dir")
+        // Same reentrancy and NULL-check reasoning as `current_passwd_entry`
+        // documents; an absent entry keeps the previous `/` fallback.
+        match current_passwd_entry().home {
+            None => Ok("/".into()),
+            Some(home) => home
+                .into_string()
+                .map_err(|_| anyhow::anyhow!("home dir is not valid utf-8"))
+                .context("failed to resolve home dir"),
         }
     }
+}
+
+/// Build `<dir>/<exe><ext>` for one PATHEXT entry, or `None` when the entry is
+/// unusable.
+///
+/// Three separate defects lived in the two lines this replaces, and every one
+/// of them is reachable from an ordinary Windows environment:
+///
+///   * `ext.to_str().expect("PATHEXT entries must be utf8")` PANICKED on an
+///     entry that was not UTF-8. `PATHEXT` is environment data; a terminal must
+///     not abort because of what it contains.
+///   * `&ext[1..]` panicked on an EMPTY entry, and `PATHEXT` ending in `;`
+///     produces exactly that — a trailing separator is common, because
+///     installers append entries without checking whether one is already there.
+///     The same slice assumed the leading `.` occupied one byte, so an entry
+///     beginning with a multi-byte character panicked on a char boundary.
+///   * `with_extension` REPLACES an existing extension instead of appending, so
+///     resolving `foo.bar` searched for `foo.EXE`. Windows appends — `cmd` and
+///     `CreateProcess` look for `foo.bar.EXE` — so this could resolve a request
+///     for one program to a DIFFERENT program that happened to share its stem.
+///
+/// Appending on the `OsStr` sidesteps the encoding question altogether: the
+/// bytes are never required to be UTF-8 and never indexed.
+#[cfg(windows)]
+fn with_pathext(dir: &Path, exe: &OsStr, ext: &OsStr) -> Option<std::path::PathBuf> {
+    let bytes = ext.as_encoded_bytes();
+    if bytes.is_empty() {
+        return None;
+    }
+    let mut name = exe.to_os_string();
+    // PATHEXT entries carry their own leading `.`; supply one if this entry
+    // omits it rather than silently producing `dirfoobar`.
+    if bytes[0] != b'.' {
+        name.push(".");
+    }
+    name.push(ext);
+    Some(dir.join(name))
 }
 
 #[cfg(windows)]
@@ -583,16 +729,13 @@ impl CommandBuilder {
                     return candidate.into_os_string();
                 }
 
-                // otherwise try tacking on some extensions.
-                // Note that this really replaces the extension in the
-                // user specified path, so this is potentially wrong.
+                // Otherwise try each PATHEXT extension in turn.
                 for ext in std::env::split_paths(&extensions) {
-                    // PATHEXT includes the leading `.`, but `with_extension`
-                    // doesn't want that
-                    let ext = ext.to_str().expect("PATHEXT entries must be utf8");
-                    let path = path.join(exe).with_extension(&ext[1..]);
-                    if path.exists() {
-                        return path.into_os_string();
+                    let Some(candidate) = with_pathext(&path, exe, ext.as_os_str()) else {
+                        continue;
+                    };
+                    if candidate.exists() {
+                        return candidate.into_os_string();
                     }
                 }
             }
@@ -753,6 +896,53 @@ fn is_cwd_relative_path<P: AsRef<Path>>(p: P) -> bool {
 mod tests {
     use super::*;
 
+    /// `get_shell` must yield something actually runnable, whether it came from
+    /// the passwd database or the `/bin/sh` fallback — a pane opened with an
+    /// unrunnable shell is an empty pane.
+    #[cfg(unix)]
+    #[test]
+    fn resolved_shell_is_executable() {
+        use nix::unistd::{access, AccessFlags};
+
+        let shell = get_shell();
+        assert!(!shell.is_empty(), "a shell path is always produced");
+        assert!(
+            access(Path::new(&shell), AccessFlags::X_OK).is_ok(),
+            "resolved shell {shell:?} must be executable"
+        );
+    }
+
+    /// The passwd lookup runs whenever a pane is spawned, and panes can be
+    /// spawned concurrently. The previous `getpwuid` handed back a pointer into
+    /// a process-wide buffer, so overlapping calls raced.
+    ///
+    /// A passing run is a stress check, not a proof — a data race need not
+    /// manifest — but a torn or reused buffer shows up here as threads
+    /// disagreeing, and this cannot pass by accident under the reentrant call.
+    #[cfg(unix)]
+    #[test]
+    fn passwd_lookup_agrees_across_threads() {
+        let expected = current_passwd_entry();
+        let threads: Vec<_> = (0..8)
+            .map(|_| {
+                std::thread::spawn(|| {
+                    (0..64)
+                        .map(|_| {
+                            let entry = current_passwd_entry();
+                            (entry.shell, entry.home)
+                        })
+                        .collect::<Vec<_>>()
+                })
+            })
+            .collect();
+        for thread in threads {
+            for (shell, home) in thread.join().expect("passwd lookup must not panic") {
+                assert_eq!(shell, expected.shell, "concurrent lookups must agree");
+                assert_eq!(home, expected.home, "concurrent lookups must agree");
+            }
+        }
+    }
+
     #[cfg(unix)]
     #[test]
     fn test_cwd_relative() {
@@ -803,6 +993,123 @@ mod tests {
             println!("iterated_envs: {:?}", iterated_envs);
             assert!(iterated_envs.is_empty());
         }
+    }
+
+    /// A scratch directory that removes itself, so these tests need no
+    /// dev-dependency (adding one would churn the locked vendor workspace).
+    #[cfg(windows)]
+    struct ScratchDir(std::path::PathBuf);
+
+    #[cfg(windows)]
+    impl ScratchDir {
+        fn new(tag: &str) -> Self {
+            use std::sync::atomic::{AtomicU32, Ordering};
+            static SEQUENCE: AtomicU32 = AtomicU32::new(0);
+            let unique = SEQUENCE.fetch_add(1, Ordering::Relaxed);
+            let path = std::env::temp_dir().join(format!(
+                "portable-pty-{tag}-{}-{unique}",
+                std::process::id()
+            ));
+            std::fs::create_dir_all(&path).expect("create scratch directory");
+            Self(path)
+        }
+    }
+
+    #[cfg(windows)]
+    impl Drop for ScratchDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// `PATHEXT` ending in `;` is ordinary — installers append entries without
+    /// checking for a trailing separator — and `split_paths` yields an empty
+    /// final entry for it. Slicing that entry panicked, aborting the terminal
+    /// while it was trying to resolve a program to spawn.
+    #[cfg(windows)]
+    #[test]
+    fn pathext_with_a_trailing_separator_does_not_panic() {
+        let scratch = ScratchDir::new("trailing-sep");
+        let mut cmd = CommandBuilder::new("no-such-program");
+        cmd.env("PATH", &scratch.0);
+        cmd.env("PATHEXT", ".COM;.EXE;");
+
+        // Unresolvable, so the search runs to exhaustion and every extension
+        // entry — including the empty one — is visited.
+        assert_eq!(
+            cmd.search_path(OsStr::new("no-such-program")),
+            OsString::from("no-such-program")
+        );
+    }
+
+    /// The same slice took byte index 1 on faith, so an entry whose first
+    /// character is multi-byte panicked on a char boundary.
+    #[cfg(windows)]
+    #[test]
+    fn pathext_entries_need_not_be_ascii() {
+        let scratch = ScratchDir::new("nonascii-ext");
+        let mut cmd = CommandBuilder::new("no-such-program");
+        cmd.env("PATH", &scratch.0);
+        cmd.env("PATHEXT", "·EXE;.EXE");
+
+        assert_eq!(
+            cmd.search_path(OsStr::new("no-such-program")),
+            OsString::from("no-such-program")
+        );
+    }
+
+    /// `to_str().expect(...)` required UTF-8, which a Windows environment
+    /// variable is never obliged to be. Kept separate from the char-boundary
+    /// case above: whichever entry comes first is the only panic a single test
+    /// can observe, so one test cannot prove both.
+    #[cfg(windows)]
+    #[test]
+    fn pathext_entries_need_not_be_utf8() {
+        use std::os::windows::ffi::OsStringExt;
+
+        let scratch = ScratchDir::new("nonutf8-ext");
+        // A lone surrogate: representable in a Windows environment variable,
+        // not representable in UTF-8, so `to_str()` yields `None`.
+        let mut extensions = OsString::from_wide(&[0xd800]);
+        extensions.push(";.EXE");
+
+        let mut cmd = CommandBuilder::new("no-such-program");
+        cmd.env("PATH", &scratch.0);
+        cmd.env("PATHEXT", &extensions);
+
+        assert_eq!(
+            cmd.search_path(OsStr::new("no-such-program")),
+            OsString::from("no-such-program")
+        );
+    }
+
+    /// `with_extension` REPLACED the extension, so resolving `foo.bar` searched
+    /// for `foo.EXE` — a different program that merely shares the stem. Windows
+    /// appends, and so must this.
+    #[cfg(windows)]
+    #[test]
+    fn pathext_is_appended_rather_than_substituted() {
+        let scratch = ScratchDir::new("append");
+        // The name the old code would have found instead of the right one.
+        std::fs::write(scratch.0.join("tool.exe"), b"wrong").unwrap();
+        let wanted = scratch.0.join("tool.bar.exe");
+        std::fs::write(&wanted, b"right").unwrap();
+
+        let mut cmd = CommandBuilder::new("tool.bar");
+        cmd.env("PATH", &scratch.0);
+        cmd.env("PATHEXT", ".EXE");
+
+        // Assert on WHICH program was selected rather than on the spelling of
+        // the path: the extension carries PATHEXT's casing, and the filesystem
+        // is case-insensitive, so `tool.bar.EXE` and `tool.bar.exe` name the
+        // same file. What matters is that it is not `tool.exe`.
+        let resolved = cmd.search_path(OsStr::new("tool.bar"));
+        assert_eq!(
+            std::fs::read(&resolved).expect("resolved path must exist"),
+            b"right",
+            "PATHEXT must extend the requested name, never replace part of it \
+             (resolved to {resolved:?})"
+        );
     }
 
     #[cfg(windows)]

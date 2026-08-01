@@ -7,6 +7,43 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 ## [Unreleased]
 
   ### Fixed
+  - **A `PATHEXT` ending in `;` crashed Kettle while resolving a program.**
+    Resolving a command against `PATH` sliced each `PATHEXT` entry to drop its
+    leading `.`, which panics on an empty entry — and a trailing separator
+    produces exactly one, because installers append extensions without checking
+    whether a separator is already there. The same slice assumed that leading
+    `.` occupied a single byte, so an entry starting with a multi-byte character
+    panicked on a char boundary, and the entry was additionally required to be
+    UTF-8, which a Windows environment variable is never obliged to be. Any of
+    the three aborted the terminal at the moment it tried to spawn a pane.
+  - **`PATHEXT` replaced part of the requested program name instead of
+    extending it.** Resolving `foo.bar` searched for `foo.EXE`, because the
+    lookup substituted the extension rather than appending one. Windows appends
+    — `cmd` and `CreateProcess` look for `foo.bar.EXE` — so Kettle could run a
+    *different* program that merely shared the requested name's stem. Extensions
+    are now appended, matching the operating system.
+  - **The Unix passwd lookup raced with itself and could dereference NULL.**
+    Resolving the login shell and home directory used `getpwuid`, which returns
+    a pointer into a buffer shared by the whole process — so two panes opening
+    at the same moment raced, and the second lookup could overwrite the entry
+    while the first was still reading through it, leaving neither the shell nor
+    the home path trustworthy. Both fields were also read with
+    `CStr::from_ptr` and no NULL check, though a passwd entry is not obliged to
+    supply either; that is a crash rather than a missing value. The lookup now
+    uses the reentrant `getpwuid_r` into a caller-owned buffer, checks both
+    fields, and treats an empty `pw_shell` as POSIX specifies — the default
+    shell — rather than as a shell named "".
+  - **The Windows environment block was read through a misaligned pointer.**
+    Expanding a `REG_EXPAND_SZ` value reinterpreted the registry's `Vec<u8>` as
+    `*const u16` and built a slice from it, which is undefined behaviour:
+    `slice::from_raw_parts` requires alignment for its element type, and a byte
+    vector guarantees none. It also fed that buffer to
+    `ExpandEnvironmentStringsW` without a terminator, so a registry value that
+    was not NUL-terminated — or whose length was odd, since the trailing byte
+    was dropped — was read past its end, and an expansion failure silently
+    replaced the variable's value with an empty string. Values are now decoded
+    pairwise, terminated explicitly, and fall back to the unexpanded text when
+    expansion fails.
   - **A command killed by a signal is no longer indistinguishable from one that
     failed.** On Unix, `kettle exec` reported a generic `1` for every signal
     death, so `kill -TERM` on a child looked exactly like the child running
