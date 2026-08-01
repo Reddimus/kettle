@@ -1168,11 +1168,19 @@ fn exec_timeout_closes_a_saturated_conpty_after_a_query() {
     // second `--timeout` this test actually asserts on.
     let query_observed = query_rx.recv_timeout(Duration::from_secs(5));
 
+    // The regression this guards is UNBOUNDED: before the fix, a saturated
+    // ConPTY meant Kettle never reached its timeout branch at all. So the
+    // watchdog only has to exceed scheduling delay, not sit close to the 8s
+    // deadline. A 4s margin measured the machine instead of the code — it
+    // failed roughly one run in eight with every core busy, which is what a
+    // full-workspace build looks like. The assertions below still prove the
+    // deadline fired: Kettle exits on its own, with 124, from its own timeout.
+    const WATCHDOG: Duration = Duration::from_secs(30);
     let (status, watchdog_killed) = loop {
         if let Some(status) = child.try_wait().expect("poll backpressured exec") {
             break (status, false);
         }
-        if started.elapsed() >= Duration::from_secs(12) {
+        if started.elapsed() >= WATCHDOG {
             child.kill().expect("kill stalled kettle exec");
             break (
                 child.wait().expect("wait for watchdog-killed kettle exec"),
@@ -1226,7 +1234,7 @@ fn exec_timeout_closes_a_saturated_conpty_after_a_query() {
          stdout ({omitted} bytes omitted): {out:?}"
     );
     assert!(
-        started.elapsed() < Duration::from_secs(12),
+        started.elapsed() < WATCHDOG,
         "saturated ConPTY close took {:?}",
         started.elapsed()
     );

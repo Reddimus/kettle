@@ -3371,6 +3371,23 @@ mod kitty_delete_tests {
 /// Hyperlink storage is shared behind an `Arc` across the cells of one link.
 /// So the estimate understates by a bounded factor rather than an unbounded
 /// one — see `docs/CONFIG.md`, which says the same thing to users.
+/// The errno meaning "no such process", used to recognize a child that exited
+/// before the kill reached it.
+///
+/// Windows has no ESRCH; its equivalent race surfaces as access-denied on a
+/// dead handle and is normalized inside the vendored PTY layer, so a value
+/// that never matches a real Windows error is correct there.
+const fn libc_esrch() -> i32 {
+    #[cfg(unix)]
+    {
+        libc::ESRCH
+    }
+    #[cfg(not(unix))]
+    {
+        i32::MIN
+    }
+}
+
 fn scrollback_line_bytes(columns: usize) -> usize {
     const ROW_OVERHEAD_BYTES: usize = 64;
     let columns = columns.max(1);
@@ -5560,11 +5577,24 @@ impl Terminal {
     /// unusable before the Windows path was corrected: it reported every
     /// successful kill as an error and every real failure as success.
     pub fn kill(&self) -> std::io::Result<()> {
-        match self.child.lock() {
+        let outcome = match self.child.lock() {
             Ok(mut c) => c.kill(),
-            Err(_) => Err(std::io::Error::other(
-                "child handle is poisoned; cannot terminate",
-            )),
+            Err(_) => {
+                return Err(std::io::Error::other(
+                    "child handle is poisoned; cannot terminate",
+                ));
+            }
+        };
+        match outcome {
+            // "It already exited" is the outcome the caller asked for, and it
+            // is the COMMON case on the timeout path: the deadline and the
+            // child finishing race every time. Unix reports that race as
+            // `ESRCH` from `kill(2)`; Windows reports it as access-denied on a
+            // dead handle and is normalized a layer below. Treating either as
+            // a failure would make `kettle exec` announce that a process may
+            // still be running precisely when it definitely is not.
+            Err(error) if error.raw_os_error() == Some(libc_esrch()) => Ok(()),
+            other => other,
         }
     }
 
