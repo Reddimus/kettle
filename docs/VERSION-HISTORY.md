@@ -6,6 +6,14 @@ artifacts.
 
 ## Current baseline
 
+These entries describe the version **this tree carries**, which the release
+commit must set before the tag exists — release CI compares the tag against
+`Cargo.toml`, `flake.nix`, and the changelog, so the files necessarily lead the
+tag. Between the release commit landing on `main` and release CI publishing,
+the version below is present in the changelog but not yet as a Git tag or a
+GitHub release. Git tags and GitHub releases remain authoritative for what has
+actually shipped.
+
 - Latest release: `v2.45.0`
 - Current workspace version: `2.45.0`
 - Release records inspected: 149 Git tags and 149 changelog headings, from
