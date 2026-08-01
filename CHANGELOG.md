@@ -92,6 +92,16 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
     terminal instead of returning an error. `kettle exec` now says so on stderr
     when a child could not be terminated, rather than exiting quietly while the
     process survives.
+  - **A pane that failed to open left its shell running.** Opening a pane
+    spawns the child first and then finishes wiring the terminal around it —
+    taking the pseudoterminal's polling descriptor, taking the non-blocking
+    writer, cloning the reader, starting the reader thread. Any of those can
+    fail, and dropping the child handle does not terminate the process it
+    represents, so the failure was reported while a live shell stayed behind
+    with no owner, no reaper, and no handle for Kettle to reach it by. On a
+    machine where one of those steps fails reliably, every attempt to open a
+    pane leaked another process, each holding its end of a pseudoconsole. The
+    child is now terminated if construction does not complete.
 
 ## [2.44.0] — 2026-08-01
 

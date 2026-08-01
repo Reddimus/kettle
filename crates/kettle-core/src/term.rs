@@ -2353,6 +2353,55 @@ fn merge_windows_paths(
     }
 }
 
+/// Terminates a freshly spawned child unless terminal construction completes.
+///
+/// `spawn_command` starts the process, but several steps after it can still
+/// fail — taking the master's polling descriptor, taking the non-blocking
+/// writer, cloning the reader, and spawning the PTY reader thread. Dropping a
+/// `Box<dyn Child>` does NOT terminate the process it represents, so any of
+/// those failures returned an error and left a live shell behind with no owner,
+/// no reaper, and no handle for kettle to reach it by. A user whose machine
+/// reliably fails one of those steps leaked a process every time a pane was
+/// opened, and each one held its end of a pseudoconsole.
+///
+/// `Terminal`'s own `Drop` takes over once construction succeeds, so the guard
+/// is disarmed immediately before the value is built — the covered window is
+/// exactly the one where nothing else would have terminated the child.
+struct SpawnedChildGuard {
+    /// `None` once disarmed. A killer rather than the `Child` itself, so the
+    /// child can move into the constructed `Terminal` untouched.
+    killer: Option<Box<dyn portable_pty::ChildKiller + Send + Sync>>,
+}
+
+impl SpawnedChildGuard {
+    fn arm(killer: Box<dyn portable_pty::ChildKiller + Send + Sync>) -> Self {
+        Self {
+            killer: Some(killer),
+        }
+    }
+
+    fn disarm(&mut self) {
+        self.killer = None;
+    }
+}
+
+impl Drop for SpawnedChildGuard {
+    fn drop(&mut self) {
+        let Some(mut killer) = self.killer.take() else {
+            return;
+        };
+        if let Err(error) = killer.kill() {
+            // Construction is already failing, so there is nothing to escalate
+            // to — but a child that outlives the terminal that started it must
+            // never be silent.
+            log::warn!(
+                "terminal setup failed after the child started, and the child \
+                 could not be terminated: {error}"
+            );
+        }
+    }
+}
+
 /// Is `prog` the WSL launcher (`wsl` / `wsl.exe`, possibly given as
 /// a full path)? The `login_shell` flag prepends `-l` for POSIX
 /// `bash -l` login-shell semantics — but `wsl.exe -l` means **list
@@ -3846,6 +3895,11 @@ impl Terminal {
             }
         }
         let child = pair.slave.spawn_command(cmd)?;
+        // The child is running from here on, and construction is not finished:
+        // taking the master's descriptor, taking the non-blocking writer,
+        // cloning the reader, and spawning the reader thread can each still
+        // fail. Arm the guard before any of them.
+        let mut spawned = SpawnedChildGuard::arm(child.clone_killer());
         drop(pair.slave);
 
         #[cfg(unix)]
@@ -4818,6 +4872,12 @@ impl Terminal {
                     }
                 })?
         };
+
+        // Every fallible step is behind us and the value below owns the child,
+        // whose `Drop` runs the reaper. Disarming here rather than earlier is
+        // the whole point: the window the guard covers is exactly the window
+        // where nothing else would have terminated the process.
+        spawned.disarm();
 
         Ok(Terminal {
             term,
@@ -10122,9 +10182,17 @@ mod teardown_tests {
         // Normalize CRLF→LF first: the repo checks out with Windows line
         // endings, so byte patterns must not assume bare `\n`.
         let src = include_str!("term.rs").replace("\r\n", "\n");
-        let start = src
-            .find("fn drop(&mut self) {")
+        // Anchor on the impl, not on the first `fn drop` in the file. There is
+        // more than one `Drop` in this module, and which one comes first is an
+        // accident of ordering — this test silently retargeted itself the
+        // moment another `Drop` was added above `Terminal`'s.
+        let impl_start = src
+            .find("impl Drop for Terminal {")
             .expect("Terminal::Drop present");
+        let start = impl_start
+            + src[impl_start..]
+                .find("fn drop(&mut self) {")
+                .expect("Terminal::Drop body present");
         let rest = &src[start..];
         // The fn body closes at a 4-space-indented `}`; every nested block
         // inside closes at >=8 spaces, so the first `\n    }` is unambiguous.
@@ -10165,6 +10233,86 @@ mod teardown_tests {
                 && body.contains("drop(master);")
                 && body.contains("child.wait()"),
             "Drop must close the master and reap the child in a detached worker"
+        );
+    }
+
+    /// A killer that records whether it was asked to terminate anything.
+    #[derive(Debug, Clone)]
+    struct RecordingKiller(std::sync::Arc<AtomicBool>);
+
+    impl portable_pty::ChildKiller for RecordingKiller {
+        fn kill(&mut self) -> std::io::Result<()> {
+            self.0.store(true, Ordering::SeqCst);
+            Ok(())
+        }
+
+        fn clone_killer(&self) -> Box<dyn portable_pty::ChildKiller + Send + Sync> {
+            Box::new(self.clone())
+        }
+    }
+
+    /// The guard exists so a construction failure after `spawn_command` cannot
+    /// leave the process running. Dropping a `Box<dyn Child>` does not
+    /// terminate anything, so without this the child simply survived.
+    #[test]
+    fn an_armed_guard_kills_the_child_it_covers() {
+        let killed = std::sync::Arc::new(AtomicBool::new(false));
+        drop(SpawnedChildGuard::arm(Box::new(RecordingKiller(
+            std::sync::Arc::clone(&killed),
+        ))));
+        assert!(
+            killed.load(Ordering::SeqCst),
+            "a construction failure must terminate the child it started"
+        );
+    }
+
+    /// The other half matters just as much: on the success path the child
+    /// belongs to the returned `Terminal`, and killing it there would close
+    /// every pane the instant it opened.
+    #[test]
+    fn a_disarmed_guard_leaves_the_child_alone() {
+        let killed = std::sync::Arc::new(AtomicBool::new(false));
+        let mut guard =
+            SpawnedChildGuard::arm(Box::new(RecordingKiller(std::sync::Arc::clone(&killed))));
+        guard.disarm();
+        drop(guard);
+        assert!(
+            !killed.load(Ordering::SeqCst),
+            "a completed construction must keep its child"
+        );
+    }
+
+    /// The mechanism above is only useful if it is wired across the whole
+    /// window. Structural, like `drop_detaches_reader_never_joins` above: the
+    /// failures it guards are injected by the operating system, so they cannot
+    /// be provoked from a test, but their ORDER can be checked directly.
+    #[test]
+    fn the_spawn_guard_covers_every_fallible_step_after_spawn() {
+        let src = include_str!("term.rs").replace("\r\n", "\n");
+        let spawn = src
+            .find("let child = pair.slave.spawn_command(cmd)?;")
+            .expect("child spawn present");
+        let arm = src
+            .find("SpawnedChildGuard::arm(child.clone_killer())")
+            .expect("spawn guard armed");
+        let disarm = src.find("spawned.disarm();").expect("spawn guard disarmed");
+        let construct = src
+            .find("\n        Ok(Terminal {")
+            .expect("terminal construction present");
+
+        assert!(
+            spawn < arm && arm < disarm && disarm < construct,
+            "the guard must be armed immediately after the spawn and disarmed \
+             only once construction can no longer fail"
+        );
+        // Nothing between arming and disarming may return early without the
+        // guard running — which `?` cannot do, since it drops locals. What
+        // WOULD escape it is an explicit `return` that bypasses the disarm, so
+        // the covered region must contain none.
+        assert!(
+            !src[arm..disarm].contains("return Ok("),
+            "a success path that returns without disarming would kill a live \
+             terminal's child"
         );
     }
 }
