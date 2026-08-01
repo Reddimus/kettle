@@ -2414,6 +2414,7 @@ const RECORDING_TITLE_SUFFIX: &str = " [REC]";
 // (potentially password-capturing) recording is never visually silent.
 const RECORDING_RAW_TITLE_SUFFIX: &str = " [REC RAW]";
 const RECORDING_LIMIT_TITLE_SUFFIX: &str = " [REC LIMIT]";
+const RECORDING_OVERLOAD_TITLE_SUFFIX: &str = " [REC INCOMPLETE]";
 const RECORDING_ERROR_TITLE_SUFFIX: &str = " [REC ERROR]";
 
 fn recording_window_title(
@@ -2429,6 +2430,9 @@ fn recording_window_title(
         }),
         Some(crate::dev_record::RecordStatus::LimitReached) => {
             title.push_str(RECORDING_LIMIT_TITLE_SUFFIX)
+        }
+        Some(crate::dev_record::RecordStatus::Overloaded) => {
+            title.push_str(RECORDING_OVERLOAD_TITLE_SUFFIX)
         }
         Some(crate::dev_record::RecordStatus::IoError) => {
             title.push_str(RECORDING_ERROR_TITLE_SUFFIX)
@@ -7280,7 +7284,25 @@ impl App {
         );
     }
 
+    fn sync_session_log_failures(&self, ws: &WindowState) {
+        for (&pane_id, pane) in &ws.mux.panes {
+            let Some(failure) = pane.term.take_session_log_failure() else {
+                continue;
+            };
+            let body = match failure {
+                kettle_core::SessionLogFailure::Overloaded => format!(
+                    "Pane {pane_id} logging stopped because its bounded persistence queue filled; the log is incomplete."
+                ),
+                kettle_core::SessionLogFailure::IoError => format!(
+                    "Pane {pane_id} logging stopped because its file could not be written or flushed."
+                ),
+            };
+            fire_notify("kettle: session log stopped", &body);
+        }
+    }
+
     fn drain_events(&mut self, ws: &mut WindowState) {
+        self.sync_session_log_failures(ws);
         let mut bell = false;
         // Pane ids that fired `TermEvent::Bell` this drain
         // pass — latched onto their containing tabs *after* the
@@ -7647,8 +7669,8 @@ impl App {
     /// last redraw drain and before a pane is reaped or its window closes would
     /// otherwise be lost to both the recorder and Lua hooks. Call this before
     /// `mux.reap()` and on close so both consumers keep their tail. Recorder
-    /// events batch through a BufWriter (~250ms interval flush); clean close
-    /// paths flush via `finish()`.
+    /// events batch on the bounded persistence worker; clean close paths hand
+    /// finalization to that worker.
     fn flush_recorder_output(&mut self, ws: &mut WindowState) {
         // Always drain what's queued right now (cheap, non-blocking).
         self.drain_recorder_output_once(ws);
@@ -7713,11 +7735,25 @@ impl App {
     /// Reflect terminal recorder failures in both persistent window state and
     /// an edge-triggered desktop notification during the same event-loop turn.
     fn sync_recording_state(&mut self, ws: &mut WindowState, io_error_body: &str) {
-        if self.recording_status() == Some(crate::dev_record::RecordStatus::IoError)
-            && !self.recording_error_reported
+        let status = self.recording_status();
+        if matches!(
+            status,
+            Some(
+                crate::dev_record::RecordStatus::Overloaded
+                    | crate::dev_record::RecordStatus::IoError
+            )
+        ) && !self.recording_error_reported
         {
             self.recording_error_reported = true;
-            fire_notify("kettle: recording error", io_error_body);
+            let (title, body) = if status == Some(crate::dev_record::RecordStatus::Overloaded) {
+                (
+                    "kettle: recording stopped",
+                    "The bounded persistence queue filled. Capture stopped and the trace is incomplete.",
+                )
+            } else {
+                ("kettle: recording error", io_error_body)
+            };
+            fire_notify(title, body);
         }
         self.sync_window_title(ws);
     }
@@ -12579,15 +12615,23 @@ impl App {
             }
             Action::ToggleSessionLog => {
                 // Terminator parity (`plugins/logger.py`):
-                // toggle the focused pane's session log. Pure helper
-                // computes the file path; this arm does the I/O.
-                // v2.20.0 P7: routed through `Terminal::set_log_file` so the
-                // reader thread's lock-skip flag stays in sync.
+                // toggle the focused pane's session log. This arm computes the
+                // path; the persistence worker performs all filesystem I/O.
+                // Routed through `Terminal::set_log_path` so secure file
+                // preparation, the reader's lock-skip flag, and the bounded
+                // writer stay in one transition without filesystem I/O here.
                 if let Some(pane) = ws.mux.focused() {
                     if pane.term.log_enabled() {
-                        // Drop the file handle to stop logging.
-                        pane.term.set_log_file(None);
-                        log::info!("toggle-session-log: stopped");
+                        match pane.term.set_log_path(None) {
+                            Ok(_) => log::info!("toggle-session-log: stopped"),
+                            Err(error) => {
+                                log::warn!("toggle-session-log: stop failed: {error}");
+                                fire_notify(
+                                    "kettle: session log error",
+                                    "The pane log could not be stopped cleanly.",
+                                );
+                            }
+                        }
                     } else {
                         let secs = std::time::SystemTime::now()
                             .duration_since(std::time::UNIX_EPOCH)
@@ -12595,23 +12639,26 @@ impl App {
                             .unwrap_or(0);
                         let cache = cache_dir_from_env(|k| std::env::var(k).ok());
                         let path = session_log_path(secs, std::process::id(), cache.as_deref());
-                        match kettle_state::open_private_file_append(&path) {
-                            Ok(f) => {
-                                log::info!("toggle-session-log: writing to {}", path.display());
-                                // Propagate the config's
-                                // strip-ANSI choice to the reader
-                                // thread's per-Terminal flag BEFORE the
-                                // log goes live, so the first logged
-                                // read already honors it.
-                                if let Ok(mut strip) = pane.term.log_strip_ansi.lock() {
-                                    *strip = self.cfg.log_strip_ansi;
-                                }
-                                pane.term.set_log_file(Some(f));
-                            }
-                            Err(e) => log::warn!(
-                                "toggle-session-log: open {} failed: {e}",
+                        // Propagate the config's strip-ANSI choice before the
+                        // log goes live, so the first admitted read honors it.
+                        if let Ok(mut strip) = pane.term.log_strip_ansi.lock() {
+                            *strip = self.cfg.log_strip_ansi;
+                        }
+                        match pane.term.set_log_path(Some(path.clone())) {
+                            Ok(_) => log::info!(
+                                "toggle-session-log: queued asynchronous open for {}",
                                 path.display()
                             ),
+                            Err(error) => {
+                                log::warn!(
+                                    "toggle-session-log: start {} failed: {error}",
+                                    path.display()
+                                );
+                                fire_notify(
+                                    "kettle: session log error",
+                                    "The pane log writer could not be started.",
+                                );
+                            }
                         }
                     }
                 }
@@ -20949,10 +20996,18 @@ impl App {
         // dropped the session's opening output (e.g. a fast `-e cmd`'s line).
         if let Some((target, raw)) = dev_record {
             let (cols, rows) = self.grid_of(ws, self.area(ws));
-            match crate::dev_record::Recorder::start_target(&target, cols as u16, rows as u16, raw)
-            {
-                Ok((rec, path)) => {
-                    log::info!("dev-record: recording this session to {}", path.display());
+            match crate::dev_record::Recorder::start_target_async(
+                &target,
+                cols as u16,
+                rows as u16,
+                raw,
+            ) {
+                Ok(mut rec) => {
+                    log::info!("dev-record: queued asynchronous start for {target:?}");
+                    let proxy = self.proxy.clone();
+                    rec.set_failure_waker(Arc::new(move || {
+                        let _ = proxy.send_event(UserEvent::Wakeup);
+                    }));
                     self.recording_start_failed = false;
                     self.recording_error_reported = false;
                     self.recorder = Some(rec);
@@ -21230,30 +21285,21 @@ impl App {
         }
         match event {
             WindowEvent::CloseRequested => {
-                // Fan out in-flight shared PTY output, then flush
-                // before exit (Drop also flushes). `finish()` only flushes
-                // recorder events already written; it cannot pull the shared
-                // sidechannel or deliver its tail to Lua.
+                // Fan out in-flight shared PTY output, then hand finalization to
+                // the writer before exit. Finalization can drain recorder events
+                // already admitted; it cannot pull the shared sidechannel or
+                // deliver its tail to Lua.
                 {
                     self.flush_recorder_output(ws);
                     // C4: the recorder spans the whole session — finish it
                     // only when the LAST window goes (this one is checked out
                     // of the map, so empty == last).
-                    let finish_failed = if self.windows.is_empty()
+                    if self.windows.is_empty()
                         && let Some(rec) = self.recorder.as_mut()
                     {
-                        let before = rec.status();
-                        rec.finish();
-                        rec.status() != before
-                            && rec.status() == crate::dev_record::RecordStatus::IoError
-                    } else {
-                        false
-                    };
-                    if finish_failed {
-                        self.sync_recording_state(
-                            ws,
-                            "Session recording stopped because its final data could not be flushed.",
-                        );
+                        // The process may be leaving, but a vanished mount must
+                        // still not park winit inside a final flush or close.
+                        rec.begin_finish();
                     }
                 }
                 self.save_session(ws);
@@ -22840,6 +22886,10 @@ impl App {
         ws: &mut WindowState,
         event_loop: &ActiveEventLoop,
     ) -> Option<std::time::Instant> {
+        // A log worker can fail after PTY output becomes silent. Its direct
+        // event-loop wake reaches this poll even when output-generation gating
+        // correctly decides there is no frame to paint.
+        self.sync_session_log_failures(ws);
         // Drain trailing recorder output before reap removes a
         // just-exited pane (covers the shell-exit → process-exit close path,
         // e.g. a fast `-e cmd` session).
@@ -23264,32 +23314,27 @@ impl App {
             );
             wait = Some(wait.map_or(next, |current| current.min(next)));
         }
-        // v2.20.0 (review fix): bound the dev-record staleness in WALL time.
-        // The recorder's interval flush is event-driven, so a burst followed
-        // by silence left its buffered tail unflushed until the next event;
-        // flush here when stale and, while dirty, wake at the deadline.
-        {
-            let recorder_status_changed = if let Some(rec) = self.recorder.as_mut() {
-                let before = rec.status();
-                rec.flush_if_stale();
-                if let Some(deadline) = rec.flush_deadline() {
-                    let next = deadline
-                        .saturating_duration_since(now)
-                        .max(std::time::Duration::from_millis(1));
-                    wait = Some(wait.map_or(next, |current| current.min(next)));
-                }
-                rec.status() != before
-            } else {
-                false
-            };
-            if recorder_status_changed {
-                self.sync_recording_state(
-                    ws,
-                    "Session recording stopped because buffered data could not be flushed.",
-                );
-            }
+        // A worker failure may already be visible before this callback begins,
+        // so comparing status only within this turn would miss the edge. The
+        // notifier is edge-triggered; this unconditional state sync is cheap.
+        if self.recorder.is_some() {
+            self.sync_recording_state(
+                ws,
+                "Session recording stopped because buffered data could not be written or flushed.",
+            );
         }
         wait.map(|remaining| now + remaining)
+    }
+}
+
+impl Drop for App {
+    fn drop(&mut self) {
+        if let Some(recorder) = self.recorder.as_mut() {
+            // Fatal renderer or event-loop exits can bypass CloseRequested.
+            // Marking shutdown asynchronous here keeps their cleanup path from
+            // inheriting arbitrary recording-device latency.
+            recorder.begin_finish();
+        }
     }
 }
 
@@ -28426,9 +28471,9 @@ mod tests {
     #[test]
     fn recording_window_title_suffix_is_ascii_safe() {
         use super::{
-            RECORDING_ERROR_TITLE_SUFFIX, RECORDING_LIMIT_TITLE_SUFFIX, RECORDING_RAW_TITLE_SUFFIX,
-            RECORDING_TITLE_SUFFIX, activation_recording_available, effective_record_status,
-            recording_window_title,
+            RECORDING_ERROR_TITLE_SUFFIX, RECORDING_LIMIT_TITLE_SUFFIX,
+            RECORDING_OVERLOAD_TITLE_SUFFIX, RECORDING_RAW_TITLE_SUFFIX, RECORDING_TITLE_SUFFIX,
+            activation_recording_available, effective_record_status, recording_window_title,
         };
         use crate::dev_record::RecordStatus;
 
@@ -28449,6 +28494,10 @@ mod tests {
         assert!(!activation_recording_available(
             true,
             Some(RecordStatus::LimitReached)
+        ));
+        assert!(!activation_recording_available(
+            true,
+            Some(RecordStatus::Overloaded)
         ));
         assert!(!activation_recording_available(
             true,
@@ -28475,11 +28524,16 @@ mod tests {
             recording_window_title("kettle".to_string(), Some(RecordStatus::IoError), false),
             "kettle [REC ERROR]"
         );
+        assert_eq!(
+            recording_window_title("kettle".to_string(), Some(RecordStatus::Overloaded), false),
+            "kettle [REC INCOMPLETE]"
+        );
         assert!(
             [
                 RECORDING_TITLE_SUFFIX,
                 RECORDING_RAW_TITLE_SUFFIX,
                 RECORDING_LIMIT_TITLE_SUFFIX,
+                RECORDING_OVERLOAD_TITLE_SUFFIX,
                 RECORDING_ERROR_TITLE_SUFFIX
             ]
             .iter()
