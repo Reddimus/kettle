@@ -72,6 +72,14 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
     `#![forbid(unsafe_code)]`.
 
   ### Fixed
+  - Xterm `modifyOtherKeys` negotiation now has real per-terminal state.
+    It starts at level zero, reports only the application-selected level, and
+    applies the modifier-aware level-one/two matrix to Return, Tab, Backspace,
+    Escape, Space, and ASCII keys without gating cursor, function, or keypad
+    keys. Omitted XTMODKEYS values and both RIS and DECSTR restore the initial
+    level. The new `modify-other-keys = enter|off` setting controls only
+    Kettle's pre-negotiation modified-Enter fallback; `enter` is the default so
+    existing CLI multiline chords survive without pretending level two is on.
   - A `kettle exec` run whose consumer closed the pipe could die from `SIGPIPE`
     instead of reporting the exit code it had already chosen. The stdout worker
     blocks `SIGPIPE` for itself, so a broken pipe correctly surfaced as `EPIPE`,

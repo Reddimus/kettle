@@ -263,6 +263,68 @@ pub fn xterm_modifier(mods: ModifiersState) -> u32 {
     m
 }
 
+/// Encode xterm's `CSI 27` form when the active level covers this exact chord.
+///
+/// Level one cannot be represented by a blanket gate: it preserves aliases
+/// such as Ctrl+I and Shift+Return while encoding Alt+Return and Ctrl+Tab.
+fn modify_other_keys_sequence(
+    code: u8,
+    mods: ModifiersState,
+    mode: TermMode,
+    level_one_encodes: bool,
+    level_two_encodes: bool,
+) -> Option<Vec<u8>> {
+    let modifier = xterm_modifier(mods);
+    if modifier == 1 {
+        return None;
+    }
+
+    let encodes = if mode.contains(TermMode::MODIFY_OTHER_KEYS_2) {
+        level_two_encodes
+    } else if mode.contains(TermMode::MODIFY_OTHER_KEYS_1) {
+        level_one_encodes
+    } else {
+        false
+    };
+
+    encodes.then(|| format!("\x1b[27;{modifier};{code}~").into_bytes())
+}
+
+fn modify_other_keys_was_negotiated(mode: TermMode) -> bool {
+    mode.contains(TermMode::MODIFY_OTHER_KEYS_NEGOTIATED)
+        || mode.intersects(TermMode::MODIFY_OTHER_KEYS)
+}
+
+fn legacy_control_code(c: char) -> Option<u8> {
+    let c = c.to_ascii_lowercase();
+    match c {
+        'a'..='z' => Some((c as u8) - b'a' + 1),
+        '@' | '`' | '2' | ' ' => Some(0x00),
+        '[' | '{' | '3' => Some(0x1b),
+        '\\' | '|' | '4' => Some(0x1c),
+        ']' | '}' | '5' => Some(0x1d),
+        '^' | '~' | '6' => Some(0x1e),
+        '_' | '/' | '7' => Some(0x1f),
+        '?' | '8' => Some(0x7f),
+        _ => None,
+    }
+}
+
+fn level_one_encodes_ascii(c: char, mods: ModifiersState) -> bool {
+    if mods.alt_key() || mods.super_key() {
+        return true;
+    }
+    if !mods.control_key() {
+        return false;
+    }
+
+    let code = c as u8;
+    // Level one keeps Control/Shift behavior for the printable control-input
+    // range and for aliases outside it; replacing either would reintroduce
+    // collisions that this compatibility level intentionally retains.
+    !(64..=127).contains(&code) && legacy_control_code(c).is_none()
+}
+
 /// Application-keypad (DECKPAM) encoding for a **numpad** key, or `None` when it
 /// doesn't apply (mode off, not a numpad key, or a Ctrl/Alt modifier is held).
 ///
@@ -366,17 +428,34 @@ pub fn encode(
     if let Key::Named(n) = key {
         match n {
             NamedKey::Enter => {
-                // Keep ordinary Enter byte-for-byte compatible. When the
-                // focused application has not negotiated Kitty CSI-u, use
-                // xterm modifyOtherKeys level-2 form for modified Enter so
-                // Shift/Ctrl/Alt do not collapse into a submit keystroke.
-                return Some(if modded {
+                let level_one_encodes = alt || ctrl || mods.super_key();
+                if let Some(sequence) =
+                    modify_other_keys_sequence(13, mods, mode, level_one_encodes, true)
+                {
+                    return Some(sequence);
+                }
+
+                // The fallback preserves Kettle's shipped multiline chord for
+                // clients which negotiate nothing, but cannot raise or imitate
+                // the level reported to applications.
+                let fallback = mode.contains(TermMode::UNNEGOTIATED_MODIFIED_ENTER)
+                    && !modify_other_keys_was_negotiated(mode);
+                return Some(if modded && fallback {
                     format!("\x1b[27;{m};13~").into_bytes()
                 } else {
                     vec![b'\r']
                 });
             }
             NamedKey::Backspace => {
+                if let Some(sequence) = modify_other_keys_sequence(
+                    8,
+                    mods,
+                    mode,
+                    false,
+                    mods != ModifiersState::CONTROL,
+                ) {
+                    return Some(sequence);
+                }
                 // The three flavors every modern terminal emits:
                 //   plain Backspace  → DEL (0x7F)  — xterm convention,
                 //     what readline's `backward-delete-char` reads.
@@ -397,13 +476,28 @@ pub fn encode(
             // Shift+Tab is the standard "back-tab" (`CSI Z`) used by
             // readline, fzf, and every TUI form for reverse field nav.
             NamedKey::Tab => {
+                // XKB exposes Shift+Tab as ISO_Left_Tab, an edit key outside
+                // modifyOtherKeys, so its established CSI Z form must win.
+                if !shift
+                    && let Some(sequence) = modify_other_keys_sequence(9, mods, mode, true, true)
+                {
+                    return Some(sequence);
+                }
                 return Some(if shift {
                     b"\x1b[Z".to_vec()
                 } else {
                     vec![b'\t']
                 });
             }
-            NamedKey::Escape => return Some(vec![0x1b]),
+            NamedKey::Escape => {
+                let level_one_encodes = alt || mods.super_key();
+                if let Some(sequence) =
+                    modify_other_keys_sequence(27, mods, mode, level_one_encodes, true)
+                {
+                    return Some(sequence);
+                }
+                return Some(vec![0x1b]);
+            }
             // The space bar arrives as NamedKey::Space, which
             // returned a literal space BEFORE any modifier was inspected — so
             // Ctrl+Space emitted 0x20 instead of NUL (0x00), silently breaking
@@ -412,6 +506,12 @@ pub fn encode(
             // Key::Character arm, which the space key never reaches.) xterm
             // emits NUL for Ctrl+Space and ESC+space for Alt+Space.
             NamedKey::Space => {
+                let level_one_encodes = alt || mods.super_key();
+                if let Some(sequence) =
+                    modify_other_keys_sequence(32, mods, mode, level_one_encodes, true)
+                {
+                    return Some(sequence);
+                }
                 return Some(if ctrl && !alt {
                     vec![0x00]
                 } else if alt {
@@ -449,6 +549,20 @@ pub fn encode(
     // Character keys.
     if let Key::Character(s) = key {
         let c = s.chars().next()?;
+        if c.is_ascii()
+            && s.len() == 1
+            && let Some(sequence) = modify_other_keys_sequence(
+                c as u8,
+                mods,
+                mode,
+                level_one_encodes_ascii(c, mods),
+                true,
+            )
+        {
+            // The sequence carries the key's ASCII identity before Control
+            // collapses it, which is why Ctrl+I reports 105 rather than 9.
+            return Some(sequence);
+        }
         // Preserve xterm's Meta+Control form for C-M-v. The generic Ctrl+Alt
         // path historically treated every character as printable Meta input
         // (ESC + `v`), losing Control. Keep this scoped to C-M-v so
@@ -467,22 +581,10 @@ pub fn encode(
             //   Ctrl+]              = GS  (0x1D, telnet/screen escape)
             //   Ctrl+^              = RS  (0x1E, vim alt-buffer, tmux)
             //   Ctrl+_ / Ctrl+/     = US  (0x1F, tmux/nano "undo")
-            // Adding `@`, `^`, `_`, `/` to the existing table; they were
-            // previously falling through and inserting the literal char
-            // — which is at best harmless, at worst breaks editor
-            // shortcuts in tmux/vim/nano.
-            let b = c.to_ascii_lowercase();
-            let code = match b {
-                'a'..='z' => Some((b as u8) - b'a' + 1),
-                '@' | ' ' => Some(0x00),
-                '[' => Some(0x1B),
-                '\\' => Some(0x1C),
-                ']' => Some(0x1D),
-                '^' => Some(0x1E),
-                '_' | '/' => Some(0x1F),
-                _ => None,
-            };
-            if let Some(code) = code {
+            // Shifted partners such as `{`, `|`, `}`, and `~` must retain the
+            // same aliases at level one; emitting them literally would make
+            // that compatibility level disagree with the physical key matrix.
+            if let Some(code) = legacy_control_code(c) {
                 return Some(vec![code]);
             }
         }
@@ -1054,6 +1156,16 @@ pub fn paste_payload(text: &str, bracketed: bool) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn negotiated_modify_other_keys(level: u8) -> TermMode {
+        TermMode::MODIFY_OTHER_KEYS_NEGOTIATED
+            | match level {
+                0 => TermMode::empty(),
+                1 => TermMode::MODIFY_OTHER_KEYS_1,
+                2 => TermMode::MODIFY_OTHER_KEYS_2,
+                _ => panic!("unsupported test level {level}"),
+            }
+    }
 
     fn protocol_event(
         logical_key: Key,
@@ -1734,32 +1846,272 @@ mod tests {
     }
 
     #[test]
-    fn enter_chords_are_distinct_with_and_without_kitty_negotiation() {
-        use std::collections::HashSet;
-        use winit::keyboard::{Key, NamedKey};
+    fn modify_other_keys_return_matrix_matches_xterm_at_every_level() {
+        struct ReturnRow {
+            name: &'static str,
+            mods: ModifiersState,
+            expected: [&'static [u8]; 3],
+        }
 
         let enter = Key::Named(NamedKey::Enter);
-        let modifiers = [
-            ModifiersState::empty(),
-            ModifiersState::SHIFT,
-            ModifiersState::CONTROL,
-            ModifiersState::ALT,
+        let rows = [
+            ReturnRow {
+                name: "Shift",
+                mods: ModifiersState::SHIFT,
+                expected: [b"\r", b"\r", b"\x1b[27;2;13~"],
+            },
+            ReturnRow {
+                name: "Alt",
+                mods: ModifiersState::ALT,
+                expected: [b"\r", b"\x1b[27;3;13~", b"\x1b[27;3;13~"],
+            },
+            ReturnRow {
+                name: "Shift+Alt",
+                mods: ModifiersState::SHIFT | ModifiersState::ALT,
+                expected: [b"\r", b"\x1b[27;4;13~", b"\x1b[27;4;13~"],
+            },
+            ReturnRow {
+                name: "Control",
+                mods: ModifiersState::CONTROL,
+                expected: [b"\r", b"\x1b[27;5;13~", b"\x1b[27;5;13~"],
+            },
         ];
-        let legacy =
-            modifiers.map(|mods| encode_key_press(&enter, mods, TermMode::empty()).unwrap());
-        assert_eq!(legacy[0], b"\r");
-        assert_eq!(legacy[1], b"\x1b[27;2;13~");
-        assert_eq!(legacy[2], b"\x1b[27;5;13~");
-        assert_eq!(legacy[3], b"\x1b[27;3;13~");
-        assert_eq!(legacy.iter().collect::<HashSet<_>>().len(), legacy.len());
 
-        let kitty_mode = TermMode::DISAMBIGUATE_ESC_CODES;
-        let kitty = modifiers.map(|mods| encode_key_press(&enter, mods, kitty_mode).unwrap());
-        assert_eq!(kitty[0], b"\r");
-        assert_eq!(kitty[1], b"\x1b[13;2u");
-        assert_eq!(kitty[2], b"\x1b[13;5u");
-        assert_eq!(kitty[3], b"\x1b[13;3u");
-        assert_eq!(kitty.iter().collect::<HashSet<_>>().len(), kitty.len());
+        for row in rows {
+            for (level, expected) in row.expected.into_iter().enumerate() {
+                assert_eq!(
+                    encode_key_press(&enter, row.mods, negotiated_modify_other_keys(level as u8),),
+                    Some(expected.to_vec()),
+                    "{}+Return at modifyOtherKeys level {level}",
+                    row.name,
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn modify_other_keys_tab_and_ctrl_i_matrix() {
+        let tab = Key::Named(NamedKey::Tab);
+        let ctrl_i = Key::Character("i".into());
+
+        for level in 0..=2 {
+            let mode = negotiated_modify_other_keys(level);
+            let encoded_tab = encode_key_press(&tab, ModifiersState::empty(), mode);
+            let encoded_ctrl_i = encode_key_press(&ctrl_i, ModifiersState::CONTROL, mode);
+            let expected_ctrl_i = if level == 2 {
+                b"\x1b[27;5;105~".as_slice()
+            } else {
+                b"\t".as_slice()
+            };
+
+            assert_eq!(encoded_tab, Some(b"\t".to_vec()));
+            assert_eq!(encoded_ctrl_i, Some(expected_ctrl_i.to_vec()));
+            assert_eq!(encoded_ctrl_i == encoded_tab, level < 2);
+            assert_eq!(
+                encode_key_press(&tab, ModifiersState::SHIFT, mode),
+                Some(b"\x1b[Z".to_vec()),
+                "Shift+Tab stays the edit-key sequence at level {level}",
+            );
+
+            let expected_ctrl_tab = if level == 0 {
+                b"\t".as_slice()
+            } else {
+                b"\x1b[27;5;9~".as_slice()
+            };
+            assert_eq!(
+                encode_key_press(&tab, ModifiersState::CONTROL, mode),
+                Some(expected_ctrl_tab.to_vec()),
+            );
+        }
+    }
+
+    #[test]
+    fn plain_modify_other_keys_inputs_stay_legacy_at_every_level() {
+        let keys = [
+            (Key::Named(NamedKey::Enter), b"\r".as_slice()),
+            (Key::Named(NamedKey::Tab), b"\t".as_slice()),
+            (Key::Named(NamedKey::Backspace), b"\x7f".as_slice()),
+            (Key::Named(NamedKey::Escape), b"\x1b".as_slice()),
+            (Key::Named(NamedKey::Space), b" ".as_slice()),
+            (Key::Character("a".into()), b"a".as_slice()),
+        ];
+
+        for level in 0..=2 {
+            let mode = negotiated_modify_other_keys(level);
+            for (key, expected) in &keys {
+                assert_eq!(
+                    encode_key_press(key, ModifiersState::empty(), mode),
+                    Some(expected.to_vec()),
+                    "plain {key:?} changed at level {level}",
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn modify_other_keys_covers_named_and_ascii_legacy_inputs() {
+        let level_zero = negotiated_modify_other_keys(0);
+        let level_one = negotiated_modify_other_keys(1);
+        let level_two = negotiated_modify_other_keys(2);
+
+        let backspace = Key::Named(NamedKey::Backspace);
+        assert_eq!(
+            encode_key_press(&backspace, ModifiersState::ALT, level_zero),
+            Some(b"\x1b\x7f".to_vec())
+        );
+        assert_eq!(
+            encode_key_press(&backspace, ModifiersState::ALT, level_one),
+            Some(b"\x1b\x7f".to_vec())
+        );
+        assert_eq!(
+            encode_key_press(&backspace, ModifiersState::ALT, level_two),
+            Some(b"\x1b[27;3;8~".to_vec())
+        );
+        assert_eq!(
+            encode_key_press(&backspace, ModifiersState::CONTROL, level_two),
+            Some(b"\x08".to_vec()),
+            "xterm retains the exact Ctrl+Backspace alias at level two",
+        );
+
+        let escape = Key::Named(NamedKey::Escape);
+        assert_eq!(
+            encode_key_press(&escape, ModifiersState::SHIFT, level_one),
+            Some(b"\x1b".to_vec())
+        );
+        assert_eq!(
+            encode_key_press(&escape, ModifiersState::ALT, level_one),
+            Some(b"\x1b[27;3;27~".to_vec())
+        );
+        assert_eq!(
+            encode_key_press(&escape, ModifiersState::SHIFT, level_two),
+            Some(b"\x1b[27;2;27~".to_vec())
+        );
+
+        let space = Key::Named(NamedKey::Space);
+        assert_eq!(
+            encode_key_press(&space, ModifiersState::CONTROL, level_one),
+            Some(b"\0".to_vec())
+        );
+        assert_eq!(
+            encode_key_press(&space, ModifiersState::CONTROL, level_two),
+            Some(b"\x1b[27;5;32~".to_vec())
+        );
+        assert_eq!(
+            encode_key_press(&space, ModifiersState::ALT, level_one),
+            Some(b"\x1b[27;3;32~".to_vec())
+        );
+
+        let a = Key::Character("a".into());
+        assert_eq!(
+            encode_key_press(&a, ModifiersState::CONTROL, level_one),
+            Some(b"\x01".to_vec())
+        );
+        assert_eq!(
+            encode_key_press(&a, ModifiersState::CONTROL, level_two),
+            Some(b"\x1b[27;5;97~".to_vec())
+        );
+        assert_eq!(
+            encode_key_press(&a, ModifiersState::ALT, level_one),
+            Some(b"\x1b[27;3;97~".to_vec())
+        );
+
+        let comma = Key::Character(",".into());
+        assert_eq!(
+            encode_key_press(&comma, ModifiersState::CONTROL, level_one),
+            Some(b"\x1b[27;5;44~".to_vec())
+        );
+        let two = Key::Character("2".into());
+        assert_eq!(
+            encode_key_press(&two, ModifiersState::CONTROL, level_one),
+            Some(b"\0".to_vec())
+        );
+        assert_eq!(
+            encode_key_press(&two, ModifiersState::CONTROL, level_two),
+            Some(b"\x1b[27;5;50~".to_vec())
+        );
+
+        let shifted_bracket = Key::Character("}".into());
+        let shifted_control = ModifiersState::SHIFT | ModifiersState::CONTROL;
+        assert_eq!(
+            encode_key_press(&shifted_bracket, shifted_control, level_zero),
+            Some(b"\x1d".to_vec())
+        );
+        assert_eq!(
+            encode_key_press(&shifted_bracket, shifted_control, level_one),
+            Some(b"\x1d".to_vec())
+        );
+        assert_eq!(
+            encode_key_press(&shifted_bracket, shifted_control, level_two),
+            Some(b"\x1b[27;6;125~".to_vec())
+        );
+
+        let upper_a = Key::Character("A".into());
+        assert_eq!(
+            encode_key_press(&upper_a, ModifiersState::SHIFT, level_one),
+            Some(b"A".to_vec())
+        );
+        assert_eq!(
+            encode_key_press(&upper_a, ModifiersState::SHIFT, level_two),
+            Some(b"\x1b[27;2;65~".to_vec())
+        );
+    }
+
+    #[test]
+    fn modified_enter_fallback_applies_only_before_negotiation() {
+        let enter = Key::Named(NamedKey::Enter);
+        let fallback = TermMode::UNNEGOTIATED_MODIFIED_ENTER;
+
+        for (mods, expected) in [
+            (ModifiersState::SHIFT, b"\x1b[27;2;13~".as_slice()),
+            (ModifiersState::CONTROL, b"\x1b[27;5;13~".as_slice()),
+            (ModifiersState::ALT, b"\x1b[27;3;13~".as_slice()),
+        ] {
+            assert_eq!(
+                encode_key_press(&enter, mods, fallback),
+                Some(expected.to_vec())
+            );
+            assert_eq!(
+                encode_key_press(
+                    &enter,
+                    mods,
+                    fallback | TermMode::MODIFY_OTHER_KEYS_NEGOTIATED,
+                ),
+                Some(b"\r".to_vec())
+            );
+        }
+        assert_eq!(
+            encode_key_press(&enter, ModifiersState::SHIFT, TermMode::empty()),
+            Some(b"\r".to_vec())
+        );
+    }
+
+    #[test]
+    fn kitty_enter_encoding_wins_over_every_modify_other_keys_level() {
+        let enter = Key::Named(NamedKey::Enter);
+        for level in 0..=2 {
+            let mode = negotiated_modify_other_keys(level)
+                | TermMode::UNNEGOTIATED_MODIFIED_ENTER
+                | TermMode::DISAMBIGUATE_ESC_CODES;
+            let outputs = [
+                encode_key_press(&enter, ModifiersState::empty(), mode).unwrap(),
+                encode_key_press(&enter, ModifiersState::SHIFT, mode).unwrap(),
+                encode_key_press(&enter, ModifiersState::CONTROL, mode).unwrap(),
+                encode_key_press(&enter, ModifiersState::ALT, mode).unwrap(),
+            ];
+
+            assert_eq!(outputs[0], b"\r");
+            assert_eq!(outputs[1], b"\x1b[13;2u");
+            assert_eq!(outputs[2], b"\x1b[13;5u");
+            assert_eq!(outputs[3], b"\x1b[13;3u");
+            for left in 0..outputs.len() {
+                for right in left + 1..outputs.len() {
+                    assert_ne!(
+                        outputs[left], outputs[right],
+                        "Kitty Enter outputs collided at level {level}",
+                    );
+                }
+            }
+        }
     }
 
     #[test]

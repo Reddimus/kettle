@@ -857,11 +857,15 @@ pub struct PtyGeometry {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct TerminalCapabilities {
     pub osc52_copy: bool,
+    pub unnegotiated_modified_enter: bool,
 }
 
 impl Default for TerminalCapabilities {
     fn default() -> Self {
-        Self { osc52_copy: true }
+        Self {
+            osc52_copy: true,
+            unnegotiated_modified_enter: true,
+        }
     }
 }
 
@@ -3804,6 +3808,7 @@ impl Terminal {
             // keys, and associated text), so the engine may answer `CSI ? u`
             // and honor the per-screen keyboard-mode stack.
             kitty_keyboard: true,
+            unnegotiated_modified_enter: capabilities.unnegotiated_modified_enter,
             default_cursor_style,
             ..TermConfig::default()
         };
@@ -4796,6 +4801,23 @@ impl Terminal {
     /// live config reload takes effect without restarting the pane.
     pub fn set_osc52_copy_allowed(&self, allowed: bool) {
         self.osc52_copy_allowed.store(allowed, Ordering::Release);
+    }
+
+    /// Update Kettle's modified-Enter fallback before keyboard negotiation.
+    ///
+    /// Applying the engine option updates `TermMode` immediately without
+    /// replacing the level selected by the focused application.
+    pub fn set_unnegotiated_modified_enter(&mut self, enabled: bool) {
+        if self.term_config.unnegotiated_modified_enter == enabled {
+            return;
+        }
+
+        self.term_config.unnegotiated_modified_enter = enabled;
+        let mut term = self
+            .term
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        term.set_options(self.term_config.clone());
     }
 
     /// v2.20.0 (Ghostty `confirm-close-surface` parity): is this pane's

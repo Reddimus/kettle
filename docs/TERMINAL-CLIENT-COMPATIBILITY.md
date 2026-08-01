@@ -115,26 +115,55 @@ mode stack prevents a client from growing terminal state indefinitely.
 
 With no negotiated Kitty flags, Kettle retains the xterm-compatible bytes for
 unmodified keys, DECCKM application cursor mode, DECKPAM application keypad
-mode, modified navigation keys, and the usual control codes. Modified Enter
-uses xterm `modifyOtherKeys` level-2 form so clients that do not negotiate Kitty
-can still distinguish multiline-input chords. Plain Enter remains `CR` in both
-modes:
+mode, modified navigation keys, and the usual control codes. Cursor, function,
+editing, and keypad keys keep their own xterm encodings; `modifyOtherKeys` does
+not gate those branches.
+
+The negotiated `modifyOtherKeys` resource always starts at level zero. An
+application can select levels zero, one, or two with `CSI > 4 ; Pv m`, and
+`CSI ? 4 m` reports only that state as `CSI > 4 ; Pv m`. Omitting `Pv` restores
+resource 4 to its initial zero value; parameterless `CSI > m` restores every
+tracked modifier resource. RIS and DECSTR also restore the initial state. A
+query counts as negotiation, so after Kettle reports level zero it cannot
+contradict that reply by using its pre-negotiation Enter fallback.
+
+For Return, Tab, Backspace, Escape, Space, and ASCII characters, Kettle follows
+the [xterm modified-key matrix](https://invisible-island.net/xterm/modified-keys-us-pc105.html):
+
+- Level zero keeps the legacy encoding.
+- Level one is modifier-aware. It keeps Shift+Return as Return, Ctrl+I as Tab,
+  Shift+Tab as `CSI Z`, Backspace chords in their legacy forms, and established
+  control aliases. Alt-bearing combinations use `CSI 27 ; modifier ; code ~`;
+  Control-only ASCII combinations use it only outside `[64,127]` and when they
+  are not a known control alias. Alt+Return, Shift+Alt+Return, Ctrl+Return, and
+  Ctrl+Tab are encoded by that rule.
+- Level two uses that `CSI 27` form for modified covered keys. The exact
+  Ctrl+Backspace alias remains `BS`, and Shift+Tab remains the separate edit-key
+  sequence `CSI Z`.
+
+Plain keys are unchanged at every level. In particular, plain Enter is always
+`CR`:
 
 | Keyboard mode | Enter | Shift+Enter | Ctrl+Enter | Alt+Enter |
 |---|---|---|---|---|
-| No Kitty negotiation | `0D` | `ESC [ 27;2;13~` | `ESC [ 27;5;13~` | `ESC [ 27;3;13~` |
+| No keyboard negotiation; `modify-other-keys = enter` | `0D` | `ESC [ 27;2;13~` | `ESC [ 27;5;13~` | `ESC [ 27;3;13~` |
+| Negotiated xterm level 0 | `0D` | `0D` | `0D` | `0D` |
+| Negotiated xterm level 1 | `0D` | `0D` | `ESC [ 27;5;13~` | `ESC [ 27;3;13~` |
+| Negotiated xterm level 2 | `0D` | `ESC [ 27;2;13~` | `ESC [ 27;5;13~` | `ESC [ 27;3;13~` |
 | Kitty disambiguation negotiated | `0D` | `ESC [ 13;2u` | `ESC [ 13;5u` | `ESC [ 13;3u` |
+
+`modify-other-keys = enter` is the default and controls only the first row. It
+preserves the shipped multiline-input chords used by clients that negotiate
+nothing without claiming an xterm level. `off` removes that fallback; it does
+not block an application's xterm request or Kitty CSI-u, either of which can
+still distinguish Enter chords. This separation matters because assuming level
+two globally would also stop Ctrl+I from acting as Tab for every legacy client.
 
 This progressive behavior matters for shells and older TUIs: enabling support
 does not force CSI-u on applications that never request it. A key press consumed
 by Kettle UI or a Kettle keybinding also suppresses its matching physical
 release, so a Kitty-aware child never receives a release for a press it did not
 see.
-
-Current Neovim queries CSI-u first and falls back to xterm modifyOtherKeys only
-when the terminal does not answer. Kettle's reply lets Neovim distinguish keys
-such as `Tab`/`Ctrl+I`, `Enter`/`Ctrl+M`, Escape-related chords, and keypad keys.
-See Neovim's [TUI input documentation](https://neovim.io/doc/user/tui/#tui-input).
 
 ## tmux and full-screen clients
 
