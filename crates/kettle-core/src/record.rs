@@ -846,13 +846,18 @@ mod tests {
         const CHUNK: usize = 1024 * 1024;
         let temp = test_tempdir();
         let path = temp.path().join("invalid.cast");
-        let started = Instant::now();
-        {
+        // Allocate the payload and open the recorder OUTSIDE the timed region:
+        // a 1 MiB allocation and a file create are noise against the thing
+        // under measurement, and they make a failure harder to read.
+        let payload = vec![0xff_u8; CHUNK];
+        let elapsed = {
             let mut rec = super::Recorder::start(&path, 80, 24, false).expect("start");
-            rec.record_output(&vec![0xff_u8; CHUNK]);
+            let started = Instant::now();
+            rec.record_output(&payload);
+            let elapsed = started.elapsed();
             rec.finish();
-        }
-        let elapsed = started.elapsed();
+            elapsed
+        };
 
         let mut s = String::new();
         std::fs::File::open(&path)
@@ -867,12 +872,15 @@ mod tests {
             .filter_map(|v| v[2].as_str().map(String::from))
             .collect();
 
-        // Semantics are unchanged: one replacement per invalid byte, and the
-        // trace stays valid UTF-8 rather than truncating the child's output.
+        // Semantics are unchanged, and the trace stays valid UTF-8 rather than
+        // truncating the child's output. The rule is one replacement per
+        // invalid *run*, not per byte — a run can span several bytes. This
+        // input is the case where the two coincide: `0xff` can never begin a
+        // sequence, so `error_len()` is 1 and every byte is its own run.
         assert_eq!(
             joined.chars().count(),
             CHUNK,
-            "every invalid byte must still produce exactly one replacement"
+            "each 0xff is its own invalid run, so each must yield one replacement"
         );
         assert!(
             joined.chars().all(|c| c == '\u{FFFD}'),
