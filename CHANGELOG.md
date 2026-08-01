@@ -4,6 +4,8 @@ All notable changes to kettle. Format roughly follows
 [Keep a Changelog](https://keepachangelog.com/); the project moves in small,
 durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
+## [Unreleased]
+
 ## [2.44.0] — 2026-08-01
 
   ### Security
@@ -60,12 +62,13 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
     deadline — masked only because the sole caller capped frames below
     `PIPE_BUF`. Request framing is no longer quadratic in the accumulated
     buffer.
-  - Kettle takes `base64` 0.23 without its new default-on `simd-unsafe`
-    feature, which is hand-written `core::arch` AVX2/NEON covering both encode
-    and decode. Kettle only ever uses the scalar engine, so the feature was
-    inert — but those call sites decode kitty and iTerm image payloads
-    (untrusted terminal output) and the Ed25519 release signature, and unused
-    `unsafe` has no place on either. Disabling it also makes `base64` enforce
+  - **`base64`'s new default-on `simd-unsafe` feature put unused `unsafe` on
+    the untrusted-decode and signature-verification paths.** It is
+    hand-written `core::arch` AVX2/NEON covering both encode and decode.
+    Kettle only ever uses the scalar engine, so the feature was inert — but
+    those call sites decode kitty and iTerm image payloads (untrusted terminal
+    output) and the Ed25519 release signature, and unused `unsafe` has no
+    place on either. Disabling it also makes `base64` enforce
     `#![forbid(unsafe_code)]`.
 
   ### Fixed
