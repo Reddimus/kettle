@@ -6,10 +6,18 @@ artifacts.
 
 ## Current baseline
 
-- Latest release: `v2.44.0`
-- Current workspace version: `2.44.0`
-- Release records inspected: 148 Git tags and 148 changelog headings, from
-  `v0.1.0` through `v2.44.0`
+These entries describe the version **this tree carries**, which the release
+commit must set before the tag exists — release CI compares the tag against
+`Cargo.toml`, `flake.nix`, and the changelog, so the files necessarily lead the
+tag. Between the release commit landing on `main` and release CI publishing,
+the version below is present in the changelog but not yet as a Git tag or a
+GitHub release. Git tags and GitHub releases remain authoritative for what has
+actually shipped.
+
+- Latest release: `v2.45.0`
+- Current workspace version: `2.45.0`
+- Release records inspected: 149 Git tags and 149 changelog headings, from
+  `v0.1.0` through `v2.45.0`
 - Version-bearing source files that must stay in lockstep: workspace
   `Cargo.toml`, `flake.nix`, and the changelog. Release CI renders the Homebrew
   formula and Arch `PKGBUILD` from verified archives so their checksums cannot
@@ -31,7 +39,7 @@ artifacts.
 - `v2.21.0` to `v2.28.0` (2026-06-13 to 2026-06-19): GPU/background features,
   animated media, tab/theme settings, scrollbar work, and release packaging
   refreshes.
-- `v2.29.0` to `v2.44.0` (2026-06-19 to 2026-08-01): cwd-aware titles and
+- `v2.29.0` to `v2.45.0` (2026-06-19 to 2026-08-01): cwd-aware titles and
   shell integration, GPU device-loss resilience, Ubuntu titlebar fixes,
   keyboard text selection, package-template lockstep, bounded/private recording
   retention, graphics-resource accounting, hardened control/MCP and durable

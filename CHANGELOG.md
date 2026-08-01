@@ -6,6 +6,8 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+## [2.45.0] — 2026-08-01
+
   ### Fixed
   - **Recording retention could delete a file Kettle never wrote.** Any name in
     the recording directory that merely started `kettle-session-` and ended
