@@ -908,7 +908,11 @@ mod tests {
         assert!(!shell.is_empty(), "a shell path is always produced");
         assert!(
             access(Path::new(&shell), AccessFlags::X_OK).is_ok(),
-            "resolved shell {shell:?} must be executable"
+            // Explicit argument: this crate is edition 2018, where a
+            // single-argument `assert!` message takes the legacy
+            // `panic!(expr)` path and never captures `{shell:?}` implicitly.
+            "resolved shell {:?} must be executable",
+            shell
         );
     }
 
