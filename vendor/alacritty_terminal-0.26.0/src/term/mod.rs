@@ -22,8 +22,8 @@ use crate::term::color::Colors;
 use crate::vi_mode::{ViModeCursor, ViMotion};
 use crate::vte::ansi::{
     self, Attr, CharsetIndex, Color, CursorShape, CursorStyle, Handler, Hyperlink, KeyboardModes,
-    KeyboardModesApplyBehavior, NamedColor, NamedMode, NamedPrivateMode, PrivateMode, Rgb,
-    StandardCharset,
+    KeyboardModesApplyBehavior, ModifyOtherKeys, NamedColor, NamedMode, NamedPrivateMode,
+    PrivateMode, Rgb, StandardCharset,
 };
 
 pub mod cell;
@@ -77,7 +77,18 @@ bitflags! {
         const REPORT_ALTERNATE_KEYS   = 1 << 20;
         const REPORT_ALL_KEYS_AS_ESC  = 1 << 21;
         const REPORT_ASSOCIATED_TEXT  = 1 << 22;
+        /// Effective xterm modifyOtherKeys level one.
+        ///
+        /// This is mutually exclusive with [`TermMode::MODIFY_OTHER_KEYS_2`].
+        const MODIFY_OTHER_KEYS_1     = 1 << 23;
+        /// Effective xterm modifyOtherKeys level two.
+        ///
+        /// This is mutually exclusive with [`TermMode::MODIFY_OTHER_KEYS_1`].
+        const MODIFY_OTHER_KEYS_2     = 1 << 24;
         const MOUSE_MODE              = Self::MOUSE_REPORT_CLICK.bits() | Self::MOUSE_MOTION.bits() | Self::MOUSE_DRAG.bits();
+        /// All effective xterm modifyOtherKeys levels.
+        const MODIFY_OTHER_KEYS       = Self::MODIFY_OTHER_KEYS_1.bits()
+                                      | Self::MODIFY_OTHER_KEYS_2.bits();
         const KITTY_KEYBOARD_PROTOCOL = Self::DISAMBIGUATE_ESC_CODES.bits()
                                       | Self::REPORT_EVENT_TYPES.bits()
                                       | Self::REPORT_ALTERNATE_KEYS.bits()
@@ -116,6 +127,18 @@ impl Default for TermMode {
             | TermMode::LINE_WRAP
             | TermMode::ALTERNATE_SCROLL
             | TermMode::URGENCY_HINTS
+    }
+}
+
+fn modify_other_keys_term_mode(mode: ModifyOtherKeys, enabled: bool) -> TermMode {
+    if !enabled {
+        return TermMode::empty();
+    }
+
+    match mode {
+        ModifyOtherKeys::Reset => TermMode::empty(),
+        ModifyOtherKeys::EnableExceptWellDefined => TermMode::MODIFY_OTHER_KEYS_1,
+        ModifyOtherKeys::EnableAll => TermMode::MODIFY_OTHER_KEYS_2,
     }
 }
 
@@ -480,6 +503,15 @@ pub struct Config {
     /// Whether to enable kitty keyboard protocol.
     pub kitty_keyboard: bool,
 
+    /// XTerm modifyOtherKeys level assumed before an application negotiates.
+    pub modify_other_keys: ModifyOtherKeys,
+
+    /// Whether applications may negotiate xterm modifyOtherKeys.
+    ///
+    /// Disabling negotiation keeps reports at level zero so applications are
+    /// not told to expect key sequences the embedding terminal will suppress.
+    pub modify_other_keys_enabled: bool,
+
     /// OSC52 support mode.
     pub osc52: Osc52,
 }
@@ -492,6 +524,8 @@ impl Default for Config {
             default_cursor_style: Default::default(),
             vi_mode_cursor_style: Default::default(),
             kitty_keyboard: Default::default(),
+            modify_other_keys: ModifyOtherKeys::Reset,
+            modify_other_keys_enabled: true,
             osc52: Default::default(),
         }
     }
@@ -552,6 +586,11 @@ impl<T> Term<T> {
 
         // Initialize terminal damage, covering the entire terminal upon launch.
         let damage = TermDamageState::new(num_cols, num_lines);
+        let mode = TermMode::default()
+            | modify_other_keys_term_mode(
+                config.modify_other_keys,
+                config.modify_other_keys_enabled,
+            );
 
         Term {
             inactive_grid,
@@ -573,7 +612,7 @@ impl<T> Term<T> {
             is_focused: Default::default(),
             selection: Default::default(),
             title: Default::default(),
-            mode: Default::default(),
+            mode,
             graphics_events: GraphicsEventJournal::new(),
         }
     }
@@ -677,6 +716,19 @@ impl<T> Term<T> {
             self.keyboard_mode = KeyboardModes::NO_MODE;
             self.inactive_keyboard_mode = KeyboardModes::NO_MODE;
             self.mode.remove(TermMode::KITTY_KEYBOARD_PROTOCOL);
+        }
+
+        if self.config.modify_other_keys != old_config.modify_other_keys
+            || self.config.modify_other_keys_enabled != old_config.modify_other_keys_enabled
+        {
+            // A policy reload must update existing terminals immediately;
+            // retaining the old level would leave `off` ineffective until the
+            // application reset the terminal or the pane was replaced.
+            self.mode.remove(TermMode::MODIFY_OTHER_KEYS);
+            self.mode.insert(modify_other_keys_term_mode(
+                self.config.modify_other_keys,
+                self.config.modify_other_keys_enabled,
+            ));
         }
 
         // Damage everything on config updates.
@@ -1493,6 +1545,34 @@ impl<T: EventListener> Handler for Term<T> {
     }
 
     #[inline]
+    fn set_modify_other_keys(&mut self, mode: ModifyOtherKeys) {
+        trace!("Setting modifyOtherKeys mode to {mode:?}");
+        self.mode.remove(TermMode::MODIFY_OTHER_KEYS);
+        self.mode.insert(modify_other_keys_term_mode(
+            mode,
+            self.config.modify_other_keys_enabled,
+        ));
+    }
+
+    #[inline]
+    fn report_modify_other_keys(&mut self) {
+        trace!("Reporting modifyOtherKeys mode");
+        let level = if self.mode.contains(TermMode::MODIFY_OTHER_KEYS_2) {
+            2
+        } else if self.mode.contains(TermMode::MODIFY_OTHER_KEYS_1) {
+            1
+        } else {
+            0
+        };
+
+        // XTerm's ctlseqs documents XTQMODKEYS replies as an XTMODKEYS
+        // control, so keep the modifyOtherKeys resource selector before the
+        // effective value the application can restore.
+        let text = format!("\x1b[>4;{level}m");
+        self.event_proxy.send_event(Event::PtyWrite(text));
+    }
+
+    #[inline]
     fn push_keyboard_mode(&mut self, mode: KeyboardModes) {
         if !self.config.kitty_keyboard {
             return;
@@ -2078,6 +2158,10 @@ impl<T: EventListener> Handler for Term<T> {
         // Preserve vi mode across resets.
         self.mode &= TermMode::VI;
         self.mode.insert(TermMode::default());
+        self.mode.insert(modify_other_keys_term_mode(
+            self.config.modify_other_keys,
+            self.config.modify_other_keys_enabled,
+        ));
 
         self.event_proxy.send_event(Event::CursorBlinkingChange);
         self.mark_fully_damaged();
@@ -2767,14 +2851,126 @@ mod tests {
     use super::*;
 
     use std::mem;
+    use std::sync::{Arc, Mutex};
 
-    use crate::event::VoidListener;
+    use crate::event::{Event, EventListener, VoidListener};
     use crate::grid::{Grid, Scroll};
     use crate::index::{Column, Point, Side};
     use crate::selection::{Selection, SelectionType};
     use crate::term::cell::{Cell, Flags};
     use crate::term::test::TermSize;
-    use crate::vte::ansi::{self, CharsetIndex, Handler, StandardCharset};
+    use crate::vte::ansi::{
+        self, CharsetIndex, Handler, ModifyOtherKeys, Processor, StandardCharset,
+    };
+
+    #[derive(Clone, Default)]
+    struct PtyWriteListener(Arc<Mutex<Vec<String>>>);
+
+    impl PtyWriteListener {
+        fn drain(&self) -> Vec<String> {
+            mem::take(&mut *self.0.lock().unwrap())
+        }
+    }
+
+    impl EventListener for PtyWriteListener {
+        fn send_event(&self, event: Event) {
+            if let Event::PtyWrite(text) = event {
+                self.0.lock().unwrap().push(text);
+            }
+        }
+    }
+
+    #[test]
+    fn modify_other_keys_tracks_mutually_exclusive_effective_levels() {
+        let size = TermSize::new(5, 3);
+        let mut term = Term::new(Config::default(), &size, VoidListener);
+        let mut processor: Processor = Processor::new();
+
+        assert!(!term.mode().intersects(TermMode::MODIFY_OTHER_KEYS));
+
+        processor.advance(&mut term, b"\x1b[>4;1m");
+        assert!(term.mode().contains(TermMode::MODIFY_OTHER_KEYS_1));
+        assert!(!term.mode().contains(TermMode::MODIFY_OTHER_KEYS_2));
+
+        processor.advance(&mut term, b"\x1b[>4;2m");
+        assert!(!term.mode().contains(TermMode::MODIFY_OTHER_KEYS_1));
+        assert!(term.mode().contains(TermMode::MODIFY_OTHER_KEYS_2));
+
+        processor.advance(&mut term, b"\x1b[>4;0m");
+        assert!(!term.mode().intersects(TermMode::MODIFY_OTHER_KEYS));
+    }
+
+    #[test]
+    fn modify_other_keys_reports_the_effective_level() {
+        let size = TermSize::new(5, 3);
+        let listener = PtyWriteListener::default();
+        let mut term = Term::new(Config::default(), &size, listener.clone());
+        let mut processor: Processor = Processor::new();
+
+        for (set, reply) in [
+            (b"\x1b[>4;0m".as_slice(), "\x1b[>4;0m"),
+            (b"\x1b[>4;1m".as_slice(), "\x1b[>4;1m"),
+            (b"\x1b[>4;2m".as_slice(), "\x1b[>4;2m"),
+        ] {
+            processor.advance(&mut term, set);
+            processor.advance(&mut term, b"\x1b[?4m");
+            assert_eq!(listener.drain(), [reply]);
+        }
+    }
+
+    #[test]
+    fn reset_state_restores_configured_modify_other_keys_level() {
+        let size = TermSize::new(5, 3);
+        let config = Config {
+            modify_other_keys: ModifyOtherKeys::EnableExceptWellDefined,
+            ..Config::default()
+        };
+        let mut term = Term::new(config, &size, VoidListener);
+        let mut processor: Processor = Processor::new();
+
+        assert!(term.mode().contains(TermMode::MODIFY_OTHER_KEYS_1));
+        processor.advance(&mut term, b"\x1b[>4;2m");
+        assert!(term.mode().contains(TermMode::MODIFY_OTHER_KEYS_2));
+
+        processor.advance(&mut term, b"\x1bc");
+        assert!(term.mode().contains(TermMode::MODIFY_OTHER_KEYS_1));
+        assert!(!term.mode().contains(TermMode::MODIFY_OTHER_KEYS_2));
+    }
+
+    #[test]
+    fn modify_other_keys_option_updates_apply_to_an_existing_term() {
+        let size = TermSize::new(5, 3);
+        let mut term = Term::new(Config::default(), &size, VoidListener);
+
+        term.set_options(Config {
+            modify_other_keys: ModifyOtherKeys::EnableAll,
+            ..Config::default()
+        });
+        assert!(term.mode().contains(TermMode::MODIFY_OTHER_KEYS_2));
+
+        term.set_options(Config {
+            modify_other_keys_enabled: false,
+            ..Config::default()
+        });
+        assert!(!term.mode().intersects(TermMode::MODIFY_OTHER_KEYS));
+    }
+
+    #[test]
+    fn disabled_modify_other_keys_policy_stays_at_level_zero() {
+        let size = TermSize::new(5, 3);
+        let listener = PtyWriteListener::default();
+        let config = Config {
+            modify_other_keys: ModifyOtherKeys::EnableAll,
+            modify_other_keys_enabled: false,
+            ..Config::default()
+        };
+        let mut term = Term::new(config, &size, listener.clone());
+        let mut processor: Processor = Processor::new();
+
+        processor.advance(&mut term, b"\x1b[>4;2m\x1b[?4m");
+        assert!(!term.mode().intersects(TermMode::MODIFY_OTHER_KEYS));
+        assert_eq!(listener.drain(), ["\x1b[>4;0m"]);
+    }
 
     #[test]
     fn selection_survives_while_scrollback_history_grows() {

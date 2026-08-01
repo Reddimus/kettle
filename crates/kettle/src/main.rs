@@ -1451,6 +1451,10 @@ fn main() -> anyhow::Result<()> {
             cfg.bell, bell_suffix, cfg.osc52, cfg.minimum_contrast
         );
         println!(
+            "keyboard: modify-other-keys={}",
+            cfg.modify_other_keys.as_str()
+        );
+        println!(
             "scroll:  on-keystroke={} on-output={} multiplier={}",
             cfg.scroll_on_keystroke, cfg.scroll_on_output, cfg.scroll_multiplier
         );

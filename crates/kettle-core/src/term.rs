@@ -16,7 +16,8 @@ use alacritty_terminal::term::{
     Config as TermConfig, GraphicsEvent, GraphicsEventBatch, GraphicsScrollDirection,
 };
 use alacritty_terminal::vte::ansi::{
-    Color as AnsiColor, CursorShape, Handler, NamedColor, Processor, SYNC_MARKER_CAPACITY,
+    Color as AnsiColor, CursorShape, Handler, ModifyOtherKeys, NamedColor, Processor,
+    SYNC_MARKER_CAPACITY,
 };
 use anyhow::{Context, Result};
 use kettle_vt::kitty::{Delete as KittyDelete, DeleteTarget as KittyDeleteTarget, PlacementKey};
@@ -857,11 +858,17 @@ pub struct PtyGeometry {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct TerminalCapabilities {
     pub osc52_copy: bool,
+    pub modify_other_keys: ModifyOtherKeys,
+    pub modify_other_keys_enabled: bool,
 }
 
 impl Default for TerminalCapabilities {
     fn default() -> Self {
-        Self { osc52_copy: true }
+        Self {
+            osc52_copy: true,
+            modify_other_keys: ModifyOtherKeys::Reset,
+            modify_other_keys_enabled: true,
+        }
     }
 }
 
@@ -3804,6 +3811,8 @@ impl Terminal {
             // keys, and associated text), so the engine may answer `CSI ? u`
             // and honor the per-screen keyboard-mode stack.
             kitty_keyboard: true,
+            modify_other_keys: capabilities.modify_other_keys,
+            modify_other_keys_enabled: capabilities.modify_other_keys_enabled,
             default_cursor_style,
             ..TermConfig::default()
         };
@@ -4796,6 +4805,27 @@ impl Terminal {
     /// live config reload takes effect without restarting the pane.
     pub fn set_osc52_copy_allowed(&self, allowed: bool) {
         self.osc52_copy_allowed.store(allowed, Ordering::Release);
+    }
+
+    /// Update the xterm `modifyOtherKeys` assumption and negotiation policy.
+    ///
+    /// Applying the engine options updates the effective `TermMode` at the
+    /// same time, so a live config reload cannot leave the input encoder using
+    /// the previous policy until the next resize or terminal reset.
+    pub fn set_modify_other_keys(&mut self, mode: ModifyOtherKeys, enabled: bool) {
+        if self.term_config.modify_other_keys == mode
+            && self.term_config.modify_other_keys_enabled == enabled
+        {
+            return;
+        }
+
+        self.term_config.modify_other_keys = mode;
+        self.term_config.modify_other_keys_enabled = enabled;
+        let mut term = self
+            .term
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        term.set_options(self.term_config.clone());
     }
 
     /// v2.20.0 (Ghostty `confirm-close-surface` parity): is this pane's

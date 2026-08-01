@@ -115,14 +115,24 @@ mode stack prevents a client from growing terminal state indefinitely.
 
 With no negotiated Kitty flags, Kettle retains the xterm-compatible bytes for
 unmodified keys, DECCKM application cursor mode, DECKPAM application keypad
-mode, modified navigation keys, and the usual control codes. Modified Enter
-uses xterm `modifyOtherKeys` level-2 form so clients that do not negotiate Kitty
-can still distinguish multiline-input chords. Plain Enter remains `CR` in both
-modes:
+mode, modified navigation keys, and the usual control codes. Kettle tracks
+xterm `modifyOtherKeys` requests (`CSI > 4 ; Ps m`) and answers a
+`CSI ? 4 m` query with the effective level as `CSI > 4 ; Ps m`. Level zero and
+level one leave Return's well-known behavior unchanged, so modified Enter is
+`CR`; only level two uses the `CSI 27 ; modifier ; 13 ~` form.
+
+`modify-other-keys = always` is the default. It assumes level two until an
+application sends an explicit level, preserving the shipped multiline-input
+chords used by Claude Code, Codex, and clients that never negotiate Kitty.
+`auto` starts at level zero and waits for an application to request level two.
+`off` keeps modified Enter as `CR` and reports level zero even if an application
+tries to enable the option. Under `always` and `auto`, an explicit level zero or
+level one takes effect immediately. Plain Enter remains `CR` in every mode:
 
 | Keyboard mode | Enter | Shift+Enter | Ctrl+Enter | Alt+Enter |
 |---|---|---|---|---|
-| No Kitty negotiation | `0D` | `ESC [ 27;2;13~` | `ESC [ 27;5;13~` | `ESC [ 27;3;13~` |
+| No Kitty negotiation, effective level 0 or 1 | `0D` | `0D` | `0D` | `0D` |
+| No Kitty negotiation, effective level 2 | `0D` | `ESC [ 27;2;13~` | `ESC [ 27;5;13~` | `ESC [ 27;3;13~` |
 | Kitty disambiguation negotiated | `0D` | `ESC [ 13;2u` | `ESC [ 13;5u` | `ESC [ 13;3u` |
 
 This progressive behavior matters for shells and older TUIs: enabling support

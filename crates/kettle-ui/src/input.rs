@@ -367,10 +367,11 @@ pub fn encode(
         match n {
             NamedKey::Enter => {
                 // Keep ordinary Enter byte-for-byte compatible. When the
-                // focused application has not negotiated Kitty CSI-u, use
-                // xterm modifyOtherKeys level-2 form for modified Enter so
-                // Shift/Ctrl/Alt do not collapse into a submit keystroke.
-                return Some(if modded {
+                // focused application has selected xterm modifyOtherKeys
+                // level two, preserve the modifier so Shift/Ctrl/Alt do not
+                // collapse into a submit keystroke. Level one deliberately
+                // leaves well-known Return behavior alone, so it remains CR.
+                return Some(if modded && mode.contains(TermMode::MODIFY_OTHER_KEYS_2) {
                     format!("\x1b[27;{m};13~").into_bytes()
                 } else {
                     vec![b'\r']
@@ -1734,32 +1735,77 @@ mod tests {
     }
 
     #[test]
-    fn enter_chords_are_distinct_with_and_without_kitty_negotiation() {
-        use std::collections::HashSet;
-        use winit::keyboard::{Key, NamedKey};
-
+    fn modified_enter_requires_modify_other_keys_level_two() {
         let enter = Key::Named(NamedKey::Enter);
-        let modifiers = [
-            ModifiersState::empty(),
+        let modes = [
+            TermMode::empty(),
+            TermMode::MODIFY_OTHER_KEYS_1,
+            TermMode::MODIFY_OTHER_KEYS_2,
+        ];
+
+        for mode in modes {
+            assert_eq!(
+                encode_key_press(&enter, ModifiersState::empty(), mode),
+                Some(b"\r".to_vec()),
+                "plain Enter stays CR at every modifyOtherKeys level"
+            );
+        }
+
+        for mods in [
             ModifiersState::SHIFT,
             ModifiersState::CONTROL,
             ModifiersState::ALT,
-        ];
-        let legacy =
-            modifiers.map(|mods| encode_key_press(&enter, mods, TermMode::empty()).unwrap());
-        assert_eq!(legacy[0], b"\r");
-        assert_eq!(legacy[1], b"\x1b[27;2;13~");
-        assert_eq!(legacy[2], b"\x1b[27;5;13~");
-        assert_eq!(legacy[3], b"\x1b[27;3;13~");
-        assert_eq!(legacy.iter().collect::<HashSet<_>>().len(), legacy.len());
+        ] {
+            assert_eq!(
+                encode_key_press(&enter, mods, TermMode::empty()),
+                Some(b"\r".to_vec())
+            );
+            assert_eq!(
+                encode_key_press(&enter, mods, TermMode::MODIFY_OTHER_KEYS_1),
+                Some(b"\r".to_vec())
+            );
+        }
 
-        let kitty_mode = TermMode::DISAMBIGUATE_ESC_CODES;
-        let kitty = modifiers.map(|mods| encode_key_press(&enter, mods, kitty_mode).unwrap());
-        assert_eq!(kitty[0], b"\r");
-        assert_eq!(kitty[1], b"\x1b[13;2u");
-        assert_eq!(kitty[2], b"\x1b[13;5u");
-        assert_eq!(kitty[3], b"\x1b[13;3u");
-        assert_eq!(kitty.iter().collect::<HashSet<_>>().len(), kitty.len());
+        assert_eq!(
+            encode_key_press(&enter, ModifiersState::SHIFT, TermMode::MODIFY_OTHER_KEYS_2),
+            Some(b"\x1b[27;2;13~".to_vec())
+        );
+        assert_eq!(
+            encode_key_press(
+                &enter,
+                ModifiersState::CONTROL,
+                TermMode::MODIFY_OTHER_KEYS_2
+            ),
+            Some(b"\x1b[27;5;13~".to_vec())
+        );
+        assert_eq!(
+            encode_key_press(&enter, ModifiersState::ALT, TermMode::MODIFY_OTHER_KEYS_2),
+            Some(b"\x1b[27;3;13~".to_vec())
+        );
+    }
+
+    #[test]
+    fn kitty_enter_encoding_wins_over_every_modify_other_keys_level() {
+        let enter = Key::Named(NamedKey::Enter);
+        for modify_other_keys in [
+            TermMode::empty(),
+            TermMode::MODIFY_OTHER_KEYS_1,
+            TermMode::MODIFY_OTHER_KEYS_2,
+        ] {
+            let mode = modify_other_keys | TermMode::DISAMBIGUATE_ESC_CODES;
+            assert_eq!(
+                encode_key_press(&enter, ModifiersState::SHIFT, mode),
+                Some(b"\x1b[13;2u".to_vec())
+            );
+            assert_eq!(
+                encode_key_press(&enter, ModifiersState::CONTROL, mode),
+                Some(b"\x1b[13;5u".to_vec())
+            );
+            assert_eq!(
+                encode_key_press(&enter, ModifiersState::ALT, mode),
+                Some(b"\x1b[13;3u".to_vec())
+            );
+        }
     }
 
     #[test]

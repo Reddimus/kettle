@@ -7,6 +7,13 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 ## [Unreleased]
 
   ### Fixed
+  - Xterm `modifyOtherKeys` negotiation now has real per-terminal state.
+    Applications can select or query levels 0, 1, and 2, terminal reset
+    restores Kettle's configured assumption, and modified Enter uses the
+    `CSI 27` form only at effective level 2. The new
+    `modify-other-keys = always|auto|off` policy defaults to `always`, preserving
+    existing CLI multiline chords until an application explicitly opts out;
+    `auto` requires negotiation and `off` keeps every Enter chord as `CR`.
   - A `kettle exec` run whose consumer closed the pipe could die from `SIGPIPE`
     instead of reporting the exit code it had already chosen. The stdout worker
     blocks `SIGPIPE` for itself, so a broken pipe correctly surfaced as `EPIPE`,

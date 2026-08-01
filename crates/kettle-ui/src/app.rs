@@ -13706,6 +13706,7 @@ impl App {
             self.cfg.osc52,
             self.clipboard.is_some(),
         ));
+        ws.mux.set_modify_other_keys(self.cfg.modify_other_keys);
         let runtime_font_size = ws.renderer.as_ref().map(|r| r.font_size());
         if let Some(r) = ws.renderer.as_mut() {
             // Family first: the font-size setter re-measures cells and must see

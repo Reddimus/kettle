@@ -555,7 +555,10 @@ fn run_exec_engine(
         false,
         // Headless exec has no clipboard sink. Do not advertise DA1 extension
         // 52 when OSC 52 writes would be deliberately ignored.
-        TerminalCapabilities { osc52_copy: false },
+        TerminalCapabilities {
+            osc52_copy: false,
+            ..TerminalCapabilities::default()
+        },
         // An explicit automation cwd is a contract. Passing it to the OS even
         // after the preflight closes the deletion race: spawn fails instead of
         // silently falling back to HOME if the directory vanishes.
