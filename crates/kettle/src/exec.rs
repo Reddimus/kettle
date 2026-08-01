@@ -2627,6 +2627,61 @@ mod tests {
         );
     }
 
+    /// libtest matches `--exact` against a test's FULL path, so the fixture has
+    /// to be named the way libtest names it. The integration helpers in
+    /// `tests/exec.rs` sit at their crate root and get away with a bare name;
+    /// this one is nested, and a filter that fails to match is silent — libtest
+    /// runs nothing and exits 0, which reads as a passing child.
+    #[cfg(windows)]
+    const DESCENDANT_FIXTURE: &str = "exec::tests::windows_descendant_job_helper";
+
+    /// Whether this test binary was re-executed to act as a fixture rather than
+    /// run as part of an ordinary suite. Reading argv is race-free, unlike the
+    /// environment-variable guard the integration fixtures use — those are set
+    /// on a `Command` by their parent, which `run_exec_with` has no way to do.
+    #[cfg(windows)]
+    fn invoked_as_fixture(name: &str) -> bool {
+        let mut exact = false;
+        let mut named = false;
+        for arg in std::env::args().skip(1) {
+            exact |= arg == "--exact";
+            named |= arg == name;
+        }
+        exact && named
+    }
+
+    /// The child half of `timeout_terminates_a_windows_descendant_job`: own a
+    /// grandchild, announce it, then block until Kettle's timeout ends the job.
+    ///
+    /// This test binary is its own fixture because re-executing it costs
+    /// milliseconds. The fixture this replaced launched `powershell.exe`, whose
+    /// cold start on a loaded hosted runner regularly outlasted the very
+    /// timeout under test — so the parent fired before the fixture could name
+    /// its descendant, and the test failed having proven nothing. Raising the
+    /// timeout had already been tried; it moves the race rather than removing
+    /// it, because the fixture's setup and the deadline share one budget.
+    #[cfg(windows)]
+    #[test]
+    fn windows_descendant_job_helper() {
+        if !invoked_as_fixture(DESCENDANT_FIXTURE) {
+            return;
+        }
+        let mut descendant = std::process::Command::new("ping.exe")
+            .args(["-n", "30", "127.0.0.1"])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("spawn the descendant to be job-terminated");
+        // Stdout is the whole channel back, so no temp path has to be agreed
+        // on and no environment variable has to be mutated mid-suite.
+        println!("DESCENDANT_PID {}", descendant.id());
+        let _ = std::io::stdout().flush();
+        // Kettle's timeout is what should end this. Waiting on the descendant
+        // also bounds a stray manual invocation instead of hanging forever.
+        let _ = descendant.wait();
+    }
+
     #[cfg(windows)]
     #[test]
     fn timeout_terminates_a_windows_descendant_job() {
@@ -2635,31 +2690,21 @@ mod tests {
             OpenProcess, PROCESS_SYNCHRONIZE, WaitForSingleObject,
         };
 
-        let temp = tempfile::tempdir().unwrap();
-        let pid_file = temp.path().join("descendant.pid");
-        let escaped_pid_file = pid_file.to_string_lossy().replace('\u{27}', "''");
-        let script = format!(
-            "$child = Start-Process -FilePath ping.exe -ArgumentList @('-n','30','127.0.0.1') -PassThru; \
-             [IO.File]::WriteAllText('{escaped_pid_file}', [string]$child.Id); \
-             Wait-Process -Id $child.Id"
-        );
+        let helper = std::env::current_exe().expect("resolve the unit-test binary");
         let opts = ExecOpts {
             argv: vec![
-                "powershell.exe".into(),
-                "-NoLogo".into(),
-                "-NoProfile".into(),
-                "-NonInteractive".into(),
-                "-Command".into(),
-                script,
+                helper.to_string_lossy().into_owned(),
+                DESCENDANT_FIXTURE.into(),
+                "--exact".into(),
+                "--nocapture".into(),
+                "--test-threads=1".into(),
             ],
             cols: 80,
             rows: 24,
             cwd: None,
-            // Hosted Windows runners can spend several seconds cold-starting
-            // Windows PowerShell after a large workspace build. The fixture
-            // must reach WriteAllText before Kettle fires the timeout or the
-            // test never observes the descendant it is meant to validate.
-            timeout: Some(Duration::from_secs(10)),
+            // The fixture announces its descendant within milliseconds of
+            // starting, so this budget is margin rather than a race.
+            timeout: Some(Duration::from_secs(5)),
             mode: OutputMode::Raw,
             record: None,
             forward_stdin: false,
@@ -2667,11 +2712,22 @@ mod tests {
         let mut sink = Vec::new();
 
         assert_eq!(run_exec_with(opts, &|| None, &mut sink), EXIT_TIMEOUT);
-        let pid: u32 = std::fs::read_to_string(&pid_file)
-            .expect("PowerShell must record its descendant pid before timeout")
-            .trim()
-            .parse()
-            .unwrap();
+        let output = String::from_utf8_lossy(&sink);
+        // Take only the leading digit run: PTY output continues past the
+        // marker, and it carries CRLF plus whatever libtest prints afterwards.
+        let pid: u32 = output
+            .split("DESCENDANT_PID ")
+            .nth(1)
+            .map(|tail| {
+                tail.trim_start()
+                    .chars()
+                    .take_while(char::is_ascii_digit)
+                    .collect::<String>()
+            })
+            .and_then(|digits| digits.parse().ok())
+            .unwrap_or_else(|| {
+                panic!("fixture must announce its descendant pid before timeout; output={output:?}")
+            });
         // SAFETY: OpenProcess receives a recorded positive pid and only the
         // synchronization right. The returned handle is closed below.
         let process = unsafe { OpenProcess(PROCESS_SYNCHRONIZE, 0, pid) };
