@@ -68,9 +68,25 @@ explicit or managed recording file is opened.
 
 Each session stops at a complete NDJSON event boundary before 512 MiB. When
 space permits, its last event is a `kettle:record_limit` marker. The native
-title changes from `[REC]` to `[REC LIMIT]`. A startup, write, or flush failure
-uses `[REC ERROR]` and emits one desktop notification in the same event-loop
-turn. Neither condition terminates the terminal session.
+title changes from `[REC]` to `[REC LIMIT]`. Recording events cross a bounded
+128-message / 4 MiB persistence queue; if that queue fills, capture stops,
+already-admitted events drain, the title changes to `[REC INCOMPLETE]`, and a
+desktop notification says that the trace is incomplete. A startup, write,
+flush, or bounded-finalization failure uses `[REC ERROR]` and emits one desktop
+notification. None of these conditions terminates the terminal session.
+
+Kettle stops capture instead of adding an in-band overload marker. Once the
+bounded queue is full, admitting that marker cannot be guaranteed; relying on
+it would make the same missing event silent. The persistent title and desktop
+notification (or the explicit `kettle exec` stderr diagnostic) are therefore
+the truthful out-of-band signal, while the cast contains every complete event
+accepted before capture stopped.
+
+The GUI event loop, `kettle exec` lifecycle, and PTY parser never write, flush,
+or close recording files. One worker owns secure target initialization, timed
+flushes, and final close. It buffers complete NDJSON records and rolls a failed
+batch back to the preceding committed boundary, so an early stop retains a
+replayable valid-JSON prefix rather than a partial event.
 
 Starting a managed recording prunes the new `kettle-session-*.cast` namespace
 toward budgets of 50 files and 5 GiB. Kettle removes the oldest unlocked files
@@ -97,7 +113,10 @@ needed.
 > boundary, no-link checks, and private-file writer. `kettle exec` fails closed
 > with status 125 if the requested file cannot be secured before the child is
 > started; a later disk/write failure stops capture without killing an already
-> running child. See [AGENT.md](AGENT.md) for `kettle exec`.
+> running child. Ordinary completion polls and joins the recording worker within
+> a fixed bound; timeout and cancellation perform only a zero-duration safe
+> completion probe, report an unfinished trace, and never wait in a join. See
+> [AGENT.md](AGENT.md) for `kettle exec`.
 
 ## What it captures
 
@@ -135,9 +154,10 @@ the child's `ECHO` flag), so the recorder is conservative by default:
   capture is active so it is never silent.
 - **Pasted content is never recorded** — only a `kettle:paste len=N` marker.
 - The native window title carries **`[REC]`** while capture is active and
-  retains the limit/I/O stop states described above. Borderless and fullscreen
-  modes can hide OS title decorations, so recording errors also emit a desktop
-  notification when the platform notification service is available.
+  retains the limit/overload/I/O stop states described above. Borderless and
+  fullscreen modes can hide OS title decorations, so overload and recording
+  errors also emit a desktop notification when the platform notification
+  service is available.
 - The trace file is local-only (`0600` on Unix; protected current-user DACL on
   Windows); kettle never uploads it. Writes are best-effort — a full disk
   disables the recorder, it never crashes kettle.
@@ -149,10 +169,11 @@ flowchart LR
   PTY[PTY output] --> FAN["Shared output fan-out<br/>redraw + close drains"]
   KBD[Keystrokes] --> TOK["redacted token"]
   UI["Tabs / focus / paste"] --> MRK["UI marker"]
-  FAN --> REC[Recorder]
+  FAN --> REC["Bounded recorder admission"]
   FAN --> LUA["Lua output hooks"]
   TOK --> REC
   MRK --> REC
-  REC -->|"asciicast v2 NDJSON"| FILE[("session.cast")]
+  REC --> WORKER["Persistence worker<br/>timed flush + close"]
+  WORKER -->|"asciicast v2 NDJSON"| FILE[("session.cast")]
   FILE --> PLAY["asciinema play"]
 ```

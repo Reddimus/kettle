@@ -34,6 +34,7 @@ pub mod grid_text;
 pub mod hints;
 pub mod images;
 pub mod links;
+mod persistence;
 pub mod scrollbar;
 pub mod search;
 // Agent-first asciicast session recorder. Behind the
@@ -64,8 +65,8 @@ pub use search::{
 };
 pub use term::{
     CommandFinished, ProtocolNotification, PtyEofProgress, PtyGeometry, PtyInputTail,
-    PtyOutputSender, PtyStdin, PtyWriter, ScreenText, SharedTerm, Terminal, TerminalCapabilities,
-    WorkingDirectoryPolicy,
+    PtyOutputSender, PtyStdin, PtyWriter, ScreenText, SessionLogFailure, SharedTerm, Terminal,
+    TerminalCapabilities, WorkingDirectoryPolicy,
 };
 // OSC 9;4 taskbar-progress state, surfaced by `Terminal::progress`
 // (re-exported so the UI can name it without depending on kettle-vt directly).

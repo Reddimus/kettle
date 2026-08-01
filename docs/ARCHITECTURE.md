@@ -615,6 +615,30 @@ boundary before 512 MiB. Managed directories use private unique files, active
 file locks, and namespace-scoped 50-file / 5-GiB retention; explicit paths are
 locked before truncation.
 
+Asciicast events and per-pane session-log chunks use the same bounded
+persistence transport: 128 messages, a 4 MiB aggregate reservation, and 128 KiB
+per item. Producers use only nonblocking admission. A full queue closes that
+capture explicitly, drains writes already accepted, and publishes an overload
+state to the CLI or GUI; worker-side write/flush failure publishes the parallel
+I/O state. Saturation deliberately does not attempt an in-band marker: the full
+queue cannot guarantee that marker admission, so pretending otherwise would
+reintroduce a silent loss. The GUI instead displays `[REC INCOMPLETE]` plus a
+desktop notification, the CLI writes an explicit incomplete-trace diagnostic,
+and pane logging emits its own stop notification. The worker owns secure
+recording/session-log open, timed flush, and file
+destruction, so neither the GUI event loop, the exec lifecycle, nor the parser
+can enter filesystem I/O. Complete cast records are buffered as a batch and a
+short write is truncated back to its prior file boundary, preserving a valid
+NDJSON prefix. `flush_deadline` compatibility now returns no caller wake because
+the worker waits on that precise deadline itself.
+
+Ordinary `kettle exec` completion starts recorder finalization and polls it from
+normal lifecycle turns alongside stdout completion, retaining timeout and
+cancellation checks. It joins only after the worker reports finished and marks
+an over-bound finalization as I/O failure. An imposed stop performs only a
+zero-duration completion probe, reports an unfinished trace as failed, and
+detaches the worker; it never waits in a join.
+
 The input worker is a separate per-pane boundary from the output pump/parser
 pair. User messages are capped at 4 MiB plus the bracketed-paste envelope, with
 a slightly larger aggregate reservation for interactive input already queued.

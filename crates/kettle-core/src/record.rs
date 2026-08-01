@@ -18,9 +18,9 @@
 //! - `[t, "i", <token>]`  — keystroke TOKENS, never raw typed chars
 //!
 //! The file is owner-only (`0600` on Unix; a protected current-user DACL on
-//! Windows) and purely local — kettle never uploads it. Writes are
-//! best-effort: the first I/O error disables the recorder (a full disk must
-//! never crash the terminal).
+//! Windows) and purely local — kettle never uploads it. Events cross a bounded
+//! worker queue: overload or the first I/O error disables capture visibly (a
+//! full disk or stalled mount must never crash or freeze the terminal).
 //!
 //! Privacy: terminal OUTPUT is VERBATIM and cannot be redacted — a terminal
 //! can't tell a secret from normal output, so anything printed/echoed on
@@ -28,20 +28,27 @@
 //! docs/RECORDING.md).
 
 use std::fs::File;
-use std::io::{BufWriter, Seek, Write};
+use std::io::{Seek, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-/// v2.20.0 P5 (perf): how often buffered events are flushed to disk. Events
-/// between flushes sit in the `BufWriter` (which also self-flushes whenever
-/// its 8KiB buffer fills, so a flood can't grow the loss window); a hard
-/// crash loses at most this much trailing trace. `finish` / `Drop` still
-/// flush, so every clean close path produces a complete, replayable file —
-/// the close-path completeness guard
-/// (`recorder_output_flushed_before_reap_and_on_close` in kettle-ui) is
-/// unaffected.
-const FLUSH_INTERVAL: Duration = Duration::from_millis(250);
+use crate::persistence::{
+    AsyncFileWriter, AsyncWriterStatus, MAX_PERSISTENCE_ITEM_BYTES, PersistenceLimits,
+};
+
+/// Decode large PTY reads in bounded pieces before JSON expansion. Invalid or
+/// control-heavy bytes can expand several-fold, so admitting the raw read as
+/// one queue item would defeat the writer's per-item memory bound.
+const RECORD_OUTPUT_CHUNK_BYTES: usize = 16 * 1024;
+const _: () = assert!(RECORD_OUTPUT_CHUNK_BYTES * 6 < MAX_PERSISTENCE_ITEM_BYTES);
+/// Coalescing complete NDJSON lines reduces syscalls while retaining a modest
+/// rollback window when the underlying file reports a partial write.
+const CAST_WRITE_BUFFER_BYTES: usize = 256 * 1024;
+
+/// Compatibility callers of `finish` and `Drop` get a bounded lossless close.
+/// Liveness-sensitive owners use `begin_finish` and poll `try_finish` instead.
+const RECORD_FINISH_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// A single trace stops at an event boundary before growing past 512 MiB.
 pub const MAX_RECORD_BYTES: u64 = 512 * 1024 * 1024;
@@ -89,14 +96,16 @@ pub enum RecordingTarget {
 pub enum RecordStatus {
     Recording,
     LimitReached,
+    Overloaded,
     IoError,
 }
 
 /// An append-only asciicast writer. One per recording session.
 pub struct Recorder {
-    writer: BufWriter<File>,
+    writer: AsyncFileWriter,
     start: Instant,
     status: RecordStatus,
+    observed_status: RecordStatus,
     bytes_written: u64,
     max_bytes: u64,
     /// When true, record raw typed characters in `i` events.
@@ -107,14 +116,9 @@ pub struct Recorder {
     /// the next `record_output` chunk, so a codepoint split across two PTY reads
     /// is decoded whole instead of being mangled into U+FFFD on each side.
     utf8_carry: Vec<u8>,
-    /// v2.20.0 P5: when the buffer was last explicitly flushed (see
-    /// [`FLUSH_INTERVAL`]).
-    last_flush: Instant,
-    /// v2.20.0 (review fix): lines written since the last flush. Without
-    /// this, a burst followed by silence left the tail buffered FOREVER
-    /// (the interval flush is event-driven) — `flush_if_stale` lets the
-    /// app's timer loop bound staleness to ~FLUSH_INTERVAL in wall time.
-    dirty: bool,
+    /// Explicit asynchronous shutdown means `Drop` must detach rather than
+    /// waiting; otherwise a stalled sink would be reintroduced through RAII.
+    detach_on_drop: bool,
 }
 
 impl Recorder {
@@ -168,6 +172,49 @@ impl Recorder {
         }
     }
 
+    /// Start a GUI recording without touching its target on the caller. Secure
+    /// open, locking, retention, header write, flush, and close all remain
+    /// ordered on the same bounded persistence worker as later events.
+    pub fn start_target_async(
+        target: &RecordingTarget,
+        cols: u16,
+        rows: u16,
+        raw_input: bool,
+    ) -> std::io::Result<Self> {
+        let header = header_line(cols, rows);
+        let header_bytes = u64::try_from(header.len() + 1).unwrap_or(u64::MAX);
+        if header_bytes > MAX_RECORD_BYTES {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "recording limit is too small for the asciicast header",
+            ));
+        }
+        let writer = Box::new(LazyTargetCastWriter::new(target.clone()));
+        let mut writer = AsyncFileWriter::spawn_with_limits(
+            "kettle-record-writer",
+            writer,
+            PersistenceLimits::default(),
+        )?;
+        let mut header = header.into_bytes();
+        header.push(b'\n');
+        writer.try_write(header).map_err(|status| {
+            std::io::Error::other(format!(
+                "could not admit the asciicast header to the persistence worker: {status:?}"
+            ))
+        })?;
+        Ok(Self {
+            writer,
+            start: Instant::now(),
+            status: RecordStatus::Recording,
+            observed_status: RecordStatus::Recording,
+            bytes_written: header_bytes,
+            max_bytes: MAX_RECORD_BYTES,
+            raw_input,
+            utf8_carry: Vec::new(),
+            detach_on_drop: false,
+        })
+    }
+
     fn start_with_file(
         file: File,
         cols: u16,
@@ -175,7 +222,24 @@ impl Recorder {
         raw_input: bool,
         max_bytes: u64,
     ) -> std::io::Result<Self> {
-        let mut writer = BufWriter::new(file);
+        Self::start_with_writer(
+            Box::new(ReplaySafeCastWriter::new(file)),
+            cols,
+            rows,
+            raw_input,
+            max_bytes,
+            PersistenceLimits::default(),
+        )
+    }
+
+    fn start_with_writer(
+        mut writer: Box<dyn Write + Send>,
+        cols: u16,
+        rows: u16,
+        raw_input: bool,
+        max_bytes: u64,
+        limits: PersistenceLimits,
+    ) -> std::io::Result<Self> {
         let header = header_line(cols, rows);
         let header_bytes = u64::try_from(header.len() + 1).unwrap_or(u64::MAX);
         if header_bytes > max_bytes {
@@ -186,17 +250,30 @@ impl Recorder {
         }
         writeln!(writer, "{header}")?;
         writer.flush()?;
+        let writer = AsyncFileWriter::spawn_with_limits("kettle-record-writer", writer, limits)?;
         Ok(Self {
             writer,
             start: Instant::now(),
             status: RecordStatus::Recording,
+            observed_status: RecordStatus::Recording,
             bytes_written: header_bytes,
             max_bytes,
             raw_input,
             utf8_carry: Vec::new(),
-            last_flush: Instant::now(),
-            dirty: false,
+            detach_on_drop: false,
         })
+    }
+
+    #[cfg(test)]
+    fn start_with_test_writer(
+        writer: Box<dyn Write + Send>,
+        cols: u16,
+        rows: u16,
+        raw_input: bool,
+        max_bytes: u64,
+        limits: PersistenceLimits,
+    ) -> std::io::Result<Self> {
+        Self::start_with_writer(writer, cols, rows, raw_input, max_bytes, limits)
     }
 
     /// Whether raw typed characters are captured (vs redacted).
@@ -206,7 +283,27 @@ impl Recorder {
 
     /// Current capture state for visible UI/status reporting.
     pub fn status(&self) -> RecordStatus {
-        self.status
+        match self.writer.status() {
+            AsyncWriterStatus::Overloaded => RecordStatus::Overloaded,
+            AsyncWriterStatus::IoError => RecordStatus::IoError,
+            AsyncWriterStatus::Active | AsyncWriterStatus::Finished => self.status,
+        }
+    }
+
+    /// Return a state edge once. This lets a polling CLI report a failure that
+    /// occurred on the worker after the last output chunk was submitted.
+    pub fn take_status_change(&mut self) -> Option<RecordStatus> {
+        let current = self.status();
+        if current == self.observed_status {
+            return None;
+        }
+        self.observed_status = current;
+        Some(current)
+    }
+
+    /// Wake a latency-sensitive owner as soon as worker-side I/O fails.
+    pub fn set_failure_waker(&mut self, waker: crate::Waker) {
+        self.writer.set_failure_waker(waker);
     }
 
     /// Bytes accepted by the writer, including the asciicast header.
@@ -215,94 +312,74 @@ impl Recorder {
     }
 
     fn emit(&mut self, code: &str, data: &str) {
-        if self.status != RecordStatus::Recording {
+        if self.status() != RecordStatus::Recording {
+            return;
+        }
+        if data.len() > MAX_PERSISTENCE_ITEM_BYTES {
+            // Markers and input tokens are expected to be tiny. Capping them
+            // before JSON escaping prevents one hostile label from allocating
+            // without a fixed ceiling outside the bounded writer queue.
+            self.writer.stop_overloaded();
+            log::warn!("record: event payload exceeded the bounded persistence item size");
             return;
         }
         let secs = self.start.elapsed().as_secs_f64();
-        let line = event_line(secs, code, data);
-        let event_bytes = u64::try_from(line.len() + 1).unwrap_or(u64::MAX);
+        let mut line = event_line(secs, code, data).into_bytes();
+        line.push(b'\n');
+        let event_bytes = u64::try_from(line.len()).unwrap_or(u64::MAX);
         if self.bytes_written.saturating_add(event_bytes) > self.max_bytes {
             self.stop_at_limit(secs);
             return;
         }
-        // v2.20.0 P5: flush on a ~250ms interval instead of per event. The
-        // old per-event flush put a write syscall on the UI thread for every
-        // PTY read under flood — and the installed dev-record build records
-        // EVERY session. Crash exposure is bounded by FLUSH_INTERVAL;
-        // `finish`/`Drop` keep the clean-close trace complete.
-        let flush_due = self.last_flush.elapsed() >= FLUSH_INTERVAL;
-        let result = writeln!(self.writer, "{line}").and_then(|()| {
+        if self.writer.try_write(line).is_ok() {
             self.bytes_written += event_bytes;
-            if flush_due {
-                self.last_flush = Instant::now();
-                self.dirty = false;
-                self.writer.flush()
-            } else {
-                self.dirty = true;
-                Ok(())
+        } else {
+            match self.status() {
+                RecordStatus::Overloaded => log::warn!(
+                    "record: bounded persistence queue filled; capture stopped before dropping an event silently"
+                ),
+                RecordStatus::IoError => {
+                    log::warn!("record: persistence worker failed; disabling the recorder")
+                }
+                RecordStatus::Recording | RecordStatus::LimitReached => {}
             }
-        });
-        if result.is_err() {
-            log::warn!("record: write failed; disabling the recorder");
-            self.status = RecordStatus::IoError;
         }
     }
 
     fn stop_at_limit(&mut self, secs: f64) {
-        let marker = event_line(
+        let mut marker = event_line(
             secs,
             "m",
             &format!("kettle:record_limit bytes={}", self.max_bytes),
-        );
-        let marker_bytes = u64::try_from(marker.len() + 1).unwrap_or(u64::MAX);
+        )
+        .into_bytes();
+        marker.push(b'\n');
+        let marker_bytes = u64::try_from(marker.len()).unwrap_or(u64::MAX);
         if self.bytes_written.saturating_add(marker_bytes) <= self.max_bytes {
-            if let Err(error) = writeln!(self.writer, "{marker}") {
-                self.status = RecordStatus::IoError;
-                self.dirty = false;
-                log::warn!("record: could not write size-limit marker: {error}");
+            if self.writer.try_write(marker).is_err() {
+                log::warn!("record: could not admit the size-limit marker");
                 return;
             }
             self.bytes_written += marker_bytes;
         }
-        self.dirty = false;
-        if self.writer.flush().is_err() {
-            self.status = RecordStatus::IoError;
-            log::warn!("record: flush failed at size limit; disabling the recorder");
-        } else {
-            self.status = RecordStatus::LimitReached;
-            log::warn!(
-                "record: {} byte session limit reached; capture stopped at an event boundary",
-                self.max_bytes
-            );
-        }
+        self.status = RecordStatus::LimitReached;
+        self.writer.request_finish();
+        log::warn!(
+            "record: {} byte session limit reached; capture stopped at an event boundary",
+            self.max_bytes
+        );
     }
 
-    /// v2.20.0 (review fix): flush buffered events if any have been sitting
-    /// unflushed past `FLUSH_INTERVAL` (250ms). The interval flush in `emit` is
-    /// EVENT-driven — a burst followed by silence would otherwise leave its
-    /// tail buffered until the next event or a clean close. The app's timer
-    /// loop calls this (see `flush_deadline`) to bound the staleness in
-    /// wall-clock time.
+    /// Compatibility poll for callers written before the persistence worker
+    /// owned the wall-clock flush deadline. It performs no filesystem I/O.
     pub fn flush_if_stale(&mut self) {
-        if self.status != RecordStatus::Recording
-            || !self.dirty
-            || self.last_flush.elapsed() < FLUSH_INTERVAL
-        {
-            return;
-        }
-        self.last_flush = Instant::now();
-        self.dirty = false;
-        if self.writer.flush().is_err() {
-            log::warn!("record: flush failed; disabling the recorder");
-            self.status = RecordStatus::IoError;
-        }
+        let _ = self.writer.try_join();
     }
 
-    /// When `flush_if_stale` next needs to run, or `None` when nothing is
-    /// buffered. Lets the caller schedule a precise wake instead of polling.
+    /// The worker now waits directly until the precise stale-flush deadline, so
+    /// the event loop no longer needs a timer wake merely to perform disk I/O.
     pub fn flush_deadline(&self) -> Option<Instant> {
-        (self.status == RecordStatus::Recording && self.dirty)
-            .then(|| self.last_flush + FLUSH_INTERVAL)
+        None
     }
 
     /// Record a chunk of terminal OUTPUT (`o`). A multibyte codepoint split
@@ -315,7 +392,16 @@ impl Recorder {
     /// in the trace in cleartext. Review/scrub a `.cast` before sharing it (see
     /// docs/RECORDING.md).
     pub fn record_output(&mut self, bytes: &[u8]) {
-        if self.status != RecordStatus::Recording {
+        for chunk in bytes.chunks(RECORD_OUTPUT_CHUNK_BYTES) {
+            if self.status() != RecordStatus::Recording {
+                break;
+            }
+            self.record_output_chunk(chunk);
+        }
+    }
+
+    fn record_output_chunk(&mut self, bytes: &[u8]) {
+        if self.status() != RecordStatus::Recording {
             return;
         }
         self.utf8_carry.extend_from_slice(bytes);
@@ -390,25 +476,192 @@ impl Recorder {
         self.emit("m", label);
     }
 
-    /// Flush any buffered events. Called on close and from `Drop`. Emits any
-    /// trailing carried-over bytes (a genuinely-truncated final UTF-8 sequence)
-    /// as a U+FFFD so no output is silently dropped at end-of-stream.
-    pub fn finish(&mut self) {
-        if !self.utf8_carry.is_empty() && self.status == RecordStatus::Recording {
+    fn queue_tail_and_close(&mut self) {
+        if self.writer.finish_requested() {
+            return;
+        }
+        if !self.utf8_carry.is_empty() && self.status() == RecordStatus::Recording {
             let tail = String::from_utf8_lossy(&self.utf8_carry).into_owned();
             self.utf8_carry.clear();
             self.emit("o", &tail);
         }
-        self.dirty = false;
-        if self.writer.flush().is_err() && self.status == RecordStatus::Recording {
-            self.status = RecordStatus::IoError;
-        }
+        self.writer.request_finish();
+    }
+
+    /// Hand finalization to the worker without waiting. Liveness-sensitive
+    /// owners can keep polling `try_finish`; dropping after this call detaches
+    /// a sink that never returns from the operating system.
+    pub fn begin_finish(&mut self) {
+        self.detach_on_drop = true;
+        self.queue_tail_and_close();
+    }
+
+    /// Join only after the worker has already exited, so this method never
+    /// parks its caller in a filesystem operation.
+    pub fn try_finish(&mut self) -> bool {
+        self.begin_finish();
+        self.writer.try_join()
+    }
+
+    /// Flush and join within an explicit bound. The join itself happens only
+    /// after `JoinHandle::is_finished`, so a stalled sink consumes the bound but
+    /// can never extend it.
+    pub fn finish_with_timeout(&mut self, timeout: Duration) -> bool {
+        self.detach_on_drop = false;
+        self.queue_tail_and_close();
+        self.writer.finish_with_timeout(timeout)
+    }
+
+    /// Flush any buffered events with the compatibility close bound. Emits any
+    /// trailing carried-over bytes (a genuinely-truncated final UTF-8 sequence)
+    /// as a U+FFFD so no output is silently dropped at end-of-stream.
+    pub fn finish(&mut self) {
+        let _ = self.finish_with_timeout(RECORD_FINISH_TIMEOUT);
     }
 }
 
 impl Drop for Recorder {
     fn drop(&mut self) {
-        self.finish();
+        if self.detach_on_drop {
+            self.queue_tail_and_close();
+            let _ = self.writer.try_join();
+        } else {
+            self.finish();
+        }
+    }
+}
+
+/// Buffer complete NDJSON records and roll a failed batch back to its previous
+/// file boundary. A short filesystem write must not leave a syntactically
+/// invalid tail that makes the otherwise useful trace unreplayable.
+struct ReplaySafeCastWriter {
+    file: File,
+    pending: Vec<u8>,
+    committed_len: u64,
+}
+
+impl ReplaySafeCastWriter {
+    fn new(file: File) -> Self {
+        Self {
+            file,
+            pending: Vec::with_capacity(CAST_WRITE_BUFFER_BYTES),
+            committed_len: 0,
+        }
+    }
+
+    fn flush_pending(&mut self) -> std::io::Result<()> {
+        if self.pending.is_empty() {
+            return Ok(());
+        }
+        if let Err(write_error) = self.file.write_all(&self.pending) {
+            let repair = self
+                .file
+                .set_len(self.committed_len)
+                .and_then(|()| self.file.seek(std::io::SeekFrom::Start(self.committed_len)))
+                .map(|_| ());
+            return match repair {
+                Ok(()) => Err(write_error),
+                Err(repair_error) => Err(std::io::Error::new(
+                    write_error.kind(),
+                    format!(
+                        "recording write failed ({write_error}); could not restore the last JSON boundary ({repair_error})"
+                    ),
+                )),
+            };
+        }
+        self.committed_len = self
+            .committed_len
+            .saturating_add(u64::try_from(self.pending.len()).unwrap_or(u64::MAX));
+        self.pending.clear();
+        Ok(())
+    }
+}
+
+impl Write for ReplaySafeCastWriter {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        if self.pending.len().saturating_add(bytes.len()) > CAST_WRITE_BUFFER_BYTES {
+            self.flush_pending()?;
+        }
+        self.pending.extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.flush_pending()?;
+        self.file.flush()
+    }
+}
+
+/// Defers target access until the persistence worker consumes the header. This
+/// keeps a slow recording directory from freezing the GUI event loop while
+/// preserving the same private-open, lock, and retention routines.
+struct LazyTargetCastWriter {
+    target: RecordingTarget,
+    writer: Option<ReplaySafeCastWriter>,
+}
+
+impl LazyTargetCastWriter {
+    fn new(target: RecordingTarget) -> Self {
+        Self {
+            target,
+            writer: None,
+        }
+    }
+
+    fn open(&mut self) -> std::io::Result<&mut ReplaySafeCastWriter> {
+        if self.writer.is_none() {
+            let writer = match &self.target {
+                RecordingTarget::File(path) => {
+                    let file = open_private(path)?;
+                    log::info!("record: secured asynchronous target {}", path.display());
+                    ReplaySafeCastWriter::new(file)
+                }
+                RecordingTarget::Directory(directory) => {
+                    let (path, file) = create_unique_private_recording(directory)?;
+                    if let Err(error) = prepare_private_directory(directory) {
+                        drop(file);
+                        let _ = std::fs::remove_file(&path);
+                        return Err(error);
+                    }
+                    if let Err(error) = prune_recording_directory(
+                        directory,
+                        MAX_RECORD_DIRECTORY_BYTES,
+                        MAX_RECORD_FILES,
+                    ) {
+                        log::warn!(
+                            "record: could not apply retention in {}: {error}",
+                            directory.display()
+                        );
+                    }
+                    log::info!("record: secured asynchronous target {}", path.display());
+                    ReplaySafeCastWriter::new(file)
+                }
+            };
+            self.writer = Some(writer);
+        }
+        Ok(self
+            .writer
+            .as_mut()
+            .expect("target writer was initialized above"))
+    }
+}
+
+impl Write for LazyTargetCastWriter {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        let initializing = self.writer.is_none();
+        let writer = self.open()?;
+        writer.write_all(bytes)?;
+        if initializing {
+            // A created cast must become a valid header-only trace before later
+            // events are accepted from the queue; abrupt clean shutdown can
+            // then lose a tail without leaving an invalid artifact.
+            writer.flush()?;
+        }
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.open()?.flush()
     }
 }
 
@@ -739,7 +992,122 @@ mod tests {
         RecordStatus, Recorder, RecordingTarget, event_line, header_line, printable_token,
         prune_recording_directory, test_tempdir,
     };
+    use crate::persistence::{MAX_PERSISTENCE_ITEM_BYTES, PersistenceLimits};
     use std::io::Write as _;
+    use std::sync::{Arc, Condvar, Mutex};
+    use std::time::{Duration, Instant};
+
+    #[derive(Clone)]
+    struct ControlledSink {
+        shared: Arc<(Mutex<ControlledSinkState>, Condvar)>,
+    }
+
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum SinkMode {
+        Pass,
+        Block,
+        Fail,
+    }
+
+    struct ControlledSinkState {
+        bytes: Vec<u8>,
+        mode: SinkMode,
+        entered: bool,
+        fail_flush: bool,
+    }
+
+    impl ControlledSink {
+        fn new() -> Self {
+            Self {
+                shared: Arc::new((
+                    Mutex::new(ControlledSinkState {
+                        bytes: Vec::new(),
+                        mode: SinkMode::Pass,
+                        entered: false,
+                        fail_flush: false,
+                    }),
+                    Condvar::new(),
+                )),
+            }
+        }
+
+        fn set_mode(&self, mode: SinkMode) {
+            let (state, wake) = &*self.shared;
+            let mut state = state.lock().unwrap();
+            state.mode = mode;
+            state.entered = false;
+            wake.notify_all();
+        }
+
+        fn wait_until_entered(&self) {
+            let (state, wake) = &*self.shared;
+            let deadline = Instant::now() + Duration::from_secs(2);
+            let mut state = state.lock().unwrap();
+            while !state.entered {
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                assert!(
+                    !remaining.is_zero(),
+                    "persistence worker never entered the sink"
+                );
+                let waited = wake.wait_timeout(state, remaining).unwrap();
+                state = waited.0;
+            }
+        }
+
+        fn fail_flush(&self) {
+            let (state, _) = &*self.shared;
+            state.lock().unwrap().fail_flush = true;
+        }
+
+        fn bytes(&self) -> Vec<u8> {
+            self.shared.0.lock().unwrap().bytes.clone()
+        }
+    }
+
+    impl std::io::Write for ControlledSink {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            let (state, wake) = &*self.shared;
+            let mut state = state.lock().unwrap();
+            loop {
+                match state.mode {
+                    SinkMode::Pass => {
+                        state.bytes.extend_from_slice(bytes);
+                        return Ok(bytes.len());
+                    }
+                    SinkMode::Fail => {
+                        state.entered = true;
+                        wake.notify_all();
+                        return Err(std::io::Error::other("injected persistence failure"));
+                    }
+                    SinkMode::Block => {
+                        state.entered = true;
+                        wake.notify_all();
+                        state = wake.wait(state).unwrap();
+                    }
+                }
+            }
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            let (state, wake) = &*self.shared;
+            let mut state = state.lock().unwrap();
+            if state.fail_flush {
+                state.entered = true;
+                wake.notify_all();
+                Err(std::io::Error::other("injected flush failure"))
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    fn parse_cast(bytes: &[u8]) -> Vec<serde_json::Value> {
+        std::str::from_utf8(bytes)
+            .expect("cast must be UTF-8")
+            .lines()
+            .map(|line| serde_json::from_str(line).expect("every cast line must be valid JSON"))
+            .collect()
+    }
 
     #[test]
     fn header_is_valid_asciicast_v2_json() {
@@ -769,6 +1137,196 @@ mod tests {
     fn event_time_has_microsecond_precision() {
         let line = event_line(0.123456, "o", "x");
         assert!(line.starts_with("[0.123456, \"o\","), "{line}");
+    }
+
+    #[test]
+    fn stalled_sink_never_blocks_recording_caller() {
+        let sink = ControlledSink::new();
+        let mut recorder = Recorder::start_with_test_writer(
+            Box::new(sink.clone()),
+            80,
+            24,
+            false,
+            super::MAX_RECORD_BYTES,
+            PersistenceLimits::default(),
+        )
+        .unwrap();
+        sink.set_mode(SinkMode::Block);
+        recorder.record_output(b"worker enters the injected stall");
+        sink.wait_until_entered();
+
+        let started = Instant::now();
+        recorder.record_output(b"caller remains live");
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed < Duration::from_millis(100),
+            "queue admission waited for the stalled sink: {elapsed:?}"
+        );
+
+        sink.set_mode(SinkMode::Pass);
+        recorder.finish();
+        let events = parse_cast(&sink.bytes());
+        assert!(events.iter().any(|event| event[2] == "caller remains live"));
+    }
+
+    #[test]
+    fn asynchronous_finish_and_drop_never_wait_for_stalled_close() {
+        let sink = ControlledSink::new();
+        let mut recorder = Recorder::start_with_test_writer(
+            Box::new(sink.clone()),
+            80,
+            24,
+            false,
+            super::MAX_RECORD_BYTES,
+            PersistenceLimits::default(),
+        )
+        .unwrap();
+        sink.set_mode(SinkMode::Block);
+        recorder.record_output(b"worker remains stalled during shutdown");
+        sink.wait_until_entered();
+
+        let started = Instant::now();
+        recorder.begin_finish();
+        drop(recorder);
+        assert!(
+            started.elapsed() < Duration::from_millis(100),
+            "asynchronous close waited for the stalled sink"
+        );
+        let prefix = parse_cast(&sink.bytes());
+        assert_eq!(
+            prefix.len(),
+            1,
+            "an exit while the worker is stalled must leave a valid header-only prefix"
+        );
+        sink.set_mode(SinkMode::Pass);
+    }
+
+    #[test]
+    fn zero_bound_finish_marks_a_stalled_sink_without_waiting() {
+        let sink = ControlledSink::new();
+        let mut recorder = Recorder::start_with_test_writer(
+            Box::new(sink.clone()),
+            80,
+            24,
+            false,
+            super::MAX_RECORD_BYTES,
+            PersistenceLimits::default(),
+        )
+        .unwrap();
+        sink.set_mode(SinkMode::Block);
+        recorder.record_output(b"deadline-path output");
+        sink.wait_until_entered();
+
+        let started = Instant::now();
+        assert!(!recorder.finish_with_timeout(Duration::ZERO));
+        assert!(
+            started.elapsed() < Duration::from_millis(100),
+            "a zero-bound finish waited for the stalled filesystem"
+        );
+        assert_eq!(recorder.status(), RecordStatus::IoError);
+        assert_eq!(parse_cast(&sink.bytes()).len(), 1);
+        sink.set_mode(SinkMode::Pass);
+    }
+
+    #[test]
+    fn overload_stops_capture_visibly_and_keeps_cast_valid() {
+        let sink = ControlledSink::new();
+        let mut recorder = Recorder::start_with_test_writer(
+            Box::new(sink.clone()),
+            80,
+            24,
+            false,
+            super::MAX_RECORD_BYTES,
+            PersistenceLimits::for_test(1, 1024 * 1024, MAX_PERSISTENCE_ITEM_BYTES),
+        )
+        .unwrap();
+        sink.set_mode(SinkMode::Block);
+        recorder.record_output(b"accepted before stall");
+        sink.wait_until_entered();
+        recorder.record_output(b"accepted in bounded queue");
+        recorder.record_output(b"must not be silently dropped");
+
+        assert_eq!(recorder.status(), RecordStatus::Overloaded);
+        assert_eq!(
+            recorder.take_status_change(),
+            Some(RecordStatus::Overloaded),
+            "the owner must receive an observable incomplete-trace edge"
+        );
+        sink.set_mode(SinkMode::Pass);
+        recorder.finish();
+
+        let events = parse_cast(&sink.bytes());
+        let output: String = events
+            .iter()
+            .skip(1)
+            .filter(|event| event[1] == "o")
+            .filter_map(|event| event[2].as_str())
+            .collect();
+        assert_eq!(
+            output, "accepted before stallaccepted in bounded queue",
+            "everything admitted before overload must drain, and later output must stop"
+        );
+    }
+
+    #[test]
+    fn failing_sink_is_reported_without_blocking_and_leaves_valid_prefix() {
+        let sink = ControlledSink::new();
+        let mut recorder = Recorder::start_with_test_writer(
+            Box::new(sink.clone()),
+            80,
+            24,
+            false,
+            super::MAX_RECORD_BYTES,
+            PersistenceLimits::default(),
+        )
+        .unwrap();
+        sink.set_mode(SinkMode::Fail);
+
+        let started = Instant::now();
+        recorder.record_output(b"injected write failure");
+        assert!(
+            started.elapsed() < Duration::from_millis(100),
+            "record_output waited for an injected write error"
+        );
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while recorder.status() == RecordStatus::Recording && Instant::now() < deadline {
+            std::thread::yield_now();
+        }
+        assert_eq!(recorder.status(), RecordStatus::IoError);
+        assert_eq!(recorder.take_status_change(), Some(RecordStatus::IoError));
+        let events = parse_cast(&sink.bytes());
+        assert_eq!(events.len(), 1, "the last committed prefix is the header");
+    }
+
+    #[test]
+    fn worker_owned_flush_deadline_reports_a_silent_tail_failure() {
+        let sink = ControlledSink::new();
+        let mut recorder = Recorder::start_with_test_writer(
+            Box::new(sink.clone()),
+            80,
+            24,
+            false,
+            super::MAX_RECORD_BYTES,
+            PersistenceLimits::default(),
+        )
+        .unwrap();
+        let (wake_tx, wake_rx) = std::sync::mpsc::sync_channel(1);
+        recorder.set_failure_waker(Arc::new(move || {
+            let _ = wake_tx.try_send(());
+        }));
+        sink.fail_flush();
+        recorder.record_output(b"no later event drives a flush");
+
+        wake_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("the worker's precise stale-flush deadline must publish failure");
+        assert_eq!(recorder.status(), RecordStatus::IoError);
+        let events = parse_cast(&sink.bytes());
+        assert!(
+            events
+                .iter()
+                .any(|event| event[2] == "no later event drives a flush")
+        );
     }
 
     #[test]
@@ -957,6 +1515,58 @@ mod tests {
             events.iter().any(|e| e[1] == "r" && e[2] == "100x30"),
             "resize event missing"
         );
+    }
+
+    #[test]
+    fn asynchronous_target_start_is_lossless_and_replayable() {
+        let temp = test_tempdir();
+        let path = temp.path().join("async-replay.cast");
+        let mut recorder =
+            Recorder::start_target_async(&RecordingTarget::File(path.clone()), 80, 24, false)
+                .unwrap();
+        recorder.record_output(b"opening output");
+        recorder.record_resize(120, 40);
+        recorder.record_output(b"closing output");
+        recorder.finish();
+
+        let events = parse_cast(&std::fs::read(&path).unwrap());
+        let output: String = events
+            .iter()
+            .skip(1)
+            .filter(|event| event[1] == "o")
+            .filter_map(|event| event[2].as_str())
+            .collect();
+        assert_eq!(output, "opening outputclosing output");
+        assert!(
+            events
+                .iter()
+                .any(|event| event[1] == "r" && event[2] == "120x40")
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+        }
+    }
+
+    #[test]
+    fn asynchronous_target_lock_failure_is_observable() {
+        let temp = test_tempdir();
+        let path = temp.path().join("async-active.cast");
+        let active = Recorder::start(&path, 80, 24, false).unwrap();
+        let mut rejected =
+            Recorder::start_target_async(&RecordingTarget::File(path), 80, 24, false).unwrap();
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while rejected.status() == RecordStatus::Recording && Instant::now() < deadline {
+            std::thread::yield_now();
+        }
+        assert_eq!(rejected.status(), RecordStatus::IoError);
+        assert_eq!(rejected.take_status_change(), Some(RecordStatus::IoError));
+        drop(active);
     }
 
     #[test]

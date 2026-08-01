@@ -727,11 +727,19 @@ committed as a regression fixture and re-fed without a PTY or auth.
 **Recorder boundaries.** `kettle-core` tests exact-limit and limit-plus-one
 events, UTF-8 splits, the visible limit marker, unique private directory files,
 exclusive-writer refusal, link rejection, locked-file retention, and pruning by
-both count and bytes without touching unrelated names. `kettle-ui` pins the
-`[REC]` / `[REC LIMIT]` / `[REC ERROR]` title states and lossless redraw/close
-fan-out. `kettle exec` integration tests prove an unavailable recording path
-prevents child startup with status 125 and that cancellation promptly closes a
-replayable trace.
+both count and bytes without touching unrelated names. Injected writer tests
+hold a sink inside `write`, force a one-slot overload, and return a write error;
+they prove producer admission and asynchronous drop remain prompt, pre-overload
+events drain, failure states are observable, and every retained cast line parses
+as JSON. A zero-bound finish test proves imposed exec stops detach a stalled
+sink without waiting. The ordinary asynchronous-target test proves output and
+resize events remain lossless and replayable. A session-log test proves secure
+target creation does not occur until its persistence worker receives data.
+`kettle-ui` pins the `[REC]` / `[REC LIMIT]` /
+`[REC INCOMPLETE]` / `[REC ERROR]` title states and lossless redraw/close fan-out.
+`kettle exec` integration tests prove an unavailable recording path prevents
+child startup with status 125, a normal run writes replayable output, and
+cancellation promptly closes a replayable trace.
 
 **Windows Codex footer cursor.** Native Windows Codex goes through ConPTY. Its
 active repaint can finish with a visible cursor on the status row and then move
