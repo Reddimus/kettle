@@ -1,7 +1,7 @@
 //! A single terminal instance: PTY + `alacritty_terminal` grid + VT parser,
 //! driven by a dedicated reader thread.
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::io::{self, Read, Write};
 #[cfg(unix)]
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
@@ -5171,27 +5171,50 @@ impl Terminal {
     }
 
     pub fn placeholder_tiles(&self) -> Vec<Placement> {
+        // Read the grid FIRST, and never while holding `virtuals`. The PTY
+        // reader holds `term` and then takes `virtuals` to replay a deferred
+        // kitty virtual chunk, so holding `virtuals` across a `term` acquisition
+        // here is the opposite order and deadlocks: a child that emits
+        // `CSI ? 2026 h`, a deferred virtual placement, placeholder cells and
+        // `CSI ? 2026 l` while the UI paints parks both threads forever and
+        // freezes the pane. `relative_tiles` below already keeps one order;
+        // this is the same discipline, and the two locks now never overlap.
+        let cells = self.placeholder_cells();
+        if cells.is_empty() {
+            return Vec::new();
+        }
+
         let Ok(virtuals) = self.virtuals.lock() else {
             return Vec::new();
         };
         if virtuals.is_empty() {
             return Vec::new();
         }
+
+        // A zero/omitted underline placement id selects any virtual placement
+        // for the image; the smallest id is chosen so rendering and tests are
+        // deterministic. Resolving that per cell rescanned every virtual, which
+        // is O(cells x virtuals) — up to 256x256 scans in a single frame. One
+        // pass builds the answer for every image instead.
+        let mut smallest_for_image: HashMap<u32, u32> = HashMap::new();
+        for (image_id, placement_id) in virtuals.keys() {
+            smallest_for_image
+                .entry(*image_id)
+                .and_modify(|current| *current = (*current).min(*placement_id))
+                .or_insert(*placement_id);
+        }
+
         let mut out = Vec::new();
-        for (abs, col, res) in self.placeholder_cells() {
-            let selected = if res.placement_id != 0 {
-                virtuals.get(&(res.image_id, res.placement_id))
+        for (abs, col, res) in cells {
+            let placement_id = if res.placement_id != 0 {
+                res.placement_id
             } else {
-                // The protocol allows a zero/omitted underline placement id
-                // to select any virtual placement for the image. Pick the
-                // smallest id for deterministic rendering and tests.
-                virtuals
-                    .iter()
-                    .filter(|((image_id, _), _)| *image_id == res.image_id)
-                    .min_by_key(|((_, placement_id), _)| *placement_id)
-                    .map(|(_, entry)| entry)
+                let Some(smallest) = smallest_for_image.get(&res.image_id) else {
+                    continue;
+                };
+                *smallest
             };
-            let Some(v) = selected else {
+            let Some(v) = virtuals.get(&(res.image_id, placement_id)) else {
                 continue;
             };
             if let Some(placement) = placeholder_tile_placement(abs, col, res, v) {
@@ -7014,6 +7037,65 @@ mod cwd_reporting_tests {
         assert_eq!(
             reported_current_dir(true, Some("/shell/reported".to_owned())),
             Some("/shell/reported".to_owned())
+        );
+    }
+}
+
+/// The PTY reader holds `term` and then takes `virtuals` to replay a deferred
+/// kitty virtual chunk. Any render path that takes them in the opposite order
+/// is an ABBA deadlock: a child emitting `CSI ? 2026 h`, a deferred virtual
+/// placement, placeholder cells and `CSI ? 2026 l` while the UI paints parks
+/// both threads forever and freezes the pane. `placeholder_tiles` used to hold
+/// `virtuals` across a `placeholder_cells` call, which takes `term`.
+///
+/// A behavioural test cannot force that interleaving deterministically, so pin
+/// the shape instead: the grid read must complete before `virtuals` is locked,
+/// and the two must never be held together.
+#[cfg(test)]
+mod placeholder_lock_order_tests {
+    #[test]
+    fn placeholder_tiles_reads_the_grid_before_locking_virtuals() {
+        // Normalized, like every other source guard in this file: the split
+        // patterns below embed `\n`, so a CRLF checkout would silently find
+        // nothing and fail on an unrelated-looking `expect`.
+        let src = include_str!("term.rs").replace("\r\n", "\n");
+        let body = src
+            .split("pub fn placeholder_tiles(&self) -> Vec<Placement> {")
+            .nth(1)
+            .and_then(|rest| rest.split("\n    pub fn ").next())
+            .expect("placeholder_tiles body");
+
+        let cells_at = body
+            .find("self.placeholder_cells()")
+            .expect("placeholder_tiles must read the grid");
+        let virtuals_at = body
+            .find("self.virtuals.lock()")
+            .expect("placeholder_tiles must consult the virtual map");
+
+        assert!(
+            cells_at < virtuals_at,
+            "placeholder_tiles must finish its `term` read before locking \
+             `virtuals`; the reader takes those in the opposite order"
+        );
+    }
+
+    /// `relative_tiles` is the in-repo precedent: snapshot under one lock, drop
+    /// it, then take the others. Keep its comment honest so the discipline is
+    /// discoverable from either function.
+    #[test]
+    fn relative_tiles_still_documents_the_single_acquisition_order() {
+        // Normalized, like every other source guard in this file: the split
+        // patterns below embed `\n`, so a CRLF checkout would silently find
+        // nothing and fail on an unrelated-looking `expect`.
+        let src = include_str!("term.rs").replace("\r\n", "\n");
+        let body = src
+            .split("pub fn relative_tiles(&self) -> Vec<Placement> {")
+            .nth(1)
+            .and_then(|rest| rest.split("\n    pub fn ").next())
+            .expect("relative_tiles body");
+        assert!(
+            body.contains("single lock-acquisition order"),
+            "relative_tiles must keep stating why it snapshots before locking"
         );
     }
 }
