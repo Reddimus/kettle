@@ -29,6 +29,7 @@ use crate::images::{
     AnimEntry, Animations, ImageSourceCrop, ImageSourceRect, Images, Placement, PlacementParams,
     RelEntry, Relatives, VirtualEntry, Virtuals, prune, relative_origin, resolve_chain,
 };
+use crate::persistence::{AsyncFileWriter, AsyncWriterStatus};
 
 const PTY_READ_BUFFER_BYTES: usize = 64 * 1024;
 const PTY_PUMP_QUEUE_DEPTH: usize = 4;
@@ -2059,6 +2060,48 @@ pub struct ProtocolNotification {
     pub body: String,
 }
 
+/// Why a per-pane session log stopped before the user toggled it off.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SessionLogFailure {
+    Overloaded,
+    IoError,
+}
+
+/// Open the private append target only after the persistence worker owns this
+/// value. Creating or hardening a file can reach a slow filesystem just as a
+/// data write can, so winit must not perform that preparation for the parser.
+struct LazySessionLogWriter {
+    path: std::path::PathBuf,
+    writer: Option<std::io::BufWriter<std::fs::File>>,
+}
+
+impl LazySessionLogWriter {
+    fn new(path: std::path::PathBuf) -> Self {
+        Self { path, writer: None }
+    }
+
+    fn writer(&mut self) -> std::io::Result<&mut std::io::BufWriter<std::fs::File>> {
+        if self.writer.is_none() {
+            let file = kettle_state::open_private_file_append(&self.path)?;
+            self.writer = Some(std::io::BufWriter::new(file));
+        }
+        Ok(self
+            .writer
+            .as_mut()
+            .expect("session log writer was initialized above"))
+    }
+}
+
+impl Write for LazySessionLogWriter {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.writer()?.write(bytes)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.writer()?.flush()
+    }
+}
+
 pub struct Terminal {
     pub term: SharedTerm,
     term_config: TermConfig,
@@ -2154,15 +2197,14 @@ pub struct Terminal {
     /// The argv this pane was launched with (empty = default shell);
     /// persisted so SSH/remote panes can be restored.
     pub argv: Vec<String>,
-    /// Terminator parity (`plugins/logger.py`): optional
-    /// per-pane session log. When `Some(file)`, the reader thread
-    /// writes a copy of every raw PTY byte to the file (best-effort:
-    /// I/O errors are swallowed so a full disk doesn't take down
-    /// the reader). When `None`, zero cost on the hot path — the
-    /// v2.20.0 `log_active` flag short-circuits before the lock.
-    /// Private since v2.20.0 (P7): flip it via [`Terminal::set_log_file`]
+    /// Terminator parity (`plugins/logger.py`): optional per-pane session log.
+    /// The reader admits raw PTY bytes to a bounded worker and never performs
+    /// filesystem I/O. When `None`, zero cost on the hot path — the `log_active`
+    /// flag short-circuits before the lock.
+    /// Private: flip it via [`Terminal::set_log_path`] or
+    /// [`Terminal::set_log_file`]
     /// so `log_active` can never drift out of sync.
-    log_file: Arc<Mutex<Option<std::fs::File>>>,
+    session_log: Arc<Mutex<Option<AsyncFileWriter>>>,
     /// When `true`, the logger strips ANSI escape
     /// sequences (CSI / OSC / single-char ESC) from the bytes
     /// before writing — leaving plain-text-searchable logs.
@@ -2176,12 +2218,19 @@ pub struct Terminal {
     /// command tracking works, and a false idle skips the close-confirm
     /// dialog over a running command.
     output_start_seen: Arc<std::sync::atomic::AtomicBool>,
-    /// v2.20.0 P7 (perf): mirrors `log_file.is_some()` so the reader thread
-    /// can skip the per-read `log_file` Mutex entirely when logging is off
+    /// Mirrors an active session-log writer so the reader thread can skip its
+    /// per-read Mutex entirely when logging is off
     /// (the overwhelmingly common case — the lock + Option check ran once
-    /// per 64KiB read). Toggled ONLY through [`Terminal::set_log_file`],
+    /// per 64KiB read). Toggled ONLY through [`Terminal::set_log_path`] or
+    /// [`Terminal::set_log_file`],
     /// which keeps the pair in sync.
     log_active: Arc<std::sync::atomic::AtomicBool>,
+    /// Keeps worker-side failure reporting edge-triggered while preserving the
+    /// failed writer long enough for the UI to observe its exact reason.
+    log_failure_reported: AtomicBool,
+    /// A persistence failure can happen after PTY output falls silent, so the
+    /// writer needs an independent route back to the event loop.
+    log_waker: Waker,
     /// Exact grid + pixel geometry shared with the PTY reader's image parser.
     /// Image-to-cell conversion divides by the effective fractional cell size
     /// derived from these totals, so it agrees with both `PtySize` and CSI 14t.
@@ -3903,12 +3952,11 @@ impl Terminal {
             geometry,
             generation: 0,
         }));
-        // Terminator parity (`plugins/logger.py`): per-pane
-        // session log. Default None; `Action::ToggleSessionLog`
-        // opens/closes it at runtime. The reader thread holds a
-        // clone and writes raw PTY bytes when Some.
-        let log_file: Arc<Mutex<Option<std::fs::File>>> = Arc::new(Mutex::new(None));
-        let log_file_for_struct = log_file.clone();
+        // Terminator parity (`plugins/logger.py`): per-pane session log.
+        // Default None; `Action::ToggleSessionLog` installs a bounded writer at
+        // runtime. The reader thread retains only its nonblocking admission end.
+        let session_log: Arc<Mutex<Option<AsyncFileWriter>>> = Arc::new(Mutex::new(None));
+        let session_log_for_struct = session_log.clone();
         let log_active: Arc<std::sync::atomic::AtomicBool> =
             Arc::new(std::sync::atomic::AtomicBool::new(false));
         let log_active_for_struct = log_active.clone();
@@ -3946,7 +3994,7 @@ impl Terminal {
             let progress_cell = progress_cell.clone();
             let shared_geometry = shared_geometry.clone();
             let output_wake = output_wake.clone();
-            let log_file = log_file.clone();
+            let session_log = session_log.clone();
             let log_strip_ansi = log_strip_ansi.clone();
             let log_active = log_active.clone();
             let stop = stop.clone();
@@ -4121,24 +4169,22 @@ impl Terminal {
                                 if stop.load(Ordering::Relaxed) {
                                     break;
                                 }
-                                // Terminator parity (logger.py):
-                                // per-pane session log tap. Best-effort —
-                                // I/O errors are swallowed so a full disk
-                                // doesn't crash the reader. Held lock is
-                                // brief (just the write call).
-                                // v2.20.0 P7: the atomic flag short-circuits
-                                // the lock when no log is installed.
+                                // Terminator parity (logger.py): per-pane log
+                                // tap. A full disk or vanished mount must not
+                                // stop this parser from draining the PTY, so the
+                                // lock covers bounded queue admission only.
                                 if log_active.load(std::sync::atomic::Ordering::Relaxed)
-                                    && let Ok(mut guard) = log_file.lock()
-                                    && let Some(f) = guard.as_mut()
+                                    && let Ok(mut guard) = session_log.lock()
+                                    && let Some(writer) = guard.as_mut()
                                 {
-                                    use std::io::Write as _;
                                     let strip = log_strip_ansi.lock().map(|g| *g).unwrap_or(false);
-                                    if strip {
-                                        let cleaned = ansi_stripper.strip(&buffer);
-                                        let _ = f.write_all(&cleaned);
+                                    let bytes = if strip {
+                                        ansi_stripper.strip(&buffer)
                                     } else {
-                                        let _ = f.write_all(&buffer);
+                                        buffer.clone()
+                                    };
+                                    if writer.try_write(bytes).is_err() {
+                                        log_active.store(false, Ordering::Release);
                                     }
                                 }
                                 // Ship raw PTY bytes to the
@@ -4804,9 +4850,11 @@ impl Terminal {
             osc_cwd_seen: osc_cwd_seen_for_struct,
             progress: progress_cell,
             argv: argv.to_vec(),
-            log_file: log_file_for_struct,
+            session_log: session_log_for_struct,
             log_strip_ansi: log_strip_ansi_for_struct,
             log_active: log_active_for_struct,
+            log_failure_reported: AtomicBool::new(false),
+            log_waker: waker,
             output_start_seen: output_start_seen_for_struct,
             geometry: shared_geometry,
             applied_pty_geometry: geometry,
@@ -4876,25 +4924,89 @@ impl Terminal {
         seen_prompts && tracks_commands && !running
     }
 
-    /// v2.20.0 P7: install (`Some`) or remove (`None`) the per-pane session
-    /// log. The ONLY way to flip logging — it updates the reader thread's
-    /// `log_active` fast-path flag inside the same lock scope, so the flag
-    /// can never drift from the slot. Returns `true` if a log was active
-    /// before this call.
-    pub fn set_log_file(&self, file: Option<std::fs::File>) -> bool {
-        let Ok(mut guard) = self.log_file.lock() else {
-            return false;
-        };
-        let was = guard.is_some();
-        self.log_active
-            .store(file.is_some(), std::sync::atomic::Ordering::Relaxed);
-        *guard = file;
-        was
+    /// Install a path whose secure open/create is deferred to the persistence
+    /// worker, or remove the current per-pane session log. This is the UI path:
+    /// no filesystem operation or file close can run on the event loop.
+    pub fn set_log_path(&self, path: Option<std::path::PathBuf>) -> std::io::Result<bool> {
+        self.set_log_writer(
+            path.map(|path| Box::new(LazySessionLogWriter::new(path)) as Box<dyn Write + Send>),
+        )
+    }
+
+    /// Install an already-open file for callers that own file preparation, or
+    /// remove the current per-pane session log. Production UI callers use
+    /// [`Terminal::set_log_path`] so file preparation stays off winit.
+    pub fn set_log_file(&self, file: Option<std::fs::File>) -> std::io::Result<bool> {
+        self.set_log_writer(
+            file.map(|file| Box::new(std::io::BufWriter::new(file)) as Box<dyn Write + Send>),
+        )
+    }
+
+    fn set_log_writer(&self, writer: Option<Box<dyn Write + Send>>) -> std::io::Result<bool> {
+        let mut guard = self
+            .session_log
+            .lock()
+            .map_err(|_| std::io::Error::other("session log lock poisoned"))?;
+        let was = self.log_active.load(Ordering::Acquire);
+        match writer {
+            Some(writer) => {
+                if let Some(previous) = guard.as_mut() {
+                    if !previous.try_join() {
+                        return Err(std::io::Error::new(
+                            std::io::ErrorKind::WouldBlock,
+                            "the previous session log is still closing",
+                        ));
+                    }
+                    *guard = None;
+                }
+                let mut writer = AsyncFileWriter::spawn("kettle-session-log-writer", writer)?;
+                let active = Arc::clone(&self.log_active);
+                let wake = Arc::clone(&self.log_waker);
+                writer.set_failure_waker(Arc::new(move || {
+                    active.store(false, Ordering::Release);
+                    wake();
+                }));
+                self.log_failure_reported.store(false, Ordering::Release);
+                *guard = Some(writer);
+                self.log_active.store(true, Ordering::Release);
+            }
+            None => {
+                self.log_active.store(false, Ordering::Release);
+                self.log_failure_reported.store(false, Ordering::Release);
+                if let Some(writer) = guard.as_mut() {
+                    writer.request_finish();
+                }
+            }
+        }
+        Ok(was)
     }
 
     /// Whether a session log is currently installed.
     pub fn log_enabled(&self) -> bool {
-        self.log_active.load(std::sync::atomic::Ordering::Relaxed)
+        self.log_active.load(Ordering::Acquire)
+    }
+
+    /// Return one user-reportable failure edge from the background logger.
+    pub fn take_session_log_failure(&self) -> Option<SessionLogFailure> {
+        if self.log_failure_reported.load(Ordering::Acquire) {
+            return None;
+        }
+        let mut guard = self.session_log.lock().ok()?;
+        let writer = guard.as_mut()?;
+        let failure = match writer.status() {
+            AsyncWriterStatus::Overloaded => SessionLogFailure::Overloaded,
+            AsyncWriterStatus::IoError => SessionLogFailure::IoError,
+            AsyncWriterStatus::Active | AsyncWriterStatus::Finished => return None,
+        };
+        if self
+            .log_failure_reported
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+        {
+            Some(failure)
+        } else {
+            None
+        }
     }
 
     /// Last working directory reported via OSC 7 (or OSC 9;9), if any. This is
@@ -7464,9 +7576,11 @@ mod wslenv_tests {
 
 #[cfg(test)]
 mod home_dir_tests {
-    use super::home_dir_fallback;
+    use super::{LazySessionLogWriter, home_dir_fallback};
+    use crate::persistence::AsyncFileWriter;
     use std::ffi::OsString;
     use std::path::PathBuf;
+    use std::time::Duration;
 
     fn from<'a>(pairs: &'a [(&'a str, &'a str)]) -> impl Fn(&str) -> Option<OsString> + 'a {
         move |k| {
@@ -7569,6 +7683,69 @@ mod home_dir_tests {
         // Plain ASCII passes through unchanged.
         let s = b"no escapes here";
         assert_eq!(strip_ansi_bytes(s), b"no escapes here");
+    }
+
+    #[test]
+    fn session_log_parser_tap_only_uses_bounded_worker_admission() {
+        let source = include_str!("term.rs");
+        let tap = source
+            .split("// Terminator parity (logger.py): per-pane log")
+            .nth(1)
+            .and_then(|body| body.split("// Ship raw PTY bytes").next())
+            .expect("session-log parser tap");
+        assert!(
+            tap.contains("writer.try_write(bytes)"),
+            "the parser must hand log chunks to the shared persistence worker"
+        );
+        assert!(
+            !tap.contains("write_all") && !tap.contains(".flush("),
+            "filesystem write and flush calls must stay off the parser thread"
+        );
+    }
+
+    #[test]
+    fn session_log_target_open_is_deferred_to_the_persistence_worker() {
+        #[cfg(windows)]
+        let temp = {
+            let base = std::env::var_os("LOCALAPPDATA")
+                .or_else(|| std::env::var_os("USERPROFILE"))
+                .expect("Windows tests require LOCALAPPDATA or USERPROFILE");
+            tempfile::Builder::new()
+                .prefix("kettle-session-log-test-")
+                .tempdir_in(base)
+                .unwrap()
+        };
+        #[cfg(not(windows))]
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("deferred-session.log");
+        let sink = LazySessionLogWriter::new(path.clone());
+        assert!(
+            !path.exists(),
+            "constructing the handoff must not touch the filesystem"
+        );
+
+        let mut writer = AsyncFileWriter::spawn("session-log-open-test", Box::new(sink)).unwrap();
+        assert!(
+            !path.exists(),
+            "an idle persistence worker must not create the target before data arrives"
+        );
+        writer
+            .try_write(b"native parser output\n".to_vec())
+            .unwrap();
+        assert!(
+            writer.finish_with_timeout(Duration::from_secs(2)),
+            "deferred private target failed with {:?}",
+            writer.status()
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), b"native parser output\n");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+        }
     }
 
     /// Regression test for the split-mid-sequence log-corruption bug: a

@@ -65,6 +65,10 @@ const OUTPUT_WRITER_QUEUE_DEPTH: usize = 4;
 /// Apply the same lifecycle fairness to semantic events. The queue remains
 /// substantially deeper so a short burst can be absorbed without loss.
 const EVENT_SLICE_MESSAGES: usize = 256;
+/// Healthy local recording sinks finish well inside this bound. Crossing it is
+/// treated as an observable persistence failure instead of extending command
+/// completion indefinitely.
+const RECORD_FINISH_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Exit code for `--timeout` expiry when no child status was collected
 /// (coreutils `timeout(1)` convention).
@@ -450,9 +454,7 @@ fn stop_after_output_failure(
     let _ = wait_for_exit_code(term);
     std::thread::sleep(SETTLE);
     drain_recording_slice(raw_output, recorder);
-    if let Some(mut recorder) = recorder.take() {
-        recorder.finish();
-    }
+    finish_recording(recorder, Duration::ZERO);
     let _ = output.finish(
         EXIT_OUTPUT_DELIVERY,
         started.elapsed(),
@@ -638,6 +640,7 @@ fn run_exec_engine(
     let mut child_gone_at: Option<Instant> = None;
     let mut child_exit_code: Option<i32> = None;
     let mut completion_code: Option<i32> = None;
+    let mut recording_finish_deadline: Option<Instant> = None;
     let mut last_lifecycle_trace = started;
 
     loop {
@@ -687,12 +690,14 @@ fn run_exec_engine(
             // readiness again. Preserve the bounded audit tail directly from
             // the raw PTY channel, then apply the explicit abandon contract.
             drain_recording_slice(&orx, &mut recorder);
-            if let Some(mut recorder) = recorder.take() {
-                recorder.finish();
-            }
+            finish_recording(&mut recorder, Duration::ZERO);
             let _ = output.finish(code, started.elapsed(), OutputFinish::AbandonPending);
             log::debug!("kettle exec bounded stop teardown finished");
             return code;
+        }
+
+        if let Some(recorder) = recorder.as_mut() {
+            report_recording_status(recorder);
         }
 
         // Ordinary completion is also driven asynchronously. In particular,
@@ -700,7 +705,13 @@ fn run_exec_engine(
         // write/flush can become blocked after the child has exited.
         if let Some(code) = completion_code {
             let _ = output_or_stop!(output.ready());
-            if output_or_stop!(output.completion_ready()) {
+            let output_complete = output_or_stop!(output.completion_ready());
+            let recording_complete = poll_recording_finish(
+                &mut recorder,
+                recording_finish_deadline
+                    .expect("ordinary completion must bound recorder finalization"),
+            );
+            if output_complete && recording_complete {
                 return code;
             }
             std::thread::sleep(Duration::from_millis(8));
@@ -887,9 +898,7 @@ fn run_exec_engine(
             let _ = wait_for_exit_code(&term);
             std::thread::sleep(SETTLE);
             let _ = output_or_stop!(drain_output_slice(&orx, &mut recorder, output));
-            if let Some(mut recorder) = recorder.take() {
-                recorder.finish();
-            }
+            finish_recording(&mut recorder, Duration::ZERO);
             let _ = output.finish(
                 EXIT_INTERNAL,
                 started.elapsed(),
@@ -912,9 +921,7 @@ fn run_exec_engine(
                 let _ = wait_for_exit_code(&term);
                 std::thread::sleep(SETTLE);
                 let _ = output_or_stop!(drain_output_slice(&orx, &mut recorder, output));
-                if let Some(mut recorder) = recorder.take() {
-                    recorder.finish();
-                }
+                finish_recording(&mut recorder, Duration::ZERO);
                 let _ = output.finish(
                     EXIT_INTERNAL,
                     started.elapsed(),
@@ -955,8 +962,11 @@ fn run_exec_engine(
                 let final_output_backlog =
                     output_or_stop!(drain_output_slice(&orx, &mut recorder, output));
                 if !final_output_backlog && orx.is_empty() && output_or_stop!(output.drained()) {
-                    if let Some(mut r) = recorder.take() {
-                        r.finish();
+                    if let Some(recorder) = recorder.as_mut() {
+                        recorder.begin_finish();
+                        recording_finish_deadline = Some(Instant::now() + RECORD_FINISH_TIMEOUT);
+                    } else {
+                        recording_finish_deadline = Some(Instant::now());
                     }
                     let code = child_exit_code.unwrap_or(EXIT_INTERNAL);
                     output_or_stop!(
@@ -1222,24 +1232,64 @@ fn linux_descendants(root: u32, limit: usize) -> Vec<u32> {
 }
 
 fn record_chunk(recorder: &mut Option<kettle_core::record::Recorder>, bytes: &[u8]) {
-    use kettle_core::record::RecordStatus;
-
     let Some(recorder) = recorder.as_mut() else {
         return;
     };
-    let previous = recorder.status();
     recorder.record_output(bytes);
-    if previous == RecordStatus::Recording && recorder.status() != previous {
-        let reason = match recorder.status() {
-            RecordStatus::LimitReached => "512 MiB session limit reached",
-            RecordStatus::IoError => "recording I/O failed",
-            RecordStatus::Recording => return,
-        };
-        let _ = writeln!(
-            std::io::stderr(),
-            "kettle exec: asciicast capture stopped ({reason}); child execution continues"
-        );
+    report_recording_status(recorder);
+}
+
+fn report_recording_status(recorder: &mut kettle_core::record::Recorder) {
+    use kettle_core::record::RecordStatus;
+
+    let Some(status) = recorder.take_status_change() else {
+        return;
+    };
+    let reason = match status {
+        RecordStatus::LimitReached => "512 MiB session limit reached",
+        RecordStatus::Overloaded => "bounded persistence queue filled; the asciicast is incomplete",
+        RecordStatus::IoError => "recording I/O failed or finalization exceeded its bound",
+        RecordStatus::Recording => return,
+    };
+    let _ = writeln!(
+        std::io::stderr(),
+        "kettle exec: asciicast capture stopped ({reason}); the trace is incomplete"
+    );
+}
+
+fn finish_recording(recorder: &mut Option<kettle_core::record::Recorder>, timeout: Duration) {
+    if let Some(mut recorder) = recorder.take() {
+        // `finish_with_timeout` polls `is_finished` and joins only an exited
+        // worker. A filesystem call that never returns therefore consumes this
+        // explicit grace, never the lifecycle thread's remaining lifetime.
+        let _ = recorder.finish_with_timeout(timeout);
+        report_recording_status(&mut recorder);
     }
+}
+
+fn poll_recording_finish(
+    recorder: &mut Option<kettle_core::record::Recorder>,
+    deadline: Instant,
+) -> bool {
+    let Some(active) = recorder.as_mut() else {
+        return true;
+    };
+    if active.try_finish() {
+        report_recording_status(active);
+        recorder.take();
+        return true;
+    }
+    report_recording_status(active);
+    if Instant::now() < deadline {
+        return false;
+    }
+    // A zero-duration final poll marks a writer still inside the OS as failed
+    // and detaches it. The CLI reports that failure before returning, while a
+    // healthy worker is joined only after `is_finished` proved it safe.
+    let mut active = recorder.take().expect("recorder was present above");
+    let _ = active.finish_with_timeout(Duration::ZERO);
+    report_recording_status(&mut active);
+    true
 }
 
 /// Map a child's raw exit code into the code this process should report.
