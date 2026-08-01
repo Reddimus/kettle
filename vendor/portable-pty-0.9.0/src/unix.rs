@@ -132,47 +132,58 @@ fn tty_name(fd: RawFd) -> Option<PathBuf> {
     }
 }
 
-/// On Big Sur, Cocoa leaks various file descriptors to child processes,
-/// so we need to make a pass through the open descriptors beyond just the
-/// stdio descriptors and close them all out.
-/// This is approximately equivalent to the darwin `posix_spawnattr_setflags`
-/// option POSIX_SPAWN_CLOEXEC_DEFAULT which is used as a bit of a cheat
-/// on macOS.
-/// On Linux, gnome/mutter leak shell extension fds to wezterm too, so we
-/// also need to make an effort to clean up the mess.
+const FIRST_INHERITED_FD: libc::c_int = 3;
+const MAX_FD_SWEEP: libc::rlim_t = 1_048_576;
+
+fn descriptor_sweep_limit() -> libc::c_int {
+    let mut limits = libc::rlimit {
+        rlim_cur: 0,
+        rlim_max: 0,
+    };
+    let soft_limit = if unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut limits) } == 0 {
+        limits.rlim_cur
+    } else {
+        MAX_FD_SWEEP
+    };
+
+    // Linux's default per-process fd ceiling is a practical fallback bound;
+    // larger or unlimited values must not make child setup effectively hang.
+    soft_limit.min(MAX_FD_SWEEP) as libc::c_int
+}
+
+/// Prevent leaked descriptors from surviving into the executed program.
 ///
-/// This function enumerates the open filedescriptors in the current process
-/// and then will forcibly call close(2) on each open fd that is numbered
-/// 3 or higher, effectively closing all descriptors except for the stdio
-/// streams.
-///
-/// The implementation of this function relies on `/dev/fd` being available
-/// to provide the list of open fds.  Any errors in enumerating or closing
-/// the fds are silently ignored.
-pub fn close_random_fds() {
-    // FreeBSD, macOS and presumably other BSDish systems have /dev/fd as
-    // a directory listing the current fd numbers for the process.
-    //
-    // On Linux, /dev/fd is a symlink to /proc/self/fd
-    if let Ok(dir) = std::fs::read_dir("/dev/fd") {
-        let mut fds = vec![];
-        for entry in dir {
-            if let Some(num) = entry
-                .ok()
-                .map(|e| e.file_name())
-                .and_then(|s| s.into_string().ok())
-                .and_then(|n| n.parse::<libc::c_int>().ok())
-            {
-                if num > 2 {
-                    fds.push(num);
-                }
-            }
+/// Cocoa can leak descriptors on macOS, and gnome/mutter shell extensions can
+/// do the same on Linux. Marking them close-on-exec preserves Rust's private
+/// exec-error channel until it has reported a failed exec to the parent.
+fn mark_random_fds_cloexec(max_fd: libc::c_int) {
+    #[cfg(target_os = "linux")]
+    {
+        // A raw syscall avoids imposing a newer glibc symbol requirement on
+        // binaries that still run on older Linux distributions.
+        if unsafe {
+            libc::syscall(
+                libc::SYS_close_range,
+                FIRST_INHERITED_FD as libc::c_uint,
+                libc::c_uint::MAX,
+                libc::CLOSE_RANGE_CLOEXEC,
+            )
+        } == 0
+        {
+            return;
         }
-        for fd in fds {
-            unsafe {
-                libc::close(fd);
-            }
+        // Older kernels and sandboxes that reject close_range still need the
+        // portable sweep below or inherited descriptors would escape.
+    }
+
+    let mut fd = FIRST_INHERITED_FD;
+    while fd < max_fd {
+        // Invalid descriptors are expected in this sparse range; ignoring
+        // them keeps cleanup best-effort without constructing child errors.
+        unsafe {
+            libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC);
         }
+        fd += 1;
     }
 }
 
@@ -230,6 +241,9 @@ impl PtyFd {
 
         let mut cmd = builder.as_command()?;
         let controlling_tty = builder.get_controlling_tty();
+        // Resolve the bound in the parent because POSIX does not require
+        // getrlimit to be async-signal-safe on every supported Unix.
+        let max_fd = descriptor_sweep_limit();
 
         unsafe {
             cmd.stdin(self.as_stdio()?)
@@ -273,7 +287,7 @@ impl PtyFd {
                         }
                     }
 
-                    close_random_fds();
+                    mark_random_fds_cloexec(max_fd);
 
                     if let Some(mask) = configured_umask {
                         libc::umask(mask);
@@ -401,7 +415,140 @@ impl Write for UnixMasterWriter {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs::{File, OpenOptions};
+    use std::os::unix::fs::PermissionsExt;
     use std::time::{Duration, Instant};
+
+    const INHERITED_FD_ENV: &str = "PORTABLE_PTY_TEST_INHERITED_FD";
+
+    #[test]
+    #[ignore = "run as a subprocess by inherited_descriptor_is_closed_on_exec"]
+    fn inherited_descriptor_probe() {
+        let fd = std::env::var(INHERITED_FD_ENV)
+            .expect("inherited descriptor number")
+            .parse::<libc::c_int>()
+            .expect("numeric inherited descriptor");
+
+        assert_eq!(
+            unsafe { libc::fcntl(fd, libc::F_GETFD) },
+            -1,
+            "descriptor {} survived exec",
+            fd
+        );
+        assert_eq!(io::Error::last_os_error().raw_os_error(), Some(libc::EBADF));
+    }
+
+    #[test]
+    fn inherited_descriptor_is_closed_on_exec() -> anyhow::Result<()> {
+        let source = File::open("/dev/null")?;
+        // A moderately high number avoids a false failure if process startup
+        // reuses a recently closed descriptor before the probe can inspect it.
+        let leaked_fd = unsafe { libc::fcntl(source.as_raw_fd(), libc::F_DUPFD, 64) };
+        assert!(
+            leaked_fd >= 64,
+            "duplicate test descriptor: {}",
+            io::Error::last_os_error()
+        );
+        let leaked = unsafe { FileDescriptor::from_raw_fd(leaked_fd) };
+        let descriptor_flags = unsafe { libc::fcntl(leaked_fd, libc::F_GETFD) };
+        assert!(descriptor_flags >= 0, "read descriptor flags");
+        assert_eq!(descriptor_flags & libc::FD_CLOEXEC, 0);
+
+        let (_master, slave) = openpty(PtySize::default())?;
+        let mut command = CommandBuilder::new(std::env::current_exe()?);
+        command.args([
+            "--ignored",
+            "inherited_descriptor_probe",
+            "--test-threads=1",
+        ]);
+        command.env(INHERITED_FD_ENV, leaked_fd.to_string());
+        let mut child = slave.spawn_command(command)?;
+        drop(slave);
+
+        let status = child.wait()?;
+        drop(leaked);
+        assert!(status.success(), "descriptor probe failed: {}", status);
+        Ok(())
+    }
+
+    #[test]
+    fn exec_failure_for_nonexistent_interpreter_is_reported() -> anyhow::Result<()> {
+        const MISSING_INTERPRETER: &str = "/portable-pty-test-interpreter-does-not-exist";
+        assert!(!std::path::Path::new(MISSING_INTERPRETER).exists());
+
+        let script = std::env::temp_dir().join(format!(
+            "portable-pty-missing-interpreter-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&script);
+        let mut file = OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&script)?;
+        writeln!(file, "#!{MISSING_INTERPRETER}")?;
+        drop(file);
+        let mut permissions = std::fs::metadata(&script)?.permissions();
+        permissions.set_mode(0o700);
+        std::fs::set_permissions(&script, permissions)?;
+
+        let (_master, slave) = openpty(PtySize::default())?;
+        // CommandBuilder rejects an absent program before fork, so a missing
+        // shebang interpreter is needed to make exec itself return ENOENT.
+        let result = slave.spawn_command(CommandBuilder::new(&script));
+        let _ = std::fs::remove_file(&script);
+
+        let error = match result {
+            Ok(mut child) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                anyhow::bail!("spawn reported success after exec failed");
+            }
+            Err(error) => error,
+        };
+        assert_eq!(
+            error
+                .downcast_ref::<io::Error>()
+                .and_then(io::Error::raw_os_error),
+            Some(libc::ENOENT),
+            "unexpected spawn error: {:#}",
+            error
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn pre_exec_descriptor_sweep_has_no_allocating_source_shapes() {
+        let source = include_str!("unix.rs");
+        let hook = source
+            .split_once(".pre_exec(move || {")
+            .expect("pre_exec hook")
+            .1
+            .split_once("                    Ok(())")
+            .expect("end of pre_exec hook")
+            .0;
+        let sweep_name = if source.contains("fn mark_random_fds_cloexec") {
+            "fn mark_random_fds_cloexec"
+        } else {
+            "fn close_random_fds"
+        };
+        let sweep = source
+            .split_once(sweep_name)
+            .expect("descriptor sweep helper")
+            .1
+            .split_once("\n}\n\nimpl PtyFd")
+            .expect("end of descriptor sweep helper")
+            .0;
+
+        // Holding the allocator across fork is not a deterministic test setup,
+        // so guard the hook and its fd sweep against known allocating APIs.
+        for forbidden in [
+            "std::fs", "read_dir", "Vec", "String", "OsString", "vec!", "format!", ".collect",
+            "Box",
+        ] {
+            assert!(!hook.contains(forbidden), "pre_exec uses {}", forbidden);
+            assert!(!sweep.contains(forbidden), "fd sweep uses {}", forbidden);
+        }
+    }
 
     fn read_until(
         reader: &mut dyn Read,
