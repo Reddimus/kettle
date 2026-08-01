@@ -80,6 +80,38 @@ fn history_origin_advances_only_when_rows_are_irreversibly_removed() {
     assert_eq!(grid.history_origin(), 3);
 }
 
+/// Reflow is the other way rows leave the document for good. Narrowing wraps
+/// long lines into more rows than the history can hold, and the excess is
+/// dropped from the OLDEST end — so the origin has to move with it, exactly as
+/// it does for eviction and history purges. Before this, a column resize left
+/// the origin untouched while the rows it counted were gone, so a retained
+/// anchor pointed at a coordinate unrelated content had taken over.
+#[test]
+fn history_origin_advances_when_reflow_discards_oldest_rows() {
+    // A FULL row is essential: narrowing a sparsely occupied row wraps nothing
+    // and discards nothing. An earlier version of this test used one occupied
+    // column and passed with the fix reverted — vacuous, which is worse than
+    // no test at all.
+    let mut grid = Grid::<Cell>::new(1, 8, 1);
+    for column in 0..8 {
+        grid[Line(0)][Column(column)] = cell(char::from(b'a' + column as u8));
+    }
+    let origin_before = grid.history_origin();
+
+    // Eight cells at one column each become eight rows, well past the two
+    // (`max_scroll_limit + lines`) this grid can hold, so reflow truncates the
+    // oldest end.
+    grid.resize(true, 1, 1);
+
+    assert!(
+        grid.history_origin() > origin_before,
+        "reflow overflowed the history but the origin never moved \
+         (origin {origin_before} -> {}, total lines {})",
+        grid.history_origin(),
+        grid.total_lines()
+    );
+}
+
 #[test]
 fn history_origin_tracks_limit_reduction_and_full_reset() {
     let mut grid = Grid::<usize>::new(3, 1, 4);
