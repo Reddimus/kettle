@@ -656,17 +656,48 @@ fn stdout_burst_then_exit_helper() {
     std::fs::write(pid_path, std::process::id().to_string())
         .expect("publish stdout-burst helper pid");
 
+    // This helper must EXIT while its output is still undelivered — that is the
+    // whole premise of the regression above. Kettle's own stdout is stalled
+    // before this process starts, so once Kettle's bounded queues fill it stops
+    // draining the PTY, and a blocking `write_all` of the full burst parks here
+    // forever: the helper never exits, the setup loop times out, and the test
+    // fails having proven nothing. How much Kettle absorbs first depends on how
+    // it happens to chunk PTY reads, which is why that failure was intermittent.
+    //
+    // So push what the PTY will accept and then leave. Writing the descriptor
+    // directly keeps the accounting honest — Rust's `Stdout` is a `LineWriter`,
+    // and this payload has no newlines, so buffered writes would report progress
+    // the kernel never took.
+    //
+    // SAFETY: `fcntl`/`write` address this process's own stdout. The flags are
+    // read back before being modified so no unrelated bit is cleared, and the
+    // pointer/length pair always describes an initialized prefix of `block`.
+    unsafe {
+        let flags = libc::fcntl(1, libc::F_GETFL);
+        assert!(flags != -1, "read stdout descriptor flags");
+        assert!(
+            libc::fcntl(1, libc::F_SETFL, flags | libc::O_NONBLOCK) != -1,
+            "make the burst descriptor non-blocking"
+        );
+    }
     let block = [b'x'; 8192];
     let mut remaining = burst_bytes;
-    let mut stdout = std::io::stdout().lock();
     while remaining != 0 {
         let count = remaining.min(block.len());
-        stdout
-            .write_all(&block[..count])
-            .expect("write finite stdout burst");
-        remaining -= count;
+        let written = unsafe { libc::write(1, block.as_ptr().cast(), count) };
+        if written > 0 {
+            remaining -= written as usize;
+            continue;
+        }
+        let error = std::io::Error::last_os_error();
+        match error.kind() {
+            // The PTY will take no more; Kettle is holding what it already has.
+            std::io::ErrorKind::WouldBlock => break,
+            std::io::ErrorKind::Interrupted => continue,
+            _ if written == 0 => break,
+            _ => panic!("write finite stdout burst: {error}"),
+        }
     }
-    stdout.flush().expect("flush finite stdout burst");
     std::process::exit(STDOUT_BURST_CHILD_EXIT_CODE);
 }
 
