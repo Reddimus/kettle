@@ -224,7 +224,15 @@ impl<T: GridCell + Default + PartialEq> Grid<T> {
             let cursor_buffer_line = self.lines - self.cursor.point.line.0 as usize - 1;
             let available = min(cursor_buffer_line, reversed.len() - self.lines);
             let overflow = cursor_line_delta.saturating_sub(available);
+            // `reversed` is oldest-last, so truncation drops the OLDEST document
+            // rows. They are gone for good, which is exactly what
+            // `history_origin` exists to record: without advancing it, a
+            // retained anchor (an OSC 133 prompt mark, say) keeps pointing at a
+            // grid coordinate that unrelated content now occupies, and a resize
+            // silently relabels one command's output as another's.
+            let before = reversed.len();
             reversed.truncate(reversed.len() + overflow - cursor_line_delta);
+            self.forget_oldest_rows(before - reversed.len());
             self.cursor.point.line = max(self.cursor.point.line - overflow, Line(0));
         }
 
@@ -371,7 +379,13 @@ impl<T: GridCell + Default + PartialEq> Grid<T> {
 
         // Reverse iterator and use it as the new grid storage.
         let mut reversed: Vec<Row<T>> = new_raw.drain(..).rev().collect();
+        // Reflow can produce more rows than the history holds — narrowing wraps
+        // long lines into several. The excess dropped here is the oldest end of
+        // the document, so the origin has to move with it or surviving anchors
+        // alias content that replaced what they referred to.
+        let before = reversed.len();
         reversed.truncate(self.max_scroll_limit + self.lines);
+        self.forget_oldest_rows(before - reversed.len());
         self.raw.replace_inner(reversed);
 
         // Clamp display offset in case some lines went off.
