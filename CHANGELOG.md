@@ -6,6 +6,71 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+## [2.44.0] — 2026-08-01
+
+  ### Security
+  - **A bare-name `conpty.dll` load was a DLL preloading vector.** The vendored
+    ConPTY loader probed `conpty.dll` as a relative name, which reaches
+    `LoadLibraryW` and walks the full search order — application directory,
+    working directory, then `PATH`. The file is in neither `System32` nor
+    `SysWOW64` on a stock Windows 11 host and Kettle ships none, so the probe
+    always missed and the search always ran. A terminal is routinely launched
+    with its working directory set to a project the user has just cloned, so a
+    planted `conpty.dll` would have run its `DllMain` inside Kettle, at Kettle's
+    privilege level, on the first pane open — before any missing-export check
+    could reject it. Kettle neither ships nor supports a sideloaded
+    OpenConsole, so only the system kernel32 exports are resolved now. The same
+    pattern was removed from vendored `alacritty_terminal`'s Windows TTY
+    backend, which Kettle does not use but which compiles into the binary
+    regardless.
+  - **Closing a Unix pane executed whatever the user had half-typed.** The
+    vendored PTY writer's destructor wrote `\n` followed by `VEOF` into the
+    terminal, so closing a pane supplied an Enter nobody pressed and the shell
+    ran the pending line. The justifying comment was wrong on two counts:
+    canonical `VEOF` makes pending input available immediately and needs no
+    preceding newline, and the disabled sentinel is `_POSIX_VDISABLE` rather
+    than `0`. A blocking write inside `Drop`, reached before the child reaper is
+    spawned, could also stall teardown on a full input queue. Destructors now
+    only close the descriptor they own; deliberate EOF remains Kettle's own
+    path, which reads live termios and honours `_PC_VDISABLE`.
+  - **The updater could be made to install bytes its signed-release boundary
+    never approved.** The Windows pending-update record carried only mutable
+    stage and helper hashes plus a target version, and the helper rebuilt an
+    unsigned update without revalidating the release signature, the signed
+    manifest, the asset digest, or the installed version. A same-SID process
+    could copy the running Kettle as a correctly named helper, create the
+    allowed stage files, compute matching hashes, write the pending record, and
+    have Kettle install arbitrary — or older — bytes. A merely stale record
+    could downgrade a newer manual install. Pending updates now use an
+    authenticated capsule carrying the signed manifest, its Ed25519 signature,
+    the selected asset, the archive digest, and the package manifest; startup
+    and the helper reverify all of it against the compiled key, read the
+    actually installed version, and refuse equal-version and downgrade
+    transitions. Verification and application no longer communicate through
+    pathnames — what was verified is provably what is applied.
+  - **The control plane bounded neither peer lifetime nor peer identity.** A
+    client that connected and never read, or fed one byte at a time, held its
+    slot indefinitely, and liveness probing could not reclaim it while a
+    connection thread was blocked in a write. Requests now expire after 30
+    seconds of inactivity, frame assembly carries an absolute five-second
+    budget measured from when the server begins waiting, responses and events
+    carry write deadlines, and subscribers are kept honest with keepalives.
+    Neither end authenticated the other: Unix now compares effective peer UIDs
+    and Windows clients verify the pipe object's owner. Server-accepted and
+    client pipe handles are now overlapped on Windows so the existing
+    cancellation path covers server writes, which previously ignored their
+    deadline — masked only because the sole caller capped frames below
+    `PIPE_BUF`. Request framing is no longer quadratic in the accumulated
+    buffer.
+  - **`base64`'s new default-on `simd-unsafe` feature put unused `unsafe` on
+    the untrusted-decode and signature-verification paths.** It is
+    hand-written `core::arch` AVX2/NEON covering both encode and decode.
+    Kettle only ever uses the scalar engine, so the feature was inert — but
+    those call sites decode kitty and iTerm image payloads (untrusted terminal
+    output) and the Ed25519 release signature, and unused `unsafe` has no
+    place on either. Disabling it also makes `base64` enforce
+    `#![forbid(unsafe_code)]`.
+
   ### Fixed
   - A `kettle exec` run whose consumer closed the pipe could die from `SIGPIPE`
     instead of reporting the exit code it had already chosen. The stdout worker
