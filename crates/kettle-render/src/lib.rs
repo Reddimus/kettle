@@ -4117,17 +4117,27 @@ impl Renderer {
             // Post-text overlay: dim unfocused panes; per-pane scrollbar.
             //
             // Terminator parity, terminatorlib/config.py:84-85
-            // `inactive_color_offset` + `inactive_bg_color_offset`:
-            // when EITHER offset is < 1.0, layer a dim over the
-            // unfocused pane. Uses the BG offset for the overlay
-            // alpha (since the visible effect on the bg is most of
-            // the dim). The FG offset is kept reserved for the
-            // glyph-level desaturation that's a Bucket-D follow-up
-            // (would need to recolor each glyph's fg, which means
-            // re-running the text-shaper for unfocused panes).
+            // `inactive_color_offset` + `inactive_bg_color_offset`: when EITHER
+            // offset is < 1.0, layer a dim over the unfocused pane.
+            //
+            // The FG offset used to be READ NOWHERE — only the BG offset and
+            // the split opacity composed the alpha. That made Terminator's own
+            // default pair (`inactive_color_offset = 0.8`,
+            // `inactive_bg_color_offset = 1.0`) produce no visible change at
+            // all: the BG term was 1.0, so the dim was zero and the setting
+            // the user actually reached for did nothing.
+            //
+            // Both offsets now contribute. This is not Terminator's exact
+            // model — it scales the foreground palette per glyph
+            // (terminal.py:809-823) rather than compositing — but an overlay
+            // reproduces the visible intent ("unfocused panes recede") without
+            // re-running the shaper for every unfocused pane. Taking the max
+            // rather than summing keeps a config that sets both from dimming
+            // twice as hard as either alone.
+            let inactive_fg_dim = (1.0 - cfg.inactive_color_offset).clamp(0.0, 0.95);
             let inactive_bg_dim = (1.0 - cfg.inactive_bg_color_offset).clamp(0.0, 0.95);
             let split_opacity_dim = (1.0 - cfg.unfocused_split_opacity).clamp(0.0, 0.95);
-            let composed_dim = inactive_bg_dim.max(split_opacity_dim);
+            let composed_dim = inactive_fg_dim.max(inactive_bg_dim).max(split_opacity_dim);
             if !pv.focused && panes.len() > 1 && composed_dim > 0.0 {
                 over.push(rect(rx, ry, rw, rh, theme.background, composed_dim));
             }

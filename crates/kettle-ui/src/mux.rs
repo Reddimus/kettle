@@ -477,6 +477,14 @@ pub(crate) enum PaneTitleOrigin {
     ExplicitLaunch,
     Osc,
     Remote,
+    /// The user named this pane by hand.
+    ///
+    /// Without this variant the edit was overwritten by the next OSC 0/2 the
+    /// shell emitted — which bash and zsh send on EVERY prompt — so naming a
+    /// pane `db-prod` lasted under a second. Terminator keeps the equivalent
+    /// state as `titlebar.set_custom_string`, and its editable label no-ops
+    /// while custom (editablelabel.py:60-64).
+    Manual,
 }
 
 pub struct Pane {

@@ -2727,6 +2727,20 @@ fn update_window_remote_contexts(
     changed
 }
 
+/// May a shell-emitted OSC 0/2 title replace the pane's current one?
+///
+/// Everything except a hand-set title, which the user typed and expects to
+/// stay. Shells emit OSC 0/2 on every prompt, so without this rule a manual
+/// name survived less than a second.
+///
+/// A REMOTE title still takes precedence over a manual one, deliberately:
+/// `apply_remote_title_transition` saves the previous title and restores it
+/// when the remote context ends, so the manual name comes back on exit rather
+/// than being lost, and while connected the host is worth showing.
+fn osc_title_may_replace(origin: PaneTitleOrigin) -> bool {
+    origin != PaneTitleOrigin::Manual
+}
+
 fn apply_remote_title_transition(
     title: &mut String,
     title_is_placeholder: &mut bool,
@@ -7406,10 +7420,16 @@ impl App {
                             // I1 (audit v2.32.0): sanitize before storing — this
                             // string flows to set_title(), the tab label, and the
                             // status bar.
-                            pane.title = sanitize_title(&t);
-                            pane.title_is_placeholder = false;
-                            pane.title_origin = PaneTitleOrigin::Osc;
-                            pane.title_before_remote = None;
+                            // A hand-set title outranks the shell's. Shells
+                            // emit OSC 0/2 on every prompt, so without this
+                            // the user's name for the pane was gone within a
+                            // second of setting it.
+                            if osc_title_may_replace(pane.title_origin) {
+                                pane.title = sanitize_title(&t);
+                                pane.title_is_placeholder = false;
+                                pane.title_origin = PaneTitleOrigin::Osc;
+                                pane.title_before_remote = None;
+                            }
                         }
                     }
                     TermEvent::ResetTitle => {
@@ -7809,7 +7829,13 @@ impl App {
     /// including after tab/focus switches, not only on OSC title events.
     /// Deduped so it isn't a syscall every frame.
     fn sync_window_title(&mut self, ws: &mut WindowState) {
-        let want = self.desired_window_title(ws);
+        // A user-set title wins over the computed one. Without this the
+        // recompute below reverted "Edit window title" on the very next
+        // redraw, so the feature looked like it worked and did not.
+        let want = match &ws.window_title_override {
+            Some(forced) => forced.clone(),
+            None => self.desired_window_title(ws),
+        };
         if want != ws.last_title {
             if let Some(w) = &ws.window {
                 w.set_title(&want);
@@ -10269,6 +10295,14 @@ impl App {
             let value = state.input;
             match state.scope {
                 TitleEditScope::Window => {
+                    // Empty clears the override and restores the
+                    // `window-title-format` behaviour; anything else pins it
+                    // so `sync_window_title` stops recomputing over the top.
+                    ws.window_title_override = if value.trim().is_empty() {
+                        None
+                    } else {
+                        Some(value.clone())
+                    };
                     if let Some(w) = &ws.window {
                         w.set_title(&value);
                     }
@@ -10281,7 +10315,17 @@ impl App {
                 }
                 TitleEditScope::Pane => {
                     if let Some(p) = ws.mux.focused() {
-                        p.title = value;
+                        // Empty restores shell-driven titles; anything else
+                        // pins the name against the next OSC 0/2.
+                        if value.trim().is_empty() {
+                            p.title = "kettle".into();
+                            p.title_is_placeholder = true;
+                            p.title_origin = PaneTitleOrigin::Placeholder;
+                        } else {
+                            p.title = value;
+                            p.title_is_placeholder = false;
+                            p.title_origin = PaneTitleOrigin::Manual;
+                        }
                     }
                 }
                 TitleEditScope::Group => {
@@ -27677,6 +27721,33 @@ mod tests {
             None,
             "a hidden close button must not be hittable"
         );
+    }
+
+    /// A hand-set pane name must survive the shell's next prompt. bash and zsh
+    /// emit OSC 0/2 on EVERY prompt, so before the Manual origin existed,
+    /// naming a pane `db-prod` lasted under a second.
+    #[test]
+    fn a_hand_set_pane_title_outranks_the_shells_osc_title() {
+        use super::osc_title_may_replace;
+        use crate::mux::PaneTitleOrigin;
+
+        assert!(
+            !osc_title_may_replace(PaneTitleOrigin::Manual),
+            "a title the user typed must not be replaced by the shell"
+        );
+        // Every other origin is shell- or launch-derived and must keep
+        // tracking OSC, or titles would freeze at the first thing set.
+        for origin in [
+            PaneTitleOrigin::Placeholder,
+            PaneTitleOrigin::ExplicitLaunch,
+            PaneTitleOrigin::Osc,
+            PaneTitleOrigin::Remote,
+        ] {
+            assert!(
+                osc_title_may_replace(origin),
+                "{origin:?} must still follow the shell's title"
+            );
+        }
     }
 
     #[test]

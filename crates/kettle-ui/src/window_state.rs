@@ -657,6 +657,16 @@ pub(crate) struct WindowState {
     pub(crate) last_click: Option<(std::time::Instant, usize, usize, u8)>,
     /// Last OS window title set (dedupe `set_title` syscalls).
     pub(crate) last_title: String,
+    /// A user-set window title that must survive redraws.
+    ///
+    /// `apply_title_edit` used to call `set_title` and stop there, but
+    /// `sync_window_title` recomputes the title from `window-title-format` on
+    /// every redraw and overwrites it — so "Edit window title" appeared to
+    /// work and reverted within one frame. Terminator keeps an equivalent
+    /// `forced` flag on its window so later `set_title` calls are ignored
+    /// (window.py:1162-1198). `None` means "follow the format", which is how
+    /// clearing the field restores automatic titles.
+    pub(crate) window_title_override: Option<String>,
     /// Pane ids whose shell exited + cfg.exit_action requested
     /// restart. Drained AFTER drain_events; dedup'd on push.
     pub(crate) pending_pane_restarts: Vec<u64>,
@@ -814,6 +824,7 @@ impl WindowState {
             output_refresh_probe_pending: false,
             last_click: None,
             last_title: String::new(),
+            window_title_override: None,
             pending_pane_restarts: Vec::new(),
             window_shown: false,
             seen_output_gen: std::collections::HashMap::new(),
