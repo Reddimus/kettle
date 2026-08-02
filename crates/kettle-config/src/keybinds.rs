@@ -1021,7 +1021,49 @@ fn parse_key(s: &str) -> Option<Key> {
 }
 
 /// Parse a Ghostty trigger such as `ctrl+shift+o`.
+/// Rewrite a GTK accelerator into kettle's `+`-separated trigger form.
+///
+/// Terminator writes every binding as a GTK accelerator —
+/// `<Control><Shift>t`, `<Alt>1` — with angle-bracketed modifiers and no
+/// separator before the key. kettle splits on `+`, so such a string arrived as
+/// one unrecognised token and the binding was dropped. Every keybinding line in
+/// a real Terminator config therefore imported as nothing, which also made the
+/// ~79 Terminator action-name aliases unreachable from a copied file.
+///
+/// Returns the input untouched when it carries no `<`, so kettle's own
+/// `ctrl+shift+t` spelling takes exactly the path it always did.
+fn normalize_gtk_accelerator(s: &str) -> String {
+    if !s.contains('<') {
+        return s.to_string();
+    }
+    let mut parts: Vec<String> = Vec::new();
+    let mut rest = s.trim();
+    while let Some(open) = rest.find('<') {
+        // Anything before a `<` is stray text; GTK accelerators put modifiers
+        // first, so treat it as part of the key tail rather than guessing.
+        if open > 0 {
+            break;
+        }
+        let Some(close) = rest.find('>') else { break };
+        let modifier = &rest[open + 1..close];
+        if !modifier.is_empty() {
+            parts.push(modifier.to_string());
+        }
+        rest = &rest[close + 1..];
+    }
+    let key = rest.trim();
+    if !key.is_empty() {
+        parts.push(key.to_string());
+    }
+    if parts.is_empty() {
+        s.to_string()
+    } else {
+        parts.join("+")
+    }
+}
+
 pub fn parse_trigger(s: &str) -> Option<Trigger> {
+    let s = &normalize_gtk_accelerator(s);
     let mut mods = Mods::empty();
     let mut key: Option<Key> = None;
     let parts: Vec<&str> = s.split('+').collect();
