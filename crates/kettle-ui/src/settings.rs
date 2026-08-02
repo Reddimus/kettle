@@ -430,7 +430,15 @@ pub fn read(cfg: &Config, field: &Field) -> String {
                 })
         }
         FieldKind::Number { suffix, .. } => {
-            format!("{}{}", read_number(cfg, field.key), suffix)
+            let value = read_number(cfg, field.key);
+            // `scrollback = 0` is the grammar's "infinite", not "keep nothing".
+            // Rendering a bare `0` invited a user to step off it without
+            // realising what they were leaving.
+            if field.key == "scrollback" && value == 0 {
+                "infinite".to_string()
+            } else {
+                format!("{value}{suffix}")
+            }
         }
         FieldKind::Keybind { action } => {
             // Reverse-look-up the chord currently bound to this action in the
@@ -708,7 +716,20 @@ fn read_number(cfg: &Config, key: &str) -> i64 {
         // opacity is stored 0.0–1.0; the overlay edits it as a percent.
         "background-opacity" => (cfg.background_opacity * 100.0).round() as i64,
         "window-padding-x" => cfg.padding_x.round() as i64,
-        "scrollback" => cfg.scrollback as i64,
+        // Report the SENTINEL, not the resolved line count. `scrollback` is
+        // stored resolved, so infinite reads back as `INFINITE_SCROLLBACK`
+        // (10 M) — far above this row's 100 000 ceiling. The step then computed
+        // `(10_000_000 ± 1_000).clamp(0, 100_000)` = 100 000 and PERSISTED it,
+        // so a single arrow press on a user with infinite scrollback silently
+        // discarded their history limit. `0` is the config grammar's own
+        // spelling of infinite, so round-tripping through it is lossless.
+        "scrollback" => {
+            if cfg.scrollback >= kettle_config::INFINITE_SCROLLBACK {
+                0
+            } else {
+                cfg.scrollback as i64
+            }
+        }
         "scrollback-bytes" => (cfg.scrollback_bytes / 1_000_000) as i64,
         "tab-min-width" => cfg.tab_min_width.round() as i64,
         "scrollbar-width" => cfg.scrollbar_width.round() as i64,
@@ -735,6 +756,42 @@ fn write_number(key: &str, value: i64, _suffix: &str) -> String {
 )]
 mod tests {
     use super::*;
+
+    /// The Scrollback row edits a value stored RESOLVED, so infinite read back
+    /// as `INFINITE_SCROLLBACK` (10 M) against a row whose ceiling is 100 000.
+    /// A single ←/→ press computed `(10_000_000 ± 1_000).clamp(0, 100_000)` and
+    /// persisted 100 000 — silently discarding an unlimited history with no
+    /// prompt and no way to tell it had happened.
+    #[test]
+    fn stepping_the_scrollback_row_cannot_silently_discard_infinite_history() {
+        let mut cfg = Config::default();
+        cfg.scrollback = kettle_config::INFINITE_SCROLLBACK;
+        let field = number("Scrollback lines", "scrollback", 0, 100_000, 1_000, "");
+
+        assert_eq!(
+            read_number(&cfg, "scrollback"),
+            0,
+            "infinite must read back as the grammar's own sentinel, not the \
+             resolved line count"
+        );
+        assert_eq!(
+            read(&cfg, &field),
+            "infinite",
+            "a bare 0 would invite stepping off infinite without realising it"
+        );
+        // Stepping DOWN from infinite must stay infinite rather than land on
+        // the ceiling.
+        assert_eq!(next_value(&cfg, &field, -1), "0");
+        // Stepping UP is a deliberate move to a finite limit, which is fine —
+        // it just must not be the 100 000 the clamp used to force.
+        assert_eq!(next_value(&cfg, &field, 1), "1000");
+
+        // A finite value is unaffected.
+        cfg.scrollback = 5_000;
+        assert_eq!(read_number(&cfg, "scrollback"), 5_000);
+        assert_eq!(read(&cfg, &field), "5000");
+        assert_eq!(next_value(&cfg, &field, 1), "6000");
+    }
 
     #[test]
     fn catalogue_keys_are_all_readable() {
