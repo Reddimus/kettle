@@ -1148,7 +1148,13 @@ fn main() -> anyhow::Result<()> {
     // bad path as fatal, so a typo'd profile should not be quietly different.
     // `--config` wins when both are given (see the resolution below), so this
     // only fires when the profile is the one actually being used.
+    // Skipped for the modes that never load a profile. `--print-default-config`
+    // and `--write-default-config` early-return further down and emit compiled
+    // defaults, so refusing to start over an unrelated `--profile` typo would
+    // block work the profile has no bearing on.
     if cli.config.is_none()
+        && !cli.print_default_config
+        && !cli.write_default_config
         && let Some(name) = cli.profile.as_deref()
         && let Some(reason) = profile_problem(name)
     {
@@ -1981,15 +1987,27 @@ fn config_path_problem(p: &std::path::Path) -> Option<&'static str> {
 /// modes differ (a name that sanitises to nothing has no path to stat) and the
 /// remedy shown to the user is a list of names, not a filesystem diagnosis.
 fn profile_problem(name: &str) -> Option<String> {
+    // Resolve the config directory FIRST. Both `list_profiles` (empty Vec) and
+    // `path_for_profile` (None) collapse "no config dir" into the same answer
+    // they give for "nothing there" and "bad name" — so without this check the
+    // message would confidently say "no profiles are configured" or "not a
+    // usable profile name" on a host where the real problem is that no $HOME /
+    // XDG / APPDATA could be located at all.
+    if kettle_config::Config::default_path().is_none() {
+        return Some(String::from(
+            "cannot locate a config directory (no HOME / XDG_CONFIG_HOME / APPDATA), \
+             so no profile can be resolved",
+        ));
+    }
     let available = kettle_config::Config::list_profiles();
     let suffix = if available.is_empty() {
-        // Distinguish "you typo'd" from "you have no profiles at all", which
-        // is a different mistake with a different fix.
-        String::from("; no profiles are configured")
+        // Now unambiguous: the directory resolved and holds no profiles.
+        String::from("; no profiles were found")
     } else {
         format!("; available: {}", available.join(", "))
     };
     match kettle_config::Config::path_for_profile(name) {
+        // The config dir is known to resolve, so this can only be the name.
         None => Some(format!("not a usable profile name{suffix}")),
         Some(p) if !p.is_file() => Some(format!("no such profile{suffix}")),
         Some(p) if std::fs::File::open(&p).is_err() => Some(format!(
