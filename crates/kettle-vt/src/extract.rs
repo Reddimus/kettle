@@ -1310,15 +1310,12 @@ mod tests {
     #[test]
     fn can_and_sub_cancel_a_control_string_instead_of_wedging_it() {
         for cancel in [0x18_u8, 0x1a] {
-            for intro in [&b"]2;"[..], &b"P"[..], &b"_"[..]] {
+            for intro in [&b"\x1b]2;"[..], &b"\x1bP"[..], &b"\x1b_"[..]] {
                 let mut ex = Extractor::default();
                 let mut input = intro.to_vec();
                 input.extend_from_slice(b"payload");
                 input.push(cancel);
-                input.extend_from_slice(
-                    b"after
-",
-                );
+                input.extend_from_slice(b"after\n");
 
                 let chunks = ex.feed(&input);
                 let mut plain = Vec::new();
@@ -1336,10 +1333,7 @@ mod tests {
 
                 // And the extractor is back in Pass mode — a later feed is not
                 // still being eaten by the abandoned string.
-                let more = ex.feed(
-                    b"later
-",
-                );
+                let more = ex.feed(b"later\n");
                 let mut plain2 = Vec::new();
                 for c in &more {
                     if let Chunk::Pass(b) = c {
