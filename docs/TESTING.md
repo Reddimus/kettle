@@ -567,7 +567,13 @@ discipline here.
   registry** (`kettle-ctl/src/presence.rs`) pins claim/release
   round-trips, private directory/file modes, dead-PID pruning, bounded and
   no-follow reads, filename/payload validation, rejected hue updates, and
-  in-place valid hue updates against a temp dir; **shell detection**
+  in-place valid hue updates against a temp dir — plus pid reuse, where a
+  record naming a live pid but a different process instance is pruned while
+  this instance's own record survives, and the reverse: a delete aimed at a
+  record judged stale does nothing once the file on disk is a *newer* record
+  that took the same name (the same two rules are pinned for the ctl discovery
+  registry, once through the injected predicate and once through the real
+  one); **shell detection**
   (`detect_shells_windows`/`_unix`,
   kettle-core) is pure over injected closures (PATH lookup, WSL
   enumeration, vswhere, Git Bash probe), so the Windows-Terminal
@@ -580,7 +586,15 @@ discipline here.
   window must leave the others running. Bare-launch activation tests cover
   private lock/socket permissions, first-process election, matching handoff,
   incompatible recorder identity, bounded request validation, UI rejection
-  fallback, and the `--new-process`/explicit-argument bypass contract.
+  fallback, and the `--new-process`/explicit-argument bypass contract. Retry
+  idempotency is pinned three times: re-sending one launch's request opens a
+  single window while a separate launch still opens its own; a retry that lands
+  while the first attempt is inside the handler waits for that attempt's
+  outcome instead of opening a window beside it; and a duplicate of a launch
+  whose first attempt never finishes still receives a status inside its own
+  read deadline rather than waiting out the request and getting nothing. A
+  ledger-level test pins that a full ledger evicts only settled launches, never
+  one still inside the handler.
   Live-reload regressions additionally pin the filesystem event-kind matrix:
   opens, reads, closes, unrelated paths, and backend-specific `Other` events do
   not reload; create/modify/remove and imprecise `Any` changes to the exact file
@@ -1167,7 +1181,17 @@ These need a real display and are run by hand (or on real hardware):
     limits, queue saturation, duplicate ids, and cancellation. `kettle-ctl`
     loopback tests separately pin response deadlines, cancellation,
     authenticated peers, strict frame/id validation, concurrent activation,
-    and preservation of events that precede a response.
+    and preservation of events that precede a response. They also pin that a
+    client retires itself after any request that ended without its response —
+    a timeout, a cancellation, a breached event bound, a malformed frame — so a
+    late response cannot answer the next call and no further request reaches
+    that stream, while a structured server error (a real response) leaves the
+    client serving calls. Retirement is checked at the *server* end too: the
+    peer observes exactly one request and sees the connection close while the
+    retired client is still alive, and the abandoned exchange's buffered events
+    and unparsed bytes are released with it. The complementary case — a
+    deadline that expires before the first byte goes out — leaves the
+    connection usable and serving the next call.
   - **Live MCP**: `claude --mcp-config .mcp.json --strict-mcp-config -p "use
     kettle_run to echo a marker"` — Claude Code drives the MCP tools end-to-end.
   - **Live renderer/UI diagnostics**: on a Linux desktop run

@@ -157,14 +157,7 @@ impl CtlServer {
                 return None;
             }
         };
-        let entry = RegistryEntry {
-            v: 1,
-            kind: "gui".into(),
-            pid,
-            endpoint: endpoint.clone(),
-            version: version.into(),
-            started_unix,
-        };
+        let entry = RegistryEntry::registering("gui", pid, endpoint.clone(), version, started_unix);
         if let Err(e) = discovery::register(&registry_dir, &entry) {
             log::warn!("agent-server: cannot write discovery entry: {e}");
             return None;

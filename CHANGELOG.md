@@ -89,6 +89,47 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   emitted in, so they are accepted; argv-derived values are additionally
   length-bounded, and a second, different `ssh -i` (OpenSSH tries every identity
   in order) suppresses the entry rather than reproducing only the last key.
+  - **A control client kept using a connection whose response was still in
+    flight.** After a request timed out, was cancelled, breached the buffered
+    event bound, or hit malformed data, `kettle-ctl`'s client stayed reusable
+    without draining or retiring the stream — so the abandoned request's
+    response was read as the NEXT call's, failing correlation, and a second
+    (possibly mutating) request went onto a stream nobody could correlate. Any
+    such outcome now retires the connection: further use fails with a distinct
+    error naming the abandoned request, and the caller reconnects. Retiring
+    closes the transport and releases what the abandoned exchange had buffered,
+    so a caller holding a retired client no longer holds one of the server's
+    connection slots with it. A structured server error is a real response and
+    still leaves the client usable, and so does a request whose deadline
+    expired before any of it reached the wire — the server never saw that one.
+    A timeout or a cancellation now also says that the server may have carried
+    the request out anyway, since that is what decides whether retrying it is
+    safe, and `kettle ctl` and the MCP bridge show the agent nothing else.
+  - **One launcher click could open two windows.** Bare-launch activation is
+    at-least-once — the primary opens the window before writing its response —
+    but the request carried nothing that identified the launch, so a response
+    lost to a slow cold start made the secondary re-send an identical request
+    the primary could not tell apart from a second click. Every launch now
+    carries an idempotency key; the primary remembers what it did for that key
+    and answers a retry from the record, and a retry that arrives while the
+    first attempt is still opening the window waits for that attempt's outcome
+    instead of opening a second one. That wait is bounded well inside the
+    deadline the requester is reading under, so a duplicate always leaves with
+    an answer rather than waiting out its own request for nothing.
+  - **A reused process id resurrected dead registry and presence records.**
+    Liveness identified an owner by its pid alone, so once the system handed
+    that number to an unrelated program, a dead control server stayed
+    advertised (every client wasting a connect attempt on it) and a closed
+    window's accent claim stayed active, keeping that color out of the pool
+    forever. Records now name their owner by pid *and* by that process's
+    OS-reported start time; a record whose pid is alive but whose instance is
+    gone is pruned. A record without the token (an older build, or an OS that
+    cannot report one) keeps the previous bare-pid answer rather than being
+    pruned on suspicion. Pruning is equally careful in the other direction: a
+    record is named on disk by its owner's pid, so the delete re-reads the file
+    and does nothing unless it is still the record that was judged — otherwise
+    the new kettle that inherited the pid, and registered at that same name,
+    would be the one erased.
   - **`--working-directory` had no test at the CLI surface**, and neither did
     `--accent`. Both are validated by one function now, driven by the tests
     exactly as the CLI drives it.

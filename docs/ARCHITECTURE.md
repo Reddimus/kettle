@@ -229,7 +229,17 @@ dispatches tool calls through a four-worker, 16-request bounded queue with
 JSON-RPC cancellation tracking. The blocking control client reads frames
 incrementally under method-aware deadlines, preserves events interleaved before
 a response, and treats malformed frames or mismatched response ids as terminal
-protocol errors. Unix connections enter nonblocking mode once, before cloning;
+protocol errors. Terminal is literal: a request that ends without its response
+being read off the wire — a deadline, a cancellation, an event bound, malformed
+data, a partly written request — retires the connection, because the response
+still in flight would otherwise be correlated to the next call. Retiring closes
+the transport and releases what the abandoned exchange had buffered, so the
+server's connection slot is freed then rather than whenever the caller drops
+the client. A request that never put a byte on the wire is not one of these
+cases: the server never learned of it, so the connection stays in step. Callers
+reconnect; a cancelled mutation may still have executed, and nothing on that
+connection can report whether it did. Unix connections enter nonblocking mode
+once, before cloning;
 the transport restores ordinary blocking `Read`/`Write` semantics with
 `poll(2)` and serializes complete deadline-aware writes through one
 connection-wide gate. No operation toggles `O_NONBLOCK` on a shared open-file
@@ -250,6 +260,19 @@ seconds. Registry/presence walks stop after 1,024 directory entries, JSON is
 bounded during serialization, NDJSON readers preserve a scan offset, and UI
 collection/grid/screen/key limits are checked before duplicate allocation or
 enumeration.
+
+Registry and presence records name their owner by pid *and* by that process's
+OS-reported start time, so a pid the system later hands to an unrelated program
+cannot keep a dead server advertised or a dead window's accent claimed. A
+record without that token (an older build, an OS that cannot report one) keeps
+the historical bare-pid answer rather than being pruned on suspicion. Pruning
+runs the same rule in reverse: a record is named on disk by the pid it belongs
+to, so a delete re-reads the file first and does nothing unless it is still the
+record that was judged. Otherwise the recycled pid's *new* owner — which has
+already registered at that path — would lose an entry it can never rewrite,
+since a server registers once at startup and never heartbeats. On Linux the
+token is boot-relative while the fallback base directory can outlive a reboot;
+that mismatch can only keep a leftover record, never delete a live one.
 
 The discovery registry reserves a `kind` field — `"gui"` today — as the
 forward-compat seam for the optional `kettle-muxd` session daemon (see
@@ -294,7 +317,15 @@ primary before sending its launch identity. Accepted clients run in independent
 workers (at most 16), and every frame read/write has a five-second deadline, so
 one incomplete or unread connection cannot serialize later launches. A
 capacity-32 handoff reaches the winit thread, and
-the secondary exits only after that thread confirms OS-window creation. A busy,
+the secondary exits only after that thread confirms OS-window creation. Because
+the window opens before the response is written, delivery is at-least-once and
+every request carries a per-launch idempotency key: the primary remembers what
+it did for that key (bounded, expiring) and answers a retry from the record, so
+a response lost to a slow cold start cannot open a second window for one click.
+A retry that arrives while the first attempt is still in the handler waits for
+its outcome instead of racing it — for less than one frame deadline, since the
+requester is already reading under a deadline that started earlier and an
+answer produced after it would be written to nobody. A busy,
 incompatible, timed-out, or failed request falls back to a separate process so
 a launcher click is never discarded. Any explicit argument bypasses activation;
 `--new-process` provides a discoverable isolation escape hatch for an otherwise
@@ -423,10 +454,11 @@ putting a user path on the wire.
   cross-process dedupe goes through a presence registry in kettle-ctl
   (`crates/kettle-ctl/src/presence.rs`: one `<pid>-w<seq>.json` per
   window under `<runtime base>/kettle/instances`, a sibling of the ctl
-  discovery dir; RAII guard, dead-pid pruning, best-effort). The directory and
+  discovery dir; RAII guard, dead-owner pruning, best-effort). The directory and
   leaves are current-user private on Unix; reads are no-follow and capped at
-  4 KiB, and version, filename identity, PID, and `#rrggbb` fields are validated
-  before a claim participates in color selection.
+  4 KiB, and version, filename identity, PID, owner start-time token, and
+  `#rrggbb` fields are validated before a claim participates in color
+  selection.
   `accent-color = theme|off|none` opts out; a hex value pins one color.
 
 ## Search architecture

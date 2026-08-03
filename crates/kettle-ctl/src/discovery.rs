@@ -14,6 +14,11 @@
 //!
 //! The `kind` field is reserved so the future `kettle-muxd` daemon can register
 //! as `"muxd"` alongside `"gui"` without a format change.
+//!
+//! An entry names its owner by pid *and* by that process's start-time token
+//! (`presence::process_start_token`), because a pid alone is recycled: without
+//! the token a stranger inheriting the number keeps a dead server's entry
+//! advertised forever and every client wastes a connect attempt on it.
 
 use std::io::Read as _;
 use std::path::PathBuf;
@@ -32,7 +37,14 @@ const MAX_VERSION_BYTES: usize = 256;
 const MAX_REGISTRY_DIR_ENTRIES: usize = 1024;
 
 /// A registry entry describing one running control server.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+///
+/// `#[non_exhaustive]`: an entry is only trustworthy while it names the process
+/// instance that wrote it, so outside this crate one is built by
+/// [`RegistryEntry::registering`] (which resolves the token) or by
+/// deserializing one that already exists — never by a struct literal that can
+/// leave the binding out.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct RegistryEntry {
     /// Registry format version.
     pub v: u32,
@@ -46,6 +58,38 @@ pub struct RegistryEntry {
     pub version: String,
     /// Unix seconds when the server started (newest wins on ambiguity).
     pub started_unix: u64,
+    /// The server process's [`crate::presence::process_start_token`] at
+    /// registration, so the entry is bound to one process *instance* rather
+    /// than to a pid the OS may hand to somebody else. `None` for an entry
+    /// written by a build that predates the token, or on a platform that
+    /// cannot report one; readers then fall back to bare pid liveness.
+    #[serde(default)]
+    pub start_token: Option<u64>,
+}
+
+impl RegistryEntry {
+    /// An entry describing a control server hosted by the *current* process.
+    ///
+    /// The instance token is resolved here rather than passed in: it must
+    /// describe the process that is registering, and a call site cannot forget
+    /// what it never supplies.
+    pub fn registering(
+        kind: &str,
+        pid: u32,
+        endpoint: String,
+        version: &str,
+        started_unix: u64,
+    ) -> Self {
+        Self {
+            v: 1,
+            kind: kind.to_string(),
+            pid,
+            endpoint,
+            version: version.to_string(),
+            started_unix,
+            start_token: crate::presence::process_start_token(pid),
+        }
+    }
 }
 
 #[cfg(unix)]
@@ -320,31 +364,70 @@ pub fn list(dir: &std::path::Path) -> Vec<RegistryEntry> {
 }
 
 /// Like [`list`], but filters out entries whose owning process is no longer
-/// alive, best-effort `prune`ing each dead one as a side effect (mirroring
-/// `presence::live_entries`). Used by the client's `discover` so dead entries
-/// from a crashed/killed server don't accumulate and aren't probed.
+/// alive, best-effort [`prune_stale`]ing each dead one as a side effect
+/// (mirroring `presence::live_entries`), so dead entries from a
+/// crashed/killed server don't accumulate and aren't probed.
 ///
 /// `list` is kept pure (raw enumeration) for callers that want every entry
 /// regardless of liveness (e.g. diagnostics); this is the liveness-aware view.
+/// The client's `discover` runs the same [`list_live_by`] core with the same
+/// [`owner_alive`] predicate, differing only in that it can inject a
+/// stand-in — so what is pinned here is what discovery does.
 pub fn list_live(dir: &std::path::Path) -> Vec<RegistryEntry> {
+    list_live_by(dir, owner_alive)
+}
+
+/// Whether the process instance that wrote `entry` is still running.
+///
+/// This is the predicate the production discovery path uses, named rather than
+/// inlined so it is exercised directly by tests instead of only through
+/// stand-ins.
+pub fn owner_alive(entry: &RegistryEntry) -> bool {
+    crate::presence::owner_alive(entry.pid, entry.start_token)
+}
+
+/// The shared core of [`list_live`] and the client's discovery enumeration,
+/// with the liveness predicate injected so both run the same pruning rule.
+pub(crate) fn list_live_by(
+    dir: &std::path::Path,
+    owner_alive: impl Fn(&RegistryEntry) -> bool,
+) -> Vec<RegistryEntry> {
     let mut out = list(dir);
     out.retain(|e| {
-        if crate::presence::pid_alive(e.pid) {
+        if owner_alive(e) {
             true
         } else {
             // Dead owner — its server can never come back under this pid; drop
             // the entry so the dir can't grow forever and we don't waste a
-            // connect attempt on it.
-            prune(dir, e.pid);
+            // connect attempt on it. "Dead" includes a pid the OS has since
+            // recycled: that process is a stranger, not our server.
+            prune_stale(dir, e);
             false
         }
     });
     out
 }
 
-/// Remove a stale entry file (e.g. when a connect proves the server is dead).
-pub fn prune(dir: &std::path::Path, pid: u32) {
-    unregister(dir, pid);
+/// Remove an entry that was judged stale — but only while the file still *is*
+/// that entry.
+///
+/// An entry is named on disk by its pid, and a pid outlives the process that
+/// held it: between the read that judged this entry and this delete, the OS can
+/// hand that number to a new kettle which registers at the very same path.
+/// Deleting by pid alone would unadvertise that healthy server for the rest of
+/// its life, because a server `register`s exactly once at startup and never
+/// heartbeats. Re-reading makes the delete a no-op unless the file is still the
+/// record that was judged; if it cannot be read at all, nothing is deleted —
+/// an entry that outlives its owner is pruned by the next reader, whereas a
+/// wrongly deleted one never comes back.
+pub fn prune_stale(dir: &std::path::Path, entry: &RegistryEntry) {
+    let path = entry_path(dir, entry.pid);
+    let still_the_same = read_registry_entry(&path)
+        .and_then(|text| serde_json::from_str::<RegistryEntry>(&text).ok())
+        .is_some_and(|current| current == *entry);
+    if still_the_same {
+        let _ = std::fs::remove_file(&path);
+    }
 }
 
 /// Owns a `PSID` produced by one of two Win32 APIs, freed the way each API
@@ -571,20 +654,8 @@ mod tests {
     fn register_list_unregister_round_trip() {
         let dir = crate::test_scratch_root().join(format!("kettle-ctl-reg-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
-        let e1 = RegistryEntry {
-            v: 1,
-            kind: "gui".into(),
-            pid: 111,
-            endpoint: default_endpoint(&dir, 111),
-            version: "x".into(),
-            started_unix: 100,
-        };
-        let e2 = RegistryEntry {
-            pid: 222,
-            endpoint: default_endpoint(&dir, 222),
-            started_unix: 200,
-            ..e1.clone()
-        };
+        let e1 = RegistryEntry::registering("gui", 111, default_endpoint(&dir, 111), "x", 100);
+        let e2 = RegistryEntry::registering("gui", 222, default_endpoint(&dir, 222), "x", 200);
         register(&dir, &e1).unwrap();
         register(&dir, &e2).unwrap();
         let listed = list(&dir);
@@ -605,20 +676,15 @@ mod tests {
         // A live entry (our own pid) and a dead one (u32::MAX-1 is far past any
         // real pid table on Windows and Linux alike — same convention as the
         // presence tests).
-        let live = RegistryEntry {
-            v: 1,
-            kind: "gui".into(),
-            pid: std::process::id(),
-            endpoint: default_endpoint(&dir, std::process::id()),
-            version: "x".into(),
-            started_unix: 100,
-        };
-        let dead = RegistryEntry {
-            pid: u32::MAX - 1,
-            endpoint: default_endpoint(&dir, u32::MAX - 1),
-            started_unix: 200,
-            ..live.clone()
-        };
+        let me = std::process::id();
+        let live = RegistryEntry::registering("gui", me, default_endpoint(&dir, me), "x", 100);
+        let dead = RegistryEntry::registering(
+            "gui",
+            u32::MAX - 1,
+            default_endpoint(&dir, u32::MAX - 1),
+            "x",
+            200,
+        );
         register(&dir, &live).unwrap();
         register(&dir, &dead).unwrap();
         // Raw `list` sees both; `list_live` keeps only the live one.
@@ -634,6 +700,94 @@ mod tests {
         assert!(
             entry_path(&dir, live.pid).exists(),
             "live entry left on disk"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A server that died and whose pid the OS handed to an unrelated process
+    /// must not stay advertised. The stale entry names a pid that IS alive —
+    /// our own — so bare pid liveness cannot distinguish it from a real
+    /// server, and the entry would otherwise survive every future discovery.
+    #[cfg(any(windows, target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn list_live_prunes_an_entry_whose_pid_was_recycled() {
+        let dir =
+            crate::test_scratch_root().join(format!("kettle-ctl-recycled-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let me = std::process::id();
+        let mut recycled =
+            RegistryEntry::registering("gui", me, default_endpoint(&dir, me), "x", 100);
+        let token = recycled
+            .start_token
+            .expect("a supported platform reports a start token");
+        // Same pid, a different process instance behind it.
+        recycled.start_token = Some(token.wrapping_add(1));
+        register(&dir, &recycled).unwrap();
+        assert_eq!(list(&dir).len(), 1, "raw list still enumerates the entry");
+
+        assert!(
+            list_live(&dir).is_empty(),
+            "an entry whose owning instance is gone is not live"
+        );
+        assert!(
+            !entry_path(&dir, me).exists(),
+            "the recycled-pid entry is pruned from disk"
+        );
+
+        // The complementary half: the same pid with its real token stays.
+        let mine = RegistryEntry::registering("gui", me, default_endpoint(&dir, me), "x", 100);
+        register(&dir, &mine).unwrap();
+        assert_eq!(list_live(&dir).len(), 1, "this instance's entry survives");
+        assert!(entry_path(&dir, me).exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Pruning is aimed at a *record*, not at a pid. A reader judges an entry
+    /// stale from a snapshot, and by the time it deletes, the pid in that
+    /// entry's filename can belong to a new kettle that has already registered
+    /// there. Deleting by pid alone would unadvertise that healthy server for
+    /// the rest of its life — a server registers exactly once and never
+    /// heartbeats — which is strictly worse than the stale entry it was
+    /// chasing.
+    #[cfg(any(windows, target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn pruning_a_stale_entry_spares_the_live_one_that_replaced_it() {
+        let dir = crate::test_scratch_root()
+            .join(format!("kettle-ctl-prune-race-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let me = std::process::id();
+        let mut stale = RegistryEntry::registering("gui", me, default_endpoint(&dir, me), "x", 100);
+        let token = stale
+            .start_token
+            .expect("a supported platform reports a start token");
+        stale.start_token = Some(token.wrapping_add(1));
+        register(&dir, &stale).unwrap();
+        let judged = list(&dir);
+        assert_eq!(judged.len(), 1);
+        assert!(!owner_alive(&judged[0]), "the snapshot's entry is stale");
+
+        // The recycle completes: a new server owns that pid now and registered
+        // at the same path before the delete aimed at the old record landed.
+        let live = RegistryEntry::registering("gui", me, default_endpoint(&dir, me), "x", 200);
+        register(&dir, &live).unwrap();
+
+        prune_stale(&dir, &judged[0]);
+        assert_eq!(
+            list(&dir),
+            vec![live.clone()],
+            "a delete aimed at the stale record must not take the live one with it"
+        );
+        assert_eq!(
+            list_live(&dir),
+            vec![live.clone()],
+            "and the live server is still discoverable"
+        );
+
+        // The same call does delete the record it actually judged.
+        prune_stale(&dir, &live);
+        assert!(
+            list(&dir).is_empty(),
+            "an entry still unchanged on disk is pruned"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -658,14 +812,7 @@ mod tests {
         let dir =
             crate::test_scratch_root().join(format!("kettle-ctl-private-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
-        let entry = RegistryEntry {
-            v: 1,
-            kind: "gui".into(),
-            pid: 123,
-            endpoint: default_endpoint(&dir, 123),
-            version: "x".into(),
-            started_unix: 1,
-        };
+        let entry = RegistryEntry::registering("gui", 123, default_endpoint(&dir, 123), "x", 1);
         let path = register(&dir, &entry).unwrap();
         let metadata = std::fs::symlink_metadata(&path).unwrap();
         assert!(metadata.file_type().is_file());
@@ -693,14 +840,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&redirected).unwrap();
         symlink(&redirected, &dir).unwrap();
-        let entry = RegistryEntry {
-            v: 1,
-            kind: "gui".into(),
-            pid: 321,
-            endpoint: default_endpoint(&dir, 321),
-            version: "x".into(),
-            started_unix: 1,
-        };
+        let entry = RegistryEntry::registering("gui", 321, default_endpoint(&dir, 321), "x", 1);
         assert!(register(&dir, &entry).is_err());
 
         std::fs::remove_file(&dir).unwrap();

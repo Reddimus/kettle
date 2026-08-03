@@ -20908,17 +20908,7 @@ impl App {
         let color = pool[slot];
         let presence = kettle_ctl::presence::claim(
             &dir,
-            kettle_ctl::presence::PresenceEntry {
-                v: 1,
-                pid: me,
-                win: ws.seq,
-                rgb: rgb_hex(color),
-                auto: true,
-                started_unix: std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map(|d| d.as_secs())
-                    .unwrap_or(0),
-            },
+            kettle_ctl::presence::PresenceEntry::claiming(me, ws.seq, rgb_hex(color), true),
         );
         if let Some(r) = ws.renderer.as_mut() {
             r.set_accent_override(Some(color));
