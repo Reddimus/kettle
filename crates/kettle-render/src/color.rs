@@ -325,9 +325,65 @@ pub fn average_color(rgba: &[u8]) -> Rgb {
     Rgb::new((r / n) as u8, (g / n) as u8, (b / n) as u8)
 }
 
+/// The colour to draw the glyph sitting under a focused block cursor.
+///
+/// `cell_bg` is that cell's own background; `colors` is the runtime palette.
+///
+/// An OSC 12 runtime cursor colour moves the block out from under the theme's
+/// `cursor`/`cursor_text` pair, so the recoloured glyph has to follow
+/// reverse-video — its own cell background — instead of `theme.cursor_text`,
+/// which was tuned against `theme.cursor`. With no OSC 12 in force,
+/// `cursor_text` is exactly right, and it is what `cursor-fg-color` sets.
+///
+/// The runtime override is `colors[258]`, not `resolve_query(258, ..)`.
+/// `resolve_query` falls back to the theme and so always answers `Some`, which
+/// made this branch unconditional and left `cursor-fg-color` unreachable:
+/// setting a conspicuous cursor foreground did nothing unless an application
+/// happened to send OSC 12. Keeping the decision in one named function is what
+/// makes that testable — inline, the renderer's copy of it was not.
+pub fn cursor_glyph_color(theme: &Theme, colors: &TermColors, cell_bg: Rgb) -> Rgb {
+    if colors[258].is_some() {
+        cell_bg
+    } else {
+        theme.cursor_text
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The renderer must ask whether a runtime cursor colour EXISTS, and the
+    /// answer must reach the glyph.
+    ///
+    /// Driven through `cursor_glyph_color`, the function the frame builder
+    /// calls — an earlier version of this test asserted the distinction on
+    /// `resolve_query` and `colors[258]` directly, so restoring the bug at the
+    /// call site left it green.
+    #[test]
+    fn the_cursor_glyph_follows_reverse_video_only_under_a_runtime_override() {
+        let theme = Theme::default();
+        let mut colors = TermColors::default();
+        let cell_bg = Rgb::new(9, 8, 7);
+
+        assert_eq!(
+            cursor_glyph_color(&theme, &colors, cell_bg),
+            theme.cursor_text,
+            "with no OSC 12 in force the glyph takes cursor-fg-color"
+        );
+        assert_ne!(
+            theme.cursor_text, cell_bg,
+            "the fixture must distinguish the two answers"
+        );
+
+        colors[258] = Some(alacritty_terminal::vte::ansi::Rgb { r: 1, g: 2, b: 3 });
+        assert_eq!(
+            cursor_glyph_color(&theme, &colors, cell_bg),
+            cell_bg,
+            "an OSC 12 cursor colour moves the block, so the glyph reverses \
+             against its own cell instead"
+        );
+    }
 
     /// `resolve_query` answers "what colour is this slot", NOT "did an
     /// application override it".

@@ -42,6 +42,25 @@ outermost pair goes, and only when both ends are the same character — so
 contain them, such as a shell command. If you need a value that really does
 begin and end with a quote, add a second pair.
 
+### Colour values
+
+Anywhere a key takes a colour, all of these work:
+
+| Form | Example |
+|---|---|
+| `#rrggbb` | `#7aa2f7` |
+| `#rgb` (each digit doubled) | `#7af` |
+| bare hex | `7aa2f7` |
+| `0xRRGGBB` | `0x7AA2F7` |
+| `rgb:R/G/B` (X11/xterm, 1–4 hex digits per channel) | `rgb:7a/a2/f7` |
+| a named colour | `teal`, `orange`, `dodgerblue` |
+
+Names are the 148 CSS Color Level 4 colours — the same list X11's `rgb.txt`
+uses — matched case-insensitively, so `DodgerBlue` and `dodgerblue` are the
+same. Two are kettle's own long-standing values rather than CSS's, because
+configs were written against them: `green` is `#008000` and `gray`/`grey` is
+`#bebebe`.
+
 ## Keys
 
 | Key | Type | Default | Notes |

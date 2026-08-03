@@ -6170,17 +6170,6 @@ impl Renderer {
                 None
             }
         };
-        // An OSC 12 runtime cursor color moves the block
-        // out from under the theme's cursor/cursor_text pair, so the
-        // recolored glyph follows reverse-video (its own cell bg) instead of
-        // `theme.cursor_text` (which was tuned against `theme.cursor`).
-        // Ask whether a RUNTIME override actually exists, not what the slot
-        // resolves to. `resolve_query` falls back to the theme and therefore
-        // always returns `Some`, so testing it made this branch unconditional
-        // and left `theme.cursor_text` — which is what `cursor-fg-color`
-        // sets — unreachable. Setting a conspicuous cursor foreground did
-        // nothing at all unless an application happened to send OSC 12.
-        let cursor_rt_override = term_colors[258].is_some();
         // A wide (CJK/emoji) glyph under the cursor needs
         // a TWO-cell block — recoloring the glyph to cursor_text while the
         // 1-cell block covered only its left half left the right half drawn
@@ -6279,15 +6268,10 @@ impl Renderer {
                 if flags.contains(Flags::WIDE_CHAR) {
                     cursor_wide_quad = Some((col, 2.0));
                 }
-                // The inverted glyph color: the cell bg under an OSC 12 runtime
-                // cursor color (reverse-video), else theme `cursor_text`. The
-                // glyph keeps its NORMAL `fg` in the pane buffer; the cursor
-                // pass draws this recolored copy on top of the block.
-                let cursor_fg = if cursor_rt_override {
-                    bg
-                } else {
-                    theme.cursor_text
-                };
+                // The glyph keeps its NORMAL `fg` in the pane buffer; the
+                // cursor pass draws this recolored copy on top of the block.
+                // See `color::cursor_glyph_color` for which colour and why.
+                let cursor_fg = color::cursor_glyph_color(theme, term_colors, bg);
                 cursor_glyph_capture = Some((sc.c, cursor_fg));
             }
 
@@ -10491,6 +10475,157 @@ mod gpu_tests {
             Ok(false) => eprintln!("no GPU adapter on this host; skipped"),
             Err(e) => panic!("offscreen GPU self-test failed: {e}"),
         }
+    }
+
+    /// A half-opaque quad must contribute half its colour, not a quarter.
+    ///
+    /// The quad shader returns PREMULTIPLIED colour (`rgb * a`) while the
+    /// pipeline was configured with `ALPHA_BLENDING`, whose source factor is
+    /// `SrcAlpha` — so the GPU multiplied by alpha a second time. Every
+    /// translucent surface kettle draws came out at alpha², darkening images,
+    /// panels, highlights, separators, and the unfocused-pane dim overlay.
+    ///
+    /// This renders and reads the pixel back, so it is the convention as the
+    /// hardware actually applies it. `tests/alpha_convention.rs` reads the
+    /// source for the pipelines this cannot cheaply stand up; a source-token
+    /// check can always be worked around, a rendered pixel cannot.
+    #[test]
+    fn a_half_opaque_quad_blends_at_half_not_a_quarter() {
+        let _serialized = gpu_test_guard();
+        let Some(pixel) = pollster::block_on(render_one_translucent_quad()) else {
+            eprintln!("no GPU adapter on this host; skipped");
+            return;
+        };
+
+        // White at 50% alpha over black: premultiplied source-over leaves 0.5
+        // linear, which the sRGB target stores as ~188. Multiplying by alpha
+        // twice leaves 0.25 linear, stored as ~137 — far outside any tolerance
+        // a driver's rounding needs.
+        let expected = 188_u8;
+        let doubled = 137_u8;
+        for (channel, value) in ["r", "g", "b"].into_iter().zip(pixel) {
+            assert!(
+                value.abs_diff(expected) <= 3,
+                "channel {channel} came back {value}, expected ~{expected}; \
+                 ~{doubled} means alpha was applied twice (premultiplied shader \
+                 output paired with a straight-alpha blend state)"
+            );
+        }
+    }
+
+    /// Draw one 50%-opaque white quad over black and read the centre pixel
+    /// back. `None` when the host has no usable adapter.
+    async fn render_one_translucent_quad() -> Option<[u8; 3]> {
+        let cfg = Config::default();
+        let (_instance, adapter) = resolve_headless_adapter(&cfg, "alpha_blend_test")
+            .await
+            .ok()?;
+        let (device, queue) = adapter
+            .request_device(&wgpu::DeviceDescriptor {
+                label: Some("kettle-alpha-blend-test"),
+                ..Default::default()
+            })
+            .await
+            .ok()?;
+
+        // Match the offscreen self-test's format so this measures the same
+        // pipeline configuration the renderer builds for a real surface.
+        let format = wgpu::TextureFormat::Rgba8UnormSrgb;
+        let size = 8_u32;
+        let mut quads = QuadPipeline::new(&device, format);
+        quads.upload(
+            &device,
+            &queue,
+            [size as f32, size as f32],
+            &[QuadInstance {
+                pos: [0.0, 0.0],
+                size: [size as f32, size as f32],
+                color: [1.0, 1.0, 1.0, 0.5],
+            }],
+        );
+
+        let texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("kettle-alpha-blend-target"),
+            size: wgpu::Extent3d {
+                width: size,
+                height: size,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        // 8 px * 4 bytes is below the 256-byte copy alignment, so pad the row.
+        let bytes_per_row = 256_u32;
+        let readback = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("kettle-alpha-blend-readback"),
+            size: u64::from(bytes_per_row) * u64::from(size),
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+
+        let mut encoder =
+            device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("kettle-alpha-blend-pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                        store: wgpu::StoreOp::Store,
+                    },
+                    depth_slice: None,
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            quads.draw(&mut pass);
+        }
+        encoder.copy_texture_to_buffer(
+            wgpu::TexelCopyTextureInfo {
+                texture: &texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::TexelCopyBufferInfo {
+                buffer: &readback,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(bytes_per_row),
+                    rows_per_image: Some(size),
+                },
+            },
+            wgpu::Extent3d {
+                width: size,
+                height: size,
+                depth_or_array_layers: 1,
+            },
+        );
+        queue.submit(std::iter::once(encoder.finish()));
+
+        let slice = readback.slice(..);
+        let (tx, rx) = std::sync::mpsc::channel();
+        slice.map_async(wgpu::MapMode::Read, move |result| {
+            let _ = tx.send(result);
+        });
+        let _ = device.poll(wgpu::PollType::wait_indefinitely());
+        rx.recv().ok()?.ok()?;
+        let data = slice.get_mapped_range().ok()?;
+        // Centre row, centre pixel — well inside the quad.
+        let offset = (size as usize / 2) * bytes_per_row as usize + (size as usize / 2) * 4;
+        let pixel = [data[offset], data[offset + 1], data[offset + 2]];
+        drop(data);
+        readback.unmap();
+        Some(pixel)
     }
 
     #[cfg(target_os = "windows")]

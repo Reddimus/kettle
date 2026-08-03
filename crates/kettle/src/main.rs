@@ -1159,42 +1159,8 @@ fn main() -> anyhow::Result<()> {
     {
         return Err(anyhow::anyhow!("--profile {name}: {reason}"));
     }
-    // `--accent COLOR` promises an override. Both consumers parsed it with
-    // `and_then(Rgb::parse)`, so an unparseable value was silently discarded
-    // and kettle started with the configured accent — the flag appeared to
-    // work and changed nothing. Fail at the surface, naming the accepted
-    // forms, the same way `--config` and `--profile` do.
-    if let Some(accent) = cli.accent.as_deref()
-        && kettle_config::Rgb::parse(accent).is_none()
-    {
-        return Err(anyhow::anyhow!(
-            "--accent {accent:?}: not a color (expected #rgb, #rrggbb, \
-             rgb:R/G/B, or an X11 color name)"
-        ));
-    }
-    // Same shape for `--working-directory DIR`. The engine
-    // silently falls back to `$HOME` when the directory doesn't exist
-    // (see `kettle_core::term::Terminal::new`: `Some(d) if is_dir =>
-    // cmd.cwd(d)`, else HOME), so a typo'd `-d ~/projets` spawned the
-    // shell in the user's home with no warning and no obvious cue that
-    // the requested cwd was ignored. Hard-fail at the CLI surface
-    // before the engine even runs; report whether the path is missing
-    // (typo) or exists-but-isn't-a-directory (named a file by
-    // mistake) so the user's fix is one keystroke away.
-    if let Some(p) = &cli.working_directory {
-        let kind = if !p.exists() {
-            Some("no such file or directory")
-        } else if !p.is_dir() {
-            Some("not a directory")
-        } else {
-            None
-        };
-        if let Some(reason) = kind {
-            return Err(anyhow::anyhow!(
-                "--working-directory {}: {reason}",
-                p.display()
-            ));
-        }
+    if let Some(reason) = flag_value_problem(&cli) {
+        return Err(anyhow::anyhow!("{reason}"));
     }
 
     if cli.list_themes {
@@ -1228,56 +1194,21 @@ fn main() -> anyhow::Result<()> {
         let path = resolve_config_path(&cli).ok_or_else(|| {
             anyhow::anyhow!("could not resolve a config path (no HOME / XDG / APPDATA?)")
         })?;
-        // `exists()` follows symlinks and answers about the TARGET, and the
-        // answer is stale the moment it is returned. Checking then writing let
-        // a dangling link create whatever it pointed at, and let anyone who
-        // could swap the path between the two steps redirect the write onto a
-        // file of their choosing — while the message below still promised we
-        // refuse to clobber. Ask the OS to create it exclusively instead, so
-        // "does not already exist" and "this is the file I wrote" are one
-        // atomic decision. `create_new` also refuses to follow a symlink.
-        if let Some(dir) = path.parent() {
-            std::fs::create_dir_all(dir).map_err(|e| {
-                anyhow::anyhow!("could not create config directory {}: {e}", dir.display())
-            })?;
-        }
-        match std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&path)
-        {
-            Ok(mut file) => {
-                use std::io::Write as _;
-                file.write_all(include_str!("../../../docs/kettle.example.config").as_bytes())
-                    .and_then(|()| file.flush())
-                    .map_err(|e| {
-                        anyhow::anyhow!("could not write config {}: {e}", path.display())
-                    })?;
+        match write_default_config(&path)? {
+            DefaultConfigWrite::Written => {
+                println!("Wrote a default config to {}.", path.display());
+                println!(
+                    "Everything is commented out — uncomment what you want, then relaunch kettle."
+                );
             }
-            // A directory at the config path is also "something is already
-            // here, leave it alone" — but Windows reports it as a permission
-            // error rather than AlreadyExists, so testing only for the latter
-            // turned a friendly exit 0 into `Access is denied` and exit 1.
-            Err(e)
-                if e.kind() == std::io::ErrorKind::AlreadyExists
-                    || path.symlink_metadata().is_ok() =>
-            {
+            DefaultConfigWrite::AlreadyPresent => {
                 println!(
                     "config already exists at {} — leaving it untouched.",
                     path.display()
                 );
                 println!("Delete it first if you want a fresh default, or edit it directly.");
-                return Ok(());
-            }
-            Err(e) => {
-                return Err(anyhow::anyhow!(
-                    "could not write config {}: {e}",
-                    path.display()
-                ));
             }
         }
-        println!("Wrote a default config to {}.", path.display());
-        println!("Everything is commented out — uncomment what you want, then relaunch kettle.");
         return Ok(());
     }
     if let Some(shell) = cli.print_completions.as_deref() {
@@ -2070,6 +2001,103 @@ fn ignores_profile(cli: &Cli) -> bool {
     ignores_profile && !reads_profile
 }
 
+/// What `--write-default-config` did.
+#[derive(Debug, PartialEq, Eq)]
+enum DefaultConfigWrite {
+    Written,
+    /// Something is already at that path. Not an error: the flag's promise is
+    /// "you will end up with a config", and one is there.
+    AlreadyPresent,
+}
+
+/// Create `path` with the shipped default config, refusing to clobber.
+///
+/// This is the whole of `--write-default-config` apart from resolving the path
+/// and printing, so a test exercises the real decision rather than restating it.
+///
+/// `exists()` follows symlinks and answers about the TARGET, and the answer is
+/// stale the moment it is returned. Checking and then writing let a dangling
+/// link create whatever it pointed at, and let anyone who could swap the path
+/// between the two steps redirect the write onto a file of their choosing —
+/// while the message still promised we refuse to clobber. `create_new` asks the
+/// OS to make "does not already exist" and "this is the file I wrote" one
+/// atomic decision, and refuses to follow a symlink.
+fn write_default_config(path: &std::path::Path) -> anyhow::Result<DefaultConfigWrite> {
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir).map_err(|e| {
+            anyhow::anyhow!("could not create config directory {}: {e}", dir.display())
+        })?;
+    }
+    match std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+    {
+        Ok(mut file) => {
+            use std::io::Write as _;
+            file.write_all(include_str!("../../../docs/kettle.example.config").as_bytes())
+                .and_then(|()| file.flush())
+                .map_err(|e| anyhow::anyhow!("could not write config {}: {e}", path.display()))?;
+            Ok(DefaultConfigWrite::Written)
+        }
+        // A directory at the config path is also "something is already here,
+        // leave it alone" — but Windows reports it as a permission error rather
+        // than AlreadyExists, so testing only for the latter turned a friendly
+        // exit 0 into `Access is denied` and exit 1.
+        Err(e)
+            if e.kind() == std::io::ErrorKind::AlreadyExists || path.symlink_metadata().is_ok() =>
+        {
+            Ok(DefaultConfigWrite::AlreadyPresent)
+        }
+        Err(e) => Err(anyhow::anyhow!(
+            "could not write config {}: {e}",
+            path.display()
+        )),
+    }
+}
+
+/// Reject flag VALUES that are parsed again later by code that shrugs when the
+/// parse fails.
+///
+/// A flag whose value silently falls back is worse than one that errors: it
+/// looks like it worked. `--accent` was parsed with `and_then(Rgb::parse)` in
+/// both of its consumers, so an unparseable color started kettle with the
+/// configured accent and no message. `--working-directory` was the same shape —
+/// `kettle_core::term::Terminal::new` uses `Some(d) if is_dir => cmd.cwd(d)`
+/// and falls back to `$HOME` otherwise, so a typo'd `-d ~/projets` opened the
+/// shell in the home directory with nothing to indicate the request was
+/// dropped.
+///
+/// This is one function so a test can drive it from a parsed `Cli` exactly as
+/// `run` does. It reports the first problem it finds, message included, in the
+/// same shape as `--profile`.
+fn flag_value_problem(cli: &Cli) -> Option<String> {
+    if let Some(accent) = cli.accent.as_deref()
+        && kettle_config::Rgb::parse(accent).is_none()
+    {
+        return Some(format!(
+            "--accent {accent:?}: not a color (expected #rgb, #rrggbb, \
+             rgb:R/G/B, or an X11 color name)"
+        ));
+    }
+    if let Some(path) = &cli.working_directory {
+        // Distinguish the two so the user's fix is one keystroke away: a
+        // missing path is a typo, an existing non-directory means they named a
+        // file by mistake.
+        let reason = if !path.exists() {
+            Some("no such file or directory")
+        } else if !path.is_dir() {
+            Some("not a directory")
+        } else {
+            None
+        };
+        if let Some(reason) = reason {
+            return Some(format!("--working-directory {}: {reason}", path.display()));
+        }
+    }
+    None
+}
+
 fn profile_problem(name: &str) -> Option<String> {
     // Resolve the config directory FIRST. Both `list_profiles` (empty Vec) and
     // `path_for_profile` (None) collapse "no config dir" into the same answer
@@ -2475,8 +2503,9 @@ mod crash_log_tests {
 #[cfg(test)]
 mod tests {
     use super::{
-        Cli, append_remote_command, append_remote_command_with_timeout, config_path_problem,
-        encode_remote_send_command, extra_check_config_lines, format_ssh_hosts, ignores_profile,
+        Cli, DefaultConfigWrite, append_remote_command, append_remote_command_with_timeout,
+        config_path_problem, encode_remote_send_command, extra_check_config_lines,
+        flag_value_problem, format_ssh_hosts, ignores_profile, write_default_config,
     };
     use clap::Parser;
 
@@ -2489,57 +2518,102 @@ mod tests {
     /// latter turned the friendly "already exists, leaving it untouched" exit 0
     /// into `Access is denied` and exit 1.
     ///
-    /// Exercised through the same helper the CLI arm uses, so deleting the
-    /// production branch fails this.
+    /// Every case goes through `write_default_config`, the function the CLI arm
+    /// calls — an earlier version of this test restated `create_new` and the
+    /// error predicate locally, so deleting the production code left it green.
     #[test]
     fn write_default_config_leaves_anything_already_there_untouched() {
-        use std::io::ErrorKind;
-
         let dir = tempfile::tempdir().expect("tempdir");
 
         // A regular file that is already there.
         let existing = dir.path().join("config");
         std::fs::write(&existing, b"mine").expect("seed");
-        let err = std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&existing)
-            .expect_err("must not clobber an existing config");
-        assert!(
-            err.kind() == ErrorKind::AlreadyExists || existing.symlink_metadata().is_ok(),
-            "an existing regular file must be recognised as already-present"
+        assert_eq!(
+            write_default_config(&existing).expect("an existing file is not an error"),
+            DefaultConfigWrite::AlreadyPresent
         );
         assert_eq!(
             std::fs::read(&existing).expect("unchanged"),
             b"mine",
-            "and its contents must be untouched"
+            "an existing config must be left exactly as it was"
         );
 
-        // A DIRECTORY at the config path — the case that regressed.
+        // A DIRECTORY at the config path — the case that regressed. Windows
+        // reports this as a permission error rather than AlreadyExists.
         let as_dir = dir.path().join("config-dir");
         std::fs::create_dir(&as_dir).expect("seed dir");
-        let err = std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&as_dir)
-            .expect_err("must not write over a directory");
-        assert!(
-            err.kind() == ErrorKind::AlreadyExists || as_dir.symlink_metadata().is_ok(),
-            "a directory at the config path must be recognised as already-present, \
-             not surfaced as a raw permission error: {err:?}"
+        assert_eq!(
+            write_default_config(&as_dir)
+                .expect("a directory at the config path must not be a hard error"),
+            DefaultConfigWrite::AlreadyPresent
+        );
+        assert!(as_dir.is_dir(), "and the directory must survive");
+
+        // A path that is genuinely free gets the shipped default, parent
+        // directories and all.
+        let fresh = dir.path().join("missing").join("parents").join("config");
+        assert_eq!(
+            write_default_config(&fresh).expect("a free path must be writable"),
+            DefaultConfigWrite::Written
+        );
+        assert_eq!(
+            std::fs::read_to_string(&fresh).expect("read back"),
+            include_str!("../../../docs/kettle.example.config"),
+            "the file written must be the config kettle ships"
         );
 
-        // A path that is genuinely free still gets written.
-        let fresh = dir.path().join("fresh").join("config");
-        std::fs::create_dir_all(fresh.parent().expect("parent")).expect("mkdir");
-        let mut file = std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&fresh)
-            .expect("a free path must be writable");
-        use std::io::Write as _;
-        file.write_all(b"x").expect("write");
-        assert_eq!(std::fs::read(&fresh).expect("read"), b"x");
+        // And running it twice is idempotent rather than destructive.
+        assert_eq!(
+            write_default_config(&fresh).expect("second run"),
+            DefaultConfigWrite::AlreadyPresent
+        );
+    }
+
+    /// A flag value that silently falls back is worse than one that errors.
+    ///
+    /// `--accent` was parsed with `and_then(Rgb::parse)` by both of its
+    /// consumers, so `--accent tael` started kettle with the configured accent
+    /// and said nothing: the flag looked like it worked. `--working-directory`
+    /// had the same shape, falling back to `$HOME`. Both are checked at the
+    /// surface now, through the function `run` itself calls.
+    #[test]
+    fn flag_values_that_would_be_silently_dropped_are_rejected_at_the_surface() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let file = dir.path().join("not-a-directory");
+        std::fs::write(&file, b"").expect("seed");
+        let missing = dir.path().join("nope");
+
+        for (args, expected) in [
+            (vec!["kettle", "--accent", "tael"], Some("--accent")),
+            (vec!["kettle", "--accent", "#gg0000"], Some("--accent")),
+            (vec!["kettle", "--accent", ""], Some("--accent")),
+            (vec!["kettle", "--accent", "#ff6b35"], None),
+            (vec!["kettle", "--accent", "teal"], None),
+            (vec!["kettle", "--accent", "rgb:ff/6b/35"], None),
+            (
+                vec!["kettle", "-d", file.to_str().expect("utf-8")],
+                Some("--working-directory"),
+            ),
+            (
+                vec!["kettle", "-d", missing.to_str().expect("utf-8")],
+                Some("--working-directory"),
+            ),
+            (
+                vec!["kettle", "-d", dir.path().to_str().expect("utf-8")],
+                None,
+            ),
+            (vec!["kettle"], None),
+        ] {
+            let cli = Cli::parse_from(&args);
+            match (flag_value_problem(&cli), expected) {
+                (Some(reason), Some(flag)) => assert!(
+                    reason.starts_with(flag),
+                    "{args:?} must be refused by {flag}, got {reason:?}"
+                ),
+                (None, None) => {}
+                (got, want) => panic!("{args:?}: expected {want:?}, got {got:?}"),
+            }
+        }
     }
 
     /// A `--profile` typo must not block a command that never reads a profile.

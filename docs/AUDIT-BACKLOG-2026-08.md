@@ -54,6 +54,28 @@ neighbouring one open.
 - `--write-default-config` returned an error for an existing DIRECTORY, because
   Windows reports that as a permission failure rather than `AlreadyExists`.
 
+A second review, of that second round, found four more. Those are now fixed too,
+and the pattern is the same one again:
+
+- Regenerating the Linux provenance record from the archive alone **disowned**
+  files the previous release installed and this one no longer ships. They stayed
+  on disk with nothing recording them, and uninstall deletes only what
+  provenance lists. `scripts/install-unix.py` seeds the new record from the old
+  one; both writers now share one function, so the drift that hid the original
+  bug cannot recur.
+- Directory ownership was sampled BEFORE the writes, so a transaction that
+  created a directory and rolled back left it unowned — the retry saw it as
+  pre-existing and never claimed it. The transaction reports what it created and
+  removes those directories on rollback.
+- The `exec` stripper's UTF-8 shield asked the CURRENT state whether to emit a
+  continuation byte. The forced 64-KiB resynchronization can land on a lead
+  byte, swallowing it and moving to ground — so the continuations were emitted
+  with no lead in front of them and stdout became invalid UTF-8 from there on. A
+  character now follows its lead.
+- `--check-config` deduplicated inert keys on the spelling in the file, so
+  `use-system-font` and `use_system_font` — one key to the parser — were
+  reported as two separate inert settings.
+
 Still open on those same fixes:
 
 - The premultiplied blend fix is correct locally, but `lib.rs`'s surface clear
@@ -63,6 +85,16 @@ Still open on those same fixes:
 - `--write-default-config` still follows a **parent** junction; only the final
   component is atomic. Redirecting creation to an absent destination remains
   possible for an attacker who can replace a writable parent directory.
+- Rollback removes the directories the transaction created only when the
+  process that created them is the one rolling back. A process killed mid-update
+  leaves recovery to `recover_transaction`, which rebuilds the transaction from
+  the journal — and the journal does not record directory creations, because
+  widening its schema would make a journal unreadable to the release that might
+  have to recover it. Such a directory stays behind unowned.
+- Linux provenance now records the uid that PUBLISHED the files
+  (`geteuid()`, matching `install-unix.py`) rather than the prefix owner. The
+  two agree in every reachable case, so no test can distinguish them without
+  root and an ACL-writable root-owned prefix; the assertion pins intent only.
 
 ## Deferred — correctness
 
@@ -154,5 +186,28 @@ parity work. The recurring shapes:
   self-test accepts any error text containing `PTY`.
 - `install.rs` tests that call a `cfg(test)` duplicate containing the logic the
   production path is missing, so both stay green while the bug ships.
+
+Five of these were closed rather than deferred, each by moving the decision into
+a named function the test drives exactly as production does:
+
+- `--write-default-config` — the test restated `create_new` and the error
+  predicate locally; deleting the production branch left it green. The branch is
+  now `write_default_config`, and the test also checks the bytes written are the
+  config kettle ships.
+- The cursor glyph colour — the test demonstrated that `resolve_query(258, ..)`
+  and `term_colors[258]` differ, but never referenced the renderer's condition,
+  so restoring the bug at the call site left it green. It is
+  `color::cursor_glyph_color` now.
+- The profile cycle order — `list_profiles` can only read the real config
+  directory, so its documented ordering was untested. The rule is
+  `sort_profile_names`.
+- `--accent` and `--working-directory` had no test at the CLI surface at all.
+  Both are `flag_value_problem` now, driven from a parsed `Cli`.
+- The alpha convention detector recognised exactly two token spellings, so
+  multiplying through `let extra = in.color.a` read as a single multiply. It
+  resolves aliases now — but the real answer is
+  `gpu_tests::a_half_opaque_quad_blends_at_half_not_a_quarter`, which renders a
+  translucent quad and reads the pixel back. It returns 137 instead of 188 with
+  the original bug restored.
 
 See `docs/TESTING.md` for the checks that catch each shape.

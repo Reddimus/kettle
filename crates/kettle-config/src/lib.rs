@@ -2756,6 +2756,27 @@ fn peacock_accent(theme: &Theme, seed: u64) -> crate::color::Rgb {
     candidates[(seed % candidates.len() as u64) as usize]
 }
 
+/// Order profile names the way `Action::NextProfile` / `PrevProfile` cycle
+/// them: case-insensitively, with the exact bytes as the tie-break.
+///
+/// The order has to be total and stable, or the cycle depends on whatever
+/// order the filesystem happened to enumerate the directory in — the same two
+/// keypresses landing somewhere different on a different machine, or after
+/// adding an unrelated profile. Case-insensitive because `Work` and `work` next
+/// to each other in a listing that sorted `W` before `h` reads as a bug; the
+/// bytewise tie-break because case-insensitive comparison alone is not a total
+/// order over distinct names.
+///
+/// Pure, and separate from [`Config::list_profiles`], which can only read the
+/// real config directory — so the rule above is checkable without one.
+fn sort_profile_names(names: &mut [String]) {
+    names.sort_by(|a, b| {
+        a.to_lowercase()
+            .cmp(&b.to_lowercase())
+            .then_with(|| a.cmp(b))
+    });
+}
+
 impl Config {
     /// The effective UI-chrome accent (focus border, active tab,
     /// titlebars, menu/settings highlights), resolved in precedence:
@@ -2869,11 +2890,7 @@ impl Config {
                 name.strip_suffix(".config").map(|s| s.to_string())
             })
             .collect();
-        names.sort_by(|a, b| {
-            a.to_lowercase()
-                .cmp(&b.to_lowercase())
-                .then_with(|| a.cmp(b))
-        });
+        sort_profile_names(&mut names);
         names
     }
 
@@ -3793,15 +3810,24 @@ impl Config {
         "use-theme-colors",
     ];
 
-    /// Which [`Config::INERT_KEYS`] this text actually sets, in file order.
+    /// Which [`Config::INERT_KEYS`] this text actually sets, in file order,
+    /// spelled the way the file spells them.
+    ///
+    /// One setting is reported once however many ways it is written.
+    /// Deduplicating on the raw spelling instead reported `use-system-font`
+    /// and `use_system_font` as two separate inert settings, which reads as two
+    /// problems to fix when kettle sees a single key set twice — the parser
+    /// folds `_` to `-` and lowercases before any of this.
     pub fn inert_keys_present(text: &str) -> Vec<String> {
         let mut seen = Vec::new();
+        let mut reported = Vec::new();
         for entry in parse::parse(text) {
-            if Self::INERT_KEYS.contains(&entry.key.as_str()) && !seen.contains(&entry.raw_key) {
-                seen.push(entry.raw_key.clone());
+            if Self::INERT_KEYS.contains(&entry.key.as_str()) && !seen.contains(&entry.key) {
+                seen.push(entry.key.clone());
+                reported.push(entry.raw_key.clone());
             }
         }
-        seen
+        reported
     }
 
     pub fn parse_collect(text: &str) -> (Config, Vec<String>) {
@@ -10233,6 +10259,56 @@ split_horiz = <Control><Shift>j
         }
     }
 
+    /// The profile cycle order must be total, stable, and case-insensitive.
+    ///
+    /// `Action::NextProfile` / `PrevProfile` step through this list, so an
+    /// order that depends on directory-enumeration order means the same two
+    /// keypresses land somewhere different on another machine, or after an
+    /// unrelated profile is added. `list_profiles` can only read the real
+    /// config directory, so the rule lives in `sort_profile_names` where it can
+    /// actually be checked.
+    #[test]
+    fn the_profile_cycle_order_does_not_depend_on_the_filesystem() {
+        // Case-insensitive first: `home` sorts before `Work`, which a plain
+        // bytewise sort would reverse because every uppercase letter is below
+        // every lowercase one.
+        let mut names = vec![
+            "Work".to_string(),
+            "home".to_string(),
+            "Alpha".to_string(),
+            "beta".to_string(),
+        ];
+        sort_profile_names(&mut names);
+        assert_eq!(names, ["Alpha", "beta", "home", "Work"]);
+
+        // Names that differ only in case still have ONE fixed order, or the
+        // sort is not total and the cycle can wobble between runs.
+        let mut names = vec!["work".to_string(), "Work".to_string(), "WORK".to_string()];
+        sort_profile_names(&mut names);
+        assert_eq!(names, ["WORK", "Work", "work"]);
+
+        // Same input in any starting order lands in the same place.
+        let mut reversed = vec!["work".to_string(), "WORK".to_string(), "Work".to_string()];
+        sort_profile_names(&mut reversed);
+        assert_eq!(
+            reversed, names,
+            "the order must not depend on the input order"
+        );
+
+        // Digits and separators are ordinary characters, not special cases.
+        let mut names = vec![
+            "dev-2".to_string(),
+            "dev-10".to_string(),
+            "dev-1".to_string(),
+        ];
+        sort_profile_names(&mut names);
+        assert_eq!(
+            names,
+            ["dev-1", "dev-10", "dev-2"],
+            "lexicographic, not numeric — but deterministic"
+        );
+    }
+
     /// Drift guard. `profile_name_from_path` is the inverse of
     /// `path_for_profile`: it should recover the bare profile name from
     /// a `<config-dir>/profiles/<name>.config` path, and return `None`
@@ -11244,6 +11320,25 @@ font-size = 15
             "use-system-font = true\nfont-size = 13\nextra-styling = true\nuse-system-font = false\n",
         );
         assert_eq!(cfg.inert_keys, vec!["use-system-font", "extra-styling"]);
+
+        // One setting is one report however many ways the file spells it. The
+        // parser folds `_` to `-` and lowercases, so these are all the same key
+        // — listing them separately reads as several problems to fix when there
+        // is one, and it is the FIRST spelling that locates the line.
+        let cfg = Config::parse_text(
+            "use-system-font = true\nuse_system_font = false\nUSE-SYSTEM-FONT = true\n",
+        );
+        assert_eq!(
+            cfg.inert_keys,
+            vec!["use-system-font"],
+            "aliases of one inert key must be reported once"
+        );
+        let cfg = Config::parse_text("use_system_font = true\nuse-system-font = false\n");
+        assert_eq!(
+            cfg.inert_keys,
+            vec!["use_system_font"],
+            "and reported in the spelling the file used first"
+        );
     }
 
     /// Terminator's `group_all` GROUPS; it does not broadcast.

@@ -2743,9 +2743,6 @@ fn apply_verified_linux_update(
     install: &ManagedInstall,
     update: &AvailableUpdate,
 ) -> Result<(), UpdateError> {
-    use std::collections::BTreeMap;
-    use std::os::unix::fs::MetadataExt as _;
-
     package.file(Path::new("kettle"))?;
     package.file(Path::new("install.sh"))?;
     // Provenance verification REQUIRES this file to be recorded, and the update
@@ -2829,37 +2826,14 @@ fn apply_verified_linux_update(
     destinations.push(PathBuf::from("share/kettle/install.json"));
     destinations.push(PathBuf::from(UNIX_INSTALL_PROVENANCE_FILE));
 
-    // Carry the previous record's directories forward and add any this update
-    // must create, so uninstall still knows exactly what it owns.
-    let mut owned_directories = previous_provenance
-        .directories
-        .into_iter()
-        .map(|record| (record.path, record.mode))
-        .collect::<BTreeMap<_, _>>();
-    for destination in &destinations {
-        let mut relative = PathBuf::new();
-        if let Some(parent) = destination.parent() {
-            for component in parent.components() {
-                let Component::Normal(name) = component else {
-                    return Err(UpdateError::Transaction(format!(
-                        "unsafe Linux provenance directory {}",
-                        destination.display()
-                    )));
-                };
-                relative.push(name);
-                if !install.prefix.join(&relative).try_exists()? {
-                    owned_directories.insert(relative_to_string(&relative)?, 0o755);
-                }
-            }
-        }
-    }
     transaction.preflight_destinations(&destinations)?;
 
     // Every file this transaction writes must appear in the NEW provenance
     // record. Not regenerating it left the OLD hashes describing the NEW files,
     // so the very next verification reported the installation unmanaged:
     // startup could not confirm or clean the committed transaction, and every
-    // later self-update refused to run.
+    // later self-update refused to run. `install_unix_provenance` below merges
+    // these with what the previous release already owned.
     let mut provenance_files = Vec::with_capacity(destinations.len());
     for (source, destination, mode) in map {
         let bytes = package.bytes(Path::new(source))?;
@@ -2917,33 +2891,103 @@ fn apply_verified_linux_update(
         mode: 0o644,
     });
 
-    // The reader requires records sorted strictly by path.
-    provenance_files.sort_by(|left, right| left.path.cmp(&right.path));
-    let prefix = install.prefix.to_str().ok_or_else(|| {
-        UpdateError::Transaction("Linux install prefix is not valid UTF-8".into())
-    })?;
+    install_unix_provenance(transaction, install, previous_provenance, provenance_files)?;
+    transaction.finish_preflight()?;
+    Ok(())
+}
+
+/// Write the Linux install provenance for a transaction that has just published
+/// its files, as its final journaled entry.
+///
+/// Both Linux appliers end here so the record they produce cannot drift. That
+/// mattered: the two used to build it separately, and when the production one
+/// stopped installing `install-unix.py` the duplicate below kept recording it,
+/// so every test stayed green while real installs were rejected as unmanaged.
+///
+/// `published` is what THIS transaction wrote; `previous` is the record it
+/// replaces. The two are merged rather than the new one replacing the old,
+/// because a file an earlier release installed and this archive no longer ships
+/// is still on disk — dropping its record leaves it unremovable, since uninstall
+/// deletes only what provenance lists. `install-unix.py` seeds from the old
+/// record for the same reason, and the two writers have to agree.
+#[cfg(target_os = "linux")]
+fn install_unix_provenance(
+    transaction: &mut Transaction,
+    install: &ManagedInstall,
+    previous: UnixInstallProvenance,
+    published: Vec<UnixInstallFile>,
+) -> Result<(), UpdateError> {
+    use std::collections::BTreeMap;
+
+    // `BTreeMap` gives the strict path ordering the reader requires, and lets a
+    // republished path replace its old record rather than duplicating it.
+    let mut files = previous
+        .files
+        .into_iter()
+        .map(|record| (record.path.clone(), record))
+        .collect::<BTreeMap<_, _>>();
+    for file in published {
+        files.insert(file.path.clone(), file);
+    }
+
+    // Carry the previous record's directories forward and add the ones this
+    // transaction actually created. Sampling `try_exists` before the writes
+    // instead asked the wrong question: a transaction that created a directory
+    // and then rolled back left it on disk unrecorded, so the retry saw it as
+    // pre-existing, omitted it, and uninstall left it behind for good. The
+    // transaction now reports what it created and removes those directories
+    // when it rolls back, so both answers come from the same authority.
+    //
+    // This is called after every other publication and installs the record as
+    // the transaction's last entry, so `created_directories` is complete: the
+    // provenance file's own parent is created by an earlier entry.
+    let mut directories = previous
+        .directories
+        .into_iter()
+        .map(|record| (record.path, record.mode))
+        .collect::<BTreeMap<_, _>>();
+    directories.extend(
+        transaction
+            .created_directories()
+            .iter()
+            .map(|(path, mode)| (path.clone(), *mode)),
+    );
+
     // Enforce the reader's bounds BEFORE writing: `read_linux_install_provenance`
     // refuses a record past `MAX_ARCHIVE_ENTRIES`, so exceeding it here would
     // produce provenance this installer can never read back — and since both
     // upgrade and uninstall need a readable record, the install would be
     // stranded by its own success.
-    if provenance_files.len() > MAX_ARCHIVE_ENTRIES || owned_directories.len() > MAX_ARCHIVE_ENTRIES
-    {
+    if files.len() > MAX_ARCHIVE_ENTRIES || directories.len() > MAX_ARCHIVE_ENTRIES {
         return Err(UpdateError::UnmanagedInstall(format!(
             "refusing to record Linux install provenance with {} files and {} \
              directories; the readable maximum is {MAX_ARCHIVE_ENTRIES} each",
-            provenance_files.len(),
-            owned_directories.len()
+            files.len(),
+            directories.len()
         )));
     }
+    let prefix = install.prefix.to_str().ok_or_else(|| {
+        UpdateError::Transaction("Linux install prefix is not valid UTF-8".into())
+    })?;
     let provenance = UnixInstallProvenance {
         schema: 1,
         product: "kettle".into(),
         managed_by: "kettle-installer".into(),
         prefix: prefix.into(),
-        owner_uid: install.prefix.metadata()?.uid(),
-        files: provenance_files,
-        directories: owned_directories
+        // The uid that PUBLISHED these files — which is what verification then
+        // compares every recorded file against — rather than the prefix's
+        // owner. The two agree in every case that verifies: a root install into
+        // a root-owned prefix, or a user install into their own. They diverge
+        // only when a non-root user has ACL write access to a root-owned
+        // prefix, and `read_linux_install_provenance` already refuses that
+        // install because the record it just wrote is not owned by the prefix
+        // owner either. So this changes no reachable outcome; it stops the two
+        // writers disagreeing about what the field means. `install-unix.py`
+        // records `os.geteuid()`, and a record written by one has to be
+        // readable by the other.
+        owner_uid: unsafe { libc::geteuid() },
+        files: files.into_values().collect(),
+        directories: directories
             .into_iter()
             .map(|(path, mode)| UnixInstallDirectory { path, mode })
             .collect(),
@@ -2958,9 +3002,7 @@ fn apply_verified_linux_update(
         Path::new(UNIX_INSTALL_PROVENANCE_FILE),
         provenance.as_bytes(),
         Some(0o644),
-    )?;
-    transaction.finish_preflight()?;
-    Ok(())
+    )
 }
 
 #[cfg(target_os = "linux")]
@@ -2978,9 +3020,6 @@ fn apply_staged_update(
     install: &ManagedInstall,
     update: &AvailableUpdate,
 ) -> Result<(), UpdateError> {
-    use std::collections::BTreeMap;
-    use std::os::unix::fs::MetadataExt as _;
-
     let root = staging.join("kettle");
     let binary = root.join("kettle");
     require_file(&binary, "kettle/kettle")?;
@@ -3058,28 +3097,6 @@ fn apply_staged_update(
     destinations.push(PathBuf::from("share/kettle/install.json"));
     destinations.push(PathBuf::from(UNIX_INSTALL_PROVENANCE_FILE));
 
-    let mut owned_directories = previous_provenance
-        .directories
-        .into_iter()
-        .map(|record| (record.path, record.mode))
-        .collect::<BTreeMap<_, _>>();
-    for destination in &destinations {
-        let mut relative = PathBuf::new();
-        if let Some(parent) = destination.parent() {
-            for component in parent.components() {
-                let Component::Normal(name) = component else {
-                    return Err(UpdateError::Transaction(format!(
-                        "unsafe Linux provenance directory {}",
-                        destination.display()
-                    )));
-                };
-                relative.push(name);
-                if !install.prefix.join(&relative).try_exists()? {
-                    owned_directories.insert(relative_to_string(&relative)?, 0o755);
-                }
-            }
-        }
-    }
     transaction.preflight_destinations(&destinations)?;
     let mut provenance_files = Vec::with_capacity(destinations.len() - 1);
     for (source, destination, mode) in map {
@@ -3146,52 +3163,7 @@ fn apply_staged_update(
         sha256: sha256_bytes(marker.as_bytes()),
         mode: 0o644,
     });
-    provenance_files.sort_by(|left, right| left.path.cmp(&right.path));
-    if provenance_files.len() > MAX_ARCHIVE_ENTRIES {
-        return Err(UpdateError::Transaction(
-            "Linux install provenance exceeds its file limit".into(),
-        ));
-    }
-    let prefix = install.prefix.to_str().ok_or_else(|| {
-        UpdateError::Transaction("Linux install prefix is not valid UTF-8".into())
-    })?;
-    // Enforce the reader's bounds here, before writing. `read_linux_install_provenance`
-    // refuses a record whose file or directory count exceeds MAX_ARCHIVE_ENTRIES, so
-    // writing past it would produce provenance this installer can never read back —
-    // and since upgrade and uninstall both require a readable record first, the
-    // install would be permanently stranded by its own success.
-    if provenance_files.len() > MAX_ARCHIVE_ENTRIES || owned_directories.len() > MAX_ARCHIVE_ENTRIES
-    {
-        return Err(UpdateError::UnmanagedInstall(format!(
-            "refusing to record Linux install provenance with {} files and {} \
-             directories; the readable maximum is {MAX_ARCHIVE_ENTRIES} each",
-            provenance_files.len(),
-            owned_directories.len()
-        )));
-    }
-    let provenance = UnixInstallProvenance {
-        schema: 1,
-        product: "kettle".into(),
-        managed_by: "kettle-installer".into(),
-        prefix: prefix.into(),
-        owner_uid: install.prefix.metadata()?.uid(),
-        files: provenance_files,
-        directories: owned_directories
-            .into_iter()
-            .map(|(path, mode)| UnixInstallDirectory { path, mode })
-            .collect(),
-    };
-    let provenance = serde_json::to_string_pretty(&provenance)? + "\n";
-    if provenance.len() > 1024 * 1024 {
-        return Err(UpdateError::Transaction(
-            "Linux install provenance exceeds its byte limit".into(),
-        ));
-    }
-    transaction.install_bytes(
-        Path::new(UNIX_INSTALL_PROVENANCE_FILE),
-        provenance.as_bytes(),
-        Some(0o644),
-    )?;
+    install_unix_provenance(transaction, install, previous_provenance, provenance_files)?;
     transaction.finish_preflight()?;
     Ok(())
 }
@@ -3459,6 +3431,23 @@ fn anchored_parent(
     relative: &Path,
     create_missing: bool,
 ) -> Result<AnchoredParent, UpdateError> {
+    anchored_parent_recording(prefix, relative, create_missing, &mut Vec::new())
+}
+
+/// As [`anchored_parent`], additionally appending each prefix-relative
+/// directory this call actually created to `created`.
+///
+/// `fs::create_dir` returning `Ok(())` — as opposed to `AlreadyExists` — is the
+/// only authoritative answer to "did we create this?". Sampling `try_exists`
+/// before the writes gets it wrong whenever an earlier attempt created the
+/// directory and rolled back.
+#[cfg(target_os = "linux")]
+fn anchored_parent_recording(
+    prefix: &Path,
+    relative: &Path,
+    create_missing: bool,
+    created: &mut Vec<String>,
+) -> Result<AnchoredParent, UpdateError> {
     validate_relative(relative)?;
     let mut directory = open_anchored_directory(prefix).map_err(|error| {
         UpdateError::Transaction(format!(
@@ -3472,10 +3461,12 @@ fn anchored_parent(
         ));
     }
     if let Some(parent) = relative.parent() {
+        let mut walked = PathBuf::new();
         for component in parent.components() {
             let Component::Normal(name) = component else {
                 return Err(UpdateError::Transaction("unsafe install path".into()));
             };
+            walked.push(name);
             let candidate = directory_descriptor_path(&directory).join(name);
             let next = match open_anchored_directory(&candidate) {
                 Ok(next) => next,
@@ -3490,6 +3481,7 @@ fn anchored_parent(
                             // Persist each new directory entry before a journal
                             // can refer to content below it.
                             directory.sync_all()?;
+                            created.push(relative_to_string(&walked)?);
                         }
                         Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
                         Err(error) => return Err(error.into()),
@@ -3933,6 +3925,23 @@ fn anchored_parent(
     relative: &Path,
     create_missing: bool,
 ) -> Result<AnchoredParent, UpdateError> {
+    anchored_parent_recording(prefix, relative, create_missing, &mut Vec::new())
+}
+
+/// As [`anchored_parent`], additionally appending each prefix-relative
+/// directory this call actually created to `created`.
+///
+/// `fs::create_dir` returning `Ok(())` — as opposed to `AlreadyExists` — is the
+/// only authoritative answer to "did we create this?". Sampling `try_exists`
+/// before the writes gets it wrong whenever an earlier attempt created the
+/// directory and rolled back.
+#[cfg(windows)]
+fn anchored_parent_recording(
+    prefix: &Path,
+    relative: &Path,
+    create_missing: bool,
+    created: &mut Vec<String>,
+) -> Result<AnchoredParent, UpdateError> {
     validate_relative(relative)?;
     let prefix = std::path::absolute(prefix)?;
     let mut path = PathBuf::new();
@@ -3964,10 +3973,12 @@ fn anchored_parent(
         )));
     }
     if let Some(parent) = relative.parent() {
+        let mut walked = PathBuf::new();
         for component in parent.components() {
             let Component::Normal(name) = component else {
                 return Err(UpdateError::Transaction("unsafe install path".into()));
             };
+            walked.push(name);
             path.push(name);
             let next = match open_anchored_directory(&path) {
                 Ok(next) => next,
@@ -3975,7 +3986,7 @@ fn anchored_parent(
                     if create_missing && error.kind() == std::io::ErrorKind::NotFound =>
                 {
                     match fs::create_dir(&path) {
-                        Ok(()) => {}
+                        Ok(()) => created.push(relative_to_string(&walked)?),
                         Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
                         Err(error) => return Err(error.into()),
                     }
@@ -4332,6 +4343,17 @@ struct Transaction {
     backup_dir: PathBuf,
     journal: Journal,
     preflight: Option<std::collections::HashMap<String, PreflightDestination>>,
+    /// Prefix-relative directories this transaction created, and the mode they
+    /// were created with.
+    ///
+    /// Publishing a file creates its missing parents. Nothing recorded that, so
+    /// a transaction that created a directory and then rolled back left it on
+    /// disk: the file was restored, the directory was not, and the Linux
+    /// provenance regeneration on the next attempt saw it as pre-existing and
+    /// never claimed it. Rollback removes these (deepest first, only while
+    /// empty) and the provenance writer reads them, so "who created this
+    /// directory" has one answer instead of a guess made before the writes.
+    created_directories: std::collections::BTreeMap<String, u32>,
 }
 
 #[cfg(any(windows, target_os = "linux"))]
@@ -4399,6 +4421,7 @@ impl Transaction {
                 entries: Vec::new(),
             },
             preflight: None,
+            created_directories: std::collections::BTreeMap::new(),
         };
         if let Err(error) = transaction.persist_journal() {
             let _ = remove_new_backup_dir_checked(prefix, &transaction.backup_dir);
@@ -4511,8 +4534,13 @@ impl Transaction {
                 "transaction replacement exceeds the safety quota".into(),
             ));
         }
-        let (_destination_parent, destination) =
-            anchored_destination(&self.prefix, relative, true)?;
+        let mut created = Vec::new();
+        let destination_parent =
+            anchored_parent_recording(&self.prefix, relative, true, &mut created)?;
+        let destination = destination_parent.destination(relative)?;
+        for path in created {
+            self.created_directories.insert(path, 0o755);
+        }
         let key = relative_string.to_ascii_lowercase();
         let mut snapshot = if let Some(preflight) = self.preflight.as_mut() {
             preflight.remove(&key).ok_or_else(|| {
@@ -4574,11 +4602,55 @@ impl Transaction {
         atomic_write(&self.journal_path, &bytes, None)
     }
 
+    /// Prefix-relative directories this transaction created, deduplicated and
+    /// in path order, with the mode they were created with.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    fn created_directories(&self) -> &std::collections::BTreeMap<String, u32> {
+        &self.created_directories
+    }
+
     fn rollback(&mut self) -> Result<(), UpdateError> {
         self.journal.phase = JournalPhase::RollingBack;
         self.persist_journal()?;
         self.restore_entries()?;
+        self.remove_created_directories();
         self.finish_cleanup()
+    }
+
+    /// Undo the directory creations publishing performed, deepest first.
+    ///
+    /// Restoring the files is only half of "leave the prefix as we found it":
+    /// their parents were created too. A left-behind directory is not just
+    /// litter — it is unowned, so the next attempt sees it as pre-existing,
+    /// omits it from provenance, and uninstall can never remove it.
+    ///
+    /// Best effort by construction. A directory that is not empty holds
+    /// something this transaction did not put there (or a backup still being
+    /// cleaned up), and removing it would destroy data rollback is supposed to
+    /// protect; `remove_dir` refuses that case for us. Any other failure leaves
+    /// the directory exactly as it is, which is the pre-existing behaviour.
+    ///
+    /// Residual: this covers rollback within the process that did the writing.
+    /// A process killed mid-update leaves its creations to `recover_transaction`,
+    /// which rebuilds the transaction from the journal — and the journal does not
+    /// record them, because widening its schema to carry them would make a
+    /// journal unreadable to the release that might have to recover it. Such a
+    /// directory stays behind unowned, exactly as it did before this existed.
+    fn remove_created_directories(&mut self) {
+        let created = std::mem::take(&mut self.created_directories);
+        // Deepest first: `share/kettle/shell-integration` has to go before
+        // `share/kettle`, and reverse path order gives that for free because a
+        // parent is a prefix of its children.
+        for path in created.keys().rev() {
+            let relative = Path::new(path);
+            let Ok(parent) = anchored_parent(&self.prefix, relative, false) else {
+                continue;
+            };
+            let Ok(target) = parent.destination(relative) else {
+                continue;
+            };
+            let _ = fs::remove_dir(&target);
+        }
     }
 
     fn commit(mut self) -> Result<(), UpdateError> {
@@ -4646,6 +4718,9 @@ fn confirm_committed_transaction(
         backup_dir,
         journal,
         preflight: None,
+        // Recovery reconstructs a transaction from its journal, which does not
+        // record directory creations; see `remove_created_directories`.
+        created_directories: std::collections::BTreeMap::new(),
     };
     transaction.finish_cleanup()?;
     Ok(true)
@@ -4690,6 +4765,9 @@ fn recover_transaction(prefix: &Path) -> Result<(), UpdateError> {
         backup_dir,
         journal,
         preflight: None,
+        // Recovery reconstructs a transaction from its journal, which does not
+        // record directory creations; see `remove_created_directories`.
+        created_directories: std::collections::BTreeMap::new(),
     };
     if transaction.journal.phase == JournalPhase::Committed {
         Err(UpdateError::Transaction(format!(
@@ -5818,8 +5896,22 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     fn seed_linux_install_provenance(prefix: &Path) {
+        seed_linux_install_provenance_with(prefix, &[]);
+    }
+
+    /// Seed a valid provenance record, plus `extra` files that a previous
+    /// release owned. Use `extra` to represent something the NEW archive no
+    /// longer ships.
+    #[cfg(target_os = "linux")]
+    fn seed_linux_install_provenance_with(prefix: &Path, extra: &[(&str, &[u8], u32)]) {
         use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
 
+        for (relative, contents, mode) in extra.iter().copied() {
+            let path = prefix.join(relative);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(&path, contents).unwrap();
+            fs::set_permissions(&path, fs::Permissions::from_mode(mode)).unwrap();
+        }
         for (relative, contents, mode) in [
             ("bin/kettle", b"fixture".as_slice(), 0o755),
             (
@@ -5854,6 +5946,7 @@ mod tests {
         ];
         let mut files = paths
             .into_iter()
+            .chain(extra.iter().map(|(relative, _, mode)| (*relative, *mode)))
             .map(|(relative, mode)| {
                 let path = prefix.join(relative);
                 fs::set_permissions(&path, fs::Permissions::from_mode(mode)).unwrap();
@@ -6797,6 +6890,188 @@ mod tests {
                 "provenance files must be strictly sorted: {:?} then {:?}",
                 pair[0].path,
                 pair[1].path
+            );
+        }
+
+        // The record describes who wrote the files. This agrees with the prefix
+        // owner in every case that verifies, so it does not catch a change back
+        // to the prefix's uid on its own — see `install_unix_provenance`. It
+        // does pin the field against `install-unix.py`, which records the same
+        // thing.
+        assert_eq!(
+            after.owner_uid,
+            unsafe { libc::geteuid() },
+            "provenance must record the uid that published the files"
+        );
+    }
+
+    /// An update must not disown what the previous release installed.
+    ///
+    /// Provenance is the only list uninstall consults. Regenerating it from the
+    /// archive alone meant a file an older release shipped and this one dropped
+    /// stayed on disk with no record of it — installed forever, removable by
+    /// nothing. `install-unix.py` seeds the new record from the old one, so
+    /// regenerating from scratch also made the two writers disagree.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_update_keeps_owning_files_the_new_archive_dropped() {
+        let root = test_tempdir();
+        let mut archive = test_linux_package_tar("99.0.0");
+        let package = load_linux_package(&archive, &fake_update()).unwrap();
+        archive.fill(0);
+
+        let prefix = root.path().join("install");
+        fs::create_dir_all(prefix.join("bin")).unwrap();
+        fs::write(prefix.join("bin/kettle"), b"old-binary").unwrap();
+        // Shipped by the previous release; absent from the archive above.
+        let retired = "share/kettle/retired-helper.sh";
+        seed_linux_install_provenance_with(&prefix, &[(retired, b"#!/bin/sh\nretired\n", 0o755)]);
+        let install = ManagedInstall {
+            prefix: prefix.clone(),
+            executable: prefix.join("bin/kettle"),
+            marker_path: prefix.join("share/kettle/install.json"),
+        };
+        let before = read_linux_install_provenance(&prefix).unwrap();
+        let retired_before = before
+            .files
+            .iter()
+            .find(|file| file.path == retired)
+            .expect("the fixture must seed the retired file")
+            .clone();
+
+        let mut transaction = Transaction::begin(&prefix, "99.0.0").unwrap();
+        apply_verified_linux_update(&mut transaction, &package, &install, &fake_update()).unwrap();
+        transaction.commit().unwrap();
+
+        // Still on disk — the update never touched it.
+        assert!(prefix.join(retired).is_file());
+        // And still owned, byte for byte as it was recorded.
+        let after = read_linux_install_provenance(&prefix).unwrap();
+        let retired_after = after
+            .files
+            .iter()
+            .find(|file| file.path == retired)
+            .expect("an update must keep owning files it no longer ships");
+        assert_eq!(
+            (
+                &retired_after.sha256,
+                retired_after.size,
+                retired_after.mode
+            ),
+            (
+                &retired_before.sha256,
+                retired_before.size,
+                retired_before.mode
+            ),
+            "a carried-forward record must survive unchanged"
+        );
+        // Carrying forward must not duplicate the paths this update rewrote.
+        for pair in after.files.windows(2) {
+            assert!(pair[0].path < pair[1].path, "strict order after the merge");
+        }
+    }
+
+    /// Directory ownership must come from what the transaction actually
+    /// created, and a rollback must undo those creations.
+    ///
+    /// The plan used to sample `try_exists` before writing anything. A
+    /// transaction that created `share/man/man1`, failed, and rolled back
+    /// restored the files but left the directory; the retry then saw it as
+    /// pre-existing, left it out of provenance, and uninstall could never
+    /// remove it.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_update_owns_the_directories_it_creates_and_rollback_removes_them() {
+        // Directories the fixture prefix does not have and the archive needs.
+        let fresh = [
+            "share/doc/kettle",
+            "share/man/man1",
+            "share/icons/hicolor/256x256/apps",
+        ];
+
+        let make_prefix = |root: &Path| {
+            let prefix = root.join("install");
+            fs::create_dir_all(prefix.join("bin")).unwrap();
+            fs::write(prefix.join("bin/kettle"), b"old-binary").unwrap();
+            seed_linux_install_provenance(&prefix);
+            for relative in fresh {
+                assert!(
+                    !prefix.join(relative).exists(),
+                    "{relative} must be missing for this test to mean anything"
+                );
+            }
+            prefix
+        };
+        let install_for = |prefix: &Path| ManagedInstall {
+            prefix: prefix.to_path_buf(),
+            executable: prefix.join("bin/kettle"),
+            marker_path: prefix.join("share/kettle/install.json"),
+        };
+
+        // Committed: the new directories are recorded as owned.
+        let committed_root = test_tempdir();
+        let prefix = make_prefix(committed_root.path());
+        let mut archive = test_linux_package_tar("99.0.0");
+        let package = load_linux_package(&archive, &fake_update()).unwrap();
+        archive.fill(0);
+        let mut transaction = Transaction::begin(&prefix, "99.0.0").unwrap();
+        apply_verified_linux_update(
+            &mut transaction,
+            &package,
+            &install_for(&prefix),
+            &fake_update(),
+        )
+        .unwrap();
+        transaction.commit().unwrap();
+
+        let after = read_linux_install_provenance(&prefix).unwrap();
+        let owned = after
+            .directories
+            .iter()
+            .map(|record| record.path.as_str())
+            .collect::<std::collections::HashSet<_>>();
+        for relative in fresh {
+            assert!(
+                prefix.join(relative).is_dir(),
+                "{relative} must exist after the update"
+            );
+            assert!(
+                owned.contains(relative),
+                "the update created {relative} and must record owning it; recorded {owned:?}"
+            );
+        }
+        for pair in after.directories.windows(2) {
+            assert!(
+                pair[0].path < pair[1].path,
+                "directory records must be strictly sorted"
+            );
+        }
+
+        // Rolled back: the same directories are gone again.
+        let rolled_back_root = test_tempdir();
+        let prefix = make_prefix(rolled_back_root.path());
+        let mut archive = test_linux_package_tar("99.0.0");
+        let package = load_linux_package(&archive, &fake_update()).unwrap();
+        archive.fill(0);
+        let mut transaction = Transaction::begin(&prefix, "99.0.0").unwrap();
+        apply_verified_linux_update(
+            &mut transaction,
+            &package,
+            &install_for(&prefix),
+            &fake_update(),
+        )
+        .unwrap();
+        transaction.rollback().unwrap();
+
+        assert_eq!(
+            fs::read(prefix.join("bin/kettle")).unwrap(),
+            b"old-binary",
+            "rollback must restore the previous binary"
+        );
+        for relative in fresh {
+            assert!(
+                !prefix.join(relative).exists(),
+                "rollback left {relative} behind, so a retry would never claim it"
             );
         }
     }

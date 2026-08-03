@@ -6,6 +6,57 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+  Follow-through on the review of the 2.46.0 fixes: the defects that review
+  found in them, plus the tests it judged unable to fail.
+
+  ### Fixed
+  - **A Linux self-update disowned files the previous release installed.** The
+    provenance record was regenerated from the archive alone, so a file an
+    earlier release shipped and this one no longer does stayed on disk with
+    nothing recording it — uninstall deletes only what provenance lists, so it
+    was installed permanently. `scripts/install-unix.py` seeds the new record
+    from the old one; the two writers now go through one function and cannot
+    drift apart again.
+  - **A rolled-back update left directories behind, unowned.** Directory
+    ownership was decided by sampling the filesystem BEFORE the writes. A
+    transaction that created a directory and then failed restored the files but
+    not the directory, so the retry saw it as pre-existing, left it out of
+    provenance, and uninstall could never remove it. The transaction now reports
+    the directories it actually created and removes them when it rolls back.
+  - **`kettle exec` could emit invalid UTF-8 after a very long control string.**
+    The stripper shields UTF-8 continuation bytes so a `0x9c` inside a character
+    is not mistaken for the 8-bit string terminator. When the 64-KiB
+    resynchronization bound fell on a multi-byte lead byte, the lead was
+    swallowed as the string's last byte while its continuations were emitted
+    into ordinary output with no lead in front of them — anything decoding
+    stdout saw invalid UTF-8 from that point on. A character now goes wherever
+    its lead went.
+  - **Named colors were nine.** `--accent`'s own `--help` gives
+    `kettle --accent teal` as its example, and `teal` was not one of them: before
+    the flag validated its value that silently fell back to the configured
+    accent, and after, it became a hard error on kettle's own documented
+    example. `orange`, `purple`, `pink`, `navy` and the rest failed the same
+    way. All 148 CSS/X11 named colors resolve now; the original nine keep the
+    values configs were written against.
+  - **`--check-config` reported one inert setting as several.** It
+    deduplicated on the spelling in the file, so `use-system-font` and
+    `use_system_font` — which the parser folds to the same key — were listed
+    separately, reading as two problems to fix.
+  - **`--working-directory` had no test at the CLI surface**, and neither did
+    `--accent`. Both are validated by one function now, driven by the tests
+    exactly as the CLI drives it.
+
+  ### Changed
+  - The alpha-blending convention is verified by rendering a half-opaque quad
+    and reading the pixel back, rather than only by reading the shader source.
+    A source-level check can be worked around; the source check remains as a
+    cross-check for the pipelines the GPU test cannot cheaply stand up, and now
+    resolves local aliases so multiplying through a renamed variable is still
+    counted.
+  - Three decisions moved out of long functions into named ones so their tests
+    exercise what production runs rather than a restatement of it: the cursor
+    glyph colour, `--write-default-config`, and the profile cycle order.
+
 ## [2.46.0] — 2026-08-03
 
   Terminator-parity pass. Everything here is a setting, gesture, or documented

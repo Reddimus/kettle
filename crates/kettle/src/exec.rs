@@ -162,6 +162,12 @@ pub struct AnsiStripper {
     /// byte; a C1 byte in ground position, where UTF-8 could not put one, is
     /// still honored for genuinely 8-bit streams.
     utf8_continuation: u8,
+    /// Whether the lead byte of that character reached `out`.
+    ///
+    /// A character is emitted whole or swallowed whole; the state machine may
+    /// move on between its bytes and must not get a vote. See the shield in
+    /// [`AnsiStripper::push`].
+    utf8_emitted: bool,
 }
 
 #[derive(Debug, Default)]
@@ -194,7 +200,15 @@ impl AnsiStripper {
             if self.utf8_continuation > 0 {
                 if matches!(b, 0x80..=0xbf) {
                     self.utf8_continuation -= 1;
-                    if matches!(self.state, StripState::Ground) {
+                    // A continuation goes wherever its LEAD went, not wherever
+                    // the state machine has since arrived. Asking the current
+                    // state instead split characters in half: the forced
+                    // resynchronization that ends an over-long control string
+                    // can land on a lead byte, swallowing it and leaving the
+                    // machine in ground — and the continuations were then
+                    // emitted with no lead in front of them, so everything
+                    // decoding stdout saw invalid UTF-8 from that point on.
+                    if self.utf8_emitted {
                         out.push(b);
                     }
                     continue;
@@ -218,6 +232,9 @@ impl AnsiStripper {
                     // itself.
                     _ => 0,
                 };
+                // No lead byte is special to the ground arm below, so a lead
+                // reaches `out` exactly when the machine is in ground.
+                self.utf8_emitted = matches!(self.state, StripState::Ground);
             }
             let state = std::mem::take(&mut self.state);
             self.state = match state {
@@ -269,11 +286,15 @@ impl AnsiStripper {
                     escaped,
                     remaining,
                 } => {
-                    if b == 0x9c
-                        || (bel_terminated && b == 0x07)
-                        || (escaped && b == b'\\')
-                        || remaining <= 1
-                    {
+                    if b == 0x9c || (bel_terminated && b == 0x07) || (escaped && b == b'\\') {
+                        StripState::Ground
+                    } else if remaining <= 1 {
+                        // Forced resynchronization: an unterminated control
+                        // string cannot hold the stream hostage, so it ends
+                        // here. This byte was swallowed as part of the string —
+                        // and if it was a UTF-8 lead, `utf8_emitted` is already
+                        // false, so its continuations are swallowed with it
+                        // rather than surfacing in ground output alone.
                         StripState::Ground
                     } else {
                         StripState::String {
@@ -2697,6 +2718,50 @@ mod tests {
             out.len() <= 2048,
             "resynchronization retained too much data"
         );
+    }
+
+    /// Valid UTF-8 in must stay valid UTF-8 out, including across the forced
+    /// resynchronization that ends an over-long control string.
+    ///
+    /// The stripper shields UTF-8 continuation bytes so a `0x9c` inside a
+    /// character is not mistaken for the 8-bit ST. That shield outlived the
+    /// string: when the resynchronization bound fell on a multi-byte lead, the
+    /// lead was consumed as the string's last byte while the debt survived into
+    /// ground state, so the continuation bytes were emitted with nothing in
+    /// front of them. Anything decoding stdout saw invalid UTF-8 from there on.
+    ///
+    /// The boundary is swept because the payload length that lands a lead byte
+    /// exactly on it depends on how the state machine counts.
+    #[test]
+    fn ansi_stripper_never_emits_orphaned_utf8_continuations_at_the_resync_bound() {
+        for offset in -4_isize..=4 {
+            let fill = (MAX_CONTROL_SEQUENCE_BYTES as isize + offset) as usize;
+            let mut input = Vec::with_capacity(fill + 16);
+            input.extend_from_slice(b"\x1b]0;");
+            input.resize(input.len() + fill, b'x');
+            // Three-byte lead plus its continuations, one of which is 0x9c.
+            input.extend_from_slice("\u{672b}".as_bytes());
+            // The resynchronization point moves with `offset`, and it eats
+            // whatever bytes it lands on. Pad past that window so the marker is
+            // always in ground state by the time it arrives.
+            input.extend_from_slice(&[b'z'; 32]);
+            input.extend_from_slice(b"tail");
+
+            let mut stripper = AnsiStripper::default();
+            let mut out = Vec::new();
+            stripper.push(&input, &mut out);
+            let text = String::from_utf8(out.clone()).unwrap_or_else(|error| {
+                panic!(
+                    "fill {fill}: stripped output is not valid UTF-8 ({error}); \
+                     the last bytes were {:?}",
+                    &out[out.len().saturating_sub(16)..]
+                )
+            });
+            assert!(
+                text.ends_with("tail"),
+                "fill {fill}: the stream must resynchronize and pass text through, got {text:?}"
+            );
+        }
     }
 
     #[test]
