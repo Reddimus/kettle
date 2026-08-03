@@ -422,6 +422,23 @@ pub enum Action {
     /// Terminator parity. Bulk-clear the group on every
     /// pane in the focused window.
     UngroupWindow,
+    /// Terminator parity (`group_all`, window.py:933): put every pane into the
+    /// group named `All`.
+    ///
+    /// Distinct from [`Action::GroupWindow`], which prompts for a name — this
+    /// one is Terminator's fixed-name bulk grouping and needs no input.
+    /// Distinct too from [`Action::ToggleBroadcastAll`], which is what the
+    /// importer used to map this to: grouping is not broadcasting. In
+    /// Terminator you group terminals and then choose to broadcast to the
+    /// group, so mapping `group_all` onto a broadcast toggle armed input
+    /// duplication the user never asked for.
+    GroupAll,
+    /// Terminator parity (`ungroup_all`, window.py:947): clear the group on
+    /// every pane. The partner to [`Action::GroupAll`].
+    UngroupAll,
+    /// Terminator parity (`group_all_toggle`, window.py:940): group every pane
+    /// as `All`, or ungroup them if they already are.
+    ToggleGroupAll,
     /// Terminator parity (key_page_up_half): scroll up
     /// half a page.
     ScrollPageUpHalf,
@@ -855,30 +872,36 @@ impl Action {
             // feature. `ToggleBroadcastWindow` is the window-wide scope, which
             // this crate's own docs already called "Terminator's true
             // broadcast_all".
-            "broadcast_all" | "group_all" => ToggleBroadcastWindow,
+            "broadcast_all" => ToggleBroadcastWindow,
+            // `group_all` GROUPS every terminal (window.py:933); it does not
+            // arm broadcasting. `group_all_toggle` is Terminator's toggling
+            // partner and maps to the same bulk grouping here, since kettle
+            // treats re-grouping an already-grouped set as idempotent.
+            "group_all" => GroupAll,
+            "group_all_toggle" => ToggleGroupAll,
             // Kept reachable under an honest name: this is the per-tab scope.
             // NOT spelled `group_tab` — that is Terminator's "group every
             // terminal in this tab" action and already maps to `GroupTab`.
             "broadcast_tab" | "broadcast-tab" => ToggleBroadcastAll,
-            "broadcast_off" | "ungroup_all" => ToggleBroadcastOff,
+            "broadcast_off" => ToggleBroadcastOff,
+            "ungroup_all" => UngroupAll,
             "broadcast_group"
             | "broadcast-group"
             | "toggle_broadcast_group"
-            | "toggle-broadcast-group"
-            | "group_tab_toggle"
-            | "group-tab-toggle" => ToggleBroadcastGroup,
+            | "toggle-broadcast-group" => ToggleBroadcastGroup,
             "broadcast_window"
             | "broadcast-window"
             | "toggle_broadcast_window"
-            | "toggle-broadcast-window"
-            | "group_win_toggle"
-            | "group-win-toggle" => ToggleBroadcastWindow,
-            // Terminator parity
-            // (terminatorlib/keybindings DEFAULTS):
-            // `group_all_toggle` is Terminator's spelling for
-            // "toggle group-all". Reuses the existing
-            // ToggleBroadcastAll dispatch.
-            "group_all_toggle" | "group-all-toggle" => ToggleBroadcastAll,
+            | "toggle-broadcast-window" => ToggleBroadcastWindow,
+            // Terminator's `*_toggle` names toggle GROUPING (window.py:959,
+            // :987), not broadcasting. kettle's grouping actions prompt for the
+            // group name where Terminator generates one, so these bind the
+            // grouping half — a prompt the user did not expect, where the old
+            // broadcast mapping was a different feature entirely that silently
+            // duplicated every keystroke across every pane.
+            "group_tab_toggle" => GroupTab,
+            "group_win_toggle" => GroupWindow,
+
             "toggle_fullscreen" | "full_screen" => ToggleFullscreen,
             "reset" => Reset,
             "clear_history" | "clear_scrollback" | "clear_buffer" => ClearHistory,
@@ -1340,6 +1363,43 @@ pub fn apply_keybind(map: &mut Bindings, value: &str) {
     if let Some(a) = Action::from_name(act_trim) {
         map.insert(t, a);
     }
+}
+
+/// Bind `value` (`trigger=action`) as the ONLY chord for that action, dropping
+/// any chord already bound to it.
+///
+/// This is Terminator's `[keybindings]` semantics, and it is deliberately NOT
+/// what [`apply_keybind`] does. kettle's own `keybind = trigger=action` grammar
+/// is additive on purpose — a user can give one action several chords.
+/// Terminator's grammar is the inverse, `action = accelerator`: one accelerator
+/// per action, and writing one means "this is the key for this", not "here is
+/// another key for this".
+///
+/// Treating an imported line as additive left kettle's stock chord live
+/// alongside the imported one. Someone rebinding `new_tab` precisely BECAUSE
+/// Ctrl+Shift+T collides with tmux, AstroNvim, or an agent CLI found the chord
+/// still captured after the import — the rebind looked like it worked and the
+/// collision it was meant to resolve was still there.
+pub fn apply_exclusive_keybind(map: &mut Bindings, value: &str) {
+    let Some((trig, act)) = value.rsplit_once('=') else {
+        return;
+    };
+    let Some(t) = parse_trigger(trig) else {
+        return;
+    };
+    let act_trim = act.trim();
+    if is_unbind_token(act_trim) {
+        map.remove(&t);
+        return;
+    }
+    let Some(a) = Action::from_name(act_trim) else {
+        return;
+    };
+    // Drop every OTHER chord for this action first. Parameterized actions
+    // (`goto_tab:3`) compare by value, so rebinding one tab's chord leaves the
+    // other tabs' chords alone.
+    map.retain(|existing, bound| *existing == t || *bound != a);
+    map.insert(t, a);
 }
 
 /// Recognize the unbind sentinels: empty, `unbind`, `none`, `null`, `false`.
@@ -2256,18 +2316,27 @@ mod tests {
         }
     }
 
-    /// Drift guard. Terminator's `*_toggle` broadcast
-    /// keybind names map onto kettle's existing broadcast-scope
-    /// actions.
+    /// Terminator's `*_toggle` names toggle GROUPING, not broadcasting.
+    ///
+    /// `window.py:940/959/987` each flip a group assignment; broadcasting to a
+    /// group is a separate, later choice. This test previously asserted the
+    /// broadcast mapping, so it pinned the wrong behavior in place: importing
+    /// a Terminator config bound a grouping key to a broadcast toggle, and one
+    /// press sent everything the user typed to every pane at once.
+    ///
+    /// `group_tab_toggle` / `group_win_toggle` bind kettle's grouping actions,
+    /// which prompt for the group name where Terminator generates one. That
+    /// prompt is a real divergence, and a much smaller one than performing a
+    /// different feature.
     #[test]
     fn from_name_accepts_terminator_group_toggle_aliases() {
         for (s, want) in [
-            ("group_all_toggle", Action::ToggleBroadcastAll),
-            ("group-all-toggle", Action::ToggleBroadcastAll),
-            ("group_tab_toggle", Action::ToggleBroadcastGroup),
-            ("group-tab-toggle", Action::ToggleBroadcastGroup),
-            ("group_win_toggle", Action::ToggleBroadcastWindow),
-            ("group-win-toggle", Action::ToggleBroadcastWindow),
+            ("group_all_toggle", Action::ToggleGroupAll),
+            ("group-all-toggle", Action::ToggleGroupAll),
+            ("group_tab_toggle", Action::GroupTab),
+            ("group-tab-toggle", Action::GroupTab),
+            ("group_win_toggle", Action::GroupWindow),
+            ("group-win-toggle", Action::GroupWindow),
         ] {
             assert_eq!(
                 Action::from_name(s).as_ref(),

@@ -54,6 +54,82 @@ fn unquote(value: &str) -> &str {
     value
 }
 
+/// An INI-style section header: `[global_config]`, `[[default]]`,
+/// `[[[child1]]]`. Returns `(depth, name)`, where depth is the bracket nesting
+/// Terminator uses to express hierarchy.
+///
+/// kettle's own config format has no sections, so a file without any behaves
+/// exactly as it did before — every line applies.
+pub(crate) fn section_header(line: &str) -> Option<(usize, &str)> {
+    if !line.starts_with('[') || !line.ends_with(']') {
+        return None;
+    }
+    let depth = line.len() - line.trim_start_matches('[').len();
+    if depth == 0 || depth != line.len() - line.trim_end_matches(']').len() {
+        return None;
+    }
+    let name = line[depth..line.len() - depth].trim();
+    (!name.is_empty()).then_some((depth, name))
+}
+
+/// Which part of a sectioned Terminator config we are currently reading.
+///
+/// Terminator's file is INI with nesting expressed by bracket count:
+///
+/// ```text
+/// [global_config]
+///   focus = system
+/// [keybindings]
+///   new_tab = <Control><Shift>t
+/// [profiles]
+///   [[default]]
+///     background_color = "#1a1b26"
+///   [[work]]
+///     background_color = "#222222"
+/// [layouts]
+///   [[default]]
+///     [[[child1]]]
+/// ```
+///
+/// Reading every line regardless of section meant the LAST profile in the file
+/// won: a user's `[[default]]` colours were silently replaced by whichever
+/// other profile happened to be written last, and layout internals leaked in
+/// as config keys. kettle applies the global config, the keybindings, and the
+/// DEFAULT profile. Other profiles and `[layouts]` are Terminator structures
+/// with no kettle equivalent, and reading them would mean applying settings
+/// the user did not select.
+#[derive(Default)]
+struct Section {
+    /// `None` until the first header — a file with no sections at all is
+    /// kettle's own format and applies wholesale.
+    path: Option<Vec<String>>,
+}
+
+impl Section {
+    fn enter(&mut self, (depth, name): (usize, &str)) {
+        let path = self.path.get_or_insert_with(Vec::new);
+        path.truncate(depth.saturating_sub(1));
+        path.push(name.to_ascii_lowercase());
+    }
+
+    fn applies(&self) -> bool {
+        let Some(path) = self.path.as_deref() else {
+            // No section header seen yet: kettle's own flat format.
+            return true;
+        };
+        match path.first().map(String::as_str) {
+            Some("global_config" | "keybindings") => true,
+            // Only the default profile. Any other is one the user did not
+            // select, and kettle has `--profile` for choosing between configs.
+            Some("profiles") => path.get(1).is_none_or(|p| p == "default"),
+            // `[layouts]` describes Terminator's saved window trees; kettle
+            // has its own layout files, and none of these keys mean anything
+            // here.
+            _ => false,
+        }
+    }
+}
+
 pub fn parse(input: &str) -> Vec<Entry> {
     let mut out = Vec::new();
     // Strip the UTF-8 byte-order mark if Notepad / certain Windows
@@ -62,9 +138,17 @@ pub fn parse(input: &str) -> Vec<Entry> {
     // as "unknown key: ﻿theme" in --check-config and the theme silently
     // didn't apply.
     let input = input.strip_prefix('\u{feff}').unwrap_or(input);
+    let mut section = Section::default();
     for raw in input.lines() {
         let line = raw.trim();
         if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        if let Some(header) = section_header(line) {
+            section.enter(header);
+            continue;
+        }
+        if !section.applies() {
             continue;
         }
         let Some(eq) = line.find('=') else {

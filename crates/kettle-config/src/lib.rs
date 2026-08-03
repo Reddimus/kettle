@@ -2355,16 +2355,124 @@ fn parse_font_description(value: &str) -> Option<(String, Option<f32>)> {
     if trimmed.is_empty() {
         return None;
     }
-    match trimmed.rsplit_once(char::is_whitespace) {
+    let (head, size) = match trimmed.rsplit_once(char::is_whitespace) {
         // A trailing token that parses as a positive size is the Pango size.
         Some((family, last)) => match last.parse::<f32>() {
-            Ok(size) if size.is_finite() && size > 0.0 => {
-                Some((family.trim().to_string(), Some(size)))
-            }
-            _ => Some((trimmed.to_string(), None)),
+            Ok(size) if size.is_finite() && size > 0.0 => (family.trim(), Some(size)),
+            _ => (trimmed, None),
         },
         // Single token: a bare family with no size.
-        None => Some((trimmed.to_string(), None)),
+        None => (trimmed, None),
+    };
+    Some((strip_pango_style_options(head).to_string(), size))
+}
+
+/// Every Pango style keyword, lowercased and with separators removed.
+///
+/// Pango's grammar is `FAMILY [STYLE-OPTIONS] [SIZE]`, where the style options
+/// are a whitespace-separated run of these words. Matching is done on a
+/// normalized form so `Ultra-Light`, `ultra light`, and `UltraLight` all
+/// compare equal, which is the spread GTK's own font chooser produces.
+const PANGO_STYLE_OPTIONS: &[&str] = &[
+    // Style.
+    "normal",
+    "roman",
+    "oblique",
+    "italic", // Variant.
+    "smallcaps",
+    "allsmallcaps",
+    "petitecaps",
+    "allpetitecaps",
+    "unicase",
+    "titlecaps",
+    // Weight.
+    "thin",
+    "ultralight",
+    "extralight",
+    "light",
+    "semilight",
+    "demilight",
+    "book",
+    "medium",
+    "semibold",
+    "demibold",
+    "bold",
+    "ultrabold",
+    "extrabold",
+    "heavy",
+    "black",
+    "ultraheavy",
+    "extraheavy",
+    "ultrablack",
+    "extrablack", // Stretch.
+    "ultracondensed",
+    "extracondensed",
+    "condensed",
+    "semicondensed",
+    "semiexpanded",
+    "expanded",
+    "extraexpanded",
+    "ultraexpanded", // Gravity.
+    "notrotated",
+    "south",
+    "upsidedown",
+    "north",
+    "rotatedleft",
+    "east",
+    "rotatedright",
+    "west",
+];
+
+/// Drop the trailing Pango style options from a font description, leaving the
+/// family.
+///
+/// `font = DejaVu Sans Mono Bold 13` asks for the BOLD FACE of the family
+/// `DejaVu Sans Mono`. Keeping the whole string meant requesting a family
+/// literally named "DejaVu Sans Mono Bold", which no system has, so the whole
+/// font silently fell back — the user got a different typeface than the one
+/// their config named.
+///
+/// The style itself is not carried anywhere: kettle picks faces per cell from
+/// the terminal's own bold/italic attributes (with `font-family-bold` and
+/// friends as explicit overrides), and has no notion of a base weight for a
+/// style option to set. Dropping it is what makes the family resolve;
+/// `docs/CONFIG.md` says so rather than leaving it to be discovered.
+///
+/// Never strips every token — a family whose real name ends in a style word
+/// keeps at least its first — and stops at the first token that is not a style
+/// option, so `Fira Code Light Retina` keeps `Retina` and everything before it.
+fn strip_pango_style_options(head: &str) -> &str {
+    fn normalize(t: &str) -> String {
+        t.chars()
+            .filter(|c| c.is_ascii_alphanumeric())
+            .map(|c| c.to_ascii_lowercase())
+            .collect()
+    }
+    fn is_style(tokens: &str) -> bool {
+        PANGO_STYLE_OPTIONS.contains(&normalize(tokens).as_str())
+    }
+    // Split off the last `n` whitespace-separated tokens, if that leaves a
+    // non-empty family behind.
+    fn split_tail(s: &str, n: usize) -> Option<(&str, &str)> {
+        let mut rest = s;
+        for _ in 0..n {
+            rest = rest.rsplit_once(char::is_whitespace)?.0.trim_end();
+        }
+        (!rest.is_empty()).then(|| (rest, s[rest.len()..].trim_start()))
+    }
+
+    let mut end = head.trim_end();
+    loop {
+        // Two tokens first: Pango spells the compound options either way
+        // (`Semi-Bold`, `Semi Bold`, `SemiBold`), and taking one token at a
+        // time would strip `Bold` and then stop at `Semi`, leaving it stuck to
+        // the family.
+        let two = split_tail(end, 2).filter(|(_, tail)| is_style(tail));
+        let one = split_tail(end, 1).filter(|(_, tail)| is_style(tail));
+        match two.or(one) {
+            Some((rest, _)) => end = rest,
+            None => return end,
+        }
     }
 }
 
@@ -2985,6 +3093,8 @@ impl Config {
         "scroll-on-input",
         "scroll-on-keystroke",
         "scroll-on-output",
+        "scrollback-infinite",
+        "scrollback_infinite",
         "scroll-tabbar",
         "scroll_tabbar",
         "search-wrap",
@@ -3041,6 +3151,15 @@ impl Config {
         for raw in text.lines() {
             let line = raw.trim();
             if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            // An INI section header is structure, not a malformed assignment.
+            // Terminator's config is sectioned, so scanning for a bare `=` on
+            // every line reported a wall of errors on a file that is perfectly
+            // well-formed — telling the user to fix lines that are supposed to
+            // be there. Recognized with the same helper the tokenizer uses, so
+            // the two cannot disagree about what a header looks like.
+            if parse::section_header(line).is_some() {
                 continue;
             }
             if !line.contains('=') {
@@ -3110,7 +3229,7 @@ impl Config {
                 // `scrollback-limit` alias too, so the diagnostic must
                 // recognise it — otherwise `scrollback-limit = 99999999999`
                 // bypassed the malformed-value warning entirely.
-                "scrollback" | "scrollback-limit" => {
+                "scrollback" | "scrollback-limit" | "scrollback-lines" => {
                     v.eq_ignore_ascii_case("infinite")
                         || v.eq_ignore_ascii_case("unlimited")
                         || v.parse::<usize>().is_ok_and(|n| n <= INFINITE_SCROLLBACK)
@@ -3858,7 +3977,12 @@ impl Config {
                         cfg.search_background = Some(c);
                     }
                 }
-                "scrollback-limit" | "scrollback" => {
+                // Terminator names it `scrollback_lines` (config.py:242), and
+                // `scrollback_infinite` (config.py:243) is its unbounded flag,
+                // which kettle expresses as the same key set to `infinite`.
+                // Neither had an arm, so the scrollback size out of a copied
+                // config was an unknown key that quietly did nothing.
+                "scrollback-limit" | "scrollback" | "scrollback-lines" => {
                     let v = e.value.trim().to_ascii_lowercase();
                     // `0` / `infinite` / `unlimited` => effectively unbounded
                     // history (capped high to keep memory bounded).
@@ -3874,6 +3998,14 @@ impl Config {
                         // OOM. detect_malformed_values surfaces it as
                         // a diagnostic so the user sees the clamp.
                         cfg.scrollback = n.min(INFINITE_SCROLLBACK);
+                    }
+                }
+                // Terminator's unbounded-history flag. kettle expresses the
+                // same thing as `scrollback = infinite`, so a `True` here sets
+                // that and a `False` leaves whatever line count was given.
+                "scrollback-infinite" => {
+                    if parse_bool(&e.value) == Some(true) {
+                        cfg.scrollback = INFINITE_SCROLLBACK;
                     }
                 }
                 "scrollback-bytes" | "scrollback-byte-limit" | "scrollback-memory" => {
@@ -4971,7 +5103,11 @@ impl Config {
                     if keybinds::Action::from_name(other).is_some()
                         && keybinds::parse_trigger(&e.value).is_some() =>
                 {
-                    keybinds::apply_keybind(
+                    // Terminator's grammar is `action = accelerator` — one
+                    // accelerator per action — so an imported line REPLACES
+                    // the action's chord rather than adding to it. See
+                    // `apply_exclusive_keybind`.
+                    keybinds::apply_exclusive_keybind(
                         &mut cfg.keybinds,
                         &format!("{}={}", e.value, e.raw_key),
                     );
@@ -10771,6 +10907,236 @@ split_horiz = <Control><Shift>j\n",
                 "Terminator's `{chord}` line must bind"
             );
         }
+    }
+
+    /// A REAL Terminator config is sectioned INI, and each section means
+    /// something different.
+    ///
+    /// The importer flattened it: every line applied regardless of section, so
+    /// the LAST profile in the file won and a user's `[[default]]` colours
+    /// were silently replaced by whichever other profile happened to be
+    /// written last. `[layouts]` internals leaked in as config keys, and
+    /// `--check-config` reported every section header as a line missing its
+    /// `=` — a wall of errors on a perfectly well-formed file.
+    #[test]
+    fn a_sectioned_terminator_config_reads_the_default_profile_only() {
+        let text = "[global_config]
+  focus = system
+[keybindings]
+  new_tab = <Control><Shift>y
+[profiles]
+  [[default]]
+    background_color = \"#111111\"
+    scrollback_lines = 4321
+  [[work]]
+    background_color = \"#222222\"
+[layouts]
+  [[default]]
+    [[[child1]]]
+      type = Terminal
+      profile = work
+";
+
+        // Section headers are structure, not malformed assignments.
+        let bad = Config::detect_malformed_values(text);
+        assert!(bad.is_empty(), "a well-formed Terminator file: {bad:?}");
+
+        // `[layouts]` internals are Terminator's own window-tree description
+        // and must not surface as unknown kettle keys.
+        let (_, unknown) = Config::parse_collect(text);
+        assert!(unknown.is_empty(), "layout internals leaked: {unknown:?}");
+
+        let cfg = Config::parse_text(text);
+        assert_eq!(
+            cfg.theme.background,
+            Rgb::parse("#111111").unwrap(),
+            "the DEFAULT profile's colour must win — not whichever profile is              written last"
+        );
+        assert_eq!(
+            cfg.scrollback, 4321,
+            "and its other settings — `scrollback_lines` is Terminator's own              key name (config.py:242) and had no arm at all"
+        );
+        // The global and keybindings sections still apply.
+        assert_eq!(
+            cfg.keybinds
+                .get(&keybinds::parse_trigger("ctrl+shift+y").expect("chord"))
+                .cloned(),
+            Some(keybinds::Action::NewTab)
+        );
+    }
+
+    /// A file with no sections at all is kettle's own format and must be
+    /// entirely unaffected — the section logic only engages once a header
+    /// appears.
+    #[test]
+    fn a_flat_kettle_config_is_unaffected_by_section_handling() {
+        let cfg = Config::parse_text(
+            "scrollback = 777
+font-size = 15
+",
+        );
+        assert_eq!(cfg.scrollback, 777);
+        assert!((cfg.font_size - 15.0).abs() < f32::EPSILON);
+    }
+
+    /// Terminator's `group_all` GROUPS; it does not broadcast.
+    ///
+    /// `window.py:933` puts every terminal into a group named "All".
+    /// Broadcasting to a group is a separate, later choice — so mapping
+    /// `group_all` onto a broadcast toggle armed input duplication the user
+    /// never asked for: one keypress after importing their config, everything
+    /// they typed went to every pane.
+    #[test]
+    fn terminator_group_actions_group_rather_than_broadcast() {
+        use keybinds::Action;
+        for (name, expected) in [
+            ("group_all", Action::GroupAll),
+            ("group_all_toggle", Action::ToggleGroupAll),
+            ("ungroup_all", Action::UngroupAll),
+            // The broadcast names stay broadcast names.
+            ("broadcast_all", Action::ToggleBroadcastWindow),
+            ("broadcast_off", Action::ToggleBroadcastOff),
+        ] {
+            assert_eq!(
+                keybinds::Action::from_name(name),
+                Some(expected),
+                "{name} must map to the action Terminator actually performs"
+            );
+        }
+    }
+
+    /// An imported Terminator binding REPLACES kettle's chord for that action.
+    ///
+    /// Terminator's grammar is `action = accelerator`: one accelerator per
+    /// action. Treating it as additive (kettle's own `keybind =` semantics)
+    /// left the stock chord live alongside the imported one — so someone
+    /// rebinding `new_tab` precisely BECAUSE Ctrl+Shift+T collides with tmux,
+    /// AstroNvim, or an agent CLI found it still captured afterwards. The
+    /// rebind looked like it worked and the collision it was meant to resolve
+    /// was still there.
+    #[test]
+    fn an_imported_binding_replaces_kettles_chord_for_that_action() {
+        let stock = keybinds::parse_trigger("ctrl+shift+t").expect("chord");
+        assert_eq!(
+            Config::parse_text("").keybinds.get(&stock).cloned(),
+            Some(keybinds::Action::NewTab),
+            "Ctrl+Shift+T is kettle's stock NewTab chord"
+        );
+
+        let cfg = Config::parse_text(
+            "new_tab = <Control><Shift>y
+",
+        );
+        let imported = keybinds::parse_trigger("ctrl+shift+y").expect("chord");
+        assert_eq!(
+            cfg.keybinds.get(&imported).cloned(),
+            Some(keybinds::Action::NewTab),
+            "the imported chord binds"
+        );
+        assert_eq!(
+            cfg.keybinds.get(&stock),
+            None,
+            "and the stock chord it replaces must be GONE — otherwise the              collision the user rebound to escape is still there"
+        );
+        // Only that action is touched.
+        assert_eq!(
+            cfg.keybinds
+                .get(&keybinds::parse_trigger("ctrl+shift+w").expect("chord"))
+                .cloned(),
+            Config::parse_text("")
+                .keybinds
+                .get(&keybinds::parse_trigger("ctrl+shift+w").expect("chord"))
+                .cloned(),
+            "an unrelated action keeps its chord"
+        );
+
+        // kettle's OWN grammar stays additive: `keybind =` adds a chord
+        // without taking the existing one away.
+        let additive = Config::parse_text(
+            "keybind = ctrl+shift+y=new_tab
+",
+        );
+        assert_eq!(
+            additive.keybinds.get(&imported).cloned(),
+            Some(keybinds::Action::NewTab)
+        );
+        assert_eq!(
+            additive.keybinds.get(&stock).cloned(),
+            Some(keybinds::Action::NewTab),
+            "`keybind =` is additive on purpose — one action may have several              chords"
+        );
+    }
+
+    /// A parameterized action rebinds only its own parameter.
+    #[test]
+    fn an_imported_binding_for_a_parameterized_action_leaves_its_siblings() {
+        let cfg = Config::parse_text(
+            "goto_tab:3 = <Control><Shift>F3
+",
+        );
+        let stock_2 = keybinds::parse_trigger("alt+2").expect("chord");
+        assert_eq!(
+            cfg.keybinds.get(&stock_2).cloned(),
+            Config::parse_text("").keybinds.get(&stock_2).cloned(),
+            "rebinding tab 3 must not disturb tab 2's chord"
+        );
+    }
+
+    /// A Pango style option is not part of the family name.
+    ///
+    /// `font = DejaVu Sans Mono Bold 13` asks for the bold FACE of `DejaVu
+    /// Sans Mono`. Keeping the whole string requested a family literally named
+    /// "DejaVu Sans Mono Bold", which no system has — so the entire font
+    /// silently fell back and the user got a different typeface than their
+    /// config named. GTK's font chooser writes exactly this shape, so it is
+    /// what a copied Terminator config contains.
+    #[test]
+    fn a_pango_style_option_is_not_part_of_the_family() {
+        for (desc, family, size) in [
+            ("DejaVu Sans Mono Bold 13", "DejaVu Sans Mono", Some(13.0)),
+            ("Monospace 11", "Monospace", Some(11.0)),
+            ("Cascadia Code Light Italic 12", "Cascadia Code", Some(12.0)),
+            // Hyphenated and spaced spellings of the same option.
+            ("Iosevka Ultra-Light 10", "Iosevka", Some(10.0)),
+            ("Iosevka Semi Bold 10", "Iosevka", Some(10.0)),
+            // No size at all.
+            ("Fira Code Bold", "Fira Code", None),
+            // Nothing to strip.
+            ("JetBrains Mono 14", "JetBrains Mono", Some(14.0)),
+        ] {
+            let cfg = Config::parse_text(&format!(
+                "font = {desc}
+"
+            ));
+            assert_eq!(cfg.font_family, family, "family from {desc:?}");
+            if let Some(size) = size {
+                assert!(
+                    (cfg.font_size - size).abs() < f32::EPSILON,
+                    "size from {desc:?}: got {}",
+                    cfg.font_size
+                );
+            }
+        }
+
+        // Stops at the first token that is NOT a style option, so a family
+        // whose own name contains one keeps everything up to it.
+        assert_eq!(
+            Config::parse_text(
+                "font = Fira Code Light Retina 12
+"
+            )
+            .font_family,
+            "Fira Code Light Retina"
+        );
+        // And never strips a family down to nothing.
+        assert_eq!(
+            Config::parse_text(
+                "font = Bold 12
+"
+            )
+            .font_family,
+            "Bold"
+        );
     }
 
     /// A malformed accelerator must bind NOTHING.
