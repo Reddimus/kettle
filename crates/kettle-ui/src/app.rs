@@ -6946,16 +6946,32 @@ impl App {
         // the URL (its pattern matches), kettle does NOT fall
         // through to the cfg.custom_url_handler or system-open
         // paths — the handler decides what (if anything) to launch.
-        let handled_by_lua = self
+        let outcome = self
             .lua_engine
             .as_ref()
-            .is_some_and(|engine| engine.try_url_handler(uri));
+            .map(|engine| engine.try_url_handler(uri))
+            .unwrap_or(crate::lua::UrlHandlerOutcome::Fallthrough);
         // URL-handler callbacks are distinct from UrlClicked observers and can
         // queue the same side effects. Drain before any claimed-handler return.
         self.drain_lua_hook_commands(ws, "URL handler");
-        if handled_by_lua {
-            return;
-        }
+        // A handler may REWRITE the URL — that is the documented contract in
+        // `docs/examples/init.lua` and the shape every example there uses.
+        let rewritten;
+        let uri = match &outcome {
+            crate::lua::UrlHandlerOutcome::Handled => return,
+            crate::lua::UrlHandlerOutcome::Open(target) => {
+                // Re-check the allowlist. The handler is the user's own code,
+                // but it is fed untrusted terminal text, so it must not be a
+                // way to turn that text into a URL kettle would have refused.
+                if !kettle_core::links::is_safe_url(target) {
+                    log::warn!("lua url_handler returned an unsafe URL; refusing to open it");
+                    return;
+                }
+                rewritten = target.clone();
+                rewritten.as_str()
+            }
+            crate::lua::UrlHandlerOutcome::Fallthrough => uri,
+        };
         if self.cfg.use_custom_url_handler && !self.cfg.custom_url_handler.is_empty() {
             // Custom handler — spawn detached so a long-running
             // browser launch doesn't freeze kettle.
@@ -7771,6 +7787,15 @@ impl App {
             ws.mux.touch_tab_bell(id);
             self.fire_lua_event(ws, crate::LuaEvent::Bell(id), "bell hook");
         }
+        // The focused pane is being looked at, so its bell is answered.
+        //
+        // Deliberately here rather than on focus-change events: focus moves by
+        // far more routes than those fire on — a tab switch, `reap` promoting a
+        // sibling when the focused shell exits, the ctl API, a layout restore —
+        // and every one of them would have to remember. This runs each drain
+        // against the true current focus, so none of them can leave the latch
+        // lit on a pane the user is staring at.
+        ws.mux.clear_focused_pane_bell();
         // A single destructive drain fans out to Lua and the
         // optional recorder so neither consumer can steal bytes from the other.
         self.dispatch_output_chunks(ws, output_chunks);
@@ -9943,7 +9968,10 @@ impl App {
                         title_parts.path,
                         snaps[si].columns as u16,
                         snaps[si].screen_lines as u16,
-                        false,
+                        // Terminator parity (`icon_bell`): this was hard-coded
+                        // `false`, so the titlebar bell indicator could never
+                        // appear no matter how the setting was configured.
+                        p.bell,
                         p.group_name.clone(),
                     ));
                 }
@@ -10525,6 +10553,16 @@ impl App {
         // Terminator parity, terminal_popup_menu.py "Read only":
         // checked while the focused pane drops user input.
         let read_only = ws.mux.focused().map(|p| p.read_only).unwrap_or(false);
+        // Terminator parity, terminal_popup_menu.py: the split rows are offered
+        // only when NOT zoomed — a zoomed pane is showing alone, so splitting it
+        // has nothing to put the new pane beside. The zoom row itself swaps
+        // label with the state, the way Terminator's Zoom/Restore pair does.
+        let zoomed = ws
+            .mux
+            .tabs
+            .get(ws.mux.active)
+            .map(|t| t.zoomed)
+            .unwrap_or(false);
         vec![
             ContextMenuItem::Item {
                 label: "Copy",
@@ -10537,14 +10575,26 @@ impl App {
                 enabled: true,
             },
             ContextMenuItem::Separator,
+            // `Split Auto` splits along the pane's longer axis — Terminator
+            // offers it first because it is the one that needs no decision.
+            ContextMenuItem::Item {
+                label: "Split Auto",
+                action: Action::SplitAuto,
+                enabled: !zoomed,
+            },
             ContextMenuItem::Item {
                 label: "Split Right",
                 action: Action::SplitRight,
-                enabled: true,
+                enabled: !zoomed,
             },
             ContextMenuItem::Item {
                 label: "Split Down",
                 action: Action::SplitDown,
+                enabled: !zoomed,
+            },
+            ContextMenuItem::DynamicItem {
+                label: if zoomed { "Restore" } else { "Zoom" }.to_string(),
+                action: Action::ToggleZoom,
                 enabled: true,
             },
             ContextMenuItem::Item {
@@ -10556,6 +10606,14 @@ impl App {
             ContextMenuItem::Item {
                 label: "New Tab",
                 action: Action::NewTab,
+                enabled: true,
+            },
+            // Terminator parity, terminal_popup_menu.py "Set Window Title".
+            // The action existed and was bindable; only the menu row was
+            // missing, so the feature was keyboard-only by accident.
+            ContextMenuItem::Item {
+                label: "Set Window Title…",
+                action: Action::EditWindowTitle,
                 enabled: true,
             },
             // Terminator parity: per-pane read-only toggle. The
@@ -24208,11 +24266,25 @@ mod tests {
             .find("self.drain_lua_hook_commands(ws, \"URL handler\")")
             .expect("Lua URL handler drain");
         let handled_return = open_url
-            .find("if handled_by_lua")
+            .find("UrlHandlerOutcome::Handled => return,")
             .expect("claimed URL early return");
         assert!(
             handler < drain && drain < handled_return,
             "URL-handler callback commands must drain before a claimed handler returns"
+        );
+        // A handler may hand back a DIFFERENT URL than the one clicked, and it
+        // was fed untrusted terminal text to produce it — so the rewritten URL
+        // has to clear the same allowlist the original did, not inherit its
+        // approval.
+        let rewritten = open_url
+            .find("UrlHandlerOutcome::Open(target)")
+            .expect("rewritten URL arm");
+        let recheck = open_url
+            .find("if !kettle_core::links::is_safe_url(target)")
+            .expect("rewritten URL must be re-checked against the allowlist");
+        assert!(
+            rewritten < recheck,
+            "a Lua-supplied URL must be allowlist-checked before it is opened"
         );
     }
 
@@ -25549,6 +25621,46 @@ mod tests {
     /// and the loop wakes at the GIF's frame boundary (`bg_anim_interval`), not a
     /// fixed 30 fps. Requesting it every `about_to_wait` (level-triggered) made
     /// winit redraw continuously — the ~55% animated-idle CPU regression.
+    /// `icon_bell` shipped as a setting that could not do anything.
+    ///
+    /// The renderer draws the per-pane titlebar bell on `cfg.icon_bell &&
+    /// pv.bell`, and the frame builder passed a literal `false` for every
+    /// pane — so the key parsed, validated, defaulted to on, was documented in
+    /// CONFIG.md, and drew nothing under any configuration. The pane had no
+    /// bell state at all; only the tab did.
+    ///
+    /// Building a frame needs a live App (window + renderer + real PTYs), so
+    /// the wiring is pinned here: the pane's own state reaches the renderer,
+    /// and focusing the pane answers it.
+    #[test]
+    fn the_pane_bell_indicator_is_wired_to_real_pane_state() {
+        let src = include_str!("app.rs").replace("\r\n", "\n");
+        let at = src.find("metas.push((").expect("frame builder");
+        let push: String = src[at..].chars().take(900).collect();
+        assert!(
+            push.contains("p.bell,"),
+            "the frame must carry each pane's OWN bell state; a literal here is \
+             what made `icon_bell` undrawable"
+        );
+        // Bounded to the drain body, and the needle is assembled at runtime.
+        // An earlier version of this guard sliced to END OF FILE and searched
+        // for a literal it contained itself, so deleting the production call
+        // left it passing — a guard that cannot fail is worse than no guard.
+        let needle = ["ws.mux.clear_focused", "_pane_bell();"].concat();
+        let drain = src
+            .split("fn drain_events(&mut self, ws: &mut WindowState) {")
+            .nth(1)
+            .and_then(|b| b.split("\n    fn ").next())
+            .expect("drain_events body");
+        assert!(
+            drain.contains(needle.as_str()),
+            "the focused pane's bell must be cleared on the drain path, where \
+             the current focus is always known — clearing it only on \
+             focus-change events leaks the latch on every other route focus \
+             can take (tab switch, reap promoting a sibling, ctl, restore)"
+        );
+    }
+
     #[test]
     fn animated_bg_redraw_is_edge_triggered() {
         let src = include_str!("app.rs").replace("\r\n", "\n");
@@ -27227,6 +27339,73 @@ mod tests {
                 && src.contains("PasteSource::Clipboard => self.paste_clipboard(ws)")
                 && src.contains("PasteSource::Primary => self.paste_primary(ws)"),
             "PuTTY right-click paste must honor putty_paste_style_source_clipboard"
+        );
+    }
+
+    /// Terminator's right-click menu, row for row.
+    ///
+    /// Three of its rows had no kettle equivalent in the menu even though all
+    /// three actions existed and were bindable — Set Window Title, Split Auto,
+    /// and Zoom/Restore were keyboard-only by accident. A user who reaches for
+    /// the mouse for these (which is how Terminator presents them) found
+    /// nothing there.
+    ///
+    /// Building a real menu needs a live App, so the row list is pinned at the
+    /// source. Terminator's own set is `terminal_popup_menu.py`.
+    #[test]
+    fn the_context_menu_carries_every_terminator_row() {
+        let src = include_str!("app.rs").replace("\r\n", "\n");
+        let body = src
+            .split("fn context_menu_items(")
+            .nth(1)
+            .and_then(|b| b.split("\n    /// ").next())
+            .expect("context_menu_items body");
+        for (row, action) in [
+            ("Copy", "Action::Copy"),
+            ("Paste", "Action::Paste"),
+            ("Set Window Title…", "Action::EditWindowTitle"),
+            ("Split Auto", "Action::SplitAuto"),
+            ("Split Right", "Action::SplitRight"),
+            ("Split Down", "Action::SplitDown"),
+            ("Close Pane", "Action::ClosePane"),
+            ("New Tab", "Action::NewTab"),
+            ("Read only", "Action::TogglePaneReadOnly"),
+            ("Set Group…", "Action::CreateGroup"),
+        ] {
+            // Checked as a PAIR, not as two independent tokens: "row present"
+            // and "action present" both still hold if two rows swap actions,
+            // which is exactly the bug that sends a click somewhere else.
+            // Matching per menu ENTRY also stops a row name that appears in a
+            // nearby comment from standing in for the row itself.
+            let entry = body
+                .split("ContextMenuItem::")
+                .find(|chunk| {
+                    chunk
+                        .split("label:")
+                        .nth(1)
+                        .and_then(|rest| rest.split_once('\n'))
+                        .is_some_and(|(line, _)| line.contains(row))
+                })
+                .unwrap_or_else(|| panic!("the context menu is missing Terminator's {row:?} row"));
+            assert!(
+                entry.contains(action),
+                "{row:?} must dispatch {action} — the row and its action must \
+                 stay together, found entry: {entry:?}"
+            );
+        }
+        // Zoom swaps label with the state rather than sitting on one word,
+        // matching Terminator's Zoom/Restore pair.
+        assert!(
+            body.contains(r#"if zoomed { "Restore" } else { "Zoom" }"#)
+                && body.contains("Action::ToggleZoom"),
+            "the zoom row must show Restore while zoomed and Zoom otherwise"
+        );
+        // Splitting a zoomed pane has nothing to put the new pane beside, and
+        // `filter_disabled` drops the rows rather than greying them out.
+        assert_eq!(
+            body.matches("enabled: !zoomed,").count(),
+            3,
+            "all three split rows must be gated on the zoom state"
         );
     }
 
