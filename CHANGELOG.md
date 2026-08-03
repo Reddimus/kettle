@@ -144,6 +144,15 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
     `icat`, `timg` and `chafa` all send fresh ids and never delete. The `U=1`
     virtual form is declined outright, because a virtual placement is resolved
     by id later and has no id-less fallback.
+  - **A client that stopped reading `kettle mcp`'s stdout stranded the server.**
+    The writer thread blocks in `write`, the bounded response channel fills
+    behind it, and every tool worker blocks mid-send; shutdown then joined those
+    workers, which never return. The process stayed alive holding a terminal,
+    answering nothing, until something killed it. Worse, the reader loop blocked
+    on the same channel — so the server stopped reading stdin, which is exactly
+    where the `notifications/cancelled` that would free it arrives. Every wait
+    on the peer is bounded now, and the first send that proves the peer is not
+    reading short-circuits the rest.
   - **`--working-directory` had no test at the CLI surface**, and neither did
     `--accent`. Both are validated by one function now, driven by the tests
     exactly as the CLI drives it.

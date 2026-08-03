@@ -160,9 +160,15 @@ Still open on those same fixes:
   descendants; terminal replies outrank piped stdin with no timeout, so a child
   that queries in a loop can starve stdin indefinitely; `--cwd` rejects
   non-UTF-8 paths that work for an ordinary launch.
-- **`kettle/mcp.rs`**: stdout backpressure can deadlock the server — the writer
-  blocks, `responses.send` blocks behind it, and EOF joins workers before
-  closing the response senders.
+- ~~**`kettle/mcp.rs`**: stdout backpressure can deadlock the server — the
+  writer blocks, `responses.send` blocks behind it, and EOF joins workers before
+  closing the response senders.~~ **Fixed.** Every wait on the peer is bounded,
+  and the first send that proves the peer is not reading latches a flag the rest
+  check — otherwise bounding each send individually would have made sixty queued
+  responses cost sixty times the limit. `run_mcp` is now a thin wrapper over
+  `run_mcp_with`, which takes its transport, because the failure only appears
+  when the peer stops reading and the process's real stdout cannot be made to do
+  that from inside a test.
 
 ## Performance
 
