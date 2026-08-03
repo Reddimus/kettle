@@ -6664,6 +6664,13 @@ enum StripState {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct AnsiStripper {
     state: StripState,
+    /// UTF-8 continuation bytes still owed by the character being decoded.
+    ///
+    /// `0x9c` is both the 8-bit ST and a UTF-8 continuation byte, so a payload
+    /// containing `末` (`e6 9c ab`) ended the control string at the middle of
+    /// that character and leaked the remainder into the log. The VT extractor
+    /// already draws this distinction; the log stripper has to as well.
+    utf8_continuation: u8,
 }
 
 impl AnsiStripper {
@@ -6678,6 +6685,30 @@ impl AnsiStripper {
     pub fn strip(&mut self, input: &[u8]) -> Vec<u8> {
         let mut out = Vec::with_capacity(input.len());
         for &b in input {
+            // Mid-character: this byte belongs to the character being decoded
+            // and cannot be a control, in any state. A byte that is not a
+            // continuation means the lead was malformed, so stop shielding at
+            // once rather than swallowing what follows.
+            if self.utf8_continuation > 0 {
+                if matches!(b, 0x80..=0xbf) {
+                    self.utf8_continuation -= 1;
+                    if matches!(self.state, StripState::Plain) {
+                        out.push(b);
+                    }
+                    continue;
+                }
+                self.utf8_continuation = 0;
+            }
+            // A character can only begin where text is being read: plain
+            // output, or a control-string payload. CSI parameters are ASCII.
+            if matches!(self.state, StripState::Plain | StripState::String { .. }) {
+                self.utf8_continuation = match b {
+                    0xc2..=0xdf => 1,
+                    0xe0..=0xef => 2,
+                    0xf0..=0xf4 => 3,
+                    _ => 0,
+                };
+            }
             match self.state {
                 StripState::Plain => {
                     if b == 0x1b {
@@ -6699,7 +6730,13 @@ impl AnsiStripper {
                     };
                 }
                 StripState::Csi => {
-                    if (0x40..=0x7e).contains(&b) {
+                    if b == 0x18 || b == 0x1a {
+                        // CAN/SUB cancel the sequence. Without this the next
+                        // ordinary character was consumed as the CSI final
+                        // byte: `ESC [ 31 CAN hello` logged `ello` while the
+                        // terminal rendered `hello`.
+                        self.state = StripState::Plain;
+                    } else if (0x40..=0x7e).contains(&b) {
                         self.state = StripState::Plain;
                     }
                     // Else still inside CSI params — keep scanning.
@@ -6731,14 +6768,23 @@ impl AnsiStripper {
                 }
                 StripState::String { esc_seen } => {
                     if esc_seen {
-                        self.state = if b == b'\\' {
-                            StripState::Plain
-                        } else {
-                            StripState::String {
-                                esc_seen: b == 0x1b,
-                            }
+                        // `ESC \` is ST and ends the string. Any OTHER byte
+                        // means that ESC began a new sequence, which aborts the
+                        // string the way the terminal parser does — previously
+                        // `ESC ^ payload ESC c visible` left the stripper inside
+                        // `String` and swallowed `visible` and everything after.
+                        self.state = match b {
+                            b'\\' => StripState::Plain,
+                            0x1b => StripState::String { esc_seen: true },
+                            b'[' => StripState::Csi,
+                            b']' => StripState::Osc { esc_seen: false },
+                            b'P' | b'X' | b'^' | b'_' => StripState::String { esc_seen: false },
+                            // A single-character escape (`ESC c`) completes
+                            // here, and CAN/SUB cancel — either way the string
+                            // is over.
+                            _ => StripState::Plain,
                         };
-                    } else if b == 0x9c {
+                    } else if b == 0x9c && self.utf8_continuation == 0 {
                         self.state = StripState::Plain; // 8-bit ST
                     } else if b == 0x18 || b == 0x1a {
                         self.state = StripState::Plain; // cancelled
@@ -7847,6 +7893,84 @@ mod home_dir_tests {
     /// must still be recognized (and fully removed) when the same
     /// `AnsiStripper` instance is reused across calls — exactly how the
     /// reader thread's per-pane log path uses it. Each case below splits a
+    /// The log stripper must agree with the terminal about where a sequence
+    /// ends, or the log and the screen disagree about what happened.
+    ///
+    /// Three ways it did not:
+    ///   * CAN/SUB did not cancel a CSI, so the next ordinary character was
+    ///     eaten as the final byte — `ESC [ 31 CAN hello` logged `ello` while
+    ///     the terminal rendered `hello`.
+    ///   * A non-ST `ESC` inside a control string did not abort it, so
+    ///     `ESC ^ payload ESC c visible` left the stripper inside the string
+    ///     and swallowed everything after.
+    ///   * `0x9c` is both the 8-bit ST and a UTF-8 continuation byte, so a
+    ///     payload containing `末` (`e6 9c ab`) terminated at the middle of
+    ///     that character and leaked its tail into the log.
+    #[test]
+    fn the_log_stripper_ends_sequences_where_the_terminal_does() {
+        for (label, input, want) in [
+            ("CAN cancels a CSI", &b"\x1b[31\x18hello"[..], "hello"),
+            ("SUB cancels a CSI", &b"\x1b[31\x1ahello"[..], "hello"),
+            (
+                "a non-ST ESC aborts a control string",
+                &b"\x1b^payload\x1bcvisible"[..],
+                "visible",
+            ),
+            (
+                "CAN after that ESC still cancels",
+                &b"\x1b^payload\x1b\x18visible"[..],
+                "visible",
+            ),
+            (
+                "0x9c inside a UTF-8 character is not ST",
+                "\x1b_G payload \u{672b} more\x1b\\after".as_bytes(),
+                "after",
+            ),
+            (
+                "and the same in an OSC",
+                "\x1b]0;title \u{672b} more\x07after".as_bytes(),
+                "after",
+            ),
+        ] {
+            let mut stripper = super::AnsiStripper::new();
+            let out = stripper.strip(input);
+            assert_eq!(
+                String::from_utf8_lossy(&out),
+                want,
+                "{label}: the stripper must end the sequence where the terminal does"
+            );
+        }
+    }
+
+    /// Ordinary UTF-8 text must survive the stripper untouched — the log is
+    /// meant to be readable.
+    #[test]
+    fn utf8_text_passes_through_the_log_stripper_unharmed() {
+        for text in ["末端", "┌─┐ ‘quoted’ Ünicode └─┘", "🦀 crab", "Ûh"] {
+            let mut stripper = super::AnsiStripper::new();
+            let out = stripper.strip(text.as_bytes());
+            assert_eq!(
+                String::from_utf8(out).as_deref(),
+                Ok(text),
+                "plain text must reach the log byte for byte"
+            );
+        }
+        // And across every chunk split, since the log is fed one PTY read at
+        // a time.
+        let text = "末端 ▐ ‘q’";
+        let bytes = text.as_bytes();
+        for split in 1..bytes.len() {
+            let mut stripper = super::AnsiStripper::new();
+            let mut out = stripper.strip(&bytes[..split]);
+            out.extend_from_slice(&stripper.strip(&bytes[split..]));
+            assert_eq!(
+                String::from_utf8(out).as_deref(),
+                Ok(text),
+                "split at {split} corrupted the text"
+            );
+        }
+    }
+
     /// A session log must not accumulate image payloads.
     ///
     /// DCS (`ESC P`, Sixel) and APC (`ESC _`, Kitty graphics) were treated as

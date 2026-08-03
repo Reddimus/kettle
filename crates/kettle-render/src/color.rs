@@ -225,66 +225,70 @@ pub fn with_min_contrast(fg: Rgb, bg: Rgb, min_ratio: f64) -> Rgb {
     if min_ratio <= 1.0 || contrast_ratio(fg, bg) >= min_ratio {
         return fg;
     }
-    // Pick the endpoint to push toward. Two things matter, in this order:
-    //
-    // 1. It has to be able to REACH `min_ratio`. Thresholding background
-    //    luminance at 0.5 got this wrong, because WCAG's
-    //    `(L+0.05)/(L'+0.05)` is not symmetric about the midpoint — the
-    //    white/black crossover is at ~0.1791. On `#969696` that chose white at
-    //    2.96:1 where black gives 7.10:1, so a requested 4.5 was unreachable
-    //    from the chosen end and the function returned white anyway, quietly
-    //    failing the guarantee it exists to provide.
-    //
-    // 2. Among endpoints that CAN reach it, take the one nearer the caller's
-    //    own foreground, so we move the colour as little as possible. Simply
-    //    maximizing contrast is wrong in the other direction: `#fdfdfd` on
-    //    `#767676` is 4.465:1, a shortfall of 0.035, and both ends clear 4.5
-    //    (white 4.542, black 4.623) — maximizing flips near-white text to
-    //    near-black over nothing.
-    //
-    // If neither end can reach the target, take the better of the two and let
-    // the caller have the closest thing available.
     let white = Rgb::new(255, 255, 255);
     let black = Rgb::new(0, 0, 0);
-    let white_ratio = contrast_ratio(white, bg);
-    let black_ratio = contrast_ratio(black, bg);
-    let fg_l = relative_luminance(fg);
-    // Distance in luminance is the honest measure of "how far we are moving
-    // this colour", and it is what the bisection below actually travels.
-    let nearer_white = (1.0 - fg_l) <= fg_l;
-    let target = match (white_ratio >= min_ratio, black_ratio >= min_ratio) {
-        (true, true) => {
-            if nearer_white {
-                white
-            } else {
-                black
-            }
-        }
-        (true, false) => white,
-        (false, true) => black,
-        (false, false) => {
-            if white_ratio >= black_ratio {
-                white
-            } else {
-                black
-            }
-        }
-    };
-    // If even the extreme can't reach min_ratio (clamped 21:1), return it.
-    if contrast_ratio(target, bg) < min_ratio {
-        return target;
-    }
+
+    // Blend `fg` toward `target` just far enough to reach `min_ratio`.
     // 14 iterations resolves t to ~1/16384 — pixel-imperceptible.
-    let (mut lo, mut hi) = (0.0_f64, 1.0_f64);
-    for _ in 0..14 {
-        let mid = (lo + hi) / 2.0;
-        if contrast_ratio(blend(fg, target, mid), bg) >= min_ratio {
-            hi = mid;
-        } else {
-            lo = mid;
+    let approach = |target: Rgb| -> Rgb {
+        let (mut lo, mut hi) = (0.0_f64, 1.0_f64);
+        for _ in 0..14 {
+            let mid = (lo + hi) / 2.0;
+            if contrast_ratio(blend(fg, target, mid), bg) >= min_ratio {
+                hi = mid;
+            } else {
+                lo = mid;
+            }
+        }
+        blend(fg, target, hi)
+    };
+
+    // Which endpoint to head for. Two rules, in order:
+    //
+    // 1. It must be able to REACH `min_ratio`. Thresholding background
+    //    luminance at 0.5 got this wrong, because WCAG's
+    //    `(L+0.05)/(L'+0.05)` is not symmetric about the midpoint — white and
+    //    black cross over at ~0.1791. On `#969696` that chose white at 2.96:1
+    //    where black gives 7.10:1, so a requested 4.5 was unreachable from the
+    //    chosen end and the function returned white anyway, silently failing
+    //    the guarantee it exists to provide.
+    //
+    // 2. Among endpoints that can reach it, take the one that gets there with
+    //    the SMALLEST change to the caller's colour. Neither "maximum
+    //    contrast" nor "nearest endpoint" is that: maximizing flips `#fdfdfd`
+    //    on `#767676` from near-white to near-black over a 0.035 shortfall,
+    //    and nearest-endpoint sends `#969696` on `#5a5a5a` to `#020202` when
+    //    white reaches the same target at `#ababab`. Measuring the actual
+    //    journey is the only rule that gets both right, and it costs one extra
+    //    bisection.
+    //
+    // If neither end can reach the target, return the better of the two and
+    // let the caller have the closest thing available.
+    let white_ok = contrast_ratio(white, bg) >= min_ratio;
+    let black_ok = contrast_ratio(black, bg) >= min_ratio;
+    match (white_ok, black_ok) {
+        (true, true) => {
+            let toward_white = approach(white);
+            let toward_black = approach(black);
+            let fg_l = relative_luminance(fg);
+            let d_white = (relative_luminance(toward_white) - fg_l).abs();
+            let d_black = (relative_luminance(toward_black) - fg_l).abs();
+            if d_white <= d_black {
+                toward_white
+            } else {
+                toward_black
+            }
+        }
+        (true, false) => approach(white),
+        (false, true) => approach(black),
+        (false, false) => {
+            if contrast_ratio(white, bg) >= contrast_ratio(black, bg) {
+                white
+            } else {
+                black
+            }
         }
     }
-    blend(fg, target, hi)
 }
 
 /// Average (mean) RGB color of a tightly-packed RGBA8 buffer, used by
@@ -366,6 +370,46 @@ mod tests {
             resolve_query(258, &theme, &colors),
             Some(Rgb::new(1, 2, 3)),
             "and it takes precedence over the theme"
+        );
+    }
+
+    /// The endpoint must be chosen by how far the colour has to TRAVEL, not by
+    /// which extreme it started nearer.
+    ///
+    /// `#969696` on `#5a5a5a` asking for 3.0 is the case that separates them:
+    /// by luminance the foreground sits nearer black (0.305 from it, 0.695
+    /// from white), so a nearest-endpoint rule heads for black and lands at
+    /// roughly `#020202` — while white reaches the very same 3.0 at about
+    /// `#ababab`. Both rules I tried before this one got a case wrong;
+    /// measuring the actual journey gets all of them right.
+    #[test]
+    fn the_endpoint_is_chosen_by_distance_travelled_not_by_starting_side() {
+        let bg = Rgb::parse("#5a5a5a").expect("hex");
+        let fg = Rgb::parse("#969696").expect("hex");
+        let got = with_min_contrast(fg, bg, 3.0);
+
+        assert!(
+            contrast_ratio(got, bg) >= 3.0 - 1e-6,
+            "the requested ratio must be met, got {:.3}",
+            contrast_ratio(got, bg)
+        );
+        // The short move is upward; the long one inverts the text.
+        assert!(
+            relative_luminance(got) > relative_luminance(fg),
+            "must lighten (a small move) rather than invert to near-black: \
+             got rgb({},{},{})",
+            got.r,
+            got.g,
+            got.b
+        );
+        // And it must be a SMALL move — closer to the original than to the
+        // opposite extreme.
+        let travelled = (relative_luminance(got) - relative_luminance(fg)).abs();
+        let inverting = (relative_luminance(fg) - relative_luminance(Rgb::new(0, 0, 0))).abs();
+        assert!(
+            travelled < inverting,
+            "the chosen adjustment ({travelled:.4}) must be shorter than \
+             inverting the text ({inverting:.4})"
         );
     }
 
@@ -462,5 +506,139 @@ mod tests {
         assert!(contrast_ratio(out, bg) + 1e-6 >= 4.5);
         // Light bg ⇒ darkened toward black.
         assert!(relative_luminance(out) < relative_luminance(fg));
+    }
+
+    #[test]
+    fn text_area_reply_preserves_exact_fractional_dpi_totals() {
+        let formatter = |size: alacritty_terminal::event::WindowSize| {
+            format!(
+                "\u{1b}[4;{};{}t",
+                u32::from(size.num_lines) * u32::from(size.cell_height),
+                u32::from(size.num_cols) * u32::from(size.cell_width)
+            )
+        };
+        assert_eq!(
+            reply_for_text_area_size(960, 768, &formatter),
+            "\u{1b}[4;768;960t"
+        );
+    }
+
+    #[test]
+    fn resolve_query_covers_palette_named_cube_and_overrides() {
+        use alacritty_terminal::term::color::Colors as TermColors;
+        use alacritty_terminal::vte::ansi::Rgb as AnsiRgb;
+        let theme = Theme::default();
+        let mut colors = TermColors::default();
+
+        // 0..=15 routes to the theme palette.
+        assert_eq!(resolve_query(2, &theme, &colors), Some(theme.palette[2]));
+        // 16..=255 uses the xterm 256-color cube. Index 196 is pure red.
+        assert_eq!(
+            resolve_query(196, &theme, &colors),
+            Some(Rgb::new(255, 0, 0))
+        );
+        // 256 / 257 / 258 are default fg / bg / cursor.
+        assert_eq!(resolve_query(256, &theme, &colors), Some(theme.foreground));
+        assert_eq!(resolve_query(257, &theme, &colors), Some(theme.background));
+        assert_eq!(resolve_query(258, &theme, &colors), Some(theme.cursor));
+        // Out of range queries don't index past the fixed-size palette.
+        assert_eq!(resolve_query(259, &theme, &colors), None);
+        assert_eq!(resolve_query(99_999, &theme, &colors), None);
+
+        // Runtime override (as set by OSC 4 / 10 / 11 / 12) wins over the theme.
+        colors[257] = Some(AnsiRgb {
+            r: 0xab,
+            g: 0xcd,
+            b: 0xef,
+        });
+        assert_eq!(
+            resolve_query(257, &theme, &colors),
+            Some(Rgb::new(0xab, 0xcd, 0xef))
+        );
+    }
+
+    #[test]
+    fn average_color_means_and_skips_transparent() {
+        // Solid red (opaque) → red.
+        let red = [255u8, 0, 0, 255].repeat(100);
+        assert_eq!(average_color(&red), Rgb::new(255, 0, 0));
+        // Half black, half white (all opaque) → mid-gray.
+        let mut bw = Vec::new();
+        bw.extend(std::iter::repeat_n([0u8, 0, 0, 255], 2048).flatten());
+        bw.extend(std::iter::repeat_n([255u8, 255, 255, 255], 2048).flatten());
+        let avg = average_color(&bw);
+        assert!(
+            (120..=135).contains(&avg.r) && avg.r == avg.g && avg.g == avg.b,
+            "got {avg:?}"
+        );
+        // Fully-transparent pixels are skipped — a green opaque pixel among
+        // transparent ones yields green, not a darkened/black-biased mean.
+        let mut mixed = [0u8, 0, 0, 0].repeat(50); // transparent black
+        mixed.extend([0u8, 200, 0, 255]); // one opaque green
+        assert_eq!(average_color(&mixed), Rgb::new(0, 200, 0));
+        // Empty / all-transparent → neutral mid-gray, never a panic.
+        assert_eq!(average_color(&[]), Rgb::new(128, 128, 128));
+        assert_eq!(
+            average_color(&[0, 0, 0, 0, 0, 0, 0, 0]),
+            Rgb::new(128, 128, 128)
+        );
+    }
+
+    #[test]
+    fn contrast_ratio_extremes_and_symmetry() {
+        let w = Rgb::new(255, 255, 255);
+        let k = Rgb::new(0, 0, 0);
+        // White-on-black is 21:1; identical colors are 1:1; symmetric.
+        assert!((contrast_ratio(w, k) - 21.0).abs() < 1e-9);
+        assert!((contrast_ratio(k, w) - 21.0).abs() < 1e-9);
+        assert!((contrast_ratio(w, w) - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn dim_blends_halfway_toward_bg() {
+        // Pure white fg on pure black bg, dim → mid-gray.
+        let w = Rgb::new(255, 255, 255);
+        let k = Rgb::new(0, 0, 0);
+        let mid = dim(w, k);
+        assert!(
+            mid.r >= 126 && mid.r <= 129,
+            "dim(white, black).r ~= 128, got {}",
+            mid.r
+        );
+        // Symmetric channels.
+        assert_eq!(mid.r, mid.g);
+        assert_eq!(mid.g, mid.b);
+        // Dim onto the same color is a no-op (fg == bg → fg stays).
+        assert_eq!(dim(k, k), k);
+        // Dim a color onto itself: also unchanged.
+        let red = Rgb::new(200, 50, 50);
+        assert_eq!(dim(red, red), red);
+    }
+
+    #[test]
+    fn with_min_contrast_is_a_noop_when_ratio_already_met() {
+        let w = Rgb::new(255, 255, 255);
+        let k = Rgb::new(0, 0, 0);
+        // 21:1 already exceeds any sane threshold.
+        assert_eq!(with_min_contrast(w, k, 7.0), w);
+        // Disabled (≤ 1.0) returns the input unchanged.
+        let gray = Rgb::new(128, 128, 128);
+        assert_eq!(with_min_contrast(gray, gray, 1.0), gray);
+        assert_eq!(with_min_contrast(gray, gray, 0.0), gray);
+    }
+
+    #[test]
+    fn with_min_contrast_lifts_low_contrast_text() {
+        // Mid-gray on dark bg is hard to read; ask for 4.5:1 (WCAG AA).
+        let bg = Rgb::new(20, 20, 30);
+        let fg = Rgb::new(80, 80, 90);
+        let out = with_min_contrast(fg, bg, 4.5);
+        assert!(
+            contrast_ratio(out, bg) + 1e-6 >= 4.5,
+            "got {} for {out:?}",
+            contrast_ratio(out, bg)
+        );
+        // Direction: dark bg ⇒ lifted toward white (out is brighter).
+        assert!(relative_luminance(out) > relative_luminance(fg));
     }
 }

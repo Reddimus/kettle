@@ -312,20 +312,14 @@ impl Session {
     /// pick from yet". Closes the layout-launcher Bucket-D gap by
     /// giving `Action::OpenLayoutPicker` a source of
     /// names to filter against.
+    /// Layouts always live at `<default config dir>/layouts/`, the same place
+    /// [`Session::path_for_layout`] loads and saves them — `--config FILE`
+    /// does not relocate them, so listing must not pretend otherwise.
     pub fn list_layouts() -> Vec<String> {
         let Some(default) = kettle_config::Config::default_path() else {
             return Vec::new();
         };
-        Self::list_layouts_beside(&default)
-    }
-
-    /// The layouts that live beside `config_path`.
-    ///
-    /// `--config FILE` was validated and then ignored here, so
-    /// `--config X/config --list-layouts` described the DEFAULT directory
-    /// instead of the one the user named.
-    pub fn list_layouts_beside(config_path: &std::path::Path) -> Vec<String> {
-        let Some(dir) = config_path.parent().map(|d| d.join("layouts")) else {
+        let Some(dir) = default.parent().map(|d| d.join("layouts")) else {
             return Vec::new();
         };
         let Ok(entries) = std::fs::read_dir(&dir) else {

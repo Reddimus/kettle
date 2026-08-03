@@ -1354,14 +1354,7 @@ fn main() -> anyhow::Result<()> {
         // Companion to `--layout NAME` + the in-window layout picker (Alt+L):
         // verify which saved layouts exist from the CLI. Honors `--config` /
         // `--profile` only insofar as layouts live under the same config dir.
-        // Honour `--config` / `--profile`: the flag is validated above, and
-        // listing the DEFAULT directory's layouts while the user named a
-        // different config answers a question they did not ask.
-        let names = match resolve_config_path(&cli) {
-            Some(path) => kettle_ui::list_layouts_beside(&path),
-            None => kettle_ui::list_layouts(),
-        };
-        for name in names {
+        for name in kettle_ui::list_layouts() {
             println!("{name}");
         }
         return Ok(());
@@ -1369,12 +1362,7 @@ fn main() -> anyhow::Result<()> {
     if cli.list_profiles {
         // Companion to `--profile NAME`: list the named config profiles under
         // `<config-dir>/profiles/`.
-        // Same: list the profiles beside the config the user actually chose.
-        let names = match resolve_config_path(&cli) {
-            Some(path) => kettle_config::Config::list_profiles_beside(&path),
-            None => kettle_config::Config::list_profiles(),
-        };
-        for name in names {
+        for name in kettle_config::Config::list_profiles() {
             println!("{name}");
         }
         return Ok(());
