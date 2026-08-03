@@ -2388,9 +2388,13 @@ impl Mux {
     /// stale set resolves to `None` (the tab is gone) rather than to somebody
     /// else's tab.
     pub fn tab_index_of_any_pane(&self, panes: &[u64]) -> Option<usize> {
+        // `Node::contains` walks the tree and answers membership directly.
+        // Building a `leaf_ids()` Vec per tab just to search it allocated on
+        // every confirm re-resolve and on every `focus_pane`, which passes a
+        // single id.
         self.tabs
             .iter()
-            .position(|t| t.root.leaf_ids().iter().any(|id| panes.contains(id)))
+            .position(|t| panes.iter().any(|id| t.root.contains(*id)))
     }
 
     /// Terminator parity, detachable-tabs Bucket-D: extract a tab
