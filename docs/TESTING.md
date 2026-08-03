@@ -276,7 +276,12 @@ discipline here.
   reuse one image id without collision; mode 47 preserves the alternate store
   across both boundaries; mode 1047 preserves it on entry and clears it on
   exit; mode 1049 clears it on entry and preserves it on exit. ED 2 is
-  active-buffer-only and RIS clears both stores.
+  active-buffer-only and RIS clears both stores. Saturation fixtures pin that a
+  transmission the full image store refuses still draws but advertises no image
+  id (and that its `U=1` virtual form is refused outright), and compositing
+  fixtures pin straight-alpha source-over against a transparent and a partly
+  transparent destination, not only an opaque one, plus the zero-alpha
+  short-circuit the blend's divisor depends on.
 
 - **kettle-core image lifecycle:** the terminal engine's authoritative journal
   preserves parser execution order for RIS, ED 2, DECSET/DECRST 47/1047/1049,

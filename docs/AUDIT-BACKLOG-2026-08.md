@@ -100,15 +100,28 @@ Still open on those same fixes:
 
 - **`kettle-vt`**: 8-bit C1 introducers (`0x90`/`0x9d`/`0x9f`) bypass extraction,
   so raw-C1 Sixel/Kitty images do not render and raw-C1 OSC 7 does not update
-  cwd. `kettle-core/term.rs`'s `log_strip_ansi` has the same CAN/SUB gap just
-  fixed in the extractor, and recognises only CSI/OSC — so DCS/APC image bodies
-  are written into session logs as plain text.
+  cwd. **Closed as WON'T FIX** after building it: see `docs/ARCHITECTURE.md`.
+  In a UTF-8 stream a raw C1 byte cannot be told from mojibake, and guessing
+  wrong costs the rest of the line — `0x9d` is `¥` in CP437, so a legacy-codepage
+  console printing `¥100 units` produced exactly an OSC introducer followed by a
+  plausible body, and the implementation measured 32 bytes of that line reaching
+  the grid as 7. Recognising the values also costs a second scan pass over every
+  byte of every PTY read (~1.9× on plain ASCII), paid by everyone for a form
+  nothing in ordinary use emits. Two adversarial reviews each found a fresh
+  quadratic in the recognition scan (594×, then 3,021× after the first was
+  "fixed"). If a real emitter turns up, the honest shape is an opt-in mode
+  (S8C1T) rather than a heuristic over untrusted bytes.
+- **`kettle-core/term.rs`**: `log_strip_ansi` recognises only CSI/OSC, so
+  DCS/APC image bodies are written into session logs as plain text. (Its CAN/SUB
+  and UTF-8 gaps are fixed.)
 - **`kettle-vt`**: untrusted output can install a UNC cwd
   (`OSC 9;9;\\attacker\share`), which a downstream Windows existence check could
   turn into an SMB/WebDAV lookup. Also, OSC 9;9 trims quotes/whitespace and
   OSC 7 converts lossily, so valid POSIX paths do not round-trip.
-- **`kettle-vt/image.rs`**: straight-alpha source-over ignores destination alpha,
-  darkening Kitty animation composites.
+- ~~**`kettle-vt/image.rs`**: straight-alpha source-over ignores destination
+  alpha, darkening Kitty animation composites.~~ **Fixed**, and verified
+  bit-identical for an opaque destination so nothing that rendered correctly
+  before moves.
 - **`kettle-render`**: combining marks consume a grid column each, shifting the
   rest of the row; snapshots keep only four zero-width marks; the block cursor
   redraws only the base scalar, so an accent vanishes under the cursor.

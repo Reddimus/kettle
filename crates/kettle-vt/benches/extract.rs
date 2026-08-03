@@ -9,6 +9,13 @@
 //!   pass-through escapes, the worst case for scan restarts.
 //! - `osc_spam`: title + cwd + prompt-mark OSC sequences between text —
 //!   exercises the sequence accumulator and finish path.
+//! - `non_ascii_flood`: emoji + CJK prose — no escapes at all, but every byte
+//!   of it is one the C1 control values live among: `0x90`/`0x9d`/`0x9f` are
+//!   ordinary UTF-8 continuation bytes, and 🐝 (`F0 9F 90 9D`) carries three
+//!   of them inside one character. An ASCII-only corpus cannot see a scan
+//!   that treats those values as interesting and pays per non-ASCII
+//!   character to decide they are not — which is how a pass-through scan
+//!   turns quadratic on exactly the text most of the world types.
 //!
 //! Run: `cargo bench -p kettle-vt`. Compare medians across commits; CI does
 //! not gate on these (Surface-class hardware variance), they are a local
@@ -51,11 +58,21 @@ fn payload_osc() -> Vec<u8> {
     v
 }
 
+fn payload_non_ascii() -> Vec<u8> {
+    let mut v = Vec::with_capacity(1 << 20);
+    while v.len() < (1 << 20) {
+        v.extend_from_slice("吾輩は猫である。名前はまだ無い。".as_bytes());
+        v.extend_from_slice("\u{1F41D}\u{1F41D}\u{1F41D} привет ✳\r\n".as_bytes());
+    }
+    v
+}
+
 fn bench_extract(c: &mut Criterion) {
     let cases = [
         ("plain_flood", payload_plain()),
         ("sgr_heavy", payload_sgr()),
         ("osc_spam", payload_osc()),
+        ("non_ascii_flood", payload_non_ascii()),
     ];
     let mut g = c.benchmark_group("extractor_feed");
     for (name, payload) in &cases {

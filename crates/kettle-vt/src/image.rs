@@ -309,14 +309,36 @@ impl ImageData {
                     dst[d..d + 4].copy_from_slice(&src.rgba[s..s + 4]);
                     continue;
                 }
-                // out = src*a + dst*(1-a), rounded; a = sa/255.
+                // Straight-alpha (non-premultiplied) source-over:
+                //   out_a = sa + da*(1-sa)
+                //   out_c = (sc*sa + dc*da*(1-sa)) / out_a
+                // The destination's own alpha weights its contribution, and
+                // the result is divided back out of premultiplied space —
+                // without that division, colour over a transparent
+                // destination comes out darkened toward black instead of
+                // keeping its hue at reduced alpha, which is exactly the
+                // case a kitty animation frame canvas starts from.
+                let da = dst[d + 3] as u32;
+                // 255 × out_a, i.e. the premultiplied weights' sum. `sa > 0`
+                // here (the fully transparent source returned above), so this
+                // is never zero and the divide is always defined.
+                let out_a = sa * 255 + da * (255 - sa);
                 let blend = |sc: u8, dc: u8| -> u8 {
-                    ((sc as u32 * sa + dc as u32 * (255 - sa) + 127) / 255) as u8
+                    let num = sc as u32 * sa * 255 + dc as u32 * da * (255 - sa);
+                    ((num + out_a / 2) / out_a) as u8
                 };
                 for k in 0..3 {
                     dst[d + k] = blend(src.rgba[s + k], dst[d + k]);
                 }
-                dst[d + 3] = (sa + (dst[d + 3] as u32) * (255 - sa) / 255).min(255) as u8;
+                // The colour above divides by the exact `out_a` while the
+                // stored alpha is that value rounded to 8 bits, so the pixel
+                // can read up to ~0.2% bright against its own alpha tag. The
+                // alternative — dividing by the rounded alpha — trades that
+                // for a colour error of the same order, and both are inside
+                // one 8-bit step; the exact divisor is the one that keeps the
+                // opaque-destination case bit-identical to the pre-existing
+                // formula, so no stored output shifts.
+                dst[d + 3] = ((out_a + 127) / 255) as u8;
             }
         }
         true
@@ -483,6 +505,49 @@ mod tests {
             "from_encoded must reject width {} (cap {MAX_IMAGE_DIM})",
             MAX_IMAGE_DIM + 1
         );
+    }
+
+    /// Straight-alpha source-over weights the destination by its OWN alpha
+    /// and divides the result back out of premultiplied space:
+    /// `out_a = sa + da*(1-sa)`, `out_c = (sc*sa + dc*da*(1-sa)) / out_a`.
+    /// Dropping either term darkens colour toward black in proportion to
+    /// the transparency it is drawn over — and a kitty animation frame
+    /// canvas starts out fully transparent, so that is the common case, not
+    /// the corner case. The opaque-destination test above cannot see this:
+    /// with `da = 255` both terms collapse to the naive form.
+    #[test]
+    fn compose_over_transparent_destination_preserves_color() {
+        // 50% red over transparent black stays red at 50% alpha.
+        let mut canvas = ImageData::solid(1, 1, [0, 0, 0, 0]).unwrap();
+        let half_red = ImageData::new(1, 1, vec![255, 0, 0, 128]).unwrap();
+        assert!(canvas.compose(&half_red, 0, 0, false));
+        assert_eq!(&canvas.rgba[0..4], &[255, 0, 0, 128]);
+
+        // Over a half-transparent blue destination both hues survive,
+        // weighted by the destination's alpha: out_a = 0.5 + 0.5*0.5 = 0.75,
+        // out_r = 0.5/0.75, out_b = (0.5*0.5)/0.75.
+        let mut canvas = ImageData::solid(1, 1, [0, 0, 255, 128]).unwrap();
+        assert!(canvas.compose(&half_red, 0, 0, false));
+        assert_eq!(&canvas.rgba[0..4], &[170, 0, 85, 192]);
+    }
+
+    /// The blend divides by `out_a = sa*255 + da*(255-sa)`, which is zero
+    /// only when `sa` is. That case is short-circuited before the divide —
+    /// a fully transparent source contributes nothing — and this pins the
+    /// invariant so a future edit to the early-out cannot quietly turn the
+    /// composite into a division by zero.
+    #[test]
+    fn compose_skips_a_fully_transparent_source_pixel() {
+        for da in [0u8, 128, 255] {
+            let mut canvas = ImageData::solid(1, 1, [10, 20, 30, da]).unwrap();
+            let clear = ImageData::new(1, 1, vec![255, 0, 0, 0]).unwrap();
+            assert!(canvas.compose(&clear, 0, 0, false));
+            assert_eq!(
+                &canvas.rgba[0..4],
+                &[10, 20, 30, da],
+                "a zero-alpha source pixel must leave the destination alone"
+            );
+        }
     }
 
     #[test]

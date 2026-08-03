@@ -1070,6 +1070,28 @@ integration), out of the byte stream and forwards everything else
 correct, untouched VT stream. This keeps us on a battle-tested engine while
 adding modern features it lacks.
 
+Only the 7-bit introducers (`ESC P` / `ESC _` / `ESC ]`) open a control string.
+The 8-bit C1 equivalents `0x90` / `0x9f` / `0x9d` are passed through as text,
+which is a deliberate refusal rather than an omission — an implementation was
+built, reviewed twice, and rejected.
+
+In a UTF-8 stream a raw C1 byte is not distinguishable from mojibake, and the
+cost of guessing wrong is the rest of the line. `0x9d` is `¥` in CP437, so a
+Windows console program in a legacy codepage printing `¥100 units` hands the
+extractor the exact bytes an OSC introducer would produce; the implementation
+measured 32 bytes of that line reaching the grid as 7. Narrowing the guess by
+requiring a plausible next byte does not help, because a digit is precisely
+what follows a currency sign. Recognising the values also means a second scan
+pass over every byte of every PTY read, which measured ~1.9× on plain ASCII —
+paid by everyone, for a form nothing emits: every terminal library in ordinary
+use writes the 7-bit sequences.
+
+The audited gap this leaves is real and small: an application that emits a
+Sixel, a kitty image, or an OSC 7 cwd report with a raw C1 introducer gets no
+image and no cwd update. None is known to. If one appears, the honest fix is
+a mode the host opts into (S8C1T, `ESC SP G`), not a heuristic applied to
+every byte of untrusted output.
+
 OSC 133 prompt marks are not raw grid line numbers. The small vendored grid
 patch maintains a monotonic `history_origin` whenever retained history is
 evicted or cleared; Kettle combines it with the current history size and row to

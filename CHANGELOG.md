@@ -130,6 +130,20 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
     and does nothing unless it is still the record that was judged — otherwise
     the new kettle that inherited the pid, and registered at that same name,
     would be the one erased.
+  - **Kitty images composited over transparency came out darkened.** The blend
+    ignored the destination's own alpha and never divided back out of
+    premultiplied space, so colour drawn onto a transparent pixel was pulled
+    toward black in proportion to the transparency under it. A kitty animation
+    frame canvas starts out fully transparent, which makes that the common case
+    rather than a corner. Verified bit-identical for an opaque destination, so
+    nothing that rendered correctly before moves.
+  - **Images silently stopped appearing past the 256th.** A transmission whose
+    id the saturated store refused was handed back with that id anyway, so a
+    later `a=p,i=<id>` found nothing and `a=d,i=<id>` freed nothing. It now
+    draws while advertising no id — exactly like an `i=0` transmission — since
+    `icat`, `timg` and `chafa` all send fresh ids and never delete. The `U=1`
+    virtual form is declined outright, because a virtual placement is resolved
+    by id later and has no id-less fallback.
   - **`--working-directory` had no test at the CLI surface**, and neither did
     `--accent`. Both are validated by one function now, driven by the tests
     exactly as the CLI drives it.
