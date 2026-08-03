@@ -3394,6 +3394,32 @@ fn tab_segment_strip_width(surface_w: f32, plus_w: f32, arrow_w: f32) -> f32 {
 /// Text lane inside a tab segment. The close button is visible chrome, so the
 /// label must be centered in the lane that remains before that button rather
 /// than centered against the full segment and visually drifting under `✕`.
+/// The ✕ hit zone for one tab segment, or an EMPTY rect when the button is
+/// configured off.
+///
+/// `close-button-on-tab = false` suppressed only the paint. The hit rect was
+/// still built at full size, and all three consumers — the real press handler,
+/// the `ctl` press handler, and the pointer-cursor hover test — probe it
+/// blindly. Clicking the trailing square of any tab therefore closed it with no
+/// visible button to explain why, killing every pane in that tab.
+///
+/// Returning a zero-size rect fixes all three at once: every consumer tests
+/// with a strict `px < rx + rw`, which no zero-width rect can satisfy.
+/// `tab_title_rect` reads `close.0` only when the button is visible, so the
+/// reclaimed label space is unaffected.
+fn tab_close_rect(
+    trailing_x: f32,
+    y: f32,
+    height: f32,
+    close_visible: bool,
+) -> kettle_render::Rect4 {
+    if close_visible {
+        (trailing_x, y, height, height)
+    } else {
+        (trailing_x, y, 0.0, 0.0)
+    }
+}
+
 fn tab_title_rect(
     segment: kettle_render::Rect4,
     close: kettle_render::Rect4,
@@ -4503,6 +4529,18 @@ pub struct App {
     config_malformed_last: Vec<String>,
     /// First-tab CLI overrides (`-e cmd`, `-d dir`); consumed once.
     startup: crate::Options,
+    /// May this session write back to the `--layout NAME` file?
+    ///
+    /// `false` when a launch override (`-e` / `-d`) meant the named layout was
+    /// never LOADED. The save used to key off the layout name alone, so
+    /// `kettle --layout dev -d ~/work` opened a plain window and then
+    /// overwrote `dev.json` with that single pane on the first action that
+    /// saved — destroying the layout the flag named. The load is already gated
+    /// this way; this makes the write symmetric with it.
+    ///
+    /// Recorded here rather than recomputed at save time because the startup
+    /// command/cwd fields are consumed once and are gone by then.
+    named_layout_writable: bool,
     _watcher: Option<notify::RecommendedWatcher>,
     /// Drop guard for the remote-control watcher.
     _remote_watcher: Option<notify::RecommendedWatcher>,
@@ -5098,6 +5136,9 @@ impl App {
             };
         let mut app = App {
             cfg: initial_cfg,
+            // Assume writable; `resumed` clears it when a launch override
+            // means the named layout was never loaded.
+            named_layout_writable: true,
             windows,
             focused_seq: 1,
             next_window_seq: 2,
@@ -6194,7 +6235,8 @@ impl App {
                     layout.width
                 };
                 let rect = (x, y, seg_w, height);
-                let close = (x + seg_w - height, y, height, height);
+                let close =
+                    tab_close_rect(x + seg_w - height, y, height, self.cfg.close_button_on_tab);
                 TabSeg {
                     idx: i,
                     rect,
@@ -6314,7 +6356,12 @@ impl App {
                     })
                     .unwrap_or(RenderTabActivity::Normal);
                 let rect = (strip_x, seg_y, strip_w, height);
-                let close = (strip_x + strip_w - height, seg_y, height, height);
+                let close = tab_close_rect(
+                    strip_x + strip_w - height,
+                    seg_y,
+                    height,
+                    self.cfg.close_button_on_tab,
+                );
                 TabSeg {
                     idx: i,
                     rect,
@@ -13240,7 +13287,11 @@ impl App {
         // fresh (non-opted-in) window must NOT overwrite the saved layout that
         // `--restore` / `restore-session = true` exists to recover.
         match &self.startup.layout {
-            Some(name) => s.save_layout(name),
+            Some(name) if self.named_layout_writable => s.save_layout(name),
+            // `--layout NAME` given, but a launch override replaced it: leave
+            // the file alone rather than overwriting it with a window that was
+            // never restored from it.
+            Some(_) => {}
             None if should_restore_session(self.startup.restore, self.cfg.restore_session) => {
                 s.save()
             }
@@ -20678,6 +20729,10 @@ impl App {
         // below, but decide and preflight the restore before native resources
         // are allocated.
         let has_launch_override = self.startup.command.is_some() || self.startup.cwd.is_some();
+        // A launch override means the named layout is not loaded, so it must
+        // not be written back either — otherwise the flag that names a layout
+        // is the same flag that destroys it.
+        self.named_layout_writable = !has_launch_override;
         let loaded_session = if has_launch_override {
             None
         } else {
@@ -27580,6 +27635,48 @@ mod tests {
         // Both at once (modal opened while pointer happened to be over the
         // tab bar) → still Default.
         assert_eq!(chrome_cursor_icon(true, true), Some(CursorIcon::Default));
+    }
+
+    /// `close-button-on-tab = false` hid only the PAINT. The hit rect was
+    /// still built full-size, so clicking the trailing square of a tab closed
+    /// it with no visible button — taking every pane in that tab with it.
+    ///
+    /// The rect must therefore be unhittable when the button is off, which is
+    /// what makes all three consumers (real press, ctl press, hover cursor)
+    /// safe without each having to consult the config.
+    #[test]
+    fn a_hidden_tab_close_button_is_not_clickable() {
+        use super::{hovered_close_button, tab_close_rect};
+        use kettle_render::TabSeg;
+
+        let visible = tab_close_rect(76.0, 0.0, 24.0, true);
+        let hidden = tab_close_rect(76.0, 0.0, 24.0, false);
+        assert_eq!(visible, (76.0, 0.0, 24.0, 24.0), "shown: full square");
+        assert_eq!(hidden.2, 0.0, "hidden: zero width");
+        assert_eq!(hidden.3, 0.0, "hidden: zero height");
+
+        // The exact point that used to close the tab: dead centre of where
+        // the invisible button was.
+        let seg = |close| TabSeg {
+            idx: 0,
+            rect: (0.0, 0.0, 100.0, 24.0),
+            title_rect: (8.0, 0.0, 68.0, 24.0),
+            close,
+            title: String::new(),
+            path: None,
+            active: true,
+            activity: kettle_render::TabActivity::Normal,
+        };
+        assert_eq!(
+            hovered_close_button(&[seg(visible)], 88.0, 12.0),
+            Some(0),
+            "a visible close button must still be hittable"
+        );
+        assert_eq!(
+            hovered_close_button(&[seg(hidden)], 88.0, 12.0),
+            None,
+            "a hidden close button must not be hittable"
+        );
     }
 
     #[test]
