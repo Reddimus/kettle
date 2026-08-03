@@ -10507,6 +10507,16 @@ impl App {
         // Terminator parity, terminal_popup_menu.py "Read only":
         // checked while the focused pane drops user input.
         let read_only = ws.mux.focused().map(|p| p.read_only).unwrap_or(false);
+        // Terminator parity, terminal_popup_menu.py: the split rows are offered
+        // only when NOT zoomed — a zoomed pane is showing alone, so splitting it
+        // has nothing to put the new pane beside. The zoom row itself swaps
+        // label with the state, the way Terminator's Zoom/Restore pair does.
+        let zoomed = ws
+            .mux
+            .tabs
+            .get(ws.mux.active)
+            .map(|t| t.zoomed)
+            .unwrap_or(false);
         vec![
             ContextMenuItem::Item {
                 label: "Copy",
@@ -10519,14 +10529,26 @@ impl App {
                 enabled: true,
             },
             ContextMenuItem::Separator,
+            // `Split Auto` splits along the pane's longer axis — Terminator
+            // offers it first because it is the one that needs no decision.
+            ContextMenuItem::Item {
+                label: "Split Auto",
+                action: Action::SplitAuto,
+                enabled: !zoomed,
+            },
             ContextMenuItem::Item {
                 label: "Split Right",
                 action: Action::SplitRight,
-                enabled: true,
+                enabled: !zoomed,
             },
             ContextMenuItem::Item {
                 label: "Split Down",
                 action: Action::SplitDown,
+                enabled: !zoomed,
+            },
+            ContextMenuItem::DynamicItem {
+                label: if zoomed { "Restore" } else { "Zoom" }.to_string(),
+                action: Action::ToggleZoom,
                 enabled: true,
             },
             ContextMenuItem::Item {
@@ -10538,6 +10560,14 @@ impl App {
             ContextMenuItem::Item {
                 label: "New Tab",
                 action: Action::NewTab,
+                enabled: true,
+            },
+            // Terminator parity, terminal_popup_menu.py "Set Window Title".
+            // The action existed and was bindable; only the menu row was
+            // missing, so the feature was keyboard-only by accident.
+            ContextMenuItem::Item {
+                label: "Set Window Title…",
+                action: Action::EditWindowTitle,
                 enabled: true,
             },
             // Terminator parity: per-pane read-only toggle. The
@@ -27198,6 +27228,62 @@ mod tests {
                 && src.contains("PasteSource::Clipboard => self.paste_clipboard(ws)")
                 && src.contains("PasteSource::Primary => self.paste_primary(ws)"),
             "PuTTY right-click paste must honor putty_paste_style_source_clipboard"
+        );
+    }
+
+    /// Terminator's right-click menu, row for row.
+    ///
+    /// Three of its rows had no kettle equivalent in the menu even though all
+    /// three actions existed and were bindable — Set Window Title, Split Auto,
+    /// and Zoom/Restore were keyboard-only by accident. A user who reaches for
+    /// the mouse for these (which is how Terminator presents them) found
+    /// nothing there.
+    ///
+    /// Building a real menu needs a live App, so the row list is pinned at the
+    /// source. Terminator's own set is `terminal_popup_menu.py`.
+    #[test]
+    fn the_context_menu_carries_every_terminator_row() {
+        let src = include_str!("app.rs").replace("\r\n", "\n");
+        let body = src
+            .split("fn context_menu_items(")
+            .nth(1)
+            .and_then(|b| b.split("\n    /// ").next())
+            .expect("context_menu_items body");
+        for (row, action) in [
+            ("Copy", "Action::Copy"),
+            ("Paste", "Action::Paste"),
+            ("Set Window Title…", "Action::EditWindowTitle"),
+            ("Split Auto", "Action::SplitAuto"),
+            ("Split Right", "Action::SplitRight"),
+            ("Split Down", "Action::SplitDown"),
+            ("Close Pane", "Action::ClosePane"),
+            ("New Tab", "Action::NewTab"),
+            ("Read only", "Action::TogglePaneReadOnly"),
+            ("Set Group…", "Action::CreateGroup"),
+        ] {
+            assert!(
+                body.contains(&format!("\"{row}\"")),
+                "the context menu is missing Terminator's {row:?} row"
+            );
+            assert!(
+                body.contains(action),
+                "{row:?} must dispatch {action}, so the menu and the keybind \
+                 cannot drift apart"
+            );
+        }
+        // Zoom swaps label with the state rather than sitting on one word,
+        // matching Terminator's Zoom/Restore pair.
+        assert!(
+            body.contains(r#"if zoomed { "Restore" } else { "Zoom" }"#)
+                && body.contains("Action::ToggleZoom"),
+            "the zoom row must show Restore while zoomed and Zoom otherwise"
+        );
+        // Splitting a zoomed pane has nothing to put the new pane beside, and
+        // `filter_disabled` drops the rows rather than greying them out.
+        assert_eq!(
+            body.matches("enabled: !zoomed,").count(),
+            3,
+            "all three split rows must be gated on the zoom state"
         );
     }
 
