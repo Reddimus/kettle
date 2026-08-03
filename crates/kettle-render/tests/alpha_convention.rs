@@ -9,23 +9,32 @@
 //! correct with `ALPHA_BLENDING`; the bug was the mismatch, not either
 //! convention.
 //!
-//! Checked as a PAIR per pipeline rather than as two independent token
-//! searches: "a premultiply exists somewhere" and "a blend constant exists
-//! somewhere" both stay true if one pipeline is fixed and another regresses,
-//! which is precisely the failure this is meant to catch.
+//! This checks the pair per pipeline rather than searching for either token
+//! independently — "a premultiply exists somewhere" and "a blend constant
+//! exists somewhere" both stay true if one pipeline is fixed and another
+//! regresses.
+//!
+//! It is a source-level check and cannot see rendered pixels. Two things are
+//! done to stop it passing vacuously: the shader body is parsed for the exact
+//! number of alpha multiplications (so a double-multiply `rgb * a * a` is
+//! caught, not just any `* a`), and the detectors are themselves tested
+//! against canned strings of both shapes plus the double-multiply.
 
-/// Does this file's WGSL fragment entry point return premultiplied color?
-fn shader_premultiplies(src: &str) -> bool {
+/// How many times does this pipeline's fragment entry point multiply its color
+/// by alpha? Premultiplied output is exactly one; straight is zero; anything
+/// else is a bug in its own right.
+fn alpha_multiplications(src: &str) -> usize {
     let fs = src
         .split("fn fs(")
         .nth(1)
         .expect("every pipeline has a fragment entry point");
     let body = fs.split("\n}").next().unwrap_or(fs);
-    // `lin * in.color.a` (quad) or `c.rgb * c.a` (imgpipe).
-    body.contains("* in.color.a") || body.contains("* c.a")
+    // `lin * in.color.a` (quad) and `c.rgb * c.a` (imgpipe) are the two shapes
+    // this crate uses; count every occurrence so a second multiply is visible.
+    body.matches("* in.color.a").count() + body.matches("* c.a").count()
 }
 
-/// The blend constant this file configures.
+/// The blend constant this pipeline configures.
 fn blend_state(src: &str) -> &'static str {
     let premultiplied = src.contains("BlendState::PREMULTIPLIED_ALPHA_BLENDING");
     let straight = src.contains("BlendState::ALPHA_BLENDING")
@@ -44,37 +53,44 @@ fn each_pipeline_blends_the_way_its_shader_writes() {
         ("imgpipe", include_str!("../src/imgpipe.rs")),
         ("glyphpipe", include_str!("../src/glyphpipe.rs")),
     ] {
-        let premultiplies = shader_premultiplies(src);
-        let blend = blend_state(src);
-        let want = if premultiplies {
+        let multiplies = alpha_multiplications(src);
+        assert!(
+            multiplies <= 1,
+            "{name}: the shader multiplies by alpha {multiplies} times — more \
+             than once is a double-premultiply no blend state can undo"
+        );
+        let want = if multiplies == 1 {
             "premultiplied"
         } else {
             "straight"
         };
         assert_eq!(
-            blend,
+            blend_state(src),
             want,
-            "{name}: the shader returns {} color, so the blend state must be \
-             {want} — mismatching them applies alpha twice (or not at all)",
-            if premultiplies {
-                "premultiplied"
-            } else {
-                "straight"
-            }
+            "{name}: the shader returns {want} color, so the blend state must \
+             match — mismatching them applies alpha twice, or not at all"
         );
     }
 }
 
-/// The helpers above must actually be able to tell the two conventions apart —
-/// otherwise the test above passes by answering the same way for everything.
+/// The detectors must be able to tell the shapes apart, including the
+/// double-multiply the main test relies on them catching. Without this, a
+/// detector that answered the same way for everything would make the test
+/// above vacuous.
 #[test]
-fn the_convention_detector_distinguishes_the_two_shapes() {
-    assert!(shader_premultiplies(
-        "fn fs(in: VsOut) -> f32 {\n    return vec4(lin * in.color.a, in.color.a);\n}"
-    ));
-    assert!(!shader_premultiplies(
-        "fn fs(in: VsOut) -> f32 {\n    return textureSample(t, s, in.uv);\n}"
-    ));
+fn the_convention_detectors_distinguish_the_shapes_they_must() {
+    let straight = "fn fs(in: VsOut) -> f32 {\n    return textureSample(t, s, in.uv);\n}";
+    let premul = "fn fs(in: VsOut) -> f32 {\n    return vec4(lin * in.color.a, in.color.a);\n}";
+    let double = "fn fs(in: VsOut) -> f32 {\n    return vec4(c.rgb * c.a * c.a, c.a);\n}";
+
+    assert_eq!(alpha_multiplications(straight), 0, "straight alpha");
+    assert_eq!(alpha_multiplications(premul), 1, "premultiplied");
+    assert_eq!(
+        alpha_multiplications(double),
+        2,
+        "a double-multiply must be visible as two, not collapsed to one"
+    );
+
     assert_eq!(
         blend_state("blend: Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING),"),
         "premultiplied"

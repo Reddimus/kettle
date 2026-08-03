@@ -2743,10 +2743,20 @@ fn apply_verified_linux_update(
     install: &ManagedInstall,
     update: &AvailableUpdate,
 ) -> Result<(), UpdateError> {
+    use std::collections::BTreeMap;
+    use std::os::unix::fs::MetadataExt as _;
+
     package.file(Path::new("kettle"))?;
     package.file(Path::new("install.sh"))?;
+    // Provenance verification REQUIRES this file to be recorded, and the update
+    // replaces it like everything else, so it has to be installed here too. It
+    // was missing from the production map while the `cfg(test)` duplicate below
+    // carried it -- which is exactly why the tests stayed green.
+    package.file(Path::new("install-unix.py"))?;
+    let previous_provenance = read_linux_install_provenance(&install.prefix)?;
     let map = [
         ("install.sh", "share/kettle/install.sh", 0o755),
+        ("install-unix.py", "share/kettle/install-unix.py", 0o755),
         ("LICENSE", "share/doc/kettle/LICENSE", 0o644),
         ("NOTICE", "share/doc/kettle/NOTICE", 0o644),
         ("README.md", "share/doc/kettle/README.md", 0o644),
@@ -2817,15 +2827,59 @@ fn apply_verified_linux_update(
     }
     destinations.push(PathBuf::from("bin/kettle"));
     destinations.push(PathBuf::from("share/kettle/install.json"));
+    destinations.push(PathBuf::from(UNIX_INSTALL_PROVENANCE_FILE));
+
+    // Carry the previous record's directories forward and add any this update
+    // must create, so uninstall still knows exactly what it owns.
+    let mut owned_directories = previous_provenance
+        .directories
+        .into_iter()
+        .map(|record| (record.path, record.mode))
+        .collect::<BTreeMap<_, _>>();
+    for destination in &destinations {
+        let mut relative = PathBuf::new();
+        if let Some(parent) = destination.parent() {
+            for component in parent.components() {
+                let Component::Normal(name) = component else {
+                    return Err(UpdateError::Transaction(format!(
+                        "unsafe Linux provenance directory {}",
+                        destination.display()
+                    )));
+                };
+                relative.push(name);
+                if !install.prefix.join(&relative).try_exists()? {
+                    owned_directories.insert(relative_to_string(&relative)?, 0o755);
+                }
+            }
+        }
+    }
     transaction.preflight_destinations(&destinations)?;
 
+    // Every file this transaction writes must appear in the NEW provenance
+    // record. Not regenerating it left the OLD hashes describing the NEW files,
+    // so the very next verification reported the installation unmanaged:
+    // startup could not confirm or clean the committed transaction, and every
+    // later self-update refused to run.
+    let mut provenance_files = Vec::with_capacity(destinations.len());
     for (source, destination, mode) in map {
         let bytes = package.bytes(Path::new(source))?;
         if destination.ends_with("kettle.desktop") {
             let desktop = render_linux_desktop_bytes(bytes, &install.prefix)?;
             transaction.install_bytes(Path::new(destination), desktop.as_bytes(), Some(mode))?;
+            provenance_files.push(UnixInstallFile {
+                path: destination.to_string(),
+                size: desktop.len() as u64,
+                sha256: sha256_bytes(desktop.as_bytes()),
+                mode,
+            });
         } else {
             transaction.install_bytes(Path::new(destination), bytes, Some(mode))?;
+            provenance_files.push(UnixInstallFile {
+                path: destination.to_string(),
+                size: bytes.len() as u64,
+                sha256: sha256_bytes(bytes),
+                mode,
+            });
         }
     }
     for source in shell_files {
@@ -2833,21 +2887,76 @@ fn apply_verified_linux_update(
             .relative
             .strip_prefix("shell-integration")
             .map_err(|_| UpdateError::UnsafeArchive(source.relative.display().to_string()))?;
-        transaction.install_bytes(
-            &Path::new("share/kettle/shell-integration").join(relative),
-            &source.bytes,
-            Some(0o644),
-        )?;
+        let destination = Path::new("share/kettle/shell-integration").join(relative);
+        transaction.install_bytes(&destination, &source.bytes, Some(0o644))?;
+        provenance_files.push(UnixInstallFile {
+            path: relative_to_string(&destination)?,
+            size: source.bytes.len() as u64,
+            sha256: sha256_bytes(&source.bytes),
+            mode: 0o644,
+        });
     }
-    transaction.install_bytes(
-        Path::new("bin/kettle"),
-        package.bytes(Path::new("kettle"))?,
-        Some(0o755),
-    )?;
+    let binary = package.bytes(Path::new("kettle"))?;
+    transaction.install_bytes(Path::new("bin/kettle"), binary, Some(0o755))?;
+    provenance_files.push(UnixInstallFile {
+        path: "bin/kettle".into(),
+        size: binary.len() as u64,
+        sha256: sha256_bytes(binary),
+        mode: 0o755,
+    });
     let marker = marker_json(&update.version.to_string())?;
     transaction.install_bytes(
         Path::new("share/kettle/install.json"),
         marker.as_bytes(),
+        Some(0o644),
+    )?;
+    provenance_files.push(UnixInstallFile {
+        path: "share/kettle/install.json".into(),
+        size: marker.len() as u64,
+        sha256: sha256_bytes(marker.as_bytes()),
+        mode: 0o644,
+    });
+
+    // The reader requires records sorted strictly by path.
+    provenance_files.sort_by(|left, right| left.path.cmp(&right.path));
+    let prefix = install.prefix.to_str().ok_or_else(|| {
+        UpdateError::Transaction("Linux install prefix is not valid UTF-8".into())
+    })?;
+    // Enforce the reader's bounds BEFORE writing: `read_linux_install_provenance`
+    // refuses a record past `MAX_ARCHIVE_ENTRIES`, so exceeding it here would
+    // produce provenance this installer can never read back — and since both
+    // upgrade and uninstall need a readable record, the install would be
+    // stranded by its own success.
+    if provenance_files.len() > MAX_ARCHIVE_ENTRIES || owned_directories.len() > MAX_ARCHIVE_ENTRIES
+    {
+        return Err(UpdateError::UnmanagedInstall(format!(
+            "refusing to record Linux install provenance with {} files and {} \
+             directories; the readable maximum is {MAX_ARCHIVE_ENTRIES} each",
+            provenance_files.len(),
+            owned_directories.len()
+        )));
+    }
+    let provenance = UnixInstallProvenance {
+        schema: 1,
+        product: "kettle".into(),
+        managed_by: "kettle-installer".into(),
+        prefix: prefix.into(),
+        owner_uid: install.prefix.metadata()?.uid(),
+        files: provenance_files,
+        directories: owned_directories
+            .into_iter()
+            .map(|(path, mode)| UnixInstallDirectory { path, mode })
+            .collect(),
+    };
+    let provenance = serde_json::to_string_pretty(&provenance)? + "\n";
+    if provenance.len() > 1024 * 1024 {
+        return Err(UpdateError::Transaction(
+            "Linux install provenance exceeds its byte limit".into(),
+        ));
+    }
+    transaction.install_bytes(
+        Path::new(UNIX_INSTALL_PROVENANCE_FILE),
+        provenance.as_bytes(),
         Some(0o644),
     )?;
     transaction.finish_preflight()?;
@@ -6524,6 +6633,11 @@ mod tests {
         let payloads = [
             ("kettle", b"verified-binary".as_slice(), 0o755),
             ("install.sh", b"verified-installer".as_slice(), 0o755),
+            // The real release archive ships this (release.yml installs
+            // `scripts/install-unix.py` into `dist/kettle/`), and provenance
+            // verification requires it to be recorded. The fixture omitted it
+            // only because the production path used to omit it too.
+            ("install-unix.py", b"verified-unix-installer".as_slice(), 0o755),
             ("LICENSE", b"license".as_slice(), 0o644),
             ("NOTICE", b"notice".as_slice(), 0o644),
             ("README.md", b"readme".as_slice(), 0o644),
@@ -6590,6 +6704,18 @@ mod tests {
         archive.into_inner().unwrap().finish().unwrap()
     }
 
+    /// A managed Linux update must leave the installation still managed.
+    ///
+    /// The updater replaces provenance-covered files — `bin/kettle`,
+    /// `install.sh`, the desktop file, icons, the man page — and did not
+    /// regenerate `install-files.json`. The record therefore still held the
+    /// OLD hashes for the NEW files, so the very next verification reported
+    /// the installation unmanaged: startup could not confirm or clean the
+    /// committed transaction, and every later `kettle update` refused to run.
+    /// One official update was enough to strand an installation permanently.
+    ///
+    /// The previous version of this test seeded no provenance and asserted
+    /// only that two files had new bytes, so it passed throughout.
     #[cfg(target_os = "linux")]
     #[test]
     fn linux_transaction_applies_bytes_from_verified_archive_memory() {
@@ -6601,13 +6727,19 @@ mod tests {
         let prefix = root.path().join("install");
         fs::create_dir_all(prefix.join("bin")).unwrap();
         fs::write(prefix.join("bin/kettle"), b"old-binary").unwrap();
+        // A real update always runs against an install that already verified,
+        // because `install_update` calls `detect_managed_install` first.
+        seed_linux_install_provenance(&prefix);
         let install = ManagedInstall {
             prefix: prefix.clone(),
             executable: prefix.join("bin/kettle"),
             marker_path: prefix.join("share/kettle/install.json"),
         };
+        let before = read_linux_install_provenance(&prefix).unwrap();
+
         let mut transaction = Transaction::begin(&prefix, "99.0.0").unwrap();
         apply_verified_linux_update(&mut transaction, &package, &install, &fake_update()).unwrap();
+        transaction.commit().unwrap();
 
         assert_eq!(
             fs::read(prefix.join("bin/kettle")).unwrap(),
@@ -6617,7 +6749,56 @@ mod tests {
             fs::read(prefix.join("share/kettle/install.sh")).unwrap(),
             b"verified-installer"
         );
-        transaction.rollback().unwrap();
+
+        // The record was regenerated, not left describing the old files.
+        let after = read_linux_install_provenance(&prefix).unwrap();
+        assert_ne!(
+            before.files, after.files,
+            "the provenance record must be rewritten by the update"
+        );
+
+        // Every recorded hash must match what is actually on disk — this is
+        // precisely the check that failed after a real update.
+        for record in &after.files {
+            let path = prefix.join(&record.path);
+            let metadata = fs::metadata(&path).unwrap_or_else(|error| {
+                panic!(
+                    "recorded file {} is missing after update: {error}",
+                    record.path
+                )
+            });
+            assert_eq!(
+                sha256_file(&path).unwrap(),
+                record.sha256,
+                "provenance hash for {} does not match the installed bytes",
+                record.path
+            );
+            assert_eq!(metadata.len(), record.size, "size for {}", record.path);
+        }
+
+        // The files the verifier demands are all present in the new record.
+        for required in [
+            "bin/kettle",
+            "share/applications/kettle.desktop",
+            "share/kettle/install.sh",
+            "share/kettle/install-unix.py",
+            "share/kettle/install.json",
+        ] {
+            assert!(
+                after.files.iter().any(|file| file.path == required),
+                "the regenerated provenance must record {required}"
+            );
+        }
+
+        // Records must be sorted strictly by path, or the reader rejects them.
+        for pair in after.files.windows(2) {
+            assert!(
+                pair[0].path < pair[1].path,
+                "provenance files must be strictly sorted: {:?} then {:?}",
+                pair[0].path,
+                pair[1].path
+            );
+        }
     }
 
     #[cfg(target_os = "linux")]

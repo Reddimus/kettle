@@ -186,22 +186,36 @@ impl AnsiStripper {
     /// Feed a chunk; append the stripped plaintext to `out`.
     pub fn push(&mut self, input: &[u8], out: &mut Vec<u8>) {
         for &b in input {
-            // Mid-character: this byte belongs to the character being decoded,
-            // whatever it looks like. Only Ground can start a sequence, so a
-            // control sequence already in progress is untouched by this.
-            if self.utf8_continuation > 0 && matches!(self.state, StripState::Ground) {
-                self.utf8_continuation -= 1;
-                out.push(b);
-                continue;
+            // Mid-character: a continuation byte belongs to the character being
+            // decoded and can never be a control, in ANY state. Tracking this
+            // only in Ground still let `0x9c` inside an OSC read as ST — so
+            // `ESC ] 0 ; ✳ title BEL` (`✳` is `e2 9c b3`) terminated the string
+            // early and leaked the rest of it as visible text.
+            if self.utf8_continuation > 0 {
+                if matches!(b, 0x80..=0xbf) {
+                    self.utf8_continuation -= 1;
+                    if matches!(self.state, StripState::Ground) {
+                        out.push(b);
+                    }
+                    continue;
+                }
+                // Not a continuation after all: the lead was malformed or
+                // truncated. Stop shielding immediately and let this byte be
+                // interpreted normally — blindly swallowing N bytes hid real
+                // C1 controls and desynchronized on a lead-followed-by-lead.
+                self.utf8_continuation = 0;
             }
-            if matches!(self.state, StripState::Ground) {
-                // A UTF-8 lead byte owes 1..=3 continuations. Anything else
-                // (ASCII, a stray continuation, an invalid lead) owes none and
-                // falls through to the control-byte match unchanged.
+            // A character can only BEGIN where text is being read: ground, or
+            // the payload of a control string (an OSC 2 title is UTF-8). CSI
+            // parameter bytes are ASCII by definition.
+            if matches!(self.state, StripState::Ground | StripState::String { .. }) {
                 self.utf8_continuation = match b {
                     0xc2..=0xdf => 1,
                     0xe0..=0xef => 2,
                     0xf0..=0xf4 => 3,
+                    // ASCII, a stray continuation, or an invalid lead
+                    // (0xc0/0xc1/0xf5..) owes nothing and is interpreted as
+                    // itself.
                     _ => 0,
                 };
             }
@@ -2337,6 +2351,75 @@ mod tests {
                 "{label}: plain text must survive stripping byte for byte, got {out:02x?}"
             );
         }
+    }
+
+    /// A UTF-8 character INSIDE a control string must not terminate it.
+    ///
+    /// Tracking continuation bytes only in ground state left `0x9c` inside an
+    /// OSC reading as ST: `ESC ] 0 ; ✳ title BEL X` (`✳` is `e2 9c b3`) ended
+    /// the string at the `9c` and leaked `b3 title BEL X` into the output as
+    /// visible garbage. Titles are exactly where non-ASCII shows up.
+    #[test]
+    fn a_utf8_character_inside_a_control_string_does_not_terminate_it() {
+        for (label, payload) in [
+            ("U+2733 contains 0x9c, which is ST", "\u{2733}"),
+            ("U+2590 contains 0x90, which is DCS", "\u{2590}"),
+            ("U+2018 contains 0x98, which is SOS", "\u{2018}"),
+            ("U+00db contains 0x9b, which is CSI", "\u{00db}"),
+        ] {
+            let mut input = b"\x1b]0;".to_vec();
+            input.extend_from_slice(payload.as_bytes());
+            input.extend_from_slice(b" title\x07visible");
+
+            let mut stripper = AnsiStripper::default();
+            let mut out = Vec::new();
+            stripper.push(&input, &mut out);
+            assert_eq!(
+                String::from_utf8_lossy(&out),
+                "visible",
+                "{label}: the whole OSC must be stripped, with nothing leaking"
+            );
+        }
+    }
+
+    /// A malformed lead byte must not shield the bytes after it.
+    ///
+    /// Counting N continuations unconditionally swallowed whatever followed,
+    /// so a real control could be missed and a lead-followed-by-lead
+    /// desynchronized the parser. A byte that is not `0x80..=0xbf` ends the
+    /// shield immediately and is interpreted on its own terms.
+    #[test]
+    fn a_malformed_lead_byte_does_not_swallow_what_follows() {
+        // `e2` promises two continuations; `9b` is one, but `31` is not — so
+        // the sequence is malformed and `31` onward must be read normally.
+        let mut stripper = AnsiStripper::default();
+        let mut out = Vec::new();
+        stripper.push(&[0xe2, 0x9b, 0x31, 0x6d, b'X'], &mut out);
+        assert!(
+            out.ends_with(b"X"),
+            "text after a malformed sequence must still be emitted, got {out:02x?}"
+        );
+
+        // A lead immediately followed by another lead: the first is abandoned,
+        // the second starts a real character.
+        let mut stripper = AnsiStripper::default();
+        let mut out = Vec::new();
+        let mut input = vec![0xe2];
+        input.extend_from_slice("é!".as_bytes());
+        stripper.push(&input, &mut out);
+        assert!(
+            String::from_utf8_lossy(&out).ends_with("é!"),
+            "the second character must survive, got {out:02x?}"
+        );
+
+        // A real 8-bit CSI after a broken lead is still recognised and removed.
+        let mut stripper = AnsiStripper::default();
+        let mut out = Vec::new();
+        stripper.push(&[0xe2, 0x41, 0x9b, b'3', b'1', b'm', b'Z'], &mut out);
+        assert!(
+            out.ends_with(b"Z") && !out.contains(&b'm'),
+            "the CSI must still be stripped after a malformed lead, got {out:02x?}"
+        );
     }
 
     /// A character split across two chunks must still survive — the PTY hands

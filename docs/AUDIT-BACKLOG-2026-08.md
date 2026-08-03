@@ -3,11 +3,16 @@
 Four independent adversarial audits at max reasoning effort covered the eight
 crates outside the Terminator-parity surface: `kettle-core` + `kettle-vt`,
 `kettle-render`, `kettle-ctl` + `kettle-state` + `kettle-remote`, and `kettle` +
-`kettle-update`. Together they returned **91 findings**.
+`kettle-update`. Together they returned **91 findings**, and a follow-up review of the fixes
+returned 8 more.
 
-Six were fixed immediately — the ones that corrupt output, hang a pane, break a
-documented guarantee, or defeat a safety promise. They are in the changelog.
-Everything else is recorded here rather than silently dropped.
+Seven were fixed immediately — the ones that corrupt output, hang a pane, break a
+documented guarantee, or defeat a safety promise — and a review of those fixes
+then found four of them incomplete, which is recorded below rather than
+smoothed over. Everything else is listed here rather than silently dropped.
+
+"Fixed" below means the stated trigger no longer reproduces and a test covers
+it. Where a fix is partial, it says so and names what is left.
 
 A finding being listed here is not a claim that it is minor. It is a claim that
 it was **verified as real and consciously deferred**, usually because the fix is
@@ -23,6 +28,41 @@ a rewrite that needs its own change and its own measurement.
 | `kettle-render/color.rs` | `minimum-contrast` chose its endpoint by thresholding luminance at 0.5, but the WCAG crossover is ~0.1791. Mid-tone backgrounds got the *worse* endpoint and the guarantee silently failed. |
 | `kettle-render/{quad,imgpipe}.rs` | Shaders returned premultiplied color while the blend state was straight-alpha, so alpha was applied twice — every translucent surface rendered at roughly α². |
 | `kettle-vt/extract.rs` | CAN/SUB did not cancel a control string, so one stray `0x18` inside an OSC swallowed the rest of the stream and the pane appeared frozen. |
+| `kettle-update/install.rs` | The Linux updater replaced provenance-covered files without regenerating `install-files.json`, so the record held the OLD hashes for the NEW files and the next verification reported the installation **unmanaged** — stranding it permanently after one official update. It also never installed `install-unix.py`, which verification requires. The `cfg(test)` duplicate `apply_staged_update` carried the complete correct logic, which is why every test stayed green. Verified on Linux. |
+
+### Residual, on fixes above
+
+A review of the fixes found several of them **partial**, and they were then
+completed in the same branch. Recording the shape here because it is the
+recurring failure mode: a fix that closes the case you tested and leaves the
+neighbouring one open.
+
+- ANSI stripping tracked UTF-8 only in ground state, so `0x9c` inside an OSC
+  still read as ST — `ESC ] 0 ; ✳ title BEL` leaked its tail. Now tracked in
+  every state where text can appear.
+- A malformed lead byte blindly shielded the next N bytes, hiding real C1
+  controls. A byte that is not `0x80..=0xbf` now ends the shield at once.
+- CAN/SUB cancellation was bypassed when `st_pending` was set, so `ESC CAN`
+  reopened the freeze with one byte of disguise.
+- `cancel_seq` used `Vec::clear`, retaining up to the 16 MiB capacity while
+  releasing the budget reservation that accounted for it.
+- Choosing the contrast endpoint by maximum ratio reversed near-compliant
+  foregrounds: `#fdfdfd` on `#767676` is 4.465:1, and both ends clear 4.5, so
+  maximizing flipped near-white text to near-black. It now prefers the endpoint
+  the foreground is already nearest and crosses over only when that side cannot
+  reach the target.
+- `--write-default-config` returned an error for an existing DIRECTORY, because
+  Windows reports that as a permission failure rather than `AlreadyExists`.
+
+Still open on those same fixes:
+
+- The premultiplied blend fix is correct locally, but `lib.rs`'s surface clear
+  still writes straight RGB under `CompositeAlphaMode::PreMultiplied`. For a
+  translucent clear the two former bugs partly cancelled, so this combination
+  needs the clear fixed to be fully right.
+- `--write-default-config` still follows a **parent** junction; only the final
+  component is atomic. Redirecting creation to an absent destination remains
+  possible for an attacker who can replace a writable parent directory.
 
 ## Deferred — correctness
 
@@ -66,12 +106,11 @@ a rewrite that needs its own change and its own measurement.
   directory is treated as private with no owner/DACL validation; and the
   "durable" replace contract is not met (parent sync is a no-op, the rename is
   not write-through).
-- **`kettle-update`**: the Linux updater replaces provenance-covered files
-  without updating `install-unix.py` or regenerating `install-files.json`, so
-  after any managed update provenance verification rejects the installation.
-  **This is the highest-severity deferred item.** Also: Windows startup deletes
-  any file matching the helper/archive name pattern without an ownership or age
-  check, and `InstallMarker.version` is written but never validated.
+- **`kettle-update`**: Windows startup deletes any file matching the
+  helper/archive name pattern without an ownership or age check, and
+  `InstallMarker.version` is written but never validated.
+  (The Linux provenance break that was listed here as the highest-severity
+  deferred item has since been **fixed** — see the table above.)
 - **`kettle/exec.rs`**: process-tree termination misses double-forked/`setsid()`
   descendants; terminal replies outrank piped stdin with no timeout, so a child
   that queries in a loop can starve stdin indefinitely; `--cwd` rejects

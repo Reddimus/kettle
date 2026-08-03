@@ -394,6 +394,17 @@ impl Extractor {
                             self.handle_pending_chunks(&mut out, &mut handle);
                             continue;
                         }
+                        // CAN/SUB cancel here too. An ESC arriving mid-string
+                        // sets `st_pending` and this branch owns the next byte,
+                        // so checking for cancellation only on the bulk path
+                        // left `ESC CAN` appending both bytes as payload and
+                        // the string still open — the same freeze, reachable by
+                        // putting an ESC in front of the CAN.
+                        if b == 0x18 || b == 0x1a {
+                            i += 1;
+                            self.cancel_seq();
+                            continue;
+                        }
                         if self.discarding_seq {
                             // Account for the ESC consumed on the preceding
                             // iteration first. If it is the final quarantined
@@ -679,7 +690,12 @@ impl Extractor {
             self.reset_discard();
             return;
         }
-        self.seq.clear();
+        // Release the memory, not just the length. `clear()` keeps the whole
+        // capacity — up to the 16 MiB sequence cap — while dropping the
+        // reservation tells the graphics budget it is free, so a near-limit
+        // string cancelled once per pane retained megabytes the budget
+        // believed it had reclaimed.
+        self.seq = Vec::new();
         let _seq_reservation = self.seq_reservation.take();
         self.mode = Mode::Pass;
         self.st_pending = false;
@@ -1340,27 +1356,127 @@ mod tests {
         }
     }
 
-    /// The cancellation must not change how a properly terminated string
-    /// behaves — BEL and ST still complete their sequence.
+    /// A properly terminated control string must survive INTACT.
+    ///
+    /// kettle passes non-extracted sequences (an OSC 2 title, say) straight to
+    /// the terminal engine, so "it ends with the trailing text" is satisfied
+    /// even if the parser breaks and forwards everything blindly. The real
+    /// invariant is byte-exactness: a terminated string it does not claim must
+    /// come out exactly as it went in, and one it DOES claim must be consumed
+    /// and reported.
     #[test]
-    fn a_properly_terminated_control_string_is_unaffected_by_cancel_support() {
+    fn a_properly_terminated_control_string_survives_intact() {
+        for (label, input, want) in [
+            (
+                "BEL",
+                &b"\x1b]2;title\x07visible\r\n"[..],
+                &b"\x1b]2;title\x07visible\r\n"[..],
+            ),
+            (
+                "ST",
+                &b"\x1b]2;title\x1b\\visible\r\n"[..],
+                &b"\x1b]2;title\x1b\\visible\r\n"[..],
+            ),
+            // An 8-bit ST is deliberately re-emitted in its 7-bit form, so the
+            // downstream engine never has to handle the C1 byte. Pinning that
+            // normalization is the point of this case.
+            (
+                "8-bit ST normalized to 7-bit",
+                &b"\x1b]2;title\x9cvisible\r\n"[..],
+                &b"\x1b]2;title\x1b\\visible\r\n"[..],
+            ),
+        ] {
+            let mut ex = Extractor::default();
+            let mut plain = Vec::new();
+            for c in ex.feed(input) {
+                if let Chunk::Pass(b) = c {
+                    plain.extend_from_slice(&b);
+                }
+            }
+            assert_eq!(
+                plain.as_slice(),
+                want,
+                "{label}: a title OSC is not extracted, so it must reach the \
+                 engine intact"
+            );
+        }
+
+        // An OSC kettle DOES claim is consumed and reported, so the engine
+        // never sees it. This is the half a pass-through-everything regression
+        // would break.
         let mut ex = Extractor::default();
-        let chunks = ex.feed(
-            b"]2;titlevisible
-",
-        );
         let mut plain = Vec::new();
-        for c in &chunks {
-            if let Chunk::Pass(b) = c {
-                plain.extend_from_slice(b);
+        let mut cwd = None;
+        for c in ex.feed(b"\x1b]7;file:///tmp\x07visible\r\n") {
+            match c {
+                Chunk::Pass(b) => plain.extend_from_slice(&b),
+                Chunk::Cwd(path) => cwd = Some(path),
+                _ => {}
             }
         }
-        assert!(
-            String::from_utf8_lossy(&plain).ends_with(
-                "visible
-"
-            ),
-            "a BEL-terminated OSC still passes its trailing text through"
+        assert!(cwd.is_some(), "OSC 7 must be reported as a cwd change");
+        assert_eq!(
+            String::from_utf8_lossy(&plain),
+            "visible\r\n",
+            "and consumed rather than forwarded"
+        );
+    }
+
+    /// An ESC in front of the cancel must not reopen the freeze.
+    ///
+    /// An ESC arriving mid-string sets `st_pending`, and that branch owns the
+    /// next byte — so checking for CAN/SUB only on the bulk path left
+    /// `ESC CAN` appending both bytes as payload with the string still open.
+    /// Same hang, one byte of disguise.
+    #[test]
+    fn an_escape_before_the_cancel_still_cancels() {
+        for cancel in [0x18_u8, 0x1a] {
+            for intro in [&b"\x1b]2;"[..], &b"\x1bP"[..], &b"\x1b_"[..]] {
+                let mut ex = Extractor::default();
+                let mut input = intro.to_vec();
+                input.extend_from_slice(b"payload\x1b");
+                input.push(cancel);
+                input.extend_from_slice(b"after\r\n");
+
+                let mut plain = Vec::new();
+                for c in ex.feed(&input) {
+                    if let Chunk::Pass(b) = c {
+                        plain.extend_from_slice(&b);
+                    }
+                }
+                assert_eq!(
+                    String::from_utf8_lossy(&plain),
+                    "after\r\n",
+                    "ESC then {cancel:#04x} after {intro:?} must cancel, not extend"
+                );
+            }
+        }
+    }
+
+    /// Cancelling must return the accumulator's memory, not just its length.
+    ///
+    /// `clear()` keeps the whole capacity while the budget reservation is
+    /// dropped, so the allocator holds megabytes the budget believes it has
+    /// reclaimed.
+    #[test]
+    fn cancelling_a_large_string_releases_its_buffer() {
+        let mut ex = Extractor::default();
+        let mut input = b"\x1b]2;".to_vec();
+        input.extend(std::iter::repeat_n(b'x', 512 * 1024));
+        input.push(0x18);
+        input.extend_from_slice(b"after\r\n");
+
+        let mut plain = Vec::new();
+        for c in ex.feed(&input) {
+            if let Chunk::Pass(b) = c {
+                plain.extend_from_slice(&b);
+            }
+        }
+        assert_eq!(String::from_utf8_lossy(&plain), "after\r\n");
+        assert_eq!(
+            ex.seq.capacity(),
+            0,
+            "the abandoned payload buffer must be freed, not merely emptied"
         );
     }
 

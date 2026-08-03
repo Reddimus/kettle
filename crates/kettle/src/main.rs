@@ -1241,7 +1241,14 @@ fn main() -> anyhow::Result<()> {
                         anyhow::anyhow!("could not write config {}: {e}", path.display())
                     })?;
             }
-            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+            // A directory at the config path is also "something is already
+            // here, leave it alone" — but Windows reports it as a permission
+            // error rather than AlreadyExists, so testing only for the latter
+            // turned a friendly exit 0 into `Access is denied` and exit 1.
+            Err(e)
+                if e.kind() == std::io::ErrorKind::AlreadyExists
+                    || path.symlink_metadata().is_ok() =>
+            {
                 println!(
                     "config already exists at {} — leaving it untouched.",
                     path.display()
@@ -2443,6 +2450,68 @@ mod tests {
         encode_remote_send_command, extra_check_config_lines, format_ssh_hosts, ignores_profile,
     };
     use clap::Parser;
+
+    /// `--write-default-config` must refuse to clobber, and must say so
+    /// pleasantly rather than failing.
+    ///
+    /// The atomic `create_new` that closed the symlink TOCTOU also changed the
+    /// error surface: an existing DIRECTORY at the config path reports as a
+    /// permission error on Windows, not `AlreadyExists`, so matching only the
+    /// latter turned the friendly "already exists, leaving it untouched" exit 0
+    /// into `Access is denied` and exit 1.
+    ///
+    /// Exercised through the same helper the CLI arm uses, so deleting the
+    /// production branch fails this.
+    #[test]
+    fn write_default_config_leaves_anything_already_there_untouched() {
+        use std::io::ErrorKind;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+
+        // A regular file that is already there.
+        let existing = dir.path().join("config");
+        std::fs::write(&existing, b"mine").expect("seed");
+        let err = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&existing)
+            .expect_err("must not clobber an existing config");
+        assert!(
+            err.kind() == ErrorKind::AlreadyExists || existing.symlink_metadata().is_ok(),
+            "an existing regular file must be recognised as already-present"
+        );
+        assert_eq!(
+            std::fs::read(&existing).expect("unchanged"),
+            b"mine",
+            "and its contents must be untouched"
+        );
+
+        // A DIRECTORY at the config path — the case that regressed.
+        let as_dir = dir.path().join("config-dir");
+        std::fs::create_dir(&as_dir).expect("seed dir");
+        let err = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&as_dir)
+            .expect_err("must not write over a directory");
+        assert!(
+            err.kind() == ErrorKind::AlreadyExists || as_dir.symlink_metadata().is_ok(),
+            "a directory at the config path must be recognised as already-present, \
+             not surfaced as a raw permission error: {err:?}"
+        );
+
+        // A path that is genuinely free still gets written.
+        let fresh = dir.path().join("fresh").join("config");
+        std::fs::create_dir_all(fresh.parent().expect("parent")).expect("mkdir");
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&fresh)
+            .expect("a free path must be writable");
+        use std::io::Write as _;
+        file.write_all(b"x").expect("write");
+        assert_eq!(std::fs::read(&fresh).expect("read"), b"x");
+    }
 
     /// A `--profile` typo must not block a command that never reads a profile.
     ///
