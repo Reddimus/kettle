@@ -13047,11 +13047,9 @@ impl App {
                 // no prompt, which is what separates it from `GroupWindow`.
                 // `ungroup_all` is its partner.
                 //
-                // Terminator's scope is process-wide; kettle applies it to
-                // every pane in this window, which is the same set for the
-                // single-window case that covers nearly all use, and is the
-                // widest scope this dispatch can reach without reaching into
-                // other windows' muxes mid-borrow.
+                // Terminator's scope is its whole terminal collection
+                // (`self.terminator.terminals`), so this reaches every window,
+                // not just the focused one — see the loop below.
                 let all = kettle_ui_group_all_name();
                 // `group_all_toggle` asks the INVOKING terminal, not the whole
                 // set (window.py:940-945: `if widget.group == 'All'`). Testing
@@ -25759,11 +25757,7 @@ mod tests {
     /// wiring is pinned here.
     #[test]
     fn the_group_all_actions_reach_a_dispatch_that_groups() {
-        let src = include_str!("app.rs").replace(
-            "
-", "
-",
-        );
+        let src = include_str!("app.rs").replace("\r\n", "\n");
         let arm_head = [
             "Action::GroupAll | Action::Ungroup",
             "All | Action::ToggleGroupAll => {",

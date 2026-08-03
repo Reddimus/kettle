@@ -2009,16 +2009,16 @@ fn ignores_profile(cli: &Cli) -> bool {
     // invocation skip validation for a mode that needed it:
     // `--profile typo --list-profiles --list-ssh-hosts` ran `list-ssh-hosts`
     // first and silently printed defaults.
-    let reads_profile = cli.list_keybinds
-        || cli.list_layouts
-        || cli.list_ssh_hosts
-        || cli.check_config
-        || cli.check_update;
+    let reads_profile =
+        cli.list_keybinds || cli.list_layouts || cli.list_ssh_hosts || cli.check_config;
     let ignores_profile = cli.print_default_config
         || cli.write_default_config
         || cli.list_themes
         || cli.list_profiles
         || cli.list_actions
+        // `--check-update` asks the update server and prints the answer; it
+        // never resolves a config path, let alone a profile.
+        || cli.check_update
         || cli.shell_integration.is_some()
         || cli.print_completions.is_some();
     ignores_profile && !reads_profile
@@ -2434,6 +2434,7 @@ mod tests {
             vec!["kettle", "--profile", "typo", "--print-default-config"],
             vec!["kettle", "--profile", "typo", "--write-default-config"],
             vec!["kettle", "--profile", "typo", "--print-completions", "bash"],
+            vec!["kettle", "--profile", "typo", "--check-update"],
             vec!["kettle", "--profile", "typo", "--shell-integration", "bash"],
         ] {
             let cli = Cli::parse_from(&args);
@@ -2448,6 +2449,15 @@ mod tests {
             vec!["kettle", "--profile", "typo", "--list-layouts"],
             vec!["kettle", "--profile", "typo", "--list-ssh-hosts"],
             vec!["kettle", "--profile", "typo", "--check-config"],
+            // Mixed with a profile-reading mode, the whole invocation is
+            // disqualified even though --check-update alone is exempt.
+            vec![
+                "kettle",
+                "--profile",
+                "typo",
+                "--check-update",
+                "--check-config",
+            ],
             vec!["kettle", "--profile", "typo"],
             // MIXED modes: clap allows several at once and only the first in
             // source order runs, so an any-of-the-ignorers test let this skip
