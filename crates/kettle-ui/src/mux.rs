@@ -2303,34 +2303,61 @@ impl Mux {
         self.tabs.is_empty()
     }
 
+    /// Point focus at `pane`, wherever it lives, so a subsequent
+    /// [`Mux::close_focused`] acts on it. Returns false if the pane is gone.
+    ///
+    /// Used by the `ask-before-closing` confirm path: the prompt names the
+    /// pane the user actually pointed at, and by the time they answer, focus
+    /// may have moved to a sibling because the target's own shell exited.
+    /// Re-focusing before closing keeps `close_focused`'s sibling-promotion
+    /// and tab-collapse behavior exactly as-is rather than duplicating it.
+    pub fn focus_pane(&mut self, pane: u64) -> bool {
+        let Some(idx) = self.tab_index_of_any_pane(&[pane]) else {
+            return false;
+        };
+        self.active = idx;
+        if let Some(tab) = self.tabs.get_mut(idx) {
+            tab.focus = pane;
+        }
+        true
+    }
+
     pub fn close_tab(&mut self) -> bool {
         let a = self.active;
         self.close_tab_at(a)
     }
 
-    /// Index of the tab that currently holds `pane`, or `None` if no tab
-    /// does.
+    /// Pane ids that name the tab at `idx` for as long as ANY of them lives —
+    /// the inverse of [`Mux::tab_index_of_any_pane`], and the way to hold onto
+    /// a tab across anything that can renumber the tab list.
+    ///
+    /// All of the tab's leaves, not just the first: anchoring on one pane
+    /// meant a split tab stopped resolving the moment that particular pane's
+    /// shell exited, even though the tab was still on screen with its other
+    /// panes running — and the confirm prompt would then quietly do nothing.
+    pub fn tab_anchor_panes(&self, idx: usize) -> Vec<u64> {
+        self.tabs
+            .get(idx)
+            .map(|t| t.root.leaf_ids())
+            .unwrap_or_default()
+    }
+
+    /// Index of the tab holding any of `panes`, or `None` if none of them is
+    /// in a tab any more (the tab is gone).
     ///
     /// A tab index is only meaningful at the instant it is read: a shell
     /// exiting reaps its pane, which can drop a whole tab and shift every
     /// index after it down one. That is fine for code that closes a tab
     /// immediately, but not for anything that remembers a tab across a
-    /// pause — most of all the `ask-before-closing` prompt, which can sit
-    /// on screen indefinitely waiting for an answer. Naming the tab by a
-    /// pane it contains survives those shifts, and a pane id is never
-    /// reused, so a stale id resolves to `None` (the tab is already gone)
-    /// rather than to somebody else's tab.
-    /// A pane id that names the tab at `idx` for as long as that tab exists —
-    /// the inverse of [`Mux::tab_index_of_pane`], and the way to hold onto a
-    /// tab across anything that can renumber the tab list.
-    pub fn tab_anchor_pane(&self, idx: usize) -> Option<u64> {
-        self.tabs.get(idx).map(|t| t.root.first_leaf())
-    }
-
-    pub fn tab_index_of_pane(&self, pane: u64) -> Option<usize> {
+    /// pause — most of all the `ask-before-closing` prompt, which can sit on
+    /// screen indefinitely waiting for an answer. Naming the tab by the panes
+    /// it holds survives those shifts, and a pane id is never reused, so a
+    /// stale set resolves to `None` (the tab is gone) rather than to somebody
+    /// else's tab.
+    pub fn tab_index_of_any_pane(&self, panes: &[u64]) -> Option<usize> {
         self.tabs
             .iter()
-            .position(|t| t.root.leaf_ids().contains(&pane))
+            .position(|t| t.root.leaf_ids().iter().any(|id| panes.contains(id)))
     }
 
     /// Terminator parity, detachable-tabs Bucket-D: extract a tab
@@ -4781,15 +4808,16 @@ mod node_tests {
         }
 
         // Take an anchor on the third tab, the way the ✕ button does.
-        let anchor = m.tab_anchor_pane(2).expect("third tab exists");
-        assert_eq!(m.tab_index_of_pane(anchor), Some(2));
+        let anchor = m.tab_anchor_panes(2);
+        assert_eq!(anchor, vec![3], "the third tab's only pane");
+        assert_eq!(m.tab_index_of_any_pane(&anchor), Some(2));
 
         // A shell exits in the first tab while the prompt is still up.
         assert!(!m.close_tab_at(0));
         // The raw index 2 is now out of bounds, but the anchor still finds the
         // tab the user actually pointed at.
         assert_eq!(
-            m.tab_index_of_pane(anchor),
+            m.tab_index_of_any_pane(&anchor),
             Some(1),
             "the anchored tab moved, it did not become a different tab"
         );
@@ -4797,7 +4825,7 @@ mod node_tests {
         // Now the anchored tab itself goes away before the answer arrives.
         assert!(!m.close_tab_at(1));
         assert_eq!(
-            m.tab_index_of_pane(anchor),
+            m.tab_index_of_any_pane(&anchor),
             None,
             "a tab that is already gone must resolve to nothing, never to a \
              surviving tab — pane ids are process-global and never reused, so \
@@ -4805,7 +4833,44 @@ mod node_tests {
         );
 
         // Anchoring past the end is simply no tab.
-        assert_eq!(m.tab_anchor_pane(99), None);
+        assert!(m.tab_anchor_panes(99).is_empty());
+    }
+
+    /// An `ask-before-closing` prompt names the pane it was raised for, and
+    /// the answer must act on THAT pane.
+    ///
+    /// The prompt can sit on screen indefinitely. In that time the target's own
+    /// shell can exit, which promotes a sibling into focus — so "close the
+    /// focused pane" no longer means what it meant when the prompt went up.
+    /// Confirming then closed the sibling, which can be a tmux or agent session
+    /// the user never selected.
+    #[test]
+    fn a_confirmed_pane_close_acts_on_the_pane_it_was_raised_for() {
+        let mut m = Mux::new();
+        let mut root = Node::Leaf(10);
+        assert!(root.split_leaf(10, 20, Dir::Horizontal));
+        m.tabs.push(Tab {
+            root,
+            focus: 10,
+            title_override: None,
+            zoomed: false,
+            last_output_at: None,
+            last_seen_at: None,
+            bell: false,
+        });
+
+        // The prompt was raised for pane 10; focus then moves to 20.
+        m.tabs[0].focus = 20;
+        assert_eq!(m.active_focus(), Some(20));
+
+        // Re-focusing by id is what makes the confirmed close act on the
+        // original target rather than on whatever is focused now.
+        assert!(m.focus_pane(10), "the target is still present");
+        assert_eq!(m.active_focus(), Some(10));
+
+        // A target that is already gone reports so, and the caller closes
+        // nothing rather than falling back to the current focus.
+        assert!(!m.focus_pane(999), "a vanished target must not resolve");
     }
 
     /// A split tab must be anchorable by any pane it holds, not just its first
@@ -4825,9 +4890,17 @@ mod node_tests {
             last_seen_at: None,
             bell: false,
         });
-        assert_eq!(m.tab_index_of_pane(10), Some(0));
-        assert_eq!(m.tab_index_of_pane(20), Some(0), "the sibling too");
-        assert_eq!(m.tab_index_of_pane(30), None, "a pane in no tab");
+        assert_eq!(m.tab_index_of_any_pane(&[10]), Some(0));
+        assert_eq!(m.tab_index_of_any_pane(&[20]), Some(0), "the sibling too");
+        assert_eq!(m.tab_index_of_any_pane(&[30]), None, "a pane in no tab");
+        // The anchor is the WHOLE tab, so losing one pane does not lose the
+        // tab: this is what a single first-leaf anchor got wrong.
+        assert_eq!(m.tab_anchor_panes(0), vec![10, 20]);
+        assert_eq!(
+            m.tab_index_of_any_pane(&[10, 20]),
+            Some(0),
+            "any surviving pane still names the tab"
+        );
     }
 
     #[test]
