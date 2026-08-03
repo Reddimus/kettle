@@ -33,10 +33,15 @@ print("kettle theme:      " .. kettle.theme())
 -- Register a pattern → callback. When kettle's pane-content URL
 -- detector matches the pattern, the callback runs BEFORE the
 -- default open-in-browser path. The callback receives the matched
--- text and must return either:
+-- text and must return one of:
 --   - a string URL (kettle opens it via the OS / custom handler)
---   - nil (decline; kettle falls through to the next handler /
---     default open)
+--   - true (the handler opened it itself; kettle opens nothing)
+--   - nil or false (decline; kettle falls through to the next
+--     handler and then to its own default open)
+--
+-- A handler that raises is treated as a decline and logged: a handler
+-- exists to enhance a link, so a broken one must never be the reason
+-- a link stops working.
 --
 -- The Launchpad / APT examples below port the Terminator
 -- `url_handlers.py` defaults so a kettle user can opt into the

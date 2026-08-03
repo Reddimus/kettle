@@ -6922,16 +6922,32 @@ impl App {
         // the URL (its pattern matches), kettle does NOT fall
         // through to the cfg.custom_url_handler or system-open
         // paths — the handler decides what (if anything) to launch.
-        let handled_by_lua = self
+        let outcome = self
             .lua_engine
             .as_ref()
-            .is_some_and(|engine| engine.try_url_handler(uri));
+            .map(|engine| engine.try_url_handler(uri))
+            .unwrap_or(crate::lua::UrlHandlerOutcome::Fallthrough);
         // URL-handler callbacks are distinct from UrlClicked observers and can
         // queue the same side effects. Drain before any claimed-handler return.
         self.drain_lua_hook_commands(ws, "URL handler");
-        if handled_by_lua {
-            return;
-        }
+        // A handler may REWRITE the URL — that is the documented contract in
+        // `docs/examples/init.lua` and the shape every example there uses.
+        let rewritten;
+        let uri = match &outcome {
+            crate::lua::UrlHandlerOutcome::Handled => return,
+            crate::lua::UrlHandlerOutcome::Open(target) => {
+                // Re-check the allowlist. The handler is the user's own code,
+                // but it is fed untrusted terminal text, so it must not be a
+                // way to turn that text into a URL kettle would have refused.
+                if !kettle_core::links::is_safe_url(target) {
+                    log::warn!("lua url_handler returned an unsafe URL; refusing to open it");
+                    return;
+                }
+                rewritten = target.clone();
+                rewritten.as_str()
+            }
+            crate::lua::UrlHandlerOutcome::Fallthrough => uri,
+        };
         if self.cfg.use_custom_url_handler && !self.cfg.custom_url_handler.is_empty() {
             // Custom handler — spawn detached so a long-running
             // browser launch doesn't freeze kettle.
@@ -7747,6 +7763,15 @@ impl App {
             ws.mux.touch_tab_bell(id);
             self.fire_lua_event(ws, crate::LuaEvent::Bell(id), "bell hook");
         }
+        // The focused pane is being looked at, so its bell is answered.
+        //
+        // Deliberately here rather than on focus-change events: focus moves by
+        // far more routes than those fire on — a tab switch, `reap` promoting a
+        // sibling when the focused shell exits, the ctl API, a layout restore —
+        // and every one of them would have to remember. This runs each drain
+        // against the true current focus, so none of them can leave the latch
+        // lit on a pane the user is staring at.
+        ws.mux.clear_focused_pane_bell();
         // A single destructive drain fans out to Lua and the
         // optional recorder so neither consumer can steal bytes from the other.
         self.dispatch_output_chunks(ws, output_chunks);
@@ -10144,9 +10169,6 @@ impl App {
     /// cursor visible on the new pane right away.
     fn note_focus_change(&mut self, ws: &mut WindowState, pre: (usize, Option<u64>)) {
         if self.focus_key(ws) != pre {
-            // The user is now looking at this pane, which answers whatever its
-            // bell was trying to say.
-            ws.mux.clear_focused_pane_bell();
             // Vi mode belongs to the pane that owns alacritty_terminal's
             // engine cursor. A focus change must not leave that old pane in
             // TermMode::VI while the UI routes keys to a different pane.
@@ -24208,11 +24230,25 @@ mod tests {
             .find("self.drain_lua_hook_commands(ws, \"URL handler\")")
             .expect("Lua URL handler drain");
         let handled_return = open_url
-            .find("if handled_by_lua")
+            .find("UrlHandlerOutcome::Handled => return,")
             .expect("claimed URL early return");
         assert!(
             handler < drain && drain < handled_return,
             "URL-handler callback commands must drain before a claimed handler returns"
+        );
+        // A handler may hand back a DIFFERENT URL than the one clicked, and it
+        // was fed untrusted terminal text to produce it — so the rewritten URL
+        // has to clear the same allowlist the original did, not inherit its
+        // approval.
+        let rewritten = open_url
+            .find("UrlHandlerOutcome::Open(target)")
+            .expect("rewritten URL arm");
+        let recheck = open_url
+            .find("if !kettle_core::links::is_safe_url(target)")
+            .expect("rewritten URL must be re-checked against the allowlist");
+        assert!(
+            rewritten < recheck,
+            "a Lua-supplied URL must be allowlist-checked before it is opened"
         );
     }
 
@@ -25570,14 +25606,22 @@ mod tests {
             "the frame must carry each pane's OWN bell state; a literal here is \
              what made `icon_bell` undrawable"
         );
-        let focus = src
-            .split("fn note_focus_change(")
+        // Bounded to the drain body, and the needle is assembled at runtime.
+        // An earlier version of this guard sliced to END OF FILE and searched
+        // for a literal it contained itself, so deleting the production call
+        // left it passing — a guard that cannot fail is worse than no guard.
+        let needle = ["ws.mux.clear_focused", "_pane_bell();"].concat();
+        let drain = src
+            .split("fn drain_events(&mut self, ws: &mut WindowState) {")
             .nth(1)
-            .expect("note_focus_change");
+            .and_then(|b| b.split("\n    fn ").next())
+            .expect("drain_events body");
         assert!(
-            focus.contains("ws.mux.clear_focused_pane_bell();"),
-            "focusing a pane must clear its bell, or the indicator latches on \
-             forever once it fires"
+            drain.contains(needle.as_str()),
+            "the focused pane's bell must be cleared on the drain path, where \
+             the current focus is always known — clearing it only on \
+             focus-change events leaks the latch on every other route focus \
+             can take (tab switch, reap promoting a sibling, ctl, restore)"
         );
     }
 
@@ -27261,14 +27305,25 @@ mod tests {
             ("Read only", "Action::TogglePaneReadOnly"),
             ("Set Group…", "Action::CreateGroup"),
         ] {
+            // Checked as a PAIR, not as two independent tokens: "row present"
+            // and "action present" both still hold if two rows swap actions,
+            // which is exactly the bug that sends a click somewhere else.
+            // Matching per menu ENTRY also stops a row name that appears in a
+            // nearby comment from standing in for the row itself.
+            let entry = body
+                .split("ContextMenuItem::")
+                .find(|chunk| {
+                    chunk
+                        .split("label:")
+                        .nth(1)
+                        .and_then(|rest| rest.split_once('\n'))
+                        .is_some_and(|(line, _)| line.contains(row))
+                })
+                .unwrap_or_else(|| panic!("the context menu is missing Terminator's {row:?} row"));
             assert!(
-                body.contains(&format!("\"{row}\"")),
-                "the context menu is missing Terminator's {row:?} row"
-            );
-            assert!(
-                body.contains(action),
-                "{row:?} must dispatch {action}, so the menu and the keybind \
-                 cannot drift apart"
+                entry.contains(action),
+                "{row:?} must dispatch {action} — the row and its action must \
+                 stay together, found entry: {entry:?}"
             );
         }
         // Zoom swaps label with the state rather than sitting on one word,
