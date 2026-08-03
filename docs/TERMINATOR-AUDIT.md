@@ -14,6 +14,24 @@ Status: re-verified 2026-06-12 by the v2.20.0 Terminator + Ghostty deep-dive
 cross-check — the parity claims held against source (residual gaps tracked in
 `docs/UX-COMPARISON.md` § "v2.20.0 Terminator + Ghostty deep-dive").
 
+Correction pass, 2026-08-03. A machine check of this document against both
+sources — every Terminator option name it cites, checked against a clone of
+the audited SHA; every kettle symbol it names, checked against the tree —
+found claims that no source supported:
+
+- Options attributed to Terminator that Terminator does not have, at any SHA:
+  `hide_titlebar` (the real key is `show_titlebar`, and the sense was
+  inverted), `tab_max_width`, and `use_login_shell` (the real key is
+  `login_shell`, which was already covered by its own row).
+- A kettle function credited by name in two places, `maybe_confirm_then`,
+  which has never existed in the tree.
+- `ask_before_closing` described as "complete end-to-end" while four close
+  gestures bypassed the prompt entirely.
+
+Those rows are corrected below. A claim in this document is worth only as
+much as the source behind it, so prefer citing a file and symbol that can be
+checked over an adjective that cannot.
+
 For every Terminator feature, this doc classifies it into one of five buckets:
 
 - **A — Already shipped.** kettle has the equivalent. Cite the kettle cycle.
@@ -196,8 +214,10 @@ activity/bell indicators + custom icon + editable group label.
 kettle **ships per-pane titlebars**. Layout
 reserves `ch + 6.0` pixels of chrome per pane when
 `show_titlebar = true` AND there are >1 panes in a tab (single-pane
-tabs hide the titlebar — same default as Terminator's `hide_titlebar
-= true` for solo panes). Label format:
+tabs hide the titlebar). Terminator's own option is `show_titlebar`,
+default `True` (`config.py:238`); there is no `hide_titlebar` anywhere in
+Terminator's source, and an earlier revision of this document cited one.
+Label format:
 
   `[group_name]  title  COLSxROWS  [bell]`
 
@@ -420,17 +440,16 @@ The full feature-by-feature ledger. Rows flip from B/C → ✅ A as cycles land.
 | ~~`colorterm`~~ | config.py | ✅ string config key (default `truecolor`) wired to spawned PTY env; WSL launches also propagate it via `WSLENV` |
 | ~~`title_at_bottom`~~ | config.py | ✅ `title-at-bottom` flips the per-pane bar to the bottom. Terminal paint/clipping and UI pointer/native-IME projection share a title-position-aware grid origin, so the bottom mode does not leave a phantom top inset or shift cell hit testing. |
 | ~~`scroll_tabbar` (scrollable tab bar)~~ | config.py | ✅ v2.26.0 — `scroll-tabbar` config key: when tabs overflow the bar width, the strip scrolls with ‹›arrows + the mouse wheel (Terminator's "scroll the bar"). With it off, the wheel-over-tabs gesture cycles tabs instead (kitty/iTerm2 parity). |
-| `homogeneous_tabbar` / `tab_max_width` | config.py | ✅ kettle always uses equal-width tabs across the available strip and does not expose either Terminator knob. The full segment is the active surface, hit target, drag target, and title budget. |
+| `homogeneous_tabbar` | config.py | ✅ kettle always uses equal-width tabs across the available strip and does not expose the Terminator knob. (An earlier revision paired this with a `tab_max_width` option; Terminator has no such key.) The full segment is the active surface, hit target, drag target, and title budget. |
 | ~~`close_button_on_tab`~~ (toggle ✕ on tabs) | config.py | ✅ `close-button-on-tab` config key wired to tab-bar render |
 | ~~`borderless`~~ | config.py | ✅ bool config key, applied via winit `Window::with_decorations(false)` |
 | ~~`always_on_top`~~ | config.py | ✅ bool config key, applied via winit `WindowLevel::AlwaysOnTop` |
 | `sticky` (on all workspaces) | config.py | 🟡 wired on macOS via `winit::platform::macos::WindowExtMacOS::set_visible_on_all_workspaces(true)`, called post-construction (Window-level method, not a build-time attribute like `with_skip_taskbar`'s). X11/Wayland remain Bucket E (winit 0.30 doesn't expose `_NET_WM_STATE_STICKY`; would need raw-window-handle direct atom writes — heavy dep for one config key). A Terminator config that sets `sticky = true` works correctly on macOS; on other platforms the value parses without effect. |
 | `hide_from_taskbar` | config.py | 🟡 wired on Windows via `WindowAttributesExtWindows::with_skip_taskbar` (winit 0.30 only exposes the API there). X11/Wayland/macOS remain Bucket E (would need raw-window-handle direct atom writes). A Terminator config that sets `hide_from_taskbar = true` works correctly on Windows; on other platforms the value parses without effect. |
-| ~~`ask_before_closing = always/multiple_terminals/never`~~ | config.py | A — complete end-to-end and deployed. `should_prompt` helper, state types, keyboard nav state machine, renderer bottom-bar projection, CloseWindow/CloseTab/ClosePane interception via `maybe_confirm_then` dispatch wrapper, and mouse hit-testing for the visible `[Cancel]` / `[Close]` buttons. A follow-up right-aligned the buttons, added a pointer-cursor hover state, and routed clicks through the same safe cancel/confirm dispatch path as keyboard input. Centered-panel rendering remains optional polish, not a functional blocker. |
+| ~~`ask_before_closing = always/multiple_terminals/never`~~ | config.py | ✅ `should_prompt` helper, state types, keyboard nav state machine, renderer bottom-bar projection, and mouse hit-testing for the visible `[Cancel]` / `[Close]` buttons. Every close gesture routes through the `confirm_close` gate. **This row previously read "complete end-to-end" and credited a `maybe_confirm_then` dispatch wrapper — no such function has ever existed in kettle, and the claim was wrong on the substance too: only the three close *actions* asked. The titlebar ✕, Alt+F4, the tab-bar ✕ button, and middle-clicking a tab all closed without prompting, under every setting including `always`. Fixed and drift-guarded since.** Centered-panel rendering remains optional polish. |
 | ~~`exit_action = close/restart/hold`~~ | config.py | ✅ `exit-action` config key honors close/hold/restart |
 | ~~`login_shell`~~ | config.py | ✅ `login-shell` config key threaded through `Terminal::new_with_env` (`kettle-ui/mux.rs`) so the spawn argv gets `-l` when true |
 | ~~`geometry_hinting`~~ (font-step resize) | config.py | ✅ `geometry-hinting` config key honored via winit `with_resize_increments` (8x16 px approximation; X11 honors, Wayland varies, macOS no-op) |
-| `use_login_shell` | config.py | duplicate of `login_shell` |
 | ~~`paste_selection` (X11 primary)~~ | keybinds | ✅ `Action::PastePrimary` uses X11 PRIMARY on Linux and falls back to the regular clipboard on Wayland/macOS/Windows; middle-click and PuTTY-style right-click share the same hardened paste paths |
 | `send_newline` | keybinds | ✅ `Action::SendNewline` writes a literal LF when explicitly bound or selected. The default Shift+Enter is forwarded distinctly to the client (Kettle's fallback before negotiation, negotiated xterm or CSI-u afterward); it is not a hidden Kettle keybinding. |
 | ~~`reset_clear`~~ (Reset + Clear) | keybinds | ✅ `Action::ResetAndClear` (composes Reset + ClearHistory) |
@@ -714,7 +733,7 @@ and progressed each through implementation. Status snapshot:
 |------------------------------|--------|------------|-------|
 | `plugins/remote.py`          | ✅ A   | 7/7        | SSH/Docker/Podman/kubectl detect + right-click reconnect. Deployed. |
 | `plugins/auto_theme.py`      | ✅ A   | 7/7        | Manual + clock schedule + sunrise/sunset (NOAA solar). Deployed. |
-| `ask_before_closing`         | ✅ A   | Complete; centered-panel polish deferred | CloseWindow/CloseTab/ClosePane all route through `maybe_confirm_then`. Bottom-bar modal renderer supports keyboard navigation and mouse clicks on the visible `[Cancel]` / `[Close]` buttons. Deployed. |
+| `ask_before_closing`         | ✅ A   | Complete; centered-panel polish deferred | Every close gesture — the three close actions, the titlebar ✕, Alt+F4, the tab-bar ✕, and middle-click — routes through the shared `confirm_close` gate, pinned by `every_close_gesture_asks_before_closing`. Bottom-bar modal renderer supports keyboard navigation and mouse clicks on the visible `[Cancel]` / `[Close]` buttons. |
 | `tab_position = left/right`  | ✅ A   | 7/8 + 1 polish-deferred | Variants + layout + paint + cfg width. Drag-reorder y-axis deferred (horizontal works; y-axis is identical-shape work). Deployed. |
 | `plugins/terminalshot.py`    | ✅ A   | 7/7        | Action + path helper + Renderer slot + wgpu surface readback + focused-pane crop + desktop notification. Deployed. |
 | Named broadcast groups       | ✅ A   | 7/8        | `BroadcastScope { Off, Tab, All, Group(String) }` + mux migration + bulk-apply GroupTab/Window + UngroupTab/Window + ToggleBroadcastGroup/Window + `[group]` titlebar pill + right-click context-menu entries. Cross-window groups via the file-based IPC remain. Deployed. |
