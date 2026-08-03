@@ -421,10 +421,18 @@ impl Extractor {
                         // inside a DCS/APC body is payload, exactly as the
                         // old per-byte arm treated it.
                         let hay = &input[i..];
-                        let stop = if self.mode == Mode::Osc {
+                        let terminator = if self.mode == Mode::Osc {
                             memchr::memchr3(0x1b, 0x9c, 0x07, hay)
                         } else {
                             memchr::memchr2(0x1b, 0x9c, hay)
+                        };
+                        // CAN/SUB cancel the string wherever they appear, so
+                        // they are stop bytes too — scanned separately because
+                        // `memchr` tops out at three needles.
+                        let cancel = memchr::memchr2(0x18, 0x1a, hay);
+                        let stop = match (terminator, cancel) {
+                            (Some(t), Some(c)) => Some(t.min(c)),
+                            (t, c) => t.or(c),
                         };
                         match stop {
                             Some(off) => {
@@ -460,7 +468,9 @@ impl Extractor {
                                     continue;
                                 }
                                 i += 1;
-                                if b == 0x1b {
+                                if b == 0x18 || b == 0x1a {
+                                    self.cancel_seq();
+                                } else if b == 0x1b {
                                     self.st_pending = true;
                                 } else {
                                     self.term_bel = b == 0x07;
@@ -650,6 +660,30 @@ impl Extractor {
         self.st_pending = false;
         self.term_bel = false;
         self.mode = Mode::Pass;
+    }
+
+    /// CAN (0x18) / SUB (0x1a) abandon the control string in progress.
+    ///
+    /// DEC defines both as immediate cancellation of DCS/OSC/APC/PM/SOS, and
+    /// every real terminal implements it. Treating them as payload meant the
+    /// extractor stayed in the string state waiting for a terminator that was
+    /// never coming: a single stray `0x18` inside an OSC swallowed the rest of
+    /// the stream, so the pane simply stopped updating and looked frozen.
+    ///
+    /// The accumulated bytes are dropped rather than emitted — a cancelled
+    /// string was never a command, and printing its half-finished payload to
+    /// the grid is how the "stray text after a truncated title" class of bug
+    /// happens.
+    fn cancel_seq(&mut self) {
+        if self.discarding_seq {
+            self.reset_discard();
+            return;
+        }
+        self.seq.clear();
+        let _seq_reservation = self.seq_reservation.take();
+        self.mode = Mode::Pass;
+        self.st_pending = false;
+        self.term_bel = false;
     }
 
     fn finish_seq(&mut self, out: &mut Vec<Chunk>) {
@@ -1250,6 +1284,86 @@ fn parse_prompt(rest: &[u8]) -> Option<PromptKind> {
 
 #[cfg(test)]
 mod tests {
+    /// CAN/SUB must cancel a control string, or the terminal freezes.
+    ///
+    /// DEC defines `0x18` and `0x1a` as immediate cancellation of any
+    /// DCS/OSC/APC string. Treating them as payload left the extractor waiting
+    /// for a terminator that never arrived, so ONE stray byte swallowed the
+    /// entire rest of the stream — the pane stopped updating and looked hung.
+    /// Untrusted program output can contain that byte.
+    #[test]
+    fn can_and_sub_cancel_a_control_string_instead_of_wedging_it() {
+        for cancel in [0x18_u8, 0x1a] {
+            for intro in [&b"]2;"[..], &b"P"[..], &b"_"[..]] {
+                let mut ex = Extractor::default();
+                let mut input = intro.to_vec();
+                input.extend_from_slice(b"payload");
+                input.push(cancel);
+                input.extend_from_slice(
+                    b"after
+",
+                );
+
+                let chunks = ex.feed(&input);
+                let mut plain = Vec::new();
+                for c in &chunks {
+                    if let Chunk::Pass(b) = c {
+                        plain.extend_from_slice(b);
+                    }
+                }
+                assert_eq!(
+                    String::from_utf8_lossy(&plain),
+                    "after
+",
+                    "cancel {cancel:#04x} after {intro:?}: output following the                      cancellation must reach the terminal, and the abandoned                      payload must not"
+                );
+
+                // And the extractor is back in Pass mode — a later feed is not
+                // still being eaten by the abandoned string.
+                let more = ex.feed(
+                    b"later
+",
+                );
+                let mut plain2 = Vec::new();
+                for c in &more {
+                    if let Chunk::Pass(b) = c {
+                        plain2.extend_from_slice(b);
+                    }
+                }
+                assert_eq!(
+                    String::from_utf8_lossy(&plain2),
+                    "later
+",
+                    "the next chunk must not be swallowed either"
+                );
+            }
+        }
+    }
+
+    /// The cancellation must not change how a properly terminated string
+    /// behaves — BEL and ST still complete their sequence.
+    #[test]
+    fn a_properly_terminated_control_string_is_unaffected_by_cancel_support() {
+        let mut ex = Extractor::default();
+        let chunks = ex.feed(
+            b"]2;titlevisible
+",
+        );
+        let mut plain = Vec::new();
+        for c in &chunks {
+            if let Chunk::Pass(b) = c {
+                plain.extend_from_slice(b);
+            }
+        }
+        assert!(
+            String::from_utf8_lossy(&plain).ends_with(
+                "visible
+"
+            ),
+            "a BEL-terminated OSC still passes its trailing text through"
+        );
+    }
+
     use super::{Chunk, Extractor, PromptKind};
     use crate::kitty::PlacementKey;
     use base64::Engine;

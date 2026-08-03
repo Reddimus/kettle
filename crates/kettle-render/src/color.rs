@@ -225,13 +225,21 @@ pub fn with_min_contrast(fg: Rgb, bg: Rgb, min_ratio: f64) -> Rgb {
     if min_ratio <= 1.0 || contrast_ratio(fg, bg) >= min_ratio {
         return fg;
     }
-    // Push the fg toward whichever extreme is *farther* from the bg's
-    // luminance — that gains contrast fastest.
-    let bg_l = relative_luminance(bg);
-    let target = if bg_l < 0.5 {
-        Rgb::new(255, 255, 255)
+    // Push the fg toward whichever extreme actually has more contrast against
+    // the bg. Ask the ratio directly rather than thresholding luminance: the
+    // white/black crossover for WCAG contrast is at luminance ~0.1791, not
+    // 0.5, because the ratio is `(L+0.05)/(L'+0.05)` and not symmetric about
+    // the midpoint. Splitting at 0.5 chose white for every mid-tone
+    // background — on `#969696` that is 2.96:1 where black gives 7.10:1, so a
+    // `minimum-contrast = 4.5` could not be reached from the chosen end and
+    // the function returned white at 2.96:1, quietly failing the guarantee it
+    // exists to provide.
+    let white = Rgb::new(255, 255, 255);
+    let black = Rgb::new(0, 0, 0);
+    let target = if contrast_ratio(white, bg) >= contrast_ratio(black, bg) {
+        white
     } else {
-        Rgb::new(0, 0, 0)
+        black
     };
     // If even the extreme can't reach min_ratio (clamped 21:1), return it.
     if contrast_ratio(target, bg) < min_ratio {
@@ -286,6 +294,66 @@ pub fn average_color(rgba: &[u8]) -> Rgb {
 
 #[cfg(test)]
 mod tests {
+    /// `minimum-contrast` must actually reach the ratio it promises.
+    ///
+    /// The endpoint used to be chosen by thresholding background luminance at
+    /// 0.5, but the WCAG ratio `(L+0.05)/(L'+0.05)` is not symmetric about the
+    /// midpoint — white and black cross over at luminance ~0.1791. Every
+    /// mid-tone background between those got white, which on `#969696` is
+    /// 2.96:1 where black gives 7.10:1. Asking for 4.5 was then unreachable
+    /// from the chosen end, and the function returned white at 2.96:1 while
+    /// reporting success.
+    #[test]
+    fn minimum_contrast_reaches_the_requested_ratio_on_mid_tone_backgrounds() {
+        for hex in [
+            "#969696", // 2.96 white vs 7.10 black — the reported case
+            "#808080", // 3.95 vs 5.32
+            "#777777", // 4.48 vs 4.69 — just past the crossover
+            "#8a8a8a", "#a0a0a0", "#b4b4b4",
+        ] {
+            let bg = Rgb::parse(hex).expect("hex");
+            for want in [3.0_f64, 4.5, 7.0] {
+                let got = with_min_contrast(bg, bg, want);
+                let reached = contrast_ratio(got, bg);
+                // Either the ratio is met, or even the best endpoint cannot
+                // meet it — in which case we must have picked the BEST one.
+                let best = contrast_ratio(Rgb::new(255, 255, 255), bg)
+                    .max(contrast_ratio(Rgb::new(0, 0, 0), bg));
+                assert!(
+                    reached >= want - 1e-6 || (best < want && reached >= best - 1e-6),
+                    "{hex} at min {want}: reached {reached:.2}, best possible {best:.2}"
+                );
+            }
+        }
+    }
+
+    /// Below the crossover the answer is white, above it black — and the
+    /// function must track the real crossover, not a guessed one.
+    #[test]
+    fn minimum_contrast_picks_whichever_endpoint_actually_has_more_contrast() {
+        for hex in [
+            "#000000", "#101010", "#2e3436", "#5a5a5a", // white wins
+            "#777777", "#969696", "#c0c0c0", "#ffffff", // black wins
+        ] {
+            let bg = Rgb::parse(hex).expect("hex");
+            let white = contrast_ratio(Rgb::new(255, 255, 255), bg);
+            let black = contrast_ratio(Rgb::new(0, 0, 0), bg);
+            // Ask for more than either endpoint can give, so the function is
+            // forced to return the endpoint itself.
+            let got = with_min_contrast(bg, bg, 25.0);
+            let want = if white >= black {
+                Rgb::new(255, 255, 255)
+            } else {
+                Rgb::new(0, 0, 0)
+            };
+            assert_eq!(
+                (got.r, got.g, got.b),
+                (want.r, want.g, want.b),
+                "{hex}: white gives {white:.2}, black gives {black:.2} — must pick the larger"
+            );
+        }
+    }
+
     use super::*;
 
     #[test]

@@ -398,7 +398,15 @@ impl ImagePipeline {
                 compilation_options: Default::default(),
                 targets: &[Some(wgpu::ColorTargetState {
                     format,
-                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                    // This pipeline's fragment shader returns PREMULTIPLIED
+                    // color (`rgb * a`), so the blend must not apply alpha a
+                    // second time. `ALPHA_BLENDING` uses `SrcAlpha` for the
+                    // source factor, which computed `rgb * a * a` — a
+                    // 50%-opaque surface contributed 25%, darkening every
+                    // translucent image, panel, highlight, and separator.
+                    // (`glyphpipe` deliberately returns STRAIGHT alpha and
+                    // correctly keeps `ALPHA_BLENDING`.)
+                    blend: Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING),
                     write_mask: wgpu::ColorWrites::ALL,
                 })],
             }),

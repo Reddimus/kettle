@@ -144,6 +144,24 @@ const MAX_CONTROL_SEQUENCE_BYTES: usize = 64 * 1024;
 #[derive(Debug, Default)]
 pub struct AnsiStripper {
     state: StripState,
+    /// UTF-8 continuation bytes still owed by the character being decoded.
+    ///
+    /// Terminal output is UTF-8, and the C1 control bytes this stripper
+    /// recognizes — `0x90` DCS, `0x98` SOS, `0x9b` CSI, `0x9d` OSC, `0x9e` PM,
+    /// `0x9f` APC — are all in the `0x80..=0xbf` continuation range. Treating
+    /// them as controls wherever they appeared ate the middle of ordinary
+    /// characters and left invalid UTF-8 behind:
+    ///
+    /// * `Û` is `c3 9b` — the `9b` was read as CSI, so `Ûh` became a lone `c3`.
+    /// * `‘` is `e2 80 98` — the `98` was read as SOS.
+    /// * `▐` is `e2 96 90` — the `90` was read as DCS.
+    ///
+    /// Box-drawing and smart quotes are exactly what a TUI emits, and MCP's
+    /// `kettle_run` strips by default, so this corrupted the output an agent
+    /// reads. Counting the sequence keeps a continuation byte a continuation
+    /// byte; a C1 byte in ground position, where UTF-8 could not put one, is
+    /// still honored for genuinely 8-bit streams.
+    utf8_continuation: u8,
 }
 
 #[derive(Debug, Default)]
@@ -168,6 +186,25 @@ impl AnsiStripper {
     /// Feed a chunk; append the stripped plaintext to `out`.
     pub fn push(&mut self, input: &[u8], out: &mut Vec<u8>) {
         for &b in input {
+            // Mid-character: this byte belongs to the character being decoded,
+            // whatever it looks like. Only Ground can start a sequence, so a
+            // control sequence already in progress is untouched by this.
+            if self.utf8_continuation > 0 && matches!(self.state, StripState::Ground) {
+                self.utf8_continuation -= 1;
+                out.push(b);
+                continue;
+            }
+            if matches!(self.state, StripState::Ground) {
+                // A UTF-8 lead byte owes 1..=3 continuations. Anything else
+                // (ASCII, a stray continuation, an invalid lead) owes none and
+                // falls through to the control-byte match unchanged.
+                self.utf8_continuation = match b {
+                    0xc2..=0xdf => 1,
+                    0xe0..=0xef => 2,
+                    0xf0..=0xf4 => 3,
+                    _ => 0,
+                };
+            }
             let state = std::mem::take(&mut self.state);
             self.state = match state {
                 StripState::Ground => match b {
@@ -1298,8 +1335,13 @@ fn poll_recording_finish(
 /// folds signal death into the code there, so we mask to 0..=255 — the value we
 /// log then matches what the shell would see. On Windows the full 32-bit code
 /// is meaningful (children routinely exit with codes outside 0..=255, e.g.
-/// `STATUS_ACCESS_VIOLATION` 0xC0000005), so we pass it through, saturating into
-/// `i32` rather than truncating to one byte.
+/// `STATUS_ACCESS_VIOLATION` 0xC0000005), so we reinterpret the bits rather
+/// than truncating or saturating.
+///
+/// Saturating was wrong for exactly the case the line above names: it turned
+/// 0xC0000005 into 0x7FFFFFFF and destroyed the diagnostic. `as i32` preserves
+/// every bit, and Windows takes the low 32 bits back off the process exit, so
+/// the caller sees the status the child really died with.
 fn clamp_code(code: u32) -> i32 {
     #[cfg(unix)]
     {
@@ -1307,7 +1349,7 @@ fn clamp_code(code: u32) -> i32 {
     }
     #[cfg(windows)]
     {
-        code.min(i32::MAX as u32) as i32
+        code as i32
     }
     #[cfg(not(any(unix, windows)))]
     {
@@ -2265,6 +2307,83 @@ fn windows_console_size() -> Option<(u16, u16)> {
 mod tests {
     use super::*;
 
+    /// `--strip-ansi` corrupted ordinary text, and MCP `kettle_run` strips by
+    /// default — so this was the output an agent CLI read.
+    ///
+    /// The C1 controls the stripper recognizes (`0x90` DCS, `0x98` SOS, `0x9b`
+    /// CSI, `0x9d` OSC, `0x9e` PM, `0x9f` APC) all sit in UTF-8's
+    /// `0x80..=0xbf` continuation range. Honoring them anywhere ate the middle
+    /// of characters and emitted invalid UTF-8: `Ûh` became a lone `c3`.
+    ///
+    /// The three cases below are not exotic. Box-drawing and smart quotes are
+    /// what a TUI — tmux, AstroNvim, any agent's status output — emits
+    /// constantly.
+    #[test]
+    fn stripping_ansi_does_not_eat_the_middle_of_a_utf8_character() {
+        for (label, text) in [
+            ("U+00db, whose second byte is 0x9b CSI", "Ûh"),
+            ("U+2018, whose third byte is 0x98 SOS", "\u{2018}x"),
+            ("U+2590, whose third byte is 0x90 DCS", "\u{2590}y"),
+            ("U+009d as OSC vs U+00dd", "Ýz"),
+            ("astral plane, four bytes", "\u{1f980}!"),
+            ("mixed run", "┌─┐ ‘quoted’ Ünicode └─┘"),
+        ] {
+            let mut stripper = AnsiStripper::default();
+            let mut out = Vec::new();
+            stripper.push(text.as_bytes(), &mut out);
+            assert_eq!(
+                String::from_utf8(out.clone()).as_deref(),
+                Ok(text),
+                "{label}: plain text must survive stripping byte for byte, got {out:02x?}"
+            );
+        }
+    }
+
+    /// A character split across two chunks must still survive — the PTY hands
+    /// output over in arbitrary slices, so a lead byte and its continuations
+    /// routinely arrive separately.
+    #[test]
+    fn a_utf8_character_split_across_chunks_survives_stripping() {
+        let text = "Û▐‘";
+        let bytes = text.as_bytes();
+        for split in 1..bytes.len() {
+            let mut stripper = AnsiStripper::default();
+            let mut out = Vec::new();
+            stripper.push(&bytes[..split], &mut out);
+            stripper.push(&bytes[split..], &mut out);
+            assert_eq!(
+                String::from_utf8(out.clone()).as_deref(),
+                Ok(text),
+                "split at {split} must not corrupt the character straddling it"
+            );
+        }
+    }
+
+    /// The escape sequences it exists to remove must still go — including the
+    /// 8-bit C1 forms in ground position, where UTF-8 cannot place them.
+    #[test]
+    fn stripping_ansi_still_removes_the_sequences_it_is_for() {
+        for (label, input, want) in [
+            ("CSI SGR", b"\x1b[31mred\x1b[0m".to_vec(), "red"),
+            ("OSC title", b"\x1b]0;title\x07after".to_vec(), "after"),
+            (
+                "8-bit CSI in ground",
+                vec![0x9b, b'3', b'1', b'm', b'x'],
+                "x",
+            ),
+            ("8-bit OSC in ground", vec![0x9d, b't', 0x9c, b'y'], "y"),
+        ] {
+            let mut stripper = AnsiStripper::default();
+            let mut out = Vec::new();
+            stripper.push(&input, &mut out);
+            assert_eq!(
+                String::from_utf8_lossy(&out),
+                want,
+                "{label}: the sequence must still be stripped"
+            );
+        }
+    }
+
     #[test]
     fn output_slice_bounds_a_continuously_refilled_channel() {
         let (sender, receiver) = crossbeam_channel::unbounded();
@@ -2522,8 +2641,26 @@ mod tests {
         #[cfg(windows)]
         {
             assert_eq!(clamp_code(256), 256);
-            // 0xC0000005 (STATUS_ACCESS_VIOLATION) saturates into i32, not 0x05.
-            assert_eq!(clamp_code(0xC000_0005), i32::MAX);
+            // 0xC0000005 (STATUS_ACCESS_VIOLATION) must survive as itself. This
+            // previously asserted `i32::MAX`, pinning the saturation that threw
+            // the diagnostic away — the crash code an agent or CI script reads
+            // to tell an access violation from any other failure.
+            assert_eq!(clamp_code(0xC000_0005), 0xC000_0005u32 as i32);
+            assert_eq!(clamp_code(0xC000_0005) as u32, 0xC000_0005);
+            // Every crash-class NTSTATUS round-trips, not just that one.
+            for status in [
+                0xC000_0005u32,
+                0xC000_001D,
+                0xC000_0094,
+                0xC000_0409,
+                0x8000_0003,
+            ] {
+                assert_eq!(
+                    clamp_code(status) as u32,
+                    status,
+                    "NTSTATUS {status:#010x} must reach the caller intact"
+                );
+            }
             assert_eq!(clamp_code(3), 3);
         }
     }

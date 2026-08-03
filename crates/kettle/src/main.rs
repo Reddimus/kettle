@@ -1215,21 +1215,47 @@ fn main() -> anyhow::Result<()> {
         let path = resolve_config_path(&cli).ok_or_else(|| {
             anyhow::anyhow!("could not resolve a config path (no HOME / XDG / APPDATA?)")
         })?;
-        if path.exists() {
-            println!(
-                "config already exists at {} — leaving it untouched.",
-                path.display()
-            );
-            println!("Delete it first if you want a fresh default, or edit it directly.");
-            return Ok(());
-        }
+        // `exists()` follows symlinks and answers about the TARGET, and the
+        // answer is stale the moment it is returned. Checking then writing let
+        // a dangling link create whatever it pointed at, and let anyone who
+        // could swap the path between the two steps redirect the write onto a
+        // file of their choosing — while the message below still promised we
+        // refuse to clobber. Ask the OS to create it exclusively instead, so
+        // "does not already exist" and "this is the file I wrote" are one
+        // atomic decision. `create_new` also refuses to follow a symlink.
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir).map_err(|e| {
                 anyhow::anyhow!("could not create config directory {}: {e}", dir.display())
             })?;
         }
-        std::fs::write(&path, include_str!("../../../docs/kettle.example.config"))
-            .map_err(|e| anyhow::anyhow!("could not write config {}: {e}", path.display()))?;
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+        {
+            Ok(mut file) => {
+                use std::io::Write as _;
+                file.write_all(include_str!("../../../docs/kettle.example.config").as_bytes())
+                    .and_then(|()| file.flush())
+                    .map_err(|e| {
+                        anyhow::anyhow!("could not write config {}: {e}", path.display())
+                    })?;
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                println!(
+                    "config already exists at {} — leaving it untouched.",
+                    path.display()
+                );
+                println!("Delete it first if you want a fresh default, or edit it directly.");
+                return Ok(());
+            }
+            Err(e) => {
+                return Err(anyhow::anyhow!(
+                    "could not write config {}: {e}",
+                    path.display()
+                ));
+            }
+        }
         println!("Wrote a default config to {}.", path.display());
         println!("Everything is commented out — uncomment what you want, then relaunch kettle.");
         return Ok(());
