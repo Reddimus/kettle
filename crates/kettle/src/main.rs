@@ -1153,8 +1153,7 @@ fn main() -> anyhow::Result<()> {
     // defaults, so refusing to start over an unrelated `--profile` typo would
     // block work the profile has no bearing on.
     if cli.config.is_none()
-        && !cli.print_default_config
-        && !cli.write_default_config
+        && !ignores_profile(&cli)
         && let Some(name) = cli.profile.as_deref()
         && let Some(reason) = profile_problem(name)
     {
@@ -1986,6 +1985,33 @@ fn config_path_problem(p: &std::path::Path) -> Option<&'static str> {
 /// Kept separate from [`config_path_problem`] rather than merged: the failure
 /// modes differ (a name that sanitises to nothing has no path to stat) and the
 /// remedy shown to the user is a list of names, not a filesystem diagnosis.
+/// Does this invocation ignore `--profile` entirely?
+///
+/// These modes print compiled-in information — theme names, action names, the
+/// embedded default config, the shell-integration snippet, completions, and
+/// the profile list itself — and never load a profile's settings. Refusing to
+/// run them over an unrelated `--profile` typo blocks work the profile has no
+/// bearing on, and `--list-profiles` is the worst case: it is the command that
+/// shows the valid names, so a typo left the user with no way to discover the
+/// right one.
+///
+/// Deliberately NOT listed: `--list-keybinds` and `--list-layouts` resolve the
+/// profile's config, so for those a typo really does mean the output is wrong
+/// (the built-in keymap instead of the user's) and refusing is correct.
+///
+/// Written as one predicate rather than a chain of `!cli.foo` at the guard so
+/// that adding an informational mode is a question somebody has to answer here
+/// instead of a condition nobody remembers to extend.
+fn ignores_profile(cli: &Cli) -> bool {
+    cli.print_default_config
+        || cli.write_default_config
+        || cli.list_themes
+        || cli.list_profiles
+        || cli.list_actions
+        || cli.shell_integration.is_some()
+        || cli.print_completions.is_some()
+}
+
 fn profile_problem(name: &str) -> Option<String> {
     // Resolve the config directory FIRST. Both `list_profiles` (empty Vec) and
     // `path_for_profile` (None) collapse "no config dir" into the same answer
@@ -2376,9 +2402,46 @@ mod crash_log_tests {
 mod tests {
     use super::{
         Cli, append_remote_command, append_remote_command_with_timeout, config_path_problem,
-        encode_remote_send_command, extra_check_config_lines, format_ssh_hosts,
+        encode_remote_send_command, extra_check_config_lines, format_ssh_hosts, ignores_profile,
     };
     use clap::Parser;
+
+    /// A `--profile` typo must not block a command that never reads a profile.
+    ///
+    /// `--list-profiles` is the sharp case: it is how you find the valid names,
+    /// so refusing to run it over a bad name left the user with nowhere to go
+    /// from the CLI. The modes that DO resolve the profile must keep refusing —
+    /// there, a typo means the output is quietly wrong (built-in keymap instead
+    /// of the user's) rather than merely blocked.
+    #[test]
+    fn a_profile_typo_only_blocks_commands_that_read_a_profile() {
+        for args in [
+            vec!["kettle", "--profile", "typo", "--list-profiles"],
+            vec!["kettle", "--profile", "typo", "--list-themes"],
+            vec!["kettle", "--profile", "typo", "--list-actions"],
+            vec!["kettle", "--profile", "typo", "--print-default-config"],
+            vec!["kettle", "--profile", "typo", "--write-default-config"],
+            vec!["kettle", "--profile", "typo", "--print-completions", "bash"],
+            vec!["kettle", "--profile", "typo", "--shell-integration", "bash"],
+        ] {
+            let cli = Cli::parse_from(&args);
+            assert!(
+                ignores_profile(&cli),
+                "{args:?} prints compiled-in information and must run despite a                  bad --profile"
+            );
+        }
+        for args in [
+            vec!["kettle", "--profile", "typo", "--list-keybinds"],
+            vec!["kettle", "--profile", "typo", "--list-layouts"],
+            vec!["kettle", "--profile", "typo"],
+        ] {
+            let cli = Cli::parse_from(&args);
+            assert!(
+                !ignores_profile(&cli),
+                "{args:?} resolves the profile's config, so a typo must be                  reported rather than silently showing the wrong thing"
+            );
+        }
+    }
 
     fn remote_test_tempdir() -> tempfile::TempDir {
         #[cfg(windows)]

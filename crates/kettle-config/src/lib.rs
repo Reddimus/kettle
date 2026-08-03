@@ -3566,6 +3566,16 @@ impl Config {
                     if let Some((i, h)) = v.split_once('=') {
                         i.trim().parse::<usize>().is_ok_and(|n| n < 16)
                             && Rgb::parse(h.trim()).is_some()
+                    } else if v.contains(':') {
+                        // Terminator writes its palette as one colon-separated
+                        // list of 8 or 16 colours, and `parse_collect` accepts
+                        // exactly that. The diagnostic did not, so the palette
+                        // out of a real Terminator config applied correctly at
+                        // runtime while `--check-config` called it malformed —
+                        // sending the user to fix a line that was already
+                        // right. Validate with the same parser that applies it,
+                        // so the two cannot disagree.
+                        parse_colon_palette(v).is_some()
                     } else {
                         let name = v.trim();
                         Theme::find_name(name).is_some()
@@ -7787,6 +7797,61 @@ cell-height = 1.2\n";
         }
     }
 
+    /// Everything a real Terminator config contains must ALSO pass
+    /// `--check-config`, not merely apply.
+    ///
+    /// `a_real_terminator_config_imports` proves the values reach the Config.
+    /// It calls `parse_text`, never `detect_malformed_values` — so the colon
+    /// palette straight out of Terminator applied correctly at runtime while
+    /// the checker called it malformed, sending the user to fix a line that
+    /// was already right. Reporting a working line as broken is its own bug.
+    #[test]
+    fn a_real_terminator_config_also_passes_the_checker() {
+        let text = "scroll_on_keystroke = False
+scroll_on_output = True
+background_color = \"#1a1b26\"
+foreground_color = '#c0caf5'
+font = DejaVu Sans Mono 13
+palette = \"#2e3436:#cc0000:#4e9a06:#c4a000:#3465a4:#75507b:#06989a:#d3d7cf\"
+new_tab = <Control><Shift>y
+split_horiz = <Control><Shift>j
+";
+        let bad = Config::detect_malformed_values(text);
+        assert!(
+            bad.is_empty(),
+            "a config that imports correctly must not be reported malformed: {bad:?}"
+        );
+
+        // A 16-colour list is equally valid, and a wrong-length or
+        // non-colour list must still be caught rather than blanket-accepted.
+        let sixteen: Vec<String> = (0..16).map(|i| format!("#0000{i:02x}")).collect();
+        assert!(
+            Config::detect_malformed_values(&format!(
+                "palette = {}
+",
+                sixteen.join(":")
+            ))
+            .is_empty(),
+            "a 16-colour colon palette is valid"
+        );
+        assert!(
+            !Config::detect_malformed_values(
+                "palette = #2e3436:#cc0000:#4e9a06
+"
+            )
+            .is_empty(),
+            "a 3-colour list is not a palette and must still be flagged"
+        );
+        assert!(
+            !Config::detect_malformed_values(
+                "palette = #2e3436:nope:#4e9a06:#c4a000:#3465a4:#75507b:#06989a:#d3d7cf
+"
+            )
+            .is_empty(),
+            "a non-colour entry must still be flagged"
+        );
+    }
+
     /// Reverse-coverage guard — every key name the
     /// `detect_malformed_values` validator recognizes must ALSO be recognized
     /// (applied, not warned-as-unknown) by `parse_collect`. This is the test
@@ -10706,6 +10771,40 @@ split_horiz = <Control><Shift>j\n",
                 "Terminator's `{chord}` line must bind"
             );
         }
+    }
+
+    /// A malformed accelerator must bind NOTHING.
+    ///
+    /// The normalizer used to drop an empty modifier group, so `<>t` became
+    /// the bare key `t` — a typo in a config quietly bound an ordinary letter,
+    /// and from then on typing that letter fired the action instead of
+    /// reaching the shell. Silently narrowing a chord to a bare key is the
+    /// worst possible reading of a malformed line.
+    #[test]
+    fn a_malformed_accelerator_binds_nothing() {
+        for junk in [
+            "<>t",          // empty modifier group — used to become plain `t`
+            "<Control><>t", // ...including after a real modifier
+            "<Control",     // unclosed
+            "<Control>",    // modifiers with no key
+            "<Control><Shift>",
+        ] {
+            assert!(
+                keybinds::parse_trigger(junk).is_none(),
+                "{junk:?} is malformed and must not bind anything"
+            );
+        }
+        // The well-formed neighbours of those still work.
+        assert_eq!(
+            keybinds::parse_trigger("<Control>t"),
+            keybinds::parse_trigger("ctrl+t")
+        );
+        // GTK's own `Ctl` abbreviation is accepted, since Terminator configs
+        // are written by GTK.
+        assert_eq!(
+            keybinds::parse_trigger("<Ctl><Shift>y"),
+            keybinds::parse_trigger("ctrl+shift+y")
+        );
     }
 
     /// The GTK accelerator rewrite must not disturb kettle's own spelling.

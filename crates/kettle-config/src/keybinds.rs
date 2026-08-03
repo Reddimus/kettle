@@ -1061,9 +1061,9 @@ fn parse_key(s: &str) -> Option<Key> {
 /// `ctrl+shift+t` spelling takes exactly the path it always did and costs
 /// nothing extra — this runs for every trigger in every config, and all but
 /// the imported ones are already in kettle's spelling.
-fn normalize_gtk_accelerator(s: &str) -> std::borrow::Cow<'_, str> {
+fn normalize_gtk_accelerator(s: &str) -> Option<std::borrow::Cow<'_, str>> {
     if !s.contains('<') {
-        return std::borrow::Cow::Borrowed(s);
+        return Some(std::borrow::Cow::Borrowed(s));
     }
     let mut parts: Vec<String> = Vec::new();
     let mut rest = s.trim();
@@ -1073,26 +1073,34 @@ fn normalize_gtk_accelerator(s: &str) -> std::borrow::Cow<'_, str> {
         if open > 0 {
             break;
         }
-        let Some(close) = rest.find('>') else { break };
+        let Some(close) = rest.find('>') else {
+            // `<Control` with no `>` is not an accelerator. Refuse rather than
+            // guess at what was meant.
+            return None;
+        };
         let modifier = &rest[open + 1..close];
-        if !modifier.is_empty() {
-            parts.push(modifier.to_string());
+        if modifier.is_empty() {
+            // `<>t` is malformed. Dropping the empty group silently turned it
+            // into the bare key `t` — so a typo in a config quietly bound an
+            // ordinary letter, and typing that letter fired the action instead
+            // of reaching the shell. A malformed accelerator must bind
+            // NOTHING; the unknown-value diagnostic then names the line.
+            return None;
         }
+        parts.push(modifier.to_string());
         rest = &rest[close + 1..];
     }
     let key = rest.trim();
-    if !key.is_empty() {
-        parts.push(key.to_string());
+    if key.is_empty() {
+        // Modifiers with no key (`<Control><Shift>`) is not a chord.
+        return None;
     }
-    if parts.is_empty() {
-        std::borrow::Cow::Borrowed(s)
-    } else {
-        std::borrow::Cow::Owned(parts.join("+"))
-    }
+    parts.push(key.to_string());
+    Some(std::borrow::Cow::Owned(parts.join("+")))
 }
 
 pub fn parse_trigger(s: &str) -> Option<Trigger> {
-    let s = normalize_gtk_accelerator(s);
+    let s = normalize_gtk_accelerator(s)?;
     let mut mods = Mods::empty();
     let mut key: Option<Key> = None;
     let parts: Vec<&str> = s.split('+').collect();
@@ -1111,7 +1119,9 @@ pub fn parse_trigger(s: &str) -> Option<Trigger> {
                 mods |= Mods::SHIFT;
                 true
             }
-            "ctrl" | "control" => {
+            // GTK's accelerator parser accepts `Ctl` as well as `Ctrl` and
+            // `Control`, and Terminator configs are written by GTK.
+            "ctrl" | "control" | "ctl" => {
                 mods |= Mods::CTRL;
                 true
             }

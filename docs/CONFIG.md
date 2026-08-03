@@ -24,6 +24,24 @@ ignored** so a Start-menu launch and a shell launch read the same config — set
 `kettle --check-config` to validate it (resolved settings + any unrecognized
 keys). The file is **watched and reloaded live**.
 
+### Syntax
+
+One `key = value` per line. The first `=` splits the pair, surrounding
+whitespace is trimmed, and a `#` at the start of a line comments the whole
+line out (a `#` inside a value is part of the value, so hex colours work).
+
+Keys may be written with `-` or `_`; the two are the same key, so
+`scroll-on-output` and `scroll_on_output` both work.
+
+**One matched pair of surrounding quotes is stripped from a value.** Terminator's
+own manual writes quoted values (`background_color = "#1a1b26"`,
+`scrollback_lines = '500'`), and without this the quote became part of the text
+and every such line was silently discarded by the value parsers. Only the
+outermost pair goes, and only when both ends are the same character — so
+`"a'` is left alone and inner quotes survive for values that legitimately
+contain them, such as a shell command. If you need a value that really does
+begin and end with a quote, add a second pair.
+
 ## Keys
 
 | Key | Type | Default | Notes |
