@@ -508,6 +508,16 @@ pub struct Pane {
     /// be selectively enabled. Per-tab broadcast remains the
     /// quick-toggle path.
     pub group_name: Option<String>,
+    /// Terminator parity (`icon_bell`): this pane rang its bell and the user
+    /// has not looked at it since.
+    ///
+    /// The tab bar has had its own bell latch for a while, but the per-PANE
+    /// one was missing entirely — the renderer's titlebar indicator read a
+    /// field the frame builder hard-coded to `false`, so `icon_bell` parsed,
+    /// validated, defaulted to on, was documented, and could never draw
+    /// anything. Latched like the tab's: set when the bell rings in a pane the
+    /// user is not looking at, cleared when they focus it.
+    pub bell: bool,
     pub closed: bool,
     /// `exit-action = hold` was silently broken — `reap()`
     /// removed any pane whose child had exited regardless of intent. `held`
@@ -1239,6 +1249,15 @@ impl Mux {
     /// tab. Skipped for the active tab (the visual-bell flash already
     /// surfaces it there).
     pub fn touch_tab_bell(&mut self, pane_id: u64) {
+        // Terminator parity (`icon_bell`): the pane's own titlebar indicator
+        // latches on the same rule as the tab's — the pane the user is
+        // already looking at needs no "look here", and the visual-bell flash
+        // covers it.
+        if Some(pane_id) != self.active_focus()
+            && let Some(pane) = self.panes.get_mut(&pane_id)
+        {
+            pane.bell = true;
+        }
         let active = self.active;
         for (i, tab) in self.tabs.iter_mut().enumerate() {
             if i == active {
@@ -1248,6 +1267,19 @@ impl Mux {
                 tab.bell = true;
                 return;
             }
+        }
+    }
+
+    /// Clear the pane bell indicator now that the user is looking at it.
+    ///
+    /// Mirrors `touch_active_tab_seen` for the per-pane latch: the indicator
+    /// answers "something happened while you were away", so focusing the pane
+    /// is the event that answers it.
+    pub fn clear_focused_pane_bell(&mut self) {
+        if let Some(id) = self.active_focus()
+            && let Some(pane) = self.panes.get_mut(&id)
+        {
+            pane.bell = false;
         }
     }
 
@@ -1346,6 +1378,7 @@ impl Mux {
                 remote_context: None,
                 agent_attached: false,
                 read_only: false,
+                bell: false,
             },
         );
         Ok(id)

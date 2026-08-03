@@ -9807,7 +9807,10 @@ impl App {
                         title_parts.path,
                         snaps[si].columns as u16,
                         snaps[si].screen_lines as u16,
-                        false,
+                        // Terminator parity (`icon_bell`): this was hard-coded
+                        // `false`, so the titlebar bell indicator could never
+                        // appear no matter how the setting was configured.
+                        p.bell,
                         p.group_name.clone(),
                     ));
                 }
@@ -10029,6 +10032,9 @@ impl App {
     /// cursor visible on the new pane right away.
     fn note_focus_change(&mut self, ws: &mut WindowState, pre: (usize, Option<u64>)) {
         if self.focus_key(ws) != pre {
+            // The user is now looking at this pane, which answers whatever its
+            // bell was trying to say.
+            ws.mux.clear_focused_pane_bell();
             // Vi mode belongs to the pane that owns alacritty_terminal's
             // engine cursor. A focus change must not leave that old pane in
             // TermMode::VI while the UI routes keys to a different pane.
@@ -25275,6 +25281,38 @@ mod tests {
     /// and the loop wakes at the GIF's frame boundary (`bg_anim_interval`), not a
     /// fixed 30 fps. Requesting it every `about_to_wait` (level-triggered) made
     /// winit redraw continuously — the ~55% animated-idle CPU regression.
+    /// `icon_bell` shipped as a setting that could not do anything.
+    ///
+    /// The renderer draws the per-pane titlebar bell on `cfg.icon_bell &&
+    /// pv.bell`, and the frame builder passed a literal `false` for every
+    /// pane — so the key parsed, validated, defaulted to on, was documented in
+    /// CONFIG.md, and drew nothing under any configuration. The pane had no
+    /// bell state at all; only the tab did.
+    ///
+    /// Building a frame needs a live App (window + renderer + real PTYs), so
+    /// the wiring is pinned here: the pane's own state reaches the renderer,
+    /// and focusing the pane answers it.
+    #[test]
+    fn the_pane_bell_indicator_is_wired_to_real_pane_state() {
+        let src = include_str!("app.rs").replace("\r\n", "\n");
+        let at = src.find("metas.push((").expect("frame builder");
+        let push: String = src[at..].chars().take(900).collect();
+        assert!(
+            push.contains("p.bell,"),
+            "the frame must carry each pane's OWN bell state; a literal here is \
+             what made `icon_bell` undrawable"
+        );
+        let focus = src
+            .split("fn note_focus_change(")
+            .nth(1)
+            .expect("note_focus_change");
+        assert!(
+            focus.contains("ws.mux.clear_focused_pane_bell();"),
+            "focusing a pane must clear its bell, or the indicator latches on \
+             forever once it fires"
+        );
+    }
+
     #[test]
     fn animated_bg_redraw_is_edge_triggered() {
         let src = include_str!("app.rs").replace("\r\n", "\n");

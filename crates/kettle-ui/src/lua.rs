@@ -832,6 +832,12 @@ impl LuaEngine {
     /// otherwise (kettle continues to its default open-in-browser
     /// path).
     ///
+    /// A matching handler claims the URL unless it returns `false` or raises,
+    /// either of which falls through to the next handler and ultimately to
+    /// kettle's own open. Declining and failing both have to leave the link
+    /// working: a handler is there to enhance a link, so it must never be the
+    /// reason one stops opening.
+    ///
     /// Uses Lua's built-in `string.match` for pattern compatibility
     /// with Terminator's URLHandler regex semantics (which are
     /// Python-flavored, but Lua patterns are similar enough for
@@ -855,11 +861,31 @@ impl LuaEngine {
                 let m: mlua::Value = s.call((url, pattern.as_str()))?;
                 if !matches!(m, mlua::Value::Nil) {
                     let cb: mlua::Function = entry.get("callback")?;
-                    let call_result: mlua::Result<()> = cb.call(url.to_string());
-                    if let Err(e) = call_result {
-                        log::warn!("lua url_handler callback {i}: {e}");
+                    // The callback's OUTCOME decides whether the URL was
+                    // claimed, and the safe answer to both failure modes is
+                    // "not claimed" — falling back to kettle's own open. A
+                    // handler exists to enhance a link, so a handler that
+                    // threw, or that declined, must not be the reason the
+                    // link does nothing at all. This used to discard the
+                    // result (`mlua::Result<()>`), log the error, and claim
+                    // the URL regardless: one broken plugin made every URL it
+                    // matched unopenable, which is the same "one broken
+                    // plugin can't take down the terminal" rule the event
+                    // dispatch below already follows.
+                    match cb.call::<mlua::Value>(url.to_string()) {
+                        // An explicit `false` declines; anything else
+                        // (including no return at all, which is what the
+                        // documented handler shape does) claims it.
+                        Ok(mlua::Value::Boolean(false)) => continue,
+                        Ok(_) => return Ok(true),
+                        Err(e) => {
+                            log::warn!(
+                                "lua url_handler callback {i} failed, falling back to \
+                                 kettle's own open: {e}"
+                            );
+                            continue;
+                        }
                     }
-                    return Ok(true);
                 }
             }
             Ok(false)
@@ -1648,6 +1674,65 @@ mod tests {
         // Non-matching URL → kettle's default path proceeds.
         assert!(!eng.try_url_handler("https://example.com/"));
         assert_eq!(eng.eval_str("return github_hits").unwrap(), "1");
+    }
+
+    /// A handler must never be the reason a link stops opening.
+    ///
+    /// A matching handler used to claim the URL no matter what happened
+    /// inside it — the callback's result was discarded as `mlua::Result<()>`
+    /// and an error was logged and ignored. So a plugin with a typo in it
+    /// made every URL matching its pattern silently unopenable: the click did
+    /// nothing, and the only trace was a log line. Both an error and an
+    /// explicit decline now fall through to the next handler, and finally to
+    /// kettle's own open.
+    #[test]
+    fn a_broken_or_declining_url_handler_leaves_the_link_working() {
+        let eng = LuaEngine::new("Default").expect("init");
+        eng.eval_str(
+            "kettle.add_url_handler('boom', 'https://boom%.example/.*',
+                 function(_url) error('this plugin has a bug') end)
+             kettle.add_url_handler('decline', 'https://decline%.example/.*',
+                 function(_url) return false end)
+             claimed_hits = 0
+             kettle.add_url_handler('claim', 'https://claim%.example/.*',
+                 function(_url) claimed_hits = claimed_hits + 1 end)",
+        )
+        .expect("eval");
+
+        assert!(
+            !eng.try_url_handler("https://boom.example/x"),
+            "a handler that raised must not swallow the URL"
+        );
+        assert!(
+            !eng.try_url_handler("https://decline.example/x"),
+            "a handler that returned false declined it"
+        );
+        // The ordinary handler — which returns nothing, the shape the docs
+        // show — still claims, so this is not a behavior change for working
+        // plugins.
+        assert!(eng.try_url_handler("https://claim.example/x"));
+        assert_eq!(eng.eval_str("return claimed_hits").unwrap(), "1");
+    }
+
+    /// A failing handler must not stop a LATER one from claiming the URL —
+    /// `continue`, not `return`. Two plugins can register overlapping
+    /// patterns, and the first one being broken must not disable the second.
+    #[test]
+    fn a_failing_handler_does_not_block_a_later_match() {
+        let eng = LuaEngine::new("Default").expect("init");
+        eng.eval_str(
+            "rescued = 0
+             kettle.add_url_handler('first_broken', 'https://both%.example/.*',
+                 function(_url) error('bug') end)
+             kettle.add_url_handler('second_good', 'https://both%.example/.*',
+                 function(_url) rescued = rescued + 1 end)",
+        )
+        .expect("eval");
+        assert!(
+            eng.try_url_handler("https://both.example/x"),
+            "the second handler must still get its chance"
+        );
+        assert_eq!(eng.eval_str("return rescued").unwrap(), "1");
     }
 
     #[test]

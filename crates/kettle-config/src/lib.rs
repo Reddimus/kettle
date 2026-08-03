@@ -4508,22 +4508,30 @@ impl Config {
                 "background-image" | "background_image" => {
                     cfg.background_image = e.value.trim().to_string();
                 }
+                // These three are enum-valued strings, and the renderer matches
+                // them case-SENSITIVELY (`match cfg.background_image_mode
+                // .as_str()`) while `--check-config` validates them
+                // case-INSENSITIVELY. So `background_image_mode = Tile` passed
+                // the check and then fell through the renderer's match to the
+                // default arm: the setting reported as valid and did nothing.
+                // Fold on the way in, where the validator has already decided
+                // that case does not carry meaning here.
                 "background-image-mode" | "background_image_mode" => {
                     let v = e.value.trim();
                     if !v.is_empty() {
-                        cfg.background_image_mode = v.to_string();
+                        cfg.background_image_mode = v.to_ascii_lowercase();
                     }
                 }
                 "background-image-align-horiz" | "background_image_align_horiz" => {
                     let v = e.value.trim();
                     if !v.is_empty() {
-                        cfg.background_image_align_horiz = v.to_string();
+                        cfg.background_image_align_horiz = v.to_ascii_lowercase();
                     }
                 }
                 "background-image-align-vert" | "background_image_align_vert" => {
                     let v = e.value.trim();
                     if !v.is_empty() {
-                        cfg.background_image_align_vert = v.to_string();
+                        cfg.background_image_align_vert = v.to_ascii_lowercase();
                     }
                 }
                 "background-blur" | "background_blur" => {
@@ -7599,6 +7607,68 @@ cell-height = 1.2\n";
              background_image_align_vert = TOP\n",
         );
         assert!(ok.is_empty(), "all valid placement values: {ok:?}");
+    }
+
+    /// Accepting a value is a promise that it does something.
+    ///
+    /// The test above pins `TILE` and `RIGHT` as passing `--check-config`,
+    /// because the validator lowercases before comparing. The renderer does
+    /// not: it matches `cfg.background_image_mode.as_str()` against lowercase
+    /// literals, so an accepted-but-uppercased value fell straight through to
+    /// the default arm. `background_image_mode = Tile` was reported valid and
+    /// then tiled nothing.
+    ///
+    /// Every spelling the validator accepts must therefore be STORED in the
+    /// one spelling the renderer matches.
+    #[test]
+    fn an_accepted_placement_value_is_stored_in_the_spelling_the_renderer_matches() {
+        for (key, canonical) in [
+            (
+                "background-image-mode",
+                ["tile", "center", "scale", "stretch_and_fill"].as_slice(),
+            ),
+            (
+                "background-image-align-horiz",
+                ["left", "center", "right"].as_slice(),
+            ),
+            (
+                "background-image-align-vert",
+                ["top", "middle", "bottom"].as_slice(),
+            ),
+        ] {
+            for value in canonical {
+                for spelling in [
+                    value.to_string(),
+                    value.to_ascii_uppercase(),
+                    // Leading capital — what a user actually types.
+                    {
+                        let mut c = value.chars();
+                        match c.next() {
+                            Some(f) => f.to_ascii_uppercase().to_string() + c.as_str(),
+                            None => String::new(),
+                        }
+                    },
+                ] {
+                    let line = format!("{key} = {spelling}\n");
+                    assert!(
+                        Config::detect_malformed_values(&line).is_empty(),
+                        "{line:?} must pass --check-config"
+                    );
+                    let cfg = Config::parse_text(&line);
+                    let stored = match key {
+                        "background-image-mode" => &cfg.background_image_mode,
+                        "background-image-align-horiz" => &cfg.background_image_align_horiz,
+                        _ => &cfg.background_image_align_vert,
+                    };
+                    assert_eq!(
+                        stored, value,
+                        "{spelling:?} passes the checker, so it must reach the \
+                         renderer as {value:?} rather than falling through its \
+                         match to the default"
+                    );
+                }
+            }
+        }
     }
 
     /// Reverse-coverage guard — every key name the
