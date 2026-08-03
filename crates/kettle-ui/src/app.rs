@@ -1142,19 +1142,47 @@ pub enum ConfirmKeyResult {
     Ignore,
 }
 
+/// How much a close of the tab at `idx` would take: `(panes, busy)`.
+///
+/// `busy` counts only panes that are NOT sitting idle at an integrated-shell
+/// prompt — an idle prompt has no work to lose. A pane with no shell
+/// integration cannot prove it is idle, so it reports busy and the prompt
+/// still fires; the same goes for a missing tab, where prompting is the
+/// conservative answer.
+fn tab_close_scope(ws: &WindowState, idx: usize) -> (usize, usize) {
+    let Some(tab) = ws.mux.tabs.get(idx) else {
+        return (1, 1);
+    };
+    let ids = tab.root.leaf_ids();
+    let busy = ids
+        .iter()
+        .filter(|id| {
+            ws.mux
+                .panes
+                .get(id)
+                .map(|p| !p.term.shell_idle())
+                .unwrap_or(true)
+        })
+        .count();
+    (ids.len(), busy)
+}
+
+/// How much closing this whole window would take: `(panes, busy)` across
+/// every tab. Same idle rule as [`tab_close_scope`].
+fn window_close_scope(ws: &WindowState) -> (usize, usize) {
+    (
+        ws.mux.panes.len(),
+        ws.mux
+            .panes
+            .values()
+            .filter(|p| !p.term.shell_idle())
+            .count(),
+    )
+}
+
 /// Pure helper that maps a (current_focus, num_buttons,
 /// key) tuple to the next action for the confirm-dialog state
 /// machine, wired to the App's winit key handler.
-/// Count the
-/// leaf panes in a split-tree node. Used by the `Action::CloseTab`
-/// dispatch to ask `should_prompt(scope_count)`.
-fn count_leaves(node: &crate::mux::Node) -> usize {
-    match node {
-        crate::mux::Node::Leaf(_) => 1,
-        crate::mux::Node::Split { a, b, .. } => count_leaves(a) + count_leaves(b),
-    }
-}
-
 fn confirm_dialog_keypress(
     current_focus: usize,
     num_buttons: usize,
@@ -2727,6 +2755,69 @@ fn update_window_remote_contexts(
     changed
 }
 
+/// May a shell-emitted OSC 0/2 title replace the pane's current one?
+///
+/// Everything except a hand-set title, which the user typed and expects to
+/// stay. Shells emit OSC 0/2 on every prompt, so without this rule a manual
+/// name survived less than a second.
+///
+/// A REMOTE title still takes precedence over a manual one, deliberately:
+/// `apply_remote_title_transition` saves the previous title and restores it
+/// when the remote context ends, so the manual name comes back on exit rather
+/// than being lost, and while connected the host is worth showing.
+fn osc_title_may_replace(origin: PaneTitleOrigin) -> bool {
+    origin != PaneTitleOrigin::Manual
+}
+
+/// Apply a shell-driven title change: `Some(t)` for an OSC 0/2 set, `None`
+/// for a reset.
+///
+/// Both doors need the same two rules, which is why they share one function:
+///
+/// * A `Manual` title is the user's, and the shell may not touch it — by
+///   either door. Gating only the set left a hand-set name alive exactly
+///   until the next reset sequence, which shells also emit at prompts.
+/// * Inside a remote context the change IS applied — the remote shell's own
+///   title (`user@host:~/work`) beats kettle's synthetic label — but the
+///   origin stays `Remote` and the saved pre-remote title is left alone.
+///   Overwriting either one broke the disconnect restore twice over: it
+///   destroyed the title to restore TO, and it demoted the origin so
+///   `apply_remote_title_transition` no longer recognised the pane as coming
+///   back from a remote context at all. Exiting ssh then left the remote
+///   host's name on a local pane indefinitely.
+fn apply_shell_title(
+    title: &mut String,
+    title_is_placeholder: &mut bool,
+    origin: &mut PaneTitleOrigin,
+    title_before_remote: &mut Option<(String, PaneTitleOrigin)>,
+    new: Option<&str>,
+) {
+    if !osc_title_may_replace(*origin) {
+        return;
+    }
+    let in_remote = *origin == PaneTitleOrigin::Remote;
+    match new {
+        // I1 (audit v2.32.0): sanitize before storing — this string flows to
+        // set_title(), the tab label, and the status bar.
+        Some(t) => {
+            *title = sanitize_title(t);
+            *title_is_placeholder = false;
+        }
+        None => {
+            *title = "kettle".into();
+            *title_is_placeholder = true;
+        }
+    }
+    if in_remote {
+        return;
+    }
+    *origin = match new {
+        Some(_) => PaneTitleOrigin::Osc,
+        None => PaneTitleOrigin::Placeholder,
+    };
+    *title_before_remote = None;
+}
+
 fn apply_remote_title_transition(
     title: &mut String,
     title_is_placeholder: &mut bool,
@@ -3213,6 +3304,12 @@ pub enum ConfirmAction {
     CloseWindow,
     /// Close the focused tab (every pane in the tab).
     CloseTab,
+    /// Close whichever tab holds this pane — the ✕ button and middle-click
+    /// can target a tab that is not the focused one, so [`ConfirmAction::CloseTab`]
+    /// would close the wrong one. Carries a pane rather than a tab index
+    /// because the prompt can sit unanswered while an exiting shell
+    /// renumbers the tabs (see `Mux::tab_index_of_pane`).
+    CloseTabHolding(u64),
     /// Close the focused pane.
     ClosePane,
     /// Send a clipboard/PRIMARY paste after the user accepted the multi-line
@@ -7403,20 +7500,23 @@ impl App {
                         if pane.title_is_placeholder && is_conhost_startup_title(&t, &pane.argv) {
                             // keep the placeholder seed; do not store the exe path
                         } else {
-                            // I1 (audit v2.32.0): sanitize before storing — this
-                            // string flows to set_title(), the tab label, and the
-                            // status bar.
-                            pane.title = sanitize_title(&t);
-                            pane.title_is_placeholder = false;
-                            pane.title_origin = PaneTitleOrigin::Osc;
-                            pane.title_before_remote = None;
+                            apply_shell_title(
+                                &mut pane.title,
+                                &mut pane.title_is_placeholder,
+                                &mut pane.title_origin,
+                                &mut pane.title_before_remote,
+                                Some(&t),
+                            );
                         }
                     }
                     TermEvent::ResetTitle => {
-                        pane.title = "kettle".into();
-                        pane.title_is_placeholder = true;
-                        pane.title_origin = PaneTitleOrigin::Placeholder;
-                        pane.title_before_remote = None;
+                        apply_shell_title(
+                            &mut pane.title,
+                            &mut pane.title_is_placeholder,
+                            &mut pane.title_origin,
+                            &mut pane.title_before_remote,
+                            None,
+                        );
                     }
                     TermEvent::PtyWrite(s) => {
                         if !pane.queue_protocol_reply(s.as_bytes()).is_queued() {
@@ -7809,7 +7909,19 @@ impl App {
     /// including after tab/focus switches, not only on OSC title events.
     /// Deduped so it isn't a syscall every frame.
     fn sync_window_title(&mut self, ws: &mut WindowState) {
-        let want = self.desired_window_title(ws);
+        // A user-set title wins over the computed one. Without this the
+        // recompute below reverted "Edit window title" on the very next
+        // redraw, so the feature looked like it worked and did not.
+        //
+        // An override is a fixed string and this runs on the redraw path, so
+        // compare before cloning: in the steady state nothing has changed and
+        // there is nothing to allocate. (The computed branch has to build its
+        // string before it can compare — that one is unavoidable.)
+        let want = match &ws.window_title_override {
+            Some(forced) if *forced == ws.last_title => return,
+            Some(forced) => forced.clone(),
+            None => self.desired_window_title(ws),
+        };
         if want != ws.last_title {
             if let Some(w) = &ws.window {
                 w.set_title(&want);
@@ -10275,6 +10387,14 @@ impl App {
             let value = state.input;
             match state.scope {
                 TitleEditScope::Window => {
+                    // Empty clears the override and restores the
+                    // `window-title-format` behaviour; anything else pins it
+                    // so `sync_window_title` stops recomputing over the top.
+                    ws.window_title_override = if value.trim().is_empty() {
+                        None
+                    } else {
+                        Some(value.clone())
+                    };
                     if let Some(w) = &ws.window {
                         w.set_title(&value);
                     }
@@ -10287,7 +10407,17 @@ impl App {
                 }
                 TitleEditScope::Pane => {
                     if let Some(p) = ws.mux.focused() {
-                        p.title = value;
+                        // Empty restores shell-driven titles; anything else
+                        // pins the name against the next OSC 0/2.
+                        if value.trim().is_empty() {
+                            p.title = "kettle".into();
+                            p.title_is_placeholder = true;
+                            p.title_origin = PaneTitleOrigin::Placeholder;
+                        } else {
+                            p.title = value;
+                            p.title_is_placeholder = false;
+                            p.title_origin = PaneTitleOrigin::Manual;
+                        }
                     }
                 }
                 TitleEditScope::Group => {
@@ -11899,28 +12029,19 @@ impl App {
                 // sitting idle at an integrated-shell prompt has no work to
                 // lose — skip the confirm. Plain shells (no OSC 133 marks)
                 // never report idle, so their behavior is unchanged.
-                let busy = ws
-                    .mux
-                    .focused()
-                    .map(|p| !p.term.shell_idle())
-                    .unwrap_or(true);
-                if busy && self.cfg.ask_before_closing.should_prompt(1) {
-                    self.close_all_modals(ws);
-                    ws.confirm_dialog = Some(ConfirmDialogState {
-                        prompt: "Close this pane?".to_string(),
-                        buttons: vec![
-                            ConfirmButton::Cancel,
-                            ConfirmButton::Confirm {
-                                label: "Close".to_string(),
-                                destructive: true,
-                            },
-                        ],
-                        focus_idx: 0,
-                        on_confirm: ConfirmAction::ClosePane,
-                    });
-                    if let Some(w) = &ws.window {
-                        w.request_redraw();
-                    }
+                let busy = usize::from(
+                    ws.mux
+                        .focused()
+                        .map(|p| !p.term.shell_idle())
+                        .unwrap_or(true),
+                );
+                if self.confirm_close(
+                    ws,
+                    "Close this pane?".to_string(),
+                    1,
+                    busy,
+                    ConfirmAction::ClosePane,
+                ) {
                     return;
                 }
                 // Capture the focused pane id BEFORE the close —
@@ -11972,57 +12093,14 @@ impl App {
                 // active tab via the modal when ask_before_closing
                 // says so. scope_count = leaves in the active tab
                 // (panes_in_tab below).
-                let panes_in_tab = ws
-                    .mux
-                    .tabs
-                    .get(ws.mux.active)
-                    .map(|t| count_leaves(&t.root))
-                    .unwrap_or(1);
-                // v2.20.0 (Ghostty parity): only panes NOT idle at an
-                // integrated-shell prompt count toward the confirm decision
-                // (an idle prompt has no work to lose; no marks → counts
-                // as busy → unchanged behavior).
-                let busy_in_tab = ws
-                    .mux
-                    .tabs
-                    .get(ws.mux.active)
-                    .map(|t| {
-                        t.root
-                            .leaf_ids()
-                            .iter()
-                            .filter(|id| {
-                                ws.mux
-                                    .panes
-                                    .get(id)
-                                    .map(|p| !p.term.shell_idle())
-                                    .unwrap_or(true)
-                            })
-                            .count()
-                    })
-                    .unwrap_or(panes_in_tab);
-                // Audit v2.32.0: decouple the two questions. `busy_in_tab > 0`
-                // is the all-idle SKIP (nothing running → nothing to lose), but
-                // the single-vs-multiple decision must use the TOTAL scope
-                // (`panes_in_tab`), not the busy count — otherwise a 3-pane tab
-                // with one busy pane passed `should_prompt(1)` and silently
-                // closed all three under MultipleTerminals mode.
-                if busy_in_tab > 0 && self.cfg.ask_before_closing.should_prompt(panes_in_tab) {
-                    self.close_all_modals(ws);
-                    ws.confirm_dialog = Some(ConfirmDialogState {
-                        prompt: format!("Close tab with {panes_in_tab} pane(s)?"),
-                        buttons: vec![
-                            ConfirmButton::Cancel,
-                            ConfirmButton::Confirm {
-                                label: "Close".to_string(),
-                                destructive: true,
-                            },
-                        ],
-                        focus_idx: 0,
-                        on_confirm: ConfirmAction::CloseTab,
-                    });
-                    if let Some(w) = &ws.window {
-                        w.request_redraw();
-                    }
+                let (panes_in_tab, busy_in_tab) = tab_close_scope(ws, ws.mux.active);
+                if self.confirm_close(
+                    ws,
+                    format!("Close tab with {panes_in_tab} pane(s)?"),
+                    panes_in_tab,
+                    busy_in_tab,
+                    ConfirmAction::CloseTab,
+                ) {
                     return;
                 }
                 // Capture the active index BEFORE close
@@ -12043,36 +12121,14 @@ impl App {
                 // with on_confirm=CloseWindow; the modal's Confirm
                 // dispatch (in the key handler) re-runs the close
                 // path below.
-                let scope = ws.mux.panes.len();
-                // v2.20.0 (Ghostty parity): idle-at-prompt panes don't
-                // count (see ClosePane above).
-                let busy = ws
-                    .mux
-                    .panes
-                    .values()
-                    .filter(|p| !p.term.shell_idle())
-                    .count();
-                // Audit v2.32.0: `busy > 0` is the all-idle skip; the
-                // single-vs-multiple decision uses the TOTAL `scope` (see
-                // CloseTab above) so a window of N panes with one busy pane
-                // still prompts under MultipleTerminals.
-                if busy > 0 && self.cfg.ask_before_closing.should_prompt(scope) {
-                    self.close_all_modals(ws);
-                    ws.confirm_dialog = Some(ConfirmDialogState {
-                        prompt: format!("Close {scope} pane(s)?"),
-                        buttons: vec![
-                            ConfirmButton::Cancel,
-                            ConfirmButton::Confirm {
-                                label: "Close".to_string(),
-                                destructive: true,
-                            },
-                        ],
-                        focus_idx: 0, // Cancel — safe default.
-                        on_confirm: ConfirmAction::CloseWindow,
-                    });
-                    if let Some(w) = &ws.window {
-                        w.request_redraw();
-                    }
+                let (scope, busy) = window_close_scope(ws);
+                if self.confirm_close(
+                    ws,
+                    format!("Close {scope} pane(s)?"),
+                    scope,
+                    busy,
+                    ConfirmAction::CloseWindow,
+                ) {
                     return;
                 }
                 // Distinct from `CloseTab`: drop *every* tab + pane in
@@ -12081,12 +12137,11 @@ impl App {
                 // gave the user a confusingly-misnamed alias for
                 // `close_tab`. Now they're genuinely different.
                 ws.mux.close_window();
-                // Save the (now-empty) session so next
-                // launch starts fresh. Otherwise the previous
-                // multi-tab state from before close_window stays
-                // in session.json and silently restores.
-                self.save_session(ws);
-                self.pending_window_close = true;
+                // Saves the (now-empty) session so next launch starts fresh —
+                // otherwise the previous multi-tab state from before
+                // close_window stays in session.json and silently restores —
+                // and flushes the recording tail.
+                self.close_window_now(ws);
             }
             Action::NextTab => ws.mux.next_tab(),
             Action::PrevTab => ws.mux.prev_tab(),
@@ -13585,6 +13640,80 @@ impl App {
         }
     }
 
+    /// Tear this window down for good: flush the recording, save the session,
+    /// and flag the close for `finish_window_dispatch`.
+    ///
+    /// Every window-close path ends here, whether the user was asked first or
+    /// not. Keeping it in one place is what stops the recording tail from
+    /// depending on WHICH gesture closed the window — the flush used to live
+    /// only in the `CloseRequested` arm, so closing via the keybind, or via a
+    /// titlebar ✕ that stopped to ask `ask-before-closing` first, dropped
+    /// whatever PTY output was still in flight. (`Drop for App` still finishes
+    /// the recorder as a backstop for crashes; it cannot do this fan-out,
+    /// because by then there is no window to fan out from.)
+    fn close_window_now(&mut self, ws: &mut WindowState) {
+        // Fan out in-flight shared PTY output, then hand finalization to
+        // the writer before exit. Finalization can drain recorder events
+        // already admitted; it cannot pull the shared sidechannel or
+        // deliver its tail to Lua.
+        self.flush_recorder_output(ws);
+        // C4: the recorder spans the whole session — finish it only when the
+        // LAST window goes (this one is checked out of the map, so empty ==
+        // last).
+        if self.windows.is_empty()
+            && let Some(rec) = self.recorder.as_mut()
+        {
+            // The process may be leaving, but a vanished mount must still not
+            // park winit inside a final flush or close.
+            rec.begin_finish();
+        }
+        self.save_session(ws);
+        self.pending_window_close = true;
+    }
+
+    /// Raise the `ask-before-closing` prompt if the policy calls for one.
+    ///
+    /// Returns `true` when the prompt is up and the caller must abandon its
+    /// close, `false` when the close should go ahead untouched. Every close
+    /// gesture routes through here so none of them can drift out of step:
+    /// the ✕ button, middle-click, the titlebar/Alt+F4 close, and the three
+    /// close actions all ask the same question the same way.
+    fn confirm_close(
+        &mut self,
+        ws: &mut WindowState,
+        prompt: String,
+        scope: usize,
+        busy: usize,
+        on_confirm: ConfirmAction,
+    ) -> bool {
+        // The two questions are deliberately separate. `busy == 0` is the
+        // all-idle skip — nothing is running, so there is nothing to lose and
+        // no reason to interrupt. The single-vs-multiple decision then uses
+        // the TOTAL scope, not the busy count, so a 3-pane tab with one busy
+        // pane still prompts under `multiple-terminals` instead of silently
+        // taking all three.
+        if busy == 0 || !self.cfg.ask_before_closing.should_prompt(scope) {
+            return false;
+        }
+        self.close_all_modals(ws);
+        ws.confirm_dialog = Some(ConfirmDialogState {
+            prompt,
+            buttons: vec![
+                ConfirmButton::Cancel,
+                ConfirmButton::Confirm {
+                    label: "Close".to_string(),
+                    destructive: true,
+                },
+            ],
+            focus_idx: 0, // Cancel — safe default.
+            on_confirm,
+        });
+        if let Some(w) = &ws.window {
+            w.request_redraw();
+        }
+        true
+    }
+
     /// Phase 5 of [`TERMINATOR-CONFIRM-DIALOG-DESIGN.md`](
     /// ../../../docs/TERMINATOR-CONFIRM-DIALOG-DESIGN.md): dispatch
     /// the `ConfirmAction` after the user accepts the modal. Skips
@@ -13602,8 +13731,7 @@ impl App {
         match action {
             ConfirmAction::CloseWindow => {
                 ws.mux.close_window();
-                self.save_session(ws);
-                self.pending_window_close = true;
+                self.close_window_now(ws);
             }
             ConfirmAction::CloseTab => {
                 // Capture the payload before mutation and fire the same
@@ -13619,6 +13747,28 @@ impl App {
                 }
                 if let Some(window) = &ws.window {
                     window.request_redraw();
+                }
+            }
+            ConfirmAction::CloseTabHolding(pane) => {
+                // Re-resolve the tab now: the prompt may have been on screen
+                // for a while, and an exiting shell can drop a tab and shift
+                // every index after it. `None` means the tab this prompt was
+                // about is already gone, so there is nothing left to close.
+                let Some(idx) = ws.mux.tab_index_of_pane(pane) else {
+                    if let Some(w) = &ws.window {
+                        w.request_redraw();
+                    }
+                    return;
+                };
+                let last = ws.mux.close_tab_at(idx);
+                self.fire_tab_close_event(ws, idx);
+                self.save_session(ws);
+                if last {
+                    self.pending_window_close = true;
+                    return;
+                }
+                if let Some(w) = &ws.window {
+                    w.request_redraw();
                 }
             }
             ConfirmAction::ClosePane => {
@@ -15326,6 +15476,23 @@ impl App {
             {
                 let close = bcode == 1 || rect_contains(seg.close, px, py);
                 if close {
+                    // Same close as the GUI ✕/middle-click above, so the same
+                    // `ask-before-closing` question — an agent driving the tab
+                    // bar must not be a way around the user's own policy.
+                    let (panes, busy) = tab_close_scope(ws, seg.idx);
+                    if let Some(anchor) = ws.mux.tab_anchor_pane(seg.idx)
+                        && self.confirm_close(
+                            ws,
+                            format!("Close tab with {panes} pane(s)?"),
+                            panes,
+                            busy,
+                            ConfirmAction::CloseTabHolding(anchor),
+                        )
+                    {
+                        // Handled: the press raised the prompt, so it must not
+                        // also reach the pane underneath.
+                        return true;
+                    }
                     let pre = self.focus_key(ws);
                     let closing_idx = seg.idx;
                     if ws.mux.close_tab_at(seg.idx) {
@@ -21346,25 +21513,24 @@ impl App {
         }
         match event {
             WindowEvent::CloseRequested => {
-                // Fan out in-flight shared PTY output, then hand finalization to
-                // the writer before exit. Finalization can drain recorder events
-                // already admitted; it cannot pull the shared sidechannel or
-                // deliver its tail to Lua.
-                {
-                    self.flush_recorder_output(ws);
-                    // C4: the recorder spans the whole session — finish it
-                    // only when the LAST window goes (this one is checked out
-                    // of the map, so empty == last).
-                    if self.windows.is_empty()
-                        && let Some(rec) = self.recorder.as_mut()
-                    {
-                        // The process may be leaving, but a vanished mount must
-                        // still not park winit inside a final flush or close.
-                        rec.begin_finish();
-                    }
+                // The titlebar ✕ and Alt+F4 destroy exactly as much as
+                // `Action::CloseWindow` does, so they have to ask the same
+                // question — this path used to skip `ask-before-closing`
+                // entirely and take every running pane with it. Ask BEFORE
+                // any of the teardown below: saving the session and finishing
+                // the recorder are not things to do speculatively while the
+                // user is still deciding.
+                let (scope, busy) = window_close_scope(ws);
+                if self.confirm_close(
+                    ws,
+                    format!("Close {scope} pane(s)?"),
+                    scope,
+                    busy,
+                    ConfirmAction::CloseWindow,
+                ) {
+                    return;
                 }
-                self.save_session(ws);
-                self.pending_window_close = true;
+                self.close_window_now(ws);
             }
             WindowEvent::Resized(size) => {
                 self.sync_output_frame_budget(ws, false);
@@ -21974,6 +22140,24 @@ impl App {
                     } else if let Some(seg) = bar.segments.iter().find(|s| in_bar(s.rect, px, py)) {
                         let close = bcode == 1 || in_bar(seg.close, px, py);
                         if close {
+                            // Both gestures that land here — the ✕ button and
+                            // middle-click — destroy as much as
+                            // `Action::CloseTab` and so must ask the same
+                            // question. They can also target a tab that is NOT
+                            // the focused one, so the prompt names the tab by a
+                            // pane it holds rather than by the focused index.
+                            let (panes, busy) = tab_close_scope(ws, seg.idx);
+                            if let Some(anchor) = ws.mux.tab_anchor_pane(seg.idx)
+                                && self.confirm_close(
+                                    ws,
+                                    format!("Close tab with {panes} pane(s)?"),
+                                    panes,
+                                    busy,
+                                    ConfirmAction::CloseTabHolding(anchor),
+                                )
+                            {
+                                return;
+                            }
                             // Closing a tab (middle-click or
                             // ✕) can shift focus to a different tab
                             // (`reap_tabs`'s bookkeeping).
@@ -23428,6 +23612,60 @@ mod modal_discipline_guard {
             "any_modal_open must count the confirm dialog so input doesn't fall \
              through to the terminal behind it"
         );
+    }
+
+    /// `ask-before-closing` is only worth anything if EVERY way to close
+    /// something asks. Four gestures used to walk straight past it — the
+    /// titlebar ✕ and Alt+F4 (both arrive as `WindowEvent::CloseRequested`),
+    /// the tab bar's ✕ button, and middle-clicking a tab — so a window full of
+    /// running work vanished on one stray click no matter how the setting was
+    /// configured.
+    ///
+    /// Each close site is checked for the `confirm_close` gate that raises the
+    /// prompt. The gate itself decides whether to prompt; what this pins is
+    /// that the decision is asked at all.
+    #[test]
+    fn every_close_gesture_asks_before_closing() {
+        let src = include_str!("app.rs").replace("\r\n", "\n");
+        // Slice from a marker to the end of its enclosing arm/statement,
+        // deliberately short so an inserted close below the window still fails.
+        let after = |marker: &str, len: usize| -> String {
+            let at = src
+                .find(marker)
+                .unwrap_or_else(|| panic!("close site `{marker}` not found"));
+            src[at..].chars().take(len).collect()
+        };
+
+        assert!(
+            after("WindowEvent::CloseRequested => {", 1200).contains("self.confirm_close("),
+            "the titlebar ✕ and Alt+F4 must ask before taking every pane in the \
+             window; they arrive as CloseRequested"
+        );
+        // Both tab-bar close gestures (the ✕ hit and middle-click) funnel
+        // through one hit test, written once for real mouse input and once for
+        // the ctl/agent path. Neither may skip the prompt. The needle is
+        // assembled at runtime so this test does not match its own source.
+        let needle = ["let close = bcode", " == 1 ||"].concat();
+        let close_sites: Vec<_> = src.match_indices(needle.as_str()).collect();
+        assert_eq!(
+            close_sites.len(),
+            2,
+            "expected exactly two tab-close hit tests (GUI + ctl); a new one \
+             must be gated too"
+        );
+        for (at, _) in close_sites {
+            let body: String = src[at..].chars().take(1100).collect();
+            assert!(
+                body.contains("self.confirm_close("),
+                "a tab ✕ / middle-click close must ask before closing"
+            );
+            assert!(
+                body.contains("ConfirmAction::CloseTabHolding("),
+                "the ✕ can target a tab that is not the focused one, so the \
+                 prompt must name that tab by a pane it holds — CloseTab would \
+                 close the focused tab instead"
+            );
+        }
     }
 
     /// Drift guard. The confirm-dialog dispatch must honor
@@ -25370,6 +25608,37 @@ mod tests {
         assert!(
             close_drain.contains("self.dispatch_output_chunks(ws, tail);"),
             "close-time output must use the shared fan-out dispatcher"
+        );
+
+        // Whether a window close was asked about first must not change what
+        // gets recorded. All three window-close paths share one teardown, so
+        // the recording tail cannot depend on the gesture: the titlebar
+        // ✕ / Alt+F4, the `close_window` action, and the confirmed prompt.
+        let teardown = src
+            .split("fn close_window_now(&mut self, ws: &mut WindowState)")
+            .nth(1)
+            .and_then(|body| body.split("\n    /// Raise the").next())
+            .expect("close_window_now body");
+        for expected in [
+            "self.flush_recorder_output(ws);",
+            "rec.begin_finish();",
+            "self.save_session(ws);",
+            "self.pending_window_close = true;",
+        ] {
+            assert!(
+                teardown.contains(expected),
+                "the shared window teardown must still do {expected:?}"
+            );
+        }
+        // Assembled at runtime so the count does not include this test's own
+        // source.
+        let call = ["self.close_window", "_now(ws);"].concat();
+        assert_eq!(
+            src.matches(call.as_str()).count(),
+            3,
+            "exactly three window-close paths (CloseRequested, Action::CloseWindow, \
+             ConfirmAction::CloseWindow) must share the teardown — a fourth that \
+             hand-rolls it would silently drop the recording tail"
         );
     }
 
@@ -27717,6 +27986,129 @@ mod tests {
         );
     }
 
+    /// A hand-set pane name must survive the shell's next prompt. bash and zsh
+    /// emit OSC 0/2 on EVERY prompt, so before the Manual origin existed,
+    /// naming a pane `db-prod` lasted under a second.
+    #[test]
+    fn a_hand_set_pane_title_outranks_the_shells_osc_title() {
+        use super::osc_title_may_replace;
+        use crate::mux::PaneTitleOrigin;
+
+        assert!(
+            !osc_title_may_replace(PaneTitleOrigin::Manual),
+            "a title the user typed must not be replaced by the shell"
+        );
+        // Every other origin is shell- or launch-derived and must keep
+        // tracking OSC, or titles would freeze at the first thing set.
+        for origin in [
+            PaneTitleOrigin::Placeholder,
+            PaneTitleOrigin::ExplicitLaunch,
+            PaneTitleOrigin::Osc,
+            PaneTitleOrigin::Remote,
+        ] {
+            assert!(
+                osc_title_may_replace(origin),
+                "{origin:?} must still follow the shell's title"
+            );
+        }
+    }
+
+    /// The gate has to cover BOTH doors. Gating only the OSC set left the
+    /// hand-set name alive exactly until the shell emitted a title RESET,
+    /// which shells also do at prompts — so the title still vanished, just
+    /// via the other event.
+    #[test]
+    fn a_hand_set_pane_title_survives_a_title_reset_too() {
+        use super::apply_shell_title;
+        use crate::mux::PaneTitleOrigin;
+
+        let mut title = "db-prod".to_string();
+        let mut placeholder = false;
+        let mut origin = PaneTitleOrigin::Manual;
+        let mut before_remote = None;
+
+        for door in [Some("bash"), None] {
+            apply_shell_title(
+                &mut title,
+                &mut placeholder,
+                &mut origin,
+                &mut before_remote,
+                door,
+            );
+            assert_eq!(title, "db-prod", "the shell must not take a hand-set name");
+            assert_eq!(origin, PaneTitleOrigin::Manual);
+            assert!(!placeholder);
+        }
+    }
+
+    /// Exiting ssh must put the pane's own name back. The remote shell's title
+    /// is shown while connected — it is more useful than kettle's synthetic
+    /// label — but applying it used to clear the saved pre-remote title AND
+    /// demote the origin away from `Remote`, so the disconnect restore had
+    /// nothing to restore and no longer recognised that it should. A pane
+    /// named `db-prod` came back from ssh still calling itself the remote host.
+    #[test]
+    fn a_remote_shells_title_shows_without_losing_the_name_to_come_back_to() {
+        use super::{apply_remote_title_transition, apply_shell_title};
+        use crate::mux::PaneTitleOrigin;
+
+        let mut title = "db-prod".to_string();
+        let mut placeholder = false;
+        let mut origin = PaneTitleOrigin::Manual;
+        let mut before_remote = None;
+
+        // Enter a remote context: the manual name is stashed.
+        let ctx = kettle_remote::RemoteContext::Ssh {
+            host: "buildbox".into(),
+            user: Some("kevim".into()),
+        };
+        apply_remote_title_transition(
+            &mut title,
+            &mut placeholder,
+            &mut origin,
+            &mut before_remote,
+            Some(&ctx),
+        );
+        assert_eq!(origin, PaneTitleOrigin::Remote);
+        assert_eq!(
+            before_remote,
+            Some(("db-prod".to_string(), PaneTitleOrigin::Manual))
+        );
+
+        // The remote shell sets its own title. It shows...
+        apply_shell_title(
+            &mut title,
+            &mut placeholder,
+            &mut origin,
+            &mut before_remote,
+            Some("kevim@buildbox:~/work"),
+        );
+        assert_eq!(title, "kevim@buildbox:~/work", "the remote title shows");
+        // ...without disturbing either thing the restore depends on.
+        assert_eq!(
+            origin,
+            PaneTitleOrigin::Remote,
+            "the pane is still in a remote context"
+        );
+        assert_eq!(
+            before_remote,
+            Some(("db-prod".to_string(), PaneTitleOrigin::Manual)),
+            "the name to come back to must survive the remote shell's title"
+        );
+
+        // Disconnect: the hand-set name comes back.
+        apply_remote_title_transition(
+            &mut title,
+            &mut placeholder,
+            &mut origin,
+            &mut before_remote,
+            None,
+        );
+        assert_eq!(title, "db-prod");
+        assert_eq!(origin, PaneTitleOrigin::Manual);
+        assert_eq!(before_remote, None);
+    }
+
     #[test]
     fn hovered_close_button_finds_only_the_close_rect_hits() {
         use super::hovered_close_button;
@@ -28860,16 +29252,15 @@ mod tests {
         assert!(smart_selection_at("plain prose with nothing structured", 5).is_none());
     }
 
-    /// Drift guard. `count_leaves` is the pure helper
-    /// behind `Action::CloseTab`'s scope_count for the confirm-
-    /// dialog. Walks a tiny synthetic tree to verify the recursion.
+    /// Drift guard on the pane count behind every close prompt: it decides
+    /// whether `ask-before-closing = multiple-terminals` fires at all, so
+    /// undercounting a nested split silently closes panes without asking.
     #[test]
     fn count_leaves_for_nested_splits() {
-        use super::count_leaves;
         use crate::mux::{Dir, Node};
         // Single leaf.
         let leaf = Node::Leaf(1);
-        assert_eq!(count_leaves(&leaf), 1);
+        assert_eq!(leaf.leaf_ids().len(), 1);
         // Two-way split.
         let split = Node::Split {
             dir: Dir::Horizontal,
@@ -28877,7 +29268,7 @@ mod tests {
             a: Box::new(Node::Leaf(1)),
             b: Box::new(Node::Leaf(2)),
         };
-        assert_eq!(count_leaves(&split), 2);
+        assert_eq!(split.leaf_ids().len(), 2);
         // Three-way nested split (a is a split, b is a leaf).
         let nested = Node::Split {
             dir: Dir::Vertical,
@@ -28890,7 +29281,7 @@ mod tests {
             }),
             b: Box::new(Node::Leaf(3)),
         };
-        assert_eq!(count_leaves(&nested), 3);
+        assert_eq!(nested.leaf_ids().len(), 3);
         // Four-way (both a and b are splits).
         let four = Node::Split {
             dir: Dir::Horizontal,
@@ -28908,7 +29299,7 @@ mod tests {
                 b: Box::new(Node::Leaf(4)),
             }),
         };
-        assert_eq!(count_leaves(&four), 4);
+        assert_eq!(four.leaf_ids().len(), 4);
     }
 
     /// Drift guard. `confirm_dialog_keypress` is the pure
