@@ -23793,6 +23793,22 @@ mod modal_discipline_guard {
                 && body.contains("if was_last {"),
             "ClosePane dispatch must exit when close_focused() reports the last pane"
         );
+        // The confirmed pane close must act on the pane the PROMPT was raised
+        // for, which means re-focusing that pane BEFORE closing. `close_focused`
+        // acts on whatever is focused now, and while the prompt was up the
+        // target's own shell may have exited and promoted a sibling — so
+        // without the re-focus, confirming closes the sibling.
+        let refocus = body
+            .find(concat!("ws.mux.", "focus_pane(target)"))
+            .expect("confirmed ClosePane must re-focus its recorded target");
+        let pane_close = body
+            .find(concat!("let was_last = ws.mux.", "close_focused();"))
+            .expect("ClosePane close call");
+        assert!(
+            refocus < pane_close,
+            "the re-focus must come BEFORE the close, or the close still acts \
+             on whatever happens to be focused"
+        );
     }
 
     #[test]
