@@ -6,6 +6,169 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+## [2.46.0] — 2026-08-03
+
+  Terminator-parity pass. Everything here is a setting, gesture, or documented
+  promise that already existed and did not do what it said — found by auditing
+  kettle against a clone of GNOME Terminator, then by four rounds of
+  adversarial review over the fixes themselves.
+
+  ### Fixed
+  - **`ask-before-closing` was bypassed by four close gestures.** Only the three
+    close *actions* asked. The titlebar ✕, Alt+F4 (both arrive as
+    `WindowEvent::CloseRequested`), the tab bar's ✕ button, and middle-clicking
+    a tab all closed immediately — so a window of running work vanished on one
+    stray click under every setting, `always` included. Every close now routes
+    through one gate, and a drift guard fails the build if a close site is added
+    that skips it.
+  - **A confirmed close could act on something the user never selected.** The ✕
+    and middle-click can target a tab that is not the focused one, and the
+    prompt can sit unanswered for as long as the user takes to reply — during
+    which an exiting shell renumbers the tabs, or the target pane's own shell
+    exits and promotes a sibling into focus. Confirmations now carry their
+    target: a tab by the panes it holds, a pane by its id. A target that has
+    since vanished closes nothing rather than falling back to whatever is
+    focused now.
+  - **The recording tail depended on which gesture closed the window.** The
+    flush walks the pane map and reads each pane's output sidechannel, and two
+    of the three window-close paths cleared that map first — handing the flush
+    nothing to drain. The same clearing decided what `restore-session` saved, so
+    whether a session came back depended on whether the confirm prompt happened
+    to appear. Both are now decided by the requester's intent, not by timing.
+  - **A hand-set pane title died three ways.** Shells emit OSC 0/2 on every
+    prompt, so naming a pane lasted under a second. Gating the OSC *set* alone
+    was not enough — a title RESET wiped it too, and shells emit those at
+    prompts as well. Separately, applying a title inside a remote context
+    cleared the saved pre-remote title *and* demoted the origin, so leaving ssh
+    restored nothing: a pane named `db-prod` came back still calling itself the
+    remote host. The remote shell's own title still shows while connected.
+  - **`icon_bell` could not draw under any configuration.** The renderer gates
+    the per-pane titlebar bell on `cfg.icon_bell && pane.bell`, and the frame
+    builder passed a literal `false` for every pane — the pane had no bell state
+    at all, only the tab did. Panes now latch their own, cleared when the user
+    looks at them.
+  - **Every Lua URL handler kettle ships was dead.** `docs/examples/init.lua`
+    documents the contract as *return a string and kettle opens that URL*, and
+    every example in it is that shape (`LP: #12345` → Launchpad, `lp:branch`,
+    `apt://`). The returned string was discarded while the handler still claimed
+    the URL, so copying the documented file gave you links that matched, ran,
+    computed the right URL, and opened nothing. A handler that raises or
+    declines now falls through to kettle's own open instead of killing the link,
+    a malformed Lua pattern no longer disables every handler after it, and a
+    rewritten URL is re-checked against the same allowlist as the original.
+  - **`background_image_mode = Tile` was accepted and ignored.**
+    `--check-config` validates the three background-image placement enums
+    case-insensitively while the renderer matches them case-sensitively, so an
+    accepted uppercase value fell through to the default arm. Accepting a value
+    is a promise it does something.
+  - **`inactive_color_offset` dimmed nothing.** Its foreground offset was read
+    nowhere, so Terminator's own default pair produced exactly zero visible
+    dimming.
+  - **A hidden tab close button was still clickable.** `close-button-on-tab =
+    false` hid only the paint; the hit rect stayed full-size, so clicking the
+    trailing square of a tab closed it — and every pane in it — with no visible
+    button.
+  - **Three right-click rows Terminator has were missing.** Set Window Title,
+    Split Auto, and Zoom/Restore all existed as bindable actions; only the menu
+    rows were absent, making them keyboard-only by accident.
+
+  ### Fixed — Terminator config import
+  - **A real Terminator config is sectioned INI, and it was read flat.** Every
+    line applied regardless of section, so the LAST profile in the file won and
+    a user's `[[default]]` colours were silently replaced by whichever profile
+    was written last. `[layouts]` internals leaked in as config keys, and
+    `--check-config` reported every section header as a line missing its `=` — a
+    wall of errors on a well-formed file. kettle now reads `[global_config]`,
+    `[keybindings]`, and the default profile. A file with no sections is
+    kettle's own format and is untouched.
+  - **The whole `[keybindings]` section imported as nothing.** The tokenizer
+    folds `_` to `-` so Terminator's key spellings reach kettle's hyphenated
+    arms — and that fold also rewrote the ACTION names, which are spelled with
+    underscores. `new_tab` arrived as `new-tab`, matched no arm, and became an
+    unknown key. Verified before the fix: `new_tab = <Control><Shift>y` left the
+    keybind count unmoved.
+  - **Imported bindings were additive.** Terminator's grammar is `action =
+    accelerator` — one accelerator per action. Treating it as additive left
+    kettle's stock chord live alongside the imported one, so rebinding `new_tab`
+    precisely *because* Ctrl+Shift+T collides with tmux, AstroNvim, or an agent
+    CLI did not resolve the collision. kettle's own `keybind =` stays additive.
+  - **Grouping reaches every window** — Terminator's scope is its whole
+    terminal collection — and `group_all_toggle` asks the pane you invoked it
+    from rather than testing whether everything is already grouped, which
+    inverted the answer whenever one pane had been ungrouped by hand.
+    `group_tab_toggle` and `group_win_toggle` are their own actions now; when
+    they shared one with the non-toggling names, importing both had the second
+    silently unbind the first.
+  - **`group_all` armed broadcasting instead of grouping.** Grouping is not
+    broadcasting — in Terminator you group terminals and then choose to
+    broadcast to the group. All three `*_toggle` names were mapped onto
+    broadcast actions, so one press after importing sent everything typed to
+    every pane at once.
+  - **A malformed accelerator bound an ordinary letter.** An empty modifier
+    group was dropped, so `<>t` narrowed to the bare key `t` — from then on
+    typing that letter fired the action instead of reaching the shell. Malformed
+    accelerators now bind nothing. GTK's `<Ctl>` abbreviation is accepted.
+  - **Pango style options were folded into the family name.** `font = DejaVu
+    Sans Mono Bold 13` asks for the bold face of `DejaVu Sans Mono`; keeping the
+    whole string requested a family no system has, so the font silently fell
+    back to something else entirely.
+  - **`scrollback_lines`** — Terminator's own key name — had no arm, so the
+    scrollback size out of a copied config did nothing. Added, with
+    `scrollback_infinite`.
+  - **A working colour palette was reported broken.** Terminator writes its
+    palette as one colon-separated list, which applies correctly at runtime
+    while `--check-config` called it malformed — sending users to fix a line
+    that was already right.
+  - **Quoted values.** Terminator's manual writes `background_color =
+    "#1a1b26"`; the quote became part of the value and the line was silently
+    discarded. One matched pair is now stripped, documented in `CONFIG.md`.
+  - **A malformed section header kept the previous section in force.** A typo'd
+    `[[work]` fell through while the parser still believed it was inside
+    `[[default]]`, so one profile's settings quietly became the user's
+    defaults — a failure with no warning and no symptom except wrong colours.
+    An unreadable header now means the parser has lost its place, and nothing
+    applies until the next one it can read. A skipped nesting level
+    (`[profiles]` then `[[[default]]]`) no longer collapses into the
+    default-profile path either.
+  - **`scrollback_infinite` raced `scrollback_lines`.** Whichever line came
+    second won; Terminator treats the boolean as an override of the count.
+  - **An empty accelerator now disables a shortcut**, which is what it means in
+    Terminator — its own defaults ship several, and its preferences UI writes
+    one when a binding is cleared. Ignoring the line left kettle's chord live,
+    so a config that deliberately freed a chord for tmux, AstroNvim, or an
+    agent CLI did not free it.
+  - **Pango: `Regular` and family lists.** `Regular` was missing from the style
+    table, so the most common description GTK writes
+    (`DejaVu Sans Mono Regular 13`) requested a family no system has. A comma
+    is Pango's family-LIST separator, so `Arial Black, 12` resolved to the
+    family `Arial`.
+
+  ### Fixed — CLI
+  - **`--profile typo --list-profiles` refused to run**, which is the command
+    that shows the valid profile names. Same for `--list-themes`,
+    `--list-actions`, `--print-completions`, `--shell-integration`, and
+    `--check-update`, none of which read a profile. `--list-keybinds`,
+    `--list-layouts`, `--list-ssh-hosts` and `--check-config` still refuse:
+    those resolve the profile, so a typo means the output is quietly wrong
+    rather than merely blocked — and any of them appearing in a mixed
+    invocation disqualifies the whole command line, since several modes can be
+    set at once and only the first runs.
+  - **Named layouts were written back over.** A `--layout NAME` launched with a
+    command or cwd override saved the overridden state back to the named layout
+    file, destroying it.
+  - **Infinite scrollback displayed as `0`** in the Settings panel.
+
+  ### Documentation
+  - `docs/TERMINATOR-AUDIT.md`: corrected five claims that no source supported —
+    `hide_titlebar`, `tab_max_width`, and `use_login_shell` are not Terminator
+    options at any SHA; `maybe_confirm_then` exists only in this feature's design
+    pseudocode and changelog entry, never in a Rust source; and
+    `ask_before_closing` was described as "complete end-to-end" while four
+    gestures bypassed it. The Method section records how these were found, so
+    the next pass can re-run the check instead of re-reading prose.
+  - `docs/CONFIG.md`: new Syntax section covering the `=` split, comments,
+    `-`/`_` equivalence, and the quote rule.
+
 ## [2.45.0] — 2026-08-01
 
   ### Fixed
