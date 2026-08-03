@@ -1442,8 +1442,8 @@ fn shell_single_quote(s: &str) -> String {
 ///   - `ssh -o StrictHostKeyChecking=no host` → host=host
 ///   - `sshpass -p secret ssh user@host`     → host=host, user=Some(user)
 ///
-/// Options are walked the way getopt(3) parses them (see
-/// [`parse_short_bundle`]) to find the first non-option argv element, which is
+/// Options are walked the way getopt(3) parses them (see the crate-private
+/// `parse_short_bundle`) to find the first non-option argv element, which is
 /// the target (potentially `user@host`). Along the way the options that decide
 /// which endpoint that target names — port, ProxyJump, identity, config file,
 /// login name — are captured into [`SshOptions`] instead of merely skipped,

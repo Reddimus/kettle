@@ -370,9 +370,11 @@ pub fn list(dir: &std::path::Path) -> Vec<RegistryEntry> {
 ///
 /// `list` is kept pure (raw enumeration) for callers that want every entry
 /// regardless of liveness (e.g. diagnostics); this is the liveness-aware view.
-/// The client's `discover` runs the same [`list_live_by`] core with the same
-/// [`owner_alive`] predicate, differing only in that it can inject a
-/// stand-in — so what is pinned here is what discovery does.
+/// The client's `discover` runs the same `list_live_by` core with the same
+/// `owner_alive` predicate, differing only in that it can inject a stand-in —
+/// so what is pinned here is what discovery does. (Both are crate-private, so
+/// they are named rather than linked: rustdoc denies a public item linking to
+/// something the reader cannot follow.)
 pub fn list_live(dir: &std::path::Path) -> Vec<RegistryEntry> {
     list_live_by(dir, owner_alive)
 }
