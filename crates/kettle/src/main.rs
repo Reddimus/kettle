@@ -2115,6 +2115,22 @@ fn profile_problem(name: &str) -> Option<String> {
 ///   - `status-bar` — `status_bar != Off`
 fn extra_check_config_lines(cfg: &kettle_config::Config) -> Vec<String> {
     let mut lines = Vec::new();
+    // Keys that parse and validate but have no consumer. Reporting them is the
+    // whole point: accepted-and-inert is indistinguishable from working, which
+    // is how a user spends an afternoon wondering why a documented setting
+    // changes nothing.
+    if !cfg.inert_keys.is_empty() {
+        lines.push(format!(
+            "inert:   {} (accepted and validated, but kettle does not act on \
+             {} yet)",
+            cfg.inert_keys.join(", "),
+            if cfg.inert_keys.len() == 1 {
+                "it"
+            } else {
+                "them"
+            }
+        ));
+    }
     if let Some(c) = cfg.accent_color {
         lines.push(format!("accent:  #{:02x}{:02x}{:02x}", c.r, c.g, c.b));
     }

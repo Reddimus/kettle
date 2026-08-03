@@ -6635,6 +6635,15 @@ enum StripState {
     /// body, so the very next byte can complete (`\\`) or invalidate it (any
     /// other byte, including another ESC, which restarts the same check).
     Osc { esc_seen: bool },
+    /// Inside a DCS/APC/PM/SOS control string (`ESC P`, `ESC _`, `ESC ^`,
+    /// `ESC X`), scanning for ST.
+    ///
+    /// These were previously treated as single-character escapes, so only the
+    /// two introducer bytes were removed and the entire BODY was written to
+    /// the session log as text — Sixel pixel data and Kitty graphics payloads,
+    /// which carry encoded file paths and shared-memory names. A log the user
+    /// enabled to keep a transcript was instead accumulating binary payloads.
+    String { esc_seen: bool },
 }
 
 /// Terminator parity (`plugins/logger.py` extension): a persistent-state
@@ -6681,6 +6690,9 @@ impl AnsiStripper {
                     self.state = match b {
                         b'[' => StripState::Csi,
                         b']' => StripState::Osc { esc_seen: false },
+                        // DCS / SOS / PM / APC all run to ST and carry a
+                        // payload that must not reach the log.
+                        b'P' | b'X' | b'^' | b'_' => StripState::String { esc_seen: false },
                         // Single-char ESC (like ESC c reset): this one byte
                         // completes it, back to plain.
                         _ => StripState::Plain,
@@ -6708,10 +6720,32 @@ impl AnsiStripper {
                         };
                     } else if b == 0x07 {
                         self.state = StripState::Plain; // BEL terminator
+                    } else if b == 0x18 || b == 0x1a {
+                        // CAN/SUB cancel the string (DEC). Without this an
+                        // unterminated OSC swallowed the remainder of the log.
+                        self.state = StripState::Plain;
                     } else if b == 0x1b {
                         self.state = StripState::Osc { esc_seen: true };
                     }
                     // Else still inside the OSC payload — keep scanning.
+                }
+                StripState::String { esc_seen } => {
+                    if esc_seen {
+                        self.state = if b == b'\\' {
+                            StripState::Plain
+                        } else {
+                            StripState::String {
+                                esc_seen: b == 0x1b,
+                            }
+                        };
+                    } else if b == 0x9c {
+                        self.state = StripState::Plain; // 8-bit ST
+                    } else if b == 0x18 || b == 0x1a {
+                        self.state = StripState::Plain; // cancelled
+                    } else if b == 0x1b {
+                        self.state = StripState::String { esc_seen: true };
+                    }
+                    // Else still inside the payload — dropped, not logged.
                 }
             }
         }
@@ -7813,6 +7847,85 @@ mod home_dir_tests {
     /// must still be recognized (and fully removed) when the same
     /// `AnsiStripper` instance is reused across calls — exactly how the
     /// reader thread's per-pane log path uses it. Each case below splits a
+    /// A session log must not accumulate image payloads.
+    ///
+    /// DCS (`ESC P`, Sixel) and APC (`ESC _`, Kitty graphics) were treated as
+    /// single-character escapes, so only the two introducer bytes were removed
+    /// and the entire BODY was written to the log as text. Kitty payloads carry
+    /// encoded file paths and shared-memory names, and Sixel carries raw pixel
+    /// data — so a log the user enabled to keep a readable transcript was
+    /// instead accumulating binary and, worse, path-bearing payloads.
+    #[test]
+    fn session_log_stripping_drops_image_payloads_not_just_their_introducers() {
+        for (label, input, want) in [
+            (
+                "Sixel DCS",
+                &b"before\x1bPq#0;2;0;0;0#0~~@@vv@@~~@@~~$\x1b\\after"[..],
+                "beforeafter",
+            ),
+            (
+                "Kitty APC with a file path",
+                &b"before\x1b_Ga=T,f=100,t=f;L3RtcC9zZWNyZXQucG5n\x1b\\after"[..],
+                "beforeafter",
+            ),
+            ("PM", &b"before\x1b^private\x1b\\after"[..], "beforeafter"),
+            ("SOS", &b"before\x1bXstring\x1b\\after"[..], "beforeafter"),
+            (
+                "DCS closed by 8-bit ST",
+                &b"before\x1bPpayload\x9cafter"[..],
+                "beforeafter",
+            ),
+        ] {
+            let mut stripper = super::AnsiStripper::new();
+            let out = stripper.strip(input);
+            assert_eq!(
+                String::from_utf8_lossy(&out),
+                want,
+                "{label}: the payload must be dropped, not logged"
+            );
+        }
+    }
+
+    /// A control string split across chunks must stay suppressed — the log is
+    /// fed one PTY read at a time, so a payload routinely straddles a boundary.
+    #[test]
+    fn a_control_string_split_across_log_chunks_stays_suppressed() {
+        let input = b"before\x1b_Ga=T;payload-with-/tmp/path\x1b\\after";
+        for split in 1..input.len() {
+            let mut stripper = super::AnsiStripper::new();
+            let mut out = stripper.strip(&input[..split]);
+            out.extend_from_slice(&stripper.strip(&input[split..]));
+            assert_eq!(
+                String::from_utf8_lossy(&out),
+                "beforeafter",
+                "split at {split} leaked payload into the log"
+            );
+        }
+    }
+
+    /// CAN/SUB cancel a control string, so an unterminated one cannot swallow
+    /// the rest of the log.
+    #[test]
+    fn a_cancelled_control_string_does_not_swallow_the_rest_of_the_log() {
+        for cancel in [0x18_u8, 0x1a] {
+            for intro in [&b"\x1b]0;"[..], &b"\x1bP"[..], &b"\x1b_"[..]] {
+                let mut input = b"before".to_vec();
+                input.extend_from_slice(intro);
+                input.extend_from_slice(b"payload");
+                input.push(cancel);
+                input.extend_from_slice(b"after");
+
+                let mut stripper = super::AnsiStripper::new();
+                let out = stripper.strip(&input);
+                assert_eq!(
+                    String::from_utf8_lossy(&out),
+                    "beforeafter",
+                    "cancel {cancel:#04x} after {intro:?}: the log must resume"
+                );
+            }
+        }
+    }
+
     /// sequence at a different, deliberately awkward byte boundary; with the
     /// old per-call-stateless `strip_ansi_bytes` the second chunk would have
     /// leaked raw escape-sequence bytes into the log as literal text.

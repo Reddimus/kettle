@@ -1083,6 +1083,10 @@ impl FontFeature {
 
 #[derive(Debug, Clone)]
 pub struct Config {
+    /// Keys this config sets that kettle accepts but does not act on — see
+    /// [`Config::INERT_KEYS`]. Populated at parse time so `--check-config` can
+    /// say so rather than letting the setting look like it works.
+    pub inert_keys: Vec<String>,
     pub font_family: String,
     /// Per-style family overrides (fall back to `font_family`).
     pub font_family_bold: Option<String>,
@@ -2522,6 +2526,7 @@ fn parse_colon_palette(value: &str) -> Option<Vec<Rgb>> {
 impl Default for Config {
     fn default() -> Self {
         Config {
+            inert_keys: Vec::new(),
             font_family: font::FAMILY.to_string(),
             font_family_bold: None,
             font_family_italic: None,
@@ -3763,6 +3768,36 @@ impl Config {
 
     /// Parse, also returning any unrecognized config keys (typo guard,
     /// surfaced by `kettle --check-config` and a startup `log::warn`).
+    /// Keys kettle ACCEPTS but does not act on.
+    ///
+    /// Each of these parses, passes `--check-config`, and is documented — and
+    /// has no consumer anywhere outside this crate. Silently accepting a
+    /// setting that does nothing is the worst of the three options: rejecting
+    /// them would break configs that load today, and implementing five
+    /// unrelated features is not a config change. So they stay accepted and
+    /// `--check-config` says plainly that they are inert.
+    ///
+    /// Removing a key from this list means either implementing it or deciding
+    /// it should be rejected; it must not simply be dropped.
+    pub const INERT_KEYS: &'static [&'static str] = &[
+        "extra-styling",
+        "title-font",
+        "title-use-system-font",
+        "use-system-font",
+        "use-theme-colors",
+    ];
+
+    /// Which [`Config::INERT_KEYS`] this text actually sets, in file order.
+    pub fn inert_keys_present(text: &str) -> Vec<String> {
+        let mut seen = Vec::new();
+        for entry in parse::parse(text) {
+            if Self::INERT_KEYS.contains(&entry.key.as_str()) && !seen.contains(&entry.raw_key) {
+                seen.push(entry.raw_key.clone());
+            }
+        }
+        seen
+    }
+
     pub fn parse_collect(text: &str) -> (Config, Vec<String>) {
         let mut cfg = Config::default();
         let mut explicit_palette: Vec<(usize, Rgb)> = Vec::new();
@@ -5155,6 +5190,7 @@ impl Config {
                 _ => unknown.push(e.raw_key.clone()),
             }
         }
+        cfg.inert_keys = Self::inert_keys_present(text);
         // Terminator's `scrollback_infinite` overrides the line count rather
         // than racing it: `scrollback_infinite = True` above
         // `scrollback_lines = 100` must still mean unbounded, and it did not
@@ -11151,6 +11187,57 @@ font-size = 15
             Some(keybinds::Action::ToggleGroupTab),
             "the toggle is its own action, so both chords survive"
         );
+    }
+
+    /// A setting that is accepted but does nothing must SAY so.
+    ///
+    /// `extra-styling`, `title-font`, `title-use-system-font`,
+    /// `use-system-font`, and `use-theme-colors` all parse, pass
+    /// `--check-config`, and are documented — while having no consumer
+    /// anywhere outside this crate. Accepted-and-inert is indistinguishable
+    /// from working, which is how someone spends an afternoon wondering why a
+    /// documented setting changes nothing.
+    ///
+    /// This also guards the list itself: if a key here gains a real consumer,
+    /// it must be removed from `INERT_KEYS` deliberately rather than left
+    /// claiming to be inert.
+    #[test]
+    fn keys_that_do_nothing_are_reported_as_doing_nothing() {
+        // Every listed key is reported when set, under either spelling.
+        for key in Config::INERT_KEYS {
+            let hyphen = Config::parse_text(&format!("{key} = 1\n"));
+            assert_eq!(
+                hyphen.inert_keys,
+                vec![key.to_string()],
+                "{key} must be reported as inert"
+            );
+            let underscore_key = key.replace('-', "_");
+            let underscore = Config::parse_text(&format!("{underscore_key} = 1\n"));
+            assert_eq!(
+                underscore.inert_keys,
+                vec![underscore_key.clone()],
+                "{underscore_key} must be reported as inert, in the user's own spelling"
+            );
+            // And it must NOT also be reported as an unknown key — it is
+            // recognised, just not acted on.
+            let (_, unknown) = Config::parse_collect(&format!("{key} = 1\n"));
+            assert!(
+                unknown.is_empty(),
+                "{key} is recognised, so it must not warn as unknown: {unknown:?}"
+            );
+        }
+
+        // A config that sets none of them reports none.
+        assert!(
+            Config::parse_text("font-size = 13\n").inert_keys.is_empty(),
+            "an ordinary config has no inert keys"
+        );
+
+        // Several at once, in file order, without duplicates.
+        let cfg = Config::parse_text(
+            "use-system-font = true\nfont-size = 13\nextra-styling = true\nuse-system-font = false\n",
+        );
+        assert_eq!(cfg.inert_keys, vec!["use-system-font", "extra-styling"]);
     }
 
     /// Terminator's `group_all` GROUPS; it does not broadcast.
