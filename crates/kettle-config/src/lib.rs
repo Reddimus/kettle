@@ -10585,8 +10585,8 @@ background_color = \"#1a1b26\"\n\
 foreground_color = '#c0caf5'\n\
 font = DejaVu Sans Mono 13\n\
 palette = \"#2e3436:#cc0000:#4e9a06:#c4a000:#3465a4:#75507b:#06989a:#d3d7cf\"\n\
-new_tab = <Control><Shift>t\n\
-split_horiz = <Control><Shift>o\n",
+new_tab = <Control><Shift>y\n\
+split_horiz = <Control><Shift>j\n",
         );
 
         // Underscore keys reach their hyphenated arms.
@@ -10611,12 +10611,31 @@ split_horiz = <Control><Shift>o\n",
         assert_eq!(cfg.theme.palette[7], Rgb::parse("#d3d7cf").unwrap());
 
         // GTK accelerators bind through the bare-action-name grammar.
-        let new_tab = keybinds::parse_trigger("ctrl+shift+t").expect("trigger parses");
-        assert_eq!(
-            cfg.keybinds.get(&new_tab).cloned(),
-            Some(keybinds::Action::NewTab),
-            "Terminator's `new_tab = <Control><Shift>t` must bind"
-        );
+        //
+        // The chords here are deliberately ones kettle does NOT ship a default
+        // for. This assertion used to read `<Control><Shift>t` → `NewTab`,
+        // which is kettle's own stock binding — so it passed no matter what
+        // the importer did, and it went on passing while every line in a
+        // `[keybindings]` section was in fact being dropped as an unknown key.
+        // Binding a chord that starts out unbound is the only version of this
+        // check that can fail when the import breaks.
+        let stock = Config::parse_text("");
+        for (chord, action) in [
+            ("ctrl+shift+y", keybinds::Action::NewTab),
+            ("ctrl+shift+j", keybinds::Action::SplitDown),
+        ] {
+            let trig = keybinds::parse_trigger(chord).expect("trigger parses");
+            assert_eq!(
+                stock.keybinds.get(&trig),
+                None,
+                "{chord} must start out unbound or this proves nothing"
+            );
+            assert_eq!(
+                cfg.keybinds.get(&trig).cloned(),
+                Some(action),
+                "Terminator's `{chord}` line must bind"
+            );
+        }
     }
 
     /// The GTK accelerator rewrite must not disturb kettle's own spelling.

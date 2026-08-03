@@ -70,8 +70,8 @@ pub fn parse(input: &str) -> Vec<Entry> {
         let Some(eq) = line.find('=') else {
             continue;
         };
-        let raw_key = line[..eq].trim().to_ascii_lowercase();
-        let key = raw_key.replace('_', "-");
+        let raw_key = line[..eq].trim().to_string();
+        let key = raw_key.to_ascii_lowercase().replace('_', "-");
         let value = unquote(line[eq + 1..].trim()).to_string();
         if key.is_empty() {
             continue;
