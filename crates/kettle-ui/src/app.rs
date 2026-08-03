@@ -3293,6 +3293,21 @@ pub struct TitleEditState {
 /// ../../../docs/TERMINATOR-CONFIRM-DIALOG-DESIGN.md):
 /// the action a confirmed modal will dispatch when the user accepts.
 ///
+/// Whether a window close should also empty the mux before the session is
+/// saved.
+///
+/// `close_window` means "this window is finished" and saves an empty session so
+/// the next launch starts fresh. The titlebar ✕ / Alt+F4 means "put this away"
+/// and leaves the session restorable. Both close the window; they disagree only
+/// about what next launch should show — and that must not depend on whether the
+/// `ask-before-closing` prompt happened to appear in between, which is exactly
+/// what a single unparameterized `CloseWindow` confirm action made it do.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DropPanes {
+    Yes,
+    No,
+}
+
 /// First user is the `ask_before_closing` flow
 /// (`Action::CloseWindow` / `CloseTab` / `ClosePane`). Future additions could
 /// add `KillProcess`, `DiscardLayout`, `ResetConfig` etc. — the
@@ -3301,17 +3316,26 @@ pub struct TitleEditState {
 #[derive(Debug, Clone)]
 pub enum ConfirmAction {
     /// Close the entire window (every tab + every pane).
-    CloseWindow,
-    /// Close the focused tab (every pane in the tab).
-    CloseTab,
-    /// Close whichever tab holds this pane — the ✕ button and middle-click
-    /// can target a tab that is not the focused one, so [`ConfirmAction::CloseTab`]
-    /// would close the wrong one. Carries a pane rather than a tab index
-    /// because the prompt can sit unanswered while an exiting shell
-    /// renumbers the tabs (see `Mux::tab_index_of_pane`).
-    CloseTabHolding(u64),
-    /// Close the focused pane.
-    ClosePane,
+    ///
+    /// `drop_panes` carries the requester's intent through the prompt, so
+    /// confirming does what the gesture would have done unprompted.
+    CloseWindow { drop_panes: DropPanes },
+    /// Close whichever tab holds any of these panes.
+    ///
+    /// Every tab close routes through here, including the focused-tab one.
+    /// A prompt can sit unanswered for as long as the user takes, and in that
+    /// time a shell exiting renumbers the tabs — so "the tab at index N" and
+    /// "the focused tab" both stop meaning what they meant when the prompt
+    /// went up. Naming the tab by the panes it held is stable across that; an
+    /// empty resolution means the tab is already gone.
+    CloseTabHolding(Vec<u64>),
+    /// Close this specific pane.
+    ///
+    /// Carries the id for the same reason: while the prompt is up, the
+    /// focused pane can change — the target's own shell exiting promotes a
+    /// sibling into focus — and confirming would then close the sibling, which
+    /// may be a tmux or agent session the user never selected.
+    ClosePane(u64),
     /// Send a clipboard/PRIMARY paste after the user accepted the multi-line
     /// paste protection prompt.
     PasteText(Box<str>),
@@ -12087,13 +12111,17 @@ impl App {
                         .map(|p| !p.term.shell_idle())
                         .unwrap_or(true),
                 );
-                if self.confirm_close(
-                    ws,
-                    "Close this pane?".to_string(),
-                    1,
-                    busy,
-                    ConfirmAction::ClosePane,
-                ) {
+                // Name the pane now — by the time the prompt is answered,
+                // "focused" may mean a different one.
+                if let Some(target) = ws.mux.active_focus()
+                    && self.confirm_close(
+                        ws,
+                        "Close this pane?".to_string(),
+                        1,
+                        busy,
+                        ConfirmAction::ClosePane(target),
+                    )
+                {
                     return;
                 }
                 // Capture the focused pane id BEFORE the close —
@@ -12151,7 +12179,7 @@ impl App {
                     format!("Close tab with {panes_in_tab} pane(s)?"),
                     panes_in_tab,
                     busy_in_tab,
-                    ConfirmAction::CloseTab,
+                    ConfirmAction::CloseTabHolding(ws.mux.tab_anchor_panes(ws.mux.active)),
                 ) {
                     return;
                 }
@@ -12179,7 +12207,9 @@ impl App {
                     format!("Close {scope} pane(s)?"),
                     scope,
                     busy,
-                    ConfirmAction::CloseWindow,
+                    ConfirmAction::CloseWindow {
+                        drop_panes: DropPanes::Yes,
+                    },
                 ) {
                     return;
                 }
@@ -12188,12 +12218,7 @@ impl App {
                 // both actions did `close_tab()` so binding `close_window`
                 // gave the user a confusingly-misnamed alias for
                 // `close_tab`. Now they're genuinely different.
-                ws.mux.close_window();
-                // Saves the (now-empty) session so next launch starts fresh —
-                // otherwise the previous multi-tab state from before
-                // close_window stays in session.json and silently restores —
-                // and flushes the recording tail.
-                self.close_window_now(ws);
+                self.close_window_now(ws, DropPanes::Yes);
             }
             Action::NextTab => ws.mux.next_tab(),
             Action::PrevTab => ws.mux.prev_tab(),
@@ -13703,11 +13728,17 @@ impl App {
     /// whatever PTY output was still in flight. (`Drop for App` still finishes
     /// the recorder as a backstop for crashes; it cannot do this fan-out,
     /// because by then there is no window to fan out from.)
-    fn close_window_now(&mut self, ws: &mut WindowState) {
+    fn close_window_now(&mut self, ws: &mut WindowState, drop_panes: DropPanes) {
         // Fan out in-flight shared PTY output, then hand finalization to
         // the writer before exit. Finalization can drain recorder events
         // already admitted; it cannot pull the shared sidechannel or
         // deliver its tail to Lua.
+        //
+        // This MUST run before anything drops panes: the flush walks
+        // `ws.mux.panes` and reads each one's output sidechannel, so a caller
+        // that cleared the mux first handed it an empty map and lost the whole
+        // tail. `DropPanes` is why the clearing lives here rather than at the
+        // call sites — the order is the point.
         self.flush_recorder_output(ws);
         // C4: the recorder spans the whole session — finish it only when the
         // LAST window goes (this one is checked out of the map, so empty ==
@@ -13718,6 +13749,13 @@ impl App {
             // The process may be leaving, but a vanished mount must still not
             // park winit inside a final flush or close.
             rec.begin_finish();
+        }
+        if drop_panes == DropPanes::Yes {
+            // `close_window` means "this window is finished, do not bring it
+            // back": clear the mux so the session saved below is the empty
+            // one. Otherwise the multi-tab state from before the close stays
+            // in session.json and silently restores on next launch.
+            ws.mux.close_window();
         }
         self.save_session(ws);
         self.pending_window_close = true;
@@ -13781,32 +13819,20 @@ impl App {
         _event_loop: &winit::event_loop::ActiveEventLoop,
     ) {
         match action {
-            ConfirmAction::CloseWindow => {
-                ws.mux.close_window();
-                self.close_window_now(ws);
+            ConfirmAction::CloseWindow { drop_panes } => {
+                // Carries the requester's intent: confirming a `close_window`
+                // action must still clear the session, and confirming a
+                // titlebar close must still leave it restorable. Without this
+                // the answer depended on whether the prompt happened to
+                // appear.
+                self.close_window_now(ws, drop_panes);
             }
-            ConfirmAction::CloseTab => {
-                // Capture the payload before mutation and fire the same
-                // recorder/Lua lifecycle boundary as every unconfirmed close.
-                // The hook must run before the last-tab early return too.
-                let closing_idx = ws.mux.active;
-                let tab_was_last = ws.mux.close_tab();
-                self.fire_tab_close_event(ws, closing_idx);
-                self.save_session(ws);
-                if tab_was_last {
-                    self.pending_window_close = true;
-                    return;
-                }
-                if let Some(window) = &ws.window {
-                    window.request_redraw();
-                }
-            }
-            ConfirmAction::CloseTabHolding(pane) => {
+            ConfirmAction::CloseTabHolding(panes) => {
                 // Re-resolve the tab now: the prompt may have been on screen
                 // for a while, and an exiting shell can drop a tab and shift
                 // every index after it. `None` means the tab this prompt was
                 // about is already gone, so there is nothing left to close.
-                let Some(idx) = ws.mux.tab_index_of_pane(pane) else {
+                let Some(idx) = ws.mux.tab_index_of_any_pane(&panes) else {
                     if let Some(w) = &ws.window {
                         w.request_redraw();
                     }
@@ -13823,14 +13849,20 @@ impl App {
                     w.request_redraw();
                 }
             }
-            ConfirmAction::ClosePane => {
-                // Capture the pane id before the close so the
-                // pane_close hook fires with the right id (mirrors the
-                // keybind path).
-                let closing_pane = ws.mux.active_focus();
-                if let Some(id) = closing_pane {
-                    self.fire_pane_close_event(ws, id);
+            ConfirmAction::ClosePane(target) => {
+                // Close the pane the PROMPT was about, not whatever happens to
+                // be focused now. While the prompt was up the target's own
+                // shell may have exited and promoted a sibling into focus —
+                // confirming then closed the sibling, which can be a tmux or
+                // agent session the user never selected. A target that is
+                // already gone means there is nothing left to close.
+                if !ws.mux.focus_pane(target) {
+                    if let Some(w) = &ws.window {
+                        w.request_redraw();
+                    }
+                    return;
                 }
+                self.fire_pane_close_event(ws, target);
                 let was_last = ws.mux.close_focused();
                 // Honor close_focused()'s return like the
                 // keybind ClosePane path — `true` means the last pane closed,
@@ -15532,7 +15564,8 @@ impl App {
                     // `ask-before-closing` question — an agent driving the tab
                     // bar must not be a way around the user's own policy.
                     let (panes, busy) = tab_close_scope(ws, seg.idx);
-                    if let Some(anchor) = ws.mux.tab_anchor_pane(seg.idx)
+                    if let Some(anchor) =
+                        Some(ws.mux.tab_anchor_panes(seg.idx)).filter(|a| !a.is_empty())
                         && self.confirm_close(
                             ws,
                             format!("Close tab with {panes} pane(s)?"),
@@ -21578,11 +21611,13 @@ impl App {
                     format!("Close {scope} pane(s)?"),
                     scope,
                     busy,
-                    ConfirmAction::CloseWindow,
+                    ConfirmAction::CloseWindow {
+                        drop_panes: DropPanes::No,
+                    },
                 ) {
                     return;
                 }
-                self.close_window_now(ws);
+                self.close_window_now(ws, DropPanes::No);
             }
             WindowEvent::Resized(size) => {
                 self.sync_output_frame_budget(ws, false);
@@ -22199,7 +22234,8 @@ impl App {
                             // the focused one, so the prompt names the tab by a
                             // pane it holds rather than by the focused index.
                             let (panes, busy) = tab_close_scope(ws, seg.idx);
-                            if let Some(anchor) = ws.mux.tab_anchor_pane(seg.idx)
+                            if let Some(anchor) =
+                                Some(ws.mux.tab_anchor_panes(seg.idx)).filter(|a| !a.is_empty())
                                 && self.confirm_close(
                                     ws,
                                     format!("Close tab with {panes} pane(s)?"),
@@ -23736,26 +23772,42 @@ mod modal_discipline_guard {
         let end = rest.find("\n    }").expect("fn end");
         let body = &rest[..end];
         let tab_close = body
-            .find("let tab_was_last = ws.mux.close_tab();")
-            .expect("CloseTab dispatch must honor the close result");
+            .find("let last = ws.mux.close_tab_at(idx);")
+            .expect("confirmed tab close must honor the close result");
         let tab_event = body
-            .find("self.fire_tab_close_event(ws, closing_idx);")
-            .expect("confirmed CloseTab must emit its lifecycle event");
+            .find("self.fire_tab_close_event(ws, idx);")
+            .expect("confirmed tab close must emit its lifecycle event");
         let tab_exit = body
-            .find("if tab_was_last {")
-            .expect("CloseTab dispatch must exit on the last tab");
+            .find("if last {")
+            .expect("confirmed tab close must exit on the last tab");
         assert!(
-            body.contains("let closing_idx = ws.mux.active;")
+            body.contains("ws.mux.tab_index_of_any_pane(&panes)")
                 && body.contains("self.pending_window_close = true;")
                 && tab_close < tab_event
                 && tab_event < tab_exit,
-            "confirmed CloseTab must capture the original index, emit the event \
+            "a confirmed tab close must re-resolve its target, emit the event \
              on every outcome, then exit when the last tab closes"
         );
         assert!(
             body.contains(concat!("let was_last = ws.mux.", "close_focused();"))
                 && body.contains("if was_last {"),
             "ClosePane dispatch must exit when close_focused() reports the last pane"
+        );
+        // The confirmed pane close must act on the pane the PROMPT was raised
+        // for, which means re-focusing that pane BEFORE closing. `close_focused`
+        // acts on whatever is focused now, and while the prompt was up the
+        // target's own shell may have exited and promoted a sibling — so
+        // without the re-focus, confirming closes the sibling.
+        let refocus = body
+            .find(concat!("ws.mux.", "focus_pane(target)"))
+            .expect("confirmed ClosePane must re-focus its recorded target");
+        let pane_close = body
+            .find(concat!("let was_last = ws.mux.", "close_focused();"))
+            .expect("ClosePane close call");
+        assert!(
+            refocus < pane_close,
+            "the re-focus must come BEFORE the close, or the close still acts \
+             on whatever happens to be focused"
         );
     }
 
@@ -25688,10 +25740,17 @@ mod tests {
         // gets recorded. All three window-close paths share one teardown, so
         // the recording tail cannot depend on the gesture: the titlebar
         // ✕ / Alt+F4, the `close_window` action, and the confirmed prompt.
+        // Anchored on the DEFINITION, not on a signature spelling — and
+        // assembled at runtime so this test's own mentions cannot stand in for
+        // it. A previous version pinned the full parameter list; adding a
+        // parameter made the split fall through to the test's own literal, and
+        // the guard went on "passing" while measuring the wrong region
+        // entirely.
+        let teardown_fn = ["    fn close_window", "_now(&mut self"].concat();
         let teardown = src
-            .split("fn close_window_now(&mut self, ws: &mut WindowState)")
+            .split(teardown_fn.as_str())
             .nth(1)
-            .and_then(|body| body.split("\n    /// Raise the").next())
+            .and_then(|body| body.split("\n    /// ").next())
             .expect("close_window_now body");
         for expected in [
             "self.flush_recorder_output(ws);",
@@ -25706,13 +25765,37 @@ mod tests {
         }
         // Assembled at runtime so the count does not include this test's own
         // source.
-        let call = ["self.close_window", "_now(ws);"].concat();
+        let call = ["self.close_window", "_now(ws, "].concat();
         assert_eq!(
             src.matches(call.as_str()).count(),
             3,
             "exactly three window-close paths (CloseRequested, Action::CloseWindow, \
              ConfirmAction::CloseWindow) must share the teardown — a fourth that \
              hand-rolls it would silently drop the recording tail"
+        );
+        // ORDER, not just presence. The flush walks `ws.mux.panes` and reads
+        // each pane's output sidechannel, so clearing the mux first hands it an
+        // empty map and loses the whole tail — which is what two of these three
+        // paths used to do by calling `close_window()` themselves beforehand.
+        // The clear now lives inside the teardown, after the flush.
+        let flush = teardown
+            .find("self.flush_recorder_output(ws);")
+            .expect("teardown flush");
+        // Needle assembled at runtime so this test's own two mentions of it do
+        // not count as production call sites.
+        let clear_call = ["ws.mux.close", "_window();"].concat();
+        let clear = teardown
+            .find(clear_call.as_str())
+            .expect("the teardown must own the pane clearing so it cannot precede the flush");
+        assert!(
+            flush < clear,
+            "the recorder flush must run BEFORE the panes it reads are dropped"
+        );
+        assert_eq!(
+            src.matches(clear_call.as_str()).count(),
+            1,
+            "only the shared teardown may clear the mux — a call site that does \
+             it first empties the panes the flush reads from"
         );
     }
 
