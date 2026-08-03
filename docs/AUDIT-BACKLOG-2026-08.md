@@ -151,9 +151,21 @@ Still open on those same fixes:
   directory is treated as private with no owner/DACL validation; and the
   "durable" replace contract is not met (parent sync is a no-op, the rename is
   not write-through).
-- **`kettle-update`**: Windows startup deletes any file matching the
-  helper/archive name pattern without an ownership or age check, and
-  `InstallMarker.version` is written but never validated.
+- **`kettle-update`**: the startup sweep finding is **overstated and closed**.
+  Re-read against the code: the deletion is not "any file matching the pattern".
+  The name must carry a valid transaction id, the path is resolved through
+  `cleanup_anchored_destination`, and `open_windows_held_file` opens with
+  `FILE_FLAG_OPEN_REPARSE_POINT` and refuses anything that is not a
+  single-hardlink, non-reparse, ordinary file. The symlink and hardlink
+  redirections that would make an unowned delete into an arbitrary-delete
+  primitive are all already closed; what remains is kettle deleting a file an
+  attacker planted under kettle's own scratch name, which harms only them. An
+  ownership check would add nothing an attacker who can write to the install
+  prefix has not already defeated by replacing `kettle.exe`.
+  `InstallMarker.version` written-but-never-validated was real, and is **fixed**:
+  every other field of that record was checked, and `install.json` is what
+  support instructions and packaging scripts read to answer "what is installed
+  here".
   (The Linux provenance break that was listed here as the highest-severity
   deferred item has since been **fixed** — see the table above.)
 - **`kettle/exec.rs`**: process-tree termination misses double-forked/`setsid()`

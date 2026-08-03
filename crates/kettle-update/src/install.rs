@@ -1046,6 +1046,19 @@ fn detect_managed_install_at(executable: &Path) -> Result<ManagedInstall, Update
         || marker.product != "kettle"
         || marker.managed_by != "kettle-installer"
         || marker.target != target
+        // Every field of this record was validated except the one a human
+        // reads. `marker_json` only ever writes a real semver, so a value that
+        // is not one did not come from a kettle installer — and `install.json`
+        // is what support instructions, packaging scripts, and the user
+        // themselves consult to answer "what is installed here". An unchecked
+        // string there is a claim kettle makes and never verifies.
+        || semver::Version::parse(&marker.version).is_err()
+    // Every field of this record was validated except the one a human
+    // reads. `marker_json` only ever writes a real semver, so a value that
+    // is not one did not come from a kettle installer — and `install.json`
+    // is what support instructions, packaging scripts, and the user
+    // themselves consult to answer "what is installed here". An unchecked
+    // string there is a claim kettle makes and never verifies.
     {
         return Err(UpdateError::UnmanagedInstall(
             "the installer marker does not match this kettle build".to_string(),
@@ -6029,6 +6042,28 @@ mod tests {
             assert!(error.to_string().contains("local development install"));
             assert!(error.to_string().contains("rebuild and reinstall"));
         }
+
+        // `version` was the one field written and never checked, and it is the
+        // one a person reads: `install.json` is what support instructions and
+        // packaging scripts consult for "what is installed here". A marker
+        // carrying a version no kettle installer would write is not this
+        // build's marker.
+        marker.channel = "stable".into();
+        for bogus in ["", "not-a-version", "2.35", "v2.35.0", "../../etc/passwd"] {
+            marker.version = bogus.into();
+            fs::write(&marker_path, serde_json::to_vec(&marker).unwrap()).unwrap();
+            let error = detect_managed_install_at(&executable).unwrap_err();
+            assert!(
+                error
+                    .to_string()
+                    .contains("does not match this kettle build"),
+                "version {bogus:?} must be refused, got {error}"
+            );
+        }
+        // And a real one is still accepted, so the check is not simply "no".
+        marker.version = "2.35.0".into();
+        fs::write(&marker_path, serde_json::to_vec(&marker).unwrap()).unwrap();
+        assert!(detect_managed_install_at(&executable).is_ok());
     }
 
     #[cfg(target_os = "linux")]

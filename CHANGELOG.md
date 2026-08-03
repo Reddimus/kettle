@@ -153,6 +153,12 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
     where the `notifications/cancelled` that would free it arrives. Every wait
     on the peer is bounded now, and the first send that proves the peer is not
     reading short-circuits the rest.
+  - **The installed-version record was never checked.** Every other field of
+    `install.json` was validated on read; `version` — the one a person actually
+    reads, and what support instructions and packaging scripts consult for
+    "what is installed here" — was written and trusted. A marker carrying a
+    version no kettle installer would write is now refused like any other
+    mismatch.
   - **`--working-directory` had no test at the CLI surface**, and neither did
     `--accent`. Both are validated by one function now, driven by the tests
     exactly as the CLI drives it.
