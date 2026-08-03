@@ -114,10 +114,13 @@ Still open on those same fixes:
 - **`kettle-core/term.rs`**: `log_strip_ansi` recognises only CSI/OSC, so
   DCS/APC image bodies are written into session logs as plain text. (Its CAN/SUB
   and UTF-8 gaps are fixed.)
-- **`kettle-vt`**: untrusted output can install a UNC cwd
-  (`OSC 9;9;\\attacker\share`), which a downstream Windows existence check could
-  turn into an SMB/WebDAV lookup. Also, OSC 9;9 trims quotes/whitespace and
-  OSC 7 converts lossily, so valid POSIX paths do not round-trip.
+- **`kettle-vt`**: untrusted output could install a UNC cwd, which a downstream
+  Windows existence check turns into an SMB/WebDAV lookup that hands over the
+  machine's credentials during the handshake. **Fixed** — both report channels
+  (OSC 7 and OSC 9;9) go through one guard that refuses a path leading with two
+  separators in any mix, one carrying a control character, and one longer than
+  any real path. Still open: OSC 9;9 trims quotes and whitespace and OSC 7
+  converts lossily, so a valid POSIX path containing them does not round-trip.
 - ~~**`kettle-vt/image.rs`**: straight-alpha source-over ignores destination
   alpha, darkening Kitty animation composites.~~ **Fixed**, and verified
   bit-identical for an opaque destination so nothing that rendered correctly

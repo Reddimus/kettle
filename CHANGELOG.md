@@ -171,6 +171,15 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
     setting's own reference described the opposite ("1.0 = no tint, 0.0 = fully
     dark"), so anyone configuring it from the documentation reached for the
     wrong end. The prose is corrected and the direction is pinned by a test.
+  - **Untrusted output could point a pane's working directory off the machine.**
+    A reported cwd (OSC 7 or OSC 9;9) is a claim by whatever is writing to the
+    pane, and kettle acts on it — an existence check, a new tab's directory,
+    "open in file manager". One line of output could set it to a UNC server
+    path, and on Windows the very next existence check reaches out over SMB or
+    WebDAV and hands over the machine's credentials during the handshake, before
+    anything is opened. `cat`ting a hostile file was enough to send it. Both
+    channels now refuse a path that leads with two separators, carries a control
+    character, or is longer than any real path.
   - **`--working-directory` had no test at the CLI surface**, and neither did
     `--accent`. Both are validated by one function now, driven by the tests
     exactly as the CLI drives it.

