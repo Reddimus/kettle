@@ -753,7 +753,18 @@ impl Action {
         // dropped — an earlier malformed-value check flagged it, but
         // the runtime still didn't bind anything. Same pattern as
         // `enum_keys_are_case_insensitive`.
-        let lowered = s.trim().to_ascii_lowercase();
+        //
+        // Hyphens fold to underscores for the same reason the config
+        // tokenizer folds them the other way: an action name reaches here in
+        // whichever spelling its source uses, and hand-maintaining a dual
+        // alias per action does not hold. Several were missing, and the
+        // tokenizer's own folding turned Terminator's `new_tab` into
+        // `new-tab` — a spelling no arm listed — so every line in a copied
+        // `[keybindings]` section resolved to nothing. No action is spelled
+        // with a hyphen and no underscore twin (pinned by
+        // `every_action_name_resolves_in_both_spellings`), so folding this
+        // direction cannot shadow one.
+        let lowered = s.trim().to_ascii_lowercase().replace('-', "_");
         Some(match lowered.as_str() {
             "copy_to_clipboard" | "copy" => Copy,
             "paste_from_clipboard" | "paste" => Paste,
@@ -1037,7 +1048,51 @@ fn parse_key(s: &str) -> Option<Key> {
 }
 
 /// Parse a Ghostty trigger such as `ctrl+shift+o`.
+/// Rewrite a GTK accelerator into kettle's `+`-separated trigger form.
+///
+/// Terminator writes every binding as a GTK accelerator —
+/// `<Control><Shift>t`, `<Alt>1` — with angle-bracketed modifiers and no
+/// separator before the key. kettle splits on `+`, so such a string arrived as
+/// one unrecognised token and the binding was dropped. Every keybinding line in
+/// a real Terminator config therefore imported as nothing, which also made the
+/// ~79 Terminator action-name aliases unreachable from a copied file.
+///
+/// Borrows the input back untouched when it carries no `<`, so kettle's own
+/// `ctrl+shift+t` spelling takes exactly the path it always did and costs
+/// nothing extra — this runs for every trigger in every config, and all but
+/// the imported ones are already in kettle's spelling.
+fn normalize_gtk_accelerator(s: &str) -> std::borrow::Cow<'_, str> {
+    if !s.contains('<') {
+        return std::borrow::Cow::Borrowed(s);
+    }
+    let mut parts: Vec<String> = Vec::new();
+    let mut rest = s.trim();
+    while let Some(open) = rest.find('<') {
+        // Anything before a `<` is stray text; GTK accelerators put modifiers
+        // first, so treat it as part of the key tail rather than guessing.
+        if open > 0 {
+            break;
+        }
+        let Some(close) = rest.find('>') else { break };
+        let modifier = &rest[open + 1..close];
+        if !modifier.is_empty() {
+            parts.push(modifier.to_string());
+        }
+        rest = &rest[close + 1..];
+    }
+    let key = rest.trim();
+    if !key.is_empty() {
+        parts.push(key.to_string());
+    }
+    if parts.is_empty() {
+        std::borrow::Cow::Borrowed(s)
+    } else {
+        std::borrow::Cow::Owned(parts.join("+"))
+    }
+}
+
 pub fn parse_trigger(s: &str) -> Option<Trigger> {
+    let s = normalize_gtk_accelerator(s);
     let mut mods = Mods::empty();
     let mut key: Option<Key> = None;
     let parts: Vec<&str> = s.split('+').collect();
@@ -2036,6 +2091,58 @@ mod tests {
                 "alias {s:?} should parse to PrevTab"
             );
         }
+    }
+
+    /// Every action name must resolve in BOTH spellings.
+    ///
+    /// The config tokenizer folds `_` to `-` so that Terminator's key
+    /// spellings match kettle's hyphenated arms. That fold also rewrites the
+    /// action names in a `[keybindings]` section — `new_tab` arrives here as
+    /// `new-tab` — and this table is written almost entirely in underscores,
+    /// so the section imported as nothing at all. The reverse fold in
+    /// `from_name` closes it; this walks the table to prove there is no name
+    /// that works in one spelling only, in either direction.
+    #[test]
+    fn every_action_name_resolves_in_both_spellings() {
+        let src = include_str!("keybinds.rs");
+        let start = src.find("pub fn from_name(").expect("from_name");
+        let body = &src[start..];
+        let end = body.find("\n    pub fn ").unwrap_or(body.len());
+        let body = &body[..end];
+
+        let mut checked = 0usize;
+        for lit in body.split('"').skip(1).step_by(2) {
+            // Only the action-name literals: lowercase words joined by `_`
+            // or `-`, which is every arm pattern in the table.
+            if lit.is_empty()
+                || !lit
+                    .bytes()
+                    .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_' || b == b'-')
+            {
+                continue;
+            }
+            let Some(expected) = Action::from_name(lit) else {
+                continue;
+            };
+            checked += 1;
+            let underscored = lit.replace('-', "_");
+            let hyphenated = lit.replace('_', "-");
+            assert_eq!(
+                Action::from_name(&underscored),
+                Some(expected.clone()),
+                "{lit:?} must also resolve as {underscored:?}"
+            );
+            assert_eq!(
+                Action::from_name(&hyphenated),
+                Some(expected),
+                "{lit:?} must also resolve as {hyphenated:?} — the config \
+                 tokenizer hands action names over in this spelling"
+            );
+        }
+        assert!(
+            checked > 100,
+            "expected to walk the whole action table, only saw {checked} names"
+        );
     }
 
     /// Drift guard: Terminator's scroll/tab action spellings parse so

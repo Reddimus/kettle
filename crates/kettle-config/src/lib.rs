@@ -2337,6 +2337,59 @@ fn normalize_key(k: &str) -> String {
     k.trim().to_ascii_lowercase().replace('-', "_")
 }
 
+/// Split a Pango font description — Terminator's `font = Mono 10` — into a
+/// family and an optional size.
+///
+/// Pango's grammar is `FAMILY [STYLE-OPTIONS] [SIZE]`, so the size is a
+/// trailing number and everything before it is the family (families may
+/// contain spaces: `DejaVu Sans Mono 11`). Returns `None` for an empty value so
+/// the caller leaves the existing settings alone.
+///
+/// Style words (`Bold`, `Italic`, …) are deliberately kept as part of the
+/// family string rather than parsed out: kettle selects styles per-run from the
+/// terminal's own attributes, so a style baked into the base family would fight
+/// that. Leaving them in means `Mono Bold 10` resolves through the same
+/// family-matching path as any other family name.
+fn parse_font_description(value: &str) -> Option<(String, Option<f32>)> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    match trimmed.rsplit_once(char::is_whitespace) {
+        // A trailing token that parses as a positive size is the Pango size.
+        Some((family, last)) => match last.parse::<f32>() {
+            Ok(size) if size.is_finite() && size > 0.0 => {
+                Some((family.trim().to_string(), Some(size)))
+            }
+            _ => Some((trimmed.to_string(), None)),
+        },
+        // Single token: a bare family with no size.
+        None => Some((trimmed.to_string(), None)),
+    }
+}
+
+/// Parse Terminator's colon-separated palette list into ordered colours.
+///
+/// Terminator writes `palette = "#2e3436:#cc0000:…"` — the whole palette in one
+/// value, slots in order. Returns `None` when the value is not a colon list or
+/// any element is not a colour, so the caller can fall through to kettle's
+/// `N=#hex` and named-preset forms rather than half-applying a malformed list.
+///
+/// Accepts 8 or 16 entries: Terminator itself writes 16, but an 8-entry list
+/// (the normal-intensity half) appears in older configs and hand-written ones,
+/// and applying it to slots 0..8 is exactly right.
+fn parse_colon_palette(value: &str) -> Option<Vec<Rgb>> {
+    let trimmed = value.trim();
+    if !trimmed.contains(':') {
+        return None;
+    }
+    let parts: Vec<&str> = trimmed.split(':').map(str::trim).collect();
+    if !matches!(parts.len(), 8 | 16) {
+        return None;
+    }
+    parts.into_iter().map(Rgb::parse).collect()
+}
+
 impl Default for Config {
     fn default() -> Self {
         Config {
@@ -3379,7 +3432,18 @@ impl Config {
                 // `cursor-style-blink = no` quietly enabled the blink.
                 // Validate the WHOLE bool-key set (was only
                 // 8 of ~100), so `borderless = treu` etc. are caught too.
-                k if Self::BOOL_KEYS.contains(&k) => parse_bool(v).is_some(),
+                // Compare in the parser's folded spelling. `BOOL_KEYS` lists
+                // both spellings of many keys for documentation and coverage
+                // asserts, and the tokenizer now yields only the hyphenated
+                // form — a raw `contains` would silently stop validating every
+                // underscore-spelled entry, so a typo'd `allow_bold = treu`
+                // would go back to being accepted in silence.
+                k if Self::BOOL_KEYS
+                    .iter()
+                    .any(|listed| listed.replace('_', "-") == k) =>
+                {
+                    parse_bool(v).is_some()
+                }
                 // Enum keys that previously fell through to
                 // `_ => true` (silently kept their default on a typo).
                 "focus" => matches!(
@@ -3538,7 +3602,10 @@ impl Config {
                 _ => true,
             };
             if !ok {
-                bad.push(format!("{} = {:?}", e.key, v));
+                // Echo the user's own spelling. The parser folds `_`→`-`
+                // internally, but a diagnostic that renames their key sends
+                // them looking for a line their file does not contain.
+                bad.push(format!("{} = {:?}", e.raw_key, v));
             }
         }
         bad
@@ -3597,6 +3664,24 @@ impl Config {
                 "font-family" => {
                     if !e.value.trim().is_empty() {
                         cfg.font_family = e.value.clone();
+                    }
+                }
+                // Terminator's `font = Mono 10` — a Pango font description
+                // carrying BOTH family and size, and the single most-set
+                // profile key. kettle only had `font-family` + `font-size`, so
+                // the whole line was an unrecognised key and both values were
+                // lost. Split the trailing size off the description; an
+                // explicit `font-family` / `font-size` still wins by
+                // precedence, since those arms assign unconditionally and this
+                // one only fills what the description carried.
+                "font" => {
+                    if let Some((family, size)) = parse_font_description(&e.value) {
+                        if !family.is_empty() {
+                            cfg.font_family = family;
+                        }
+                        if let Some(size) = size {
+                            cfg.font_size = size;
+                        }
                     }
                 }
                 "font-family-bold" => {
@@ -3714,6 +3799,17 @@ impl Config {
                         && let (Ok(i), Some(c)) = (i.trim().parse(), Rgb::parse(h.trim()))
                     {
                         explicit_palette.push((i, c));
+                    } else if let Some(colors) = parse_colon_palette(&e.value) {
+                        // Terminator's own spelling — `palette =
+                        // "#2e3436:#cc0000:…"`, a colon-separated list of
+                        // slots in order. This is the key most Terminator
+                        // users customise, and it previously fell into the
+                        // named-preset branch below (a colon list contains no
+                        // `=`), failed `Theme::find_name`, and applied
+                        // nothing: the whole palette silently discarded.
+                        for (i, c) in colors.into_iter().enumerate() {
+                            explicit_palette.push((i, c));
+                        }
                     } else if !e.value.contains('=') {
                         // Terminator parity (palette
                         // named-preset alias): Terminator accepts
@@ -4853,7 +4949,27 @@ impl Config {
                     }
                 }
                 "keybind" => keybinds::apply_keybind(&mut cfg.keybinds, &e.value),
-                other => unknown.push(other.to_string()),
+                // A line keyed by a bare ACTION name is Terminator's
+                // `[keybindings]` grammar: `new_tab = <Control><Shift>t`.
+                // kettle's own grammar is the inverse — `keybind =
+                // <trigger>=<action>` — so every such line was an unknown key
+                // and the whole section imported as nothing. Rewrite it into
+                // kettle's form when the key names a real action AND the value
+                // parses as a trigger; anything else still falls through to
+                // the unknown-key warning rather than being silently eaten.
+                other
+                    if keybinds::Action::from_name(other).is_some()
+                        && keybinds::parse_trigger(&e.value).is_some() =>
+                {
+                    keybinds::apply_keybind(
+                        &mut cfg.keybinds,
+                        &format!("{}={}", e.value, e.raw_key),
+                    );
+                }
+                // Report the spelling the user actually wrote, not the folded
+                // one — otherwise the warning names a line that does not exist
+                // in their file.
+                _ => unknown.push(e.raw_key.clone()),
             }
         }
         for (i, c) in explicit_palette {
@@ -10514,5 +10630,107 @@ cell-height = 1.2\n";
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "font-size = 14\n");
         assert!(!path.with_extension("bak").exists());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod terminator_import_tests {
+    use super::*;
+
+    /// A config copied from Terminator must actually import. Every line below
+    /// is Terminator's own spelling — underscore keys, GTK accelerators, a
+    /// Pango font description, a colon palette, and quoted values as
+    /// Terminator's manual itself writes them.
+    ///
+    /// Each of these was previously dropped: the keys were unrecognised, the
+    /// quotes defeated the value parsers, and the `[keybindings]` grammar is
+    /// the inverse of kettle's.
+    #[test]
+    fn a_real_terminator_config_imports() {
+        let cfg = Config::parse_text(
+            "\
+scroll_on_keystroke = False\n\
+scroll_on_output = True\n\
+background_color = \"#1a1b26\"\n\
+foreground_color = '#c0caf5'\n\
+font = DejaVu Sans Mono 13\n\
+palette = \"#2e3436:#cc0000:#4e9a06:#c4a000:#3465a4:#75507b:#06989a:#d3d7cf\"\n\
+new_tab = <Control><Shift>y\n\
+split_horiz = <Control><Shift>j\n",
+        );
+
+        // Underscore keys reach their hyphenated arms.
+        assert!(!cfg.scroll_on_keystroke, "scroll_on_keystroke must apply");
+        assert!(cfg.scroll_on_output, "scroll_on_output must apply");
+
+        // Quoted colours survive the quotes.
+        assert_eq!(cfg.theme.background, Rgb::parse("#1a1b26").unwrap());
+        assert_eq!(cfg.theme.foreground, Rgb::parse("#c0caf5").unwrap());
+
+        // A Pango description carries BOTH family and size.
+        assert_eq!(cfg.font_family, "DejaVu Sans Mono");
+        assert!(
+            (cfg.font_size - 13.0).abs() < f32::EPSILON,
+            "font size from the Pango description, got {}",
+            cfg.font_size
+        );
+
+        // The colon palette lands in order, quotes and all.
+        assert_eq!(cfg.theme.palette[0], Rgb::parse("#2e3436").unwrap());
+        assert_eq!(cfg.theme.palette[1], Rgb::parse("#cc0000").unwrap());
+        assert_eq!(cfg.theme.palette[7], Rgb::parse("#d3d7cf").unwrap());
+
+        // GTK accelerators bind through the bare-action-name grammar.
+        //
+        // The chords here are deliberately ones kettle does NOT ship a default
+        // for. This assertion used to read `<Control><Shift>t` → `NewTab`,
+        // which is kettle's own stock binding — so it passed no matter what
+        // the importer did, and it went on passing while every line in a
+        // `[keybindings]` section was in fact being dropped as an unknown key.
+        // Binding a chord that starts out unbound is the only version of this
+        // check that can fail when the import breaks.
+        let stock = Config::parse_text("");
+        for (chord, action) in [
+            ("ctrl+shift+y", keybinds::Action::NewTab),
+            ("ctrl+shift+j", keybinds::Action::SplitDown),
+        ] {
+            let trig = keybinds::parse_trigger(chord).expect("trigger parses");
+            assert_eq!(
+                stock.keybinds.get(&trig),
+                None,
+                "{chord} must start out unbound or this proves nothing"
+            );
+            assert_eq!(
+                cfg.keybinds.get(&trig).cloned(),
+                Some(action),
+                "Terminator's `{chord}` line must bind"
+            );
+        }
+    }
+
+    /// The GTK accelerator rewrite must not disturb kettle's own spelling.
+    #[test]
+    fn kettle_trigger_spelling_is_unchanged_by_the_accelerator_rewrite() {
+        assert_eq!(
+            keybinds::parse_trigger("ctrl+shift+t"),
+            keybinds::parse_trigger("<Control><Shift>t"),
+            "both spellings must produce the same trigger"
+        );
+        assert_eq!(
+            keybinds::parse_trigger("alt+1"),
+            keybinds::parse_trigger("<Alt>1")
+        );
+        // Junk still fails rather than silently binding something.
+        assert!(keybinds::parse_trigger("<Control>").is_none());
+    }
+
+    /// Only a MATCHED pair is stripped, and only the outermost one, so values
+    /// that legitimately contain quotes are preserved.
+    #[test]
+    fn unquoting_is_conservative() {
+        let cfg = Config::parse_text("window-title-format = \"a'b\"\n");
+        assert_eq!(cfg.window_title_format, "a'b");
+        let mismatched = Config::parse_text("window-title-format = \"unterminated\n");
+        assert_eq!(mismatched.window_title_format, "\"unterminated");
     }
 }
