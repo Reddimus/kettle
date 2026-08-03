@@ -14,7 +14,10 @@ the version below is present in the changelog but not yet as a Git tag or a
 GitHub release. Git tags and GitHub releases remain authoritative for what has
 actually shipped.
 
-- Latest release: `v2.46.0`
+- Latest version in this tree: `v2.46.0` — carried by the changelog and the
+  version-bearing source files. It becomes a release when release CI publishes
+  the tag; until then the entry above it is the newest thing that actually
+  shipped.
 - Current workspace version: `2.46.0`
 - Release records inspected: 150 Git tags and 150 changelog headings, from
   `v0.1.0` through `v2.46.0`
