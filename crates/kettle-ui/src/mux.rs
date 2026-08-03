@@ -477,6 +477,14 @@ pub(crate) enum PaneTitleOrigin {
     ExplicitLaunch,
     Osc,
     Remote,
+    /// The user named this pane by hand.
+    ///
+    /// Without this variant the edit was overwritten by the next OSC 0/2 the
+    /// shell emitted — which bash and zsh send on EVERY prompt — so naming a
+    /// pane `db-prod` lasted under a second. Terminator keeps the equivalent
+    /// state as `titlebar.set_custom_string`, and its editable label no-ops
+    /// while custom (editablelabel.py:60-64).
+    Manual,
 }
 
 pub struct Pane {
@@ -2298,6 +2306,31 @@ impl Mux {
     pub fn close_tab(&mut self) -> bool {
         let a = self.active;
         self.close_tab_at(a)
+    }
+
+    /// Index of the tab that currently holds `pane`, or `None` if no tab
+    /// does.
+    ///
+    /// A tab index is only meaningful at the instant it is read: a shell
+    /// exiting reaps its pane, which can drop a whole tab and shift every
+    /// index after it down one. That is fine for code that closes a tab
+    /// immediately, but not for anything that remembers a tab across a
+    /// pause — most of all the `ask-before-closing` prompt, which can sit
+    /// on screen indefinitely waiting for an answer. Naming the tab by a
+    /// pane it contains survives those shifts, and a pane id is never
+    /// reused, so a stale id resolves to `None` (the tab is already gone)
+    /// rather than to somebody else's tab.
+    /// A pane id that names the tab at `idx` for as long as that tab exists —
+    /// the inverse of [`Mux::tab_index_of_pane`], and the way to hold onto a
+    /// tab across anything that can renumber the tab list.
+    pub fn tab_anchor_pane(&self, idx: usize) -> Option<u64> {
+        self.tabs.get(idx).map(|t| t.root.first_leaf())
+    }
+
+    pub fn tab_index_of_pane(&self, pane: u64) -> Option<usize> {
+        self.tabs
+            .iter()
+            .position(|t| t.root.leaf_ids().contains(&pane))
     }
 
     /// Terminator parity, detachable-tabs Bucket-D: extract a tab
@@ -4724,6 +4757,77 @@ mod node_tests {
         // Closing the final tab reports "empty".
         assert!(m.close_tab_at(0));
         assert!(m.tabs.is_empty());
+    }
+
+    /// The whole reason the `ask-before-closing` prompt names a tab by a pane
+    /// instead of by an index: the prompt can sit on screen for as long as the
+    /// user takes to answer, and a shell exiting in the meantime drops its tab
+    /// and shifts every index after it down one. A remembered index would then
+    /// resolve to somebody else's tab — confirming "close this tab" would close
+    /// a different one.
+    #[test]
+    fn a_tab_anchor_outlives_the_tabs_being_renumbered() {
+        let mut m = Mux::new();
+        for id in 1..=3u64 {
+            m.tabs.push(Tab {
+                root: Node::Leaf(id),
+                focus: id,
+                title_override: None,
+                zoomed: false,
+                last_output_at: None,
+                last_seen_at: None,
+                bell: false,
+            });
+        }
+
+        // Take an anchor on the third tab, the way the ✕ button does.
+        let anchor = m.tab_anchor_pane(2).expect("third tab exists");
+        assert_eq!(m.tab_index_of_pane(anchor), Some(2));
+
+        // A shell exits in the first tab while the prompt is still up.
+        assert!(!m.close_tab_at(0));
+        // The raw index 2 is now out of bounds, but the anchor still finds the
+        // tab the user actually pointed at.
+        assert_eq!(
+            m.tab_index_of_pane(anchor),
+            Some(1),
+            "the anchored tab moved, it did not become a different tab"
+        );
+
+        // Now the anchored tab itself goes away before the answer arrives.
+        assert!(!m.close_tab_at(1));
+        assert_eq!(
+            m.tab_index_of_pane(anchor),
+            None,
+            "a tab that is already gone must resolve to nothing, never to a \
+             surviving tab — pane ids are process-global and never reused, so \
+             this cannot alias"
+        );
+
+        // Anchoring past the end is simply no tab.
+        assert_eq!(m.tab_anchor_pane(99), None);
+    }
+
+    /// A split tab must be anchorable by any pane it holds, not just its first
+    /// leaf — closing a pane inside the tab rewrites the tree and can change
+    /// which leaf comes first.
+    #[test]
+    fn a_tab_anchor_resolves_from_any_pane_in_a_split() {
+        let mut m = Mux::new();
+        let mut root = Node::Leaf(10);
+        assert!(root.split_leaf(10, 20, Dir::Horizontal));
+        m.tabs.push(Tab {
+            root,
+            focus: 10,
+            title_override: None,
+            zoomed: false,
+            last_output_at: None,
+            last_seen_at: None,
+            bell: false,
+        });
+        assert_eq!(m.tab_index_of_pane(10), Some(0));
+        assert_eq!(m.tab_index_of_pane(20), Some(0), "the sibling too");
+        assert_eq!(m.tab_index_of_pane(30), None, "a pane in no tab");
     }
 
     #[test]
