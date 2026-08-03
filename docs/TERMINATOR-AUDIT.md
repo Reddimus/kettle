@@ -16,15 +16,20 @@ cross-check — the parity claims held against source (residual gaps tracked in
 
 Correction pass, 2026-08-03. A machine check of this document against both
 sources — every Terminator option name it cites, checked against a clone of
-the audited SHA; every kettle symbol it names, checked against the tree —
-found claims that no source supported:
+the audited SHA; every kettle symbol it names, checked against the Rust
+sources under `crates/` — found claims that no source supported:
 
 - Options attributed to Terminator that Terminator does not have, at any SHA:
   `hide_titlebar` (the real key is `show_titlebar`, and the sense was
   inverted), `tab_max_width`, and `use_login_shell` (the real key is
   `login_shell`, which was already covered by its own row).
 - A kettle function credited by name in two places, `maybe_confirm_then`,
-  which has never existed in the tree.
+  that exists in no Rust source. It is not a typo for something real: it was
+  specified as pseudocode in
+  [`TERMINATOR-CONFIRM-DIALOG-DESIGN.md`](TERMINATOR-CONFIRM-DIALOG-DESIGN.md)
+  and announced in `CHANGELOG.md`, and then the feature shipped a different
+  way. Design and release prose recorded the plan; nothing checked that the
+  plan is what landed, and this document repeated the name as evidence.
 - `ask_before_closing` described as "complete end-to-end" while four close
   gestures bypassed the prompt entirely.
 
@@ -446,7 +451,7 @@ The full feature-by-feature ledger. Rows flip from B/C → ✅ A as cycles land.
 | ~~`always_on_top`~~ | config.py | ✅ bool config key, applied via winit `WindowLevel::AlwaysOnTop` |
 | `sticky` (on all workspaces) | config.py | 🟡 wired on macOS via `winit::platform::macos::WindowExtMacOS::set_visible_on_all_workspaces(true)`, called post-construction (Window-level method, not a build-time attribute like `with_skip_taskbar`'s). X11/Wayland remain Bucket E (winit 0.30 doesn't expose `_NET_WM_STATE_STICKY`; would need raw-window-handle direct atom writes — heavy dep for one config key). A Terminator config that sets `sticky = true` works correctly on macOS; on other platforms the value parses without effect. |
 | `hide_from_taskbar` | config.py | 🟡 wired on Windows via `WindowAttributesExtWindows::with_skip_taskbar` (winit 0.30 only exposes the API there). X11/Wayland/macOS remain Bucket E (would need raw-window-handle direct atom writes). A Terminator config that sets `hide_from_taskbar = true` works correctly on Windows; on other platforms the value parses without effect. |
-| ~~`ask_before_closing = always/multiple_terminals/never`~~ | config.py | ✅ `should_prompt` helper, state types, keyboard nav state machine, renderer bottom-bar projection, and mouse hit-testing for the visible `[Cancel]` / `[Close]` buttons. Every close gesture routes through the `confirm_close` gate. **This row previously read "complete end-to-end" and credited a `maybe_confirm_then` dispatch wrapper — no such function has ever existed in kettle, and the claim was wrong on the substance too: only the three close *actions* asked. The titlebar ✕, Alt+F4, the tab-bar ✕ button, and middle-clicking a tab all closed without prompting, under every setting including `always`. Fixed and drift-guarded since.** Centered-panel rendering remains optional polish. |
+| ~~`ask_before_closing = always/multiple_terminals/never`~~ | config.py | ✅ `should_prompt` helper, state types, keyboard nav state machine, renderer bottom-bar projection, and mouse hit-testing for the visible `[Cancel]` / `[Close]` buttons. Every close gesture routes through the `confirm_close` gate. **This row previously read "complete end-to-end" and credited a `maybe_confirm_then` dispatch wrapper — that name exists only in this feature's design pseudocode and its changelog entry, never in a Rust source, and the claim was wrong on the substance too: only the three close *actions* asked. The titlebar ✕, Alt+F4, the tab-bar ✕ button, and middle-clicking a tab all closed without prompting, under every setting including `always`. Fixed and drift-guarded since.** Centered-panel rendering remains optional polish. |
 | ~~`exit_action = close/restart/hold`~~ | config.py | ✅ `exit-action` config key honors close/hold/restart |
 | ~~`login_shell`~~ | config.py | ✅ `login-shell` config key threaded through `Terminal::new_with_env` (`kettle-ui/mux.rs`) so the spawn argv gets `-l` when true |
 | ~~`geometry_hinting`~~ (font-step resize) | config.py | ✅ `geometry-hinting` config key honored via winit `with_resize_increments` (8x16 px approximation; X11 honors, Wayland varies, macOS no-op) |
