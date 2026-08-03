@@ -111,6 +111,9 @@ pub fn commands() -> Vec<(&'static str, Action)> {
         ("Group every pane in this window", GroupWindow),
         ("Ungroup every pane in this tab", UngroupTab),
         ("Ungroup every pane in this window", UngroupWindow),
+        ("Group every pane as \"All\"", GroupAll),
+        ("Ungroup every pane", UngroupAll),
+        ("Toggle grouping every pane as \"All\"", ToggleGroupAll),
         ("Reset terminal", Reset),
         ("Clear scrollback", ClearHistory),
         ("Reload config", ReloadConfig),
@@ -279,6 +282,9 @@ mod tests {
             GroupWindow,
             UngroupTab,
             UngroupWindow,
+            GroupAll,
+            UngroupAll,
+            ToggleGroupAll,
             OpenContextMenu,
             UndoCloseTab,
             DuplicateTab,
@@ -395,6 +401,9 @@ mod tests {
                 | CreateGroup
                 | GroupTab
                 | GroupWindow
+                | GroupAll
+                | UngroupAll
+                | ToggleGroupAll
                 | UngroupTab
                 | UngroupWindow
                 | OpenContextMenu

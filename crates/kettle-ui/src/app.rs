@@ -1142,6 +1142,15 @@ pub enum ConfirmKeyResult {
     Ignore,
 }
 
+/// The group name Terminator's `group_all` uses (`window.py:936`, `_('All')`).
+///
+/// A named constant so the importer, the dispatch, and any future "is
+/// everything grouped?" check cannot disagree about the spelling — the name is
+/// user-visible in the titlebar pill.
+fn kettle_ui_group_all_name() -> &'static str {
+    "All"
+}
+
 /// How much a close of the tab at `idx` would take: `(panes, busy)`.
 ///
 /// `busy` counts only panes that are NOT sitting idle at an integrated-shell
@@ -13028,6 +13037,43 @@ impl App {
                     input: String::new(),
                     bulk,
                 });
+                if let Some(w) = &ws.window {
+                    w.request_redraw();
+                }
+            }
+            Action::GroupAll | Action::UngroupAll | Action::ToggleGroupAll => {
+                // Terminator parity (window.py:933 / :947). `group_all` puts
+                // every terminal into a group literally named "All"; there is
+                // no prompt, which is what separates it from `GroupWindow`.
+                // `ungroup_all` is its partner.
+                //
+                // Terminator's scope is process-wide; kettle applies it to
+                // every pane in this window, which is the same set for the
+                // single-window case that covers nearly all use, and is the
+                // widest scope this dispatch can reach without reaching into
+                // other windows' muxes mid-borrow.
+                let all = kettle_ui_group_all_name();
+                // `group_all_toggle` ungroups when everything is already in
+                // the group, and groups otherwise (window.py:940). An empty
+                // window has nothing grouped, so it groups.
+                let already_grouped = !ws.mux.panes.is_empty()
+                    && ws
+                        .mux
+                        .panes
+                        .values()
+                        .all(|p| p.group_name.as_deref() == Some(all));
+                let group = match action {
+                    Action::GroupAll => true,
+                    Action::UngroupAll => false,
+                    _ => !already_grouped,
+                }
+                .then(|| all.to_string());
+                let pane_ids: Vec<u64> = ws.mux.panes.keys().copied().collect();
+                for id in pane_ids {
+                    if let Some(p) = ws.mux.panes.get_mut(&id) {
+                        p.group_name = group.clone();
+                    }
+                }
                 if let Some(w) = &ws.window {
                     w.request_redraw();
                 }
