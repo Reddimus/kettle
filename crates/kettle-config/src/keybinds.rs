@@ -596,6 +596,8 @@ pub fn action_names() -> Vec<&'static str> {
         "search",
         "broadcast_all",
         "group_all",
+        "broadcast_tab",
+        "broadcast-tab",
         "group_all_toggle",
         "group_tab_toggle",
         "group_win_toggle",
@@ -832,7 +834,21 @@ impl Action {
             "decrease_font_size" | "zoom_out" => DecreaseFontSize,
             "reset_font_size" | "zoom_normal" => ResetFontSize,
             "start_search" | "search" => StartSearch,
-            "broadcast_all" | "group_all" => ToggleBroadcastAll,
+            // Terminator's `broadcast_all` is `set_groupsend('all')`
+            // (terminal.py:2193-2195) — EVERY terminal, not just the current
+            // tab's. It previously aliased to `ToggleBroadcastAll`, whose
+            // dispatch sets `BroadcastScope::Tab`, so a user who bound
+            // `broadcast_all` and typed a command believed it reached every
+            // pane while it reached only the focused tab's. Narrowing the
+            // blast radius silently is the dangerous direction for a broadcast
+            // feature. `ToggleBroadcastWindow` is the window-wide scope, which
+            // this crate's own docs already called "Terminator's true
+            // broadcast_all".
+            "broadcast_all" | "group_all" => ToggleBroadcastWindow,
+            // Kept reachable under an honest name: this is the per-tab scope.
+            // NOT spelled `group_tab` — that is Terminator's "group every
+            // terminal in this tab" action and already maps to `GroupTab`.
+            "broadcast_tab" | "broadcast-tab" => ToggleBroadcastAll,
             "broadcast_off" | "ungroup_all" => ToggleBroadcastOff,
             "broadcast_group"
             | "broadcast-group"

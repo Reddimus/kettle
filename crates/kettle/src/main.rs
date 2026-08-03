@@ -1139,6 +1139,27 @@ fn main() -> anyhow::Result<()> {
     {
         return Err(anyhow::anyhow!("--config {}: {reason}", p.display()));
     }
+    // `--profile NAME` gets the same treatment, and for a sharper reason than
+    // `--config` had. A profile that does not resolve used to fall all the way
+    // through to `Config::default()` — so `--profile darkk` launched with
+    // COMPILE-TIME defaults rather than the user's own config: stock theme,
+    // stock font, stock keybinds, no diagnostic. Losing every setting is a
+    // worse outcome than refusing to start, and `--config` already treats a
+    // bad path as fatal, so a typo'd profile should not be quietly different.
+    // `--config` wins when both are given (see the resolution below), so this
+    // only fires when the profile is the one actually being used.
+    // Skipped for the modes that never load a profile. `--print-default-config`
+    // and `--write-default-config` early-return further down and emit compiled
+    // defaults, so refusing to start over an unrelated `--profile` typo would
+    // block work the profile has no bearing on.
+    if cli.config.is_none()
+        && !cli.print_default_config
+        && !cli.write_default_config
+        && let Some(name) = cli.profile.as_deref()
+        && let Some(reason) = profile_problem(name)
+    {
+        return Err(anyhow::anyhow!("--profile {name}: {reason}"));
+    }
     // Same shape for `--working-directory DIR`. The engine
     // silently falls back to `$HOME` when the directory doesn't exist
     // (see `kettle_core::term::Terminal::new`: `Some(d) if is_dir =>
@@ -1951,6 +1972,49 @@ fn config_path_problem(p: &std::path::Path) -> Option<&'static str> {
         Some("not readable (permission denied or I/O error)")
     } else {
         None
+    }
+}
+
+/// Why `--profile NAME` cannot be used, or `None` when it resolves.
+///
+/// A profile that does not resolve previously fell through to
+/// `Config::default()`, so a typo launched kettle with compile-time defaults
+/// instead of the user's settings — everything they had configured, silently
+/// gone. The message names the profiles that DO exist, because the usual cause
+/// is a typo and the fix is one word.
+///
+/// Kept separate from [`config_path_problem`] rather than merged: the failure
+/// modes differ (a name that sanitises to nothing has no path to stat) and the
+/// remedy shown to the user is a list of names, not a filesystem diagnosis.
+fn profile_problem(name: &str) -> Option<String> {
+    // Resolve the config directory FIRST. Both `list_profiles` (empty Vec) and
+    // `path_for_profile` (None) collapse "no config dir" into the same answer
+    // they give for "nothing there" and "bad name" — so without this check the
+    // message would confidently say "no profiles are configured" or "not a
+    // usable profile name" on a host where the real problem is that no $HOME /
+    // XDG / APPDATA could be located at all.
+    if kettle_config::Config::default_path().is_none() {
+        return Some(String::from(
+            "cannot locate a config directory (no HOME / XDG_CONFIG_HOME / APPDATA), \
+             so no profile can be resolved",
+        ));
+    }
+    let available = kettle_config::Config::list_profiles();
+    let suffix = if available.is_empty() {
+        // Now unambiguous: the directory resolved and holds no profiles.
+        String::from("; no profiles were found")
+    } else {
+        format!("; available: {}", available.join(", "))
+    };
+    match kettle_config::Config::path_for_profile(name) {
+        // The config dir is known to resolve, so this can only be the name.
+        None => Some(format!("not a usable profile name{suffix}")),
+        Some(p) if !p.is_file() => Some(format!("no such profile{suffix}")),
+        Some(p) if std::fs::File::open(&p).is_err() => Some(format!(
+            "profile file is not readable (permission denied or I/O error): {}",
+            p.display()
+        )),
+        Some(_) => None,
     }
 }
 
