@@ -170,6 +170,95 @@ pub fn parse(input: &str) -> Vec<Entry> {
 }
 
 #[cfg(test)]
+mod section_tests {
+    use super::*;
+
+    /// `section_header` slices by BYTE offset (`line[depth..len - depth]`), so
+    /// a multi-byte character in a header must not be able to land a boundary
+    /// mid-character. That would panic on a config file — untrusted input,
+    /// often someone else's file pasted from a forum.
+    ///
+    /// Symmetry is what makes it safe: the function refuses unless the leading
+    /// and trailing bracket counts are equal, and brackets are single-byte, so
+    /// both offsets always land on an ASCII bracket. Proven here, not argued.
+    #[test]
+    fn a_section_header_never_slices_a_character_in_half() {
+        for line in [
+            "[é]",
+            "[[é]]",
+            "[[[é]]]",
+            "[日本語]",
+            "[[プロファイル]]",
+            "[emoji 🦀 here]",
+            "[[🦀]]",
+            "[ﬁ]",
+            "[e\u{301}]",
+            "[👩\u{200d}💻]",
+        ] {
+            assert!(
+                section_header(line).is_some(),
+                "{line:?} is a well-formed header"
+            );
+            // And the whole tokenizer survives it.
+            let _ = parse(&format!("{line}\nfoo = bar\n"));
+        }
+    }
+
+    /// Adversarial and degenerate headers must be refused, not misread — and
+    /// above all must not panic.
+    #[test]
+    fn a_malformed_section_header_is_refused_without_panicking() {
+        for line in [
+            "[", "]", "[]", "[[]]", "[[[]]]", "]]", "[[", "[a]]", "[[a]", "[ ]", "[  ]", "a[b]",
+            "[b]c", "[[a]]]", "[]]", "[[]",
+        ] {
+            let got = section_header(line);
+            assert!(
+                got.is_none(),
+                "{line:?} must not be read as a header, got {got:?}"
+            );
+            let _ = parse(&format!("{line}\nfoo = bar\n"));
+        }
+    }
+
+    /// Deep nesting must not index past the string. Terminator itself only
+    /// goes three deep, but a hand-edited or generated file can say anything.
+    #[test]
+    fn absurd_nesting_depth_is_handled() {
+        for depth in [1usize, 2, 3, 8, 64, 512] {
+            let line = format!("{}name{}", "[".repeat(depth), "]".repeat(depth));
+            assert_eq!(section_header(&line), Some((depth, "name")));
+            let _ = parse(&format!("{line}\nfoo = bar\n"));
+        }
+        // Brackets with nothing between them is not a header at any depth.
+        for depth in [1usize, 4, 64] {
+            let line = format!("{}{}", "[".repeat(depth), "]".repeat(depth));
+            assert_eq!(section_header(&line), None);
+        }
+    }
+
+    /// A config with no section headers is kettle's own format, and the
+    /// section machinery must be completely inert for it.
+    #[test]
+    fn a_flat_config_is_untouched_by_section_filtering() {
+        let flat = "theme = TokyoNight Night\nfont-size = 14\n# comment\n\nscrollback = 5000\n";
+        let entries = parse(flat);
+        assert_eq!(entries.len(), 3);
+        assert_eq!(entries[0].key, "theme");
+        assert_eq!(entries[2].value, "5000");
+    }
+
+    /// A value that merely LOOKS like a header must still be a value.
+    #[test]
+    fn a_bracketed_value_is_not_a_header() {
+        let entries = parse("word-delimiters = []{}()\ntrigger = [error]\n");
+        assert_eq!(entries.len(), 2, "both lines are assignments");
+        assert_eq!(entries[0].value, "[]{}()");
+        assert_eq!(entries[1].value, "[error]");
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
