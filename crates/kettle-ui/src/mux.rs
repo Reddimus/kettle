@@ -4901,9 +4901,22 @@ mod node_tests {
         assert_eq!(m.active_focus(), Some(20));
 
         // Re-focusing by id is what makes the confirmed close act on the
-        // original target rather than on whatever is focused now.
+        // original target rather than on whatever is focused now — and the
+        // close must then actually take pane 10, not its sibling. Asserting
+        // only the refocus let an implementation that refocused 10 and closed
+        // 20 pass.
         assert!(m.focus_pane(10), "the target is still present");
         assert_eq!(m.active_focus(), Some(10));
+        assert!(!m.close_focused(), "the tab survives its sibling");
+        assert!(
+            !m.panes.contains_key(&10),
+            "pane 10 — the prompt's target — is gone"
+        );
+        assert_eq!(
+            m.active_focus(),
+            Some(20),
+            "and the sibling the user did NOT select is still here"
+        );
 
         // A target that is already gone reports so, and the caller closes
         // nothing rather than falling back to the current focus.
@@ -4930,14 +4943,21 @@ mod node_tests {
         assert_eq!(m.tab_index_of_any_pane(&[10]), Some(0));
         assert_eq!(m.tab_index_of_any_pane(&[20]), Some(0), "the sibling too");
         assert_eq!(m.tab_index_of_any_pane(&[30]), None, "a pane in no tab");
-        // The anchor is the WHOLE tab, so losing one pane does not lose the
-        // tab: this is what a single first-leaf anchor got wrong.
-        assert_eq!(m.tab_anchor_panes(0), vec![10, 20]);
+
+        // The point of anchoring on the WHOLE tab: remove the first pane and
+        // the anchor must still find the tab. A resolver that only consulted
+        // `panes[0]` passed every assertion above and failed exactly here.
+        let anchor = m.tab_anchor_panes(0);
+        assert_eq!(anchor, vec![10, 20]);
+        m.focus_pane(10);
+        assert!(!m.close_focused(), "the tab survives");
         assert_eq!(
-            m.tab_index_of_any_pane(&[10, 20]),
+            m.tab_index_of_any_pane(&anchor),
             Some(0),
-            "any surviving pane still names the tab"
+            "pane 20 still names the tab after pane 10 exited"
         );
+        // The surviving pane is now the whole tab.
+        assert_eq!(m.tab_anchor_panes(0), vec![20]);
     }
 
     #[test]

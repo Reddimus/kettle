@@ -13047,31 +13047,65 @@ impl App {
                 // no prompt, which is what separates it from `GroupWindow`.
                 // `ungroup_all` is its partner.
                 //
-                // Terminator's scope is process-wide; kettle applies it to
-                // every pane in this window, which is the same set for the
-                // single-window case that covers nearly all use, and is the
-                // widest scope this dispatch can reach without reaching into
-                // other windows' muxes mid-borrow.
+                // Terminator's scope is its whole terminal collection
+                // (`self.terminator.terminals`), so this reaches every window,
+                // not just the focused one — see the loop below.
                 let all = kettle_ui_group_all_name();
-                // `group_all_toggle` ungroups when everything is already in
-                // the group, and groups otherwise (window.py:940). An empty
-                // window has nothing grouped, so it groups.
-                let already_grouped = !ws.mux.panes.is_empty()
-                    && ws
-                        .mux
-                        .panes
-                        .values()
-                        .all(|p| p.group_name.as_deref() == Some(all));
+                // `group_all_toggle` asks the INVOKING terminal, not the whole
+                // set (window.py:940-945: `if widget.group == 'All'`). Testing
+                // "is everything already grouped" instead inverted the answer
+                // whenever one sibling had been ungrouped by hand: Terminator
+                // ungroups everything, kettle grouped the straggler.
                 let group = match action {
                     Action::GroupAll => true,
                     Action::UngroupAll => false,
-                    _ => !already_grouped,
+                    _ => ws.mux.focused().and_then(|p| p.group_name.as_deref()) != Some(all),
                 }
                 .then(|| all.to_string());
-                let pane_ids: Vec<u64> = ws.mux.panes.keys().copied().collect();
+                // Terminator's scope is its whole terminal collection, across
+                // every window (`self.terminator.terminals`), so a second
+                // kettle window must not be left out.
+                for target in std::iter::once(&mut *ws).chain(self.windows.values_mut()) {
+                    let pane_ids: Vec<u64> = target.mux.panes.keys().copied().collect();
+                    for id in pane_ids {
+                        if let Some(p) = target.mux.panes.get_mut(&id) {
+                            p.group_name = group.clone();
+                        }
+                    }
+                    if let Some(w) = &target.window {
+                        w.request_redraw();
+                    }
+                }
+            }
+            Action::ToggleGroupTab | Action::ToggleGroupWindow => {
+                // Terminator parity (window.py:959, :987). It tests the
+                // INVOKING terminal's group and generates the name rather than
+                // asking for one — `Tab N` / `Window group N` — which is what
+                // makes these a toggle at all, where kettle's `GroupTab` and
+                // `GroupWindow` open the name prompt.
+                let tab_scope = matches!(action, Action::ToggleGroupTab);
+                let name = if tab_scope {
+                    format!("Tab {}", ws.mux.active + 1)
+                } else {
+                    format!("Window group {}", ws.seq)
+                };
+                let grouped = ws
+                    .mux
+                    .focused()
+                    .and_then(|p| p.group_name.as_deref())
+                    .is_some_and(|g| g == name);
+                let pane_ids: Vec<u64> = if tab_scope {
+                    ws.mux
+                        .tabs
+                        .get(ws.mux.active)
+                        .map(|t| t.root.leaf_ids())
+                        .unwrap_or_default()
+                } else {
+                    ws.mux.panes.keys().copied().collect()
+                };
                 for id in pane_ids {
                     if let Some(p) = ws.mux.panes.get_mut(&id) {
-                        p.group_name = group.clone();
+                        p.group_name = (!grouped).then(|| name.clone());
                     }
                 }
                 if let Some(w) = &ws.window {
@@ -13902,14 +13936,26 @@ impl App {
                 // confirming then closed the sibling, which can be a tmux or
                 // agent session the user never selected. A target that is
                 // already gone means there is nothing left to close.
+                // Re-focusing the target moves the ACTIVE TAB to wherever it
+                // lives. If the user changed tabs while the prompt was up (the
+                // ctl API can, even with a modal on screen), snapping them back
+                // to the closed pane's tab is not something they asked for —
+                // so remember where they were and put them back.
+                let viewing = ws.mux.active;
                 if !ws.mux.focus_pane(target) {
                     if let Some(w) = &ws.window {
                         w.request_redraw();
                     }
                     return;
                 }
+                let closing_tab = ws.mux.active;
                 self.fire_pane_close_event(ws, target);
                 let was_last = ws.mux.close_focused();
+                // Only restore when they were genuinely somewhere else; the
+                // close itself may have shifted indices, so clamp.
+                if !was_last && viewing != closing_tab && viewing < ws.mux.tabs.len() {
+                    ws.mux.active = viewing;
+                }
                 // Honor close_focused()'s return like the
                 // keybind ClosePane path — `true` means the last pane closed,
                 // so exit; otherwise redraw the collapsed layout (the renderer
@@ -23826,9 +23872,16 @@ mod modal_discipline_guard {
         let tab_exit = body
             .find("if last {")
             .expect("confirmed tab close must exit on the last tab");
+        // Scoped to the TAB arm. Searching the whole dispatch for
+        // `pending_window_close` passed even with the assignment deleted from
+        // this arm, because the pane arm below contains one too.
+        let tab_arm = &body[tab_close..];
+        let tab_arm = &tab_arm[..tab_arm
+            .find("ConfirmAction::ClosePane")
+            .unwrap_or(tab_arm.len())];
         assert!(
             body.contains("ws.mux.tab_index_of_any_pane(&panes)")
-                && body.contains("self.pending_window_close = true;")
+                && tab_arm.contains("self.pending_window_close = true;")
                 && tab_close < tab_event
                 && tab_event < tab_exit,
             "a confirmed tab close must re-resolve its target, emit the event \
@@ -23864,6 +23917,10 @@ mod modal_discipline_guard {
         let close_call = ["ws.mux.", "close_focused();"].concat();
         let focus_capture = ["let closing_pane = ws.mux.", "active_focus();"].concat();
         let lifecycle_call = ["self.fire_pane_close_event", "(ws, id);"].concat();
+        // The confirmed close names its target explicitly rather than reading
+        // the current focus, so it spells both of these differently.
+        let confirm_capture = ["if !ws.mux.focus", "_pane(target) {"].concat();
+        let confirm_event = ["self.fire_pane_close_event", "(ws, target);"].concat();
         let close_positions = source
             .match_indices(&close_call)
             .map(|(position, _)| position)
@@ -23873,18 +23930,27 @@ mod modal_discipline_guard {
             2,
             "every close_focused call site must be lifecycle-audited"
         );
+        // Each site is checked against the region since the PREVIOUS site, not
+        // against the whole prefix. `rfind` over everything before a call let
+        // the confirmed-close arm satisfy itself with the direct-close arm's
+        // capture/event pair further up the file, so deleting the confirmed
+        // arm's lifecycle event still passed.
+        let mut region_start = 0usize;
         for close_position in close_positions {
-            let prefix = &source[..close_position];
-            let capture_position = prefix
+            let region = &source[region_start..close_position];
+            let capture_position = region
                 .rfind(&focus_capture)
-                .expect("pane id captured before close");
-            let event_position = prefix
+                .or_else(|| region.rfind(&confirm_capture))
+                .expect("pane id captured before close, in this arm");
+            let event_position = region
                 .rfind(&lifecycle_call)
-                .expect("pane-close lifecycle event present");
+                .or_else(|| region.rfind(&confirm_event))
+                .expect("pane-close lifecycle event present, in this arm");
             assert!(
-                capture_position < event_position && event_position < close_position,
+                capture_position < event_position,
                 "pane-close callbacks must run while the addressed PTY still exists"
             );
+            region_start = close_position;
         }
     }
 }
@@ -25683,6 +25749,44 @@ mod tests {
     /// and the loop wakes at the GIF's frame boundary (`bg_anim_interval`), not a
     /// fixed 30 fps. Requesting it every `about_to_wait` (level-triggered) made
     /// winit redraw continuously — the ~55% animated-idle CPU regression.
+    /// The group actions must actually GROUP, not just resolve to a name.
+    ///
+    /// The config-side test proves `group_all` maps to `Action::GroupAll`; it
+    /// says nothing about what the dispatch does, so deleting or no-oping the
+    /// arm left it green. Building a real window needs a live App, so the
+    /// wiring is pinned here.
+    #[test]
+    fn the_group_all_actions_reach_a_dispatch_that_groups() {
+        let src = include_str!("app.rs").replace("\r\n", "\n");
+        let arm_head = [
+            "Action::GroupAll | Action::Ungroup",
+            "All | Action::ToggleGroupAll => {",
+        ]
+        .concat();
+        let at = src
+            .find(arm_head.as_str())
+            .expect("GroupAll/UngroupAll/ToggleGroupAll must have a dispatch arm");
+        let arm: String = src[at..].chars().take(2400).collect();
+        assert!(
+            arm.contains("p.group_name = group.clone();"),
+            "the arm must write the group onto panes, not merely exist"
+        );
+        assert!(
+            arm.contains("kettle_ui_group_all_name()"),
+            "and use Terminator's own fixed name"
+        );
+        // Terminator's scope is its whole terminal collection, across windows.
+        assert!(
+            arm.contains("self.windows.values_mut()"),
+            "grouping must reach every window, not just the focused one"
+        );
+        // The toggle asks the INVOKING pane, matching window.py:940-945.
+        assert!(
+            arm.contains("ws.mux.focused()"),
+            "the toggle must test the focused pane, not the whole set"
+        );
+    }
+
     /// `icon_bell` shipped as a setting that could not do anything.
     ///
     /// The renderer draws the per-pane titlebar bell on `cfg.icon_bell &&

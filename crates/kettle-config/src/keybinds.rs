@@ -439,6 +439,19 @@ pub enum Action {
     /// Terminator parity (`group_all_toggle`, window.py:940): group every pane
     /// as `All`, or ungroup them if they already are.
     ToggleGroupAll,
+    /// Terminator parity (`group_tab_toggle`, window.py:987): group every pane
+    /// in this tab under a generated `Tab N` name, or ungroup them if they
+    /// already carry one.
+    ///
+    /// Distinct from [`Action::GroupTab`], which prompts for a name — and
+    /// distinct in the type system for a second reason: two Terminator names
+    /// that both resolved to `GroupTab` made an imported `group_tab` line and
+    /// an imported `group_tab_toggle` line fight over the same action, so the
+    /// second silently unbound the first.
+    ToggleGroupTab,
+    /// Terminator parity (`group_win_toggle`, window.py:959): the same for
+    /// every pane in the window, under a generated `Window group N`.
+    ToggleGroupWindow,
     /// Terminator parity (key_page_up_half): scroll up
     /// half a page.
     ScrollPageUpHalf,
@@ -899,8 +912,8 @@ impl Action {
             // grouping half — a prompt the user did not expect, where the old
             // broadcast mapping was a different feature entirely that silently
             // duplicated every keystroke across every pane.
-            "group_tab_toggle" => GroupTab,
-            "group_win_toggle" => GroupWindow,
+            "group_tab_toggle" => ToggleGroupTab,
+            "group_win_toggle" => ToggleGroupWindow,
 
             "toggle_fullscreen" | "full_screen" => ToggleFullscreen,
             "reset" => Reset,
@@ -1097,9 +1110,12 @@ fn normalize_gtk_accelerator(s: &str) -> Option<std::borrow::Cow<'_, str>> {
             break;
         }
         let Some(close) = rest.find('>') else {
-            // `<Control` with no `>` is not an accelerator. Refuse rather than
-            // guess at what was meant.
-            return None;
+            // No closing `>`, so this is not a GTK accelerator at all — it is
+            // kettle's own grammar, where `<` is a perfectly ordinary key.
+            // `keybind = <=copy` binds it, and refusing here broke that.
+            // Whatever remains becomes the key; a genuine typo like `<Control`
+            // then fails at the key parser, which is where it should fail.
+            break;
         };
         let modifier = &rest[open + 1..close];
         if modifier.is_empty() {
@@ -1400,6 +1416,20 @@ pub fn apply_exclusive_keybind(map: &mut Bindings, value: &str) {
     // other tabs' chords alone.
     map.retain(|existing, bound| *existing == t || *bound != a);
     map.insert(t, a);
+}
+
+/// Remove every chord bound to `action_name`.
+///
+/// Terminator's `[keybindings]` grammar disables a shortcut by giving it an
+/// empty accelerator — its shipped defaults contain several, and its
+/// preferences UI writes one when a binding is cleared. Ignoring those lines
+/// left kettle's own default chord live, so a config that deliberately freed a
+/// chord (to hand it back to tmux, AstroNvim, or an agent CLI) did not free it.
+pub fn unbind_action(map: &mut Bindings, action_name: &str) {
+    let Some(a) = Action::from_name(action_name) else {
+        return;
+    };
+    map.retain(|_, bound| *bound != a);
 }
 
 /// Recognize the unbind sentinels: empty, `unbind`, `none`, `null`, `false`.
@@ -2324,19 +2354,19 @@ mod tests {
     /// a Terminator config bound a grouping key to a broadcast toggle, and one
     /// press sent everything the user typed to every pane at once.
     ///
-    /// `group_tab_toggle` / `group_win_toggle` bind kettle's grouping actions,
-    /// which prompt for the group name where Terminator generates one. That
-    /// prompt is a real divergence, and a much smaller one than performing a
-    /// different feature.
+    /// Each toggle is its OWN action rather than an alias of the non-toggling
+    /// one. Two Terminator names resolving to a single kettle action made an
+    /// imported config containing both silently unbind the first, since an
+    /// imported binding is exclusive per action.
     #[test]
     fn from_name_accepts_terminator_group_toggle_aliases() {
         for (s, want) in [
             ("group_all_toggle", Action::ToggleGroupAll),
             ("group-all-toggle", Action::ToggleGroupAll),
-            ("group_tab_toggle", Action::GroupTab),
-            ("group-tab-toggle", Action::GroupTab),
-            ("group_win_toggle", Action::GroupWindow),
-            ("group-win-toggle", Action::GroupWindow),
+            ("group_tab_toggle", Action::ToggleGroupTab),
+            ("group-tab-toggle", Action::ToggleGroupTab),
+            ("group_win_toggle", Action::ToggleGroupWindow),
+            ("group-win-toggle", Action::ToggleGroupWindow),
         ] {
             assert_eq!(
                 Action::from_name(s).as_ref(),
