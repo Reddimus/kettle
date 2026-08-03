@@ -1092,7 +1092,13 @@ The most recent additions:
 
 - **kettle-remote crate** (SSH / Docker / Podman / kubectl / lxc
   detection) — drives per-pane title prefixes and the right-click "Clone
-  session" entry. Windows and macOS retain the cross-platform `sysinfo`
+  session" entry. A detected context carries the options that select the
+  endpoint (ssh port / ProxyJump / identity / config file; container client
+  context, daemon address, namespace, config file, in-pod container) so the
+  reconnect command reproduces the original session rather than whatever the
+  client's defaults reach; an option that cannot be reproduced faithfully
+  suppresses the menu entry instead. Windows and macOS retain the
+  cross-platform `sysinfo`
   snapshot. One coalescing worker owns process enumeration for all windows and
   wakes the event loop only after publishing a complete latest snapshot.
   Linux starts from known PTY child PIDs and follows bounded

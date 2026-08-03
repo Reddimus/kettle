@@ -104,12 +104,58 @@ the heavy sysinfo dep doesn't propagate to non-UI consumers (the headless
 
 ```rust
 pub enum RemoteContext {
-    Ssh { host: String, user: Option<String> },
-    Container { runtime: ContainerRuntime, container: String },
+    Ssh { host: String, user: Option<String>, options: SshOptions },
+    Container {
+        runtime: ContainerRuntime,
+        container: String,
+        options: ContainerOptions,
+    },
 }
 
 pub enum ContainerRuntime { Docker, Podman, Kubectl, Lxc }
 ```
+
+A name is not an endpoint. `box` reached over `-p 2222 -J bastion` and `box`
+reached directly are different services; `web` under `docker --context remote`
+and `web` on the local daemon are containers on different machines. `SshOptions`
+(port, ProxyJump, identity, config file) and `ContainerOptions` (client context,
+daemon/API-server address, namespace, config file, in-pod container) carry what
+selects the endpoint so `clone_session_command` can reproduce it.
+
+Both option structs also carry an `unreproducible` flag for the cases this crate
+will not re-emit — an `-o ProxyCommand=…` is an arbitrary shell command, `-W`
+makes the session a stdio forward rather than a shell, `--token` is a credential
+that must never be echoed back into a command line, and so are the identity
+selectors around it (the kubeconfig `--user`, `--as`, the TLS and
+client-certificate flags, `ssh -o IdentityFile=…`) because reconnecting without
+them silently falls back to a different account. A flag whose name says endpoint
+on a runtime whose own table does not claim it fails closed the same way.
+`clone_session_command` returns `None` for all of these and the caller drops the
+menu entry: no Reconnect beats a Reconnect that lands somewhere else. The pane
+still gets its remote title.
+
+### Reading the argv the way each CLI reads it
+
+The walk is a parser for four real command lines, not a keyword search, and the
+places where the four disagree are exactly where a wrong endpoint comes from:
+
+- **Short bundles** follow getopt(3)/pflag: every letter is an option, booleans
+  bundle freely, and the first value-taking letter takes the rest of the token
+  or the next argv element. A boolean is not always inert — `podman -r` selects
+  the remote service with no value attached.
+- **`--`** is not one rule. docker and podman use it only to end flag parsing,
+  so `docker exec -- web sh` still names `web`. kubectl's `exec` reads how many
+  positionals preceded it (cobra's `ArgsLenAtDash`) and, when none did, treats
+  everything after it as the command with the pod coming from `-f`/stdin.
+- **A container named outside the argv** — `kubectl exec -f pod.yaml`, `podman
+  exec --latest` — leaves nothing to title or reconnect to, so detection yields
+  `None` rather than promoting the command to a container name.
+
+Values that do survive are validated against a per-field charset at parse time
+and single-quoted at build time. The charset is wide enough for the paths people
+actually have (`C:\Program Files (x86)\…`, `/home/o'brien/…` — every character
+in it is literal inside `'…'`, apostrophes included via the `'\''` idiom) and
+bounded in length, because the result is typed into a live PTY.
 
 ## Phase roadmap
 

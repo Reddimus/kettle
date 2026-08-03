@@ -537,9 +537,23 @@ discipline here.
   require the phase timestamp to advance before a redraw request, and normalize
   repeated empty IME preedit notifications to the same absent state.
 
-- **kettle-remote** (30+ tests): injected process-tree fixtures cover SSH and
+- **kettle-remote** (50+ tests): injected process-tree fixtures cover SSH and
   container detection, deterministic breadth-first selection, cwd/shell clone
-  behavior, cycles, missing roots, and injection-safe reconnect commands. The
+  behavior, cycles, missing roots, and injection-safe reconnect commands.
+  Endpoint fidelity has its own set: the options that decide which machine a
+  host or container name reaches (ssh port / ProxyJump / identity / config
+  file, Docker and Podman context, daemon address, kubectl namespace and in-pod
+  container, lxc container root) must survive into the reconnect command in
+  both their separated and joined spellings, an option value must never be read
+  as the host or container, and an option that cannot be reproduced — a
+  ProxyCommand, a stdio forward, a bearer token, a credential or identity
+  selector — must yield no reconnect command at all while leaving the remote
+  title intact. Each suppression set is paired with positive controls, so
+  "suppressed" cannot pass by suppressing everything; `--` is asserted per CLI
+  (docker/podman keep naming the container after it, kubectl and `podman exec
+  --latest` never do); ordinary Windows and POSIX paths must KEEP the entry; and
+  a structural guard walks both option tables against the emit tables so an
+  option can never be captured into a slot the reconnect command would drop. The
   portable proc parsers reject invalid/overflowed PIDs and preserve lossy argv;
   Linux CI additionally builds a synthetic proc tree and proves the rooted
   scanner finds the requested SSH descendant and cwd without reading an

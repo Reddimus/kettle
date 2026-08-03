@@ -38,14 +38,89 @@ pub use sysinfo::System as SysinfoSystem;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RemoteContext {
     /// SSH session. `host` is the target host (e.g. `box.example.com`);
-    /// `user` is the optional username if the argv had `user@host`.
-    Ssh { host: String, user: Option<String> },
+    /// `user` is the optional username if the argv had `user@host` or `-l user`;
+    /// `options` carries the connection options that decide which endpoint the
+    /// host name actually resolves to.
+    Ssh {
+        host: String,
+        user: Option<String>,
+        options: SshOptions,
+    },
     /// Container session (Docker / Podman / kubectl exec / lxc-attach).
-    /// `container` is the target name/id from the argv.
+    /// `container` is the target name/id from the argv; `options` carries the
+    /// client-side context that decides which daemon, cluster, or namespace
+    /// that name lives in.
     Container {
         runtime: ContainerRuntime,
         container: String,
+        options: ContainerOptions,
     },
+}
+
+/// The `ssh` connection options that decide WHICH endpoint a session reached.
+///
+/// A host name on its own does not identify a service: `ssh -p 2222 -J bastion
+/// -i key box` and `ssh box` are two different machines behind one word. The
+/// detector therefore carries these alongside the host so
+/// [`clone_session_command`] can reproduce the original endpoint instead of a
+/// plausible-looking neighbour.
+///
+/// Values are validated at parse time (same conservative-charset rule as the
+/// host/user fields) and single-quoted at build time. An endpoint-selecting
+/// option that cannot be reproduced sets [`unreproducible`](Self::unreproducible)
+/// instead, which suppresses the Reconnect entry entirely.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SshOptions {
+    /// `-p PORT` (or the joined `-pPORT`): the port the session connected to.
+    pub port: Option<String>,
+    /// `-J DESTINATION`: the ProxyJump chain the session tunnelled through. A
+    /// reconnect without it either fails or lands on a same-named host in the
+    /// local network instead.
+    pub jump: Option<String>,
+    /// `-i IDENTITY_FILE`: the key the endpoint authenticated. Dropping it can
+    /// silently select a different account on the same host.
+    pub identity: Option<String>,
+    /// `-F CONFIG_FILE`: the config that resolves host aliases, and therefore
+    /// what `host` names at all.
+    pub config: Option<String>,
+    /// An endpoint-selecting option was present that this crate does not
+    /// reproduce — `-o ProxyCommand=…` (an arbitrary shell command), `-W`
+    /// (the session is a stdio forward, not a shell), or a value that escaped
+    /// its charset. The pane still gets a remote title; the Reconnect entry is
+    /// dropped rather than pointed somewhere else.
+    pub unreproducible: bool,
+}
+
+/// The client-side context that decides WHICH daemon, cluster, or namespace an
+/// `exec` attached to.
+///
+/// As with [`SshOptions`], the container name alone is not an endpoint:
+/// `docker --context remote exec web` and `docker exec web` are containers on
+/// two different machines, and `kubectl -n prod exec api` and `kubectl exec
+/// api` are two different pods.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ContainerOptions {
+    /// Which named connection the client used: Docker `--context`/`-c`,
+    /// Podman `--connection`/`-c`, kubectl `--context`.
+    pub context: Option<String>,
+    /// The daemon / API-server address given directly: Docker `--host`/`-H`,
+    /// Podman `--url`, kubectl `--server`/`-s`.
+    pub endpoint: Option<String>,
+    /// kubectl `--namespace`/`-n`.
+    pub namespace: Option<String>,
+    /// The file or directory that resolves everything else: Docker `--config`,
+    /// kubectl `--kubeconfig`, `lxc-attach --lxcpath`/`-P`.
+    pub config: Option<String>,
+    /// `kubectl exec --container`/`-c`: which container inside the pod. A pod
+    /// is not one shell — reconnecting without this lands in the pod's default
+    /// container.
+    pub pod_container: Option<String>,
+    /// An endpoint-selecting option was present that this crate does not
+    /// reproduce — a credential that must never be re-emitted (`--token`,
+    /// `--password`), a selector with no single-flag equivalent, or a value
+    /// that escaped its charset. Reconnect is suppressed rather than sent to
+    /// the local daemon.
+    pub unreproducible: bool,
 }
 
 /// Which container runtime the detected `docker exec` /
@@ -1207,18 +1282,129 @@ fn has_control_char(s: &str) -> bool {
 /// nothing and closes the injection surface.
 fn field_is_safe(s: &str, extra: &str) -> bool {
     !s.is_empty()
+        && s.len() <= MAX_FIELD_LEN
         && s.chars()
             .all(|c| c.is_ascii_alphanumeric() || extra.contains(c))
 }
+
+/// Longest argv-derived value any field will carry into the auto-executed
+/// Reconnect line. Nothing legitimate comes close — the longest realistic case
+/// is a Windows extended-length path, and even those stay well under this — but
+/// the values come from a descendant process's argv, which the user did not
+/// necessarily type. Without a cap, one field can make the emitted line longer
+/// than the tty's canonical input buffer (4096 bytes on Linux), and the shell
+/// then sees a truncated line: harmless in practice, because truncation lands
+/// inside a `'…'` and leaves an unterminated quote rather than a different
+/// command, but a bounded value is the property to have on a line kettle types
+/// into a PTY for the user.
+const MAX_FIELD_LEN: usize = 512;
 
 /// SSH host: DNS labels (`a-z0-9.-`), IPv6 literals (`:`, optional `[ ]`
 /// brackets and `%zone`), and the `user@host` split already consumed the `@`.
 const SSH_HOST_EXTRA: &str = ".-_:%[]";
 /// SSH login user: POSIX usernames plus the small set real-world accounts use.
 const SSH_USER_EXTRA: &str = ".-_$\\@";
+/// SSH ProxyJump destination (`-J`): a host, plus the `user@` prefix and the
+/// `,` that separates a multi-hop chain.
+const SSH_JUMP_EXTRA: &str = ".-_:%[]@,";
+/// A filesystem path given as an option value (`ssh -i`/`-F`, `docker
+/// --config`, `kubectl --kubeconfig`, `lxc-attach --lxcpath`). Every character
+/// here is literal inside the POSIX single quotes the value is emitted in
+/// (including `'` itself, which [`shell_single_quote`] closes/escapes/reopens
+/// with the canonical `'\''` idiom), so the set is as wide as real paths need:
+/// `C:\Program Files (x86)\…` is the ordinary shape of a Windows install path,
+/// and a set without `(`/`)` silently removed the whole Reconnect entry for it
+/// rather than reproducing it.
+///
+/// Still excluded — and the reason this is an allowlist at all — is everything
+/// that would matter if the quoting layer were ever wrong: `$`, backtick, `"`,
+/// `;`, `|`, `&&`-style control, redirection, glob, and any control character.
+/// A path needing one of those is not reproduced (see
+/// [`SshOptions::unreproducible`]).
+const FILE_PATH_EXTRA: &str = "./\\-_~: +@()[]{},=#!%'";
 /// Container name/id: Docker/Podman/kubectl/lxc allow `[A-Za-z0-9][A-Za-z0-9_.-]`
 /// plus `/` (kubectl `type/name`, registry-qualified refs) and `:` (tags).
 const CONTAINER_EXTRA: &str = ".-_:/";
+/// A daemon / API-server address (`docker -H`, `podman --url`, `kubectl -s`):
+/// `tcp://host:2375`, `unix:///var/run/docker.sock`, `ssh://user@host`.
+const CONTAINER_ENDPOINT_EXTRA: &str = ".-_:/@+%[]";
+
+/// Record an endpoint-selecting option value, or — when the value escapes its
+/// charset — mark the context unreproducible. Losing the value silently is the
+/// one outcome that is not allowed: it would leave a Reconnect that looks
+/// right and connects elsewhere.
+fn capture_option(slot: &mut Option<String>, unreproducible: &mut bool, value: &str, safe: bool) {
+    if safe {
+        *slot = Some(value.to_string());
+    } else {
+        *unreproducible = true;
+    }
+}
+
+/// One short-option occurrence pulled out of a `-abc`-style argv token.
+struct ShortOption<'a> {
+    /// The first value-taking letter in the bundle, if the bundle has one.
+    flag: Option<char>,
+    /// Its value: the remainder of the token (`-p2222`), or the next argv
+    /// element (`-p 2222`). `None` when the bundle ends on a value-taking
+    /// letter with nothing left to consume.
+    value: Option<&'a str>,
+    /// Whether `value` came from the NEXT argv element, so the caller advances
+    /// two tokens instead of one.
+    consumed_next: bool,
+    /// The boolean letters in front of [`flag`](Self::flag) — the whole bundle
+    /// when it has no value-taking letter at all. A boolean is not always
+    /// nothing: `podman -r` selects the remote service, so a caller that read
+    /// only the value-taking letter reconnected to the local socket.
+    booleans: &'a str,
+}
+
+/// Walk one `-abc` token the way getopt(3) — and Go's pflag, which
+/// docker/podman/kubectl use — does: every letter is an option, boolean
+/// letters bundle freely (`-it`, `-Nf`), and the first value-taking letter
+/// closes the bundle by taking the rest of the token as its value or, failing
+/// that, the next argv element.
+///
+/// Treating a bundle as one opaque token is what let `ssh -vp 2222 box` read
+/// `2222` as the destination and `kubectl exec -itc sidecar pod` read
+/// `sidecar` as the pod.
+fn parse_short_bundle<'a>(
+    bundle: &'a str,
+    next: Option<&'a str>,
+    mut takes_value: impl FnMut(char) -> bool,
+) -> ShortOption<'a> {
+    let mut rest = bundle;
+    let mut booleans_len = 0;
+    while let Some(flag) = rest.chars().next() {
+        rest = &rest[flag.len_utf8()..];
+        if !takes_value(flag) {
+            booleans_len += flag.len_utf8();
+            continue;
+        }
+        let booleans = &bundle[..booleans_len];
+        return if rest.is_empty() {
+            ShortOption {
+                flag: Some(flag),
+                value: next,
+                consumed_next: next.is_some(),
+                booleans,
+            }
+        } else {
+            ShortOption {
+                flag: Some(flag),
+                value: Some(rest),
+                consumed_next: false,
+                booleans,
+            }
+        };
+    }
+    ShortOption {
+        flag: None,
+        value: None,
+        consumed_next: false,
+        booleans: bundle,
+    }
+}
 
 /// v2.32.0 (audit H1, SECURITY): POSIX single-quote a dynamic field so it is
 /// inert when interpolated into a shell command — every character between the
@@ -1252,13 +1438,17 @@ fn shell_single_quote(s: &str) -> String {
 /// Host extraction:
 ///   - `ssh host`                            → host=host, user=None
 ///   - `ssh user@host`                       → host=host, user=Some(user)
-///   - `ssh -p 22 user@host`                 → same
+///   - `ssh -p 22 user@host`                 → same, port=Some("22")
 ///   - `ssh -o StrictHostKeyChecking=no host` → host=host
 ///   - `sshpass -p secret ssh user@host`     → host=host, user=Some(user)
 ///
-/// The detector skips `-flag value` and `-flag=value` and `--flag=value`
-/// prefixes to find the first non-option argv element. That element is
-/// the target (potentially `user@host`).
+/// Options are walked the way getopt(3) parses them (see
+/// [`parse_short_bundle`]) to find the first non-option argv element, which is
+/// the target (potentially `user@host`). Along the way the options that decide
+/// which endpoint that target names — port, ProxyJump, identity, config file,
+/// login name — are captured into [`SshOptions`] instead of merely skipped,
+/// and one that cannot be reproduced marks the context so no Reconnect is
+/// offered.
 ///
 /// Pure — takes a `&[String]` slice; unit-testable without spawning
 /// anything.
@@ -1312,66 +1502,78 @@ pub fn detect_ssh(argv: &[String]) -> Option<RemoteContext> {
     // the login user. An explicit `user@host` (parsed from `target` below) wins
     // per OpenSSH precedence, so `-l` only fills `user` when `user@host` didn't.
     let mut flag_user: Option<&str> = None;
+    // The remaining endpoint-selecting options travel with the host: `box` on
+    // its own is not a service, and a Reconnect that dropped `-p`/`-J`/`-i`
+    // would open a session on a different one.
+    let mut options = SshOptions::default();
     while i < argv.len() {
         let a = &argv[i];
-        if let Some(s) = a.strip_prefix("--")
-            && s.contains('=')
-        {
+        if a.starts_with("--") {
+            // OpenSSH takes no long options — a `--`-prefixed token is the
+            // end-of-options marker or something this detector cannot read.
             i += 1;
             continue;
         }
-        if let Some(s) = a.strip_prefix('-')
-            && !s.is_empty()
-        {
-            // `-o foo=bar` / `-p 22` / `-l user` / `-J jump` style: skip a value.
-            // This is the COMPLETE OpenSSH value-taking
-            // single-char option set (ssh(1)). The old subset omitted `-J`
-            // (ProxyJump, common in bastion setups) and `-w/-e/-m/-O/-Q/-S/-B/
-            // -E/-I`, so e.g. `ssh -J jump host` skipped nothing and took `jump`
-            // as the target → reconnected to the bastion. The joined form
-            // (`-Jjump`) is a single multi-char token and is already skipped as
-            // one below.
-            let needs_value = matches!(
-                s,
-                "B" | "b"
-                    | "c"
-                    | "D"
-                    | "E"
-                    | "e"
-                    | "F"
-                    | "I"
-                    | "i"
-                    | "J"
-                    | "L"
-                    | "l"
-                    | "m"
-                    | "O"
-                    | "o"
-                    | "p"
-                    | "Q"
-                    | "R"
-                    | "S"
-                    | "W"
-                    | "w"
-            );
-            if needs_value && i + 1 < argv.len() {
-                // H2 (audit v2.32.0): `-l user` (login name) — capture the value
-                // instead of merely skipping it, so a later Reconnect / title
-                // reproduces it. Only the bare `-l` form carries the user here;
-                // the joined `-luser` form is a single multi-char token that
-                // falls to the `else` (skipped, no separate value) — matching the
-                // pre-existing behavior for every other value-taking flag.
-                if s == "l" {
-                    flag_user = Some(argv[i + 1].as_str());
+        let Some(bundle) = a.strip_prefix('-').filter(|rest| !rest.is_empty()) else {
+            target = Some(a.as_str());
+            break;
+        };
+        let short = parse_short_bundle(bundle, argv.get(i + 1).map(String::as_str), |flag| {
+            SSH_VALUE_OPTIONS.contains(flag)
+        });
+        if let (Some(flag), Some(value)) = (short.flag, short.value) {
+            match flag {
+                'l' => flag_user = Some(value),
+                'p' => capture_option(
+                    &mut options.port,
+                    &mut options.unreproducible,
+                    value,
+                    ssh_port_is_safe(value),
+                ),
+                'J' => capture_option(
+                    &mut options.jump,
+                    &mut options.unreproducible,
+                    value,
+                    field_is_safe(value, SSH_JUMP_EXTRA),
+                ),
+                'i' => {
+                    // `-i` is the one repeatable endpoint option: OpenSSH tries
+                    // every identity it was given, in order. This crate has one
+                    // slot, so a second, different key is not reproducible —
+                    // re-emitting only the last one can authenticate as a
+                    // different account on the same host, which is the exact
+                    // outcome `unreproducible` exists to prevent.
+                    if options
+                        .identity
+                        .as_deref()
+                        .is_some_and(|first| first != value)
+                    {
+                        options.unreproducible = true;
+                    }
+                    capture_option(
+                        &mut options.identity,
+                        &mut options.unreproducible,
+                        value,
+                        field_is_safe(value, FILE_PATH_EXTRA),
+                    );
                 }
-                i += 2;
-            } else {
-                i += 1;
+                'F' => capture_option(
+                    &mut options.config,
+                    &mut options.unreproducible,
+                    value,
+                    field_is_safe(value, FILE_PATH_EXTRA),
+                ),
+                'o' => options.unreproducible |= ssh_option_selects_endpoint(value),
+                // `-W host:port` forwards stdio to a third host instead of
+                // opening a shell on the destination, so `ssh destination`
+                // would be a different session entirely.
+                'W' => options.unreproducible = true,
+                // Everything else (ciphers, forwards, log files, control
+                // sockets) leaves the endpoint where it was.
+                _ => {}
             }
-            continue;
         }
-        target = Some(a.as_str());
-        break;
+        i += if short.consumed_next { 2 } else { 1 };
     }
     let raw = target?;
     let (user, host) = match raw.split_once('@') {
@@ -1395,7 +1597,73 @@ pub fn detect_ssh(argv: &[String]) -> Option<RemoteContext> {
     {
         return None;
     }
-    Some(RemoteContext::Ssh { host, user })
+    Some(RemoteContext::Ssh {
+        host,
+        user,
+        options,
+    })
+}
+
+/// OpenSSH's complete set of value-taking single-char options (the ssh(1)
+/// synopsis). Every other option letter is a boolean and bundles freely, so
+/// `-vp 2222` is `-v` followed by `-p 2222`.
+///
+/// Getting this set wrong misreads the destination in both directions: a
+/// missing letter leaves an option VALUE looking like the host (this is how
+/// `-J jump` used to reconnect to the bastion), while a spurious one eats the
+/// host as a value. `P` is `-P tag`, not the long-removed boolean.
+const SSH_VALUE_OPTIONS: &str = "BbcDEeFIiJLlmOoPpQRSWw";
+
+/// A TCP port as `-p` accepts it.
+fn ssh_port_is_safe(port: &str) -> bool {
+    !port.is_empty() && port.len() <= 5 && port.chars().all(|c| c.is_ascii_digit())
+}
+
+/// Does this `-o Keyword=value` decide where the session lands?
+///
+/// `-o` opens the whole ssh_config grammar on the command line, and a handful
+/// of keywords replace the destination outright (`HostName`), tunnel it
+/// through another machine (`ProxyCommand`, `ProxyJump`), rewrite the name
+/// before it is looked up (`CanonicalizeHostname`), move the port or login, or
+/// pick the credential that decides which account the host authenticates
+/// (`IdentityFile`, `CertificateFile`, `IdentityAgent` — the `-o` spellings of
+/// the same choice `-i` makes). None of them is re-emitted: a `ProxyCommand`
+/// value is itself a shell command, and the ones that do have a flag
+/// equivalent (`Port`, `User`, `IdentityFile`) resolve against `-p`/`-l`/`-i`
+/// by rules subtle enough that guessing is worse than offering nothing. So the
+/// Reconnect entry is dropped instead. Keywords that only tune an existing
+/// connection (`StrictHostKeyChecking`, `ServerAliveInterval`, …) are ignored,
+/// as they always were.
+fn ssh_option_selects_endpoint(option: &str) -> bool {
+    // ssh accepts both `-o Keyword=value` and the quoted `-o "Keyword value"`,
+    // and OpenSSH's own config reader (`process_config_line`) skips leading
+    // whitespace before the keyword — so `-o " ProxyJump=bastion"` is honoured
+    // by ssh and must be honoured here too. Splitting without the trim yielded
+    // an empty keyword, which matched nothing and let the bastion be dropped.
+    let keyword = option
+        .trim_start_matches([' ', '\t'])
+        .split(['=', ' ', '\t'])
+        .next()
+        .unwrap_or(option)
+        .to_ascii_lowercase();
+    matches!(
+        keyword.as_str(),
+        "hostname"
+            | "port"
+            | "user"
+            | "proxycommand"
+            | "proxyjump"
+            | "hostkeyalias"
+            | "bindaddress"
+            | "bindinterface"
+            | "remotecommand"
+            | "include"
+            | "identityfile"
+            | "certificatefile"
+            | "identityagent"
+            | "canonicalizehostname"
+            | "canonicaldomains"
+    )
 }
 
 /// Phase 4 of [`TERMINATOR-REMOTE-DESIGN.md`](
@@ -1405,11 +1673,14 @@ pub fn detect_ssh(argv: &[String]) -> Option<RemoteContext> {
 ///   - `docker exec [-it] <container> <cmd> [args …]`
 ///   - `podman exec [-it] <container> <cmd> [args …]`
 ///   - `kubectl exec [-it] <pod> -- <cmd> [args …]`
-///     (also `kubectl exec [-it] -n ns <pod> -- <cmd>`)
-///   - `lxc-attach [-n] <container>`
+///     (also `kubectl exec [-it] -n ns <pod> [-c container] -- <cmd>`)
+///   - `lxc-attach [-n|--name] <container>`
 ///
 /// The container token is the first non-option argv element after
-/// the `exec` / `attach` subcommand (skipping `-flag value` pairs).
+/// the `exec` / `attach` subcommand (skipping `-flag value` pairs), and the
+/// options that name the daemon, cluster, or namespace it lives in are
+/// carried in [`ContainerOptions`] — the name alone would reconnect against
+/// whatever the client's defaults happen to be.
 ///
 /// Pure — argv-in, `Option<RemoteContext>`-out. Unit-testable.
 pub fn detect_container(argv: &[String]) -> Option<RemoteContext> {
@@ -1421,6 +1692,9 @@ pub fn detect_container(argv: &[String]) -> Option<RemoteContext> {
         "lxc-attach" => ContainerRuntime::Lxc,
         _ => return None,
     };
+    // The client-side context travels with the name: `web` on the local daemon
+    // and `web` under `--context remote` are containers on different machines.
+    let mut parse = ContainerParse::default();
     let mut i = 1; // skip argv[0] (the exe)
     if runtime != ContainerRuntime::Lxc {
         // Find the `exec` subcommand, allowing GLOBAL options
@@ -1441,53 +1715,30 @@ pub fn detect_container(argv: &[String]) -> Option<RemoteContext> {
         // token to be exactly "exec" — any other subcommand there
         // (`build`, `ps`, `run`, `inspect`, …) correctly yields `None`
         // instead of being scanned past.
-        const GLOBAL_LONG_NEEDS_VALUE: &[&str] = &[
-            "host",
-            "context",
-            "config",
-            "log-level",
-            "namespace",
-            "kubeconfig",
-            "cluster",
-            "user",
-            "server",
-            "token",
-            "as",
-            "as-group",
-            "request-timeout",
-            "tlscacert",
-            "tlscert",
-            "tlskey",
-        ];
         loop {
             let a = argv.get(i)?;
-            if let Some(stripped) = a.strip_prefix("--") {
-                if stripped.is_empty() {
+            if let Some(flag) = a.strip_prefix("--") {
+                if flag.is_empty() {
                     // Bare "--" before the subcommand isn't meaningful for
                     // any of these CLIs; skip rather than treat as positional.
                     i += 1;
                     continue;
                 }
-                // Once we know `stripped` has no `=`, it IS the flag name
-                // (a `--flag=value` token never reaches this check — the
-                // `!stripped.contains('=')` short-circuits first).
-                let needs_value = !stripped.contains('=')
-                    && i + 1 < argv.len()
-                    && GLOBAL_LONG_NEEDS_VALUE.contains(&stripped);
-                i += if needs_value { 2 } else { 1 };
+                i += apply_long_option(
+                    flag,
+                    argv.get(i + 1).map(String::as_str),
+                    |name| container_global_option(runtime, name),
+                    &mut parse,
+                );
                 continue;
             }
-            if let Some(stripped) = a.strip_prefix('-')
-                && !stripped.is_empty()
-            {
-                // Single-char global flags that take a value: docker/podman
-                // `-H`/`-c`, kubectl `-n`/`-s`. Bundled/boolean shorts (`-D`,
-                // `-v`) just skip one token — same conservative default the
-                // post-`exec` flag loop below uses.
-                let needs_value = stripped.len() == 1
-                    && matches!(stripped, "H" | "c" | "n" | "l" | "s")
-                    && i + 1 < argv.len();
-                i += if needs_value { 2 } else { 1 };
+            if let Some(bundle) = a.strip_prefix('-').filter(|rest| !rest.is_empty()) {
+                i += apply_short_option(
+                    bundle,
+                    argv.get(i + 1).map(String::as_str),
+                    |name| container_global_option(runtime, name),
+                    &mut parse,
+                );
                 continue;
             }
             // First non-flag token: it MUST be the `exec` subcommand — no
@@ -1499,88 +1750,424 @@ pub fn detect_container(argv: &[String]) -> Option<RemoteContext> {
             break;
         }
     }
-    // Skip flags + their values. Container CLIs share the same
-    // shape — `-it` is a stacked short-flag bundle (no value),
-    // `-n ns` is a flag + value (kubectl namespace), `-u user`
-    // is a flag + value (docker/podman user). Be conservative:
-    // single-char flags with known value-taking ones get +=2;
-    // bundled short-flags (`-it`, `-rm`) and `--flag=value` are +=1.
-    //
-    // Lxc special case: `lxc-attach -n NAME` is the *idiomatic*
-    // form. The value of `-n` IS the container name — capture
-    // it directly instead of skipping it.
-    let needs_value = |s: &str| matches!(s, "n" | "u" | "c" | "w" | "e");
+    // Walk the subcommand's own options. `-it` is a boolean bundle, `-n ns` is
+    // kubectl's namespace, `-u user` is a uid inside the container: whichever
+    // of those names part of the ENDPOINT is captured, the rest are consumed
+    // so their values never pass for the container itself.
     while i < argv.len() {
         let a = &argv[i];
         if a == "--" {
+            // What follows `--` is NOT the same thing for every CLI, and
+            // guessing costs an endpoint:
+            //
+            // - docker/podman: `--` only ends flag parsing. The positionals
+            //   after it are still `CONTAINER COMMAND …`, so `docker exec --
+            //   web sh` really does name `web` — keep walking.
+            // - kubectl: `exec` reads cobra's `ArgsLenAtDash`, and when no
+            //   positional preceded the `--` it takes EVERYTHING after it as
+            //   the command and the pod from `-f`/stdin instead. `kubectl exec
+            //   -f pod.yaml -- sh` runs `sh` in the manifest's pod; reading
+            //   past the `--` made the COMMAND the pod, so the menu offered to
+            //   re-attach to a container called `sh`.
+            // - either CLI once the container is known, or once a flag has
+            //   said the name lives outside the argv: the rest is the command
+            //   the session was running, never an option this walk should read.
+            if parse.container.is_some()
+                || parse.implicit_name
+                || runtime == ContainerRuntime::Kubectl
+            {
+                break;
+            }
             i += 1;
             continue;
         }
-        if let Some(stripped) = a.strip_prefix("--") {
-            // A bare `--flag` is VALUELESS by default — most
-            // docker/podman/kubectl exec long flags are booleans
-            // (--privileged/--interactive/--tty/--detach). The old `i += 2`
-            // treated `docker exec --privileged alpine sh` as `--privileged
-            // alpine`, skipping the container and returning `sh`. Only a small
-            // allowlist of long flags takes a separate value.
-            let long_needs_value = !stripped.contains('=')
-                && i + 1 < argv.len()
-                && matches!(
-                    stripped,
-                    "env"
-                        | "user"
-                        | "workdir"
-                        | "namespace"
-                        | "detach-keys"
-                        | "cidfile"
-                        | "name"
-                        | "context"
-                        | "kubeconfig"
-                );
-            i += if long_needs_value { 2 } else { 1 };
+        if let Some(flag) = a.strip_prefix("--") {
+            i += apply_long_option(
+                flag,
+                argv.get(i + 1).map(String::as_str),
+                |name| container_exec_option(runtime, name),
+                &mut parse,
+            );
             continue;
         }
-        if let Some(stripped) = a.strip_prefix('-')
-            && !stripped.is_empty()
-        {
-            // Lxc: -n VALUE is the container name.
-            if runtime == ContainerRuntime::Lxc && stripped == "n" && i + 1 < argv.len() {
-                let container = &argv[i + 1];
-                // H1 (audit v2.32.0, SECURITY): see the final return below.
-                if !field_is_safe(container, CONTAINER_EXTRA) {
-                    return None;
-                }
-                return Some(RemoteContext::Container {
-                    runtime,
-                    container: container.clone(),
-                });
-            }
-            let single_char_needs_value =
-                stripped.len() == 1 && needs_value(stripped) && i + 1 < argv.len();
-            if single_char_needs_value {
-                i += 2;
-            } else {
-                i += 1;
-            }
+        if let Some(bundle) = a.strip_prefix('-').filter(|rest| !rest.is_empty()) {
+            i += apply_short_option(
+                bundle,
+                argv.get(i + 1).map(String::as_str),
+                |name| container_exec_option(runtime, name),
+                &mut parse,
+            );
             continue;
         }
-        // First non-option positional. For Lxc the lxc-attach
-        // form is `lxc-attach -n name`; without `-n` the first
-        // positional IS the name. So either way, this is the
-        // container token.
-        // H1 (audit v2.32.0, SECURITY): reject a container token that carries a
-        // control char or escapes the conservative charset, so it can never
-        // become a RemoteContext whose Reconnect command the caller auto-execs.
-        // (clone_session_command additionally single-quotes — layer 2.)
-        if !field_is_safe(a, CONTAINER_EXTRA) {
-            return None;
+        // First non-option positional. For Lxc the lxc-attach form is
+        // `lxc-attach -n name`; without `-n` the first positional IS the name.
+        // `implicit_name` means an earlier flag already claimed the container
+        // slot from outside the argv (`podman exec --latest bash`), so this
+        // token is the command, not the name.
+        if parse.container.is_none() && !parse.implicit_name {
+            parse.container = Some(a.clone());
+        } else {
+            break;
         }
-        return Some(RemoteContext::Container {
-            runtime,
-            container: a.clone(),
-        });
+        // kubectl keeps parsing its own flags past the pod
+        // (`kubectl exec pod -c sidecar -- sh`); for the others the token
+        // after the container starts the command.
+        if runtime != ContainerRuntime::Kubectl {
+            break;
+        }
+        i += 1;
     }
-    None
+    // The container was named by a manifest file or by "whichever ran last":
+    // there is no name in this argv, and inventing one from the command that
+    // followed is precisely the defect this walk exists to avoid. A positional
+    // alongside such a flag (`kubectl exec pod -f pod.yaml`) is contradictory
+    // enough that the CLIs disagree about which wins, so that shape fails
+    // closed here too — an absent menu entry, never a guessed one.
+    if parse.implicit_name {
+        return None;
+    }
+    // H1 (audit v2.32.0, SECURITY): reject a container token that carries a
+    // control char or escapes the conservative charset, so it can never
+    // become a RemoteContext whose Reconnect command the caller auto-execs.
+    // (clone_session_command additionally single-quotes — layer 2.)
+    let container = parse.container?;
+    if !field_is_safe(&container, CONTAINER_EXTRA) {
+        return None;
+    }
+    Some(RemoteContext::Container {
+        runtime,
+        container,
+        options: parse.options,
+    })
+}
+
+/// Everything [`detect_container`]'s argv walk accumulates.
+///
+/// Bundled into one accumulator because the option appliers below have to be
+/// able to touch all three: an option can name the endpoint, name the
+/// container, or say that the container is named somewhere this detector
+/// cannot look.
+#[derive(Default)]
+struct ContainerParse {
+    /// The client-side context that decides which daemon/cluster/namespace the
+    /// name resolves in.
+    options: ContainerOptions,
+    /// The container name — from `lxc-attach -n`/`--name`, or from the first
+    /// positional after the subcommand.
+    container: Option<String>,
+    /// The invocation names its container through something outside the argv:
+    /// `kubectl exec -f pod.yaml` reads the pod out of a manifest, and `podman
+    /// exec --latest`/`-l` means "whichever container ran last". Both make
+    /// every remaining positional part of the COMMAND, so no token here is the
+    /// name — and with no name there is nothing to title or reconnect to, so
+    /// detection yields `None` rather than a plausible-looking wrong answer.
+    implicit_name: bool,
+}
+
+/// Where one recognized container-CLI option lands in [`ContainerOptions`].
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ContainerOptionSlot {
+    Context,
+    Endpoint,
+    Namespace,
+    Config,
+    PodContainer,
+    /// The container name itself (`lxc-attach -n`/`--name`).
+    Name,
+    /// The container is named outside the argv — `kubectl exec -f pod.yaml`
+    /// (inside the manifest) or `podman exec --latest` (whichever ran last).
+    /// See [`ContainerParse::implicit_name`].
+    ImplicitName,
+    /// Endpoint-selecting, but never reproduced: a credential kettle must not
+    /// echo into a command line, or a selector with no single-flag equivalent.
+    Unreproducible,
+    /// Recognized so that its value is consumed, but it leaves the endpoint
+    /// alone (`--user`, `--workdir`, `--log-level`, …).
+    Ignored,
+}
+
+/// Global options — those before the `exec` subcommand — that decide which
+/// daemon or cluster the client talks to. Returns the slot plus whether the
+/// option consumes a separate value; `None` means unrecognized, which skips
+/// the token without consuming a value (the conservative default this walk has
+/// always used for booleans).
+fn container_global_option(
+    runtime: ContainerRuntime,
+    name: &str,
+) -> Option<(ContainerOptionSlot, bool)> {
+    use ContainerOptionSlot as Slot;
+    use ContainerRuntime as Runtime;
+    Some(match (runtime, name) {
+        // Docker and Podman spell "which daemon" differently, and `-c` means
+        // a different flag in each.
+        (Runtime::Docker, "context" | "c") => (Slot::Context, true),
+        (Runtime::Podman, "connection" | "c") => (Slot::Context, true),
+        (Runtime::Docker, "host" | "H") => (Slot::Endpoint, true),
+        (Runtime::Podman, "url") => (Slot::Endpoint, true),
+        // The config dir holds Docker's current context, so it selects the
+        // daemon just as `--context` does.
+        (Runtime::Docker, "config") => (Slot::Config, true),
+        // `--remote`, and its documented `-r` alias, switch Podman to its
+        // default remote service and carry no value, so there is nothing to
+        // re-emit. Recognizing only the long spelling left `podman -r exec web`
+        // reconnecting to the LOCAL socket.
+        (Runtime::Podman, "remote" | "r") => (Slot::Unreproducible, false),
+        // kubectl: the cluster, the namespace, and the file that resolves both.
+        (Runtime::Kubectl, "context") => (Slot::Context, true),
+        (Runtime::Kubectl, "server" | "s") => (Slot::Endpoint, true),
+        (Runtime::Kubectl, "namespace" | "n") => (Slot::Namespace, true),
+        (Runtime::Kubectl, "kubeconfig") => (Slot::Config, true),
+        // `--cluster` names an API server inside the kubeconfig with no
+        // one-flag equivalent, and a token or password must never be written
+        // back out into a command line.
+        (Runtime::Kubectl, "cluster" | "token" | "password") => (Slot::Unreproducible, true),
+        // Identity and credential selectors: these decide WHO the client
+        // authenticates as, and therefore which cluster/daemon the same name
+        // resolves against. Consuming them silently — which is what `Ignored`
+        // did — meant `kubectl --user prod-admin exec api-0` came back as a
+        // plain `kubectl exec api-0`, run against the DEFAULT kubeconfig user,
+        // and `docker --tlscacert … -H tcp://host:2376 exec web` came back
+        // without any of the TLS material the endpoint needs. None of them is
+        // re-emittable (a secret must never be echoed into a command line, and
+        // the rest have no single-flag equivalent that resolves the same way),
+        // so they suppress the Reconnect entry the way `--token` already did.
+        //
+        // NB: this is the GLOBAL `--user` — the kubeconfig user. The `--user`
+        // AFTER `exec` is a uid inside the container and stays ignorable.
+        (
+            _,
+            "user"
+            | "username"
+            | "as"
+            | "as-group"
+            | "certificate-authority"
+            | "client-certificate"
+            | "client-key"
+            | "tlscacert"
+            | "tlscert"
+            | "tlskey"
+            | "identity",
+        ) => (Slot::Unreproducible, true),
+        // A flag whose very NAME says endpoint, on a runtime whose own arm
+        // above did not claim it. There is no mapping to re-emit and no reason
+        // to believe the default is the same place, so fail closed instead of
+        // consuming it and reconnecting to the local daemon.
+        (
+            _,
+            "host" | "context" | "config" | "namespace" | "connection" | "url" | "server"
+            | "kubeconfig" | "cluster",
+        ) => (Slot::Unreproducible, true),
+        // Recognized only so their values are consumed instead of being
+        // mistaken for the subcommand. None of them moves the endpoint.
+        (
+            _,
+            "log-level" | "request-timeout" | "cache-dir" | "root" | "runroot" | "storage-driver"
+            | "storage-opt" | "tmpdir" | "runtime" | "l",
+        ) => (Slot::Ignored, true),
+        _ => return None,
+    })
+}
+
+/// Options after the `exec` / `attach` subcommand. Same contract as
+/// [`container_global_option`].
+fn container_exec_option(
+    runtime: ContainerRuntime,
+    name: &str,
+) -> Option<(ContainerOptionSlot, bool)> {
+    use ContainerOptionSlot as Slot;
+    use ContainerRuntime as Runtime;
+    Some(match (runtime, name) {
+        // `lxc-attach -n NAME` / `--name NAME` IS the container.
+        (Runtime::Lxc, "name" | "n") => (Slot::Name, true),
+        // A different container root holds a different set of containers.
+        (Runtime::Lxc, "lxcpath" | "P") => (Slot::Config, true),
+        // `-e` is `--elevated-privileges` here, a boolean — unlike the `-e`
+        // that sets an environment variable for docker/podman.
+        (Runtime::Lxc, "e") => (Slot::Ignored, false),
+        // lxc-attach's remaining value-taking options: `-u`/`--uid` and
+        // `-g`/`--gid` are its own, and `-o`/`--logfile` + `-l`/`--logpriority`
+        // come from the option set every lxc-* tool shares. A name missing
+        // here is read as a boolean, which leaves its VALUE looking like a
+        // positional — `lxc-attach --uid 1000 -n web` reported the container as
+        // `1000` and offered to re-attach to it.
+        (Runtime::Lxc, "uid" | "gid" | "u" | "g" | "logfile" | "o" | "logpriority" | "l") => {
+            (Slot::Ignored, true)
+        }
+        // `kubectl exec -f pod.yaml -- sh` takes the pod from a manifest this
+        // detector cannot open, and `podman exec --latest`/`-l` takes it from
+        // "whichever container ran last". Neither leaves a name in the argv,
+        // and both make every following positional part of the COMMAND.
+        (Runtime::Kubectl, "filename" | "f") => (Slot::ImplicitName, true),
+        (Runtime::Podman, "latest" | "l") => (Slot::ImplicitName, false),
+        // A pod is not one shell: `-c`/`--container` picks which of its
+        // containers the session entered.
+        (Runtime::Kubectl, "container" | "c") => (Slot::PodContainer, true),
+        // kubectl's cluster-selecting flags are accepted after the subcommand
+        // as well as before it.
+        (Runtime::Kubectl, "namespace" | "n") => (Slot::Namespace, true),
+        (Runtime::Kubectl, "context") => (Slot::Context, true),
+        (Runtime::Kubectl, "kubeconfig") => (Slot::Config, true),
+        (Runtime::Kubectl, "server" | "s") => (Slot::Endpoint, true),
+        // Value-taking options that name something INSIDE the container — a
+        // uid, an env file, a working directory. Consumed, never captured: a
+        // missing entry here is what made `docker exec --env-file vars web`
+        // report `vars` as the container.
+        (
+            _,
+            "env"
+            | "env-file"
+            | "user"
+            | "workdir"
+            | "detach-keys"
+            | "cidfile"
+            | "name"
+            | "context"
+            | "kubeconfig"
+            | "namespace"
+            | "filename"
+            | "pod-running-timeout"
+            | "preserve-fds"
+            | "arch"
+            | "namespaces"
+            | "set-var"
+            | "keep-var"
+            | "rcfile"
+            | "logfile"
+            | "logpriority"
+            | "e"
+            | "u"
+            | "w"
+            | "c"
+            | "n"
+            | "f"
+            | "a"
+            | "s"
+            | "v"
+            | "l"
+            | "L",
+        ) => (Slot::Ignored, true),
+        _ => return None,
+    })
+}
+
+/// Store one recognized option's value in the slot it belongs to, validating
+/// it against the charset that slot can safely re-emit.
+fn apply_container_option(slot: ContainerOptionSlot, value: &str, parse: &mut ContainerParse) {
+    let options = &mut parse.options;
+    let unreproducible = &mut options.unreproducible;
+    match slot {
+        ContainerOptionSlot::Context => capture_option(
+            &mut options.context,
+            unreproducible,
+            value,
+            field_is_safe(value, CONTAINER_EXTRA),
+        ),
+        ContainerOptionSlot::Endpoint => capture_option(
+            &mut options.endpoint,
+            unreproducible,
+            value,
+            field_is_safe(value, CONTAINER_ENDPOINT_EXTRA),
+        ),
+        ContainerOptionSlot::Namespace => capture_option(
+            &mut options.namespace,
+            unreproducible,
+            value,
+            field_is_safe(value, CONTAINER_EXTRA),
+        ),
+        ContainerOptionSlot::Config => capture_option(
+            &mut options.config,
+            unreproducible,
+            value,
+            field_is_safe(value, FILE_PATH_EXTRA),
+        ),
+        ContainerOptionSlot::PodContainer => capture_option(
+            &mut options.pod_container,
+            unreproducible,
+            value,
+            field_is_safe(value, CONTAINER_EXTRA),
+        ),
+        // Validated with the container name itself once parsing finishes.
+        ContainerOptionSlot::Name => parse.container = Some(value.to_string()),
+        // The value is the manifest that holds the name (`-f pod.yaml`), not
+        // the name: consumed, and recorded as "no name in this argv".
+        ContainerOptionSlot::ImplicitName => parse.implicit_name = true,
+        ContainerOptionSlot::Unreproducible => *unreproducible = true,
+        ContainerOptionSlot::Ignored => {}
+    }
+}
+
+/// Apply one recognized option that carries NO value. Most are inert, but two
+/// slots mean something on their own: an endpoint switch with nothing to
+/// re-emit (`podman --remote`/`-r`) and an implicit container name (`podman
+/// exec --latest`/`-l`). Reading only value-taking letters dropped both.
+fn apply_boolean_container_option(slot: ContainerOptionSlot, parse: &mut ContainerParse) {
+    match slot {
+        ContainerOptionSlot::Unreproducible => parse.options.unreproducible = true,
+        ContainerOptionSlot::ImplicitName => parse.implicit_name = true,
+        _ => {}
+    }
+}
+
+/// Apply one `--name` / `--name=value` token, returning how many argv tokens
+/// it consumed.
+fn apply_long_option(
+    flag: &str,
+    next: Option<&str>,
+    lookup: impl Fn(&str) -> Option<(ContainerOptionSlot, bool)>,
+    parse: &mut ContainerParse,
+) -> usize {
+    let (name, joined) = match flag.split_once('=') {
+        Some((name, value)) => (name, Some(value)),
+        None => (flag, None),
+    };
+    // An unrecognized long flag is assumed boolean — most exec flags are
+    // (`--privileged`, `--tty`), and consuming a value would swallow the
+    // container name.
+    let (slot, takes_value) = lookup(name).unwrap_or((ContainerOptionSlot::Ignored, false));
+    let (value, consumed) = match (joined, takes_value) {
+        (Some(value), _) => (Some(value), 1),
+        (None, true) => match next {
+            Some(value) => (Some(value), 2),
+            None => (None, 1),
+        },
+        (None, false) => (None, 1),
+    };
+    match value {
+        Some(value) => apply_container_option(slot, value, parse),
+        // The boolean form of an endpoint-selecting flag (`podman --remote`)
+        // or of an implicit name (`podman exec --latest`).
+        None => apply_boolean_container_option(slot, parse),
+    }
+    consumed
+}
+
+/// Apply one `-abc`-style token, returning how many argv tokens it consumed.
+fn apply_short_option(
+    bundle: &str,
+    next: Option<&str>,
+    lookup: impl Fn(&str) -> Option<(ContainerOptionSlot, bool)>,
+    parse: &mut ContainerParse,
+) -> usize {
+    let mut probe = [0_u8; 4];
+    let short = parse_short_bundle(bundle, next, |flag| {
+        lookup(flag.encode_utf8(&mut probe)).is_some_and(|(_, takes_value)| takes_value)
+    });
+    let mut found = [0_u8; 4];
+    // The letters BEFORE the value-taking one are not all inert: `podman -r`
+    // and `podman exec -l` each say something about the endpoint with no value
+    // attached, and both were silently skipped while only their long spellings
+    // worked.
+    for flag in short.booleans.chars() {
+        if let Some((slot, false)) = lookup(flag.encode_utf8(&mut found)) {
+            apply_boolean_container_option(slot, parse);
+        }
+    }
+    if let (Some(flag), Some(value)) = (short.flag, short.value)
+        && let Some((slot, _)) = lookup(flag.encode_utf8(&mut found))
+    {
+        apply_container_option(slot, value, parse);
+    }
+    if short.consumed_next { 2 } else { 1 }
 }
 
 /// Phase 7 of [`TERMINATOR-REMOTE-DESIGN.md`](
@@ -1594,6 +2181,13 @@ pub fn detect_container(argv: &[String]) -> Option<RemoteContext> {
 /// - `Ssh { user: Some("me"), host: "box" }` → `Some("ssh 'me'@'box'")`
 /// - `Container { Docker, c }` → `Some("docker exec -it 'c' $SHELL")`
 /// - `Container { Kubectl, c }` → `Some("kubectl exec -it 'c' -- $SHELL")`
+///
+/// The endpoint-selecting options detected alongside the host/container are
+/// re-emitted too — `ssh -p '2222' -J 'bastion' 'box'`, `docker --context
+/// 'remote' exec -it 'web' $SHELL` — because the bare name reaches a different
+/// service. When the original session used an option this crate cannot
+/// reproduce (`SshOptions::unreproducible` / `ContainerOptions::unreproducible`)
+/// the answer is `None`: no Reconnect at all beats a Reconnect somewhere else.
 ///
 /// Pure — no `&self`, no env. Unit-testable. The "$SHELL"
 /// placeholder leaves shell-choice to the user's environment
@@ -1616,34 +2210,110 @@ pub fn detect_container(argv: &[String]) -> Option<RemoteContext> {
 /// the menu entry entirely when no safe command can be built.
 pub fn clone_session_command(ctx: &RemoteContext) -> Option<String> {
     match ctx {
-        RemoteContext::Ssh { host, user } => {
-            if has_control_char(host) {
+        RemoteContext::Ssh {
+            host,
+            user,
+            options,
+        } => {
+            if options.unreproducible || has_control_char(host) {
                 return None;
             }
-            let h = shell_single_quote(host);
-            match user {
-                Some(u) => {
-                    if has_control_char(u) {
-                        return None;
-                    }
-                    Some(format!("ssh {}@{h}", shell_single_quote(u)))
+            let mut cmd = String::from("ssh");
+            // Fixed order (config, identity, jump, port) so the emitted line is
+            // deterministic regardless of how the user happened to type it.
+            for (flag, value) in [
+                ("-F", &options.config),
+                ("-i", &options.identity),
+                ("-J", &options.jump),
+                ("-p", &options.port),
+            ] {
+                if let Some(value) = value {
+                    push_quoted_option(&mut cmd, flag, value)?;
                 }
-                None => Some(format!("ssh {h}")),
             }
+            cmd.push(' ');
+            if let Some(u) = user {
+                if has_control_char(u) {
+                    return None;
+                }
+                cmd.push_str(&shell_single_quote(u));
+                cmd.push('@');
+            }
+            cmd.push_str(&shell_single_quote(host));
+            Some(cmd)
         }
-        RemoteContext::Container { runtime, container } => {
-            if has_control_char(container) {
+        RemoteContext::Container {
+            runtime,
+            container,
+            options,
+        } => {
+            if options.unreproducible || has_control_char(container) {
                 return None;
+            }
+            let mut cmd = String::from(match runtime {
+                ContainerRuntime::Docker => "docker",
+                ContainerRuntime::Podman => "podman",
+                ContainerRuntime::Kubectl => "kubectl",
+                ContainerRuntime::Lxc => "lxc-attach",
+            });
+            // Each runtime spells the same concept differently, so re-emit the
+            // flag this runtime understands rather than the one that was typed.
+            let globals: &[(&str, &Option<String>)] = match runtime {
+                ContainerRuntime::Docker => &[
+                    ("--config", &options.config),
+                    ("--context", &options.context),
+                    ("--host", &options.endpoint),
+                ],
+                ContainerRuntime::Podman => &[
+                    ("--connection", &options.context),
+                    ("--url", &options.endpoint),
+                ],
+                ContainerRuntime::Kubectl => &[
+                    ("--kubeconfig", &options.config),
+                    ("--context", &options.context),
+                    ("--server", &options.endpoint),
+                    ("--namespace", &options.namespace),
+                ],
+                ContainerRuntime::Lxc => &[("--lxcpath", &options.config)],
+            };
+            for (flag, value) in globals {
+                if let Some(value) = value {
+                    push_quoted_option(&mut cmd, flag, value)?;
+                }
             }
             let c = shell_single_quote(container);
-            Some(match runtime {
-                ContainerRuntime::Docker => format!("docker exec -it {c} $SHELL"),
-                ContainerRuntime::Podman => format!("podman exec -it {c} $SHELL"),
-                ContainerRuntime::Kubectl => format!("kubectl exec -it {c} -- $SHELL"),
-                ContainerRuntime::Lxc => format!("lxc-attach -n {c}"),
-            })
+            match runtime {
+                ContainerRuntime::Docker | ContainerRuntime::Podman => {
+                    cmd.push_str(&format!(" exec -it {c} $SHELL"));
+                }
+                ContainerRuntime::Kubectl => {
+                    cmd.push_str(&format!(" exec -it {c}"));
+                    if let Some(value) = &options.pod_container {
+                        push_quoted_option(&mut cmd, "-c", value)?;
+                    }
+                    cmd.push_str(" -- $SHELL");
+                }
+                ContainerRuntime::Lxc => cmd.push_str(&format!(" -n {c}")),
+            }
+            Some(cmd)
         }
     }
+}
+
+/// Append ` FLAG 'VALUE'` to a command line being built, or `None` when the
+/// value carries a control char — the caller propagates that with `?`, dropping
+/// the whole Reconnect entry rather than emitting a line that a newline could
+/// split into extra auto-executed commands (same contract as the host/user/
+/// container fields in [`clone_session_command`]).
+fn push_quoted_option(cmd: &mut String, flag: &str, value: &str) -> Option<()> {
+    if has_control_char(value) {
+        return None;
+    }
+    cmd.push(' ');
+    cmd.push_str(flag);
+    cmd.push(' ');
+    cmd.push_str(&shell_single_quote(value));
+    Some(())
 }
 
 /// Short user-friendly label for the right-click menu
@@ -1652,11 +2322,13 @@ pub fn clone_session_command(ctx: &RemoteContext) -> Option<String> {
 /// the pair `(clone_session_label(ctx), clone_session_command(ctx))`.
 pub fn clone_session_label(ctx: &RemoteContext) -> String {
     match ctx {
-        RemoteContext::Ssh { host, user } => match user {
+        RemoteContext::Ssh { host, user, .. } => match user {
             Some(u) => format!("Reconnect ssh {u}@{host}"),
             None => format!("Reconnect ssh {host}"),
         },
-        RemoteContext::Container { runtime, container } => {
+        RemoteContext::Container {
+            runtime, container, ..
+        } => {
             let runtime_name = match runtime {
                 ContainerRuntime::Docker => "docker",
                 ContainerRuntime::Podman => "podman",
@@ -1680,11 +2352,13 @@ pub fn clone_session_label(ctx: &RemoteContext) -> String {
 /// is the output). Unit-testable without disk.
 pub fn format_remote_title(ctx: &RemoteContext) -> String {
     match ctx {
-        RemoteContext::Ssh { host, user } => match user {
+        RemoteContext::Ssh { host, user, .. } => match user {
             Some(u) => format!("ssh {u}@{host}"),
             None => format!("ssh {host}"),
         },
-        RemoteContext::Container { runtime, container } => {
+        RemoteContext::Container {
+            runtime, container, ..
+        } => {
             let runtime_name = match runtime {
                 ContainerRuntime::Docker => "docker",
                 ContainerRuntime::Podman => "podman",
@@ -1699,6 +2373,30 @@ pub fn format_remote_title(ctx: &RemoteContext) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The `Ssh` context a plain `ssh [user@]host` argv must produce: host,
+    /// login user, and NO connection options. Comparing against this asserts
+    /// both halves — a stray `-p`/`-J`/`-i` capture or an `unreproducible`
+    /// verdict fails the equality just as a wrong host would. Shapes that do
+    /// carry options spell out `SshOptions` explicitly.
+    fn ssh_ctx(host: &str, user: Option<&str>) -> RemoteContext {
+        RemoteContext::Ssh {
+            host: host.to_string(),
+            user: user.map(str::to_string),
+            options: SshOptions::default(),
+        }
+    }
+
+    /// The `Container` context an `exec` against the client's default daemon
+    /// must produce — no context / endpoint / namespace captured. Same
+    /// two-sided assertion as [`ssh_ctx`].
+    fn container_ctx(runtime: ContainerRuntime, container: &str) -> RemoteContext {
+        RemoteContext::Container {
+            runtime,
+            container: container.to_string(),
+            options: ContainerOptions::default(),
+        }
+    }
 
     #[test]
     fn proc_parsers_are_bounded_to_valid_pids_and_preserve_lossy_argv() {
@@ -1765,10 +2463,7 @@ mod tests {
         );
         assert_eq!(
             detect_root_in_index(10, &tree, &index),
-            Some(RemoteContext::Ssh {
-                host: "box.example".into(),
-                user: Some("alice".into()),
-            })
+            Some(ssh_ctx("box.example", Some("alice")))
         );
 
         std::fs::remove_dir_all(root).unwrap();
@@ -1802,10 +2497,7 @@ mod tests {
         assert_eq!(tree.parent_of(20), Some(10));
         assert_eq!(
             detect_root_in_index(10, &tree, &index),
-            Some(RemoteContext::Ssh {
-                host: "threaded.example".into(),
-                user: None,
-            })
+            Some(ssh_ctx("threaded.example", None))
         );
 
         std::fs::remove_dir_all(root).unwrap();
@@ -2076,50 +2768,32 @@ mod tests {
     fn format_remote_title_covers_ssh_and_container_shapes() {
         // SSH without user.
         assert_eq!(
-            format_remote_title(&RemoteContext::Ssh {
-                host: "box.example.com".to_string(),
-                user: None,
-            }),
+            format_remote_title(&ssh_ctx("box.example.com", None)),
             "ssh box.example.com"
         );
         // SSH with user.
         assert_eq!(
-            format_remote_title(&RemoteContext::Ssh {
-                host: "box".to_string(),
-                user: Some("me".to_string()),
-            }),
+            format_remote_title(&ssh_ctx("box", Some("me"))),
             "ssh me@box"
         );
         // Container — Docker.
         assert_eq!(
-            format_remote_title(&RemoteContext::Container {
-                runtime: ContainerRuntime::Docker,
-                container: "ubuntu-2204".to_string(),
-            }),
+            format_remote_title(&container_ctx(ContainerRuntime::Docker, "ubuntu-2204")),
             "docker: ubuntu-2204"
         );
         // Container — Podman.
         assert_eq!(
-            format_remote_title(&RemoteContext::Container {
-                runtime: ContainerRuntime::Podman,
-                container: "fedora".to_string(),
-            }),
+            format_remote_title(&container_ctx(ContainerRuntime::Podman, "fedora")),
             "podman: fedora"
         );
         // Container — kubectl.
         assert_eq!(
-            format_remote_title(&RemoteContext::Container {
-                runtime: ContainerRuntime::Kubectl,
-                container: "my-pod-deadbeef".to_string(),
-            }),
+            format_remote_title(&container_ctx(ContainerRuntime::Kubectl, "my-pod-deadbeef")),
             "kubectl: my-pod-deadbeef"
         );
         // Container — LXC.
         assert_eq!(
-            format_remote_title(&RemoteContext::Container {
-                runtime: ContainerRuntime::Lxc,
-                container: "alpine".to_string(),
-            }),
+            format_remote_title(&container_ctx(ContainerRuntime::Lxc, "alpine")),
             "lxc: alpine"
         );
     }
@@ -2133,50 +2807,32 @@ mod tests {
         // return is `Option` (None only for an unsafe/control-char field).
         // SSH without user.
         assert_eq!(
-            clone_session_command(&RemoteContext::Ssh {
-                host: "box".into(),
-                user: None,
-            }),
+            clone_session_command(&ssh_ctx("box", None)),
             Some("ssh 'box'".to_string())
         );
         // SSH with user.
         assert_eq!(
-            clone_session_command(&RemoteContext::Ssh {
-                host: "box".into(),
-                user: Some("me".into()),
-            }),
+            clone_session_command(&ssh_ctx("box", Some("me"))),
             Some("ssh 'me'@'box'".to_string())
         );
         // Docker.
         assert_eq!(
-            clone_session_command(&RemoteContext::Container {
-                runtime: ContainerRuntime::Docker,
-                container: "ubuntu".into(),
-            }),
+            clone_session_command(&container_ctx(ContainerRuntime::Docker, "ubuntu")),
             Some("docker exec -it 'ubuntu' $SHELL".to_string())
         );
         // Podman.
         assert_eq!(
-            clone_session_command(&RemoteContext::Container {
-                runtime: ContainerRuntime::Podman,
-                container: "fedora".into(),
-            }),
+            clone_session_command(&container_ctx(ContainerRuntime::Podman, "fedora")),
             Some("podman exec -it 'fedora' $SHELL".to_string())
         );
         // Kubectl (note the `--` separator).
         assert_eq!(
-            clone_session_command(&RemoteContext::Container {
-                runtime: ContainerRuntime::Kubectl,
-                container: "my-pod".into(),
-            }),
+            clone_session_command(&container_ctx(ContainerRuntime::Kubectl, "my-pod")),
             Some("kubectl exec -it 'my-pod' -- $SHELL".to_string())
         );
         // LXC.
         assert_eq!(
-            clone_session_command(&RemoteContext::Container {
-                runtime: ContainerRuntime::Lxc,
-                container: "alpine".into(),
-            }),
+            clone_session_command(&container_ctx(ContainerRuntime::Lxc, "alpine")),
             Some("lxc-attach -n 'alpine'".to_string())
         );
     }
@@ -2213,11 +2869,8 @@ mod tests {
         // --- Layer 2: build-time single-quoting + control-char None --------
         // Even if a metachar value were constructed directly (bypassing the
         // detectors), single-quoting makes it inert — the `;`/`$()` are literal.
-        let cmd = clone_session_command(&RemoteContext::Ssh {
-            host: "h; rm -rf ~".into(),
-            user: None,
-        })
-        .expect("no control char → Some, just quoted");
+        let cmd = clone_session_command(&ssh_ctx("h; rm -rf ~", None))
+            .expect("no control char → Some, just quoted");
         // The metacharacters live entirely inside one quoted argument — there is
         // no UNQUOTED `;`/`$`/`(` that the shell could act on. (The exact-string
         // compare below pins this fully; the helper double-checks the property.)
@@ -2227,11 +2880,8 @@ mod tests {
             "metachars must stay quoted: {cmd}"
         );
 
-        let cmd = clone_session_command(&RemoteContext::Container {
-            runtime: ContainerRuntime::Docker,
-            container: "$(reboot)".into(),
-        })
-        .expect("no control char → Some");
+        let cmd = clone_session_command(&container_ctx(ContainerRuntime::Docker, "$(reboot)"))
+            .expect("no control char → Some");
         // NOTE: the trailing literal `$SHELL` placeholder is intentional (the
         // user's pane shell resolves it), so the metachar property is asserted on
         // just the quoted container token, not the whole line.
@@ -2242,45 +2892,20 @@ mod tests {
         );
 
         // An embedded single-quote is escaped via the `'\''` idiom (no break-out).
-        let cmd = clone_session_command(&RemoteContext::Ssh {
-            host: "a'b".into(),
-            user: None,
-        })
-        .unwrap();
+        let cmd = clone_session_command(&ssh_ctx("a'b", None)).unwrap();
         assert_eq!(cmd, "ssh 'a'\\''b'");
 
         // A control char (newline) at build time → None (never a multi-line cmd).
+        assert_eq!(clone_session_command(&ssh_ctx("h\nrm -rf ~", None)), None);
+        assert_eq!(clone_session_command(&ssh_ctx("h", Some("u\nx"))), None);
         assert_eq!(
-            clone_session_command(&RemoteContext::Ssh {
-                host: "h\nrm -rf ~".into(),
-                user: None,
-            }),
-            None
-        );
-        assert_eq!(
-            clone_session_command(&RemoteContext::Ssh {
-                host: "h".into(),
-                user: Some("u\nx".into()),
-            }),
-            None
-        );
-        assert_eq!(
-            clone_session_command(&RemoteContext::Container {
-                runtime: ContainerRuntime::Kubectl,
-                container: "p\nx".into(),
-            }),
+            clone_session_command(&container_ctx(ContainerRuntime::Kubectl, "p\nx")),
             None
         );
         // Whatever clone_session_command returns, it is always a single line.
         for ctx in [
-            RemoteContext::Ssh {
-                host: "ok-host".into(),
-                user: Some("me".into()),
-            },
-            RemoteContext::Container {
-                runtime: ContainerRuntime::Podman,
-                container: "ok_container".into(),
-            },
+            ssh_ctx("ok-host", Some("me")),
+            container_ctx(ContainerRuntime::Podman, "ok_container"),
         ] {
             if let Some(cmd) = clone_session_command(&ctx) {
                 assert!(!cmd.contains('\n'), "command must be one line: {cmd}");
@@ -2313,13 +2938,7 @@ mod tests {
     fn ssh_dash_l_user_reaches_title_and_reconnect() {
         let argv = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
         let ctx = detect_ssh(&argv(&["ssh", "-l", "bob", "h"])).unwrap();
-        assert_eq!(
-            ctx,
-            RemoteContext::Ssh {
-                host: "h".into(),
-                user: Some("bob".into()),
-            }
-        );
+        assert_eq!(ctx, ssh_ctx("h", Some("bob")));
         assert_eq!(format_remote_title(&ctx), "ssh bob@h");
         assert_eq!(
             clone_session_command(&ctx),
@@ -2329,13 +2948,7 @@ mod tests {
 
         // user@host wins over -l.
         let ctx = detect_ssh(&argv(&["ssh", "-l", "bob", "alice@h"])).unwrap();
-        assert_eq!(
-            ctx,
-            RemoteContext::Ssh {
-                host: "h".into(),
-                user: Some("alice".into()),
-            }
-        );
+        assert_eq!(ctx, ssh_ctx("h", Some("alice")));
         assert_eq!(format_remote_title(&ctx), "ssh alice@h");
     }
 
@@ -2344,31 +2957,19 @@ mod tests {
     #[test]
     fn clone_session_label_for_all_shapes() {
         assert_eq!(
-            clone_session_label(&RemoteContext::Ssh {
-                host: "box".into(),
-                user: Some("me".into()),
-            }),
+            clone_session_label(&ssh_ctx("box", Some("me"))),
             "Reconnect ssh me@box"
         );
         assert_eq!(
-            clone_session_label(&RemoteContext::Ssh {
-                host: "box".into(),
-                user: None,
-            }),
+            clone_session_label(&ssh_ctx("box", None)),
             "Reconnect ssh box"
         );
         assert_eq!(
-            clone_session_label(&RemoteContext::Container {
-                runtime: ContainerRuntime::Docker,
-                container: "foo".into(),
-            }),
+            clone_session_label(&container_ctx(ContainerRuntime::Docker, "foo")),
             "Re-attach docker foo"
         );
         assert_eq!(
-            clone_session_label(&RemoteContext::Container {
-                runtime: ContainerRuntime::Kubectl,
-                container: "my-pod".into(),
-            }),
+            clone_session_label(&container_ctx(ContainerRuntime::Kubectl, "my-pod")),
             "Re-attach kubectl my-pod"
         );
     }
@@ -2396,20 +2997,15 @@ mod tests {
         // docker exec -it <container> bash
         assert_eq!(
             detect_container(&argv(&["docker", "exec", "-it", "alpine", "bash"])),
-            Some(RemoteContext::Container {
-                runtime: ContainerRuntime::Docker,
-                container: "alpine".into(),
-            })
+            Some(container_ctx(ContainerRuntime::Docker, "alpine"))
         );
         // podman exec foo sh
         assert_eq!(
             detect_container(&argv(&["podman", "exec", "fedora", "sh"])),
-            Some(RemoteContext::Container {
-                runtime: ContainerRuntime::Podman,
-                container: "fedora".into(),
-            })
+            Some(container_ctx(ContainerRuntime::Podman, "fedora"))
         );
-        // kubectl exec -it -n my-ns my-pod -- bash
+        // kubectl exec -it -n my-ns my-pod -- bash — the namespace is part of
+        // the endpoint, so it is carried rather than merely skipped.
         assert_eq!(
             detect_container(&argv(&[
                 "kubectl", "exec", "-it", "-n", "my-ns", "my-pod", "--", "bash"
@@ -2417,31 +3013,26 @@ mod tests {
             Some(RemoteContext::Container {
                 runtime: ContainerRuntime::Kubectl,
                 container: "my-pod".into(),
+                options: ContainerOptions {
+                    namespace: Some("my-ns".into()),
+                    ..ContainerOptions::default()
+                },
             })
         );
         // lxc-attach -n alpine
         assert_eq!(
             detect_container(&argv(&["lxc-attach", "-n", "alpine"])),
-            Some(RemoteContext::Container {
-                runtime: ContainerRuntime::Lxc,
-                container: "alpine".into(),
-            })
+            Some(container_ctx(ContainerRuntime::Lxc, "alpine"))
         );
         // lxc-attach alpine (no -n)
         assert_eq!(
             detect_container(&argv(&["lxc-attach", "alpine"])),
-            Some(RemoteContext::Container {
-                runtime: ContainerRuntime::Lxc,
-                container: "alpine".into(),
-            })
+            Some(container_ctx(ContainerRuntime::Lxc, "alpine"))
         );
         // Absolute path.
         assert_eq!(
             detect_container(&argv(&["/usr/bin/docker", "exec", "foo"])),
-            Some(RemoteContext::Container {
-                runtime: ContainerRuntime::Docker,
-                container: "foo".into(),
-            })
+            Some(container_ctx(ContainerRuntime::Docker, "foo"))
         );
         // Non-container argv → None.
         assert!(detect_container(&argv(&["docker", "ps"])).is_none());
@@ -2461,69 +3052,54 @@ mod tests {
         // ssh host
         assert_eq!(
             detect_ssh(&argv(&["ssh", "box.example.com"])),
-            Some(RemoteContext::Ssh {
-                host: "box.example.com".into(),
-                user: None,
-            })
+            Some(ssh_ctx("box.example.com", None))
         );
         // ssh user@host
         assert_eq!(
             detect_ssh(&argv(&["ssh", "me@box"])),
-            Some(RemoteContext::Ssh {
-                host: "box".into(),
-                user: Some("me".into()),
-            })
+            Some(ssh_ctx("box", Some("me")))
         );
-        // ssh -p 22 user@host
+        // ssh -p 22 user@host — the port is part of the endpoint, so it is
+        // carried rather than merely skipped.
         assert_eq!(
             detect_ssh(&argv(&["ssh", "-p", "22", "alice@h.example"])),
             Some(RemoteContext::Ssh {
                 host: "h.example".into(),
                 user: Some("alice".into()),
+                options: SshOptions {
+                    port: Some("22".into()),
+                    ..SshOptions::default()
+                },
             })
         );
-        // ssh -o StrictHostKeyChecking=no host
+        // ssh -o StrictHostKeyChecking=no host — an `-o` that only tunes an
+        // existing connection leaves the endpoint alone.
         assert_eq!(
             detect_ssh(&argv(&["ssh", "-o", "StrictHostKeyChecking=no", "h"])),
-            Some(RemoteContext::Ssh {
-                host: "h".into(),
-                user: None,
-            })
+            Some(ssh_ctx("h", None))
         );
         // ssh -l user host — H2 (audit v2.32.0): `-l bob` now populates the user
         // so Reconnect / the remote title reproduce `ssh bob@h` (previously the
         // login user was silently dropped).
         assert_eq!(
             detect_ssh(&argv(&["ssh", "-l", "bob", "h"])),
-            Some(RemoteContext::Ssh {
-                host: "h".into(),
-                user: Some("bob".into()),
-            })
+            Some(ssh_ctx("h", Some("bob")))
         );
         // ssh -l bob alice@h — an explicit user@host wins over -l (OpenSSH
         // precedence); the login user stays `alice`.
         assert_eq!(
             detect_ssh(&argv(&["ssh", "-l", "bob", "alice@h"])),
-            Some(RemoteContext::Ssh {
-                host: "h".into(),
-                user: Some("alice".into()),
-            })
+            Some(ssh_ctx("h", Some("alice")))
         );
         // sshpass -p secret ssh user@host
         assert_eq!(
             detect_ssh(&argv(&["sshpass", "-p", "secret", "ssh", "carol@h"])),
-            Some(RemoteContext::Ssh {
-                host: "h".into(),
-                user: Some("carol".into()),
-            })
+            Some(ssh_ctx("h", Some("carol")))
         );
         // Absolute-path argv[0].
         assert_eq!(
             detect_ssh(&argv(&["/usr/bin/ssh", "box"])),
-            Some(RemoteContext::Ssh {
-                host: "box".into(),
-                user: None,
-            })
+            Some(ssh_ctx("box", None))
         );
         // Non-SSH argv → None.
         assert!(detect_ssh(&argv(&["vim", "ssh.txt"])).is_none());
@@ -2546,17 +3122,11 @@ mod tests {
                 r"C:\Windows\System32\OpenSSH\ssh.exe",
                 "alice@host"
             ])),
-            Some(RemoteContext::Ssh {
-                host: "host".into(),
-                user: Some("alice".into()),
-            })
+            Some(ssh_ctx("host", Some("alice")))
         );
         assert_eq!(
             detect_ssh(&argv(&["ssh.EXE", "box"])),
-            Some(RemoteContext::Ssh {
-                host: "box".into(),
-                user: None,
-            })
+            Some(ssh_ctx("box", None))
         );
         // Docker Desktop on Windows: backslash path + .exe.
         assert_eq!(
@@ -2567,10 +3137,7 @@ mod tests {
                 "alpine",
                 "sh"
             ])),
-            Some(RemoteContext::Container {
-                runtime: ContainerRuntime::Docker,
-                container: "alpine".into(),
-            })
+            Some(container_ctx(ContainerRuntime::Docker, "alpine"))
         );
         // sshpass wrapping a Windows-path ssh.exe still finds the inner ssh.
         assert_eq!(
@@ -2581,10 +3148,7 @@ mod tests {
                 r"C:\OpenSSH\ssh.exe",
                 "carol@h"
             ])),
-            Some(RemoteContext::Ssh {
-                host: "h".into(),
-                user: Some("carol".into()),
-            })
+            Some(ssh_ctx("h", Some("carol")))
         );
     }
 
@@ -2593,12 +3157,17 @@ mod tests {
     #[test]
     fn detect_handles_proxyjump_bool_flags_and_global_flags() {
         let argv = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
-        // (a) ssh -J jump host → host (was: 'jump', the bastion).
+        // (a) ssh -J jump host → host (was: 'jump', the bastion), with the
+        // bastion carried so the reconnect still tunnels through it.
         assert_eq!(
             detect_ssh(&argv(&["ssh", "-J", "jump.example", "me@host"])),
             Some(RemoteContext::Ssh {
                 host: "host".into(),
                 user: Some("me".into()),
+                options: SshOptions {
+                    jump: Some("jump.example".into()),
+                    ..SshOptions::default()
+                },
             })
         );
         // Joined -Jjump form is one token; the host still wins.
@@ -2607,25 +3176,25 @@ mod tests {
             Some(RemoteContext::Ssh {
                 host: "host".into(),
                 user: None,
+                options: SshOptions {
+                    jump: Some("jump.example".into()),
+                    ..SshOptions::default()
+                },
             })
         );
         // (b) docker exec --privileged <c> sh → c (was: 'sh').
         assert_eq!(
             detect_container(&argv(&["docker", "exec", "--privileged", "alpine", "sh"])),
-            Some(RemoteContext::Container {
-                runtime: ContainerRuntime::Docker,
-                container: "alpine".into(),
-            })
+            Some(container_ctx(ContainerRuntime::Docker, "alpine"))
         );
-        // A value-taking long flag still skips its value.
+        // A value-taking long flag still skips its value. `--user` names a
+        // uid inside the container, not the endpoint, so nothing is carried.
         assert_eq!(
             detect_container(&argv(&["docker", "exec", "--user", "root", "alpine", "sh"])),
-            Some(RemoteContext::Container {
-                runtime: ContainerRuntime::Docker,
-                container: "alpine".into(),
-            })
+            Some(container_ctx(ContainerRuntime::Docker, "alpine"))
         );
-        // (c) global flags before `exec` (kubectl -n ns exec pod) → pod.
+        // (c) global flags before `exec` (kubectl -n ns exec pod) → pod, in
+        // that namespace.
         assert_eq!(
             detect_container(&argv(&[
                 "kubectl", "-n", "prod", "exec", "my-pod", "--", "sh"
@@ -2633,6 +3202,10 @@ mod tests {
             Some(RemoteContext::Container {
                 runtime: ContainerRuntime::Kubectl,
                 container: "my-pod".into(),
+                options: ContainerOptions {
+                    namespace: Some("prod".into()),
+                    ..ContainerOptions::default()
+                },
             })
         );
         assert_eq!(
@@ -2647,6 +3220,10 @@ mod tests {
             Some(RemoteContext::Container {
                 runtime: ContainerRuntime::Docker,
                 container: "web".into(),
+                options: ContainerOptions {
+                    context: Some("remote".into()),
+                    ..ContainerOptions::default()
+                },
             })
         );
     }
@@ -2681,10 +3258,1050 @@ mod tests {
         // ACTUAL argument to a real `exec` subcommand.
         assert_eq!(
             detect_container(&argv(&["docker", "exec", "exec", "sh"])),
-            Some(RemoteContext::Container {
-                runtime: ContainerRuntime::Docker,
-                container: "exec".into(),
+            Some(container_ctx(ContainerRuntime::Docker, "exec"))
+        );
+    }
+
+    /// The options that decide WHICH host `ssh` reached were parsed past and
+    /// dropped, so Reconnect offered plain `ssh host` — a different service on
+    /// a different port, reached without the bastion and authenticated by a
+    /// different key. They now travel with the host and come back out.
+    #[test]
+    fn ssh_endpoint_options_are_reproduced_by_the_reconnect_command() {
+        let argv = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let ctx = detect_ssh(&argv(&[
+            "ssh",
+            "-p",
+            "2222",
+            "-J",
+            "bastion.example",
+            "-i",
+            "/home/me/.ssh/id_ed25519",
+            "box",
+        ]))
+        .expect("a fully-specified ssh invocation is still an ssh session");
+        assert_eq!(
+            ctx,
+            RemoteContext::Ssh {
+                host: "box".into(),
+                user: None,
+                options: SshOptions {
+                    port: Some("2222".into()),
+                    jump: Some("bastion.example".into()),
+                    identity: Some("/home/me/.ssh/id_ed25519".into()),
+                    ..SshOptions::default()
+                },
+            }
+        );
+        assert_eq!(
+            clone_session_command(&ctx),
+            Some(
+                "ssh -i '/home/me/.ssh/id_ed25519' -J 'bastion.example' -p '2222' 'box'"
+                    .to_string()
+            )
+        );
+
+        // The joined spellings of the same options carry exactly as far.
+        let joined = detect_ssh(&argv(&[
+            "ssh",
+            "-p2222",
+            "-Jbastion.example",
+            "-i/home/me/.ssh/id_ed25519",
+            "-lroot",
+            "box",
+        ]))
+        .expect("joined option forms are still an ssh session");
+        assert_eq!(
+            joined,
+            RemoteContext::Ssh {
+                host: "box".into(),
+                user: Some("root".into()),
+                options: SshOptions {
+                    port: Some("2222".into()),
+                    jump: Some("bastion.example".into()),
+                    identity: Some("/home/me/.ssh/id_ed25519".into()),
+                    ..SshOptions::default()
+                },
+            }
+        );
+        assert_eq!(
+            clone_session_command(&joined),
+            Some(
+                "ssh -i '/home/me/.ssh/id_ed25519' -J 'bastion.example' -p '2222' 'root'@'box'"
+                    .to_string()
+            )
+        );
+
+        // `-F` picks the config that resolves the alias, so the alias alone
+        // does not name the same machine.
+        let aliased = detect_ssh(&argv(&["ssh", "-F", "/etc/ssh/work.conf", "build"])).unwrap();
+        assert_eq!(
+            clone_session_command(&aliased),
+            Some("ssh -F '/etc/ssh/work.conf' 'build'".to_string())
+        );
+    }
+
+    /// ssh parses `-abc` the way getopt does, so a boolean letter in front of
+    /// a value-taking one leaves the value in the same token or the next argv
+    /// element. Reading the bundle as one opaque token made `ssh -vp 2222 box`
+    /// report the PORT as the host.
+    #[test]
+    fn ssh_short_option_bundles_do_not_swallow_the_destination() {
+        let argv = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(
+            detect_ssh(&argv(&["ssh", "-vp", "2222", "box"])),
+            Some(RemoteContext::Ssh {
+                host: "box".into(),
+                user: None,
+                options: SshOptions {
+                    port: Some("2222".into()),
+                    ..SshOptions::default()
+                },
             })
+        );
+        // A bundle of booleans still consumes nothing.
+        assert_eq!(
+            detect_ssh(&argv(&["ssh", "-tt", "box"])),
+            Some(ssh_ctx("box", None))
+        );
+    }
+
+    /// Some options cannot be re-emitted faithfully: an `-o ProxyCommand` is
+    /// an arbitrary shell command, `-W` makes the session a stdio forward
+    /// rather than a shell, and a path outside the reproducible charset cannot
+    /// be quoted back with confidence. The pane still gets its remote title —
+    /// only the Reconnect entry goes away, because a Reconnect that silently
+    /// skipped the proxy would open a session on a different machine.
+    #[test]
+    fn ssh_options_that_cannot_be_reproduced_suppress_the_reconnect() {
+        let argv = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        for unreproducible in [
+            &["ssh", "-o", "ProxyCommand=nc -X5 proxy 1080 %h %p", "box"][..],
+            &["ssh", "-o", "ProxyJump=bastion.example", "box"],
+            &["ssh", "-o", "HostName=10.0.0.9", "box"],
+            &["ssh", "-o", "Port=2222", "box"],
+            &["ssh", "-W", "internal.example:22", "box"],
+            // An identity path with a shell metacharacter is not reproduced.
+            &["ssh", "-i", "/keys/$(id -u)", "box"],
+        ] {
+            let ctx = detect_ssh(&argv(unreproducible))
+                .unwrap_or_else(|| panic!("{unreproducible:?} is still an ssh session"));
+            assert_eq!(
+                format_remote_title(&ctx),
+                "ssh box",
+                "the pane must still be labelled as remote: {unreproducible:?}"
+            );
+            assert_eq!(
+                clone_session_command(&ctx),
+                None,
+                "no reconnect beats one that lands elsewhere: {unreproducible:?}"
+            );
+        }
+
+        // Positive controls, in the same shape as the loop above: suppression
+        // has to be selective, or "no reconnect beats a wrong one" would be
+        // satisfied by never offering one at all.
+        for (reproducible, expected) in [
+            (
+                &["ssh", "-o", "ServerAliveInterval=30", "box"][..],
+                "ssh 'box'",
+            ),
+            (
+                &["ssh", "-o", "StrictHostKeyChecking=no", "box"],
+                "ssh 'box'",
+            ),
+            (&["ssh", "-p", "2222", "box"], "ssh -p '2222' 'box'"),
+            (
+                &["ssh", "-J", "bastion.example", "box"],
+                "ssh -J 'bastion.example' 'box'",
+            ),
+            (
+                &["ssh", "-i", "/keys/id_ed25519", "box"],
+                "ssh -i '/keys/id_ed25519' 'box'",
+            ),
+            (&["ssh", "-L", "8080:localhost:80", "box"], "ssh 'box'"),
+        ] {
+            let ctx = detect_ssh(&argv(reproducible))
+                .unwrap_or_else(|| panic!("{reproducible:?} is still an ssh session"));
+            assert_eq!(
+                clone_session_command(&ctx),
+                Some(expected.to_string()),
+                "{reproducible:?} names one endpoint this crate can rebuild"
+            );
+        }
+    }
+
+    /// `-o` is the whole ssh_config grammar on the command line, so the gate
+    /// that decides whether a keyword moves the endpoint has to read keywords
+    /// the way OpenSSH does. It missed the `-o` spellings of choices this crate
+    /// already treats as endpoint-defining — `IdentityFile` is `-i` under
+    /// another name, and `CanonicalizeHostname` rewrites the destination before
+    /// it is looked up — and it read the keyword without skipping the leading
+    /// whitespace `process_config_line` skips, so `-o " ProxyJump=bastion"`
+    /// yielded an EMPTY keyword, matched nothing, and offered a reconnect that
+    /// bypassed the bastion.
+    #[test]
+    fn ssh_dash_o_keywords_are_read_the_way_openssh_reads_them() {
+        let argv = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        for suppressed in [
+            "IdentityFile=/keys/other_ed25519",
+            "CertificateFile=/keys/other-cert.pub",
+            "IdentityAgent=/run/other-agent.sock",
+            "CanonicalizeHostname=yes",
+            "CanonicalDomains=example.com",
+            // Leading whitespace, in both the `=` and the space spelling.
+            " ProxyJump=bastion.example",
+            "\tProxyJump=bastion.example",
+            "  HostName=10.0.0.9",
+            " HostName 10.0.0.9",
+            "ProxyJump bastion.example",
+        ] {
+            let ctx = detect_ssh(&argv(&["ssh", "-o", suppressed, "box"]))
+                .unwrap_or_else(|| panic!("`-o {suppressed}` is still an ssh session"));
+            assert_eq!(format_remote_title(&ctx), "ssh box");
+            assert_eq!(
+                clone_session_command(&ctx),
+                None,
+                "`-o {suppressed}` reaches an endpoint this crate cannot rebuild"
+            );
+        }
+        // Keywords that only tune the connection keep Reconnect, leading
+        // whitespace and all.
+        for kept in [
+            "ServerAliveInterval=30",
+            " StrictHostKeyChecking=no",
+            "\tCompression yes",
+        ] {
+            let ctx = detect_ssh(&argv(&["ssh", "-o", kept, "box"])).unwrap();
+            assert_eq!(
+                clone_session_command(&ctx),
+                Some("ssh 'box'".to_string()),
+                "`-o {kept}` leaves the endpoint where it was"
+            );
+        }
+    }
+
+    /// A Windows install path is `C:\Program Files (x86)\…` and a POSIX home
+    /// can hold an apostrophe. Both are ordinary paths, and both are inert in
+    /// the POSIX single quotes the value is emitted in — `'` via the `'\''`
+    /// idiom — so rejecting them at parse time deleted a Reconnect entry that
+    /// used to work and bought nothing.
+    #[test]
+    fn ordinary_windows_and_posix_paths_keep_the_reconnect_entry() {
+        let argv = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let windows = detect_ssh(&argv(&[
+            "ssh",
+            "-i",
+            r"C:\Program Files (x86)\OpenSSH\id_ed25519",
+            "box",
+        ]))
+        .expect("a Windows identity path is still an ssh session");
+        let cmd = clone_session_command(&windows)
+            .expect("an ordinary Windows path keeps the reconnect entry");
+        assert_eq!(
+            cmd,
+            r"ssh -i 'C:\Program Files (x86)\OpenSSH\id_ed25519' 'box'"
+        );
+        assert!(
+            !has_unquoted_metachar(&cmd),
+            "the path's parentheses must stay inside the quotes: {cmd}"
+        );
+
+        // The same charset drives every path-shaped option, not just `-i`.
+        let kubeconfig = detect_container(&argv(&[
+            "kubectl",
+            "--kubeconfig",
+            r"C:\Program Files (x86)\kube\config",
+            "exec",
+            "api-0",
+            "--",
+            "sh",
+        ]))
+        .expect("a Windows kubeconfig path is still a kubectl session");
+        assert_eq!(
+            clone_session_command(&kubeconfig),
+            Some(
+                r"kubectl --kubeconfig 'C:\Program Files (x86)\kube\config' exec -it 'api-0' -- $SHELL"
+                    .to_string()
+            )
+        );
+
+        // An apostrophe is reproduced with the close/escape/reopen idiom.
+        let apostrophe = detect_ssh(&argv(&["ssh", "-i", "/home/o'brien/.ssh/id", "box"])).unwrap();
+        assert_eq!(
+            clone_session_command(&apostrophe),
+            Some(r"ssh -i '/home/o'\''brien/.ssh/id' 'box'".to_string())
+        );
+
+        // A path that genuinely needs a shell metacharacter is still dropped.
+        for hostile in [
+            &["ssh", "-i", "/keys/`id -u`", "box"][..],
+            &["ssh", "-i", "/keys/$HOME/id", "box"],
+            &["ssh", "-i", "/keys/a\"b", "box"],
+            &["ssh", "-i", "/keys/a|b", "box"],
+        ] {
+            assert_eq!(
+                clone_session_command(&detect_ssh(&argv(hostile)).unwrap()),
+                None,
+                "{hostile:?} is not a path this crate re-emits"
+            );
+        }
+    }
+
+    /// The Reconnect line is typed into a live PTY, and its values come from a
+    /// descendant process's argv rather than from anything the user typed
+    /// here. So a value is bounded, and `-i` — the one endpoint option OpenSSH
+    /// accepts more than once, trying each key in order — is not reproduced by
+    /// keeping the last of several: the key that authenticated may not be the
+    /// key re-emitted, which is a different account on the same host.
+    #[test]
+    fn oversized_and_repeated_option_values_suppress_the_reconnect() {
+        let argv = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let oversized = format!("/keys/{}", "a".repeat(6000));
+        let huge = detect_ssh(&argv(&["ssh", "-i", &oversized, "box"]))
+            .expect("an oversized identity path is still an ssh session");
+        assert_eq!(format_remote_title(&huge), "ssh box");
+        assert_eq!(clone_session_command(&huge), None);
+        // A field that IS the endpoint never becomes a context at all.
+        assert_eq!(
+            detect_container(&argv(&["docker", "exec", &"c".repeat(6000), "sh"])),
+            None
+        );
+        assert_eq!(detect_ssh(&argv(&["ssh", &"h".repeat(6000)])), None);
+
+        // Two different identities: one slot cannot carry both.
+        let two_keys =
+            detect_ssh(&argv(&["ssh", "-i", "/keys/a", "-i", "/keys/b", "box"])).unwrap();
+        assert_eq!(format_remote_title(&two_keys), "ssh box");
+        assert_eq!(clone_session_command(&two_keys), None);
+        // The same identity twice is still one identity.
+        let same_key =
+            detect_ssh(&argv(&["ssh", "-i", "/keys/a", "-i", "/keys/a", "box"])).unwrap();
+        assert_eq!(
+            clone_session_command(&same_key),
+            Some("ssh -i '/keys/a' 'box'".to_string())
+        );
+    }
+
+    /// `docker --context remote exec web` runs on another machine entirely;
+    /// dropping the context reconnected against the LOCAL daemon, to whatever
+    /// container happened to share the name. Same for podman's connection,
+    /// an explicit daemon address, and kubectl's namespace + in-pod container.
+    #[test]
+    fn container_client_context_is_reproduced_by_the_reconnect_command() {
+        let argv = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+
+        let docker = detect_container(&argv(&[
+            "docker",
+            "--context",
+            "remote",
+            "exec",
+            "-it",
+            "web",
+            "bash",
+        ]))
+        .unwrap();
+        assert_eq!(
+            docker,
+            RemoteContext::Container {
+                runtime: ContainerRuntime::Docker,
+                container: "web".into(),
+                options: ContainerOptions {
+                    context: Some("remote".into()),
+                    ..ContainerOptions::default()
+                },
+            }
+        );
+        assert_eq!(
+            clone_session_command(&docker),
+            Some("docker --context 'remote' exec -it 'web' $SHELL".to_string())
+        );
+        // The `--flag=value` spelling of the same option.
+        assert_eq!(
+            detect_container(&argv(&[
+                "docker",
+                "--context=remote",
+                "exec",
+                "web",
+                "bash"
+            ])),
+            Some(docker)
+        );
+
+        // An explicit daemon address, in docker's own flag.
+        let remote_daemon = detect_container(&argv(&[
+            "docker",
+            "-H",
+            "tcp://build.example:2375",
+            "exec",
+            "web",
+            "sh",
+        ]))
+        .unwrap();
+        assert_eq!(
+            clone_session_command(&remote_daemon),
+            Some("docker --host 'tcp://build.example:2375' exec -it 'web' $SHELL".to_string())
+        );
+
+        // Podman names the same concept `--connection`, so that is what comes
+        // back out.
+        let podman = detect_container(&argv(&[
+            "podman",
+            "--connection",
+            "prod",
+            "exec",
+            "api",
+            "sh",
+        ]))
+        .unwrap();
+        assert_eq!(
+            podman,
+            RemoteContext::Container {
+                runtime: ContainerRuntime::Podman,
+                container: "api".into(),
+                options: ContainerOptions {
+                    context: Some("prod".into()),
+                    ..ContainerOptions::default()
+                },
+            }
+        );
+        assert_eq!(
+            clone_session_command(&podman),
+            Some("podman --connection 'prod' exec -it 'api' $SHELL".to_string())
+        );
+
+        // kubectl: the namespace picks the pod, and `-c` picks which of the
+        // pod's containers the shell ran in.
+        let kubectl = detect_container(&argv(&[
+            "kubectl", "-n", "prod", "exec", "-it", "api-0", "-c", "sidecar", "--", "sh",
+        ]))
+        .unwrap();
+        assert_eq!(
+            kubectl,
+            RemoteContext::Container {
+                runtime: ContainerRuntime::Kubectl,
+                container: "api-0".into(),
+                options: ContainerOptions {
+                    namespace: Some("prod".into()),
+                    pod_container: Some("sidecar".into()),
+                    ..ContainerOptions::default()
+                },
+            }
+        );
+        assert_eq!(
+            clone_session_command(&kubectl),
+            Some("kubectl --namespace 'prod' exec -it 'api-0' -c 'sidecar' -- $SHELL".to_string())
+        );
+
+        // A kubeconfig defines the clusters every other selector resolves in.
+        let kubeconfig = detect_container(&argv(&[
+            "kubectl",
+            "--kubeconfig",
+            "/home/me/.kube/staging",
+            "exec",
+            "api-0",
+            "--",
+            "sh",
+        ]))
+        .unwrap();
+        assert_eq!(
+            clone_session_command(&kubeconfig),
+            Some(
+                "kubectl --kubeconfig '/home/me/.kube/staging' exec -it 'api-0' -- $SHELL"
+                    .to_string()
+            )
+        );
+    }
+
+    /// The post-subcommand option tables were incomplete, so an option VALUE
+    /// was reported as the container: `--container sidecar` named the pod,
+    /// `--env-file vars` named the container. Bundled shorts hid the same
+    /// bug (`-itc sidecar`).
+    #[test]
+    fn container_option_values_are_never_read_as_the_container() {
+        let argv = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        // The pod is `api-0`; `sidecar` is which container inside it.
+        assert_eq!(
+            detect_container(&argv(&[
+                "kubectl",
+                "exec",
+                "--container",
+                "sidecar",
+                "api-0",
+                "--",
+                "sh"
+            ])),
+            Some(RemoteContext::Container {
+                runtime: ContainerRuntime::Kubectl,
+                container: "api-0".into(),
+                options: ContainerOptions {
+                    pod_container: Some("sidecar".into()),
+                    ..ContainerOptions::default()
+                },
+            })
+        );
+        // Same option inside a short bundle.
+        assert_eq!(
+            detect_container(&argv(&[
+                "kubectl", "exec", "-itc", "sidecar", "api-0", "--", "sh"
+            ])),
+            Some(RemoteContext::Container {
+                runtime: ContainerRuntime::Kubectl,
+                container: "api-0".into(),
+                options: ContainerOptions {
+                    pod_container: Some("sidecar".into()),
+                    ..ContainerOptions::default()
+                },
+            })
+        );
+        // `vars` is an env file, not a container.
+        assert_eq!(
+            detect_container(&argv(&[
+                "docker",
+                "exec",
+                "--env-file",
+                "vars",
+                "web",
+                "sh"
+            ])),
+            Some(container_ctx(ContainerRuntime::Docker, "web"))
+        );
+    }
+
+    /// `lxc-attach` accepts `--name`, `--name=`, and the joined `-n` spelling
+    /// of the same option. Only the separated `-n NAME` form was recognized —
+    /// the long forms consumed the name as an anonymous flag value and the
+    /// pane got no remote context at all.
+    #[test]
+    fn lxc_attach_name_option_forms_are_all_detected() {
+        let argv = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        for form in [
+            &["lxc-attach", "--name", "web"][..],
+            &["lxc-attach", "--name=web"],
+            &["lxc-attach", "-nweb"],
+            &["lxc-attach", "-n", "web"],
+        ] {
+            assert_eq!(
+                detect_container(&argv(form)),
+                Some(container_ctx(ContainerRuntime::Lxc, "web")),
+                "{form:?} names container `web`"
+            );
+        }
+        // A non-default container root holds a different set of containers, so
+        // it has to come back out with the name.
+        let rooted =
+            detect_container(&argv(&["lxc-attach", "-P", "/srv/lxc", "-n", "web"])).unwrap();
+        assert_eq!(
+            rooted,
+            RemoteContext::Container {
+                runtime: ContainerRuntime::Lxc,
+                container: "web".into(),
+                options: ContainerOptions {
+                    config: Some("/srv/lxc".into()),
+                    ..ContainerOptions::default()
+                },
+            }
+        );
+        assert_eq!(
+            clone_session_command(&rooted),
+            Some("lxc-attach --lxcpath '/srv/lxc' -n 'web'".to_string())
+        );
+    }
+
+    /// A credential can never be echoed back into a command line, and
+    /// `podman --remote` has no value to carry. Both still produce a remote
+    /// title; both refuse to produce a Reconnect, because the one that could
+    /// be built would attach to the local daemon instead.
+    #[test]
+    fn container_options_that_cannot_be_reproduced_suppress_the_reconnect() {
+        let argv = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let with_token = detect_container(&argv(&[
+            "kubectl",
+            "--token",
+            "s3cr3t-bearer-token",
+            "exec",
+            "api-0",
+            "--",
+            "sh",
+        ]))
+        .expect("still a kubectl exec session");
+        assert_eq!(format_remote_title(&with_token), "kubectl: api-0");
+        assert_eq!(clone_session_command(&with_token), None);
+
+        let remote_podman =
+            detect_container(&argv(&["podman", "--remote", "exec", "web", "sh"])).unwrap();
+        assert_eq!(format_remote_title(&remote_podman), "podman: web");
+        assert_eq!(clone_session_command(&remote_podman), None);
+
+        // `-r` is podman's documented short spelling of `--remote`. Gating
+        // only the long one reconnected to the LOCAL socket for a session that
+        // ran against the remote service.
+        for short_remote in [
+            &["podman", "-r", "exec", "web", "sh"][..],
+            &["podman", "--remote", "exec", "web", "sh"],
+        ] {
+            let ctx = detect_container(&argv(short_remote)).unwrap();
+            assert_eq!(format_remote_title(&ctx), "podman: web");
+            assert_eq!(
+                clone_session_command(&ctx),
+                None,
+                "{short_remote:?} ran somewhere the local socket is not"
+            );
+        }
+
+        // An identity or credential selector decides WHICH account — and often
+        // which cluster — the same name resolves against. Consuming it and
+        // saying nothing produced a reconnect that runs as the DEFAULT
+        // kubeconfig user, or one that drops the TLS material the endpoint
+        // needs.
+        for credentialed in [
+            &[
+                "kubectl",
+                "--user",
+                "prod-admin",
+                "exec",
+                "api-0",
+                "--",
+                "sh",
+            ][..],
+            &["kubectl", "--as", "sre", "exec", "api-0", "--", "sh"],
+            &["kubectl", "--as-group", "sre", "exec", "api-0", "--", "sh"],
+            &[
+                "kubectl",
+                "--client-key",
+                "/keys/admin.key",
+                "exec",
+                "api-0",
+                "--",
+                "sh",
+            ],
+            &[
+                "kubectl",
+                "--certificate-authority",
+                "/certs/ca.pem",
+                "exec",
+                "api-0",
+                "--",
+                "sh",
+            ],
+        ] {
+            let ctx = detect_container(&argv(credentialed))
+                .unwrap_or_else(|| panic!("{credentialed:?} is still a kubectl session"));
+            assert_eq!(format_remote_title(&ctx), "kubectl: api-0");
+            assert_eq!(
+                clone_session_command(&ctx),
+                None,
+                "{credentialed:?} authenticates as someone the bare command would not"
+            );
+        }
+        let tls = detect_container(&argv(&[
+            "docker",
+            "--tlscacert",
+            "/certs/ca.pem",
+            "-H",
+            "tcp://build.example:2376",
+            "exec",
+            "web",
+            "sh",
+        ]))
+        .unwrap();
+        assert_eq!(format_remote_title(&tls), "docker: web");
+        assert_eq!(clone_session_command(&tls), None);
+
+        // A flag whose NAME says endpoint, on a runtime whose own table did not
+        // claim it: there is nothing to re-emit and no reason to believe the
+        // default is the same place, so it fails closed instead of quietly
+        // reconnecting to the local daemon.
+        for foreign in [
+            &[
+                "podman",
+                "--host",
+                "tcp://build.example:2375",
+                "exec",
+                "web",
+                "sh",
+            ][..],
+            &["podman", "--context", "remote", "exec", "web", "sh"],
+            &[
+                "kubectl",
+                "--host",
+                "https://api.example",
+                "exec",
+                "api-0",
+                "--",
+                "sh",
+            ],
+        ] {
+            let ctx = detect_container(&argv(foreign))
+                .unwrap_or_else(|| panic!("{foreign:?} is still a container session"));
+            assert_eq!(
+                clone_session_command(&ctx),
+                None,
+                "{foreign:?} names an endpoint this crate cannot map back"
+            );
+        }
+
+        // A context name outside the reproducible charset is likewise dropped
+        // rather than guessed at.
+        let hostile = detect_container(&argv(&[
+            "docker",
+            "--context",
+            "$(curl evil)",
+            "exec",
+            "web",
+            "sh",
+        ]))
+        .unwrap();
+        assert_eq!(clone_session_command(&hostile), None);
+
+        // Positive controls: suppression is selective. `--user` AFTER `exec` is
+        // a uid inside the container, not a credential for the endpoint, and a
+        // plain exec still reconnects.
+        for (reproducible, expected) in [
+            (
+                &["podman", "exec", "-it", "web", "sh"][..],
+                "podman exec -it 'web' $SHELL",
+            ),
+            (
+                &["docker", "exec", "--user", "root", "web", "sh"],
+                "docker exec -it 'web' $SHELL",
+            ),
+            (
+                &["kubectl", "exec", "-it", "api-0", "--", "sh"],
+                "kubectl exec -it 'api-0' -- $SHELL",
+            ),
+        ] {
+            let ctx = detect_container(&argv(reproducible))
+                .unwrap_or_else(|| panic!("{reproducible:?} is still a container session"));
+            assert_eq!(
+                clone_session_command(&ctx),
+                Some(expected.to_string()),
+                "{reproducible:?} names one endpoint this crate can rebuild"
+            );
+        }
+    }
+
+    /// `--` does not mean the same thing to every CLI, and guessing costs an
+    /// endpoint. docker/podman use it to end flag parsing, so the positional
+    /// after it really is the container. kubectl's `exec` reads how many
+    /// positionals preceded it (cobra's `ArgsLenAtDash`) and, when none did,
+    /// takes EVERYTHING after it as the command with the pod coming from
+    /// `-f`/stdin; `podman exec --latest` moves the container out of the argv
+    /// the same way. Skipping the `--` and scanning on made the COMMAND the
+    /// endpoint: `kubectl exec -f pod.yaml -- sh` titled the pane `kubectl: sh`
+    /// and offered to re-attach to a container called `sh`.
+    #[test]
+    fn a_command_after_a_double_dash_is_never_read_as_the_container() {
+        let argv = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        for command_only in [
+            &["kubectl", "exec", "-f", "pod.yaml", "--", "sh"][..],
+            &["kubectl", "exec", "--filename", "p.yaml", "--", "bash"],
+            &["kubectl", "exec", "--filename=p.yaml", "--", "bash"],
+            &["kubectl", "exec", "-itf", "pod.yaml", "--", "sh"],
+            // Nothing before the `--` at all: the pod came from `-f` or stdin,
+            // so every token after it is the command.
+            &["kubectl", "exec", "--", "sh"],
+            &["kubectl", "exec", "-it", "--", "web", "sh"],
+            &["podman", "exec", "--latest", "--", "bash"],
+            &["podman", "exec", "-l", "--", "bash"],
+            // Without a `--` the same flags still move the container out of the
+            // argv, so the next positional is the command, not the name.
+            &["podman", "exec", "-l", "bash"],
+            &["podman", "exec", "-it", "--latest", "bash"],
+            &["kubectl", "exec", "-f", "pod.yaml", "sh"],
+        ] {
+            assert_eq!(
+                detect_container(&argv(command_only)),
+                None,
+                "the container is not in this argv, so nothing may be offered: {command_only:?}"
+            );
+        }
+
+        // Positive controls: for docker/podman `--` only ends flag parsing, and
+        // a name given before the `--` is still the name.
+        for (named, expected) in [
+            (
+                &["docker", "exec", "--", "web", "sh"][..],
+                container_ctx(ContainerRuntime::Docker, "web"),
+            ),
+            (
+                &["podman", "exec", "-it", "--", "web", "sh"],
+                container_ctx(ContainerRuntime::Podman, "web"),
+            ),
+            (
+                &["kubectl", "exec", "api-0", "--", "sh"],
+                container_ctx(ContainerRuntime::Kubectl, "api-0"),
+            ),
+            (
+                &["lxc-attach", "-n", "web", "--", "sh"],
+                container_ctx(ContainerRuntime::Lxc, "web"),
+            ),
+        ] {
+            assert_eq!(
+                detect_container(&argv(named)),
+                Some(expected),
+                "{named:?} names its container in the argv"
+            );
+        }
+    }
+
+    /// lxc-attach's own value-taking options were missing from the table, so
+    /// each one's VALUE was read as the container: `lxc-attach --uid 1000 -n
+    /// web` titled the pane `lxc: 1000` and offered `lxc-attach -n '1000'`.
+    /// `-o`/`--logfile` and `-l`/`--logpriority` come from the option set every
+    /// lxc-* tool shares; `-u`/`--uid` and `-g`/`--gid` are lxc-attach's own.
+    #[test]
+    fn lxc_attach_option_values_are_never_read_as_the_container() {
+        let argv = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        for form in [
+            &["lxc-attach", "--uid", "1000", "-n", "web"][..],
+            &["lxc-attach", "--uid=1000", "-n", "web"],
+            &["lxc-attach", "--gid", "1000", "-n", "web"],
+            &["lxc-attach", "-u", "1000", "-n", "web"],
+            &["lxc-attach", "-g", "1000", "-n", "web"],
+            &["lxc-attach", "-o", "/tmp/lxc.log", "-n", "web"],
+            &["lxc-attach", "--logfile", "/tmp/lxc.log", "-n", "web"],
+            &["lxc-attach", "-l", "DEBUG", "-n", "web"],
+            &["lxc-attach", "-n", "web", "--uid", "1000", "--gid", "1000"],
+        ] {
+            assert_eq!(
+                detect_container(&argv(form)),
+                Some(container_ctx(ContainerRuntime::Lxc, "web")),
+                "{form:?} names container `web`"
+            );
+        }
+    }
+
+    /// Structural guard for the two option tables and the emit tables, which
+    /// are kept in step by hand: an option captured into a slot that the
+    /// runtime's `clone_session_command` arm never emits would be silently
+    /// dropped, which is exactly the "reconnect lands elsewhere" defect the
+    /// slots exist to prevent. Nothing in the type system links the two, so
+    /// assert the link.
+    #[test]
+    fn every_slot_a_runtime_can_capture_is_emitted_by_its_reconnect_command() {
+        // The union of every option name either table recognizes, long and
+        // short. Written out so the guard reads as data, and checked against
+        // the tables themselves below — the list claimed to be complete "by
+        // construction" while being hand-maintained, so a table entry landing
+        // in a slot the emitter never writes could be added without any test
+        // noticing.
+        const NAMES: &[&str] = &[
+            "context",
+            "c",
+            "connection",
+            "host",
+            "H",
+            "url",
+            "config",
+            "remote",
+            "r",
+            "server",
+            "s",
+            "namespace",
+            "n",
+            "kubeconfig",
+            "cluster",
+            "token",
+            "password",
+            "user",
+            "username",
+            "as",
+            "as-group",
+            "certificate-authority",
+            "client-certificate",
+            "client-key",
+            "tlscacert",
+            "tlscert",
+            "tlskey",
+            "identity",
+            "log-level",
+            "request-timeout",
+            "cache-dir",
+            "root",
+            "runroot",
+            "storage-driver",
+            "storage-opt",
+            "tmpdir",
+            "runtime",
+            "l",
+            "name",
+            "lxcpath",
+            "P",
+            "e",
+            "uid",
+            "gid",
+            "g",
+            "o",
+            "logfile",
+            "logpriority",
+            "container",
+            "filename",
+            "f",
+            "latest",
+            "env",
+            "env-file",
+            "workdir",
+            "detach-keys",
+            "cidfile",
+            "pod-running-timeout",
+            "preserve-fds",
+            "arch",
+            "namespaces",
+            "set-var",
+            "keep-var",
+            "rcfile",
+            "u",
+            "w",
+            "a",
+            "v",
+            "L",
+        ];
+        // Every option name the two tables actually match on, read out of
+        // their source. `NAMES` must equal this exactly, or the sweep below is
+        // silently skipping a table entry.
+        let source = include_str!("lib.rs");
+        let start = source
+            .find("fn container_global_option(")
+            .expect("the global option table");
+        let exec = source
+            .find("fn container_exec_option(")
+            .expect("the exec option table");
+        let end = exec
+            + source[exec..]
+                .find(
+                    "
+}
+",
+                )
+                .expect("the exec option table ends");
+        let mut in_tables = std::collections::BTreeSet::new();
+        for line in source[start..end].lines() {
+            // Prose in the comments is full of quoted words.
+            let code = line.split("//").next().unwrap_or("");
+            let mut rest = code;
+            while let Some(open) = rest.find('"') {
+                let after = &rest[open + 1..];
+                let Some(close) = after.find('"') else { break };
+                in_tables.insert(after[..close].to_string());
+                rest = &after[close + 1..];
+            }
+        }
+        // If the slicing above ever stops matching, this catches it rather than
+        // leaving an empty set to compare equal to an empty list.
+        assert!(
+            in_tables.len() > 50 && in_tables.contains("kubeconfig") && in_tables.contains("n"),
+            "the table scan found {} names, which is not the tables",
+            in_tables.len()
+        );
+        let declared = NAMES.iter().map(|n| (*n).to_string()).collect();
+        assert_eq!(
+            in_tables, declared,
+            "NAMES and the option tables disagree; every name either table              matches on must be swept here"
+        );
+
+        const PROBE: &str = "slot-probe";
+        for runtime in [
+            ContainerRuntime::Docker,
+            ContainerRuntime::Podman,
+            ContainerRuntime::Kubectl,
+            ContainerRuntime::Lxc,
+        ] {
+            for name in NAMES {
+                for (table, slot) in [
+                    ("global", container_global_option(runtime, name)),
+                    ("exec", container_exec_option(runtime, name)),
+                ]
+                .into_iter()
+                .filter_map(|(table, entry)| entry.map(|(slot, _)| (table, slot)))
+                {
+                    let mut options = ContainerOptions::default();
+                    match slot {
+                        ContainerOptionSlot::Context => options.context = Some(PROBE.into()),
+                        ContainerOptionSlot::Endpoint => options.endpoint = Some(PROBE.into()),
+                        ContainerOptionSlot::Namespace => options.namespace = Some(PROBE.into()),
+                        ContainerOptionSlot::Config => options.config = Some(PROBE.into()),
+                        ContainerOptionSlot::PodContainer => {
+                            options.pod_container = Some(PROBE.into());
+                        }
+                        // These reach the user through the container name or
+                        // through suppression, not through an emitted flag.
+                        ContainerOptionSlot::Name
+                        | ContainerOptionSlot::ImplicitName
+                        | ContainerOptionSlot::Unreproducible
+                        | ContainerOptionSlot::Ignored => continue,
+                    }
+                    let cmd = clone_session_command(&RemoteContext::Container {
+                        runtime,
+                        container: "c".into(),
+                        options,
+                    })
+                    .unwrap_or_else(|| {
+                        panic!("{runtime:?} {table} `{name}` captures a value but emits nothing")
+                    });
+                    assert!(
+                        cmd.contains(PROBE),
+                        "{runtime:?} {table} `{name}` lands in a slot its reconnect \
+                         command never emits: {cmd}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// The option values reach the same auto-executed line as the host and
+    /// container names, so they get the same two layers: single-quoted on the
+    /// way out, and a control character anywhere in them means no command at
+    /// all rather than one a newline could split.
+    #[test]
+    fn reconnect_option_values_are_quoted_and_control_chars_rejected() {
+        let quoted = clone_session_command(&RemoteContext::Ssh {
+            host: "box".into(),
+            user: None,
+            options: SshOptions {
+                identity: Some("/keys/a b; rm -rf ~".into()),
+                ..SshOptions::default()
+            },
+        })
+        .expect("no control char → Some, just quoted");
+        assert_eq!(quoted, "ssh -i '/keys/a b; rm -rf ~' 'box'");
+        assert!(
+            !has_unquoted_metachar(&quoted),
+            "option-value metachars must stay quoted: {quoted}"
+        );
+
+        assert_eq!(
+            clone_session_command(&RemoteContext::Ssh {
+                host: "box".into(),
+                user: None,
+                options: SshOptions {
+                    port: Some("22\nreboot".into()),
+                    ..SshOptions::default()
+                },
+            }),
+            None
+        );
+        assert_eq!(
+            clone_session_command(&RemoteContext::Container {
+                runtime: ContainerRuntime::Kubectl,
+                container: "api-0".into(),
+                options: ContainerOptions {
+                    namespace: Some("prod\nreboot".into()),
+                    ..ContainerOptions::default()
+                },
+            }),
+            None
+        );
+        assert_eq!(
+            clone_session_command(&RemoteContext::Container {
+                runtime: ContainerRuntime::Kubectl,
+                container: "api-0".into(),
+                options: ContainerOptions {
+                    pod_container: Some("side\ncar".into()),
+                    ..ContainerOptions::default()
+                },
+            }),
+            None
         );
     }
 
@@ -2701,18 +4318,12 @@ mod tests {
         // the wrapped ssh binary — the real ssh + target come after it.
         assert_eq!(
             detect_ssh(&argv(&["sshpass", "-p", "ssh", "ssh", "user@host"])),
-            Some(RemoteContext::Ssh {
-                host: "host".into(),
-                user: Some("user".into()),
-            })
+            Some(ssh_ctx("host", Some("user")))
         );
         // Same for a `-f` password-file path literally named "ssh".
         assert_eq!(
             detect_ssh(&argv(&["sshpass", "-f", "ssh", "ssh", "user@host"])),
-            Some(RemoteContext::Ssh {
-                host: "host".into(),
-                user: Some("user".into()),
-            })
+            Some(ssh_ctx("host", Some("user")))
         );
         // sshpass wrapping a non-ssh command is not an ssh session.
         assert_eq!(
@@ -3111,10 +4722,7 @@ mod tests {
         tree.add(200, Some(100), &["ssh", "alice@server.example.com"]);
         assert_eq!(
             detect_in_tree(100, &mut tree),
-            Some(RemoteContext::Ssh {
-                host: "server.example.com".into(),
-                user: Some("alice".into()),
-            })
+            Some(ssh_ctx("server.example.com", Some("alice")))
         );
     }
 
@@ -3129,10 +4737,7 @@ mod tests {
         tree.add(100, None, &["ssh", "carol@direct.example.com"]);
         assert_eq!(
             detect_in_tree(100, &mut tree),
-            Some(RemoteContext::Ssh {
-                host: "direct.example.com".into(),
-                user: Some("carol".into()),
-            })
+            Some(ssh_ctx("direct.example.com", Some("carol")))
         );
     }
 
@@ -3147,10 +4752,7 @@ mod tests {
         let idx = build_children_index(&tree);
         assert_eq!(
             detect_root_in_index(100, &tree, &idx),
-            Some(RemoteContext::Container {
-                runtime: ContainerRuntime::Docker,
-                container: "api-1".into(),
-            })
+            Some(container_ctx(ContainerRuntime::Docker, "api-1"))
         );
     }
 
@@ -3205,10 +4807,7 @@ mod tests {
 
         assert_eq!(
             detect_root_in_index_with_scratch(100, &tree, &index, &mut queue, &mut visited,),
-            Some(RemoteContext::Ssh {
-                host: "a.example".into(),
-                user: Some("alice".into()),
-            })
+            Some(ssh_ctx("a.example", Some("alice")))
         );
         assert!(!visited.contains(&999));
 
@@ -3280,10 +4879,7 @@ mod tests {
         tree.add(200, Some(150), &["ssh", "bob@deep.example"]);
         assert_eq!(
             detect_in_tree(100, &mut tree),
-            Some(RemoteContext::Ssh {
-                host: "deep.example".into(),
-                user: Some("bob".into()),
-            })
+            Some(ssh_ctx("deep.example", Some("bob")))
         );
     }
 
@@ -3304,10 +4900,7 @@ mod tests {
         );
         assert_eq!(
             detect_in_tree(100, &mut tree),
-            Some(RemoteContext::Container {
-                runtime: ContainerRuntime::Docker,
-                container: "ubuntu-2204".into(),
-            })
+            Some(container_ctx(ContainerRuntime::Docker, "ubuntu-2204"))
         );
     }
 
@@ -3325,10 +4918,7 @@ mod tests {
         tree.add(201, Some(200), &["ssh", "far.example"]);
         assert_eq!(
             detect_in_tree(100, &mut tree),
-            Some(RemoteContext::Container {
-                runtime: ContainerRuntime::Docker,
-                container: "near".into(),
-            })
+            Some(container_ctx(ContainerRuntime::Docker, "near"))
         );
     }
 

@@ -42,6 +42,53 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
     deduplicated on the spelling in the file, so `use-system-font` and
     `use_system_font` — which the parser folds to the same key — were listed
     separately, reading as two problems to fix.
+- **Reconnect went to a different endpoint than the session it cloned.** The
+  right-click "Reconnect" / "Re-attach" entry rebuilt its command from the host
+  or container name alone. Every option that decides which machine that name
+  reaches was parsed past and discarded: `ssh -p 2222 -J bastion -i key box`
+  came back as plain `ssh box` — another port, no bastion, another key — and
+  `docker --context remote exec web` came back as a local `docker exec web`,
+  attaching to whatever container happened to share the name on this machine.
+  `kubectl -n prod exec api` reconnected in the default namespace, and a pod's
+  `-c sidecar` was lost. The endpoint-selecting options now travel with the
+  name and are re-emitted, each single-quoted; where one cannot be reproduced
+  faithfully (`-o ProxyCommand=…`, `-W`, `podman --remote`, a bearer token that
+  must never be echoed back into a command line) the menu entry is dropped
+  instead, because no Reconnect beats one that lands somewhere else.
+- **An option's value could be reported as the host or container.** Short
+  options are now read the way getopt and Go's pflag actually parse them, so a
+  boolean in front of a value-taking letter no longer hides the value:
+  `ssh -vp 2222 box` reported the PORT as the host, `ssh -luser box` dropped the
+  login name, and `kubectl exec -itc sidecar pod` reported the sidecar as the
+  pod. The long-option tables gained the entries whose absence had the same
+  effect — `kubectl exec --container sidecar pod` named the container as the
+  pod and `docker exec --env-file vars web` named the env file as the
+  container — and `lxc-attach --name web` / `--name=web` / `-nweb` are detected
+  at all now, where only the separated `-n web` form used to be.
+- **`--` before the container made the COMMAND the container.** `kubectl exec -f
+  pod.yaml -- sh` takes the pod from the manifest and runs `sh` inside it; the
+  walk skipped the `--`, titled the pane `kubectl: sh`, and offered to re-attach
+  to a container by that name. `--` is now read the way each CLI reads it:
+  docker and podman use it only to end flag parsing, so `docker exec -- web sh`
+  still names `web`, while kubectl — and `podman exec --latest`/`-l` — take
+  everything after it as the command, which leaves no name in the argv and
+  therefore no menu entry rather than a wrong one. In the same pass: `podman -r`
+  (the documented short form of `--remote`) was not gated, so a session on the
+  remote service offered a reconnect to the LOCAL socket; the kubeconfig
+  `--user`, `--as`, and the Docker/kubectl TLS and client-certificate flags were
+  consumed and forgotten, so the rebuilt command authenticated as a different
+  account; `lxc-attach --uid`/`--gid`/`-g`/`-o` had their VALUES read as the
+  container name; and `ssh -o IdentityFile=…` / `CertificateFile=…` /
+  `IdentityAgent=…` / `CanonicalizeHostname=…` were not treated as
+  endpoint-selecting, while a leading space (`-o " ProxyJump=bastion"`, which
+  OpenSSH honours) evaded the keyword gate outright.
+- **A Windows install path removed the Reconnect entry.** `ssh -i "C:\Program
+  Files (x86)\OpenSSH\key" box` fell outside the reproducible path charset, so
+  the menu entry disappeared entirely. Parentheses, brackets, braces, commas and
+  apostrophes are all literal inside the POSIX single quotes the value is
+  emitted in, so they are accepted; argv-derived values are additionally
+  length-bounded, and a second, different `ssh -i` (OpenSSH tries every identity
+  in order) suppresses the entry rather than reproducing only the last key.
   - **`--working-directory` had no test at the CLI surface**, and neither did
     `--accent`. Both are validated by one function now, driven by the tests
     exactly as the CLI drives it.

@@ -25083,6 +25083,7 @@ mod tests {
         let evil_host = kettle_remote::RemoteContext::Ssh {
             host: "safe\u{202e}evil".to_string(),
             user: None,
+            options: kettle_remote::SshOptions::default(),
         };
         let raw = kettle_remote::format_remote_title(&evil_host);
         assert!(
@@ -25098,6 +25099,7 @@ mod tests {
         let evil_container = kettle_remote::RemoteContext::Container {
             runtime: kettle_remote::ContainerRuntime::Docker,
             container: "evil\x1b]0;pwned\x07".to_string(),
+            options: kettle_remote::ContainerOptions::default(),
         };
         let sanitized = sanitize_title(&kettle_remote::format_remote_title(&evil_container));
         assert!(
@@ -25111,10 +25113,12 @@ mod tests {
         let first = kettle_remote::RemoteContext::Ssh {
             host: "one.example".to_string(),
             user: Some("dev".to_string()),
+            options: kettle_remote::SshOptions::default(),
         };
         let second = kettle_remote::RemoteContext::Ssh {
             host: "two.example".to_string(),
             user: None,
+            options: kettle_remote::SshOptions::default(),
         };
         let mut title = "kettle".to_string();
         let mut placeholder = true;
@@ -28435,6 +28439,7 @@ mod tests {
         let ctx = kettle_remote::RemoteContext::Ssh {
             host: "buildbox".into(),
             user: Some("kevim".into()),
+            options: kettle_remote::SshOptions::default(),
         };
         apply_remote_title_transition(
             &mut title,
