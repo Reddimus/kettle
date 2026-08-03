@@ -1554,8 +1554,16 @@ pub struct Config {
     /// [`ChromeBackground`].
     pub chrome_background: ChromeBackground,
     /// Terminator parity (terminatorlib/config.py:106
-    /// `background_darkness`): background image opacity (0.0 fully
-    /// dark .. 1.0 untinted).
+    /// `background_darkness`): how opaque the terminal's own background colour
+    /// is where it covers a transparent, image, or starfield backdrop.
+    ///
+    /// **`0.0` is fully SEE-THROUGH and `1.0` is fully covered**, which is what
+    /// Terminator does — `terminal.py` assigns it straight to the background
+    /// colour's alpha, and a Terminator user lowers it to get more
+    /// transparency. Both this comment and `docs/CONFIG.md` used to state the
+    /// opposite ("1.0 = no tint, 0.0 = fully dark"), so anyone following the
+    /// documentation set it to exactly the wrong end. The direction is pinned
+    /// by `kettle-render`'s `darkness_scales_the_backdrop_toward_see_through`.
     pub background_darkness: f32,
     /// Terminator parity (terminatorlib/config.py:93
     /// `cell_height`): vertical cell scaling (default 1.0).

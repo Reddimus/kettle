@@ -159,6 +159,18 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
     "what is installed here" — was written and trusted. A marker carrying a
     version no kettle installer would write is now refused like any other
     mismatch.
+  - **`minimum-contrast` did nothing for bold text under `bold-is-bright`.** The
+    lift ran first and the bright remap then replaced the foreground outright
+    with a palette entry, discarding it. Since the bright variant is the lighter
+    one, the case it threw away is exactly the one that needed it: pale bold text
+    on a pale background. The two steps now run in the order that makes the
+    guarantee hold.
+  - **`background-darkness` was documented backwards.** The code matches
+    Terminator — the value is the background colour's alpha, so `0.0` is
+    see-through and `1.0` is fully covered — but both `docs/CONFIG.md` and the
+    setting's own reference described the opposite ("1.0 = no tint, 0.0 = fully
+    dark"), so anyone configuring it from the documentation reached for the
+    wrong end. The prose is corrected and the direction is pinned by a test.
   - **`--working-directory` had no test at the CLI surface**, and neither did
     `--accent`. Both are validated by one function now, driven by the tests
     exactly as the CLI drives it.

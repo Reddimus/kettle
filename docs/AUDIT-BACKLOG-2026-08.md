@@ -125,10 +125,21 @@ Still open on those same fixes:
 - **`kettle-render`**: combining marks consume a grid column each, shifting the
   rest of the row; snapshots keep only four zero-width marks; the block cursor
   redraws only the base scalar, so an accent vanishes under the cursor.
-- **`kettle-render`**: `cursor-fg-color` has no block-cursor effect (its branch
-  is unreachable); `background-darkness` changes clear alpha instead of tinting,
-  inverting the documented meaning for `background-type = transparent`;
-  min-contrast is applied before `bold-is-bright`, which can undo it.
+- **`kettle-render`**: all three **fixed**.
+  `cursor-fg-color`'s branch was unreachable; the decision is
+  `color::cursor_glyph_color` now and a test drives it.
+  `background-darkness` was not inverted in the CODE — it matches Terminator,
+  which assigns the value straight to the background colour's alpha, so `0.0` is
+  see-through and `1.0` is covered. Both `docs/CONFIG.md` and the field's own
+  doc comment described that backwards, sending anyone who followed the
+  documentation to the wrong end of the scale. The prose is corrected and the
+  direction is pinned by a test.
+  `minimum-contrast` really was defeated by `bold-is-bright`: the lift ran
+  first, and the remap then replaced the foreground outright with a palette
+  entry. The order is inverted and both steps live in `attributed_foreground`.
+  The fixture that catches it needs a base colour that is ALREADY compliant —
+  with a non-compliant one the lift moves the colour off the palette entry, the
+  remap finds nothing to match, and the bug hides.
 - **`kettle-render`**: `extra-styling`, `title-font`, `title-use-system-font`,
   `use-system-font`, `use-theme-colors` parse, validate, and have no consumer.
 - **`kettle-remote`**: SSH options are parsed and discarded, so
