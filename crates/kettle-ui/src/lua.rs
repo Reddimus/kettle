@@ -293,6 +293,21 @@ const HOOK_INSTRUCTION_INTERVAL: u32 = 1_000_000;
 /// under a second instead of wedging the UI thread forever.
 const DEFAULT_MAX_HOOK_FIRES: u64 = 128;
 
+/// What the registered Lua URL handlers decided about a URL.
+///
+/// Spelled out as three cases rather than a bool because a handler can also
+/// REWRITE the URL — the shape every handler in `docs/examples/init.lua` uses,
+/// and the one a bool silently threw away.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum UrlHandlerOutcome {
+    /// Open this URL instead of the matched text.
+    Open(String),
+    /// A handler dealt with the URL itself; open nothing.
+    Handled,
+    /// Nobody claimed it — continue to `custom_url_handler` / the system open.
+    Fallthrough,
+}
+
 pub struct LuaEngine {
     lua: Lua,
     /// Side-effect commands queued by Lua functions (plus the
@@ -826,20 +841,37 @@ impl LuaEngine {
         }
     }
 
-    /// Invoke the first registered URL handler whose
-    /// pattern matches the given URL. Returns true when a handler
-    /// claimed the URL (kettle should NOT also open it); false
-    /// otherwise (kettle continues to its default open-in-browser
-    /// path).
+    /// Run the registered URL handlers against `url` and report what they
+    /// decided.
+    ///
+    /// The contract is the one `docs/examples/init.lua` documents to users,
+    /// because that is the file they copy from:
+    ///
+    /// * **a string** — open THAT URL instead of the matched text. Every
+    ///   handler in the shipped example file is this shape (`LP: #12345` →
+    ///   `https://bugs.launchpad.net/bugs/12345`), and the returned string
+    ///   used to be discarded, so every one of them did nothing.
+    /// * **`true`** — the handler opened it itself; kettle must not open
+    ///   anything.
+    /// * **`nil` / no return / `false`** — declined. Try the next handler,
+    ///   then kettle's own open.
+    /// * **an error** — declined, and logged. A handler exists to enhance a
+    ///   link, so a broken one must never be the reason a link stops
+    ///   working; it used to claim the URL anyway and leave the click dead.
+    ///
+    /// The caller re-checks a returned URL against `is_safe_url` before
+    /// opening it. A handler runs in the user's own config, but it is fed
+    /// untrusted terminal text, so it must not become a way to turn that text
+    /// into a URL kettle would otherwise refuse.
     ///
     /// Uses Lua's built-in `string.match` for pattern compatibility
     /// with Terminator's URLHandler regex semantics (which are
     /// Python-flavored, but Lua patterns are similar enough for
     /// the common URL shapes — alternation isn't supported but most
     /// URL handlers don't need it).
-    pub fn try_url_handler(&self, url: &str) -> bool {
+    pub fn try_url_handler(&self, url: &str) -> UrlHandlerOutcome {
         self.arm_budget();
-        let r: mlua::Result<bool> = (|| {
+        let r: mlua::Result<UrlHandlerOutcome> = (|| {
             let handlers: mlua::Table = self.lua.named_registry_value("kettle_url_handlers")?;
             let n = handlers.len()?;
             for i in 1..=n {
@@ -852,21 +884,50 @@ impl LuaEngine {
                     .globals()
                     .get::<mlua::Table>("string")?
                     .get("match")?;
-                let m: mlua::Value = s.call((url, pattern.as_str()))?;
-                if !matches!(m, mlua::Value::Nil) {
-                    let cb: mlua::Function = entry.get("callback")?;
-                    let call_result: mlua::Result<()> = cb.call(url.to_string());
-                    if let Err(e) = call_result {
-                        log::warn!("lua url_handler callback {i}: {e}");
+                // A bad pattern is this handler's problem and nobody else's.
+                // `string.match` raises on malformed patterns (an unclosed
+                // `[`, say), and propagating that error abandoned the whole
+                // loop — so registering one broken pattern disabled every
+                // handler after it, and the user saw only a log line.
+                // Registration checks length and UTF-8 but cannot check the
+                // pattern, since Lua patterns are only validated on use.
+                let m: mlua::Value = match s.call((url, pattern.as_str())) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        log::warn!("lua url_handler {i} has an unusable pattern, skipping it: {e}");
+                        continue;
                     }
-                    return Ok(true);
+                };
+                if matches!(m, mlua::Value::Nil) {
+                    continue;
+                }
+                let cb: mlua::Function = entry.get("callback")?;
+                match cb.call::<mlua::Value>(url.to_string()) {
+                    Ok(mlua::Value::String(rewritten)) => {
+                        let text = rewritten.to_string_lossy();
+                        let text = text.trim();
+                        if !text.is_empty() {
+                            return Ok(UrlHandlerOutcome::Open(text.to_string()));
+                        }
+                        // An empty string says nothing; treat it as a decline
+                        // rather than opening the empty URL.
+                    }
+                    Ok(mlua::Value::Boolean(true)) => return Ok(UrlHandlerOutcome::Handled),
+                    // `false`, `nil`, no return at all, or anything else:
+                    // declined, try the next handler.
+                    Ok(_) => {}
+                    Err(e) => {
+                        log::warn!(
+                            "lua url_handler callback {i} failed, falling back to                              kettle's own open: {e}"
+                        );
+                    }
                 }
             }
-            Ok(false)
+            Ok(UrlHandlerOutcome::Fallthrough)
         })();
         r.unwrap_or_else(|e| {
             log::warn!("lua try_url_handler: {e}");
-            false
+            UrlHandlerOutcome::Fallthrough
         })
     }
 
@@ -1642,12 +1703,157 @@ mod tests {
              )",
         )
         .expect("eval");
-        // Matching URL → handler claims it.
-        assert!(eng.try_url_handler("https://github.com/kettle"));
+        // Matching URL → the callback runs. It returns nothing, which per the
+        // documented contract declines, so kettle still opens the original.
+        assert_eq!(
+            eng.try_url_handler("https://github.com/kettle"),
+            UrlHandlerOutcome::Fallthrough
+        );
         assert_eq!(eng.eval_str("return github_hits").unwrap(), "1");
-        // Non-matching URL → kettle's default path proceeds.
-        assert!(!eng.try_url_handler("https://example.com/"));
+        // Non-matching URL → the callback does not run at all.
+        assert_eq!(
+            eng.try_url_handler("https://example.com/"),
+            UrlHandlerOutcome::Fallthrough
+        );
         assert_eq!(eng.eval_str("return github_hits").unwrap(), "1");
+    }
+
+    /// A handler must never be the reason a link stops opening.
+    ///
+    /// A matching handler used to claim the URL no matter what happened
+    /// inside it — the callback's result was discarded as `mlua::Result<()>`
+    /// and an error was logged and ignored. So a plugin with a typo in it
+    /// made every URL matching its pattern silently unopenable: the click did
+    /// nothing, and the only trace was a log line. Both an error and an
+    /// explicit decline now fall through to the next handler, and finally to
+    /// kettle's own open.
+    #[test]
+    fn a_broken_or_declining_url_handler_leaves_the_link_working() {
+        let eng = LuaEngine::new("Default").expect("init");
+        eng.eval_str(
+            "kettle.add_url_handler('boom', 'https://boom%.example/.*',
+                 function(_url) error('this plugin has a bug') end)
+             kettle.add_url_handler('decline', 'https://decline%.example/.*',
+                 function(_url) return false end)
+             claimed_hits = 0
+             kettle.add_url_handler('claim', 'https://claim%.example/.*',
+                 function(_url) claimed_hits = claimed_hits + 1 return true end)",
+        )
+        .expect("eval");
+
+        assert_eq!(
+            eng.try_url_handler("https://boom.example/x"),
+            UrlHandlerOutcome::Fallthrough,
+            "a handler that raised must not swallow the URL"
+        );
+        assert_eq!(
+            eng.try_url_handler("https://decline.example/x"),
+            UrlHandlerOutcome::Fallthrough,
+            "a handler that returned false declined it"
+        );
+        // A handler that opened the URL itself says so with `true`, and then
+        // kettle must not open it a second time.
+        assert_eq!(
+            eng.try_url_handler("https://claim.example/x"),
+            UrlHandlerOutcome::Handled
+        );
+        assert_eq!(eng.eval_str("return claimed_hits").unwrap(), "1");
+    }
+
+    /// A failing handler must not stop a LATER one from claiming the URL —
+    /// `continue`, not `return`. Two plugins can register overlapping
+    /// patterns, and the first one being broken must not disable the second.
+    /// The shape every handler in `docs/examples/init.lua` uses: match some
+    /// text, return a REWRITTEN URL, and kettle opens that instead.
+    ///
+    /// The returned string used to be discarded — the result was typed
+    /// `mlua::Result<()>` — while the handler still claimed the URL. So every
+    /// example we ship (`LP: #12345` → Launchpad, `lp:branch` → code.launchpad,
+    /// `apt://gimp`) matched, ran, produced the right URL, and then opened
+    /// nothing at all. Copying the documented file gave you dead links.
+    #[test]
+    fn a_handler_that_rewrites_the_url_gets_that_url_opened() {
+        let eng = LuaEngine::new("Default").expect("init");
+        // Lifted from docs/examples/init.lua.
+        eng.eval_str(
+            "kettle.add_url_handler('launchpad_bug', '%f[%w][lL][pP]:?%s?#?(%d+)',
+                 function(text)
+                     local num = text:match('(%d+)')
+                     if num then
+                         return 'https://bugs.launchpad.net/bugs/' .. num
+                     end
+                 end)",
+        )
+        .expect("eval");
+        assert_eq!(
+            eng.try_url_handler("LP: #12345"),
+            UrlHandlerOutcome::Open("https://bugs.launchpad.net/bugs/12345".to_string()),
+            "a rewritten URL must reach the opener, not be thrown away"
+        );
+
+        // A handler whose branch does not fire returns nil, which declines —
+        // the original text is left to kettle rather than being swallowed.
+        assert_eq!(
+            eng.try_url_handler("LP: none"),
+            UrlHandlerOutcome::Fallthrough
+        );
+    }
+
+    /// An empty string is not a URL. Returning one must decline rather than
+    /// ask the opener to launch nothing.
+    #[test]
+    fn a_handler_returning_an_empty_string_declines() {
+        let eng = LuaEngine::new("Default").expect("init");
+        eng.eval_str(
+            "kettle.add_url_handler('blank', 'https://blank%.example/.*',
+                 function(_url) return '   ' end)",
+        )
+        .expect("eval");
+        assert_eq!(
+            eng.try_url_handler("https://blank.example/x"),
+            UrlHandlerOutcome::Fallthrough
+        );
+    }
+
+    /// A broken PATTERN must not disable the handlers registered after it.
+    ///
+    /// Lua patterns are validated on use, not at registration, so
+    /// `string.match` raises on something like an unclosed `[`. That error
+    /// used to propagate out of the loop, so one bad pattern silently
+    /// disabled every later handler — and the only trace was a log line.
+    #[test]
+    fn an_unusable_pattern_does_not_disable_the_handlers_after_it() {
+        let eng = LuaEngine::new("Default").expect("init");
+        eng.eval_str(
+            "kettle.add_url_handler('broken_pattern', '[', function(_url) return true end)
+             kettle.add_url_handler('good', 'https://good%.example/.*',
+                 function(_url) return 'https://rewritten.example/ok' end)",
+        )
+        .expect("eval");
+        assert_eq!(
+            eng.try_url_handler("https://good.example/x"),
+            UrlHandlerOutcome::Open("https://rewritten.example/ok".to_string()),
+            "a handler registered after a broken pattern must still run"
+        );
+    }
+
+    #[test]
+    fn a_failing_handler_does_not_block_a_later_match() {
+        let eng = LuaEngine::new("Default").expect("init");
+        eng.eval_str(
+            "rescued = 0
+             kettle.add_url_handler('first_broken', 'https://both%.example/.*',
+                 function(_url) error('bug') end)
+             kettle.add_url_handler('second_good', 'https://both%.example/.*',
+                 function(_url) rescued = rescued + 1 return true end)",
+        )
+        .expect("eval");
+        assert_eq!(
+            eng.try_url_handler("https://both.example/x"),
+            UrlHandlerOutcome::Handled,
+            "the second handler must still get its chance"
+        );
+        assert_eq!(eng.eval_str("return rescued").unwrap(), "1");
     }
 
     #[test]
