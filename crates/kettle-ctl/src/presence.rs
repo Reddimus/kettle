@@ -83,9 +83,24 @@ fn entry_path(dir: &Path, pid: u32, win: u64) -> PathBuf {
 pub fn pid_alive(pid: u32) -> bool {
     #[cfg(unix)]
     {
+        // `kill` reads its first argument as a SIGNED pid, and the special
+        // values are all <= 0: `0` is "every process in my group", `-1` is
+        // "every process I may signal", and any other negative is a process
+        // group. A record is attacker-influenced data on disk, so casting a
+        // `u32` straight through meant `u32::MAX` became `-1` and probed
+        // everything — reporting a dead owner as live, forever, and keeping
+        // its stale claim alive with it.
+        //
+        // Reject anything that cannot be a real pid before asking the kernel.
+        let Ok(pid) = libc::pid_t::try_from(pid) else {
+            return false;
+        };
+        if pid <= 0 {
+            return false;
+        }
         // kill(pid, 0): no signal sent, just the permission/existence check.
         // ESRCH = gone; EPERM = alive but not ours (still alive).
-        let r = unsafe { libc::kill(pid as libc::pid_t, 0) };
+        let r = unsafe { libc::kill(pid, 0) };
         r == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
     }
     #[cfg(windows)]
@@ -468,6 +483,25 @@ mod tests {
     fn own_pid_is_alive() {
         assert!(pid_alive(std::process::id()));
         assert!(!pid_alive(u32::MAX - 1));
+        // `kill` takes a SIGNED pid and every special value is <= 0: `0` means
+        // "my whole process group", `-1` means "everything I may signal", and
+        // other negatives mean a process group. Casting a `u32` straight
+        // through turned `u32::MAX` into `-1`, so a crafted record probed
+        // every process and came back "alive" — keeping a dead owner's claim
+        // permanently. These must all be rejected before the kernel sees them.
+        assert!(!pid_alive(u32::MAX), "u32::MAX would cast to -1");
+        assert!(!pid_alive(0), "0 addresses the caller's own process group");
+        for pid in [u32::MAX - 2, 0x8000_0000, 0xffff_fffe] {
+            assert!(
+                !pid_alive(pid),
+                "{pid:#x} cannot be a live pid and must not be probed"
+            );
+        }
+        // A pid that genuinely exists is still reported live.
+        assert!(
+            pid_alive(std::process::id()),
+            "this process must be recognised as alive"
+        );
     }
 
     #[test]

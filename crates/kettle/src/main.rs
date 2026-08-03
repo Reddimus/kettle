@@ -1159,6 +1159,19 @@ fn main() -> anyhow::Result<()> {
     {
         return Err(anyhow::anyhow!("--profile {name}: {reason}"));
     }
+    // `--accent COLOR` promises an override. Both consumers parsed it with
+    // `and_then(Rgb::parse)`, so an unparseable value was silently discarded
+    // and kettle started with the configured accent — the flag appeared to
+    // work and changed nothing. Fail at the surface, naming the accepted
+    // forms, the same way `--config` and `--profile` do.
+    if let Some(accent) = cli.accent.as_deref()
+        && kettle_config::Rgb::parse(accent).is_none()
+    {
+        return Err(anyhow::anyhow!(
+            "--accent {accent:?}: not a color (expected #rgb, #rrggbb, \
+             rgb:R/G/B, or an X11 color name)"
+        ));
+    }
     // Same shape for `--working-directory DIR`. The engine
     // silently falls back to `$HOME` when the directory doesn't exist
     // (see `kettle_core::term::Terminal::new`: `Some(d) if is_dir =>
@@ -1341,7 +1354,14 @@ fn main() -> anyhow::Result<()> {
         // Companion to `--layout NAME` + the in-window layout picker (Alt+L):
         // verify which saved layouts exist from the CLI. Honors `--config` /
         // `--profile` only insofar as layouts live under the same config dir.
-        for name in kettle_ui::list_layouts() {
+        // Honour `--config` / `--profile`: the flag is validated above, and
+        // listing the DEFAULT directory's layouts while the user named a
+        // different config answers a question they did not ask.
+        let names = match resolve_config_path(&cli) {
+            Some(path) => kettle_ui::list_layouts_beside(&path),
+            None => kettle_ui::list_layouts(),
+        };
+        for name in names {
             println!("{name}");
         }
         return Ok(());
@@ -1349,7 +1369,12 @@ fn main() -> anyhow::Result<()> {
     if cli.list_profiles {
         // Companion to `--profile NAME`: list the named config profiles under
         // `<config-dir>/profiles/`.
-        for name in kettle_config::Config::list_profiles() {
+        // Same: list the profiles beside the config the user actually chose.
+        let names = match resolve_config_path(&cli) {
+            Some(path) => kettle_config::Config::list_profiles_beside(&path),
+            None => kettle_config::Config::list_profiles(),
+        };
+        for name in names {
             println!("{name}");
         }
         return Ok(());

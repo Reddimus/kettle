@@ -325,6 +325,50 @@ pub fn average_color(rgba: &[u8]) -> Rgb {
 mod tests {
     use super::*;
 
+    /// `resolve_query` answers "what colour is this slot", NOT "did an
+    /// application override it".
+    ///
+    /// The renderer used `resolve_query(258, ..).is_some()` to decide whether
+    /// a runtime OSC 12 cursor colour was in force. It falls back to the theme
+    /// and so always returns `Some`, which made that branch unconditional and
+    /// left `theme.cursor_text` — the field `cursor-fg-color` sets —
+    /// unreachable. The setting did nothing unless an application happened to
+    /// send OSC 12.
+    ///
+    /// The distinction lives in `term_colors[258]`, and this pins it so a
+    /// future caller cannot make the same substitution.
+    #[test]
+    fn resolving_a_slot_is_not_the_same_as_it_being_overridden() {
+        let theme = Theme::default();
+        let mut colors = TermColors::default();
+
+        // No override: the slot still resolves (to the theme), but nothing has
+        // overridden it.
+        assert!(
+            resolve_query(258, &theme, &colors).is_some(),
+            "the slot always resolves, which is exactly why it cannot be used \
+             as an override test"
+        );
+        assert!(
+            colors[258].is_none(),
+            "with no OSC 12 seen, there is no runtime override"
+        );
+        assert_eq!(
+            resolve_query(258, &theme, &colors),
+            Some(theme.cursor),
+            "and it resolves to the theme's cursor colour"
+        );
+
+        // After an OSC 12, the override exists and wins.
+        colors[258] = Some(alacritty_terminal::vte::ansi::Rgb { r: 1, g: 2, b: 3 });
+        assert!(colors[258].is_some(), "now there is a runtime override");
+        assert_eq!(
+            resolve_query(258, &theme, &colors),
+            Some(Rgb::new(1, 2, 3)),
+            "and it takes precedence over the theme"
+        );
+    }
+
     /// Lifting contrast must not invert the text.
     ///
     /// `#fdfdfd` on `#767676` is 4.465:1 — a shortfall of 0.035 against a

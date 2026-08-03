@@ -2845,7 +2845,18 @@ impl Config {
         let Some(default_p) = Self::default_path() else {
             return Vec::new();
         };
-        let Some(parent) = default_p.parent() else {
+        Self::list_profiles_beside(&default_p)
+    }
+
+    /// The profiles that live beside `config_path`.
+    ///
+    /// `--config FILE` is validated by the CLI and was then ignored here:
+    /// `--config X/config --list-profiles` listed the DEFAULT directory's
+    /// profiles, so the answer described a config the user had not asked
+    /// about. Taking the path explicitly makes the flag mean the same thing
+    /// for listing as it does for loading.
+    pub fn list_profiles_beside(config_path: &std::path::Path) -> Vec<String> {
+        let Some(parent) = config_path.parent() else {
             return Vec::new();
         };
         let profiles_dir = parent.join("profiles");
@@ -11187,6 +11198,57 @@ font-size = 15
             Some(keybinds::Action::ToggleGroupTab),
             "the toggle is its own action, so both chords survive"
         );
+    }
+
+    /// `--config` must mean the same thing for listing as for loading.
+    ///
+    /// `list_profiles` resolved the DEFAULT config directory regardless, so
+    /// `kettle --config X/config --list-profiles` validated the flag and then
+    /// answered about a completely different directory — telling the user
+    /// about profiles they did not ask about, and not about the ones they did.
+    #[test]
+    fn profiles_are_listed_beside_the_config_that_was_named() {
+        // PID + nanos so parallel `cargo test` runs cannot collide; this crate
+        // carries no dev-dependencies, so no tempfile helper is available.
+        let unique = format!(
+            "kettle-cfg-list-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        );
+        let root = std::env::temp_dir().join(unique);
+        let profiles = root.join("profiles");
+        std::fs::create_dir_all(&profiles).expect("mkdir");
+        let config = root.join("config");
+        std::fs::write(&config, b"").expect("seed config");
+        for name in ["work.config", "home.config"] {
+            std::fs::write(profiles.join(name), b"font-size = 13\n").expect("seed profile");
+        }
+        // Not a profile: wrong extension.
+        std::fs::write(profiles.join("notes.txt"), b"x").expect("seed");
+
+        let mut got = Config::list_profiles_beside(&config);
+        got.sort();
+        assert_eq!(
+            got,
+            vec!["home".to_string(), "work".to_string()],
+            "the profiles beside the named config must be the ones listed"
+        );
+
+        // A config directory with no profiles subdirectory lists nothing
+        // rather than falling back somewhere else.
+        let empty_root = root.join("empty");
+        std::fs::create_dir_all(&empty_root).expect("mkdir");
+        let empty_config = empty_root.join("config");
+        std::fs::write(&empty_config, b"").expect("seed");
+        assert!(
+            Config::list_profiles_beside(&empty_config).is_empty(),
+            "an empty config directory must list nothing, not the default one"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// A setting that is accepted but does nothing must SAY so.

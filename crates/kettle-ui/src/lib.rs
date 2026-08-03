@@ -191,6 +191,12 @@ pub fn list_layouts() -> Vec<String> {
     session::Session::list_layouts()
 }
 
+/// The saved layouts beside an explicitly chosen config file, so `--config`
+/// means the same thing for listing as it does for loading.
+pub fn list_layouts_beside(config_path: &std::path::Path) -> Vec<String> {
+    session::Session::list_layouts_beside(config_path)
+}
+
 /// The synchronous `kettle --check-update` path. Does one GitHub
 /// "latest release" GET (bypassing the once/24h throttle — the user asked
 /// explicitly) and returns a human-readable line for the `kettle` bin to print.

@@ -6174,8 +6174,13 @@ impl Renderer {
         // out from under the theme's cursor/cursor_text pair, so the
         // recolored glyph follows reverse-video (its own cell bg) instead of
         // `theme.cursor_text` (which was tuned against `theme.cursor`).
-        // Resolved once; the cursor-draw below resolves the same slot.
-        let cursor_rt_override = color::resolve_query(258, theme, term_colors);
+        // Ask whether a RUNTIME override actually exists, not what the slot
+        // resolves to. `resolve_query` falls back to the theme and therefore
+        // always returns `Some`, so testing it made this branch unconditional
+        // and left `theme.cursor_text` — which is what `cursor-fg-color`
+        // sets — unreachable. Setting a conspicuous cursor foreground did
+        // nothing at all unless an application happened to send OSC 12.
+        let cursor_rt_override = term_colors[258].is_some();
         // A wide (CJK/emoji) glyph under the cursor needs
         // a TWO-cell block — recoloring the glyph to cursor_text while the
         // 1-cell block covered only its left half left the right half drawn
@@ -6278,7 +6283,7 @@ impl Renderer {
                 // cursor color (reverse-video), else theme `cursor_text`. The
                 // glyph keeps its NORMAL `fg` in the pane buffer; the cursor
                 // pass draws this recolored copy on top of the block.
-                let cursor_fg = if cursor_rt_override.is_some() {
+                let cursor_fg = if cursor_rt_override {
                     bg
                 } else {
                     theme.cursor_text
