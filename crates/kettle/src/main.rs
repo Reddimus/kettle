@@ -2427,7 +2427,8 @@ mod tests {
             let cli = Cli::parse_from(&args);
             assert!(
                 ignores_profile(&cli),
-                "{args:?} prints compiled-in information and must run despite a                  bad --profile"
+                "{args:?} prints compiled-in information and must run despite a \
+                 bad --profile"
             );
         }
         for args in [
@@ -2438,7 +2439,8 @@ mod tests {
             let cli = Cli::parse_from(&args);
             assert!(
                 !ignores_profile(&cli),
-                "{args:?} resolves the profile's config, so a typo must be                  reported rather than silently showing the wrong thing"
+                "{args:?} resolves the profile's config, so a typo must be \
+                 reported rather than silently showing the wrong thing"
             );
         }
     }

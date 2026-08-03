@@ -10950,11 +10950,13 @@ split_horiz = <Control><Shift>j\n",
         assert_eq!(
             cfg.theme.background,
             Rgb::parse("#111111").unwrap(),
-            "the DEFAULT profile's colour must win — not whichever profile is              written last"
+            "the DEFAULT profile's colour must win — not whichever profile is \
+             written last"
         );
         assert_eq!(
             cfg.scrollback, 4321,
-            "and its other settings — `scrollback_lines` is Terminator's own              key name (config.py:242) and had no arm at all"
+            "and its other settings — `scrollback_lines` is Terminator's own \
+             key name (config.py:242) and had no arm at all"
         );
         // The global and keybindings sections still apply.
         assert_eq!(
@@ -11036,7 +11038,8 @@ font-size = 15
         assert_eq!(
             cfg.keybinds.get(&stock),
             None,
-            "and the stock chord it replaces must be GONE — otherwise the              collision the user rebound to escape is still there"
+            "and the stock chord it replaces must be GONE — otherwise the \
+             collision the user rebound to escape is still there"
         );
         // Only that action is touched.
         assert_eq!(
@@ -11063,7 +11066,8 @@ font-size = 15
         assert_eq!(
             additive.keybinds.get(&stock).cloned(),
             Some(keybinds::Action::NewTab),
-            "`keybind =` is additive on purpose — one action may have several              chords"
+            "`keybind =` is additive on purpose — one action may have several \
+             chords"
         );
     }
 
