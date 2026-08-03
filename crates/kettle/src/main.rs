@@ -2003,13 +2003,25 @@ fn config_path_problem(p: &std::path::Path) -> Option<&'static str> {
 /// that adding an informational mode is a question somebody has to answer here
 /// instead of a condition nobody remembers to extend.
 fn ignores_profile(cli: &Cli) -> bool {
-    cli.print_default_config
+    // Any mode that DOES resolve the profile disqualifies the whole
+    // invocation, because clap lets several be set at once and only the first
+    // in source order runs. An any-of-the-ignorers test let a mixed
+    // invocation skip validation for a mode that needed it:
+    // `--profile typo --list-profiles --list-ssh-hosts` ran `list-ssh-hosts`
+    // first and silently printed defaults.
+    let reads_profile = cli.list_keybinds
+        || cli.list_layouts
+        || cli.list_ssh_hosts
+        || cli.check_config
+        || cli.check_update;
+    let ignores_profile = cli.print_default_config
         || cli.write_default_config
         || cli.list_themes
         || cli.list_profiles
         || cli.list_actions
         || cli.shell_integration.is_some()
-        || cli.print_completions.is_some()
+        || cli.print_completions.is_some();
+    ignores_profile && !reads_profile
 }
 
 fn profile_problem(name: &str) -> Option<String> {
@@ -2434,7 +2446,26 @@ mod tests {
         for args in [
             vec!["kettle", "--profile", "typo", "--list-keybinds"],
             vec!["kettle", "--profile", "typo", "--list-layouts"],
+            vec!["kettle", "--profile", "typo", "--list-ssh-hosts"],
+            vec!["kettle", "--profile", "typo", "--check-config"],
             vec!["kettle", "--profile", "typo"],
+            // MIXED modes: clap allows several at once and only the first in
+            // source order runs, so an any-of-the-ignorers test let this skip
+            // validation and then execute a mode that DOES read the profile.
+            vec![
+                "kettle",
+                "--profile",
+                "typo",
+                "--list-profiles",
+                "--list-ssh-hosts",
+            ],
+            vec![
+                "kettle",
+                "--profile",
+                "typo",
+                "--list-themes",
+                "--list-keybinds",
+            ],
         ] {
             let cli = Cli::parse_from(&args);
             assert!(

@@ -126,8 +126,8 @@ layouts + keybindings. ConfigObj file format at `~/.config/terminator/config`.
 | Ctrl+Shift+X | toggle_zoom | `ToggleZoom` | A |
 | Ctrl+Shift+Z | scaled_zoom | A | `Action::ScaledZoom` toggles `Mux::toggle_zoom` + scales font 1.5× on enter / restores saved size on exit (font tracked via `App::scaled_zoom_prev_font_size: Option<f32>`) |
 | Ctrl+Shift+Alt+A | hide_window | — | C (`Action::ToggleVisibility` via the `--toggle` infra) |
-| Super+G | group_all | `ToggleBroadcastAll` (semantic match) | A |
-| Super+Shift+G | ungroup_all | `ToggleBroadcastOff` | A |
+| Super+G | group_all | `GroupAll` — puts every pane in the group named `All`. (This row previously claimed `ToggleBroadcastAll` was a "semantic match". It is not: grouping and broadcasting are different operations upstream, and the mapping meant one press armed input duplication.) | A |
+| Super+Shift+G | ungroup_all | `UngroupAll` | A |
 | Super+T | group_tab | — | C (per-tab broadcast group; kettle has per-tab broadcast but no named group) |
 | Super+Shift+T | ungroup_tab | — | C |
 | Super+Shift+W | ungroup_win | — | C |

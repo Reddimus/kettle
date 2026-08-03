@@ -2364,7 +2364,17 @@ fn parse_font_description(value: &str) -> Option<(String, Option<f32>)> {
         // Single token: a bare family with no size.
         None => (trimmed, None),
     };
-    Some((strip_pango_style_options(head).to_string(), size))
+    // Pango's grammar is FAMILY-LIST, comma-separated, as a fallback chain.
+    // kettle resolves one family, so take the first — and this is also what
+    // sheds the separator itself, which would otherwise ride along into the
+    // family name (`Arial Black, 12` → the family `Arial Black,`).
+    let family = strip_pango_style_options(head)
+        .split(',')
+        .map(str::trim)
+        .find(|f| !f.is_empty())
+        .unwrap_or(head)
+        .to_string();
+    Some((family, size))
 }
 
 /// Every Pango style keyword, lowercased and with separators removed.
@@ -2374,8 +2384,12 @@ fn parse_font_description(value: &str) -> Option<(String, Option<f32>)> {
 /// normalized form so `Ultra-Light`, `ultra light`, and `UltraLight` all
 /// compare equal, which is the spread GTK's own font chooser produces.
 const PANGO_STYLE_OPTIONS: &[&str] = &[
-    // Style.
+    // Style. `regular` is what GTK's font chooser writes for a default face,
+    // so omitting it made the most common description of all
+    // (`DejaVu Sans Mono Regular 13`) request a family no system has.
     "normal",
+    "regular",
+    "book",
     "roman",
     "oblique",
     "italic", // Variant.
@@ -2449,6 +2463,13 @@ fn strip_pango_style_options(head: &str) -> &str {
             .collect()
     }
     fn is_style(tokens: &str) -> bool {
+        // A comma is Pango's family-LIST separator, so a token carrying one is
+        // part of the family, never a style option. Normalizing punctuation
+        // away turned `Arial Black, 12` into family `Arial`, because the comma
+        // made `Black,` look like the style word `black`.
+        if tokens.contains(',') {
+            return false;
+        }
         PANGO_STYLE_OPTIONS.contains(&normalize(tokens).as_str())
     }
     // Split off the last `n` whitespace-separated tokens, if that leaves a
@@ -3745,6 +3766,8 @@ impl Config {
     pub fn parse_collect(text: &str) -> (Config, Vec<String>) {
         let mut cfg = Config::default();
         let mut explicit_palette: Vec<(usize, Rgb)> = Vec::new();
+        // Collected during the loop, applied after it — see the arm below.
+        let mut scrollback_infinite: Option<bool> = None;
         // Explicit single-color overrides
         // (background / foreground / cursor block + glyph / selection
         // bg + fg) are stashed here during the parse loop and applied
@@ -4001,11 +4024,13 @@ impl Config {
                     }
                 }
                 // Terminator's unbounded-history flag. kettle expresses the
-                // same thing as `scrollback = infinite`, so a `True` here sets
-                // that and a `False` leaves whatever line count was given.
+                // same thing as `scrollback = infinite`. Terminator treats the
+                // boolean as an override of the line count, so it must not
+                // depend on which line comes first in the file — applied after
+                // the loop for that reason.
                 "scrollback-infinite" => {
-                    if parse_bool(&e.value) == Some(true) {
-                        cfg.scrollback = INFINITE_SCROLLBACK;
+                    if let Some(b) = parse_bool(&e.value) {
+                        scrollback_infinite = Some(b);
                     }
                 }
                 "scrollback-bytes" | "scrollback-byte-limit" | "scrollback-memory" => {
@@ -5099,6 +5124,18 @@ impl Config {
                 // kettle's form when the key names a real action AND the value
                 // parses as a trigger; anything else still falls through to
                 // the unknown-key warning rather than being silently eaten.
+                // An EMPTY accelerator is Terminator's "this shortcut is
+                // disabled" (its own defaults ship several, and its
+                // preferences UI writes one when you clear a binding with
+                // Backspace). Ignoring the line left kettle's default chord
+                // live, so a config that deliberately freed Ctrl+Shift+T
+                // did not free it.
+                other
+                    if keybinds::Action::from_name(other).is_some()
+                        && e.value.trim().is_empty() =>
+                {
+                    keybinds::unbind_action(&mut cfg.keybinds, other);
+                }
                 other
                     if keybinds::Action::from_name(other).is_some()
                         && keybinds::parse_trigger(&e.value).is_some() =>
@@ -5117,6 +5154,13 @@ impl Config {
                 // in their file.
                 _ => unknown.push(e.raw_key.clone()),
             }
+        }
+        // Terminator's `scrollback_infinite` overrides the line count rather
+        // than racing it: `scrollback_infinite = True` above
+        // `scrollback_lines = 100` must still mean unbounded, and it did not
+        // when both simply assigned in file order.
+        if scrollback_infinite == Some(true) {
+            cfg.scrollback = INFINITE_SCROLLBACK;
         }
         for (i, c) in explicit_palette {
             if i < 16 {
@@ -10981,6 +11025,134 @@ font-size = 15
         assert!((cfg.font_size - 15.0).abs() < f32::EPSILON);
     }
 
+    /// A malformed header must not leave the previous section in force.
+    ///
+    /// A typo'd `[[work]` used to fall through as an ordinary line while the
+    /// parser still believed it was inside `[[default]]` — so the work
+    /// profile's settings applied as the user's defaults. An unreadable header
+    /// means we no longer know where we are, and the safe answer is to apply
+    /// nothing until the next header we can read.
+    #[test]
+    fn a_malformed_header_stops_the_previous_section_from_swallowing_it() {
+        let cfg = Config::parse_text(
+            "[profiles]\n  [[default]]\n    background_color = \"#111111\"\n\
+             \n  [[work]\n    background_color = \"#222222\"\n",
+        );
+        assert_eq!(
+            cfg.theme.background,
+            Rgb::parse("#111111").unwrap(),
+            "the default profile's colour must stand; the malformed section's \
+             lines belong to nothing"
+        );
+    }
+
+    /// A skipped nesting level must not promote a section.
+    ///
+    /// `[profiles]` followed by `[[[default]]]` — three deep where two is
+    /// meant — used to collapse to the path `profiles/default` and import a
+    /// malformed section as the user's default profile.
+    #[test]
+    fn a_skipped_nesting_level_does_not_become_the_default_profile() {
+        let cfg =
+            Config::parse_text("[profiles]\n  [[[default]]]\n    background_color = \"#333333\"\n");
+        assert_ne!(
+            cfg.theme.background,
+            Rgb::parse("#333333").unwrap(),
+            "a level was skipped, so this is not the default profile"
+        );
+        // The well-formed depth still works.
+        assert_eq!(
+            Config::parse_text("[profiles]\n  [[default]]\n    background_color = \"#333333\"\n")
+                .theme
+                .background,
+            Rgb::parse("#333333").unwrap()
+        );
+    }
+
+    /// `scrollback_infinite` overrides the line count regardless of file order.
+    ///
+    /// Both simply assigned as they were read, so whichever line came second
+    /// won — and Terminator treats the boolean as an override.
+    #[test]
+    fn infinite_scrollback_does_not_depend_on_line_order() {
+        for text in [
+            "scrollback_infinite = True\nscrollback_lines = 100\n",
+            "scrollback_lines = 100\nscrollback_infinite = True\n",
+        ] {
+            assert_eq!(
+                Config::parse_text(text).scrollback,
+                INFINITE_SCROLLBACK,
+                "unbounded either way: {text:?}"
+            );
+        }
+        // `False` leaves the given line count alone.
+        assert_eq!(
+            Config::parse_text("scrollback_infinite = False\nscrollback_lines = 100\n").scrollback,
+            100
+        );
+    }
+
+    /// An empty accelerator is Terminator's "this shortcut is disabled".
+    ///
+    /// Its shipped defaults contain several, and its preferences UI writes one
+    /// when a binding is cleared. Ignoring the line left kettle's own default
+    /// chord live, so a config that deliberately freed Ctrl+Shift+T — to hand
+    /// it back to tmux, AstroNvim, or an agent CLI — did not free it.
+    #[test]
+    fn an_empty_terminator_accelerator_unbinds_kettles_default() {
+        let stock = keybinds::parse_trigger("ctrl+shift+t").expect("chord");
+        assert_eq!(
+            Config::parse_text("").keybinds.get(&stock).cloned(),
+            Some(keybinds::Action::NewTab)
+        );
+        let cfg = Config::parse_text("[keybindings]\n  new_tab =\n");
+        assert_eq!(
+            cfg.keybinds.get(&stock),
+            None,
+            "an empty accelerator disables the shortcut"
+        );
+    }
+
+    /// kettle's own grammar binds a literal `<`, and the GTK-accelerator
+    /// rewrite must not take it away.
+    ///
+    /// Rejecting an unclosed `<` broke `keybind = <=copy`, which had bound the
+    /// `<` key since before any Terminator support existed.
+    #[test]
+    fn the_accelerator_rewrite_leaves_a_literal_angle_bracket_alone() {
+        let lt = keybinds::parse_trigger("<").expect("`<` is an ordinary key");
+        let cfg = Config::parse_text("keybind = <=copy\n");
+        assert_eq!(
+            cfg.keybinds.get(&lt).cloned(),
+            Some(keybinds::Action::Copy),
+            "`keybind = <=copy` must still bind the `<` key"
+        );
+    }
+
+    /// Two distinct Terminator actions must not fight over one kettle action.
+    ///
+    /// `group_tab` and `group_tab_toggle` are separate operations upstream. Both
+    /// resolving to `Action::GroupTab` meant an imported config containing both
+    /// had its second line silently unbind the first, because an imported
+    /// binding is exclusive per action.
+    #[test]
+    fn two_terminator_group_names_do_not_unbind_each_other() {
+        let cfg = Config::parse_text(
+            "[keybindings]\n  group_tab = <Control><Shift>y\n  group_tab_toggle = <Control><Shift>j\n",
+        );
+        let a = keybinds::parse_trigger("ctrl+shift+y").expect("chord");
+        let b = keybinds::parse_trigger("ctrl+shift+j").expect("chord");
+        assert_eq!(
+            cfg.keybinds.get(&a).cloned(),
+            Some(keybinds::Action::GroupTab)
+        );
+        assert_eq!(
+            cfg.keybinds.get(&b).cloned(),
+            Some(keybinds::Action::ToggleGroupTab),
+            "the toggle is its own action, so both chords survive"
+        );
+    }
+
     /// Terminator's `group_all` GROUPS; it does not broadcast.
     ///
     /// `window.py:933` puts every terminal into a group named "All".
@@ -11079,10 +11251,19 @@ font-size = 15
 ",
         );
         let stock_2 = keybinds::parse_trigger("alt+2").expect("chord");
+        let imported = keybinds::parse_trigger("ctrl+shift+F3").expect("chord");
+
+        // Assert the import HAPPENED before asserting what it left alone —
+        // otherwise ignoring the whole line passes this test.
+        assert_eq!(
+            cfg.keybinds.get(&imported).cloned(),
+            keybinds::Action::from_name("goto_tab:3"),
+            "the imported chord must bind tab 3"
+        );
         assert_eq!(
             cfg.keybinds.get(&stock_2).cloned(),
             Config::parse_text("").keybinds.get(&stock_2).cloned(),
-            "rebinding tab 3 must not disturb tab 2's chord"
+            "while tab 2's chord is untouched"
         );
     }
 
@@ -11122,6 +11303,27 @@ font-size = 15
             }
         }
 
+        // Pango's family LIST is comma-separated as a fallback chain; kettle
+        // resolves one family, so the first entry wins and the separator does
+        // not ride along into the name.
+        assert_eq!(
+            Config::parse_text(
+                "font = Arial Black, 12
+"
+            )
+            .font_family,
+            "Arial Black",
+            "a comma-terminated family keeps its style-looking word"
+        );
+        assert_eq!(
+            Config::parse_text(
+                "font = Fira Code, DejaVu Sans Mono 12
+"
+            )
+            .font_family,
+            "Fira Code",
+            "the first family in a fallback list"
+        );
         // Stops at the first token that is NOT a style option, so a family
         // whose own name contains one keeps everything up to it.
         assert_eq!(

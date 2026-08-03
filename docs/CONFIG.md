@@ -470,10 +470,16 @@ Scroll-to-extremes moved to **Ctrl+Home** / **Ctrl+End** as a result.
 `clear_history` (also `clear_scrollback` / `clear_buffer` — wipes
 scrollback only; keep the visible screen unlike `reset`).
 
-**Broadcast / group input**: `broadcast_all` (`group_all`),
-`broadcast_off` (`ungroup_all`), `group_tab` (assign a named broadcast group to every
-pane in the focused tab), `broadcast_group` (type to every pane in the focused
-pane's named group).
+**Broadcast**: `broadcast_all` (type to every pane in the window),
+`broadcast_off`, `broadcast_group` (type to every pane in the focused pane's
+named group).
+
+**Grouping** is separate from broadcasting, as it is in Terminator: you put
+panes in a group, and then choose whether to broadcast to that group.
+`group_all` / `ungroup_all` / `group_all_toggle` put every pane into the group
+named `All`; `group_tab` and `group_win` assign a named group to the focused
+tab or window (prompting for the name), while `group_tab_toggle` and
+`group_win_toggle` toggle a generated one.
 
 **Font**: `increase_font_size` (`zoom_in`), `decrease_font_size`
 (`zoom_out`), `reset_font_size` (`zoom_normal`).

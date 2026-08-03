@@ -103,16 +103,40 @@ struct Section {
     /// `None` until the first header — a file with no sections at all is
     /// kettle's own format and applies wholesale.
     path: Option<Vec<String>>,
+    /// Set when a header could not be read or skipped a level. Nothing applies
+    /// until the next header that can be read, because we no longer know which
+    /// section the following lines belong to.
+    unknown: bool,
 }
 
 impl Section {
-    fn enter(&mut self, (depth, name): (usize, &str)) {
+    fn enter(&mut self, header: Option<(usize, &str)>) {
         let path = self.path.get_or_insert_with(Vec::new);
-        path.truncate(depth.saturating_sub(1));
+        let Some((depth, name)) = header else {
+            // Unreadable header: we have lost our place in the file.
+            self.unknown = true;
+            path.clear();
+            return;
+        };
+        // A depth must be one deeper than where we are, or shallower. Jumping
+        // levels means a level was skipped or mistyped, and collapsing it
+        // silently promoted the section: `[profiles]` then `[[[default]]]`
+        // resolved to the DEFAULT PROFILE and imported a malformed third-level
+        // section as the user's settings.
+        if depth > path.len() + 1 {
+            self.unknown = true;
+            path.clear();
+            return;
+        }
+        self.unknown = false;
+        path.truncate(depth - 1);
         path.push(name.to_ascii_lowercase());
     }
 
     fn applies(&self) -> bool {
+        if self.unknown {
+            return false;
+        }
         let Some(path) = self.path.as_deref() else {
             // No section header seen yet: kettle's own flat format.
             return true;
@@ -144,8 +168,15 @@ pub fn parse(input: &str) -> Vec<Entry> {
         if line.is_empty() || line.starts_with('#') {
             continue;
         }
-        if let Some(header) = section_header(line) {
-            section.enter(header);
+        if line.starts_with('[') {
+            // A line that OPENS like a header is structure, well-formed or
+            // not. A malformed one used to fall through as an assignment and,
+            // worse, leave the previous section in force — so a typo'd
+            // `[[work]` meant the work profile's settings kept applying as the
+            // default profile's. An unreadable header means we no longer know
+            // where we are, and the safe answer to that is to apply nothing
+            // until the next header we can read.
+            section.enter(section_header(line));
             continue;
         }
         if !section.applies() {
