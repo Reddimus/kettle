@@ -182,7 +182,7 @@ can build from source or use the Nix package.
 Then search **"kettle"** in GNOME Activities / KDE Krunner / Ubuntu's
 Super-key, or run `kettle` from any shell on your `$PATH`.
 
-Pin a specific version: `KETTLE_VERSION=v2.45.0 sh` instead of `sh`.
+Pin a specific version: `KETTLE_VERSION=v2.46.0 sh` instead of `sh`.
 System-wide install: `KETTLE_PREFIX=/usr/local sh` (needs write access).
 Uninstall later: `~/.local/share/kettle/install.sh --uninstall`.
 The one-line path requires a current `curl`, GNU `tar`, and OpenSSL 3.0+
