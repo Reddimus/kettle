@@ -392,33 +392,68 @@ pub fn run_exec_capture_cancellable(opts: ExecOpts, cancelled: &AtomicBool) -> (
     run_exec_capture_inner(opts, Some(cancelled))
 }
 
+/// A sink that keeps only the last `cap` bytes, so an unbounded producer cannot
+/// exhaust memory. Agents want "what just happened" anyway.
+///
+/// Trimming to exactly `cap` on every write made this quadratic in the output
+/// volume: once full, a 4-KiB chunk shifted the whole 1-MiB buffer down by 4
+/// KiB. A build emitting 100 MiB moved ~25 GiB of memory to keep the last 1 MiB
+/// of it, on the thread draining the PTY. Letting the buffer run to `cap` bytes
+/// of slack before compacting makes each shift pay for at least `cap` bytes of
+/// input, so the total work is linear. The peak cost is one extra `cap` of
+/// memory.
+struct TailSink {
+    buf: Vec<u8>,
+    cap: usize,
+}
+
+impl TailSink {
+    fn new(cap: usize) -> Self {
+        Self {
+            buf: Vec::new(),
+            cap,
+        }
+    }
+
+    /// The retained tail, at most `cap` bytes.
+    ///
+    /// Compaction is lazy, so the buffer can hold more than that between
+    /// writes; the excess is always at the FRONT, which is the part being
+    /// dropped.
+    fn tail(&self) -> &[u8] {
+        &self.buf[self.buf.len().saturating_sub(self.cap)..]
+    }
+}
+
+impl Write for TailSink {
+    fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
+        // A single write at least as large as the cap discards everything held
+        // so far, so copy only the part that survives rather than growing the
+        // buffer to the size of the write.
+        if data.len() >= self.cap {
+            self.buf.clear();
+            self.buf.extend_from_slice(&data[data.len() - self.cap..]);
+            return Ok(data.len());
+        }
+        self.buf.extend_from_slice(data);
+        // Compact only once the slack is used up. `saturating_mul` keeps an
+        // enormous cap from wrapping the threshold to something small.
+        if self.buf.len() > self.cap.saturating_mul(2) {
+            let drop = self.buf.len() - self.cap;
+            self.buf.drain(..drop);
+        }
+        Ok(data.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
 fn run_exec_capture_inner(opts: ExecOpts, cancelled: Option<&AtomicBool>) -> (i32, String) {
-    /// A sink that keeps only the last `cap` bytes (so an unbounded producer
-    /// can't exhaust memory; agents want "what just happened" anyway).
-    struct TailSink {
-        buf: Vec<u8>,
-        cap: usize,
-    }
-    impl Write for TailSink {
-        fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
-            self.buf.extend_from_slice(data);
-            if self.buf.len() > self.cap {
-                let drop = self.buf.len() - self.cap;
-                self.buf.drain(..drop);
-            }
-            Ok(data.len())
-        }
-        fn flush(&mut self) -> std::io::Result<()> {
-            Ok(())
-        }
-    }
-    let mut sink = TailSink {
-        buf: Vec::new(),
-        cap: 1024 * 1024,
-    };
+    let mut sink = TailSink::new(1024 * 1024);
     let mut output = DirectOutput::new(opts.mode, &mut sink);
     let code = run_exec_engine(opts, &default_size_probe, &mut output, cancelled);
-    (code, String::from_utf8_lossy(&sink.buf).into_owned())
+    (code, String::from_utf8_lossy(sink.tail()).into_owned())
 }
 
 /// Default console-size probe (real terminal dimensions when stdout is a TTY).
@@ -2762,6 +2797,62 @@ mod tests {
                 "fill {fill}: the stream must resynchronize and pass text through, got {text:?}"
             );
         }
+    }
+
+    /// The capture sink must keep the last `cap` bytes, and must not do
+    /// quadratic work to keep them.
+    ///
+    /// It trimmed to exactly `cap` on every write, so once full a small chunk
+    /// shifted the whole buffer down by that chunk's size. A build emitting 100
+    /// MiB moved roughly 25 GiB of memory to retain the last 1 MiB — on the
+    /// thread draining the PTY. Compaction is amortized now; the answer must be
+    /// unchanged.
+    #[test]
+    fn the_capture_sink_keeps_the_tail_without_quadratic_shifting() {
+        use std::io::Write as _;
+
+        // Every write size around the cap, plus the exact boundaries.
+        for cap in [1usize, 2, 7, 64] {
+            for chunk in [1usize, 3, 7, 64, 65, 200] {
+                let mut sink = TailSink::new(cap);
+                let mut written: Vec<u8> = Vec::new();
+                // Enough rounds to compact several times over.
+                for round in 0..40u16 {
+                    let data: Vec<u8> = (0..chunk).map(|i| (round as usize + i) as u8).collect();
+                    assert_eq!(sink.write(&data).unwrap(), data.len());
+                    written.extend_from_slice(&data);
+                    assert_eq!(
+                        sink.tail(),
+                        &written[written.len() - cap.min(written.len())..],
+                        "cap {cap}, chunk {chunk}, round {round}: wrong tail"
+                    );
+                    // Lazy compaction is allowed slack, but must stay bounded —
+                    // that bound is the whole point of a tail sink.
+                    assert!(
+                        sink.buf.len() <= cap * 2 + chunk,
+                        "cap {cap}, chunk {chunk}: buffer grew to {} bytes",
+                        sink.buf.len()
+                    );
+                }
+            }
+        }
+
+        // A single write larger than the cap keeps only its own tail, and does
+        // not first grow the buffer to the size of that write.
+        let mut sink = TailSink::new(8);
+        assert_eq!(sink.write(&[b'x'; 4]).unwrap(), 4);
+        assert_eq!(sink.write(b"0123456789abcdef").unwrap(), 16);
+        assert_eq!(sink.tail(), b"89abcdef");
+        assert_eq!(
+            sink.buf.len(),
+            8,
+            "an oversized write must copy only what survives"
+        );
+
+        // And a zero-length write changes nothing.
+        let before = sink.tail().to_vec();
+        assert_eq!(sink.write(b"").unwrap(), 0);
+        assert_eq!(sink.tail(), before.as_slice());
     }
 
     #[test]

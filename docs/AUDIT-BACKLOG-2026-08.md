@@ -151,20 +151,34 @@ Still open on those same fixes:
   blocks, `responses.send` blocks behind it, and EOF joins workers before
   closing the response senders.
 
-## Deferred — performance
+## Performance
 
-Each of these is a rewrite that needs measurement, not a patch:
+Three of these turned out to be a wrong algorithm rather than a rewrite, and are
+**fixed**. Each was measured before and after, on this machine, comparing the
+two implementations directly:
+
+- **Selection drawing walked every selected history line** before discarding the
+  offscreen ones, so `Ctrl+A` over a million-line scrollback cost a million
+  iterations on every repaint — every blink, every keystroke — to draw at most
+  `screen_lines` quads. The row range is clamped to the viewport first
+  (`visible_selection_rows`), making the work proportional to what is drawn.
+- **The `kettle exec` / MCP capture sink trimmed to exactly 1 MiB on every
+  write**, so once full a 4-KiB chunk shifted the whole buffer down by 4 KiB.
+  Compaction is amortized over a full cap of slack now. Retaining the last 1 MiB
+  of 64 MiB of output in 4-KiB chunks: **391 ms → 8.1 ms, 48×**, on the thread
+  draining the PTY.
+- **Glyph-cache eviction fully sorted all 131,072 entries** on the render
+  thread, inside the frame that overflowed the cache, to keep a prefix.
+  `select_nth_unstable_by_key` answers the same question in average linear time:
+  **217 ms → 43 ms over 50 rounds, 5×**.
+
+Still deferred — these are rewrites that need their own change and their own
+measurement:
 
 - Starfield is `O(surface pixels × 55 stars)` with trig/pow/exp in the fragment
   loop — roughly 456M star-iterations per 4K frame.
-- Selection drawing iterates every selected *history* line before discarding
-  offscreen rows, so a million-line selection costs a million iterations on
-  every repaint.
-- Glyph-cache eviction sorts all 131,072 entries on the render thread.
 - Animated backgrounds re-upload the whole texture every frame (~32 MiB per
   frame at 4K) and repeat it each loop.
-- The MCP 1 MiB tail sink uses front `Vec::drain`, shifting ~1 MiB per small
-  chunk — a 128–256× copy amplification on a hot path.
 - Per-cell quad vectors and the GPU instance buffer keep their high-water
   capacity and are not charged against `GraphicsBudget`.
 

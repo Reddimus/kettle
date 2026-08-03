@@ -6368,15 +6368,13 @@ impl Renderer {
         // a linear selection wraps full lines. `selection_row_span` encodes both.
         if let Some(sel) = snap.selection {
             let (s, e) = (sel.start, sel.end);
-            for r in s.line.0..=e.line.0 {
-                // Selection lines are grid-absolute; map to the
-                // viewport row and clip to the visible screen. The old `r < 0`
-                // guard DROPPED any selection scrolled up into history, and a
-                // positive `r` was drawn at the wrong (un-offset) viewport y.
+            for r in visible_selection_rows(s.line.0, e.line.0, display_off, screen_rows) {
+                // Selection lines are grid-absolute; map to the viewport row.
+                // The old `r < 0` guard DROPPED any selection scrolled up into
+                // history, and a positive `r` was drawn at the wrong
+                // (un-offset) viewport y.
                 let vrow = r + display_off;
-                if vrow < 0 || vrow >= screen_rows {
-                    continue;
-                }
+                debug_assert!((0..screen_rows).contains(&vrow));
                 let (c0, c1) = selection_row_span(
                     r,
                     (s.line.0, s.column.0),
@@ -6845,6 +6843,29 @@ fn font_features(cfg: &Config) -> FontFeatures {
         ff.set(FeatureTag::new(&f.tag), f.value);
     }
     ff
+}
+
+/// The grid rows of a selection that are actually on screen.
+///
+/// Selection endpoints are grid-absolute and a selection can cover the entire
+/// scrollback: `Ctrl+A` in a pane holding a million lines of build output is one
+/// gesture. Walking `start..=end` and skipping the offscreen rows inside the
+/// loop cost a million iterations on EVERY repaint — every blink, every
+/// keystroke — to draw at most `screen_lines` quads. Clamping first makes the
+/// work proportional to what is drawn.
+///
+/// Returns an empty range when the selection is entirely off screen, which is
+/// the ordinary case while scrolled away from it.
+fn visible_selection_rows(
+    start_line: i32,
+    end_line: i32,
+    display_offset: i32,
+    screen_rows: i32,
+) -> std::ops::RangeInclusive<i32> {
+    // `vrow = r + display_offset` must land in `0..screen_rows`.
+    let first = start_line.max(-display_offset);
+    let last = end_line.min(screen_rows - display_offset - 1);
+    first..=last
 }
 
 /// The inclusive `(first_col, last_col)` the mouse selection highlights on grid
@@ -13455,6 +13476,86 @@ mod selection_row_span_tests {
         assert_eq!(selection_row_span(-3, start, end, cols, false), (0, 12));
         // Block selection over the same scrollback rows is a column band.
         assert_eq!(selection_row_span(-4, start, end, cols, true), (8, 12));
+    }
+
+    /// Drawing a selection must cost what is drawn, not what is selected.
+    ///
+    /// `Ctrl+A` in a pane holding a million lines of build output is one
+    /// gesture, and the loop walked `start..=end` and skipped the offscreen
+    /// rows inside the body — a million iterations on every repaint, every
+    /// blink, every keystroke, to draw at most `screen_lines` quads.
+    #[test]
+    fn selection_drawing_visits_only_the_rows_on_screen() {
+        use super::visible_selection_rows;
+        let screen_rows = 40;
+
+        // The whole scrollback selected, viewport at the bottom: only the
+        // visible rows are visited, not the million behind them.
+        let rows = visible_selection_rows(-1_000_000, 39, 0, screen_rows);
+        assert_eq!(rows.clone().count(), screen_rows as usize);
+        assert_eq!((*rows.start(), *rows.end()), (0, 39));
+
+        // Scrolled up by 100: the window moves with the viewport, and the same
+        // bounded number of rows is visited.
+        let rows = visible_selection_rows(-1_000_000, 39, 100, screen_rows);
+        assert_eq!((*rows.start(), *rows.end()), (-100, -61));
+        assert_eq!(rows.count(), screen_rows as usize);
+
+        // A selection that fits on screen is unchanged — clamping must not
+        // narrow what was already visible.
+        assert_eq!(
+            {
+                let r = visible_selection_rows(5, 9, 0, screen_rows);
+                (*r.start(), *r.end())
+            },
+            (5, 9)
+        );
+
+        // Partial overlap keeps exactly the overlapping part.
+        assert_eq!(
+            {
+                let r = visible_selection_rows(-10, 3, 0, screen_rows);
+                (*r.start(), *r.end())
+            },
+            (0, 3),
+            "the part scrolled out of view is clipped, the rest still draws"
+        );
+        assert_eq!(
+            {
+                let r = visible_selection_rows(35, 80, 0, screen_rows);
+                (*r.start(), *r.end())
+            },
+            (35, 39)
+        );
+
+        // Entirely off screen: nothing to draw and nothing to walk.
+        assert_eq!(
+            visible_selection_rows(-500, -100, 0, screen_rows).count(),
+            0
+        );
+        assert_eq!(visible_selection_rows(100, 500, 0, screen_rows).count(), 0);
+        // Including the row just past each edge.
+        assert_eq!(visible_selection_rows(-5, -1, 0, screen_rows).count(), 0);
+        assert_eq!(visible_selection_rows(40, 45, 0, screen_rows).count(), 0);
+
+        // Every row this yields maps into the viewport, for a spread of
+        // offsets — the loop body's `debug_assert` depends on it.
+        for display_offset in [0, 1, 7, 100, 1_000_000] {
+            for (start, end) in [(-2_000_000, 39), (-50, 50), (-100, -100), (39, 39)] {
+                for r in visible_selection_rows(start, end, display_offset, screen_rows) {
+                    let vrow = r + display_offset;
+                    assert!(
+                        (0..screen_rows).contains(&vrow),
+                        "offset {display_offset}, selection {start}..={end}: row {r} \
+                         maps to viewport row {vrow}"
+                    );
+                    assert!(
+                        (start..=end).contains(&r),
+                        "clamping must not invent rows outside the selection"
+                    );
+                }
+            }
+        }
     }
 }
 
