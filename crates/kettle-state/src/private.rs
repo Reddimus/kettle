@@ -1430,12 +1430,13 @@ mod windows {
     };
     use windows_sys::Win32::Storage::FileSystem::{
         BY_HANDLE_FILE_INFORMATION, CREATE_NEW, CreateDirectoryW, CreateFileW, DELETE,
-        FILE_ALL_ACCESS, FILE_APPEND_DATA, FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_ENCRYPTED,
-        FILE_ATTRIBUTE_NORMAL, FILE_ATTRIBUTE_REPARSE_POINT, FILE_DELETE_CHILD,
-        FILE_DISPOSITION_INFO, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
-        FILE_ID_INFO, FILE_LIST_DIRECTORY, FILE_READ_ATTRIBUTES, FILE_RENAME_INFO,
-        FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_TRAVERSE, FileDispositionInfo,
-        FileIdInfo, FileRenameInfoEx, GetFileInformationByHandle, GetFileInformationByHandleEx,
+        FILE_ADD_FILE, FILE_ADD_SUBDIRECTORY, FILE_ALL_ACCESS, FILE_APPEND_DATA,
+        FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_ENCRYPTED, FILE_ATTRIBUTE_NORMAL,
+        FILE_ATTRIBUTE_REPARSE_POINT, FILE_DELETE_CHILD, FILE_DISPOSITION_INFO,
+        FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_ID_INFO,
+        FILE_LIST_DIRECTORY, FILE_READ_ATTRIBUTES, FILE_RENAME_INFO, FILE_SHARE_DELETE,
+        FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_TRAVERSE, FileDispositionInfo, FileIdInfo,
+        FileRenameInfoEx, GetFileInformationByHandle, GetFileInformationByHandleEx,
         GetFinalPathNameByHandleW, OPEN_EXISTING, READ_CONTROL, ReOpenFile,
         SetFileInformationByHandle, VOLUME_NAME_GUID, WRITE_DAC, WRITE_OWNER,
     };
@@ -1902,6 +1903,7 @@ mod windows {
                     current_user.sid,
                     administrators.sid,
                     system.sid,
+                    true,
                 )
                 .map_err(|error| {
                     io::Error::new(
@@ -2392,12 +2394,34 @@ mod windows {
                 || sid_is_nt_service(sid))
     }
 
+    /// Rights that redirect the PATH. Checked on every component, because
+    /// deleting, renaming, or re-permissioning any ancestor moves where the
+    /// final directory resolves to.
+    const DANGEROUS_PATH_RIGHTS: u32 =
+        FILE_DELETE_CHILD | DELETE | WRITE_DAC | WRITE_OWNER | GENERIC_ALL;
+
+    /// Rights that let a principal PUT something in the directory. Checked only
+    /// on the directory kettle actually reads from, and deliberately not on its
+    /// ancestors: `C:\` grants Authenticated Users "create folders / append
+    /// data" on stock Windows, so applying these to the whole chain rejects
+    /// every path on a normal machine — and a directory created under `C:\`
+    /// reaches nothing of kettle's.
+    ///
+    /// On the target directory it matters, because that is where kettle's
+    /// sessions, layouts, and control-server registry live, and kettle
+    /// enumerates and reads them back. `GENERIC_WRITE` is included because on a
+    /// directory it maps to exactly `FILE_ADD_FILE | FILE_ADD_SUBDIRECTORY`
+    /// plus attribute writes — so an ACE spelled with the generic bit granted
+    /// creation while passing a check that looked only for the specific ones.
+    const DANGEROUS_CONTENT_RIGHTS: u32 = GENERIC_WRITE | FILE_ADD_FILE | FILE_ADD_SUBDIRECTORY;
+
     fn require_trusted_directory_security(
         directory: &File,
         path: &Path,
         current_user: PSID,
         administrators: PSID,
         system: PSID,
+        is_target_directory: bool,
     ) -> io::Result<()> {
         let mut owner = std::ptr::null_mut();
         let mut dacl = std::ptr::null_mut();
@@ -2436,8 +2460,11 @@ mod windows {
             ));
         }
 
-        const DANGEROUS_DIRECTORY_RIGHTS: u32 =
-            FILE_DELETE_CHILD | DELETE | WRITE_DAC | WRITE_OWNER | GENERIC_ALL;
+        let dangerous_rights = if is_target_directory {
+            DANGEROUS_PATH_RIGHTS | DANGEROUS_CONTENT_RIGHTS
+        } else {
+            DANGEROUS_PATH_RIGHTS
+        };
         for index in 0..unsafe { (*dacl).AceCount } {
             let mut ace = std::ptr::null_mut();
             // SAFETY: index is bounded by the validated ACL's AceCount.
@@ -2458,10 +2485,7 @@ mod windows {
                     | ACCESS_ALLOWED_CALLBACK_OBJECT_ACE_TYPE
                     | ACCESS_ALLOWED_COMPOUND_ACE_TYPE
             );
-            if !is_allow
-                || flags & INHERIT_ONLY_ACE as u8 != 0
-                || mask & DANGEROUS_DIRECTORY_RIGHTS == 0
-            {
+            if !is_allow || flags & INHERIT_ONLY_ACE as u8 != 0 || mask & dangerous_rights == 0 {
                 continue;
             }
             if !matches!(
@@ -2703,7 +2727,9 @@ mod windows {
         // open without FILE_SHARE_DELETE while the next component is checked,
         // so an attacker cannot swap a previously validated ancestor between
         // a metadata check and the final file operation.
+        let mut remaining = ancestors.len();
         for ancestor in ancestors.into_iter().rev() {
+            remaining -= 1;
             let (handle, identity) = if let Some(parent) = handles.last() {
                 let name = ancestor.file_name().ok_or_else(|| {
                     io::Error::new(
@@ -2725,6 +2751,7 @@ mod windows {
                 current_user.sid,
                 administrators.sid,
                 system.sid,
+                remaining == 0,
             )?;
             parent_identity = Some(identity);
             handles.push(handle);
@@ -3163,6 +3190,65 @@ mod windows {
             delete_on_close_best_effort(&file);
             drop(file);
             assert!(!path.exists());
+        }
+
+        /// A directory anyone can ADD to is not private.
+        ///
+        /// The trust check covered removal and re-permissioning —
+        /// `FILE_DELETE_CHILD`, `DELETE`, `WRITE_DAC`, `WRITE_OWNER`,
+        /// `GENERIC_ALL` — and not creation. `FILE_ADD_FILE` and
+        /// `FILE_ADD_SUBDIRECTORY` let an untrusted principal PUT a file where
+        /// kettle keeps sessions, layouts, and the control-server registry,
+        /// all of which it enumerates and reads back. `GENERIC_WRITE` on a
+        /// directory maps to exactly those two, so an ACE spelled with the
+        /// generic bit walked through a check that looked only for the
+        /// specific ones.
+        ///
+        /// These rights are refused on the target directory ONLY. Applying
+        /// them to the whole ancestor chain rejects every path on a stock
+        /// Windows machine, because `C:\` grants Authenticated Users
+        /// "create folders / append data" — and a directory created under
+        /// `C:\` reaches nothing of kettle's. The first version of this fix
+        /// did exactly that and failed 14 of this crate's own tests.
+        #[test]
+        fn creation_rights_are_dangerous_on_the_target_directory_and_normal_above_it() {
+            // The path-redirecting rights apply everywhere.
+            for right in [
+                FILE_DELETE_CHILD,
+                DELETE,
+                WRITE_DAC,
+                WRITE_OWNER,
+                GENERIC_ALL,
+            ] {
+                assert_ne!(
+                    right & DANGEROUS_PATH_RIGHTS,
+                    0,
+                    "a right that redirects the path must be checked on every component"
+                );
+            }
+            // The creation rights are NOT among them — that is what keeps
+            // `C:\` acceptable as an ancestor.
+            for right in [FILE_ADD_FILE, FILE_ADD_SUBDIRECTORY, GENERIC_WRITE] {
+                assert_eq!(
+                    right & DANGEROUS_PATH_RIGHTS,
+                    0,
+                    "creation rights on an ancestor are ordinary Windows and must not \
+                     be refused there"
+                );
+                assert_ne!(
+                    right & DANGEROUS_CONTENT_RIGHTS,
+                    0,
+                    "creation rights on the directory kettle reads from must be refused"
+                );
+            }
+            // And the real ancestor that motivates the split still passes,
+            // while the state directory kettle actually uses also passes —
+            // proving the split is not simply "check nothing".
+            let dir = crate::test_tempdir();
+            assert!(
+                guard_private_parent(&dir.path().join("state.json")).is_ok(),
+                "kettle's own state directory must remain acceptable"
+            );
         }
     }
 }

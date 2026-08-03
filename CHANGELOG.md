@@ -180,6 +180,14 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
     anything is opened. `cat`ting a hostile file was enough to send it. Both
     channels now refuse a path that leads with two separators, carries a control
     character, or is longer than any real path.
+  - **A directory anyone could add files to counted as private (Windows).** The
+    trust check covered removal and re-permissioning but not creation, so an
+    ACE granting `FILE_ADD_FILE`, `FILE_ADD_SUBDIRECTORY`, or `GENERIC_WRITE`
+    let an untrusted principal plant a session, layout, or control-server
+    registry entry where kettle enumerates and reads them back. Creation rights
+    are refused on that directory now — and deliberately still allowed on its
+    ancestors, because `C:\` grants Authenticated Users "create folders" on
+    stock Windows and a directory created there reaches nothing of kettle's.
   - **`--working-directory` had no test at the CLI surface**, and neither did
     `--accent`. Both are validated by one function now, driven by the tests
     exactly as the CLI drives it.

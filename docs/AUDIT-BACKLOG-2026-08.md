@@ -160,11 +160,19 @@ Still open on those same fixes:
   timeout without draining, so a late response can be read as the next call's;
   liveness is PID-only, so PID reuse resurrects stale records; and Unix casts
   `u32` PIDs straight to `pid_t`, making `u32::MAX` signal *everything*.
-- **`kettle-state`**: the Windows private-parent ACL check omits `FILE_ADD_FILE`,
-  `FILE_ADD_SUBDIRECTORY`, and `GENERIC_WRITE`; on Windows every ordinary
-  directory is treated as private with no owner/DACL validation; and the
-  "durable" replace contract is not met (parent sync is a no-op, the rename is
-  not write-through).
+- **`kettle-state`**: the Windows private-parent ACL check omitted creation
+  rights — **fixed, but not the way the finding described**. Adding
+  `FILE_ADD_FILE` / `FILE_ADD_SUBDIRECTORY` / `GENERIC_WRITE` to the chain-wide
+  set rejects every path on a stock Windows machine, because `C:\` grants
+  Authenticated Users "create folders / append data" (14 of this crate's own
+  tests went red). Creation rights on an ANCESTOR are ordinary and reach nothing
+  of kettle's; on the directory kettle enumerates they let an untrusted
+  principal plant a session, layout, or registry entry it reads back. The check
+  now splits: path-redirecting rights on every component, creation rights on the
+  target directory only. Still open: on Windows every ordinary directory is
+  treated as private with no owner/DACL validation of its own, and the "durable"
+  replace contract is not met (parent sync is a no-op, the rename is not
+  write-through).
 - **`kettle-update`**: the startup sweep finding is **overstated and closed**.
   Re-read against the code: the deletion is not "any file matching the pattern".
   The name must carry a valid transaction id, the path is resolved through
