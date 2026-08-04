@@ -219,23 +219,36 @@ impl AnsiStripper {
                 // C1 controls and desynchronized on a lead-followed-by-lead.
                 self.utf8_continuation = 0;
             }
-            // A character can only BEGIN where text is being read: ground, or
-            // the payload of a control string (an OSC 2 title is UTF-8). CSI
-            // parameter bytes are ASCII by definition.
-            if matches!(self.state, StripState::Ground | StripState::String { .. }) {
-                self.utf8_continuation = match b {
-                    0xc2..=0xdf => 1,
-                    0xe0..=0xef => 2,
-                    0xf0..=0xf4 => 3,
-                    // ASCII, a stray continuation, or an invalid lead
-                    // (0xc0/0xc1/0xf5..) owes nothing and is interpreted as
-                    // itself.
-                    _ => 0,
-                };
-                // No lead byte is special to the ground arm below, so a lead
-                // reaches `out` exactly when the machine is in ground.
-                self.utf8_emitted = matches!(self.state, StripState::Ground);
-            }
+            // A lead byte is tracked in EVERY state, not only where text is
+            // read.
+            //
+            // Restricting this to `Ground | String` left the same split-character
+            // hole in the other two bounded states. `ESC [` followed by 64 KiB of
+            // parameter bytes forces a resynchronization out of `Csi`, and if
+            // that bound lands on a lead byte the lead is consumed there while
+            // its continuations arrive in ground — emitted with nothing in front
+            // of them. `EscapeIntermediate` has the identical bound, and `ESC`
+            // followed directly by a lead byte reaches it with no 64 KiB
+            // required at all.
+            //
+            // Tracking everywhere is also strictly safer than not: a byte in
+            // `0xc2..=0xf4` is not a legal CSI parameter, intermediate, or final
+            // byte, so the only streams this changes are already malformed — and
+            // if the bytes that follow turn out NOT to be continuations, the
+            // shield above releases them on the spot.
+            self.utf8_continuation = match b {
+                0xc2..=0xdf => 1,
+                0xe0..=0xef => 2,
+                0xf0..=0xf4 => 3,
+                // ASCII, a stray continuation, or an invalid lead
+                // (0xc0/0xc1/0xf5..) owes nothing and is interpreted as
+                // itself.
+                _ => 0,
+            };
+            // No lead byte is special to the ground arm below, so a lead reaches
+            // `out` exactly when the machine is in ground — and its
+            // continuations must go wherever it went.
+            self.utf8_emitted = matches!(self.state, StripState::Ground);
             let state = std::mem::take(&mut self.state);
             self.state = match state {
                 StripState::Ground => match b {
@@ -2767,36 +2780,71 @@ mod tests {
     ///
     /// The boundary is swept because the payload length that lands a lead byte
     /// exactly on it depends on how the state machine counts.
+    ///
+    /// All THREE bounded states are swept. Fixing only the control-string one
+    /// left the identical hole in `Csi` and `EscapeIntermediate`, which have the
+    /// same 64-KiB bound — a review found both still emitting invalid UTF-8
+    /// after the first fix shipped.
     #[test]
     fn ansi_stripper_never_emits_orphaned_utf8_continuations_at_the_resync_bound() {
-        for offset in -4_isize..=4 {
-            let fill = (MAX_CONTROL_SEQUENCE_BYTES as isize + offset) as usize;
-            let mut input = Vec::with_capacity(fill + 16);
-            input.extend_from_slice(b"\x1b]0;");
-            input.resize(input.len() + fill, b'x');
-            // Three-byte lead plus its continuations, one of which is 0x9c.
-            input.extend_from_slice("\u{672b}".as_bytes());
-            // The resynchronization point moves with `offset`, and it eats
-            // whatever bytes it lands on. Pad past that window so the marker is
-            // always in ground state by the time it arrives.
-            input.extend_from_slice(&[b'z'; 32]);
-            input.extend_from_slice(b"tail");
+        // Each opener enters a different bounded state, with a filler byte that
+        // keeps it there: OSC payload, CSI parameters, ESC intermediates.
+        for (label, opener, filler) in [
+            ("control string", &b"\x1b]0;"[..], b'x'),
+            ("csi parameters", &b"\x1b["[..], b'0'),
+            ("escape intermediates", &b"\x1b "[..], b' '),
+        ] {
+            for offset in -4_isize..=4 {
+                let fill = (MAX_CONTROL_SEQUENCE_BYTES as isize + offset) as usize;
+                let mut input = Vec::with_capacity(fill + 16);
+                input.extend_from_slice(opener);
+                input.resize(input.len() + fill, filler);
+                // Three-byte lead plus its continuations, one of which is 0x9c.
+                input.extend_from_slice("\u{672b}".as_bytes());
+                // The resynchronization point moves with `offset`, and it eats
+                // whatever bytes it lands on. Pad past that window so the marker is
+                // always in ground state by the time it arrives.
+                input.extend_from_slice(&[b'z'; 32]);
+                input.extend_from_slice(b"tail");
 
-            let mut stripper = AnsiStripper::default();
-            let mut out = Vec::new();
-            stripper.push(&input, &mut out);
-            let text = String::from_utf8(out.clone()).unwrap_or_else(|error| {
-                panic!(
-                    "fill {fill}: stripped output is not valid UTF-8 ({error}); \
-                     the last bytes were {:?}",
-                    &out[out.len().saturating_sub(16)..]
-                )
-            });
-            assert!(
-                text.ends_with("tail"),
-                "fill {fill}: the stream must resynchronize and pass text through, got {text:?}"
-            );
+                let mut stripper = AnsiStripper::default();
+                let mut out = Vec::new();
+                stripper.push(&input, &mut out);
+                let text = String::from_utf8(out.clone()).unwrap_or_else(|error| {
+                    panic!(
+                        "{label}, fill {fill}: stripped output is not valid UTF-8 \
+                     ({error}); the last bytes were {:?}",
+                        &out[out.len().saturating_sub(16)..]
+                    )
+                });
+                assert!(
+                    text.ends_with("tail"),
+                    "{label}, fill {fill}: the stream must resynchronize and pass \
+                 text through, got {text:?}"
+                );
+            }
         }
+
+        // And with no 64 KiB involved at all: `ESC` followed directly by a lead
+        // byte consumes that byte as a one-character escape, so its
+        // continuations must be consumed with it rather than surfacing alone.
+        let mut input = Vec::new();
+        input.extend_from_slice(b"head\x1b");
+        input.extend_from_slice("\u{672b}".as_bytes());
+        input.extend_from_slice(b"tail");
+        let mut stripper = AnsiStripper::default();
+        let mut out = Vec::new();
+        stripper.push(&input, &mut out);
+        let text = String::from_utf8(out.clone()).unwrap_or_else(|error| {
+            panic!(
+                "ESC + lead byte: stripped output is not valid UTF-8 ({error}); \
+                 bytes were {out:?}"
+            )
+        });
+        assert_eq!(
+            text, "headtail",
+            "the escaped character is consumed whole, not half"
+        );
     }
 
     /// The capture sink must keep the last `cap` bytes, and must not do

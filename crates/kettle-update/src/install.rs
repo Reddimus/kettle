@@ -919,7 +919,21 @@ fn read_linux_install_provenance(prefix: &Path) -> Result<UnixInstallProvenance,
             ))
         })?;
         let anchored = parent.destination(relative)?;
-        let metadata = fs::symlink_metadata(&anchored)?;
+        // Name the file. A bare `?` here surfaced as `No such file or directory
+        // (os error 2)` and nothing else — `UpdateError::Io` is transparent —
+        // so `kettle update` told the operator a file was missing without
+        // saying which one or what to do. That became reachable the moment
+        // provenance started carrying records forward: a file an old release
+        // installed and a new one no longer ships is now recorded, so deleting
+        // what looks like a leftover breaks every future update with an error
+        // that points nowhere.
+        let metadata = fs::symlink_metadata(&anchored).map_err(|error| {
+            UpdateError::UnmanagedInstall(format!(
+                "recorded Linux install file is missing: {} ({error}). Reinstall \
+                 kettle to rebuild the installation record.",
+                record.path
+            ))
+        })?;
         if !metadata.file_type().is_file()
             || metadata.nlink() != 1
             || metadata.uid() != provenance.owner_uid
@@ -1053,12 +1067,6 @@ fn detect_managed_install_at(executable: &Path) -> Result<ManagedInstall, Update
         // themselves consult to answer "what is installed here". An unchecked
         // string there is a claim kettle makes and never verifies.
         || semver::Version::parse(&marker.version).is_err()
-    // Every field of this record was validated except the one a human
-    // reads. `marker_json` only ever writes a real semver, so a value that
-    // is not one did not come from a kettle installer — and `install.json`
-    // is what support instructions, packaging scripts, and the user
-    // themselves consult to answer "what is installed here". An unchecked
-    // string there is a claim kettle makes and never verifies.
     {
         return Err(UpdateError::UnmanagedInstall(
             "the installer marker does not match this kettle build".to_string(),
@@ -4547,13 +4555,21 @@ impl Transaction {
                 "transaction replacement exceeds the safety quota".into(),
             ));
         }
+        // Record what the walk created BEFORE propagating any error from it.
+        //
+        // `?` on the walk discarded the vector, so a failure partway through a
+        // multi-level create — ENOSPC on the second component of
+        // `share/icons/hicolor/16x16`, say — left the first component on disk
+        // with nothing recording it, which is exactly the orphan this whole
+        // mechanism exists to prevent. Measured on an inode-capped tmpfs: 7
+        // directories leaked with 6 recorded.
         let mut created = Vec::new();
-        let destination_parent =
-            anchored_parent_recording(&self.prefix, relative, true, &mut created)?;
-        let destination = destination_parent.destination(relative)?;
+        let anchored = anchored_parent_recording(&self.prefix, relative, true, &mut created);
         for path in created {
             self.created_directories.insert(path, 0o755);
         }
+        let destination_parent = anchored?;
+        let destination = destination_parent.destination(relative)?;
         let key = relative_string.to_ascii_lowercase();
         let mut snapshot = if let Some(preflight) = self.preflight.as_mut() {
             preflight.remove(&key).ok_or_else(|| {
@@ -4624,9 +4640,22 @@ impl Transaction {
 
     fn rollback(&mut self) -> Result<(), UpdateError> {
         self.journal.phase = JournalPhase::RollingBack;
-        self.persist_journal()?;
-        self.restore_entries()?;
+        let persisted = self.persist_journal();
+        let restored = persisted.and_then(|()| self.restore_entries());
+        // Unconditionally, and before the `?`.
+        //
+        // Sequencing this after two fallible steps meant it never ran in the
+        // failure most likely to have caused the rollback: out of disk space
+        // fails the journal write and the restore, so both `?`s returned first
+        // and every directory this transaction created was left behind
+        // unowned — the exact end state the mechanism exists to prevent.
+        // Measured on an inode-capped filesystem: 8 recorded, 8 leaked.
+        //
+        // Removing empty directories is also the one rollback step that FREES
+        // space and cannot itself fail for lack of it, so running it first can
+        // unblock what came before rather than being blocked by it.
         self.remove_created_directories();
+        restored?;
         self.finish_cleanup()
     }
 
@@ -6918,6 +6947,47 @@ mod tests {
             );
         }
 
+        // Every destination the applier's map names must have the ARCHIVE's
+        // bytes on disk, not merely a record.
+        //
+        // "It is recorded and the record matches disk" is satisfied by a file
+        // nobody touched — which is what carrying records forward made
+        // possible. Before that, dropping an entry from the production map
+        // produced a loud "provenance is missing share/kettle/install-unix.py";
+        // afterwards the old record was carried forward and the same drift was
+        // silent, so the helper would simply never update again. That is the
+        // exact bug this test was written for, and the carry-forward defanged
+        // it. Comparing bytes is what cannot be satisfied by not acting.
+        for (source, destination) in [
+            ("kettle", "bin/kettle"),
+            ("install.sh", "share/kettle/install.sh"),
+            ("install-unix.py", "share/kettle/install-unix.py"),
+            ("LICENSE", "share/doc/kettle/LICENSE"),
+            ("NOTICE", "share/doc/kettle/NOTICE"),
+            ("README.md", "share/doc/kettle/README.md"),
+            ("CHANGELOG.md", "share/doc/kettle/CHANGELOG.md"),
+            (
+                "packaging/linux/kettle.svg",
+                "share/icons/hicolor/scalable/apps/kettle.svg",
+            ),
+            (
+                "packaging/linux/kettle-256.png",
+                "share/icons/hicolor/256x256/apps/kettle.png",
+            ),
+            ("packaging/linux/kettle.1", "share/man/man1/kettle.1"),
+        ] {
+            let want = package
+                .bytes(Path::new(source))
+                .unwrap_or_else(|error| panic!("the fixture archive must ship {source}: {error}"));
+            let got = fs::read(prefix.join(destination))
+                .unwrap_or_else(|error| panic!("{destination} was not installed: {error}"));
+            assert_eq!(
+                got, want,
+                "{destination} does not hold the bytes the archive shipped for \
+                 {source} — the applier's map no longer publishes it"
+            );
+        }
+
         // Records must be sorted strictly by path, or the reader rejects them.
         for pair in after.files.windows(2) {
             assert!(
@@ -7103,6 +7173,46 @@ mod tests {
             b"old-binary",
             "rollback must restore the previous binary"
         );
+        // Every recorded directory, not just the leaves.
+        //
+        // Asserting only the three leaf paths could not see the order: a leaf
+        // is removed last under either order, so reversing `keys().rev()` to
+        // `keys()` — which strands 12 parents, `share/doc` and `share/icons`
+        // and the rest, because `remove_dir` refuses a directory whose child
+        // has not gone yet — left this test green. Walking the whole tree is
+        // what makes deepest-first load-bearing.
+        let mut leaked = Vec::new();
+        let mut walk = vec![prefix.clone()];
+        while let Some(dir) = walk.pop() {
+            let Ok(entries) = fs::read_dir(&dir) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    if let Ok(relative) = path.strip_prefix(&prefix) {
+                        let relative = relative.to_string_lossy().replace('\\', "/");
+                        // The backup tree is the transaction's own, cleaned up
+                        // separately.
+                        if !relative.starts_with(".kettle-update-") {
+                            leaked.push(relative);
+                        }
+                    }
+                    walk.push(path);
+                }
+            }
+        }
+        leaked.sort();
+        let expected_before: Vec<String> = ["bin", "share", "share/applications", "share/kettle"]
+            .iter()
+            .map(|s| (*s).to_string())
+            .collect();
+        assert_eq!(
+            leaked, expected_before,
+            "rollback must leave exactly the directories that existed before it, \
+             and it left these instead"
+        );
+
         for relative in fresh {
             assert!(
                 !prefix.join(relative).exists(),

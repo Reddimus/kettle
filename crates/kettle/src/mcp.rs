@@ -7,7 +7,7 @@
 
 use std::collections::HashMap;
 use std::io::{BufRead, Write};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -81,7 +81,67 @@ type Pending = Arc<Mutex<HashMap<String, Arc<AtomicBool>>>>;
 /// horizon; it has crashed, or it closed stdin to signal shutdown and stopped
 /// caring. So these waits are bounded and the server exits, rather than
 /// remaining as a process nothing can talk to and nothing will reap.
+///
+/// Shortened under `cfg(test)` so the fixtures exercise the mechanism without
+/// spending the real budget in wall clock. The production value itself is
+/// asserted by `the_production_stall_limit_is_the_documented_one`.
+#[cfg(not(test))]
 const STDOUT_STALL_LIMIT: Duration = Duration::from_secs(30);
+#[cfg(test)]
+const STDOUT_STALL_LIMIT: Duration = Duration::from_millis(400);
+
+/// What the writer thread is doing, so a stalled PEER can be told apart from
+/// busy WORK.
+///
+/// These have to be distinguished, and a wall-clock budget cannot do it. An
+/// earlier version gave shutdown 30 seconds to join its workers and exited when
+/// that expired — which killed a perfectly healthy `kettle_run` whose
+/// `timeout_s` exceeded 30 (the tool's schema allows up to 600), delivered no
+/// result for it, and printed a diagnostic blaming stdout while stdout was
+/// being read the whole time. That is worse than the hang it replaced: it
+/// silently loses an agent's build output.
+///
+/// The only thing that means "the peer stopped reading" is the writer being
+/// parked inside a single `write` that has not returned. That is what this
+/// records, so a busy worker waits as long as it needs to and a jammed pipe is
+/// still caught.
+#[derive(Default)]
+struct WriterProgress {
+    /// Set while `write_message` has been entered and has not returned.
+    in_write: AtomicBool,
+    /// Incremented after each completed write, so "parked in ONE write" is
+    /// distinguishable from "writing steadily".
+    completed: AtomicU64,
+}
+
+/// Wait until `done()`, giving up only if the writer is parked inside a single
+/// write for longer than `limit`.
+///
+/// Returns `true` when `done()` became true, `false` when the writer stalled.
+/// An idle writer — no write in flight — never stalls this, however long the
+/// wait, because nothing is blocked on the peer.
+fn wait_unless_stdout_stalled(
+    progress: &WriterProgress,
+    limit: Duration,
+    mut done: impl FnMut() -> bool,
+) -> bool {
+    let mut seen = progress.completed.load(Ordering::Relaxed);
+    let mut since = Instant::now();
+    loop {
+        if done() {
+            return true;
+        }
+        let completed = progress.completed.load(Ordering::Relaxed);
+        if completed != seen || !progress.in_write.load(Ordering::Relaxed) {
+            // Progress, or nothing in flight: the peer is not the problem.
+            seen = completed;
+            since = Instant::now();
+        } else if since.elapsed() >= limit {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
 
 /// Run the stdio MCP server loop until stdin closes. Returns zero on clean EOF.
 pub fn run_mcp() -> i32 {
@@ -98,12 +158,18 @@ pub fn run_mcp() -> i32 {
 pub fn run_mcp_with(mut input: impl BufRead, output: impl Write + Send + 'static) -> i32 {
     let (responses_tx, responses_rx) =
         crossbeam_channel::bounded::<Value>(TOOL_QUEUE_CAPACITY + TOOL_WORKERS + 8);
+    let progress = Arc::new(WriterProgress::default());
+    let writer_progress = progress.clone();
     let writer = match std::thread::Builder::new()
         .name("kettle-mcp-writer".into())
         .spawn(move || {
             let mut output = output;
             while let Ok(message) = responses_rx.recv() {
-                if write_message(&mut output, &message).is_err() {
+                writer_progress.in_write.store(true, Ordering::Release);
+                let wrote = write_message(&mut output, &message);
+                writer_progress.in_write.store(false, Ordering::Release);
+                writer_progress.completed.fetch_add(1, Ordering::Release);
+                if wrote.is_err() {
                     break;
                 }
             }
@@ -196,29 +262,26 @@ pub fn run_mcp_with(mut input: impl BufRead, output: impl Write + Send + 'static
         }
     }
     // EOF is an orderly stdio shutdown. Drain already-accepted jobs so clients
-    // that write a request batch and close stdin still receive every response.
+    // that write a request batch and close stdin still receive every response —
+    // a `kettle_run` with a five-minute `timeout_s` is entitled to its five
+    // minutes, and this is the documented contract.
     //
-    // Bounded, because a peer that stopped reading stdout blocks the writer,
-    // which fills the response channel, which blocks every worker mid-`send` —
-    // and joining them then never returns. `drop(responses_tx)` below is
-    // unreachable in that state, so even the writer never learns to stop. The
-    // process stays alive holding a terminal, answering nothing, until it is
-    // killed by hand.
-    let deadline = Instant::now() + STDOUT_STALL_LIMIT;
+    // Waiting is bounded only by the writer being STUCK, never by a clock. A
+    // peer that stopped reading blocks the writer inside `write`, which fills
+    // the response channel, which blocks every worker mid-`send`; joining them
+    // then never returns, `drop(responses_tx)` below is unreachable, and the
+    // process stays alive holding a terminal until something kills it.
+    // `wait_unless_stdout_stalled` tells that apart from a worker that is
+    // simply busy — an earlier version used a 30-second budget and killed the
+    // healthy case.
     drop(jobs_tx);
     let mut stalled = responses_tx.peer_gone();
     for worker in workers {
-        // `JoinHandle` has no timed join, so wait for the thread to finish on
-        // its own terms and stop waiting once the budget is spent. A worker
-        // still blocked at that point is blocked on a channel whose reader is
-        // blocked on a pipe nobody is draining; it has no work left that can
-        // reach anyone.
-        while !worker.is_finished() {
-            if Instant::now() >= deadline {
-                stalled = true;
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(10));
+        // `JoinHandle` has no timed join, so watch `is_finished` instead.
+        if !stalled
+            && !wait_unless_stdout_stalled(&progress, STDOUT_STALL_LIMIT, || worker.is_finished())
+        {
+            stalled = true;
         }
         if stalled {
             break;
@@ -226,10 +289,19 @@ pub fn run_mcp_with(mut input: impl BufRead, output: impl Write + Send + 'static
         let _ = worker.join();
     }
     drop(responses_tx);
+    if !stalled {
+        // The workers are done and the channel is closed, so the writer is
+        // finishing its queue. It can still be parked in a write here — with
+        // few enough responses in flight the channel never filled, so nothing
+        // upstream ever noticed, and this join was the remaining way to hang
+        // forever.
+        stalled =
+            !wait_unless_stdout_stalled(&progress, STDOUT_STALL_LIMIT, || writer.is_finished());
+    }
     if stalled {
         eprintln!(
-            "kettle mcp: stdout has not been read for {}s; exiting with responses undelivered",
-            STDOUT_STALL_LIMIT.as_secs()
+            "kettle mcp: stdout has not been read for {:?}; exiting with responses undelivered",
+            STDOUT_STALL_LIMIT
         );
         // Deliberately not joining the writer: it is inside a blocking write to
         // a pipe with no reader, and joining it is the hang this exists to
@@ -818,6 +890,72 @@ mod tests {
         }
     }
 
+    /// The shortened test limit must not hide a wrong production value.
+    #[test]
+    fn the_production_stall_limit_is_the_documented_one() {
+        // `STDOUT_STALL_LIMIT` is 400 ms under cfg(test) so the fixtures below
+        // run in a second rather than a minute. The value that ships is this.
+        let shipped = if cfg!(test) {
+            Duration::from_secs(30)
+        } else {
+            STDOUT_STALL_LIMIT
+        };
+        assert_eq!(shipped, Duration::from_secs(30));
+    }
+
+    /// A worker that is simply BUSY must not be mistaken for a stalled peer.
+    ///
+    /// Shutdown used to give the workers a flat 30-second budget, which killed
+    /// a healthy `kettle_run` whose `timeout_s` exceeded it — the tool's schema
+    /// allows up to 600 — delivered no result, and printed a diagnostic blaming
+    /// stdout while stdout was being read the whole time. Losing an agent's
+    /// build output is worse than the hang that budget was meant to prevent.
+    #[test]
+    fn a_busy_worker_is_not_mistaken_for_a_stalled_peer() {
+        let progress = WriterProgress::default();
+        let started = Instant::now();
+        // Nothing is in flight, so however long this takes it is not the peer.
+        let finished = wait_unless_stdout_stalled(&progress, Duration::from_millis(50), || {
+            started.elapsed() >= Duration::from_millis(300)
+        });
+        assert!(
+            finished,
+            "an idle writer means the work is slow, not the peer — waiting must \
+             continue however long the limit has been exceeded"
+        );
+
+        // A writer that is WRITING, steadily, is also not stalled.
+        progress.in_write.store(true, Ordering::Release);
+        let started = Instant::now();
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                while started.elapsed() < Duration::from_millis(300) {
+                    std::thread::sleep(Duration::from_millis(10));
+                    progress.completed.fetch_add(1, Ordering::Release);
+                }
+            });
+            assert!(
+                wait_unless_stdout_stalled(&progress, Duration::from_millis(50), || {
+                    started.elapsed() >= Duration::from_millis(300)
+                }),
+                "a writer completing writes is making progress, not stalling"
+            );
+        });
+
+        // Parked inside ONE write, with no completions, IS the peer.
+        let progress = WriterProgress::default();
+        progress.in_write.store(true, Ordering::Release);
+        let started = Instant::now();
+        assert!(
+            !wait_unless_stdout_stalled(&progress, Duration::from_millis(50), || false),
+            "a writer parked in a single write is a peer that stopped reading"
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "and it must be detected promptly"
+        );
+    }
+
     /// A peer that stops reading kettle's stdout must not strand the process.
     ///
     /// The writer thread blocks in `write`, the bounded response channel fills
@@ -832,50 +970,61 @@ mod tests {
     /// writer that never completes a write, and requires the server to return.
     #[test]
     fn a_peer_that_stops_reading_stdout_does_not_strand_the_server() {
-        // Enough requests to fill the response channel and then some, so the
-        // reader loop and the workers both hit a full channel.
-        let mut input = String::new();
-        input.push_str(&format!(
-            "{}\n",
-            json!({"jsonrpc": "2.0", "id": 0, "method": "initialize",
-                   "params": init_params(MCP_PROTOCOL_VERSION)})
-        ));
-        for id in 1..=(TOOL_QUEUE_CAPACITY + TOOL_WORKERS + 32) {
+        // BOTH shapes.
+        //
+        // The many-message one fills the bounded response channel, so `respond`
+        // times out and latches `peer_gone`. The few-message one never fills it
+        // — nothing times out, nothing latches — and the only thing left
+        // holding the process is the writer's own join at the end. An earlier
+        // version of this fix handled only the first shape, and this test only
+        // covered the first shape, so it was green on a server that still hung
+        // forever on a single ping. One or two calls and a client that stops
+        // reading is the ordinary case; fifty is not.
+        for requests in [3, TOOL_QUEUE_CAPACITY + TOOL_WORKERS + 32] {
+            let mut input = String::new();
             input.push_str(&format!(
                 "{}\n",
-                json!({"jsonrpc": "2.0", "id": id, "method": "ping"})
+                json!({"jsonrpc": "2.0", "id": 0, "method": "initialize",
+                       "params": init_params(MCP_PROTOCOL_VERSION)})
             ));
+            for id in 1..=requests {
+                input.push_str(&format!(
+                    "{}\n",
+                    json!({"jsonrpc": "2.0", "id": id, "method": "ping"})
+                ));
+            }
+
+            let (entered, first_write) = std::sync::mpsc::sync_channel(1);
+            let (finished, done) = std::sync::mpsc::sync_channel(1);
+            let server = std::thread::spawn(move || {
+                let code = run_mcp_with(
+                    std::io::Cursor::new(input.into_bytes()),
+                    NeverDrains { entered },
+                );
+                let _ = finished.try_send(code);
+            });
+
+            first_write
+                .recv_timeout(Duration::from_secs(10))
+                .expect("the writer must reach a write before the peer can stall it");
+
+            let code = done
+                .recv_timeout(STDOUT_STALL_LIMIT + Duration::from_secs(60))
+                .unwrap_or_else(|_| {
+                    panic!(
+                        "run_mcp_with never returned with {requests} requests in \
+                         flight: a peer that stopped reading stdout stranded the \
+                         server"
+                    )
+                });
+            assert_eq!(
+                code, 1,
+                "giving up on an unreadable stdout is a failure exit, not a clean one"
+            );
+            // The writer thread is deliberately abandoned inside its blocking
+            // write, so the server thread is what must be joinable.
+            server.join().expect("server thread panicked");
         }
-
-        let (entered, first_write) = std::sync::mpsc::sync_channel(1);
-        let (finished, done) = std::sync::mpsc::sync_channel(1);
-        let server = std::thread::spawn(move || {
-            let code = run_mcp_with(
-                std::io::Cursor::new(input.into_bytes()),
-                NeverDrains { entered },
-            );
-            let _ = finished.try_send(code);
-        });
-
-        first_write
-            .recv_timeout(Duration::from_secs(10))
-            .expect("the writer must reach a write before the peer can stall it");
-
-        // The bound is 30s; allow generous slack for a loaded CI box, but far
-        // less than the "forever" this used to take.
-        let code = done
-            .recv_timeout(STDOUT_STALL_LIMIT + Duration::from_secs(60))
-            .expect(
-                "run_mcp_with never returned: a peer that stopped reading stdout \
-                 stranded the server",
-            );
-        assert_eq!(
-            code, 1,
-            "giving up on an unreadable stdout is a failure exit, not a clean one"
-        );
-        // The writer thread is deliberately abandoned inside its blocking
-        // write, so the server thread is what must be joinable.
-        server.join().expect("server thread panicked");
     }
 
     fn init_params(version: &str) -> Value {

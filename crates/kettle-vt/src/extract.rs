@@ -1083,36 +1083,83 @@ fn parse_osc9_9(payload: &[u8]) -> Option<String> {
 /// then hands the value to `is_dir`, to a new tab's working directory, and to
 /// "open in file manager".
 ///
-/// A **UNC path** is the sharp one. Emitting `OSC 9;9;` followed by a
-/// double-backslash server path costs a program one line of output; on Windows
-/// the very next existence check reaches out over SMB or WebDAV to a host of
-/// the attacker's choosing, and the handshake offers up the machine's
-/// credentials before anything has been opened. Nothing legitimate reports a
-/// cwd this way — a shell integration reports where the shell already is.
+/// A **network path** is the sharp one. A UNC server path costs a program one
+/// line of output; on Windows the very next existence check reaches out over
+/// SMB or WebDAV to a host of the attacker's choosing, and the handshake offers
+/// up the machine's credentials before anything has been opened.
 ///
-/// Rejected: an empty path, one starting with two separators in any mix (every
-/// Windows UNC and device form begins with two, and a leading `//` is
-/// implementation-defined even on POSIX), one carrying a control character (a
-/// real path has none, and they corrupt every place this is later displayed or
-/// quoted), and one longer than any real path.
+/// This is an ALLOWLIST, and it is one because the denylist it replaced was
+/// wrong. That version refused a path beginning with two separators, which
+/// misses the NT object-manager prefix `\??\` — one separator, and
+/// `\??\UNC\host\share` resolves through the very same redirector. Measured:
+/// that path answered `is_dir` in 69 ms against a share and 0.2 ms against a
+/// local directory, which is the network round-trip the guard exists to
+/// prevent. `\??\GLOBALROOT\Device\...` reaches the rest of the NT namespace
+/// the same way. Enumerating the prefixes that are dangerous cannot work;
+/// naming the two shapes that are legitimate can.
+///
+/// Accepted:
+///   * POSIX-absolute — `/home/me`, and MSYS/Cygwin's `/c/Users/me`. A second
+///     leading separator is not accepted: `//host/share` is the same UNC, and
+///     a leading `//` is implementation-defined even on POSIX.
+///   * Windows drive-rooted — `C:\Users\me` or `C:/Users/me`. Drive-RELATIVE
+///     (`C:proj`) is not a working directory; it resolves against whatever the
+///     drive's current directory happens to be.
+///   * The WSL plan-9 shares `\\wsl$\` and `\\wsl.localhost\`. These are UNC in
+///     spelling only — they are served by the local P9 redirector, with no SMB
+///     handshake and no credentials — and `wslpath -w "$PWD"` is exactly what
+///     Microsoft's documented OSC 9;9 shell integration emits, which is the
+///     integration `parse_osc9_9` exists to harvest. Refusing them silently cost
+///     cwd inheritance for anyone carrying over a Windows Terminal WSL prompt.
+///
+/// Also rejected: an empty path, one carrying a control character (a real path
+/// has none, and they corrupt every place this is later displayed or quoted),
+/// and one longer than any real path.
 fn safe_reported_cwd(path: String) -> Option<String> {
-    // Comfortably past Windows' extended-length limit and Linux's PATH_MAX,
-    // so a real path is never refused and an unbounded one never stored.
+    // Past Linux's PATH_MAX (4096) with room to spare. Windows' extended-length
+    // limit is larger (32,767), but no shell reports a working directory
+    // anywhere near either, and an unbounded value from untrusted output should
+    // not be stored.
     const MAX_REPORTED_CWD_BYTES: usize = 8192;
+    // Case-insensitive, because Windows path components are.
+    const WSL_P9_SERVERS: [&str; 2] = ["wsl$", "wsl.localhost"];
 
-    let is_separator = |c: char| c == '/' || c == '\\';
-    let mut chars = path.chars();
-    let leads_with_two_separators =
-        chars.next().is_some_and(is_separator) && chars.next().is_some_and(is_separator);
-
-    if path.is_empty()
-        || path.len() > MAX_REPORTED_CWD_BYTES
-        || leads_with_two_separators
-        || path.chars().any(char::is_control)
+    if path.is_empty() || path.len() > MAX_REPORTED_CWD_BYTES || path.chars().any(char::is_control)
     {
         return None;
     }
-    Some(path)
+
+    let is_separator = |c: char| c == '/' || c == '\\';
+    let bytes = path.as_bytes();
+
+    // `\\wsl$\Ubuntu\home` — server and share must both be present, and the
+    // server must be one of the two names the P9 redirector claims.
+    if bytes.len() > 2 && is_separator(path.as_bytes()[0] as char) && is_separator(bytes[1] as char)
+    {
+        let rest = &path[2..];
+        let cut = rest.find(is_separator)?;
+        let (server, share) = (&rest[..cut], &rest[cut + 1..]);
+        let known = WSL_P9_SERVERS
+            .iter()
+            .any(|name| server.eq_ignore_ascii_case(name));
+        return (known && !share.is_empty()).then_some(path);
+    }
+
+    // POSIX-absolute. `/` specifically, not "a separator": a lone leading
+    // backslash is not a POSIX root, it is the NT namespace (`\??\UNC\host\share`
+    // reaches the redirector with ONE separator) or a Windows path rooted on
+    // whichever drive happens to be current. Neither is a working directory
+    // anyone reports. The two-separator case was handled above.
+    if bytes[0] == b'/' && !bytes.get(1).is_some_and(|&b| b == b'/' || b == b'\\') {
+        return Some(path);
+    }
+
+    // Drive-rooted: a letter, a colon, then a separator.
+    let drive_rooted = bytes.len() > 2
+        && bytes[0].is_ascii_alphabetic()
+        && bytes[1] == b':'
+        && is_separator(bytes[2] as char);
+    drive_rooted.then_some(path)
 }
 
 /// The machine's hostname for OSC 7 validation. Asks the OS
@@ -1693,6 +1740,23 @@ mod tests {
             // The Windows device and extended-length UNC forms.
             b"\x1b]9;9;\\\\?\\UNC\\attacker.example\\share\x07",
             b"\x1b]9;9;\\\\.\\pipe\\anything\x07",
+            // The NT object-manager prefix. ONE leading separator, and it
+            // resolves through the same redirector — measured at 69 ms against
+            // a share versus 0.2 ms against a local directory. A guard that
+            // counted leading separators let this straight through.
+            b"\x1b]9;9;\\??\\UNC\\attacker.example\\share\x07",
+            b"\x1b]9;9;\\??\\C:\\Windows\x07",
+            b"\x1b]9;9;\\??\\GLOBALROOT\\Device\\HarddiskVolume3\\Windows\x07",
+            // A UNC server that merely starts like the WSL one.
+            b"\x1b]9;9;\\\\wsl$evil.example\\share\x07",
+            b"\x1b]9;9;\\\\wsl.localhost.evil.example\\share\x07",
+            // The WSL server with no share is not a directory.
+            b"\x1b]9;9;\\\\wsl$\x07",
+            b"\x1b]9;9;\\\\wsl$\\\x07",
+            // Relative and drive-relative are not working directories.
+            b"\x1b]9;9;proj\\sub\x07",
+            b"\x1b]9;9;C:proj\x07",
+            b"\x1b]9;9;..\\..\\elsewhere\x07",
             // Quoted, since prompts quote paths with spaces.
             b"\x1b]9;9;\"\\\\attacker.example\\share\"\x07",
             // And through OSC 7, which carries a path the same way.
@@ -1724,10 +1788,38 @@ mod tests {
                 &b"\x1b]9;9;C:\\Users\\me\\proj\x07"[..],
                 "C:\\Users\\me\\proj",
             ),
+            (&b"\x1b]9;9;C:/Users/me/proj\x07"[..], "C:/Users/me/proj"),
+            (&b"\x1b]9;9;C:\\\x07"[..], "C:\\"),
             (&b"\x1b]9;9;/home/me/proj\x07"[..], "/home/me/proj"),
+            (&b"\x1b]9;9;/\x07"[..], "/"),
+            // MSYS/Cygwin spell a Windows drive this way.
+            (&b"\x1b]9;9;/c/Users/me\x07"[..], "/c/Users/me"),
+            // The WSL plan-9 shares. UNC in spelling only — served by the
+            // local P9 redirector, no SMB handshake and no credentials — and
+            // `wslpath -w "$PWD"` is exactly what Microsoft's documented
+            // OSC 9;9 WSL integration emits, which is the integration this
+            // code exists to harvest.
+            (
+                &b"\x1b]9;9;\\\\wsl.localhost\\Ubuntu\\home\\me\x07"[..],
+                "\\\\wsl.localhost\\Ubuntu\\home\\me",
+            ),
+            (
+                &b"\x1b]9;9;\\\\wsl$\\Ubuntu\\home\\me\x07"[..],
+                "\\\\wsl$\\Ubuntu\\home\\me",
+            ),
+            // Case-insensitively, since Windows path components are.
+            (
+                &b"\x1b]9;9;\\\\WSL.LOCALHOST\\Ubuntu\\home\x07"[..],
+                "\\\\WSL.LOCALHOST\\Ubuntu\\home",
+            ),
             (
                 &b"\x1b]7;file://localhost/home/me/proj\x07"[..],
                 "/home/me/proj",
+            ),
+            // Non-ASCII survives intact.
+            (
+                "\x1b]9;9;/home/me/été/日本\x07".as_bytes(),
+                "/home/me/été/日本",
             ),
         ] {
             let mut ex = Extractor::new();
