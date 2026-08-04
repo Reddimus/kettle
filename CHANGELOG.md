@@ -6,6 +6,8 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+## [2.47.0] — 2026-08-03
+
   Follow-through on the review of the 2.46.0 fixes: the defects that review
   found in them, plus the tests it judged unable to fail.
 
