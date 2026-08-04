@@ -769,6 +769,11 @@ pub fn run_pending_update_helper() -> Result<(), UpdateError> {
 /// A real semver, or the literal `unknown` that `scripts/install-unix.py` and
 /// `scripts/install.ps1` both write when they cannot determine one. Anything
 /// else did not come from an installer of ours.
+///
+/// Gated to match its only caller, `detect_managed_install_at` — macOS has no
+/// managed-install path, so on that target this is dead code and `-D warnings`
+/// refuses it. Neither a Windows nor a Linux check can see that.
+#[cfg(any(windows, target_os = "linux"))]
 fn is_recorded_install_version(version: &str) -> bool {
     version == "unknown" || semver::Version::parse(version).is_ok()
 }
