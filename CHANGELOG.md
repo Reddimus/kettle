@@ -9,6 +9,17 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   Follow-through on the review of the 2.46.0 fixes: the defects that review
   found in them, plus the tests it judged unable to fail.
 
+  Then a review of *those* fixes, which found nine more and is why several
+  entries below describe a fix being corrected rather than made. The ones worth
+  knowing about: the UNC guard did not close the hole it claimed to (`\??\UNC\`
+  has one leading separator, not two, and reaches the same redirector — measured
+  at 380 ms against a share versus 0.2 ms locally); the MCP shutdown budget was
+  a regression worse than the hang it replaced, discarding the result of any
+  tool call outliving 30 seconds; and the marker-version check refused
+  `unknown`, which both installers write, reporting those installations as
+  unmanaged. Every finding was reproduced before being fixed, and every fix was
+  re-checked against the reviewer's own trigger.
+
   ### Fixed
   - **A Linux self-update disowned files the previous release installed.** The
     provenance record was regenerated from the archive alone, so a file an

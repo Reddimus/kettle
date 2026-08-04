@@ -76,6 +76,32 @@ and the pattern is the same one again:
   `use-system-font` and `use_system_font` — one key to the parser — were
   reported as two separate inert settings.
 
+A third review, of the fixes to the fixes, found nine more — and the pattern
+held a third time. The instructive ones:
+
+- The reported-cwd guard refused a path leading with TWO separators. The NT
+  object-manager prefix has ONE, and `\??\UNC\host\share` reaches the same
+  redirector; `\??\GLOBALROOT\Device\...` reaches the rest of the NT namespace.
+  Measured: 380 ms against a share, 0.2 ms against a local path — that gap is
+  the network round-trip and the credential handshake. Enumerating dangerous
+  prefixes cannot work, so it is an allowlist now. The denylist had also been
+  refusing the WSL plan-9 shares, which is exactly what Microsoft's documented
+  OSC 9;9 WSL integration emits.
+- The `exec` stripper fixed ONE of three bounded resynchronizations. `Csi` and
+  `EscapeIntermediate` have the same 64-KiB bound and the same hole; `ESC`
+  followed by a lead byte reaches it with no 64 KiB at all.
+- The MCP shutdown budget discarded the result of any tool call outliving 30
+  seconds, while printing a diagnostic blaming stdout. A wall clock cannot tell
+  a stalled peer from busy work; the writer reports whether it is parked inside
+  a write now. The hang was also still reachable below 28 queued responses,
+  where nothing ever latched — and the test's 52-message shape could not see it.
+- Carrying provenance records forward silently defanged the test written to
+  catch the original provenance bug: dropping a file from the applier's map
+  passed 43 of 43, because the carried record still matched the untouched file
+  on disk. The test compares archive bytes to disk bytes now.
+- The marker-version check refused `unknown`, which both installers write, and
+  so reported those installations as unmanaged.
+
 Still open on those same fixes:
 
 - The premultiplied blend fix is correct locally, but `lib.rs`'s surface clear
