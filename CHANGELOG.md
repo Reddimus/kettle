@@ -6,6 +6,216 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+## [2.47.0] — 2026-08-03
+
+  Follow-through on the review of the 2.46.0 fixes: the defects that review
+  found in them, plus the tests it judged unable to fail.
+
+  Then a review of *those* fixes, which found nine more and is why several
+  entries below describe a fix being corrected rather than made. The ones worth
+  knowing about: the UNC guard did not close the hole it claimed to (`\??\UNC\`
+  has one leading separator, not two, and reaches the same redirector — measured
+  at 380 ms against a share versus 0.2 ms locally); the MCP shutdown budget was
+  a regression worse than the hang it replaced, discarding the result of any
+  tool call outliving 30 seconds; and the marker-version check refused
+  `unknown`, which both installers write, reporting those installations as
+  unmanaged. Every finding was reproduced before being fixed, and every fix was
+  re-checked against the reviewer's own trigger.
+
+  ### Fixed
+  - **A Linux self-update disowned files the previous release installed.** The
+    provenance record was regenerated from the archive alone, so a file an
+    earlier release shipped and this one no longer does stayed on disk with
+    nothing recording it — uninstall deletes only what provenance lists, so it
+    was installed permanently. `scripts/install-unix.py` seeds the new record
+    from the old one; the two writers now go through one function and cannot
+    drift apart again.
+  - **A rolled-back update left directories behind, unowned.** Directory
+    ownership was decided by sampling the filesystem BEFORE the writes. A
+    transaction that created a directory and then failed restored the files but
+    not the directory, so the retry saw it as pre-existing, left it out of
+    provenance, and uninstall could never remove it. The transaction now reports
+    the directories it actually created and removes them when it rolls back.
+  - **`kettle exec` could emit invalid UTF-8 after a very long control string.**
+    The stripper shields UTF-8 continuation bytes so a `0x9c` inside a character
+    is not mistaken for the 8-bit string terminator. When the 64-KiB
+    resynchronization bound fell on a multi-byte lead byte, the lead was
+    swallowed as the string's last byte while its continuations were emitted
+    into ordinary output with no lead in front of them — anything decoding
+    stdout saw invalid UTF-8 from that point on. A character now goes wherever
+    its lead went.
+  - **Named colors were nine.** `--accent`'s own `--help` gives
+    `kettle --accent teal` as its example, and `teal` was not one of them: before
+    the flag validated its value that silently fell back to the configured
+    accent, and after, it became a hard error on kettle's own documented
+    example. `orange`, `purple`, `pink`, `navy` and the rest failed the same
+    way. All 148 CSS/X11 named colors resolve now; the original nine keep the
+    values configs were written against.
+  - **`--check-config` reported one inert setting as several.** It
+    deduplicated on the spelling in the file, so `use-system-font` and
+    `use_system_font` — which the parser folds to the same key — were listed
+    separately, reading as two problems to fix.
+- **Reconnect went to a different endpoint than the session it cloned.** The
+  right-click "Reconnect" / "Re-attach" entry rebuilt its command from the host
+  or container name alone. Every option that decides which machine that name
+  reaches was parsed past and discarded: `ssh -p 2222 -J bastion -i key box`
+  came back as plain `ssh box` — another port, no bastion, another key — and
+  `docker --context remote exec web` came back as a local `docker exec web`,
+  attaching to whatever container happened to share the name on this machine.
+  `kubectl -n prod exec api` reconnected in the default namespace, and a pod's
+  `-c sidecar` was lost. The endpoint-selecting options now travel with the
+  name and are re-emitted, each single-quoted; where one cannot be reproduced
+  faithfully (`-o ProxyCommand=…`, `-W`, `podman --remote`, a bearer token that
+  must never be echoed back into a command line) the menu entry is dropped
+  instead, because no Reconnect beats one that lands somewhere else.
+- **An option's value could be reported as the host or container.** Short
+  options are now read the way getopt and Go's pflag actually parse them, so a
+  boolean in front of a value-taking letter no longer hides the value:
+  `ssh -vp 2222 box` reported the PORT as the host, `ssh -luser box` dropped the
+  login name, and `kubectl exec -itc sidecar pod` reported the sidecar as the
+  pod. The long-option tables gained the entries whose absence had the same
+  effect — `kubectl exec --container sidecar pod` named the container as the
+  pod and `docker exec --env-file vars web` named the env file as the
+  container — and `lxc-attach --name web` / `--name=web` / `-nweb` are detected
+  at all now, where only the separated `-n web` form used to be.
+- **`--` before the container made the COMMAND the container.** `kubectl exec -f
+  pod.yaml -- sh` takes the pod from the manifest and runs `sh` inside it; the
+  walk skipped the `--`, titled the pane `kubectl: sh`, and offered to re-attach
+  to a container by that name. `--` is now read the way each CLI reads it:
+  docker and podman use it only to end flag parsing, so `docker exec -- web sh`
+  still names `web`, while kubectl — and `podman exec --latest`/`-l` — take
+  everything after it as the command, which leaves no name in the argv and
+  therefore no menu entry rather than a wrong one. In the same pass: `podman -r`
+  (the documented short form of `--remote`) was not gated, so a session on the
+  remote service offered a reconnect to the LOCAL socket; the kubeconfig
+  `--user`, `--as`, and the Docker/kubectl TLS and client-certificate flags were
+  consumed and forgotten, so the rebuilt command authenticated as a different
+  account; `lxc-attach --uid`/`--gid`/`-g`/`-o` had their VALUES read as the
+  container name; and `ssh -o IdentityFile=…` / `CertificateFile=…` /
+  `IdentityAgent=…` / `CanonicalizeHostname=…` were not treated as
+  endpoint-selecting, while a leading space (`-o " ProxyJump=bastion"`, which
+  OpenSSH honours) evaded the keyword gate outright.
+- **A Windows install path removed the Reconnect entry.** `ssh -i "C:\Program
+  Files (x86)\OpenSSH\key" box` fell outside the reproducible path charset, so
+  the menu entry disappeared entirely. Parentheses, brackets, braces, commas and
+  apostrophes are all literal inside the POSIX single quotes the value is
+  emitted in, so they are accepted; argv-derived values are additionally
+  length-bounded, and a second, different `ssh -i` (OpenSSH tries every identity
+  in order) suppresses the entry rather than reproducing only the last key.
+  - **A control client kept using a connection whose response was still in
+    flight.** After a request timed out, was cancelled, breached the buffered
+    event bound, or hit malformed data, `kettle-ctl`'s client stayed reusable
+    without draining or retiring the stream — so the abandoned request's
+    response was read as the NEXT call's, failing correlation, and a second
+    (possibly mutating) request went onto a stream nobody could correlate. Any
+    such outcome now retires the connection: further use fails with a distinct
+    error naming the abandoned request, and the caller reconnects. Retiring
+    closes the transport and releases what the abandoned exchange had buffered,
+    so a caller holding a retired client no longer holds one of the server's
+    connection slots with it. A structured server error is a real response and
+    still leaves the client usable, and so does a request whose deadline
+    expired before any of it reached the wire — the server never saw that one.
+    A timeout or a cancellation now also says that the server may have carried
+    the request out anyway, since that is what decides whether retrying it is
+    safe, and `kettle ctl` and the MCP bridge show the agent nothing else.
+  - **One launcher click could open two windows.** Bare-launch activation is
+    at-least-once — the primary opens the window before writing its response —
+    but the request carried nothing that identified the launch, so a response
+    lost to a slow cold start made the secondary re-send an identical request
+    the primary could not tell apart from a second click. Every launch now
+    carries an idempotency key; the primary remembers what it did for that key
+    and answers a retry from the record, and a retry that arrives while the
+    first attempt is still opening the window waits for that attempt's outcome
+    instead of opening a second one. That wait is bounded well inside the
+    deadline the requester is reading under, so a duplicate always leaves with
+    an answer rather than waiting out its own request for nothing.
+  - **A reused process id resurrected dead registry and presence records.**
+    Liveness identified an owner by its pid alone, so once the system handed
+    that number to an unrelated program, a dead control server stayed
+    advertised (every client wasting a connect attempt on it) and a closed
+    window's accent claim stayed active, keeping that color out of the pool
+    forever. Records now name their owner by pid *and* by that process's
+    OS-reported start time; a record whose pid is alive but whose instance is
+    gone is pruned. A record without the token (an older build, or an OS that
+    cannot report one) keeps the previous bare-pid answer rather than being
+    pruned on suspicion. Pruning is equally careful in the other direction: a
+    record is named on disk by its owner's pid, so the delete re-reads the file
+    and does nothing unless it is still the record that was judged — otherwise
+    the new kettle that inherited the pid, and registered at that same name,
+    would be the one erased.
+  - **Kitty images composited over transparency came out darkened.** The blend
+    ignored the destination's own alpha and never divided back out of
+    premultiplied space, so colour drawn onto a transparent pixel was pulled
+    toward black in proportion to the transparency under it. A kitty animation
+    frame canvas starts out fully transparent, which makes that the common case
+    rather than a corner. Verified bit-identical for an opaque destination, so
+    nothing that rendered correctly before moves.
+  - **Images silently stopped appearing past the 256th.** A transmission whose
+    id the saturated store refused was handed back with that id anyway, so a
+    later `a=p,i=<id>` found nothing and `a=d,i=<id>` freed nothing. It now
+    draws while advertising no id — exactly like an `i=0` transmission — since
+    `icat`, `timg` and `chafa` all send fresh ids and never delete. The `U=1`
+    virtual form is declined outright, because a virtual placement is resolved
+    by id later and has no id-less fallback.
+  - **A client that stopped reading `kettle mcp`'s stdout stranded the server.**
+    The writer thread blocks in `write`, the bounded response channel fills
+    behind it, and every tool worker blocks mid-send; shutdown then joined those
+    workers, which never return. The process stayed alive holding a terminal,
+    answering nothing, until something killed it. Worse, the reader loop blocked
+    on the same channel — so the server stopped reading stdin, which is exactly
+    where the `notifications/cancelled` that would free it arrives. Every wait
+    on the peer is bounded now, and the first send that proves the peer is not
+    reading short-circuits the rest.
+  - **The installed-version record was never checked.** Every other field of
+    `install.json` was validated on read; `version` — the one a person actually
+    reads, and what support instructions and packaging scripts consult for
+    "what is installed here" — was written and trusted. A marker carrying a
+    version no kettle installer would write is now refused like any other
+    mismatch.
+  - **`minimum-contrast` did nothing for bold text under `bold-is-bright`.** The
+    lift ran first and the bright remap then replaced the foreground outright
+    with a palette entry, discarding it. Since the bright variant is the lighter
+    one, the case it threw away is exactly the one that needed it: pale bold text
+    on a pale background. The two steps now run in the order that makes the
+    guarantee hold.
+  - **`background-darkness` was documented backwards.** The code matches
+    Terminator — the value is the background colour's alpha, so `0.0` is
+    see-through and `1.0` is fully covered — but both `docs/CONFIG.md` and the
+    setting's own reference described the opposite ("1.0 = no tint, 0.0 = fully
+    dark"), so anyone configuring it from the documentation reached for the
+    wrong end. The prose is corrected and the direction is pinned by a test.
+  - **Untrusted output could point a pane's working directory off the machine.**
+    A reported cwd (OSC 7 or OSC 9;9) is a claim by whatever is writing to the
+    pane, and kettle acts on it — an existence check, a new tab's directory,
+    "open in file manager". One line of output could set it to a UNC server
+    path, and on Windows the very next existence check reaches out over SMB or
+    WebDAV and hands over the machine's credentials during the handshake, before
+    anything is opened. `cat`ting a hostile file was enough to send it. Both
+    channels now refuse a path that leads with two separators, carries a control
+    character, or is longer than any real path.
+  - **A directory anyone could add files to counted as private (Windows).** The
+    trust check covered removal and re-permissioning but not creation, so an
+    ACE granting `FILE_ADD_FILE`, `FILE_ADD_SUBDIRECTORY`, or `GENERIC_WRITE`
+    let an untrusted principal plant a session, layout, or control-server
+    registry entry where kettle enumerates and reads them back. Creation rights
+    are refused on that directory now — and deliberately still allowed on its
+    ancestors, because `C:\` grants Authenticated Users "create folders" on
+    stock Windows and a directory created there reaches nothing of kettle's.
+  - **`--working-directory` had no test at the CLI surface**, and neither did
+    `--accent`. Both are validated by one function now, driven by the tests
+    exactly as the CLI drives it.
+
+  ### Changed
+  - The alpha-blending convention is verified by rendering a half-opaque quad
+    and reading the pixel back, rather than only by reading the shader source.
+    A source-level check can be worked around; the source check remains as a
+    cross-check for the pipelines the GPU test cannot cheaply stand up, and now
+    resolves local aliases so multiplying through a renamed variable is still
+    counted.
+  - Three decisions moved out of long functions into named ones so their tests
+    exercise what production runs rather than a restatement of it: the cursor
+    glyph colour, `--write-default-config`, and the profile cycle order.
+
 ## [2.46.0] — 2026-08-03
 
   Terminator-parity pass. Everything here is a setting, gesture, or documented

@@ -6170,12 +6170,6 @@ impl Renderer {
                 None
             }
         };
-        // An OSC 12 runtime cursor color moves the block
-        // out from under the theme's cursor/cursor_text pair, so the
-        // recolored glyph follows reverse-video (its own cell bg) instead of
-        // `theme.cursor_text` (which was tuned against `theme.cursor`).
-        // Resolved once; the cursor-draw below resolves the same slot.
-        let cursor_rt_override = color::resolve_query(258, theme, term_colors);
         // A wide (CJK/emoji) glyph under the cursor needs
         // a TWO-cell block — recoloring the glyph to cursor_text while the
         // 1-cell block covered only its left half left the right half drawn
@@ -6220,20 +6214,6 @@ impl Renderer {
             if selection_range.is_some_and(|r| r.contains(sc.point())) {
                 fg = theme.selection_foreground;
             }
-            // SGR 2 dim/faint — blend the foreground halfway toward the
-            // background. Renderer was ignoring `Flags::DIM` so `\e[2m`
-            // looked the same as normal weight; fish prompt themers,
-            // `less` status lines, mc all use it. Applied *before* the
-            // minimum-contrast lift so the lift can claw back legibility
-            // when a theme's dim level becomes unreadable.
-            if flags.contains(Flags::DIM) {
-                fg = color::dim(fg, bg);
-            }
-            // Lift fg toward the higher-contrast extreme if the theme/SGR
-            // combo falls below the configured WCAG ratio (off by default).
-            if cfg.minimum_contrast > 1.0 {
-                fg = color::with_min_contrast(fg, bg, cfg.minimum_contrast as f64);
-            }
             // Terminator parity, terminatorlib/config.py:111
             // `allow_bold`: when false, suppress bold attr entirely.
             // Useful on fonts without a bold companion.
@@ -6241,15 +6221,7 @@ impl Renderer {
             let italic = flags.contains(Flags::ITALIC);
             saw_styled_text |= bold || italic;
             let hidden = flags.contains(Flags::HIDDEN);
-            // Terminator parity, terminatorlib/config.py:130
-            // `bold_is_bright`: when true + bold + fg comes from
-            // palette[0..8], remap to palette[8..16] (the xterm
-            // bright variant). Color::bright_for_bold returns the
-            // mapped color or the original if it's not a low-palette
-            // index. No-op when bold isn't set.
-            if bold && cfg.bold_is_bright {
-                fg = color::bright_for_bold(fg, theme);
-            }
+            fg = attributed_foreground(fg, bg, flags.contains(Flags::DIM), bold, cfg, theme);
             // The same search pair drives the match background quads and the
             // terminal glyphs above them. Active matches use the configured
             // search fg/bg; inactive matches reuse the theme selection pair.
@@ -6274,15 +6246,10 @@ impl Renderer {
                 if flags.contains(Flags::WIDE_CHAR) {
                     cursor_wide_quad = Some((col, 2.0));
                 }
-                // The inverted glyph color: the cell bg under an OSC 12 runtime
-                // cursor color (reverse-video), else theme `cursor_text`. The
-                // glyph keeps its NORMAL `fg` in the pane buffer; the cursor
-                // pass draws this recolored copy on top of the block.
-                let cursor_fg = if cursor_rt_override.is_some() {
-                    bg
-                } else {
-                    theme.cursor_text
-                };
+                // The glyph keeps its NORMAL `fg` in the pane buffer; the
+                // cursor pass draws this recolored copy on top of the block.
+                // See `color::cursor_glyph_color` for which colour and why.
+                let cursor_fg = color::cursor_glyph_color(theme, term_colors, bg);
                 cursor_glyph_capture = Some((sc.c, cursor_fg));
             }
 
@@ -6379,15 +6346,13 @@ impl Renderer {
         // a linear selection wraps full lines. `selection_row_span` encodes both.
         if let Some(sel) = snap.selection {
             let (s, e) = (sel.start, sel.end);
-            for r in s.line.0..=e.line.0 {
-                // Selection lines are grid-absolute; map to the
-                // viewport row and clip to the visible screen. The old `r < 0`
-                // guard DROPPED any selection scrolled up into history, and a
-                // positive `r` was drawn at the wrong (un-offset) viewport y.
+            for r in visible_selection_rows(s.line.0, e.line.0, display_off, screen_rows) {
+                // Selection lines are grid-absolute; map to the viewport row.
+                // The old `r < 0` guard DROPPED any selection scrolled up into
+                // history, and a positive `r` was drawn at the wrong
+                // (un-offset) viewport y.
                 let vrow = r + display_off;
-                if vrow < 0 || vrow >= screen_rows {
-                    continue;
-                }
+                debug_assert!((0..screen_rows).contains(&vrow));
                 let (c0, c1) = selection_row_span(
                     r,
                     (s.line.0, s.column.0),
@@ -6856,6 +6821,29 @@ fn font_features(cfg: &Config) -> FontFeatures {
         ff.set(FeatureTag::new(&f.tag), f.value);
     }
     ff
+}
+
+/// The grid rows of a selection that are actually on screen.
+///
+/// Selection endpoints are grid-absolute and a selection can cover the entire
+/// scrollback: `Ctrl+A` in a pane holding a million lines of build output is one
+/// gesture. Walking `start..=end` and skipping the offscreen rows inside the
+/// loop cost a million iterations on EVERY repaint — every blink, every
+/// keystroke — to draw at most `screen_lines` quads. Clamping first makes the
+/// work proportional to what is drawn.
+///
+/// Returns an empty range when the selection is entirely off screen, which is
+/// the ordinary case while scrolled away from it.
+fn visible_selection_rows(
+    start_line: i32,
+    end_line: i32,
+    display_offset: i32,
+    screen_rows: i32,
+) -> std::ops::RangeInclusive<i32> {
+    // `vrow = r + display_offset` must land in `0..screen_rows`.
+    let first = start_line.max(-display_offset);
+    let last = end_line.min(screen_rows - display_offset - 1);
+    first..=last
 }
 
 /// The inclusive `(first_col, last_col)` the mouse selection highlights on grid
@@ -9145,10 +9133,17 @@ fn srgb(c: u8) -> f64 {
 ///
 ///   bg-type = solid (default):  alpha = background_opacity
 ///   bg-type = transparent:      alpha = background_opacity * background_darkness
-///   bg-type = image:            alpha = background_opacity (image render
-///                               will land in a later bg-image phase;
-///                               for now darkness applies same as transparent
-///                               so users get the dim tint stage early)
+///   bg-type = image/starfield:  same as transparent — darkness lets the
+///                               backdrop show through the terminal area, not
+///                               only behind the chrome
+///
+/// `background_darkness` runs SEE-THROUGH (`0.0`) to FULLY-COVERED (`1.0`),
+/// because Terminator assigns it straight to the background colour's alpha and
+/// its users lower it for more transparency. `docs/CONFIG.md` and the field's
+/// own doc comment both used to describe that backwards, which sent anyone
+/// following the documentation to the wrong end of the scale;
+/// `darkness_scales_the_backdrop_toward_see_through` pins the direction so
+/// prose and behaviour cannot drift apart again.
 ///
 /// All inputs already clamped at parse time so no defensive math needed.
 /// Surface-pixel origin of a pane's terminal grid.
@@ -9195,6 +9190,53 @@ fn pane_backdrop_rect(
     let bwid = (rw - 2.0 * bw).max(0.0);
     let bhgt = (rh - 2.0 * bw - title_top - title_bot).max(0.0);
     (bwid > 0.0 && bhgt > 0.0).then_some((bx, by, bwid, bhgt))
+}
+
+/// The foreground a cell's glyph is drawn in, after the attributes that modify
+/// colour have all had their turn.
+///
+/// Order is the whole content of this function, which is why it is a function.
+///
+/// 1. **SGR 2 dim/faint** blends toward the background. The renderer ignored
+///    `Flags::DIM` entirely at one point, so `\e[2m` looked like normal weight;
+///    fish prompt themers, `less` status lines and `mc` all use it.
+/// 2. **`bold-is-bright`** (Terminator `bold_is_bright`) remaps a bold
+///    foreground from `palette[0..8]` to its `palette[8..16]` bright variant.
+/// 3. **`minimum-contrast`** lifts toward whichever extreme is reachable, if
+///    the result still falls below the configured WCAG ratio.
+///
+/// The lift has to be LAST, because it is the only step that reasons about the
+/// colour against the background rather than transforming it. It used to run
+/// second, before `bold_is_bright` — which then replaced the foreground
+/// outright with a palette entry, discarding the lift. `minimum-contrast`
+/// therefore did nothing at all for bold text whenever `bold-is-bright` was on,
+/// which is the common configuration; and since the bright variant is the
+/// lighter one, the case it discarded is precisely the one that needed it, pale
+/// bold text on a pale background.
+///
+/// Callers apply the search-highlight and cursor-block overrides after this,
+/// deliberately: each substitutes a colour paired with its OWN background, so
+/// lifting them against the cell's background would measure the ratio against a
+/// surface that is not behind them.
+fn attributed_foreground(
+    fg: Rgb,
+    bg: Rgb,
+    dim: bool,
+    bold: bool,
+    cfg: &kettle_config::Config,
+    theme: &kettle_config::Theme,
+) -> Rgb {
+    let mut fg = fg;
+    if dim {
+        fg = color::dim(fg, bg);
+    }
+    if bold && cfg.bold_is_bright {
+        fg = color::bright_for_bold(fg, theme);
+    }
+    if cfg.minimum_contrast > 1.0 {
+        fg = color::with_min_contrast(fg, bg, cfg.minimum_contrast as f64);
+    }
+    fg
 }
 
 fn composed_bg_alpha(cfg: &kettle_config::Config) -> f64 {
@@ -10486,6 +10528,157 @@ mod gpu_tests {
             Ok(false) => eprintln!("no GPU adapter on this host; skipped"),
             Err(e) => panic!("offscreen GPU self-test failed: {e}"),
         }
+    }
+
+    /// A half-opaque quad must contribute half its colour, not a quarter.
+    ///
+    /// The quad shader returns PREMULTIPLIED colour (`rgb * a`) while the
+    /// pipeline was configured with `ALPHA_BLENDING`, whose source factor is
+    /// `SrcAlpha` — so the GPU multiplied by alpha a second time. Every
+    /// translucent surface kettle draws came out at alpha², darkening images,
+    /// panels, highlights, separators, and the unfocused-pane dim overlay.
+    ///
+    /// This renders and reads the pixel back, so it is the convention as the
+    /// hardware actually applies it. `tests/alpha_convention.rs` reads the
+    /// source for the pipelines this cannot cheaply stand up; a source-token
+    /// check can always be worked around, a rendered pixel cannot.
+    #[test]
+    fn a_half_opaque_quad_blends_at_half_not_a_quarter() {
+        let _serialized = gpu_test_guard();
+        let Some(pixel) = pollster::block_on(render_one_translucent_quad()) else {
+            eprintln!("no GPU adapter on this host; skipped");
+            return;
+        };
+
+        // White at 50% alpha over black: premultiplied source-over leaves 0.5
+        // linear, which the sRGB target stores as ~188. Multiplying by alpha
+        // twice leaves 0.25 linear, stored as ~137 — far outside any tolerance
+        // a driver's rounding needs.
+        let expected = 188_u8;
+        let doubled = 137_u8;
+        for (channel, value) in ["r", "g", "b"].into_iter().zip(pixel) {
+            assert!(
+                value.abs_diff(expected) <= 3,
+                "channel {channel} came back {value}, expected ~{expected}; \
+                 ~{doubled} means alpha was applied twice (premultiplied shader \
+                 output paired with a straight-alpha blend state)"
+            );
+        }
+    }
+
+    /// Draw one 50%-opaque white quad over black and read the centre pixel
+    /// back. `None` when the host has no usable adapter.
+    async fn render_one_translucent_quad() -> Option<[u8; 3]> {
+        let cfg = Config::default();
+        let (_instance, adapter) = resolve_headless_adapter(&cfg, "alpha_blend_test")
+            .await
+            .ok()?;
+        let (device, queue) = adapter
+            .request_device(&wgpu::DeviceDescriptor {
+                label: Some("kettle-alpha-blend-test"),
+                ..Default::default()
+            })
+            .await
+            .ok()?;
+
+        // Match the offscreen self-test's format so this measures the same
+        // pipeline configuration the renderer builds for a real surface.
+        let format = wgpu::TextureFormat::Rgba8UnormSrgb;
+        let size = 8_u32;
+        let mut quads = QuadPipeline::new(&device, format);
+        quads.upload(
+            &device,
+            &queue,
+            [size as f32, size as f32],
+            &[QuadInstance {
+                pos: [0.0, 0.0],
+                size: [size as f32, size as f32],
+                color: [1.0, 1.0, 1.0, 0.5],
+            }],
+        );
+
+        let texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("kettle-alpha-blend-target"),
+            size: wgpu::Extent3d {
+                width: size,
+                height: size,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        // 8 px * 4 bytes is below the 256-byte copy alignment, so pad the row.
+        let bytes_per_row = 256_u32;
+        let readback = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("kettle-alpha-blend-readback"),
+            size: u64::from(bytes_per_row) * u64::from(size),
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+
+        let mut encoder =
+            device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("kettle-alpha-blend-pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                        store: wgpu::StoreOp::Store,
+                    },
+                    depth_slice: None,
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            quads.draw(&mut pass);
+        }
+        encoder.copy_texture_to_buffer(
+            wgpu::TexelCopyTextureInfo {
+                texture: &texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::TexelCopyBufferInfo {
+                buffer: &readback,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(bytes_per_row),
+                    rows_per_image: Some(size),
+                },
+            },
+            wgpu::Extent3d {
+                width: size,
+                height: size,
+                depth_or_array_layers: 1,
+            },
+        );
+        queue.submit(std::iter::once(encoder.finish()));
+
+        let slice = readback.slice(..);
+        let (tx, rx) = std::sync::mpsc::channel();
+        slice.map_async(wgpu::MapMode::Read, move |result| {
+            let _ = tx.send(result);
+        });
+        let _ = device.poll(wgpu::PollType::wait_indefinitely());
+        rx.recv().ok()?.ok()?;
+        let data = slice.get_mapped_range().ok()?;
+        // Centre row, centre pixel — well inside the quad.
+        let offset = (size as usize / 2) * bytes_per_row as usize + (size as usize / 2) * 4;
+        let pixel = [data[offset], data[offset + 1], data[offset + 2]];
+        drop(data);
+        readback.unmap();
+        Some(pixel)
     }
 
     #[cfg(target_os = "windows")]
@@ -13220,6 +13413,163 @@ mod inline_placement_budget_tests {
 }
 
 #[cfg(test)]
+mod attributed_foreground_tests {
+    use super::{Rgb, attributed_foreground, color};
+    use kettle_config::{Config, Theme};
+
+    /// `minimum-contrast` must survive `bold-is-bright`.
+    ///
+    /// The lift ran first and `bold_is_bright` then replaced the foreground
+    /// outright with a palette entry, so the guarantee silently did nothing for
+    /// bold text whenever `bold-is-bright` was on — the common configuration.
+    /// And because the bright variant is the LIGHTER one, the case it discarded
+    /// is exactly the one that needed it.
+    #[test]
+    fn the_contrast_lift_sees_the_colour_bold_is_bright_actually_produces() {
+        let mut theme = Theme {
+            background: Rgb::new(0xe8, 0xe8, 0xe8),
+            ..Theme::default()
+        };
+        // A pale background, a low-palette colour that ALREADY meets the
+        // ratio against it (9.44:1), and a bright variant that badly does not
+        // (1.01:1).
+        //
+        // The base colour being compliant is what makes this load-bearing. The
+        // lift is then a no-op, so running it before the remap leaves the remap
+        // free to replace the result with something unreadable. A fixture whose
+        // base is NON-compliant cannot show that: the lift moves the colour off
+        // the palette entry, and the remap — which matches palette entries
+        // exactly — finds nothing to remap and quietly does nothing.
+        theme.palette[2] = Rgb::new(0x20, 0x40, 0x20);
+        theme.palette[10] = Rgb::new(0xd8, 0xf0, 0xd8);
+        let bg = theme.background;
+        let fg = theme.palette[2];
+
+        let cfg = Config {
+            bold_is_bright: true,
+            minimum_contrast: 4.5,
+            ..Config::default()
+        };
+
+        // The bright variant on its own is far below the requested ratio —
+        // otherwise this fixture would prove nothing.
+        let bright = color::bright_for_bold(fg, &theme);
+        assert_eq!(bright, theme.palette[10], "the fixture must actually remap");
+        assert!(
+            color::contrast_ratio(bright, bg) < 4.5,
+            "the bright variant must start unreadable, got {:.2}",
+            color::contrast_ratio(bright, bg)
+        );
+
+        let drawn = attributed_foreground(fg, bg, false, true, &cfg, &theme);
+        assert!(
+            color::contrast_ratio(drawn, bg) >= 4.5 - 1e-6,
+            "minimum-contrast must hold for bold text under bold-is-bright, \
+             got {:.2} from {drawn:?}",
+            color::contrast_ratio(drawn, bg)
+        );
+
+        // Non-bold skips the remap, so the compliant base colour is left as
+        // it is rather than lifted away from what the theme asked for.
+        assert!(
+            color::contrast_ratio(fg, bg) >= 4.5,
+            "the fixture's base colour must already be compliant, got {:.2}",
+            color::contrast_ratio(fg, bg)
+        );
+        assert_eq!(
+            attributed_foreground(fg, bg, false, false, &cfg, &theme),
+            fg,
+            "a compliant non-bold colour must be left alone"
+        );
+
+        // With the lift off, bold-is-bright still does its job untouched.
+        let no_lift = Config {
+            bold_is_bright: true,
+            ..Config::default()
+        };
+        assert_eq!(
+            attributed_foreground(fg, bg, false, true, &no_lift, &theme),
+            bright,
+            "with minimum-contrast off, the bright variant must be what is drawn"
+        );
+
+        // Dim composes first, and the lift still applies to its result.
+        let dimmed = attributed_foreground(fg, bg, true, false, &no_lift, &theme);
+        assert_eq!(
+            dimmed,
+            color::dim(fg, bg),
+            "dim must apply to the resolved fg"
+        );
+        assert!(
+            color::contrast_ratio(attributed_foreground(fg, bg, true, false, &cfg, &theme), bg)
+                >= 4.5 - 1e-6,
+            "a dimmed foreground must still be lifted to the configured ratio"
+        );
+    }
+}
+
+#[cfg(test)]
+mod background_darkness_tests {
+    use super::composed_bg_alpha;
+    use kettle_config::{BackgroundType, Config};
+
+    /// `background-darkness` runs see-through → covered, and the docs must say
+    /// so.
+    ///
+    /// Terminator assigns this value straight to the background colour's alpha,
+    /// and its users lower it to get MORE transparency. Both `docs/CONFIG.md`
+    /// and the field's own doc comment described the scale backwards — "1.0 =
+    /// no tint, 0.0 = fully dark" — so anyone configuring kettle from its
+    /// documentation reached for the wrong end. The code was right; the prose
+    /// was not, and nothing tied the two together.
+    #[test]
+    fn darkness_scales_the_backdrop_toward_see_through() {
+        let with = |background_type, darkness, opacity| {
+            composed_bg_alpha(&Config {
+                background_type,
+                background_darkness: darkness,
+                background_opacity: opacity,
+                ..Config::default()
+            })
+        };
+
+        for background_type in [
+            BackgroundType::Transparent,
+            BackgroundType::Image,
+            BackgroundType::Starfield,
+        ] {
+            // 0.0 paints nothing over the backdrop: fully see-through.
+            assert_eq!(with(background_type, 0.0, 1.0), 0.0, "{background_type:?}");
+            // 1.0 paints the terminal background at full opacity: covered.
+            assert_eq!(with(background_type, 1.0, 1.0), 1.0, "{background_type:?}");
+            // And it is monotonic in between, not inverted or clamped flat.
+            let quarter = with(background_type, 0.25, 1.0);
+            let half = with(background_type, 0.5, 1.0);
+            assert!(
+                0.0 < quarter && quarter < half && half < 1.0,
+                "{background_type:?}: darkness must increase coverage, got \
+                 0.25 -> {quarter}, 0.5 -> {half}"
+            );
+            // It composes with background-opacity rather than replacing it.
+            assert!(
+                (with(background_type, 0.5, 0.5) - 0.25).abs() < 1e-9,
+                "{background_type:?}: darkness and opacity must multiply"
+            );
+        }
+
+        // A solid background ignores darkness entirely — there is no backdrop
+        // for it to reveal. (Compared with a tolerance: the config stores these
+        // as `f32` and the alpha is `f64`, so 0.8 does not round-trip exactly.)
+        for darkness in [0.0, 0.5, 1.0] {
+            assert!(
+                (with(BackgroundType::Solid, darkness, 0.8) - 0.8).abs() < 1e-6,
+                "a solid background must not consult darkness"
+            );
+        }
+    }
+}
+
+#[cfg(test)]
 mod selection_row_span_tests {
     use super::selection_row_span;
 
@@ -13315,6 +13665,86 @@ mod selection_row_span_tests {
         assert_eq!(selection_row_span(-3, start, end, cols, false), (0, 12));
         // Block selection over the same scrollback rows is a column band.
         assert_eq!(selection_row_span(-4, start, end, cols, true), (8, 12));
+    }
+
+    /// Drawing a selection must cost what is drawn, not what is selected.
+    ///
+    /// `Ctrl+A` in a pane holding a million lines of build output is one
+    /// gesture, and the loop walked `start..=end` and skipped the offscreen
+    /// rows inside the body — a million iterations on every repaint, every
+    /// blink, every keystroke, to draw at most `screen_lines` quads.
+    #[test]
+    fn selection_drawing_visits_only_the_rows_on_screen() {
+        use super::visible_selection_rows;
+        let screen_rows = 40;
+
+        // The whole scrollback selected, viewport at the bottom: only the
+        // visible rows are visited, not the million behind them.
+        let rows = visible_selection_rows(-1_000_000, 39, 0, screen_rows);
+        assert_eq!(rows.clone().count(), screen_rows as usize);
+        assert_eq!((*rows.start(), *rows.end()), (0, 39));
+
+        // Scrolled up by 100: the window moves with the viewport, and the same
+        // bounded number of rows is visited.
+        let rows = visible_selection_rows(-1_000_000, 39, 100, screen_rows);
+        assert_eq!((*rows.start(), *rows.end()), (-100, -61));
+        assert_eq!(rows.count(), screen_rows as usize);
+
+        // A selection that fits on screen is unchanged — clamping must not
+        // narrow what was already visible.
+        assert_eq!(
+            {
+                let r = visible_selection_rows(5, 9, 0, screen_rows);
+                (*r.start(), *r.end())
+            },
+            (5, 9)
+        );
+
+        // Partial overlap keeps exactly the overlapping part.
+        assert_eq!(
+            {
+                let r = visible_selection_rows(-10, 3, 0, screen_rows);
+                (*r.start(), *r.end())
+            },
+            (0, 3),
+            "the part scrolled out of view is clipped, the rest still draws"
+        );
+        assert_eq!(
+            {
+                let r = visible_selection_rows(35, 80, 0, screen_rows);
+                (*r.start(), *r.end())
+            },
+            (35, 39)
+        );
+
+        // Entirely off screen: nothing to draw and nothing to walk.
+        assert_eq!(
+            visible_selection_rows(-500, -100, 0, screen_rows).count(),
+            0
+        );
+        assert_eq!(visible_selection_rows(100, 500, 0, screen_rows).count(), 0);
+        // Including the row just past each edge.
+        assert_eq!(visible_selection_rows(-5, -1, 0, screen_rows).count(), 0);
+        assert_eq!(visible_selection_rows(40, 45, 0, screen_rows).count(), 0);
+
+        // Every row this yields maps into the viewport, for a spread of
+        // offsets — the loop body's `debug_assert` depends on it.
+        for display_offset in [0, 1, 7, 100, 1_000_000] {
+            for (start, end) in [(-2_000_000, 39), (-50, 50), (-100, -100), (39, 39)] {
+                for r in visible_selection_rows(start, end, display_offset, screen_rows) {
+                    let vrow = r + display_offset;
+                    assert!(
+                        (0..screen_rows).contains(&vrow),
+                        "offset {display_offset}, selection {start}..={end}: row {r} \
+                         maps to viewport row {vrow}"
+                    );
+                    assert!(
+                        (start..=end).contains(&r),
+                        "clamping must not invent rows outside the selection"
+                    );
+                }
+            }
+        }
     }
 }
 

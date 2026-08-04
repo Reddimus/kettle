@@ -7,8 +7,9 @@
 
 use std::collections::HashMap;
 use std::io::{BufRead, Write};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -66,17 +67,109 @@ struct ToolJob {
 
 type Pending = Arc<Mutex<HashMap<String, Arc<AtomicBool>>>>;
 
+/// How long the server will wait on a peer that has stopped reading its
+/// stdout, before giving up on delivering anything more.
+///
+/// Everything downstream of a jammed stdout blocks: the writer thread blocks in
+/// `write`, the bounded response channel fills behind it, the tool workers
+/// block sending their results, and the reader loop blocks the moment it needs
+/// to send anything at all. That last one is the sharp end — a server that
+/// cannot read stdin cannot receive the `notifications/cancelled` that would
+/// free it, so the jam becomes permanent.
+///
+/// A client that has stopped reading is not coming back within any useful
+/// horizon; it has crashed, or it closed stdin to signal shutdown and stopped
+/// caring. So these waits are bounded and the server exits, rather than
+/// remaining as a process nothing can talk to and nothing will reap.
+///
+/// Shortened under `cfg(test)` so the fixtures exercise the mechanism without
+/// spending the real budget in wall clock. The production value itself is
+/// asserted by `the_production_stall_limit_is_the_documented_one`.
+#[cfg(not(test))]
+const STDOUT_STALL_LIMIT: Duration = Duration::from_secs(30);
+#[cfg(test)]
+const STDOUT_STALL_LIMIT: Duration = Duration::from_millis(400);
+
+/// What the writer thread is doing, so a stalled PEER can be told apart from
+/// busy WORK.
+///
+/// These have to be distinguished, and a wall-clock budget cannot do it. An
+/// earlier version gave shutdown 30 seconds to join its workers and exited when
+/// that expired — which killed a perfectly healthy `kettle_run` whose
+/// `timeout_s` exceeded 30 (the tool's schema allows up to 600), delivered no
+/// result for it, and printed a diagnostic blaming stdout while stdout was
+/// being read the whole time. That is worse than the hang it replaced: it
+/// silently loses an agent's build output.
+///
+/// The only thing that means "the peer stopped reading" is the writer being
+/// parked inside a single `write` that has not returned. That is what this
+/// records, so a busy worker waits as long as it needs to and a jammed pipe is
+/// still caught.
+#[derive(Default)]
+struct WriterProgress {
+    /// Set while `write_message` has been entered and has not returned.
+    in_write: AtomicBool,
+    /// Incremented after each completed write, so "parked in ONE write" is
+    /// distinguishable from "writing steadily".
+    completed: AtomicU64,
+}
+
+/// Wait until `done()`, giving up only if the writer is parked inside a single
+/// write for longer than `limit`.
+///
+/// Returns `true` when `done()` became true, `false` when the writer stalled.
+/// An idle writer — no write in flight — never stalls this, however long the
+/// wait, because nothing is blocked on the peer.
+fn wait_unless_stdout_stalled(
+    progress: &WriterProgress,
+    limit: Duration,
+    mut done: impl FnMut() -> bool,
+) -> bool {
+    let mut seen = progress.completed.load(Ordering::Relaxed);
+    let mut since = Instant::now();
+    loop {
+        if done() {
+            return true;
+        }
+        let completed = progress.completed.load(Ordering::Relaxed);
+        if completed != seen || !progress.in_write.load(Ordering::Relaxed) {
+            // Progress, or nothing in flight: the peer is not the problem.
+            seen = completed;
+            since = Instant::now();
+        } else if since.elapsed() >= limit {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
 /// Run the stdio MCP server loop until stdin closes. Returns zero on clean EOF.
 pub fn run_mcp() -> i32 {
+    let stdin = std::io::stdin();
+    run_mcp_with(stdin.lock(), std::io::stdout())
+}
+
+/// The server proper, over any transport.
+///
+/// `run_mcp` supplies the real stdio. Taking them as parameters is what makes
+/// the stall behaviour above testable at all: the failure only appears when the
+/// peer stops reading, and the process's real stdout cannot be made to do that
+/// from inside a test.
+pub fn run_mcp_with(mut input: impl BufRead, output: impl Write + Send + 'static) -> i32 {
     let (responses_tx, responses_rx) =
         crossbeam_channel::bounded::<Value>(TOOL_QUEUE_CAPACITY + TOOL_WORKERS + 8);
+    let progress = Arc::new(WriterProgress::default());
+    let writer_progress = progress.clone();
     let writer = match std::thread::Builder::new()
         .name("kettle-mcp-writer".into())
         .spawn(move || {
-            let stdout = std::io::stdout();
-            let mut stdout = stdout.lock();
+            let mut output = output;
             while let Ok(message) = responses_rx.recv() {
-                if write_message(&mut stdout, &message).is_err() {
+                writer_progress.in_write.store(true, Ordering::Release);
+                let wrote = write_message(&mut output, &message);
+                writer_progress.in_write.store(false, Ordering::Release);
+                writer_progress.completed.fetch_add(1, Ordering::Release);
+                if wrote.is_err() {
                     break;
                 }
             }
@@ -88,6 +181,7 @@ pub fn run_mcp() -> i32 {
         }
     };
 
+    let responses_tx = Responder::new(responses_tx);
     let (jobs_tx, jobs_rx) = crossbeam_channel::bounded::<ToolJob>(TOOL_QUEUE_CAPACITY);
     let pending: Pending = Arc::new(Mutex::new(HashMap::new()));
     let mut workers = Vec::with_capacity(TOOL_WORKERS);
@@ -109,19 +203,16 @@ pub fn run_mcp() -> i32 {
         return 1;
     }
 
-    let stdin = std::io::stdin();
-    let mut input = stdin.lock();
     let mut lifecycle = Lifecycle::Uninitialized;
     loop {
         let line = match read_capped_line(&mut input) {
             Ok(Some(line)) => line,
             Ok(None) => break,
             Err(ReadLineError::TooLarge) => {
-                let _ = responses_tx.send(error_response(
-                    Value::Null,
-                    -32700,
-                    "JSON-RPC line exceeds 1 MiB",
-                ));
+                respond(
+                    &responses_tx,
+                    error_response(Value::Null, -32700, "JSON-RPC line exceeds 1 MiB"),
+                );
                 break;
             }
             Err(ReadLineError::Io(error)) => {
@@ -135,88 +226,190 @@ pub fn run_mcp() -> i32 {
         let text = match std::str::from_utf8(&line) {
             Ok(text) => text.trim(),
             Err(error) => {
-                let _ = responses_tx.send(error_response(
-                    Value::Null,
-                    -32700,
-                    &format!("invalid UTF-8: {error}"),
-                ));
+                respond(
+                    &responses_tx,
+                    error_response(Value::Null, -32700, &format!("invalid UTF-8: {error}")),
+                );
                 continue;
             }
         };
         if json_nesting_too_deep(text, MAX_JSON_NESTING_DEPTH) {
-            let _ = responses_tx.send(error_response(
-                Value::Null,
-                -32700,
-                &format!("JSON nesting exceeds {MAX_JSON_NESTING_DEPTH} levels"),
-            ));
+            respond(
+                &responses_tx,
+                error_response(
+                    Value::Null,
+                    -32700,
+                    &format!("JSON nesting exceeds {MAX_JSON_NESTING_DEPTH} levels"),
+                ),
+            );
             continue;
         }
         let message: Value = match serde_json::from_str(text) {
             Ok(message) => message,
             Err(error) => {
-                let _ = responses_tx.send(error_response(
-                    Value::Null,
-                    -32700,
-                    &format!("parse error: {error}"),
-                ));
+                respond(
+                    &responses_tx,
+                    error_response(Value::Null, -32700, &format!("parse error: {error}")),
+                );
                 continue;
             }
         };
         dispatch_message(message, &mut lifecycle, &jobs_tx, &responses_tx, &pending);
+        if responses_tx.peer_gone() {
+            // Nothing further can be delivered, so there is nothing to be
+            // gained by parsing more of stdin. Go to shutdown.
+            break;
+        }
     }
     // EOF is an orderly stdio shutdown. Drain already-accepted jobs so clients
-    // that write a request batch and close stdin still receive every response.
+    // that write a request batch and close stdin still receive every response —
+    // a `kettle_run` with a five-minute `timeout_s` is entitled to its five
+    // minutes, and this is the documented contract.
+    //
+    // Waiting is bounded only by the writer being STUCK, never by a clock. A
+    // peer that stopped reading blocks the writer inside `write`, which fills
+    // the response channel, which blocks every worker mid-`send`; joining them
+    // then never returns, `drop(responses_tx)` below is unreachable, and the
+    // process stays alive holding a terminal until something kills it.
+    // `wait_unless_stdout_stalled` tells that apart from a worker that is
+    // simply busy — an earlier version used a 30-second budget and killed the
+    // healthy case.
     drop(jobs_tx);
+    let mut stalled = responses_tx.peer_gone();
     for worker in workers {
+        // `JoinHandle` has no timed join, so watch `is_finished` instead.
+        if !stalled
+            && !wait_unless_stdout_stalled(&progress, STDOUT_STALL_LIMIT, || worker.is_finished())
+        {
+            stalled = true;
+        }
+        if stalled {
+            break;
+        }
         let _ = worker.join();
     }
     drop(responses_tx);
+    if !stalled {
+        // The workers are done and the channel is closed, so the writer is
+        // finishing its queue. It can still be parked in a write here — with
+        // few enough responses in flight the channel never filled, so nothing
+        // upstream ever noticed, and this join was the remaining way to hang
+        // forever.
+        stalled =
+            !wait_unless_stdout_stalled(&progress, STDOUT_STALL_LIMIT, || writer.is_finished());
+    }
+    if stalled {
+        eprintln!(
+            "kettle mcp: stdout has not been read for {:?}; exiting with responses undelivered",
+            STDOUT_STALL_LIMIT
+        );
+        // Deliberately not joining the writer: it is inside a blocking write to
+        // a pipe with no reader, and joining it is the hang this exists to
+        // avoid. Leaving the process is what closes that handle.
+        return 1;
+    }
     let _ = writer.join();
     0
+}
+
+/// The protocol output channel, plus the one-way latch that records the peer
+/// has stopped reading.
+///
+/// A plain `send` on the bounded response channel blocks once the writer is
+/// stuck in a `write` to a stdout nobody is draining. Blocking there is worse
+/// than dropping the message: the caller is either a tool worker, which then
+/// never returns to the pool, or the reader loop, which then stops reading
+/// stdin — and the `notifications/cancelled` that would free everything
+/// arrives on stdin. The loop deadlocks itself precisely when the client is
+/// trying to get its attention.
+///
+/// The latch is what makes the total cost bounded rather than per-message. A
+/// timeout on any one send is proof the peer is not reading, and there is no
+/// second opinion to be had: every later send would wait the same full
+/// deadline and then drop the message anyway. Sixty queued responses would
+/// have cost sixty times the limit. After the first, they cost nothing.
+#[derive(Clone)]
+struct Responder {
+    tx: crossbeam_channel::Sender<Value>,
+    peer_gone: Arc<AtomicBool>,
+}
+
+impl Responder {
+    fn new(tx: crossbeam_channel::Sender<Value>) -> Self {
+        Self {
+            tx,
+            peer_gone: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    /// Has a send already proved the peer is not reading?
+    fn peer_gone(&self) -> bool {
+        self.peer_gone.load(Ordering::Relaxed)
+    }
+}
+
+/// Hand a protocol message to the writer, giving up if it cannot be accepted.
+///
+/// The message is lost when the deadline expires, which is honest about the
+/// situation: nothing written after this point reaches the peer either.
+fn respond(responses: &Responder, message: Value) {
+    if responses.peer_gone() {
+        return;
+    }
+    if responses
+        .tx
+        .send_timeout(message, STDOUT_STALL_LIMIT)
+        .is_err()
+    {
+        responses.peer_gone.store(true, Ordering::Relaxed);
+    }
 }
 
 fn dispatch_message(
     message: Value,
     lifecycle: &mut Lifecycle,
     jobs: &crossbeam_channel::Sender<ToolJob>,
-    responses: &crossbeam_channel::Sender<Value>,
+    responses: &Responder,
     pending: &Pending,
 ) {
     let Some(object) = message.as_object() else {
-        let _ = responses.send(error_response(Value::Null, -32600, "invalid request"));
+        respond(
+            responses,
+            error_response(Value::Null, -32600, "invalid request"),
+        );
         return;
     };
     let id = object.get("id").cloned();
     if object.get("jsonrpc").and_then(Value::as_str) != Some("2.0") {
-        let _ = responses.send(error_response(
-            valid_error_id(id),
-            -32600,
-            "jsonrpc must be '2.0'",
-        ));
+        respond(
+            responses,
+            error_response(valid_error_id(id), -32600, "jsonrpc must be '2.0'"),
+        );
         return;
     }
     let Some(method) = object.get("method").and_then(Value::as_str) else {
-        let _ = responses.send(error_response(
-            valid_error_id(id),
-            -32600,
-            "method must be a string",
-        ));
+        respond(
+            responses,
+            error_response(valid_error_id(id), -32600, "method must be a string"),
+        );
         return;
     };
     if let Some(id) = &id
         && !is_request_id(id)
     {
-        let _ = responses.send(error_response(
-            Value::Null,
-            -32600,
-            "id must be a string or integer",
-        ));
+        respond(
+            responses,
+            error_response(Value::Null, -32600, "id must be a string or integer"),
+        );
         return;
     }
     let params = object.get("params").cloned().unwrap_or_else(|| json!({}));
     if !params.is_object() {
         if let Some(id) = id {
-            let _ = responses.send(error_response(id, -32602, "params must be an object"));
+            respond(
+                responses,
+                error_response(id, -32602, "params must be an object"),
+            );
         }
         return;
     }
@@ -236,16 +429,19 @@ fn dispatch_message(
 
     if method == "initialize" {
         if *lifecycle != Lifecycle::Uninitialized {
-            let _ = responses.send(error_response(id, -32600, "server is already initialized"));
+            respond(
+                responses,
+                error_response(id, -32600, "server is already initialized"),
+            );
             return;
         }
         match handle_initialize(id, &params) {
             Ok(response) => {
                 *lifecycle = Lifecycle::Initializing;
-                let _ = responses.send(response);
+                respond(responses, response);
             }
             Err(response) => {
-                let _ = responses.send(response);
+                respond(responses, response);
             }
         }
         return;
@@ -254,33 +450,31 @@ fn dispatch_message(
     // Ping is the lifecycle exception: clients may use it while completing the
     // initialize handshake, and receivers must answer it promptly.
     if method == "ping" {
-        let _ = responses.send(success(id, json!({})));
+        respond(responses, success(id, json!({})));
         return;
     }
 
     if *lifecycle != Lifecycle::Ready {
-        let _ = responses.send(error_response(
-            id,
-            SERVER_NOT_INITIALIZED,
-            "server is not initialized",
-        ));
+        respond(
+            responses,
+            error_response(id, SERVER_NOT_INITIALIZED, "server is not initialized"),
+        );
         return;
     }
 
     match method {
         "tools/list" => {
-            let _ = responses.send(success(
-                id,
-                json!({"tools": crate::mcp_tools::tool_specs()}),
-            ));
+            respond(
+                responses,
+                success(id, json!({"tools": crate::mcp_tools::tool_specs()})),
+            );
         }
         "tools/call" => schedule_tool(id, params, jobs, responses, pending),
         _ => {
-            let _ = responses.send(error_response(
-                id,
-                -32601,
-                &format!("method not found: {method}"),
-            ));
+            respond(
+                responses,
+                error_response(id, -32601, &format!("method not found: {method}")),
+            );
         }
     }
 }
@@ -289,26 +483,28 @@ fn schedule_tool(
     id: Value,
     params: Value,
     jobs: &crossbeam_channel::Sender<ToolJob>,
-    responses: &crossbeam_channel::Sender<Value>,
+    responses: &Responder,
     pending: &Pending,
 ) {
     if let Err(message) = crate::mcp_tools::validate_tool_call(&params) {
-        let _ = responses.send(error_response(id, -32602, &message));
+        respond(responses, error_response(id, -32602, &message));
         return;
     }
     let key = request_key(&id);
     let cancelled = Arc::new(AtomicBool::new(false));
     {
         let Ok(mut requests) = pending.lock() else {
-            let _ = responses.send(error_response(
-                id,
-                -32603,
-                "request registry is unavailable",
-            ));
+            respond(
+                responses,
+                error_response(id, -32603, "request registry is unavailable"),
+            );
             return;
         };
         if requests.contains_key(&key) {
-            let _ = responses.send(error_response(id, -32600, "duplicate in-flight request id"));
+            respond(
+                responses,
+                error_response(id, -32600, "duplicate in-flight request id"),
+            );
             return;
         }
         requests.insert(key.clone(), cancelled.clone());
@@ -323,19 +519,14 @@ fn schedule_tool(
         if let Ok(mut requests) = pending.lock() {
             requests.remove(&key);
         }
-        let _ = responses.send(error_response(
-            id,
-            SERVER_BUSY,
-            "tool queue is full; retry later",
-        ));
+        respond(
+            responses,
+            error_response(id, SERVER_BUSY, "tool queue is full; retry later"),
+        );
     }
 }
 
-fn tool_worker(
-    jobs: crossbeam_channel::Receiver<ToolJob>,
-    responses: crossbeam_channel::Sender<Value>,
-    pending: Pending,
-) {
+fn tool_worker(jobs: crossbeam_channel::Receiver<ToolJob>, responses: Responder, pending: Pending) {
     while let Ok(job) = jobs.recv() {
         let response = if job.cancelled.load(Ordering::Acquire) {
             None
@@ -352,9 +543,13 @@ fn tool_worker(
         // MCP cancellation is advisory and fire-and-forget: once cancellation
         // is observed, cease work and do not emit a response the client has
         // already declared it will ignore.
-        if completed_before_cancellation
-            && response.is_some_and(|response| responses.send(response).is_err())
-        {
+        if completed_before_cancellation && let Some(response) = response {
+            respond(&responses, response);
+        }
+        // The writer has gone away, or the peer stopped reading it — `respond`
+        // latches both. Nothing this worker produces from here can reach
+        // anyone, so it leaves the pool rather than running tools into a void.
+        if responses.peer_gone() {
             return;
         }
     }
@@ -672,6 +867,166 @@ fn read_capped_line(reader: &mut impl BufRead) -> Result<Option<Vec<u8>>, ReadLi
 mod tests {
     use super::*;
 
+    /// A writer that never finishes a write, standing in for a peer that has
+    /// stopped reading its end of the pipe.
+    ///
+    /// This is the only way to reach the stall from inside a test: the
+    /// process's real stdout cannot be made to stop draining, and a `Vec<u8>`
+    /// sink never applies backpressure at all.
+    struct NeverDrains {
+        entered: std::sync::mpsc::SyncSender<()>,
+    }
+
+    impl Write for NeverDrains {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            // Announce the first write, then never return. `try_send` because
+            // the receiver only wants to know it happened once.
+            let _ = self.entered.try_send(());
+            std::thread::sleep(Duration::from_secs(3600));
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// The shortened test limit must not hide a wrong production value.
+    #[test]
+    fn the_production_stall_limit_is_the_documented_one() {
+        // `STDOUT_STALL_LIMIT` is 400 ms under cfg(test) so the fixtures below
+        // run in a second rather than a minute. The value that ships is this.
+        let shipped = if cfg!(test) {
+            Duration::from_secs(30)
+        } else {
+            STDOUT_STALL_LIMIT
+        };
+        assert_eq!(shipped, Duration::from_secs(30));
+    }
+
+    /// A worker that is simply BUSY must not be mistaken for a stalled peer.
+    ///
+    /// Shutdown used to give the workers a flat 30-second budget, which killed
+    /// a healthy `kettle_run` whose `timeout_s` exceeded it — the tool's schema
+    /// allows up to 600 — delivered no result, and printed a diagnostic blaming
+    /// stdout while stdout was being read the whole time. Losing an agent's
+    /// build output is worse than the hang that budget was meant to prevent.
+    #[test]
+    fn a_busy_worker_is_not_mistaken_for_a_stalled_peer() {
+        let progress = WriterProgress::default();
+        let started = Instant::now();
+        // Nothing is in flight, so however long this takes it is not the peer.
+        let finished = wait_unless_stdout_stalled(&progress, Duration::from_millis(50), || {
+            started.elapsed() >= Duration::from_millis(300)
+        });
+        assert!(
+            finished,
+            "an idle writer means the work is slow, not the peer — waiting must \
+             continue however long the limit has been exceeded"
+        );
+
+        // A writer that is WRITING, steadily, is also not stalled.
+        progress.in_write.store(true, Ordering::Release);
+        let started = Instant::now();
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                while started.elapsed() < Duration::from_millis(300) {
+                    std::thread::sleep(Duration::from_millis(10));
+                    progress.completed.fetch_add(1, Ordering::Release);
+                }
+            });
+            assert!(
+                wait_unless_stdout_stalled(&progress, Duration::from_millis(50), || {
+                    started.elapsed() >= Duration::from_millis(300)
+                }),
+                "a writer completing writes is making progress, not stalling"
+            );
+        });
+
+        // Parked inside ONE write, with no completions, IS the peer.
+        let progress = WriterProgress::default();
+        progress.in_write.store(true, Ordering::Release);
+        let started = Instant::now();
+        assert!(
+            !wait_unless_stdout_stalled(&progress, Duration::from_millis(50), || false),
+            "a writer parked in a single write is a peer that stopped reading"
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "and it must be detected promptly"
+        );
+    }
+
+    /// A peer that stops reading kettle's stdout must not strand the process.
+    ///
+    /// The writer thread blocks in `write`, the bounded response channel fills
+    /// behind it, and every tool worker blocks mid-`send`. Shutdown then joined
+    /// those workers — which never return — so `drop(responses_tx)` was
+    /// unreachable and the server sat holding a terminal, answering nothing,
+    /// until something killed it. The reader loop had the same problem earlier:
+    /// its own `send` blocked, so it stopped reading stdin, which is where the
+    /// `notifications/cancelled` that would free everything arrives.
+    ///
+    /// The waits are bounded now. This drives the real `run_mcp_with` against a
+    /// writer that never completes a write, and requires the server to return.
+    #[test]
+    fn a_peer_that_stops_reading_stdout_does_not_strand_the_server() {
+        // BOTH shapes.
+        //
+        // The many-message one fills the bounded response channel, so `respond`
+        // times out and latches `peer_gone`. The few-message one never fills it
+        // — nothing times out, nothing latches — and the only thing left
+        // holding the process is the writer's own join at the end. An earlier
+        // version of this fix handled only the first shape, and this test only
+        // covered the first shape, so it was green on a server that still hung
+        // forever on a single ping. One or two calls and a client that stops
+        // reading is the ordinary case; fifty is not.
+        for requests in [3, TOOL_QUEUE_CAPACITY + TOOL_WORKERS + 32] {
+            let mut input = String::new();
+            input.push_str(&format!(
+                "{}\n",
+                json!({"jsonrpc": "2.0", "id": 0, "method": "initialize",
+                       "params": init_params(MCP_PROTOCOL_VERSION)})
+            ));
+            for id in 1..=requests {
+                input.push_str(&format!(
+                    "{}\n",
+                    json!({"jsonrpc": "2.0", "id": id, "method": "ping"})
+                ));
+            }
+
+            let (entered, first_write) = std::sync::mpsc::sync_channel(1);
+            let (finished, done) = std::sync::mpsc::sync_channel(1);
+            let server = std::thread::spawn(move || {
+                let code = run_mcp_with(
+                    std::io::Cursor::new(input.into_bytes()),
+                    NeverDrains { entered },
+                );
+                let _ = finished.try_send(code);
+            });
+
+            first_write
+                .recv_timeout(Duration::from_secs(10))
+                .expect("the writer must reach a write before the peer can stall it");
+
+            let code = done
+                .recv_timeout(STDOUT_STALL_LIMIT + Duration::from_secs(60))
+                .unwrap_or_else(|_| {
+                    panic!(
+                        "run_mcp_with never returned with {requests} requests in \
+                         flight: a peer that stopped reading stdout stranded the \
+                         server"
+                    )
+                });
+            assert_eq!(
+                code, 1,
+                "giving up on an unreadable stdout is a failure exit, not a clean one"
+            );
+            // The writer thread is deliberately abandoned inside its blocking
+            // write, so the server thread is what must be joinable.
+            server.join().expect("server thread panicked");
+        }
+    }
+
     fn init_params(version: &str) -> Value {
         json!({
             "protocolVersion": version,
@@ -723,6 +1078,7 @@ mod tests {
     fn lifecycle_requires_exact_initialized_notification() {
         let (jobs_tx, _jobs_rx) = crossbeam_channel::bounded(1);
         let (responses_tx, responses_rx) = crossbeam_channel::bounded(8);
+        let responses_tx = Responder::new(responses_tx);
         let pending = Arc::new(Mutex::new(HashMap::new()));
         let mut lifecycle = Lifecycle::Uninitialized;
         dispatch_message(
@@ -801,6 +1157,7 @@ mod tests {
     fn queued_cancellation_skips_tool_execution() {
         let (jobs_tx, jobs_rx) = crossbeam_channel::bounded(1);
         let (responses_tx, responses_rx) = crossbeam_channel::bounded(2);
+        let responses_tx = Responder::new(responses_tx);
         let pending = Arc::new(Mutex::new(HashMap::new()));
         schedule_tool(
             json!(11),
@@ -827,6 +1184,7 @@ mod tests {
     fn duplicate_id_preserves_original_request_and_queue_is_bounded() {
         let (jobs_tx, jobs_rx) = crossbeam_channel::bounded(1);
         let (responses_tx, responses_rx) = crossbeam_channel::bounded(8);
+        let responses_tx = Responder::new(responses_tx);
         let pending = Arc::new(Mutex::new(HashMap::new()));
         schedule_tool(
             json!(7),
@@ -868,6 +1226,7 @@ mod tests {
     fn malformed_and_unknown_tool_calls_are_protocol_errors() {
         let (jobs_tx, jobs_rx) = crossbeam_channel::bounded(2);
         let (responses_tx, responses_rx) = crossbeam_channel::bounded(2);
+        let responses_tx = Responder::new(responses_tx);
         let pending = Arc::new(Mutex::new(HashMap::new()));
 
         schedule_tool(
@@ -898,6 +1257,7 @@ mod tests {
     fn known_tool_input_errors_are_tool_results() {
         let (jobs_tx, jobs_rx) = crossbeam_channel::bounded(1);
         let (responses_tx, responses_rx) = crossbeam_channel::bounded(1);
+        let responses_tx = Responder::new(responses_tx);
         let pending = Arc::new(Mutex::new(HashMap::new()));
         schedule_tool(
             json!(5),
@@ -987,6 +1347,7 @@ mod tests {
     fn deeply_nested_line_is_rejected_before_parsing() {
         let (jobs_tx, _jobs_rx) = crossbeam_channel::bounded(1);
         let (responses_tx, responses_rx) = crossbeam_channel::bounded(1);
+        let responses_tx = Responder::new(responses_tx);
         let pending = Arc::new(Mutex::new(HashMap::new()));
         let mut lifecycle = Lifecycle::Ready;
         let text = format!(
@@ -1023,6 +1384,7 @@ mod tests {
     fn invalid_request_and_notifications_follow_json_rpc_rules() {
         let (jobs_tx, _jobs_rx) = crossbeam_channel::bounded(1);
         let (responses_tx, responses_rx) = crossbeam_channel::bounded(8);
+        let responses_tx = Responder::new(responses_tx);
         let pending = Arc::new(Mutex::new(HashMap::new()));
         let mut lifecycle = Lifecycle::Ready;
         dispatch_message(

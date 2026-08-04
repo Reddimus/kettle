@@ -312,6 +312,9 @@ impl Session {
     /// pick from yet". Closes the layout-launcher Bucket-D gap by
     /// giving `Action::OpenLayoutPicker` a source of
     /// names to filter against.
+    /// Layouts always live at `<default config dir>/layouts/`, the same place
+    /// [`Session::path_for_layout`] loads and saves them — `--config FILE`
+    /// does not relocate them, so listing must not pretend otherwise.
     pub fn list_layouts() -> Vec<String> {
         let Some(default) = kettle_config::Config::default_path() else {
             return Vec::new();

@@ -1083,6 +1083,10 @@ impl FontFeature {
 
 #[derive(Debug, Clone)]
 pub struct Config {
+    /// Keys this config sets that kettle accepts but does not act on — see
+    /// [`Config::INERT_KEYS`]. Populated at parse time so `--check-config` can
+    /// say so rather than letting the setting look like it works.
+    pub inert_keys: Vec<String>,
     pub font_family: String,
     /// Per-style family overrides (fall back to `font_family`).
     pub font_family_bold: Option<String>,
@@ -1550,8 +1554,16 @@ pub struct Config {
     /// [`ChromeBackground`].
     pub chrome_background: ChromeBackground,
     /// Terminator parity (terminatorlib/config.py:106
-    /// `background_darkness`): background image opacity (0.0 fully
-    /// dark .. 1.0 untinted).
+    /// `background_darkness`): how opaque the terminal's own background colour
+    /// is where it covers a transparent, image, or starfield backdrop.
+    ///
+    /// **`0.0` is fully SEE-THROUGH and `1.0` is fully covered**, which is what
+    /// Terminator does — `terminal.py` assigns it straight to the background
+    /// colour's alpha, and a Terminator user lowers it to get more
+    /// transparency. Both this comment and `docs/CONFIG.md` used to state the
+    /// opposite ("1.0 = no tint, 0.0 = fully dark"), so anyone following the
+    /// documentation set it to exactly the wrong end. The direction is pinned
+    /// by `kettle-render`'s `darkness_scales_the_backdrop_toward_see_through`.
     pub background_darkness: f32,
     /// Terminator parity (terminatorlib/config.py:93
     /// `cell_height`): vertical cell scaling (default 1.0).
@@ -2522,6 +2534,7 @@ fn parse_colon_palette(value: &str) -> Option<Vec<Rgb>> {
 impl Default for Config {
     fn default() -> Self {
         Config {
+            inert_keys: Vec::new(),
             font_family: font::FAMILY.to_string(),
             font_family_bold: None,
             font_family_italic: None,
@@ -2751,6 +2764,27 @@ fn peacock_accent(theme: &Theme, seed: u64) -> crate::color::Rgb {
     candidates[(seed % candidates.len() as u64) as usize]
 }
 
+/// Order profile names the way `Action::NextProfile` / `PrevProfile` cycle
+/// them: case-insensitively, with the exact bytes as the tie-break.
+///
+/// The order has to be total and stable, or the cycle depends on whatever
+/// order the filesystem happened to enumerate the directory in — the same two
+/// keypresses landing somewhere different on a different machine, or after
+/// adding an unrelated profile. Case-insensitive because `Work` and `work` next
+/// to each other in a listing that sorted `W` before `h` reads as a bug; the
+/// bytewise tie-break because case-insensitive comparison alone is not a total
+/// order over distinct names.
+///
+/// Pure, and separate from [`Config::list_profiles`], which can only read the
+/// real config directory — so the rule above is checkable without one.
+fn sort_profile_names(names: &mut [String]) {
+    names.sort_by(|a, b| {
+        a.to_lowercase()
+            .cmp(&b.to_lowercase())
+            .then_with(|| a.cmp(b))
+    });
+}
+
 impl Config {
     /// The effective UI-chrome accent (focus border, active tab,
     /// titlebars, menu/settings highlights), resolved in precedence:
@@ -2836,6 +2870,12 @@ impl Config {
     ///
     /// In all three cases, `Action::NextProfile` / `PrevProfile`
     /// will no-op rather than panic.
+    /// Profiles always live at `<default config dir>/profiles/`, the same
+    /// place [`Config::path_for_profile`] loads them from — `--config FILE`
+    /// does not relocate them, so listing must not pretend otherwise. An
+    /// earlier attempt to make listing follow `--config` put the answer out of
+    /// step with the loader, which is worse than the inconsistency it set out
+    /// to fix.
     pub fn list_profiles() -> Vec<String> {
         let Some(default_p) = Self::default_path() else {
             return Vec::new();
@@ -2858,11 +2898,7 @@ impl Config {
                 name.strip_suffix(".config").map(|s| s.to_string())
             })
             .collect();
-        names.sort_by(|a, b| {
-            a.to_lowercase()
-                .cmp(&b.to_lowercase())
-                .then_with(|| a.cmp(b))
-        });
+        sort_profile_names(&mut names);
         names
     }
 
@@ -3763,6 +3799,45 @@ impl Config {
 
     /// Parse, also returning any unrecognized config keys (typo guard,
     /// surfaced by `kettle --check-config` and a startup `log::warn`).
+    /// Keys kettle ACCEPTS but does not act on.
+    ///
+    /// Each of these parses, passes `--check-config`, and is documented — and
+    /// has no consumer anywhere outside this crate. Silently accepting a
+    /// setting that does nothing is the worst of the three options: rejecting
+    /// them would break configs that load today, and implementing five
+    /// unrelated features is not a config change. So they stay accepted and
+    /// `--check-config` says plainly that they are inert.
+    ///
+    /// Removing a key from this list means either implementing it or deciding
+    /// it should be rejected; it must not simply be dropped.
+    pub const INERT_KEYS: &'static [&'static str] = &[
+        "extra-styling",
+        "title-font",
+        "title-use-system-font",
+        "use-system-font",
+        "use-theme-colors",
+    ];
+
+    /// Which [`Config::INERT_KEYS`] this text actually sets, in file order,
+    /// spelled the way the file spells them.
+    ///
+    /// One setting is reported once however many ways it is written.
+    /// Deduplicating on the raw spelling instead reported `use-system-font`
+    /// and `use_system_font` as two separate inert settings, which reads as two
+    /// problems to fix when kettle sees a single key set twice — the parser
+    /// folds `_` to `-` and lowercases before any of this.
+    pub fn inert_keys_present(text: &str) -> Vec<String> {
+        let mut seen = Vec::new();
+        let mut reported = Vec::new();
+        for entry in parse::parse(text) {
+            if Self::INERT_KEYS.contains(&entry.key.as_str()) && !seen.contains(&entry.key) {
+                seen.push(entry.key.clone());
+                reported.push(entry.raw_key.clone());
+            }
+        }
+        reported
+    }
+
     pub fn parse_collect(text: &str) -> (Config, Vec<String>) {
         let mut cfg = Config::default();
         let mut explicit_palette: Vec<(usize, Rgb)> = Vec::new();
@@ -5155,6 +5230,7 @@ impl Config {
                 _ => unknown.push(e.raw_key.clone()),
             }
         }
+        cfg.inert_keys = Self::inert_keys_present(text);
         // Terminator's `scrollback_infinite` overrides the line count rather
         // than racing it: `scrollback_infinite = True` above
         // `scrollback_lines = 100` must still mean unbounded, and it did not
@@ -10191,6 +10267,56 @@ split_horiz = <Control><Shift>j
         }
     }
 
+    /// The profile cycle order must be total, stable, and case-insensitive.
+    ///
+    /// `Action::NextProfile` / `PrevProfile` step through this list, so an
+    /// order that depends on directory-enumeration order means the same two
+    /// keypresses land somewhere different on another machine, or after an
+    /// unrelated profile is added. `list_profiles` can only read the real
+    /// config directory, so the rule lives in `sort_profile_names` where it can
+    /// actually be checked.
+    #[test]
+    fn the_profile_cycle_order_does_not_depend_on_the_filesystem() {
+        // Case-insensitive first: `home` sorts before `Work`, which a plain
+        // bytewise sort would reverse because every uppercase letter is below
+        // every lowercase one.
+        let mut names = vec![
+            "Work".to_string(),
+            "home".to_string(),
+            "Alpha".to_string(),
+            "beta".to_string(),
+        ];
+        sort_profile_names(&mut names);
+        assert_eq!(names, ["Alpha", "beta", "home", "Work"]);
+
+        // Names that differ only in case still have ONE fixed order, or the
+        // sort is not total and the cycle can wobble between runs.
+        let mut names = vec!["work".to_string(), "Work".to_string(), "WORK".to_string()];
+        sort_profile_names(&mut names);
+        assert_eq!(names, ["WORK", "Work", "work"]);
+
+        // Same input in any starting order lands in the same place.
+        let mut reversed = vec!["work".to_string(), "WORK".to_string(), "Work".to_string()];
+        sort_profile_names(&mut reversed);
+        assert_eq!(
+            reversed, names,
+            "the order must not depend on the input order"
+        );
+
+        // Digits and separators are ordinary characters, not special cases.
+        let mut names = vec![
+            "dev-2".to_string(),
+            "dev-10".to_string(),
+            "dev-1".to_string(),
+        ];
+        sort_profile_names(&mut names);
+        assert_eq!(
+            names,
+            ["dev-1", "dev-10", "dev-2"],
+            "lexicographic, not numeric — but deterministic"
+        );
+    }
+
     /// Drift guard. `profile_name_from_path` is the inverse of
     /// `path_for_profile`: it should recover the bare profile name from
     /// a `<config-dir>/profiles/<name>.config` path, and return `None`
@@ -11150,6 +11276,76 @@ font-size = 15
             cfg.keybinds.get(&b).cloned(),
             Some(keybinds::Action::ToggleGroupTab),
             "the toggle is its own action, so both chords survive"
+        );
+    }
+
+    /// A setting that is accepted but does nothing must SAY so.
+    ///
+    /// `extra-styling`, `title-font`, `title-use-system-font`,
+    /// `use-system-font`, and `use-theme-colors` all parse, pass
+    /// `--check-config`, and are documented — while having no consumer
+    /// anywhere outside this crate. Accepted-and-inert is indistinguishable
+    /// from working, which is how someone spends an afternoon wondering why a
+    /// documented setting changes nothing.
+    ///
+    /// This also guards the list itself: if a key here gains a real consumer,
+    /// it must be removed from `INERT_KEYS` deliberately rather than left
+    /// claiming to be inert.
+    #[test]
+    fn keys_that_do_nothing_are_reported_as_doing_nothing() {
+        // Every listed key is reported when set, under either spelling.
+        for key in Config::INERT_KEYS {
+            let hyphen = Config::parse_text(&format!("{key} = 1\n"));
+            assert_eq!(
+                hyphen.inert_keys,
+                vec![key.to_string()],
+                "{key} must be reported as inert"
+            );
+            let underscore_key = key.replace('-', "_");
+            let underscore = Config::parse_text(&format!("{underscore_key} = 1\n"));
+            assert_eq!(
+                underscore.inert_keys,
+                vec![underscore_key.clone()],
+                "{underscore_key} must be reported as inert, in the user's own spelling"
+            );
+            // And it must NOT also be reported as an unknown key — it is
+            // recognised, just not acted on.
+            let (_, unknown) = Config::parse_collect(&format!("{key} = 1\n"));
+            assert!(
+                unknown.is_empty(),
+                "{key} is recognised, so it must not warn as unknown: {unknown:?}"
+            );
+        }
+
+        // A config that sets none of them reports none.
+        assert!(
+            Config::parse_text("font-size = 13\n").inert_keys.is_empty(),
+            "an ordinary config has no inert keys"
+        );
+
+        // Several at once, in file order, without duplicates.
+        let cfg = Config::parse_text(
+            "use-system-font = true\nfont-size = 13\nextra-styling = true\nuse-system-font = false\n",
+        );
+        assert_eq!(cfg.inert_keys, vec!["use-system-font", "extra-styling"]);
+
+        // One setting is one report however many ways the file spells it. The
+        // parser folds `_` to `-` and lowercases, so these are all the same key
+        // — listing them separately reads as several problems to fix when there
+        // is one, and it is the FIRST spelling that locates the line.
+        let cfg = Config::parse_text(
+            "use-system-font = true\nuse_system_font = false\nUSE-SYSTEM-FONT = true\n",
+        );
+        assert_eq!(
+            cfg.inert_keys,
+            vec!["use-system-font"],
+            "aliases of one inert key must be reported once"
+        );
+        let cfg = Config::parse_text("use_system_font = true\nuse-system-font = false\n");
+        assert_eq!(
+            cfg.inert_keys,
+            vec!["use_system_font"],
+            "and reported in the spelling the file used first"
         );
     }
 

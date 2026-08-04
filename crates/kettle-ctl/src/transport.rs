@@ -144,17 +144,38 @@ impl CtlStream {
     /// nonblocking behavior macOS AF_UNIX requires.
     pub fn write_all_until(
         &mut self,
-        mut buf: &[u8],
+        buf: &[u8],
         deadline: Instant,
         cancelled: Option<&AtomicBool>,
     ) -> io::Result<()> {
+        self.write_all_until_counted(buf, deadline, cancelled).1
+    }
+
+    /// [`write_all_until`](CtlStream::write_all_until), also reporting how many
+    /// bytes reached the peer.
+    ///
+    /// A caller that must know whether an exchange *started* cannot infer it
+    /// from the error: a deadline or a cancellation can land before the first
+    /// byte goes out, in which case the peer never learned of the request at
+    /// all and the connection is still in step.
+    pub fn write_all_until_counted(
+        &mut self,
+        mut buf: &[u8],
+        deadline: Instant,
+        cancelled: Option<&AtomicBool>,
+    ) -> (usize, io::Result<()>) {
+        let mut written_total = 0usize;
         #[cfg(unix)]
         let write_gate = {
             let CtlStream::Unix(stream) = &*self;
             stream.write_gate.clone()
         };
         #[cfg(unix)]
-        let write_guard = lock_write_gate_until(&write_gate, deadline, cancelled)?;
+        let write_guard = match lock_write_gate_until(&write_gate, deadline, cancelled) {
+            Ok(guard) => guard,
+            // The gate was never taken, so this frame put nothing on the wire.
+            Err(error) => return (0, Err(error)),
+        };
 
         let result = (|| {
             while !buf.is_empty() {
@@ -200,6 +221,7 @@ impl CtlStream {
                         "failed to write the control frame",
                     ));
                 }
+                written_total += written;
                 buf = &buf[written..];
             }
             Ok(())
@@ -207,7 +229,7 @@ impl CtlStream {
 
         #[cfg(unix)]
         drop(write_guard);
-        result
+        (written_total, result)
     }
 
     /// Wait until at least one byte can be read, the peer closes, or `timeout`

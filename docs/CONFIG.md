@@ -42,6 +42,25 @@ outermost pair goes, and only when both ends are the same character — so
 contain them, such as a shell command. If you need a value that really does
 begin and end with a quote, add a second pair.
 
+### Colour values
+
+Anywhere a key takes a colour, all of these work:
+
+| Form | Example |
+|---|---|
+| `#rrggbb` | `#7aa2f7` |
+| `#rgb` (each digit doubled) | `#7af` |
+| bare hex | `7aa2f7` |
+| `0xRRGGBB` | `0x7AA2F7` |
+| `rgb:R/G/B` (X11/xterm, 1–4 hex digits per channel) | `rgb:7a/a2/f7` |
+| a named colour | `teal`, `orange`, `dodgerblue` |
+
+Names are the 148 CSS Color Level 4 colours — the same list X11's `rgb.txt`
+uses — matched case-insensitively, so `DodgerBlue` and `dodgerblue` are the
+same. Two are kettle's own long-standing values rather than CSS's, because
+configs were written against them: `green` is `#008000` and `gray`/`grey` is
+`#bebebe`.
+
 ## Keys
 
 | Key | Type | Default | Notes |
@@ -291,7 +310,7 @@ per-key audit against Terminator's source.
 | `background-image-align-horiz` | enum | `center` | `left` \| `center` \| `right` (applies to `center` + `scale` modes) |
 | `background-image-align-vert` | enum | `middle` | `top` \| `middle` \| `bottom` |
 | `background-blur` | bool | `false` | CPU-side 3-pass separable box blur at decode (approximates Gaussian) |
-| `background-darkness` | float 0..1 | `0.5` | Compose tint over the image (`1.0` = no tint, `0.0` = fully dark; default `0.5` = 50% tint, matching Terminator's `background_darkness`) |
+| `background-darkness` | float 0..1 | `0.5` | How opaque the terminal's own background colour is where it covers a `transparent` / `image` / `starfield` backdrop. **`0.0` = fully see-through** (the backdrop shows at full strength), **`1.0` = fully covered** (the backdrop is hidden behind the terminal background); default `0.5`. Matches Terminator, which assigns this straight to the background colour's alpha — lower it for more transparency. Only applies when `background-type` is not `solid`. *(This row previously described the scale backwards.)* |
 | `exit-action` | enum | `close` | What happens when the shell exits: `close` (default) \| `hold` (keep dead-pane visible) \| `restart` (re-spawn shell — spawns the same argv + cwd in a new tab, deduped so alacritty's `Exit` + `ChildExit` emit pair counts once) |
 | `force-no-bell` | bool | `false` | Terminator `force_no_bell` parity. Silences EVERY bell flavor regardless of the `bell` mode — visual flash, audible (none today), window-attention, and the `tab_bar.bell` activity dot. Use when running in a meeting / library / next-to-a-baby setup |
 | `visible-bell` / `urgent-bell` | bool / bool | `—` | Terminator compat aliases for the unified `bell` key. Terminator splits the bell into two orthogonal bools; kettle's `bell = both` is `visible_bell + urgent_bell`, `bell = visual` is `visible_bell` alone, `bell = attention` is `urgent_bell` alone. The two arms compose at end-of-parse so file order doesn't matter. **Precedence:** if you set the canonical `bell = …` key explicitly, the Terminator aliases are ignored — canonical wins over alias on hybrid configs |

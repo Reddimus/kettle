@@ -276,7 +276,12 @@ discipline here.
   reuse one image id without collision; mode 47 preserves the alternate store
   across both boundaries; mode 1047 preserves it on entry and clears it on
   exit; mode 1049 clears it on entry and preserves it on exit. ED 2 is
-  active-buffer-only and RIS clears both stores.
+  active-buffer-only and RIS clears both stores. Saturation fixtures pin that a
+  transmission the full image store refuses still draws but advertises no image
+  id (and that its `U=1` virtual form is refused outright), and compositing
+  fixtures pin straight-alpha source-over against a transparent and a partly
+  transparent destination, not only an opaque one, plus the zero-alpha
+  short-circuit the blend's divisor depends on.
 
 - **kettle-core image lifecycle:** the terminal engine's authoritative journal
   preserves parser execution order for RIS, ED 2, DECSET/DECRST 47/1047/1049,
@@ -537,9 +542,23 @@ discipline here.
   require the phase timestamp to advance before a redraw request, and normalize
   repeated empty IME preedit notifications to the same absent state.
 
-- **kettle-remote** (30+ tests): injected process-tree fixtures cover SSH and
+- **kettle-remote** (50+ tests): injected process-tree fixtures cover SSH and
   container detection, deterministic breadth-first selection, cwd/shell clone
-  behavior, cycles, missing roots, and injection-safe reconnect commands. The
+  behavior, cycles, missing roots, and injection-safe reconnect commands.
+  Endpoint fidelity has its own set: the options that decide which machine a
+  host or container name reaches (ssh port / ProxyJump / identity / config
+  file, Docker and Podman context, daemon address, kubectl namespace and in-pod
+  container, lxc container root) must survive into the reconnect command in
+  both their separated and joined spellings, an option value must never be read
+  as the host or container, and an option that cannot be reproduced — a
+  ProxyCommand, a stdio forward, a bearer token, a credential or identity
+  selector — must yield no reconnect command at all while leaving the remote
+  title intact. Each suppression set is paired with positive controls, so
+  "suppressed" cannot pass by suppressing everything; `--` is asserted per CLI
+  (docker/podman keep naming the container after it, kubectl and `podman exec
+  --latest` never do); ordinary Windows and POSIX paths must KEEP the entry; and
+  a structural guard walks both option tables against the emit tables so an
+  option can never be captured into a slot the reconnect command would drop. The
   portable proc parsers reject invalid/overflowed PIDs and preserve lossy argv;
   Linux CI additionally builds a synthetic proc tree and proves the rooted
   scanner finds the requested SSH descendant and cwd without reading an
@@ -553,7 +572,13 @@ discipline here.
   registry** (`kettle-ctl/src/presence.rs`) pins claim/release
   round-trips, private directory/file modes, dead-PID pruning, bounded and
   no-follow reads, filename/payload validation, rejected hue updates, and
-  in-place valid hue updates against a temp dir; **shell detection**
+  in-place valid hue updates against a temp dir — plus pid reuse, where a
+  record naming a live pid but a different process instance is pruned while
+  this instance's own record survives, and the reverse: a delete aimed at a
+  record judged stale does nothing once the file on disk is a *newer* record
+  that took the same name (the same two rules are pinned for the ctl discovery
+  registry, once through the injected predicate and once through the real
+  one); **shell detection**
   (`detect_shells_windows`/`_unix`,
   kettle-core) is pure over injected closures (PATH lookup, WSL
   enumeration, vswhere, Git Bash probe), so the Windows-Terminal
@@ -566,7 +591,15 @@ discipline here.
   window must leave the others running. Bare-launch activation tests cover
   private lock/socket permissions, first-process election, matching handoff,
   incompatible recorder identity, bounded request validation, UI rejection
-  fallback, and the `--new-process`/explicit-argument bypass contract.
+  fallback, and the `--new-process`/explicit-argument bypass contract. Retry
+  idempotency is pinned three times: re-sending one launch's request opens a
+  single window while a separate launch still opens its own; a retry that lands
+  while the first attempt is inside the handler waits for that attempt's
+  outcome instead of opening a window beside it; and a duplicate of a launch
+  whose first attempt never finishes still receives a status inside its own
+  read deadline rather than waiting out the request and getting nothing. A
+  ledger-level test pins that a full ledger evicts only settled launches, never
+  one still inside the handler.
   Live-reload regressions additionally pin the filesystem event-kind matrix:
   opens, reads, closes, unrelated paths, and backend-specific `Other` events do
   not reload; create/modify/remove and imprecise `Any` changes to the exact file
@@ -1153,7 +1186,17 @@ These need a real display and are run by hand (or on real hardware):
     limits, queue saturation, duplicate ids, and cancellation. `kettle-ctl`
     loopback tests separately pin response deadlines, cancellation,
     authenticated peers, strict frame/id validation, concurrent activation,
-    and preservation of events that precede a response.
+    and preservation of events that precede a response. They also pin that a
+    client retires itself after any request that ended without its response —
+    a timeout, a cancellation, a breached event bound, a malformed frame — so a
+    late response cannot answer the next call and no further request reaches
+    that stream, while a structured server error (a real response) leaves the
+    client serving calls. Retirement is checked at the *server* end too: the
+    peer observes exactly one request and sees the connection close while the
+    retired client is still alive, and the abandoned exchange's buffered events
+    and unparsed bytes are released with it. The complementary case — a
+    deadline that expires before the first byte goes out — leaves the
+    connection usable and serving the next call.
   - **Live MCP**: `claude --mcp-config .mcp.json --strict-mcp-config -p "use
     kettle_run to echo a marker"` — Claude Code drives the MCP tools end-to-end.
   - **Live renderer/UI diagnostics**: on a Linux desktop run

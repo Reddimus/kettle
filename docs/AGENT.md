@@ -301,6 +301,18 @@ receive a bounded keepalive every 20 seconds so an unread stream eventually
 backpressures and is reclaimed. These are availability limits, not permission
 boundaries.
 
+On the client side, a request that ends without its response — a deadline, a
+cancellation, a breach of the buffered-event bound, malformed data — retires
+that connection, because the response still in flight would otherwise be read
+as the next call's. Retiring closes the transport there and then, so the
+server's connection slot is released without waiting for the client to be
+dropped. A request whose deadline expired before any of it reached the wire is
+not retired: the server never saw it. `kettle ctl` and the MCP bridge open a
+connection per invocation; an embedder that keeps one open must reconnect. A
+cancelled or timed-out mutation is of unknown fate — the server may already
+have performed it — and the error text says so, because the agent reading it is
+the one deciding whether to retry.
+
 `run_command` correlates the shell's OSC 133 command-end marker to learn the
 exit code. **Without shell integration** there is no marker, so the call returns
 `{timed_out: true, …}` after `timeout_s` (default 15) with a hint to run

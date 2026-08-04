@@ -144,6 +144,30 @@ const MAX_CONTROL_SEQUENCE_BYTES: usize = 64 * 1024;
 #[derive(Debug, Default)]
 pub struct AnsiStripper {
     state: StripState,
+    /// UTF-8 continuation bytes still owed by the character being decoded.
+    ///
+    /// Terminal output is UTF-8, and the C1 control bytes this stripper
+    /// recognizes — `0x90` DCS, `0x98` SOS, `0x9b` CSI, `0x9d` OSC, `0x9e` PM,
+    /// `0x9f` APC — are all in the `0x80..=0xbf` continuation range. Treating
+    /// them as controls wherever they appeared ate the middle of ordinary
+    /// characters and left invalid UTF-8 behind:
+    ///
+    /// * `Û` is `c3 9b` — the `9b` was read as CSI, so `Ûh` became a lone `c3`.
+    /// * `‘` is `e2 80 98` — the `98` was read as SOS.
+    /// * `▐` is `e2 96 90` — the `90` was read as DCS.
+    ///
+    /// Box-drawing and smart quotes are exactly what a TUI emits, and MCP's
+    /// `kettle_run` strips by default, so this corrupted the output an agent
+    /// reads. Counting the sequence keeps a continuation byte a continuation
+    /// byte; a C1 byte in ground position, where UTF-8 could not put one, is
+    /// still honored for genuinely 8-bit streams.
+    utf8_continuation: u8,
+    /// Whether the lead byte of that character reached `out`.
+    ///
+    /// A character is emitted whole or swallowed whole; the state machine may
+    /// move on between its bytes and must not get a vote. See the shield in
+    /// [`AnsiStripper::push`].
+    utf8_emitted: bool,
 }
 
 #[derive(Debug, Default)]
@@ -168,6 +192,63 @@ impl AnsiStripper {
     /// Feed a chunk; append the stripped plaintext to `out`.
     pub fn push(&mut self, input: &[u8], out: &mut Vec<u8>) {
         for &b in input {
+            // Mid-character: a continuation byte belongs to the character being
+            // decoded and can never be a control, in ANY state. Tracking this
+            // only in Ground still let `0x9c` inside an OSC read as ST — so
+            // `ESC ] 0 ; ✳ title BEL` (`✳` is `e2 9c b3`) terminated the string
+            // early and leaked the rest of it as visible text.
+            if self.utf8_continuation > 0 {
+                if matches!(b, 0x80..=0xbf) {
+                    self.utf8_continuation -= 1;
+                    // A continuation goes wherever its LEAD went, not wherever
+                    // the state machine has since arrived. Asking the current
+                    // state instead split characters in half: the forced
+                    // resynchronization that ends an over-long control string
+                    // can land on a lead byte, swallowing it and leaving the
+                    // machine in ground — and the continuations were then
+                    // emitted with no lead in front of them, so everything
+                    // decoding stdout saw invalid UTF-8 from that point on.
+                    if self.utf8_emitted {
+                        out.push(b);
+                    }
+                    continue;
+                }
+                // Not a continuation after all: the lead was malformed or
+                // truncated. Stop shielding immediately and let this byte be
+                // interpreted normally — blindly swallowing N bytes hid real
+                // C1 controls and desynchronized on a lead-followed-by-lead.
+                self.utf8_continuation = 0;
+            }
+            // A lead byte is tracked in EVERY state, not only where text is
+            // read.
+            //
+            // Restricting this to `Ground | String` left the same split-character
+            // hole in the other two bounded states. `ESC [` followed by 64 KiB of
+            // parameter bytes forces a resynchronization out of `Csi`, and if
+            // that bound lands on a lead byte the lead is consumed there while
+            // its continuations arrive in ground — emitted with nothing in front
+            // of them. `EscapeIntermediate` has the identical bound, and `ESC`
+            // followed directly by a lead byte reaches it with no 64 KiB
+            // required at all.
+            //
+            // Tracking everywhere is also strictly safer than not: a byte in
+            // `0xc2..=0xf4` is not a legal CSI parameter, intermediate, or final
+            // byte, so the only streams this changes are already malformed — and
+            // if the bytes that follow turn out NOT to be continuations, the
+            // shield above releases them on the spot.
+            self.utf8_continuation = match b {
+                0xc2..=0xdf => 1,
+                0xe0..=0xef => 2,
+                0xf0..=0xf4 => 3,
+                // ASCII, a stray continuation, or an invalid lead
+                // (0xc0/0xc1/0xf5..) owes nothing and is interpreted as
+                // itself.
+                _ => 0,
+            };
+            // No lead byte is special to the ground arm below, so a lead reaches
+            // `out` exactly when the machine is in ground — and its
+            // continuations must go wherever it went.
+            self.utf8_emitted = matches!(self.state, StripState::Ground);
             let state = std::mem::take(&mut self.state);
             self.state = match state {
                 StripState::Ground => match b {
@@ -218,11 +299,15 @@ impl AnsiStripper {
                     escaped,
                     remaining,
                 } => {
-                    if b == 0x9c
-                        || (bel_terminated && b == 0x07)
-                        || (escaped && b == b'\\')
-                        || remaining <= 1
-                    {
+                    if b == 0x9c || (bel_terminated && b == 0x07) || (escaped && b == b'\\') {
+                        StripState::Ground
+                    } else if remaining <= 1 {
+                        // Forced resynchronization: an unterminated control
+                        // string cannot hold the stream hostage, so it ends
+                        // here. This byte was swallowed as part of the string —
+                        // and if it was a UTF-8 lead, `utf8_emitted` is already
+                        // false, so its continuations are swallowed with it
+                        // rather than surfacing in ground output alone.
                         StripState::Ground
                     } else {
                         StripState::String {
@@ -320,33 +405,68 @@ pub fn run_exec_capture_cancellable(opts: ExecOpts, cancelled: &AtomicBool) -> (
     run_exec_capture_inner(opts, Some(cancelled))
 }
 
+/// A sink that keeps only the last `cap` bytes, so an unbounded producer cannot
+/// exhaust memory. Agents want "what just happened" anyway.
+///
+/// Trimming to exactly `cap` on every write made this quadratic in the output
+/// volume: once full, a 4-KiB chunk shifted the whole 1-MiB buffer down by 4
+/// KiB. A build emitting 100 MiB moved ~25 GiB of memory to keep the last 1 MiB
+/// of it, on the thread draining the PTY. Letting the buffer run to `cap` bytes
+/// of slack before compacting makes each shift pay for at least `cap` bytes of
+/// input, so the total work is linear. The peak cost is one extra `cap` of
+/// memory.
+struct TailSink {
+    buf: Vec<u8>,
+    cap: usize,
+}
+
+impl TailSink {
+    fn new(cap: usize) -> Self {
+        Self {
+            buf: Vec::new(),
+            cap,
+        }
+    }
+
+    /// The retained tail, at most `cap` bytes.
+    ///
+    /// Compaction is lazy, so the buffer can hold more than that between
+    /// writes; the excess is always at the FRONT, which is the part being
+    /// dropped.
+    fn tail(&self) -> &[u8] {
+        &self.buf[self.buf.len().saturating_sub(self.cap)..]
+    }
+}
+
+impl Write for TailSink {
+    fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
+        // A single write at least as large as the cap discards everything held
+        // so far, so copy only the part that survives rather than growing the
+        // buffer to the size of the write.
+        if data.len() >= self.cap {
+            self.buf.clear();
+            self.buf.extend_from_slice(&data[data.len() - self.cap..]);
+            return Ok(data.len());
+        }
+        self.buf.extend_from_slice(data);
+        // Compact only once the slack is used up. `saturating_mul` keeps an
+        // enormous cap from wrapping the threshold to something small.
+        if self.buf.len() > self.cap.saturating_mul(2) {
+            let drop = self.buf.len() - self.cap;
+            self.buf.drain(..drop);
+        }
+        Ok(data.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
 fn run_exec_capture_inner(opts: ExecOpts, cancelled: Option<&AtomicBool>) -> (i32, String) {
-    /// A sink that keeps only the last `cap` bytes (so an unbounded producer
-    /// can't exhaust memory; agents want "what just happened" anyway).
-    struct TailSink {
-        buf: Vec<u8>,
-        cap: usize,
-    }
-    impl Write for TailSink {
-        fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
-            self.buf.extend_from_slice(data);
-            if self.buf.len() > self.cap {
-                let drop = self.buf.len() - self.cap;
-                self.buf.drain(..drop);
-            }
-            Ok(data.len())
-        }
-        fn flush(&mut self) -> std::io::Result<()> {
-            Ok(())
-        }
-    }
-    let mut sink = TailSink {
-        buf: Vec::new(),
-        cap: 1024 * 1024,
-    };
+    let mut sink = TailSink::new(1024 * 1024);
     let mut output = DirectOutput::new(opts.mode, &mut sink);
     let code = run_exec_engine(opts, &default_size_probe, &mut output, cancelled);
-    (code, String::from_utf8_lossy(&sink.buf).into_owned())
+    (code, String::from_utf8_lossy(sink.tail()).into_owned())
 }
 
 /// Default console-size probe (real terminal dimensions when stdout is a TTY).
@@ -1298,8 +1418,13 @@ fn poll_recording_finish(
 /// folds signal death into the code there, so we mask to 0..=255 — the value we
 /// log then matches what the shell would see. On Windows the full 32-bit code
 /// is meaningful (children routinely exit with codes outside 0..=255, e.g.
-/// `STATUS_ACCESS_VIOLATION` 0xC0000005), so we pass it through, saturating into
-/// `i32` rather than truncating to one byte.
+/// `STATUS_ACCESS_VIOLATION` 0xC0000005), so we reinterpret the bits rather
+/// than truncating or saturating.
+///
+/// Saturating was wrong for exactly the case the line above names: it turned
+/// 0xC0000005 into 0x7FFFFFFF and destroyed the diagnostic. `as i32` preserves
+/// every bit, and Windows takes the low 32 bits back off the process exit, so
+/// the caller sees the status the child really died with.
 fn clamp_code(code: u32) -> i32 {
     #[cfg(unix)]
     {
@@ -1307,7 +1432,7 @@ fn clamp_code(code: u32) -> i32 {
     }
     #[cfg(windows)]
     {
-        code.min(i32::MAX as u32) as i32
+        code as i32
     }
     #[cfg(not(any(unix, windows)))]
     {
@@ -2265,6 +2390,152 @@ fn windows_console_size() -> Option<(u16, u16)> {
 mod tests {
     use super::*;
 
+    /// `--strip-ansi` corrupted ordinary text, and MCP `kettle_run` strips by
+    /// default — so this was the output an agent CLI read.
+    ///
+    /// The C1 controls the stripper recognizes (`0x90` DCS, `0x98` SOS, `0x9b`
+    /// CSI, `0x9d` OSC, `0x9e` PM, `0x9f` APC) all sit in UTF-8's
+    /// `0x80..=0xbf` continuation range. Honoring them anywhere ate the middle
+    /// of characters and emitted invalid UTF-8: `Ûh` became a lone `c3`.
+    ///
+    /// The three cases below are not exotic. Box-drawing and smart quotes are
+    /// what a TUI — tmux, AstroNvim, any agent's status output — emits
+    /// constantly.
+    #[test]
+    fn stripping_ansi_does_not_eat_the_middle_of_a_utf8_character() {
+        for (label, text) in [
+            ("U+00db, whose second byte is 0x9b CSI", "Ûh"),
+            ("U+2018, whose third byte is 0x98 SOS", "\u{2018}x"),
+            ("U+2590, whose third byte is 0x90 DCS", "\u{2590}y"),
+            ("U+009d as OSC vs U+00dd", "Ýz"),
+            ("astral plane, four bytes", "\u{1f980}!"),
+            ("mixed run", "┌─┐ ‘quoted’ Ünicode └─┘"),
+        ] {
+            let mut stripper = AnsiStripper::default();
+            let mut out = Vec::new();
+            stripper.push(text.as_bytes(), &mut out);
+            assert_eq!(
+                String::from_utf8(out.clone()).as_deref(),
+                Ok(text),
+                "{label}: plain text must survive stripping byte for byte, got {out:02x?}"
+            );
+        }
+    }
+
+    /// A UTF-8 character INSIDE a control string must not terminate it.
+    ///
+    /// Tracking continuation bytes only in ground state left `0x9c` inside an
+    /// OSC reading as ST: `ESC ] 0 ; ✳ title BEL X` (`✳` is `e2 9c b3`) ended
+    /// the string at the `9c` and leaked `b3 title BEL X` into the output as
+    /// visible garbage. Titles are exactly where non-ASCII shows up.
+    #[test]
+    fn a_utf8_character_inside_a_control_string_does_not_terminate_it() {
+        for (label, payload) in [
+            ("U+2733 contains 0x9c, which is ST", "\u{2733}"),
+            ("U+2590 contains 0x90, which is DCS", "\u{2590}"),
+            ("U+2018 contains 0x98, which is SOS", "\u{2018}"),
+            ("U+00db contains 0x9b, which is CSI", "\u{00db}"),
+        ] {
+            let mut input = b"\x1b]0;".to_vec();
+            input.extend_from_slice(payload.as_bytes());
+            input.extend_from_slice(b" title\x07visible");
+
+            let mut stripper = AnsiStripper::default();
+            let mut out = Vec::new();
+            stripper.push(&input, &mut out);
+            assert_eq!(
+                String::from_utf8_lossy(&out),
+                "visible",
+                "{label}: the whole OSC must be stripped, with nothing leaking"
+            );
+        }
+    }
+
+    /// A malformed lead byte must not shield the bytes after it.
+    ///
+    /// Counting N continuations unconditionally swallowed whatever followed,
+    /// so a real control could be missed and a lead-followed-by-lead
+    /// desynchronized the parser. A byte that is not `0x80..=0xbf` ends the
+    /// shield immediately and is interpreted on its own terms.
+    #[test]
+    fn a_malformed_lead_byte_does_not_swallow_what_follows() {
+        // `e2` promises two continuations; `9b` is one, but `31` is not — so
+        // the sequence is malformed and `31` onward must be read normally.
+        let mut stripper = AnsiStripper::default();
+        let mut out = Vec::new();
+        stripper.push(&[0xe2, 0x9b, 0x31, 0x6d, b'X'], &mut out);
+        assert!(
+            out.ends_with(b"X"),
+            "text after a malformed sequence must still be emitted, got {out:02x?}"
+        );
+
+        // A lead immediately followed by another lead: the first is abandoned,
+        // the second starts a real character.
+        let mut stripper = AnsiStripper::default();
+        let mut out = Vec::new();
+        let mut input = vec![0xe2];
+        input.extend_from_slice("é!".as_bytes());
+        stripper.push(&input, &mut out);
+        assert!(
+            String::from_utf8_lossy(&out).ends_with("é!"),
+            "the second character must survive, got {out:02x?}"
+        );
+
+        // A real 8-bit CSI after a broken lead is still recognised and removed.
+        let mut stripper = AnsiStripper::default();
+        let mut out = Vec::new();
+        stripper.push(&[0xe2, 0x41, 0x9b, b'3', b'1', b'm', b'Z'], &mut out);
+        assert!(
+            out.ends_with(b"Z") && !out.contains(&b'm'),
+            "the CSI must still be stripped after a malformed lead, got {out:02x?}"
+        );
+    }
+
+    /// A character split across two chunks must still survive — the PTY hands
+    /// output over in arbitrary slices, so a lead byte and its continuations
+    /// routinely arrive separately.
+    #[test]
+    fn a_utf8_character_split_across_chunks_survives_stripping() {
+        let text = "Û▐‘";
+        let bytes = text.as_bytes();
+        for split in 1..bytes.len() {
+            let mut stripper = AnsiStripper::default();
+            let mut out = Vec::new();
+            stripper.push(&bytes[..split], &mut out);
+            stripper.push(&bytes[split..], &mut out);
+            assert_eq!(
+                String::from_utf8(out.clone()).as_deref(),
+                Ok(text),
+                "split at {split} must not corrupt the character straddling it"
+            );
+        }
+    }
+
+    /// The escape sequences it exists to remove must still go — including the
+    /// 8-bit C1 forms in ground position, where UTF-8 cannot place them.
+    #[test]
+    fn stripping_ansi_still_removes_the_sequences_it_is_for() {
+        for (label, input, want) in [
+            ("CSI SGR", b"\x1b[31mred\x1b[0m".to_vec(), "red"),
+            ("OSC title", b"\x1b]0;title\x07after".to_vec(), "after"),
+            (
+                "8-bit CSI in ground",
+                vec![0x9b, b'3', b'1', b'm', b'x'],
+                "x",
+            ),
+            ("8-bit OSC in ground", vec![0x9d, b't', 0x9c, b'y'], "y"),
+        ] {
+            let mut stripper = AnsiStripper::default();
+            let mut out = Vec::new();
+            stripper.push(&input, &mut out);
+            assert_eq!(
+                String::from_utf8_lossy(&out),
+                want,
+                "{label}: the sequence must still be stripped"
+            );
+        }
+    }
+
     #[test]
     fn output_slice_bounds_a_continuously_refilled_channel() {
         let (sender, receiver) = crossbeam_channel::unbounded();
@@ -2497,6 +2768,141 @@ mod tests {
         );
     }
 
+    /// Valid UTF-8 in must stay valid UTF-8 out, including across the forced
+    /// resynchronization that ends an over-long control string.
+    ///
+    /// The stripper shields UTF-8 continuation bytes so a `0x9c` inside a
+    /// character is not mistaken for the 8-bit ST. That shield outlived the
+    /// string: when the resynchronization bound fell on a multi-byte lead, the
+    /// lead was consumed as the string's last byte while the debt survived into
+    /// ground state, so the continuation bytes were emitted with nothing in
+    /// front of them. Anything decoding stdout saw invalid UTF-8 from there on.
+    ///
+    /// The boundary is swept because the payload length that lands a lead byte
+    /// exactly on it depends on how the state machine counts.
+    ///
+    /// All THREE bounded states are swept. Fixing only the control-string one
+    /// left the identical hole in `Csi` and `EscapeIntermediate`, which have the
+    /// same 64-KiB bound — a review found both still emitting invalid UTF-8
+    /// after the first fix shipped.
+    #[test]
+    fn ansi_stripper_never_emits_orphaned_utf8_continuations_at_the_resync_bound() {
+        // Each opener enters a different bounded state, with a filler byte that
+        // keeps it there: OSC payload, CSI parameters, ESC intermediates.
+        for (label, opener, filler) in [
+            ("control string", &b"\x1b]0;"[..], b'x'),
+            ("csi parameters", &b"\x1b["[..], b'0'),
+            ("escape intermediates", &b"\x1b "[..], b' '),
+        ] {
+            for offset in -4_isize..=4 {
+                let fill = (MAX_CONTROL_SEQUENCE_BYTES as isize + offset) as usize;
+                let mut input = Vec::with_capacity(fill + 16);
+                input.extend_from_slice(opener);
+                input.resize(input.len() + fill, filler);
+                // Three-byte lead plus its continuations, one of which is 0x9c.
+                input.extend_from_slice("\u{672b}".as_bytes());
+                // The resynchronization point moves with `offset`, and it eats
+                // whatever bytes it lands on. Pad past that window so the marker is
+                // always in ground state by the time it arrives.
+                input.extend_from_slice(&[b'z'; 32]);
+                input.extend_from_slice(b"tail");
+
+                let mut stripper = AnsiStripper::default();
+                let mut out = Vec::new();
+                stripper.push(&input, &mut out);
+                let text = String::from_utf8(out.clone()).unwrap_or_else(|error| {
+                    panic!(
+                        "{label}, fill {fill}: stripped output is not valid UTF-8 \
+                     ({error}); the last bytes were {:?}",
+                        &out[out.len().saturating_sub(16)..]
+                    )
+                });
+                assert!(
+                    text.ends_with("tail"),
+                    "{label}, fill {fill}: the stream must resynchronize and pass \
+                 text through, got {text:?}"
+                );
+            }
+        }
+
+        // And with no 64 KiB involved at all: `ESC` followed directly by a lead
+        // byte consumes that byte as a one-character escape, so its
+        // continuations must be consumed with it rather than surfacing alone.
+        let mut input = Vec::new();
+        input.extend_from_slice(b"head\x1b");
+        input.extend_from_slice("\u{672b}".as_bytes());
+        input.extend_from_slice(b"tail");
+        let mut stripper = AnsiStripper::default();
+        let mut out = Vec::new();
+        stripper.push(&input, &mut out);
+        let text = String::from_utf8(out.clone()).unwrap_or_else(|error| {
+            panic!(
+                "ESC + lead byte: stripped output is not valid UTF-8 ({error}); \
+                 bytes were {out:?}"
+            )
+        });
+        assert_eq!(
+            text, "headtail",
+            "the escaped character is consumed whole, not half"
+        );
+    }
+
+    /// The capture sink must keep the last `cap` bytes, and must not do
+    /// quadratic work to keep them.
+    ///
+    /// It trimmed to exactly `cap` on every write, so once full a small chunk
+    /// shifted the whole buffer down by that chunk's size. A build emitting 100
+    /// MiB moved roughly 25 GiB of memory to retain the last 1 MiB — on the
+    /// thread draining the PTY. Compaction is amortized now; the answer must be
+    /// unchanged.
+    #[test]
+    fn the_capture_sink_keeps_the_tail_without_quadratic_shifting() {
+        use std::io::Write as _;
+
+        // Every write size around the cap, plus the exact boundaries.
+        for cap in [1usize, 2, 7, 64] {
+            for chunk in [1usize, 3, 7, 64, 65, 200] {
+                let mut sink = TailSink::new(cap);
+                let mut written: Vec<u8> = Vec::new();
+                // Enough rounds to compact several times over.
+                for round in 0..40u16 {
+                    let data: Vec<u8> = (0..chunk).map(|i| (round as usize + i) as u8).collect();
+                    assert_eq!(sink.write(&data).unwrap(), data.len());
+                    written.extend_from_slice(&data);
+                    assert_eq!(
+                        sink.tail(),
+                        &written[written.len() - cap.min(written.len())..],
+                        "cap {cap}, chunk {chunk}, round {round}: wrong tail"
+                    );
+                    // Lazy compaction is allowed slack, but must stay bounded —
+                    // that bound is the whole point of a tail sink.
+                    assert!(
+                        sink.buf.len() <= cap * 2 + chunk,
+                        "cap {cap}, chunk {chunk}: buffer grew to {} bytes",
+                        sink.buf.len()
+                    );
+                }
+            }
+        }
+
+        // A single write larger than the cap keeps only its own tail, and does
+        // not first grow the buffer to the size of that write.
+        let mut sink = TailSink::new(8);
+        assert_eq!(sink.write(&[b'x'; 4]).unwrap(), 4);
+        assert_eq!(sink.write(b"0123456789abcdef").unwrap(), 16);
+        assert_eq!(sink.tail(), b"89abcdef");
+        assert_eq!(
+            sink.buf.len(),
+            8,
+            "an oversized write must copy only what survives"
+        );
+
+        // And a zero-length write changes nothing.
+        let before = sink.tail().to_vec();
+        assert_eq!(sink.write(b"").unwrap(), 0);
+        assert_eq!(sink.tail(), before.as_slice());
+    }
+
     #[test]
     fn ansi_stripper_bare_trailing_escape_dropped() {
         let mut s = AnsiStripper::default();
@@ -2522,8 +2928,26 @@ mod tests {
         #[cfg(windows)]
         {
             assert_eq!(clamp_code(256), 256);
-            // 0xC0000005 (STATUS_ACCESS_VIOLATION) saturates into i32, not 0x05.
-            assert_eq!(clamp_code(0xC000_0005), i32::MAX);
+            // 0xC0000005 (STATUS_ACCESS_VIOLATION) must survive as itself. This
+            // previously asserted `i32::MAX`, pinning the saturation that threw
+            // the diagnostic away — the crash code an agent or CI script reads
+            // to tell an access violation from any other failure.
+            assert_eq!(clamp_code(0xC000_0005), 0xC000_0005u32 as i32);
+            assert_eq!(clamp_code(0xC000_0005) as u32, 0xC000_0005);
+            // Every crash-class NTSTATUS round-trips, not just that one.
+            for status in [
+                0xC000_0005u32,
+                0xC000_001D,
+                0xC000_0094,
+                0xC000_0409,
+                0x8000_0003,
+            ] {
+                assert_eq!(
+                    clamp_code(status) as u32,
+                    status,
+                    "NTSTATUS {status:#010x} must reach the caller intact"
+                );
+            }
             assert_eq!(clamp_code(3), 3);
         }
     }

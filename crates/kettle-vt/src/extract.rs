@@ -394,6 +394,17 @@ impl Extractor {
                             self.handle_pending_chunks(&mut out, &mut handle);
                             continue;
                         }
+                        // CAN/SUB cancel here too. An ESC arriving mid-string
+                        // sets `st_pending` and this branch owns the next byte,
+                        // so checking for cancellation only on the bulk path
+                        // left `ESC CAN` appending both bytes as payload and
+                        // the string still open — the same freeze, reachable by
+                        // putting an ESC in front of the CAN.
+                        if b == 0x18 || b == 0x1a {
+                            i += 1;
+                            self.cancel_seq();
+                            continue;
+                        }
                         if self.discarding_seq {
                             // Account for the ESC consumed on the preceding
                             // iteration first. If it is the final quarantined
@@ -421,10 +432,18 @@ impl Extractor {
                         // inside a DCS/APC body is payload, exactly as the
                         // old per-byte arm treated it.
                         let hay = &input[i..];
-                        let stop = if self.mode == Mode::Osc {
+                        let terminator = if self.mode == Mode::Osc {
                             memchr::memchr3(0x1b, 0x9c, 0x07, hay)
                         } else {
                             memchr::memchr2(0x1b, 0x9c, hay)
+                        };
+                        // CAN/SUB cancel the string wherever they appear, so
+                        // they are stop bytes too — scanned separately because
+                        // `memchr` tops out at three needles.
+                        let cancel = memchr::memchr2(0x18, 0x1a, hay);
+                        let stop = match (terminator, cancel) {
+                            (Some(t), Some(c)) => Some(t.min(c)),
+                            (t, c) => t.or(c),
                         };
                         match stop {
                             Some(off) => {
@@ -460,7 +479,9 @@ impl Extractor {
                                     continue;
                                 }
                                 i += 1;
-                                if b == 0x1b {
+                                if b == 0x18 || b == 0x1a {
+                                    self.cancel_seq();
+                                } else if b == 0x1b {
                                     self.st_pending = true;
                                 } else {
                                     self.term_bel = b == 0x07;
@@ -652,6 +673,35 @@ impl Extractor {
         self.mode = Mode::Pass;
     }
 
+    /// CAN (0x18) / SUB (0x1a) abandon the control string in progress.
+    ///
+    /// DEC defines both as immediate cancellation of DCS/OSC/APC/PM/SOS, and
+    /// every real terminal implements it. Treating them as payload meant the
+    /// extractor stayed in the string state waiting for a terminator that was
+    /// never coming: a single stray `0x18` inside an OSC swallowed the rest of
+    /// the stream, so the pane simply stopped updating and looked frozen.
+    ///
+    /// The accumulated bytes are dropped rather than emitted — a cancelled
+    /// string was never a command, and printing its half-finished payload to
+    /// the grid is how the "stray text after a truncated title" class of bug
+    /// happens.
+    fn cancel_seq(&mut self) {
+        if self.discarding_seq {
+            self.reset_discard();
+            return;
+        }
+        // Release the memory, not just the length. `clear()` keeps the whole
+        // capacity — up to the 16 MiB sequence cap — while dropping the
+        // reservation tells the graphics budget it is free, so a near-limit
+        // string cancelled once per pane retained megabytes the budget
+        // believed it had reclaimed.
+        self.seq = Vec::new();
+        let _seq_reservation = self.seq_reservation.take();
+        self.mode = Mode::Pass;
+        self.st_pending = false;
+        self.term_bel = false;
+    }
+
     fn finish_seq(&mut self, out: &mut Vec<Chunk>) {
         if self.discarding_seq {
             self.reset_discard();
@@ -670,7 +720,9 @@ impl Extractor {
         }
         // OSC 7 cwd report (`7;file://host/abs/path`).
         if mode == Mode::Osc && seq.starts_with(b"7;") {
-            if let Some(path) = parse_osc7(&String::from_utf8_lossy(&seq[2..])) {
+            if let Some(path) =
+                parse_osc7(&String::from_utf8_lossy(&seq[2..])).and_then(safe_reported_cwd)
+            {
                 out.push(Chunk::Cwd(path));
             }
             return;
@@ -693,7 +745,7 @@ impl Extractor {
         // notification. Surfaces the same Chunk::Cwd as OSC 7 (last-writer-wins;
         // both are shell-volunteered truth).
         if mode == Mode::Osc && seq.starts_with(b"9;9;") {
-            if let Some(path) = parse_osc9_9(&seq[4..]) {
+            if let Some(path) = parse_osc9_9(&seq[4..]).and_then(safe_reported_cwd) {
                 out.push(Chunk::Cwd(path));
             }
             return;
@@ -1024,6 +1076,92 @@ fn parse_osc9_9(payload: &[u8]) -> Option<String> {
     }
 }
 
+/// The last gate between a cwd a program CLAIMED and one kettle will act on.
+///
+/// Both OSC 7 and OSC 9;9 are volunteered by whatever is writing to the pane,
+/// which includes anything a user runs, `cat`s, or is shown over ssh. Kettle
+/// then hands the value to `is_dir`, to a new tab's working directory, and to
+/// "open in file manager".
+///
+/// A **network path** is the sharp one. A UNC server path costs a program one
+/// line of output; on Windows the very next existence check reaches out over
+/// SMB or WebDAV to a host of the attacker's choosing, and the handshake offers
+/// up the machine's credentials before anything has been opened.
+///
+/// This is an ALLOWLIST, and it is one because the denylist it replaced was
+/// wrong. That version refused a path beginning with two separators, which
+/// misses the NT object-manager prefix `\??\` — one separator, and
+/// `\??\UNC\host\share` resolves through the very same redirector. Measured:
+/// that path answered `is_dir` in 69 ms against a share and 0.2 ms against a
+/// local directory, which is the network round-trip the guard exists to
+/// prevent. `\??\GLOBALROOT\Device\...` reaches the rest of the NT namespace
+/// the same way. Enumerating the prefixes that are dangerous cannot work;
+/// naming the two shapes that are legitimate can.
+///
+/// Accepted:
+///   * POSIX-absolute — `/home/me`, and MSYS/Cygwin's `/c/Users/me`. A second
+///     leading separator is not accepted: `//host/share` is the same UNC, and
+///     a leading `//` is implementation-defined even on POSIX.
+///   * Windows drive-rooted — `C:\Users\me` or `C:/Users/me`. Drive-RELATIVE
+///     (`C:proj`) is not a working directory; it resolves against whatever the
+///     drive's current directory happens to be.
+///   * The WSL plan-9 shares `\\wsl$\` and `\\wsl.localhost\`. These are UNC in
+///     spelling only — they are served by the local P9 redirector, with no SMB
+///     handshake and no credentials — and `wslpath -w "$PWD"` is exactly what
+///     Microsoft's documented OSC 9;9 shell integration emits, which is the
+///     integration `parse_osc9_9` exists to harvest. Refusing them silently cost
+///     cwd inheritance for anyone carrying over a Windows Terminal WSL prompt.
+///
+/// Also rejected: an empty path, one carrying a control character (a real path
+/// has none, and they corrupt every place this is later displayed or quoted),
+/// and one longer than any real path.
+fn safe_reported_cwd(path: String) -> Option<String> {
+    // Past Linux's PATH_MAX (4096) with room to spare. Windows' extended-length
+    // limit is larger (32,767), but no shell reports a working directory
+    // anywhere near either, and an unbounded value from untrusted output should
+    // not be stored.
+    const MAX_REPORTED_CWD_BYTES: usize = 8192;
+    // Case-insensitive, because Windows path components are.
+    const WSL_P9_SERVERS: [&str; 2] = ["wsl$", "wsl.localhost"];
+
+    if path.is_empty() || path.len() > MAX_REPORTED_CWD_BYTES || path.chars().any(char::is_control)
+    {
+        return None;
+    }
+
+    let is_separator = |c: char| c == '/' || c == '\\';
+    let bytes = path.as_bytes();
+
+    // `\\wsl$\Ubuntu\home` — server and share must both be present, and the
+    // server must be one of the two names the P9 redirector claims.
+    if bytes.len() > 2 && is_separator(path.as_bytes()[0] as char) && is_separator(bytes[1] as char)
+    {
+        let rest = &path[2..];
+        let cut = rest.find(is_separator)?;
+        let (server, share) = (&rest[..cut], &rest[cut + 1..]);
+        let known = WSL_P9_SERVERS
+            .iter()
+            .any(|name| server.eq_ignore_ascii_case(name));
+        return (known && !share.is_empty()).then_some(path);
+    }
+
+    // POSIX-absolute. `/` specifically, not "a separator": a lone leading
+    // backslash is not a POSIX root, it is the NT namespace (`\??\UNC\host\share`
+    // reaches the redirector with ONE separator) or a Windows path rooted on
+    // whichever drive happens to be current. Neither is a working directory
+    // anyone reports. The two-separator case was handled above.
+    if bytes[0] == b'/' && !bytes.get(1).is_some_and(|&b| b == b'/' || b == b'\\') {
+        return Some(path);
+    }
+
+    // Drive-rooted: a letter, a colon, then a separator.
+    let drive_rooted = bytes.len() > 2
+        && bytes[0].is_ascii_alphabetic()
+        && bytes[1] == b':'
+        && is_separator(bytes[2] as char);
+    drive_rooted.then_some(path)
+}
+
 /// The machine's hostname for OSC 7 validation. Asks the OS
 /// (gethostname(2) / GetComputerNameExW — review fix: the env vars alone
 /// fail OPEN on Linux/macOS, where interactive bash does not export
@@ -1250,6 +1388,180 @@ fn parse_prompt(rest: &[u8]) -> Option<PromptKind> {
 
 #[cfg(test)]
 mod tests {
+    /// CAN/SUB must cancel a control string, or the terminal freezes.
+    ///
+    /// DEC defines `0x18` and `0x1a` as immediate cancellation of any
+    /// DCS/OSC/APC string. Treating them as payload left the extractor waiting
+    /// for a terminator that never arrived, so ONE stray byte swallowed the
+    /// entire rest of the stream — the pane stopped updating and looked hung.
+    /// Untrusted program output can contain that byte.
+    #[test]
+    fn can_and_sub_cancel_a_control_string_instead_of_wedging_it() {
+        for cancel in [0x18_u8, 0x1a] {
+            for intro in [&b"\x1b]2;"[..], &b"\x1bP"[..], &b"\x1b_"[..]] {
+                let mut ex = Extractor::default();
+                let mut input = intro.to_vec();
+                input.extend_from_slice(b"payload");
+                input.push(cancel);
+                input.extend_from_slice(b"after\n");
+
+                let chunks = ex.feed(&input);
+                let mut plain = Vec::new();
+                for c in &chunks {
+                    if let Chunk::Pass(b) = c {
+                        plain.extend_from_slice(b);
+                    }
+                }
+                assert_eq!(
+                    String::from_utf8_lossy(&plain),
+                    "after
+",
+                    "cancel {cancel:#04x} after {intro:?}: output following the                      cancellation must reach the terminal, and the abandoned                      payload must not"
+                );
+
+                // And the extractor is back in Pass mode — a later feed is not
+                // still being eaten by the abandoned string.
+                let more = ex.feed(b"later\n");
+                let mut plain2 = Vec::new();
+                for c in &more {
+                    if let Chunk::Pass(b) = c {
+                        plain2.extend_from_slice(b);
+                    }
+                }
+                assert_eq!(
+                    String::from_utf8_lossy(&plain2),
+                    "later
+",
+                    "the next chunk must not be swallowed either"
+                );
+            }
+        }
+    }
+
+    /// A properly terminated control string must survive INTACT.
+    ///
+    /// kettle passes non-extracted sequences (an OSC 2 title, say) straight to
+    /// the terminal engine, so "it ends with the trailing text" is satisfied
+    /// even if the parser breaks and forwards everything blindly. The real
+    /// invariant is byte-exactness: a terminated string it does not claim must
+    /// come out exactly as it went in, and one it DOES claim must be consumed
+    /// and reported.
+    #[test]
+    fn a_properly_terminated_control_string_survives_intact() {
+        for (label, input, want) in [
+            (
+                "BEL",
+                &b"\x1b]2;title\x07visible\r\n"[..],
+                &b"\x1b]2;title\x07visible\r\n"[..],
+            ),
+            (
+                "ST",
+                &b"\x1b]2;title\x1b\\visible\r\n"[..],
+                &b"\x1b]2;title\x1b\\visible\r\n"[..],
+            ),
+            // An 8-bit ST is deliberately re-emitted in its 7-bit form, so the
+            // downstream engine never has to handle the C1 byte. Pinning that
+            // normalization is the point of this case.
+            (
+                "8-bit ST normalized to 7-bit",
+                &b"\x1b]2;title\x9cvisible\r\n"[..],
+                &b"\x1b]2;title\x1b\\visible\r\n"[..],
+            ),
+        ] {
+            let mut ex = Extractor::default();
+            let mut plain = Vec::new();
+            for c in ex.feed(input) {
+                if let Chunk::Pass(b) = c {
+                    plain.extend_from_slice(&b);
+                }
+            }
+            assert_eq!(
+                plain.as_slice(),
+                want,
+                "{label}: a title OSC is not extracted, so it must reach the \
+                 engine intact"
+            );
+        }
+
+        // An OSC kettle DOES claim is consumed and reported, so the engine
+        // never sees it. This is the half a pass-through-everything regression
+        // would break.
+        let mut ex = Extractor::default();
+        let mut plain = Vec::new();
+        let mut cwd = None;
+        for c in ex.feed(b"\x1b]7;file:///tmp\x07visible\r\n") {
+            match c {
+                Chunk::Pass(b) => plain.extend_from_slice(&b),
+                Chunk::Cwd(path) => cwd = Some(path),
+                _ => {}
+            }
+        }
+        assert!(cwd.is_some(), "OSC 7 must be reported as a cwd change");
+        assert_eq!(
+            String::from_utf8_lossy(&plain),
+            "visible\r\n",
+            "and consumed rather than forwarded"
+        );
+    }
+
+    /// An ESC in front of the cancel must not reopen the freeze.
+    ///
+    /// An ESC arriving mid-string sets `st_pending`, and that branch owns the
+    /// next byte — so checking for CAN/SUB only on the bulk path left
+    /// `ESC CAN` appending both bytes as payload with the string still open.
+    /// Same hang, one byte of disguise.
+    #[test]
+    fn an_escape_before_the_cancel_still_cancels() {
+        for cancel in [0x18_u8, 0x1a] {
+            for intro in [&b"\x1b]2;"[..], &b"\x1bP"[..], &b"\x1b_"[..]] {
+                let mut ex = Extractor::default();
+                let mut input = intro.to_vec();
+                input.extend_from_slice(b"payload\x1b");
+                input.push(cancel);
+                input.extend_from_slice(b"after\r\n");
+
+                let mut plain = Vec::new();
+                for c in ex.feed(&input) {
+                    if let Chunk::Pass(b) = c {
+                        plain.extend_from_slice(&b);
+                    }
+                }
+                assert_eq!(
+                    String::from_utf8_lossy(&plain),
+                    "after\r\n",
+                    "ESC then {cancel:#04x} after {intro:?} must cancel, not extend"
+                );
+            }
+        }
+    }
+
+    /// Cancelling must return the accumulator's memory, not just its length.
+    ///
+    /// `clear()` keeps the whole capacity while the budget reservation is
+    /// dropped, so the allocator holds megabytes the budget believes it has
+    /// reclaimed.
+    #[test]
+    fn cancelling_a_large_string_releases_its_buffer() {
+        let mut ex = Extractor::default();
+        let mut input = b"\x1b]2;".to_vec();
+        input.extend(std::iter::repeat_n(b'x', 512 * 1024));
+        input.push(0x18);
+        input.extend_from_slice(b"after\r\n");
+
+        let mut plain = Vec::new();
+        for c in ex.feed(&input) {
+            if let Chunk::Pass(b) = c {
+                plain.extend_from_slice(&b);
+            }
+        }
+        assert_eq!(String::from_utf8_lossy(&plain), "after\r\n");
+        assert_eq!(
+            ex.seq.capacity(),
+            0,
+            "the abandoned payload buffer must be freed, not merely emptied"
+        );
+    }
+
     use super::{Chunk, Extractor, PromptKind};
     use crate::kitty::PlacementKey;
     use base64::Engine;
@@ -1404,6 +1716,120 @@ mod tests {
             .flatten()
             .collect();
         assert_eq!(passed, b"$ ");
+    }
+
+    /// A reported cwd is a claim by whatever is writing to the pane, and kettle
+    /// acts on it — `is_dir`, a new tab's working directory, "open in file
+    /// manager".
+    ///
+    /// The sharp case is a UNC path. One line of output sets the pane's cwd to
+    /// a server of the attacker's choosing, and on Windows the very next
+    /// existence check reaches out over SMB or WebDAV, handing over the
+    /// machine's credentials during the handshake — before anything is opened.
+    /// `cat`ting a hostile file is enough to send it. Both report channels are
+    /// covered, since OSC 7 carries a path just as OSC 9;9 does.
+    #[test]
+    fn a_reported_cwd_that_would_reach_off_this_machine_is_refused() {
+        let refused: &[&[u8]] = &[
+            // UNC, the credential-leak shape, in both spellings.
+            b"\x1b]9;9;\\\\attacker.example\\share\x07",
+            b"\x1b]9;9;//attacker.example/share\x07",
+            // Mixed separators reach the same place.
+            b"\x1b]9;9;\\/attacker.example/share\x07",
+            b"\x1b]9;9;/\\attacker.example\\share\x07",
+            // The Windows device and extended-length UNC forms.
+            b"\x1b]9;9;\\\\?\\UNC\\attacker.example\\share\x07",
+            b"\x1b]9;9;\\\\.\\pipe\\anything\x07",
+            // The NT object-manager prefix. ONE leading separator, and it
+            // resolves through the same redirector — measured at 69 ms against
+            // a share versus 0.2 ms against a local directory. A guard that
+            // counted leading separators let this straight through.
+            b"\x1b]9;9;\\??\\UNC\\attacker.example\\share\x07",
+            b"\x1b]9;9;\\??\\C:\\Windows\x07",
+            b"\x1b]9;9;\\??\\GLOBALROOT\\Device\\HarddiskVolume3\\Windows\x07",
+            // A UNC server that merely starts like the WSL one.
+            b"\x1b]9;9;\\\\wsl$evil.example\\share\x07",
+            b"\x1b]9;9;\\\\wsl.localhost.evil.example\\share\x07",
+            // The WSL server with no share is not a directory.
+            b"\x1b]9;9;\\\\wsl$\x07",
+            b"\x1b]9;9;\\\\wsl$\\\x07",
+            // Relative and drive-relative are not working directories.
+            b"\x1b]9;9;proj\\sub\x07",
+            b"\x1b]9;9;C:proj\x07",
+            b"\x1b]9;9;..\\..\\elsewhere\x07",
+            // Quoted, since prompts quote paths with spaces.
+            b"\x1b]9;9;\"\\\\attacker.example\\share\"\x07",
+            // And through OSC 7, which carries a path the same way.
+            b"\x1b]7;file://localhost//attacker.example/share\x07",
+        ];
+        for payload in refused {
+            let mut ex = Extractor::new();
+            let out = ex.feed(payload);
+            assert!(
+                !out.iter().any(|c| matches!(c, Chunk::Cwd(_))),
+                "a cwd reaching off this machine must be refused: {:?} produced {out:?}",
+                String::from_utf8_lossy(payload)
+            );
+        }
+
+        // A control character in a path is not a path, and it corrupts every
+        // place the value is later displayed or quoted.
+        let mut ex = Extractor::new();
+        assert!(
+            !ex.feed(b"\x1b]9;9;C:\\ok\x1b]0;title\x07")
+                .iter()
+                .any(|c| matches!(c, Chunk::Cwd(_))),
+            "a cwd carrying a control character must be refused"
+        );
+
+        // Ordinary reports still work — the guard must not simply say no.
+        for (payload, want) in [
+            (
+                &b"\x1b]9;9;C:\\Users\\me\\proj\x07"[..],
+                "C:\\Users\\me\\proj",
+            ),
+            (&b"\x1b]9;9;C:/Users/me/proj\x07"[..], "C:/Users/me/proj"),
+            (&b"\x1b]9;9;C:\\\x07"[..], "C:\\"),
+            (&b"\x1b]9;9;/home/me/proj\x07"[..], "/home/me/proj"),
+            (&b"\x1b]9;9;/\x07"[..], "/"),
+            // MSYS/Cygwin spell a Windows drive this way.
+            (&b"\x1b]9;9;/c/Users/me\x07"[..], "/c/Users/me"),
+            // The WSL plan-9 shares. UNC in spelling only — served by the
+            // local P9 redirector, no SMB handshake and no credentials — and
+            // `wslpath -w "$PWD"` is exactly what Microsoft's documented
+            // OSC 9;9 WSL integration emits, which is the integration this
+            // code exists to harvest.
+            (
+                &b"\x1b]9;9;\\\\wsl.localhost\\Ubuntu\\home\\me\x07"[..],
+                "\\\\wsl.localhost\\Ubuntu\\home\\me",
+            ),
+            (
+                &b"\x1b]9;9;\\\\wsl$\\Ubuntu\\home\\me\x07"[..],
+                "\\\\wsl$\\Ubuntu\\home\\me",
+            ),
+            // Case-insensitively, since Windows path components are.
+            (
+                &b"\x1b]9;9;\\\\WSL.LOCALHOST\\Ubuntu\\home\x07"[..],
+                "\\\\WSL.LOCALHOST\\Ubuntu\\home",
+            ),
+            (
+                &b"\x1b]7;file://localhost/home/me/proj\x07"[..],
+                "/home/me/proj",
+            ),
+            // Non-ASCII survives intact.
+            (
+                "\x1b]9;9;/home/me/été/日本\x07".as_bytes(),
+                "/home/me/été/日本",
+            ),
+        ] {
+            let mut ex = Extractor::new();
+            let out = ex.feed(payload);
+            assert!(
+                out.iter().any(|c| matches!(c, Chunk::Cwd(p) if p == want)),
+                "an ordinary cwd must still be reported: {:?} produced {out:?}",
+                String::from_utf8_lossy(payload)
+            );
+        }
     }
 
     /// v2.29.0: OSC 9;9 (ConEmu "set working directory") is consumed as a Cwd

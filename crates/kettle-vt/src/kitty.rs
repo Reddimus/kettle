@@ -872,13 +872,19 @@ impl KittyState {
         let Some(img) = decode_with_budget(&control, &payload, &self.budget) else {
             return KittyOut::None;
         };
+        // Whether this id is addressable afterwards — i.e. whether `a=p,i=`
+        // finds the data and `a=d,i=` can free it. Id 0 never is (it names
+        // no slot), and neither is an id the saturated store turned away.
+        let mut addressable = false;
         if id != 0 {
             // Cap stored-image count. An update to an
             // already-present id is always allowed (replaces in
             // place — no growth); a brand-new id past saturation is
             // refused so an attacker can't grow `store` indefinitely
             // by completing distinct `i=` transmissions.
-            if self.store.contains_key(&id) || self.store.len() < self.budget.limits().placements {
+            addressable =
+                self.store.contains_key(&id) || self.store.len() < self.budget.limits().placements;
+            if addressable {
                 self.store.insert(id, img.clone());
                 self.next_image_serial = self.next_image_serial.wrapping_add(1);
                 if let Some(number) = first.get("I").and_then(|v| v.parse::<u32>().ok()) {
@@ -888,10 +894,25 @@ impl KittyState {
                     self.image_numbers.remove(&id);
                 }
             }
+            // `image_numbers` is deliberately left alone when the store
+            // refuses: it is keyed by stored id, so writing an entry for an
+            // absent image would grow a second map past the same cap that
+            // just fired.
         }
         // `U=1` (possibly combined with `a=T`): store + register a virtual
         // placement, but draw nothing at the cursor.
         if first.get("U").map(|v| v == "1").unwrap_or(false) {
+            if !addressable {
+                // A virtual placement is resolved later by looking the image up
+                // by id, so registering one that cannot be looked up leaves
+                // placeholder cells compositing nothing forever.
+                //
+                // `id == 0` is that case too, not only a store refusal: an
+                // `i=0` transmission names no slot, so a `U=1` alongside it
+                // registers a placement nothing can ever resolve. Gating on
+                // `id != 0 && !addressable` let exactly that through.
+                return KittyOut::None;
+            }
             let fz = first.get("z").and_then(|v| v.parse().ok()).unwrap_or(z);
             let placement = first
                 .get("p")
@@ -924,7 +945,12 @@ impl KittyState {
             let fz = first.get("z").and_then(|v| v.parse().ok()).unwrap_or(z);
             KittyOut::Place(Placed {
                 img,
-                id: (id != 0).then_some(id),
+                // An image the store turned away still draws — refusing to
+                // draw it would make images silently stop appearing past the
+                // cap for `icat`/`timg`/`chafa`, which never delete. It just
+                // advertises no id, exactly like an `i=0` transmission, so no
+                // later `a=p,i=` or `a=d,i=` can dangle on it.
+                id: addressable.then_some(id),
                 placement_id: first
                     .get("p")
                     .and_then(|v| v.parse::<u32>().ok())
@@ -1905,6 +1931,60 @@ mod tests {
             cap,
             "update to existing id must replace in place (no growth)"
         );
+    }
+
+    /// A transmit-and-display whose id the saturated store refuses must still
+    /// draw, but must not hand back a placement *for that id*: the client
+    /// could never address it again, since the matching `a=p,i=<id>` finds
+    /// nothing and `a=d,i=<id>` frees nothing. So the placement carries no
+    /// id, exactly like an `i=0` transmission. Dropping the image instead
+    /// would be worse than the dangling id it fixes — `icat`, `timg` and
+    /// `chafa` all send fresh ids and never delete, so a user paging through
+    /// images would watch them silently stop appearing at #257. The `U=1`
+    /// form has no such fallback (a virtual placement is resolved by id
+    /// later), so that one is declined outright.
+    #[test]
+    fn kitty_stored_image_cap_places_without_an_id_it_cannot_store() {
+        let mut k = KittyState::default();
+        let cap = k.budget.limits().placements;
+        for id in 1..=cap as u32 {
+            k.feed(&format!("a=T,i={id},f=32,s=1,v=1;{PX}"));
+        }
+        // Baseline: an id the store does hold still places, with its id.
+        assert!(
+            matches!(k.feed("a=p,i=1"), KittyOut::Place(p) if p.id == Some(1)),
+            "a stored id must still place"
+        );
+
+        let overflow = cap as u32 + 1;
+        let KittyOut::Place(placed) = k.feed(&format!("a=T,i={overflow},f=32,s=1,v=1;{PX}")) else {
+            panic!("transmit+display past store saturation must still draw");
+        };
+        assert_eq!(
+            placed.id, None,
+            "the placement must not advertise an id the store refused"
+        );
+        assert!(
+            k.image(overflow).is_none(),
+            "the refused id must not be stored"
+        );
+        assert!(
+            matches!(k.feed(&format!("a=p,i={overflow}")), KittyOut::None),
+            "the follow-up place must agree that the id is unknown"
+        );
+
+        // The `U=1` form registers into a different map and must be refused
+        // outright on the same grounds: a virtual placement whose image was
+        // never stored composites nothing, and there is no id-less form of
+        // it to fall back to.
+        assert!(
+            matches!(
+                k.feed(&format!("a=T,U=1,i={overflow},c=1,r=1,f=32,s=1,v=1;{PX}")),
+                KittyOut::None
+            ),
+            "a virtual placement must not be registered for a refused image"
+        );
+        assert!(k.virtual_placement(overflow, 0).is_none());
     }
 
     #[test]

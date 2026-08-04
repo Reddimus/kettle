@@ -123,12 +123,24 @@ struct CachedSlot {
 /// least-recently-touched entries. Generic over the key type so the eviction
 /// *policy* is unit-testable with plain keys, without needing a real
 /// `CacheKey` (which can only be constructed from a loaded font face).
+///
+/// This runs on the render thread, inside the frame that overflowed the cache,
+/// over `MAX_GLYPH_SLOTS` (131,072) entries, with `n` = 16,384 — the single
+/// caller evicts down to 7/8 of capacity. Fully sorting them to keep a prefix did `O(len log len)`
+/// comparisons for an answer that needs `O(len)`: partition around the nth
+/// element and take what falls below it. `select_nth_unstable_by_key` is
+/// average linear and leaves the prefix unordered, which is all a victim list
+/// needs — nothing downstream depends on the order they are dropped in.
 fn lru_victims<K: Copy>(ages: impl Iterator<Item = (K, u64)>, n: usize) -> Vec<K> {
     if n == 0 {
         return Vec::new();
     }
     let mut by_age: Vec<(u64, K)> = ages.map(|(k, age)| (age, k)).collect();
-    by_age.sort_unstable_by_key(|&(age, _)| age);
+    if n >= by_age.len() {
+        return by_age.into_iter().map(|(_, k)| k).collect();
+    }
+    // Everything at or before index `n - 1` is <= everything after it.
+    by_age.select_nth_unstable_by_key(n - 1, |&(age, _)| age);
     by_age.truncate(n);
     by_age.into_iter().map(|(_, k)| k).collect()
 }
@@ -662,9 +674,11 @@ impl GlyphPipeline {
         const MAX_GLYPH_SLOTS: usize = 131_072;
         if self.slots.len() >= MAX_GLYPH_SLOTS {
             // Evict down to 7/8 capacity rather than one slot at a time, so
-            // the O(n log n) age scan amortizes over the next ~16K misses
-            // instead of running on every single insert once the cache is
-            // steady-state at the cap.
+            // the age scan amortizes over the next ~16K misses instead of
+            // running on every single insert once the cache is steady-state at
+            // the cap. (The scan is linear, not `O(n log n)` — see
+            // `lru_victims`. This comment said otherwise for as long as the
+            // sort it described was there.)
             let target = MAX_GLYPH_SLOTS - MAX_GLYPH_SLOTS / 8;
             self.evict_lru(self.slots.len().saturating_sub(target));
         }
@@ -949,6 +963,56 @@ mod tests {
         let mut victims = lru_victims(ages.into_iter(), 10);
         victims.sort_unstable();
         assert_eq!(victims, vec![1, 2]);
+        // And exactly as many as exist — the boundary between partitioning and
+        // taking everything.
+        let ages = vec![(1u32, 5u64), (2, 2)];
+        let mut victims = lru_victims(ages.into_iter(), 2);
+        victims.sort_unstable();
+        assert_eq!(victims, vec![1, 2]);
+    }
+
+    /// The victims must be the `n` coldest for every `n`, at a size where the
+    /// difference between partitioning and sorting is real.
+    ///
+    /// Eviction runs on the render thread over as many as `MAX_GLYPH_SLOTS`
+    /// entries, so it partitions rather than sorts. A partition leaves the
+    /// prefix unordered, which is fine — but only if it is still the right
+    /// SET. This checks that against the definition directly.
+    #[test]
+    fn lru_victims_are_the_coldest_set_whatever_the_order_within_it() {
+        // A deterministic scatter of ages with many ties, since real epochs
+        // repeat heavily — every glyph touched in one frame shares an epoch.
+        let entries: Vec<(u32, u64)> = (0..4096u32)
+            .map(|k| (k, u64::from(k.wrapping_mul(2_654_435_761) >> 20)))
+            .collect();
+
+        for n in [1usize, 2, 17, 512, 2048, 4095, 4096] {
+            let mut victims = lru_victims(entries.iter().copied(), n);
+            assert_eq!(victims.len(), n, "n = {n}: wrong number of victims");
+            victims.sort_unstable();
+            victims.dedup();
+            assert_eq!(victims.len(), n, "n = {n}: victims must be distinct keys");
+
+            // Every victim must be at least as cold as every survivor.
+            let picked: std::collections::HashSet<u32> = victims.into_iter().collect();
+            let coldest_survivor = entries
+                .iter()
+                .filter(|(k, _)| !picked.contains(k))
+                .map(|&(_, age)| age)
+                .min();
+            let warmest_victim = entries
+                .iter()
+                .filter(|(k, _)| picked.contains(k))
+                .map(|&(_, age)| age)
+                .max();
+            if let (Some(survivor), Some(victim)) = (coldest_survivor, warmest_victim) {
+                assert!(
+                    victim <= survivor,
+                    "n = {n}: evicted an entry of age {victim} while keeping one of \
+                     age {survivor}"
+                );
+            }
+        }
     }
 
     /// Drift guard (eviction-not-refusal fix). `ensure_glyph` must evict cold
