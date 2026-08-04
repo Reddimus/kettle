@@ -538,20 +538,72 @@ pub(crate) fn clamp_geometry_to_monitors(
     sanitized
 }
 
+// What this process last wrote to each session path, so an unchanged session
+// can skip the durable write. Bounded because `--layout NAME` lets the path
+// vary; a process realistically touches one or two.
+//
+// Thread-local rather than a global lock: every write comes from the winit
+// event-loop thread, and a memo that is merely empty on another thread costs
+// one redundant write, never a wrong one.
+thread_local! {
+    static LAST_WRITTEN: std::cell::RefCell<std::collections::HashMap<PathBuf, String>> =
+        std::cell::RefCell::new(std::collections::HashMap::new());
+}
+
+/// Upper bound on the memo above.
+const MAX_MEMOIZED_SESSION_PATHS: usize = 8;
+
 /// Durable private save. The shared state writer stages the complete JSON in
 /// the destination directory, syncs it, atomically replaces the old snapshot,
 /// and syncs the directory. The resulting file is private (`0600` on Unix).
+///
+/// The durable write is skipped when the file already says exactly this.
+///
+/// This is reached from `handle_action`'s unconditional tail, so it runs on
+/// EVERY keybound action — scrolling, focus moves, `Copy`. The write is
+/// `atomic_replace`, which stages the bytes, `sync_all()`s them, applies the
+/// Windows DACL, renames, and then fsyncs the parent directory: measured at
+/// 30–100 ms, synchronously, on the event-loop thread. Holding
+/// `Ctrl+Shift+Down` for scrollback at key-repeat rate therefore asked for
+/// tens of blocking disk writes a second and the window stopped responding.
+///
+/// Serializing is about a millisecond; it is the durability syscalls that
+/// cost, and almost none of those actions change the session at all. Comparing
+/// the serialized text against what this process last wrote there removes the
+/// cost without weakening any guarantee — a real change is still written
+/// immediately and synchronously, exactly as before.
+///
+/// The memo is re-checked against the file's current size, so a session file
+/// deleted or replaced out from under us is rewritten rather than assumed to
+/// still be there.
 pub(crate) fn save_to_path(s: &Session, p: &std::path::Path) -> std::io::Result<()> {
     if let Some(dir) = p.parent() {
         std::fs::create_dir_all(dir)?;
     }
     let text = serde_json::to_string_pretty(s)
         .map_err(|e| std::io::Error::other(format!("serialize session: {e}")))?;
+    let already_on_disk = LAST_WRITTEN.with(|memo| {
+        memo.borrow().get(p).is_some_and(|previous| {
+            *previous == text
+                && std::fs::metadata(p).is_ok_and(|meta| meta.len() == text.len() as u64)
+        })
+    });
+    if already_on_disk {
+        return Ok(());
+    }
     kettle_state::atomic_replace(
         p,
         text.as_bytes(),
         kettle_state::AtomicWriteOptions::PRIVATE,
-    )
+    )?;
+    LAST_WRITTEN.with(|memo| {
+        let mut memo = memo.borrow_mut();
+        if memo.len() >= MAX_MEMOIZED_SESSION_PATHS && !memo.contains_key(p) {
+            memo.clear();
+        }
+        memo.insert(p.to_path_buf(), text);
+    });
+    Ok(())
 }
 
 /// Read and parse a session file at `path`. A read error (no file, HOME
@@ -688,6 +740,123 @@ fn stash_oversize_session(path: &std::path::Path, size: u64, limit: u64) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A directory the PRIVATE atomic write will accept.
+    ///
+    /// `%TEMP%` is not one on Windows: it grants deletion rights to an
+    /// untrusted principal, and `atomic_replace` refuses to create a private
+    /// file under a parent like that. `kettle-state`'s own tests solve this
+    /// the same way, by staging under the user-private profile instead.
+    fn private_tempdir() -> tempfile::TempDir {
+        #[cfg(windows)]
+        {
+            let base = std::env::var_os("LOCALAPPDATA")
+                .or_else(|| std::env::var_os("USERPROFILE"))
+                .expect("Windows tests require LOCALAPPDATA or USERPROFILE");
+            tempfile::Builder::new()
+                .prefix("kettle-session-test-")
+                .tempdir_in(base)
+                .expect("create test directory in the user-private profile")
+        }
+        #[cfg(not(windows))]
+        {
+            tempfile::tempdir().expect("create test directory")
+        }
+    }
+
+    /// An unchanged session must not be written again, and a changed one must.
+    ///
+    /// `save_to_path` runs from `handle_action`'s unconditional tail, so it
+    /// fires on every keybound action — including scrolling, which changes
+    /// nothing in the session. Each write fsyncs the file and its parent
+    /// directory on the event-loop thread, so the repeats were a measurable
+    /// stall, not just wasted I/O.
+    ///
+    /// Detected by the file's modification time rather than its contents: the
+    /// bytes are identical either way, so only "was the file rewritten?"
+    /// distinguishes the two, and that is the thing being fixed.
+    #[test]
+    fn an_unchanged_session_skips_the_durable_write() {
+        let dir = private_tempdir();
+        let path = dir.path().join("session.json");
+        let session = Session {
+            tabs: Vec::new(),
+            active: 0,
+            theme: None,
+            windows: Vec::new(),
+        };
+
+        save_to_path(&session, &path).expect("first write");
+        let first = std::fs::metadata(&path).expect("written").modified().ok();
+        assert!(path.exists(), "the first save must create the file");
+
+        // Coarse filesystem timestamps would make an "unchanged mtime" pass
+        // for the wrong reason, so move the recorded time far enough back
+        // that any rewrite is unambiguous.
+        let backdated = std::time::SystemTime::now() - std::time::Duration::from_secs(60);
+        let file = std::fs::OpenOptions::new()
+            .write(true)
+            .open(&path)
+            .expect("reopen");
+        file.set_modified(backdated).expect("backdate");
+        drop(file);
+        let stamped = std::fs::metadata(&path).expect("stat").modified().ok();
+        assert_ne!(
+            stamped, first,
+            "the fixture must actually move the timestamp, or the assertion \
+             below cannot fail"
+        );
+
+        save_to_path(&session, &path).expect("second write");
+        assert_eq!(
+            std::fs::metadata(&path).expect("stat").modified().ok(),
+            stamped,
+            "an identical session must not be rewritten"
+        );
+
+        // A real change still writes, immediately.
+        let changed = Session {
+            active: 3,
+            ..Session {
+                tabs: Vec::new(),
+                active: 0,
+                theme: None,
+                windows: Vec::new(),
+            }
+        };
+        save_to_path(&changed, &path).expect("third write");
+        assert_ne!(
+            std::fs::metadata(&path).expect("stat").modified().ok(),
+            stamped,
+            "a changed session must be written"
+        );
+        let reloaded: Session =
+            serde_json::from_slice(&std::fs::read(&path).expect("read")).expect("parse");
+        assert_eq!(reloaded.active, 3);
+    }
+
+    /// The memo must not stand in for the file. A session file deleted out
+    /// from under the process has to be recreated, not assumed present.
+    #[test]
+    fn a_deleted_session_file_is_rewritten_despite_the_memo() {
+        let dir = private_tempdir();
+        let path = dir.path().join("session.json");
+        let session = Session {
+            tabs: Vec::new(),
+            active: 0,
+            theme: None,
+            windows: Vec::new(),
+        };
+        save_to_path(&session, &path).expect("first write");
+        std::fs::remove_file(&path).expect("remove");
+        assert!(!path.exists(), "fixture must actually remove the file");
+
+        save_to_path(&session, &path).expect("rewrite");
+        assert!(
+            path.exists(),
+            "an identical session whose file is gone must still be written"
+        );
+    }
 
     fn leaf_node() -> SNode {
         SNode::Leaf {

@@ -563,15 +563,7 @@ pub fn encode(
             // collapses it, which is why Ctrl+I reports 105 rather than 9.
             return Some(sequence);
         }
-        // Preserve xterm's Meta+Control form for C-M-v. The generic Ctrl+Alt
-        // path historically treated every character as printable Meta input
-        // (ESC + `v`), losing Control. Keep this scoped to C-M-v so
-        // AltGr-produced characters on international layouts retain their
-        // existing text behavior.
-        if ctrl && alt && c.eq_ignore_ascii_case(&'v') {
-            return Some(vec![0x1b, 0x16]);
-        }
-        if ctrl && !alt {
+        if ctrl && let Some(code) = legacy_control_code(c) {
             // Full xterm control-code table for Ctrl+<punctuation> — the
             // letters are the obvious A→0x01..Z→0x1A range, the rest is
             // the seven-bit C0 row terminals have produced since VT100:
@@ -584,8 +576,41 @@ pub fn encode(
             // Shifted partners such as `{`, `|`, `}`, and `~` must retain the
             // same aliases at level one; emitting them literally would make
             // that compatibility level disagree with the physical key matrix.
-            if let Some(code) = legacy_control_code(c) {
-                return Some(vec![code]);
+            //
+            // Adding Alt prefixes ESC — xterm's Meta+Control form. This used
+            // to be scoped to `C-M-v` alone, so every other `C-M-<char>` fell
+            // through to the printable-Meta path below and silently lost
+            // Control: `C-M-f` ran `forward-word` instead of `forward-sexp`
+            // in Emacs, and no `\e\C-h` readline binding could fire. Worse,
+            // that path emitted the character verbatim after ESC, so
+            // `Ctrl+Alt+[`, `]`, `_` and `Shift+P` wrote a bare CSI, OSC, APC
+            // or DCS introducer into the PTY and the terminal swallowed
+            // whatever the user typed next as sequence parameters.
+            //
+            // The scoping was justified by AltGr on international layouts.
+            // winit's `get_agnostic_mods` does clear CONTROL *and* ALT for
+            // AltGr — but only when the RIGHT Alt is down
+            // (`has_alt_graph && key_pressed(VK_RMENU)`), and Windows also
+            // documents left-Ctrl + left-Alt as an AltGr substitute. That
+            // substitute arrives here as plain CONTROL|ALT, and on a German
+            // layout it is how you type `@`. Turning it into DC1 would be a
+            // worse answer than the wrong-character one already given.
+            //
+            // The discriminator is whether the layout actually composed
+            // something: AltGr+Q reports the logical key `q` with `@` as the
+            // committed text, so the two DIFFER. A plain `Ctrl+Alt+V` reports
+            // `v` and `v` — the platform echoing the base character, not a
+            // composition — and must still take the table. Printability alone
+            // is not enough to tell them apart. (X11 and Wayland are
+            // unaffected either way: AltGr is Mod5 there, never ALT.)
+            let composed_a_character = alt
+                && text.is_some_and(|t| {
+                    !t.is_empty()
+                        && !t.eq_ignore_ascii_case(s.as_str())
+                        && !t.chars().any(char::is_control)
+                });
+            if !composed_a_character {
+                return Some(if alt { vec![0x1b, code] } else { vec![code] });
             }
         }
         let mut out = Vec::new();
@@ -1740,6 +1765,141 @@ mod tests {
         assert_eq!(
             encode(&sp(), None, ModifiersState::ALT, mode),
             Some(vec![0x1b, b' '])
+        );
+    }
+
+    /// `Ctrl+Alt+<char>` is xterm's Meta+Control form: ESC then the C0 code.
+    ///
+    /// It used to be special-cased for `C-M-v` alone, so every other chord
+    /// fell through to the printable-Meta path and lost Control — and for the
+    /// four characters whose C0 codes are sequence introducers it wrote a bare
+    /// CSI / OSC / APC / DCS opener into the PTY, after which the terminal
+    /// consumed whatever the user typed next as parameters.
+    #[test]
+    fn ctrl_alt_characters_keep_control_and_never_emit_a_bare_introducer() {
+        use winit::keyboard::Key;
+
+        let mode = TermMode::empty();
+        let ctrl_alt = ModifiersState::CONTROL | ModifiersState::ALT;
+        let encode_char = |c: char, mods: ModifiersState| -> Vec<u8> {
+            let key = Key::Character(c.to_string().into());
+            encode(&key, None, mods, mode).unwrap_or_else(|| panic!("{c} encodes"))
+        };
+
+        for (c, code) in [
+            ('a', 0x01_u8),
+            ('f', 0x06),
+            ('b', 0x02),
+            ('k', 0x0b),
+            ('v', 0x16),
+            // The four that used to escape as introducers.
+            ('[', 0x1b), // CSI
+            (']', 0x1d), // OSC
+            ('_', 0x1f), // APC
+            ('p', 0x10), // DCS, reached as Ctrl+Alt+Shift+P
+        ] {
+            // Precondition: plain Ctrl already produces this C0 code, so the
+            // Alt case below is asserting a real relationship rather than a
+            // restated constant.
+            assert_eq!(
+                encode_char(c, ModifiersState::CONTROL),
+                vec![code],
+                "Ctrl+{c} must be its C0 code"
+            );
+            assert_eq!(
+                encode_char(c, ctrl_alt),
+                vec![0x1b, code],
+                "Ctrl+Alt+{c} must be ESC followed by the C0 code, not ESC {c}"
+            );
+        }
+
+        // The specific regression: never the literal character, which is what
+        // turned these four into sequence openers.
+        for introducer in ['[', ']', '_'] {
+            assert_ne!(
+                encode_char(introducer, ctrl_alt),
+                vec![0x1b, introducer as u8],
+                "Ctrl+Alt+{introducer} must not write a bare introducer"
+            );
+        }
+
+        // A character with no C0 code keeps its printable-Meta behaviour, so
+        // an AltGr-produced glyph on an international layout is untouched.
+        assert_eq!(
+            encode_char('é', ctrl_alt),
+            {
+                let mut expected = vec![0x1b];
+                expected.extend_from_slice("é".as_bytes());
+                expected
+            },
+            "a character outside the C0 table stays printable Meta input"
+        );
+
+        // The AltGr substitute. winit only neutralizes AltGr for the RIGHT
+        // Alt, but Windows documents left-Ctrl + left-Alt as a substitute, so
+        // a German `Ctrl+Alt+Q` — how you type `@` — reaches this branch as
+        // plain CONTROL|ALT with `@` as the committed text. The C0 table must
+        // not claim it: `q` is in the table, and answering DC1/XON to a
+        // request for `@` would be worse than the wrong character the old
+        // code gave.
+        let composed = encode(
+            &Key::Character("q".to_string().into()),
+            Some("@"),
+            ctrl_alt,
+            mode,
+        )
+        .expect("composed key encodes");
+        assert_ne!(
+            composed,
+            vec![0x1b, 0x11],
+            "a press that committed a printable character must not be \
+             encoded as that key's control code"
+        );
+
+        // And a chord that committed no printable text still takes the table,
+        // which is what keeps the fix above from disabling itself.
+        assert_eq!(
+            encode(
+                &Key::Character("a".to_string().into()),
+                None,
+                ctrl_alt,
+                mode
+            ),
+            Some(vec![0x1b, 0x01])
+        );
+        // Nor is the platform echoing the base character a composition: the
+        // committed text has to DIFFER from the logical key. Printability
+        // alone would have flattened every `Ctrl+Alt+<letter>` on Windows,
+        // where the text is usually the letter itself.
+        assert_eq!(
+            encode(
+                &Key::Character("a".to_string().into()),
+                Some("a"),
+                ctrl_alt,
+                mode
+            ),
+            Some(vec![0x1b, 0x01])
+        );
+        assert_eq!(
+            encode(
+                &Key::Character("A".to_string().into()),
+                Some("a"),
+                ctrl_alt,
+                mode
+            ),
+            Some(vec![0x1b, 0x01]),
+            "a case-only difference is not a composition either"
+        );
+        // A committed CONTROL character is not composition — that is just the
+        // platform echoing the chord back, and the table still applies.
+        assert_eq!(
+            encode(
+                &Key::Character("a".to_string().into()),
+                Some("\u{1}"),
+                ctrl_alt,
+                mode
+            ),
+            Some(vec![0x1b, 0x01])
         );
     }
 

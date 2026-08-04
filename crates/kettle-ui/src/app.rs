@@ -13450,8 +13450,26 @@ impl App {
     fn snapshot_window(w: &WindowState) -> crate::session::SWindow {
         let s = w.mux.snapshot();
         let geometry = w.window.as_ref().and_then(|win| {
-            let pos = win.outer_position().ok()?;
+            // A minimized window does not report where it will come back to.
+            // Win32 answers `GetWindowRect` with the (-32000, -32000) sentinel
+            // and `GetClientRect` with 0x0, and winit passes both through
+            // verbatim, so snapshotting one persisted a geometry that the
+            // restore clamp could only rescue as far as its 160x120 floor —
+            // the window came back as an unusable stub. Saving no geometry
+            // restores it at the default size instead, which is the honest
+            // answer to "we do not know where this window was".
+            //
+            // The size check is not redundant with `is_minimized`: it is the
+            // observable that actually breaks the restore, and it also covers
+            // a window reporting a degenerate size for any other reason.
+            if win.is_minimized().unwrap_or(false) {
+                return None;
+            }
             let size = win.inner_size();
+            if size.width == 0 || size.height == 0 {
+                return None;
+            }
+            let pos = win.outer_position().ok()?;
             Some(crate::session::SGeometry {
                 x: pos.x,
                 y: pos.y,
@@ -13898,6 +13916,28 @@ impl App {
         // with the other key handlers.
         _event_loop: &winit::event_loop::ActiveEventLoop,
     ) {
+        self.dispatch_confirm_action_arms(ws, action);
+        // The same tail `handle_action` gives every keybind and menu action.
+        //
+        // Answering a confirmation is a second, separate entry point into the
+        // same state changes, and it did not have this: a confirmed pane or
+        // tab close collapsed the layout and repainted it, while the surviving
+        // PTYs kept the rows and columns they had before the close. With
+        // `ask-before-closing` on — which is what the ✕ and Alt+F4 prompts
+        // require — every confirmed close left a shell drawing into part of
+        // its pane with dead space around it, and typing did not heal it;
+        // only some later unrelated action running this tail did.
+        //
+        // It lives here rather than in the arms so a new arm cannot forget it,
+        // which is how the original went missing. `resize_all` is what every
+        // action already pays unconditionally, so no arm needs to opt out —
+        // except a window on its way out, which has nothing left to resize.
+        if !self.pending_window_close {
+            self.resize_all(ws);
+        }
+    }
+
+    fn dispatch_confirm_action_arms(&mut self, ws: &mut WindowState, action: ConfirmAction) {
         match action {
             ConfirmAction::CloseWindow { drop_panes } => {
                 // Carries the requester's intent: confirming a `close_window`
@@ -16243,7 +16283,7 @@ impl App {
                 let b = if crate::input::key_press_uses_kitty_sequence(key, *mods, mode) {
                     b
                 } else {
-                    apply_bs_del_binding(&self.cfg, key, *mods, b)
+                    apply_bs_del_binding(&self.cfg, key, b)
                 };
                 if let Err(message) = extend_ctl_send_key_bytes(&mut bytes, &b) {
                     return Response::err(req.id, ec::BAD_PARAMS, message);
@@ -18498,19 +18538,40 @@ impl App {
 /// the user's `backspace-binding`/`delete-binding`. Extracted in v2.20.0
 /// (review fix) so `send_keys` honors the same remap as GUI keystrokes —
 /// the "same path as a human key press" contract.
-fn apply_bs_del_binding(cfg: &Config, key: &Key, mods: ModifiersState, bytes: Vec<u8>) -> Vec<u8> {
+///
+/// The binding only ever replaces the UNMODIFIED encoding, and the test for
+/// that is the encoded bytes themselves rather than an inspection of the
+/// modifier state. Reasoning from modifiers is what went wrong: Backspace
+/// guarded on `!control && !alt` — correct for its level-0 C0 forms — and
+/// Delete, whose `CSI 3 ~` form carries a modifier parameter for *shift, alt,
+/// control and super alike*, guarded on nothing at all. Since
+/// `delete-binding` defaults to `EscapeSequence`, every modified Delete was
+/// rewritten back to the plain `CSI 3 ~`: `Ctrl+Delete` became byte-identical
+/// to `Delete`, so readline's `kill-word` and every `<C-Del>` / `<S-Del>` /
+/// `<M-Del>` mapping in an editor deleted one character instead.
+///
+/// Comparing against the plain form cannot drift from the encoder, and it is
+/// right for the cases modifier logic keeps missing: a `modifyOtherKeys`
+/// level-1 `Shift+Backspace` (`CSI 27;2;8~`) and any kitty-protocol encoding
+/// are left alone, because an application that negotiated a precise encoding
+/// must not have it overwritten by a legacy remap.
+fn apply_bs_del_binding(cfg: &Config, key: &Key, bytes: Vec<u8>) -> Vec<u8> {
     let Key::Named(named) = key else {
         return bytes;
     };
     use kettle_config::{BackspaceBinding, DeleteBinding};
-    if *named == NamedKey::Backspace && !mods.control_key() && !mods.alt_key() {
+    /// What `input::encode` emits for an unmodified Backspace.
+    const PLAIN_BACKSPACE: &[u8] = &[0x7f];
+    /// What `input::encode` emits for an unmodified Delete.
+    const PLAIN_DELETE: &[u8] = b"\x1b[3~";
+    if *named == NamedKey::Backspace && bytes == PLAIN_BACKSPACE {
         match cfg.backspace_binding {
             BackspaceBinding::AsciiDel => vec![0x7f],
             BackspaceBinding::ControlH => vec![0x08],
             BackspaceBinding::EscapeSequence => b"\x1b[3~".to_vec(),
             BackspaceBinding::Automatic => bytes,
         }
-    } else if *named == NamedKey::Delete {
+    } else if *named == NamedKey::Delete && bytes == PLAIN_DELETE {
         match cfg.delete_binding {
             DeleteBinding::AsciiDel => vec![0x7f],
             DeleteBinding::ControlH => vec![0x08],
@@ -23283,7 +23344,7 @@ impl App {
                     // v2.20.0: shared with `send_keys` (review fix) so the
                     // agent plane honors the same remap as GUI keystrokes.
                     if !input::uses_kitty_sequence(&event, ws.mods, mode) {
-                        bytes = apply_bs_del_binding(&self.cfg, &event.logical_key, ws.mods, bytes);
+                        bytes = apply_bs_del_binding(&self.cfg, &event.logical_key, bytes);
                     }
                     self.write_terminal_input(ws, &bytes);
                 }
@@ -23848,8 +23909,8 @@ mod modal_discipline_guard {
     fn confirm_close_honors_close_returns() {
         let src = include_str!("app.rs").replace("\r\n", "\n");
         let start = src
-            .find("fn dispatch_confirm_action(")
-            .expect("dispatch_confirm_action not found");
+            .find("fn dispatch_confirm_action_arms(")
+            .expect("dispatch_confirm_action_arms not found");
         let rest = &src[start..];
         let end = rest.find("\n    }").expect("fn end");
         let body = &rest[..end];
@@ -23897,6 +23958,60 @@ mod modal_discipline_guard {
             refocus < pane_close,
             "the re-focus must come BEFORE the close, or the close still acts \
              on whatever happens to be focused"
+        );
+    }
+
+    /// Answering a confirmation must end with the same resize tail every
+    /// keybind and menu action gets, and that tail must live in exactly one
+    /// place.
+    ///
+    /// It went missing because `dispatch_confirm_action` is a second entry
+    /// point into the same state changes and simply did not have it, so a
+    /// confirmed close collapsed the layout while the surviving PTYs kept
+    /// their old size. Pinning it to the wrapper — and asserting the arms do
+    /// NOT carry their own — is what stops a future arm from reintroducing
+    /// the gap. A behavioral check needs a live event loop and a window; the
+    /// file's other confirm-dispatch guards are source-level for the same
+    /// reason.
+    #[test]
+    fn confirm_dispatch_resizes_once_for_every_arm() {
+        let src = include_str!("app.rs").replace("\r\n", "\n");
+        // Built at runtime so this guard cannot match its own source.
+        let resize = ["self.", "resize_all(ws);"].concat();
+
+        let body_of = |name: &str| -> String {
+            let start = src.find(name).unwrap_or_else(|| panic!("{name} not found"));
+            let rest = &src[start..];
+            let end = rest.find("\n    }").expect("fn end");
+            rest[..end].to_string()
+        };
+
+        let wrapper = body_of("fn dispatch_confirm_action(");
+        let arms = body_of("fn dispatch_confirm_action_arms(");
+        assert!(
+            wrapper.contains(&resize),
+            "the confirm dispatch must end with the resize tail, or every \
+             confirmed close leaves the surviving panes' PTYs at their \
+             pre-close size"
+        );
+        assert!(
+            wrapper.contains("if !self.pending_window_close"),
+            "a window on its way out has nothing left to resize"
+        );
+        assert!(
+            !arms.contains(&resize),
+            "the tail belongs to the wrapper alone; an arm carrying its own \
+             copy is how the next arm ends up without one"
+        );
+        // The wrapper must actually delegate, or the assertions above pass
+        // against a function that does nothing.
+        assert!(
+            wrapper.contains("self.dispatch_confirm_action_arms(ws, action);"),
+            "the wrapper must delegate to the arms"
+        );
+        assert!(
+            arms.contains("ConfirmAction::ClosePane(target)"),
+            "the arms function must be the one holding the match"
         );
     }
 
@@ -23950,18 +24065,18 @@ mod tests {
     use super::{
         AUTOMATION_RETRY_MIN, App, AutomationRetry, ContextMenuItem, MAX_REMOTE_COMMANDS_PER_BATCH,
         Osc52ClipboardChannel, ParsedRemoteCommandBatch, PendingLuaCommand, PendingLuaCommands,
-        PendingRemoteCommand, RemoteBatchClaim, SplitDrag, apply_output_generation_outcome,
-        apply_remote_title_transition, argv_is_nonlocal_client, assign_mnemonics,
-        cached_pane_cursor_blinking, claim_remote_command_file, context_menu_item_columns,
-        context_menu_max_scroll_offset, context_menu_scroll_for_highlight,
-        context_menu_snapshot_reuse_safe, context_menu_surface_can_fit_row, count_rows_fitting,
-        ctl_input_error, filter_disabled, find_menu_row_y, fit_context_menu_row,
-        input_rejection_message, local_paste_within_limit, modal_swallows_pointer,
-        osc52_clipboard_channel, output_generation_advanced, output_wakeup_needs_paint,
-        pane_cursor_blinking_with, pane_snapshot_keys_match, parse_remote_command_batch,
-        rank_layouts, sanitize_native_window_title, sanitize_title, selection_kind,
-        should_notify_input_rejection, should_poll_remote_window, should_restore_session,
-        should_reveal_after_renderer_init, stage_applied_remote_probe,
+        PendingRemoteCommand, RemoteBatchClaim, SplitDrag, apply_bs_del_binding,
+        apply_output_generation_outcome, apply_remote_title_transition, argv_is_nonlocal_client,
+        assign_mnemonics, cached_pane_cursor_blinking, claim_remote_command_file,
+        context_menu_item_columns, context_menu_max_scroll_offset,
+        context_menu_scroll_for_highlight, context_menu_snapshot_reuse_safe,
+        context_menu_surface_can_fit_row, count_rows_fitting, ctl_input_error, filter_disabled,
+        find_menu_row_y, fit_context_menu_row, input_rejection_message, local_paste_within_limit,
+        modal_swallows_pointer, osc52_clipboard_channel, output_generation_advanced,
+        output_wakeup_needs_paint, pane_cursor_blinking_with, pane_snapshot_keys_match,
+        parse_remote_command_batch, rank_layouts, sanitize_native_window_title, sanitize_title,
+        selection_kind, should_notify_input_rejection, should_poll_remote_window,
+        should_restore_session, should_reveal_after_renderer_init, stage_applied_remote_probe,
         stage_output_generations_for_frame, stage_remote_targets, startup_inner_size_px,
         typeahead_match,
     };
@@ -23972,6 +24087,124 @@ mod tests {
     use kettle_render::{ContextMenuRow, FrameOutcome, PaneSnapshot};
     use std::sync::Arc;
     use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+
+    /// `backspace-binding` / `delete-binding` must replace only the
+    /// UNMODIFIED key, and had no test of any kind before this one.
+    ///
+    /// Every case drives the real encoder and then the real remap, in the
+    /// order the key path uses them, so the expectations cannot drift from
+    /// what the terminal actually writes. `delete-binding` defaults to
+    /// `EscapeSequence`, so the unguarded Delete arm rewrote *every* modified
+    /// Delete back to the plain `CSI 3 ~` — `Ctrl+Delete` was byte-identical
+    /// to `Delete`, and no `<C-Del>` mapping could ever fire.
+    #[test]
+    fn a_modified_delete_keeps_its_modifier_through_the_binding_remap() {
+        use kettle_core::TermMode;
+        use winit::keyboard::{Key, ModifiersState, NamedKey};
+
+        let cfg = kettle_config::Config::default();
+        let mode = TermMode::empty();
+        let delete = Key::Named(NamedKey::Delete);
+        let encode = |mods: ModifiersState| -> Vec<u8> {
+            crate::input::encode_key_press(&delete, mods, mode).expect("Delete encodes")
+        };
+
+        // Precondition: the default really is the binding that rewrites, and
+        // the encoder really does distinguish these. Without both, the
+        // assertions below would hold for the wrong reason.
+        assert_eq!(
+            cfg.delete_binding,
+            kettle_config::DeleteBinding::EscapeSequence,
+            "this test is about the DEFAULT binding"
+        );
+        let plain = encode(ModifiersState::empty());
+        assert_eq!(plain, b"\x1b[3~");
+
+        for (label, mods) in [
+            ("ctrl", ModifiersState::CONTROL),
+            ("shift", ModifiersState::SHIFT),
+            ("alt", ModifiersState::ALT),
+            (
+                "ctrl+shift",
+                ModifiersState::CONTROL | ModifiersState::SHIFT,
+            ),
+        ] {
+            let encoded = encode(mods);
+            assert_ne!(
+                encoded, plain,
+                "the encoder must distinguish {label}+Delete, or this test \
+                 cannot detect the remap flattening it"
+            );
+            assert_eq!(
+                apply_bs_del_binding(&cfg, &delete, encoded.clone()),
+                encoded,
+                "{label}+Delete must survive the binding remap unchanged"
+            );
+        }
+
+        // The feature itself still works on the unmodified key.
+        let ascii_del = kettle_config::Config {
+            delete_binding: kettle_config::DeleteBinding::AsciiDel,
+            ..kettle_config::Config::default()
+        };
+        assert_eq!(
+            apply_bs_del_binding(&ascii_del, &delete, plain.clone()),
+            vec![0x7f],
+            "an unmodified Delete must still honour the binding"
+        );
+    }
+
+    /// Backspace's binding has the same contract, and the same trap one level
+    /// down: its level-0 forms vary with control and alt, but a
+    /// `modifyOtherKeys` level-2 `Shift+Backspace` is a `CSI 27;2;8~` that the
+    /// old `!control && !alt` guard would have happily flattened to `0x7f`.
+    #[test]
+    fn a_modified_backspace_keeps_its_encoding_through_the_binding_remap() {
+        use kettle_core::TermMode;
+        use winit::keyboard::{Key, ModifiersState, NamedKey};
+
+        let cfg = kettle_config::Config {
+            backspace_binding: kettle_config::BackspaceBinding::ControlH,
+            ..kettle_config::Config::default()
+        };
+        let backspace = Key::Named(NamedKey::Backspace);
+        let plain =
+            crate::input::encode_key_press(&backspace, ModifiersState::empty(), TermMode::empty())
+                .expect("Backspace encodes");
+        assert_eq!(plain, vec![0x7f]);
+        assert_eq!(
+            apply_bs_del_binding(&cfg, &backspace, plain),
+            vec![0x08],
+            "an unmodified Backspace must honour `control-h`"
+        );
+
+        for (label, mods, mode) in [
+            ("ctrl", ModifiersState::CONTROL, TermMode::empty()),
+            ("alt", ModifiersState::ALT, TermMode::empty()),
+            // Backspace opts out of level-1 encoding but opts in at level 2
+            // for anything that is not bare Control, so this is the level
+            // where Shift produces a distinct sequence.
+            (
+                "shift at modifyOtherKeys level 2",
+                ModifiersState::SHIFT,
+                TermMode::MODIFY_OTHER_KEYS_2,
+            ),
+        ] {
+            let encoded =
+                crate::input::encode_key_press(&backspace, mods, mode).expect("Backspace encodes");
+            assert_ne!(
+                encoded,
+                vec![0x7f],
+                "the encoder must distinguish {label}+Backspace, or this case \
+                 cannot detect the remap flattening it"
+            );
+            assert_eq!(
+                apply_bs_del_binding(&cfg, &backspace, encoded.clone()),
+                encoded,
+                "{label}+Backspace must survive the binding remap unchanged"
+            );
+        }
+    }
 
     #[test]
     fn input_rejections_have_distinct_rpc_semantics() {
@@ -25701,19 +25934,57 @@ mod tests {
         );
     }
 
+    /// The production half of this file: everything above the test module.
+    ///
+    /// A source guard that searches the WHOLE file also searches its own
+    /// assertions, so every plain `src.contains("…")` matches the needle
+    /// written one line above it and passes whether or not the production code
+    /// is there at all. That is not hypothetical here: `split_divider_drag_is_wired`
+    /// went on passing after the multi-window refactor threaded `ws` through
+    /// `split_drag_at` and `split_seam_hover_icon`, with zero production
+    /// matches for either needle — and it still passed with the entire
+    /// press-to-start-drag block deleted, while rustc reported both functions
+    /// as dead code.
+    ///
+    /// Cutting the test module off first removes the whole class instead of
+    /// patching one needle at a time. Guards that need to search their own
+    /// module's helpers can still use `include_str!` directly.
+    fn production_source() -> String {
+        let src = include_str!("app.rs").replace("\r\n", "\n");
+        let marker = "\n#[cfg(test)]\nmod tests {";
+        let cut = src
+            .find(marker)
+            .expect("app.rs must have a test module to slice off");
+        let production = src[..cut].to_string();
+        assert!(
+            !production.contains("fn production_source()"),
+            "the slice must exclude the test module, or every guard built on \
+             it still self-matches"
+        );
+        production
+    }
+
     /// Drift guard. Mouse drag-to-resize of split dividers is
     /// wired across three event handlers (press starts the drag, move applies
     /// the new ratio, up/focus-loss ends it) plus a hover resize-cursor. A
     /// behavioral test needs a window + a real mouse drag (and the geometry math
     /// is already unit-tested in `mux::node_tests`), so pin the wiring at the
     /// source level.
+    ///
+    /// Every needle below is matched against the production slice only, so a
+    /// signature change that leaves the guard behind fails it instead of
+    /// feeding it its own text.
     #[test]
     fn split_divider_drag_is_wired() {
-        let src = include_str!("app.rs");
+        let src = production_source();
         // Press starts the drag from a seam hit-test.
         assert!(
-            src.contains("if let Some(drag) = self.split_drag_at(area, px, py)"),
+            src.contains("let Some(drag) = self.split_drag_at(ws, area, px, py)"),
             "left-press must start a split-divider drag on a seam hit"
+        );
+        assert!(
+            src.contains("ws.dragging_split = Some(drag);"),
+            "the seam hit must actually latch the drag"
         );
         // Move applies the new ratio.
         assert!(
@@ -25721,8 +25992,7 @@ mod tests {
                 && src.contains("ws.mux.set_split_ratio(ws.mux.active, &path, ratio);"),
             "CursorMoved must apply the dragged split ratio"
         );
-        // Up + focus-loss end the drag (distinctive comments at each site, so
-        // this guard doesn't self-match its own assertion literals).
+        // Up + focus-loss end the drag.
         assert!(
             src.contains("End any split-divider drag on left-button up."),
             "the split drag must be cleared on left-button up"
@@ -25733,7 +26003,7 @@ mod tests {
         );
         // Hover shows a resize cursor.
         assert!(
-            src.contains(".or_else(|| self.split_seam_hover_icon())"),
+            src.contains(".or_else(|| self.split_seam_hover_icon(ws))"),
             "hovering a divider must show the resize cursor"
         );
     }
@@ -28128,10 +28398,10 @@ mod tests {
         // The confirm dialog's dispatch must finish the SAME way the
         // direct path does — no separate, divergent apply logic.
         let dispatch = src
-            .split("fn dispatch_confirm_action(")
+            .split("fn dispatch_confirm_action_arms(")
             .nth(1)
             .and_then(|s| s.split("\n    fn ").next())
-            .expect("dispatch_confirm_action body present");
+            .expect("dispatch_confirm_action_arms body present");
         assert!(
             dispatch.contains("ConfirmAction::RebindKeybind {")
                 && dispatch.contains("self.apply_keybind_rebind(trig, act, action_name);"),

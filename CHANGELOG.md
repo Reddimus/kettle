@@ -6,6 +6,136 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+  Findings from an audit of `kettle-ui` — the largest crate, and the one
+  holding the UI/UX states and the AstroNvim / tmux / agent-CLI input surface —
+  plus the last of the render residuals from the 2.47.0 review.
+
+  ### Performance
+  - **The starfield evaluated its whole model once per star per pixel.** The
+    hash, the angle, the radial ease, the colour lookup and the sRGB decode all
+    lived inside the fragment shader's per-star loop, and none of them depend on
+    the pixel being shaded — at 4K that was roughly 456 million star-iterations
+    a frame, about ten transcendentals apiece, recomputing 55 stars' worth of
+    values over and over.
+
+    Everything pixel-independent is hoisted out. The angle, phase and colour are
+    fixed for the life of the field and are computed once at startup; the radial
+    position, radii and brightness change with time and resolution and are
+    computed once per frame for 55 stars, then uploaded. What is left in the
+    shader is the part that genuinely varies per pixel: the distance to each
+    star and the two falloff terms, one `exp` instead of ten transcendentals.
+    Stars too dim to see are dropped before upload, so they no longer cost a
+    `continue` on every pixel.
+
+    The brightness curve is production code now rather than a copy kept in the
+    test module, so the tests that pin the visual contract drive the function
+    that actually runs. A GPU test renders a real frame and checks the stars
+    land where the CPU placed them, which is the only thing that can catch a
+    layout disagreement between the Rust uniform struct and the hand-written
+    WGSL — verified by swapping the struct's two members and watching it go red
+    while every CPU test stayed green.
+
+  ### Fixed
+  - **Every modified Delete lost its modifier, under the shipped default.**
+    `delete-binding` defaults to `escape-sequence`, and the remap that
+    implements it had no modifier guard, so it rewrote `Ctrl+Delete`,
+    `Shift+Delete` and `Alt+Delete` back to the plain `CSI 3 ~`. `Ctrl+Delete`
+    was byte-identical to `Delete`: readline's `kill-word` deleted one
+    character, and no `<C-Del>` / `<S-Del>` / `<M-Del>` mapping in an editor
+    could ever fire. It hit both input planes — real keystrokes and agent
+    `send_keys` — and the remap had no test of any kind.
+
+    The binding now replaces only the *unmodified* encoding, and decides that
+    by comparing the encoded bytes rather than inspecting modifier state.
+    Reasoning from modifiers is what went wrong in the first place: Backspace
+    guarded on control and alt, correct for its C0 forms, while Delete's
+    `CSI 3 ~` carries a parameter for shift, alt, control and super alike.
+    Comparing against the plain form cannot drift from the encoder, and it also
+    leaves `modifyOtherKeys` and kitty-protocol encodings alone — an
+    application that negotiated a precise encoding should not have it
+    overwritten by a legacy remap.
+
+  - **`Ctrl+Alt+<char>` dropped Control, and four of them wrote a bare escape
+    introducer into the terminal.** The Meta+Control form was special-cased for
+    `C-M-v` alone; every other chord fell through to the printable-Meta path,
+    so `C-M-f` ran `forward-word` instead of `forward-sexp` in Emacs and no
+    `\e\C-h` readline binding fired. Worse, that path emitted the character
+    verbatim after `ESC`, so `Ctrl+Alt+[`, `]`, `_` and `Shift+P` sent a CSI,
+    OSC, APC or DCS opener to the shell and the terminal then consumed
+    whatever was typed next as sequence parameters.
+
+    The whole C0 table takes the Meta+Control form now. The scoping had been
+    justified by AltGr on international layouts, but that hazard cannot reach
+    the branch: winit clears CONTROL *and* ALT whenever the layout has AltGr
+    and the right Alt is down, and on X11/Wayland AltGr is Mod5, never ALT. A
+    character outside the ASCII control table is unaffected either way.
+
+  - **Answering a close confirmation left the surviving panes' PTYs at their
+    pre-close size.** Every keybind and menu action ends with a resize; the
+    confirm dispatch is a separate entry point and did not. With
+    `ask-before-closing` on — which the ✕ and Alt+F4 prompts require — a
+    confirmed pane or tab close collapsed the layout and repainted it while the
+    shells kept their old rows and columns, so a tmux, vim or agent CLI drew
+    into part of its pane with dead space around it. Typing did not heal it;
+    only some later unrelated action did. The resize is now the dispatch's
+    tail, in one place, so a new arm cannot forget it.
+
+  - **Minimizing a window persisted it as a 160×120 stub.** The session
+    snapshot read the window's position and size with no minimized check, and
+    Win32 answers a minimized window with the `(-32000, -32000)` sentinel and a
+    0×0 client rect, which winit passes through verbatim. The restore clamp
+    could only rescue that as far as its floor, so the window came back
+    unusable. A window that cannot say where it will return to now saves no
+    geometry and restores at the default size.
+
+  - **Dragging a tab reordered the other tabs.** `move_active_tab` swapped,
+    which is only the same as moving when the distance is exactly one. The drag
+    handler passes `target_index - active`, Windows coalesces mouse motion so a
+    single event can cross several narrow segments, and an overshoot past the
+    edge clamps to the last one — so the tab at the destination teleported back
+    to the dragged tab's original slot. It relocates now, sliding whatever it
+    passes. The shipped test never asserted the order of the tabs it did not
+    drag, so it stayed green under both meanings; it compares the whole bar now.
+
+  - **The session file was rewritten, durably, on every keybound action.**
+    `handle_action`'s unconditional tail saves the session, and the save is an
+    atomic replace that stages the bytes, `sync_all()`s them, applies the
+    Windows DACL, renames, and fsyncs the parent directory — 30–100 ms,
+    synchronously, on the event-loop thread. Since most of the ~200 action arms
+    fall through to that tail, holding `Ctrl+Shift+Down` to scroll asked for
+    tens of blocking disk writes a second and the window stopped responding.
+
+    Serializing costs about a millisecond; it is the durability syscalls that
+    cost, and almost none of those actions change the session at all. An
+    unchanged session skips the write now. A real change is still written
+    immediately and synchronously, so no guarantee moved, and the memo is
+    re-checked against the file's size so a session deleted out from under the
+    process is rewritten rather than assumed.
+
+  - **Translucent backgrounds composited too bright, and translucent
+    screenshots were wrong in both directions.** Closing the last open item
+    from the 2.47.0 premultiplied-alpha fix. Every pipeline that draws over the
+    frame's clear treats the destination as premultiplied — `quad` and
+    `imgpipe` through `PREMULTIPLIED_ALPHA_BLENDING`, `glyphpipe` through
+    `ALPHA_BLENDING`, whose `OneMinusSrcAlpha` destination factor is the
+    premultiplied "over" operator. The clear is the one write in the frame that
+    does not pass through a blend, so it is the only one that has to
+    premultiply itself, and it wrote straight colour instead. Measured on the
+    GPU: a 50%-alpha black quad over a 50%-alpha white background reads back at
+    188 with the straight clear and 156 with the correct one.
+
+    The multiply belongs in linear space, because an sRGB attachment is decoded
+    before blending and re-encoded on write. Only `PreMultiplied` surfaces get
+    it: `Opaque` discards alpha at composite time, so scaling would only darken
+    the surface toward black, and `PostMultiplied` divides it back out.
+
+    The same chain ran into the capture paths, where it was worse: PNG stores
+    straight alpha, and both the offscreen `--screenshot` and the live-surface
+    `ctl screenshot` saved premultiplied pixels unconverted. Both now convert,
+    in the space matching the attachment's format — a plain `Unorm` surface
+    blends on the stored bytes, an sRGB one in linear, and applying either
+    reciprocal in the other's space leaves the capture visibly off.
+
 ## [2.47.0] — 2026-08-03
 
   Follow-through on the review of the 2.46.0 fixes: the defects that review

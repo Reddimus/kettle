@@ -2244,22 +2244,32 @@ impl Mux {
         }
     }
 
-    /// Swap the active tab with its neighbor `delta` positions away.
-    /// `delta > 0` moves the tab right, `delta < 0` moves it left. Clamps
-    /// at the edges (no wrap, matching iTerm2 / Ghostty / WezTerm — wrap
-    /// would have the tab bar lurch across the bar on every press).
-    /// Returns `true` if the tab actually moved.
+    /// Move the active tab `delta` positions along the bar, sliding every tab
+    /// it passes over back by one. `delta > 0` moves the tab right, `delta <
+    /// 0` moves it left. Clamps at the edges (no wrap, matching iTerm2 /
+    /// Ghostty / WezTerm — wrap would have the tab bar lurch across the bar on
+    /// every press). Returns `true` if the tab actually moved.
+    ///
+    /// This used to `swap`, which is only the same thing when `|delta| == 1`:
+    /// for anything larger the tab sitting at the destination teleported back
+    /// to the dragged tab's original slot. Drag-to-reorder reaches larger
+    /// deltas routinely — the drag handler passes
+    /// `tab_drag_target_index(cursor_x) - active`, Windows coalesces
+    /// `WM_MOUSEMOVE` so one event can cross several narrow segments, and an
+    /// overshoot past the right edge clamps to the LAST segment. So dragging
+    /// one tab silently reordered the others.
     pub fn move_active_tab(&mut self, delta: i32) -> bool {
         let n = self.tabs.len();
         if n < 2 || delta == 0 {
             return false;
         }
-        let from = self.active as i32;
-        let to = (from + delta).clamp(0, n as i32 - 1) as usize;
-        if to == self.active {
+        let from = self.active;
+        let to = (from as i32 + delta).clamp(0, n as i32 - 1) as usize;
+        if to == from {
             return false;
         }
-        self.tabs.swap(self.active, to);
+        let tab = self.tabs.remove(from);
+        self.tabs.insert(to, tab);
         self.active = to;
         true
     }
@@ -4746,10 +4756,15 @@ mod node_tests {
     }
 
     #[test]
-    fn move_active_tab_swaps_and_clamps() {
+    fn move_active_tab_relocates_and_clamps() {
         // Build a 4-tab mux without spawning real terminals; use the leaf
-        // ids as a fingerprint so we can verify the active tab actually
-        // moved (not just that the index changed).
+        // ids as a fingerprint so we can verify the WHOLE bar, not just the
+        // tab that moved.
+        //
+        // Asserting only the dragged tab is what let the `swap` bug ship:
+        // the old test checked the moved tab's new slot and never looked at
+        // the others, so it stayed green under both semantics. Every case
+        // below compares the entire order.
         let mut m = Mux::new();
         for id in 1..=4u64 {
             m.tabs.push(Tab {
@@ -4762,24 +4777,47 @@ mod node_tests {
                 bell: false,
             });
         }
-        // Move tab at index 1 (id=2) one place right → swap with id=3.
+        let order = |m: &Mux| -> Vec<u64> {
+            m.tabs
+                .iter()
+                .map(|tab| match tab.root {
+                    Node::Leaf(id) => id,
+                    _ => u64::MAX,
+                })
+                .collect()
+        };
+        assert_eq!(order(&m), vec![1, 2, 3, 4]);
+
+        // One place right is the case where relocating and swapping agree.
         m.active = 1;
         assert!(m.move_active_tab(1));
         assert_eq!(m.active, 2);
-        assert!(matches!(m.tabs[1].root, Node::Leaf(3)));
-        assert!(matches!(m.tabs[2].root, Node::Leaf(2)));
-        // Move the same tab three steps right — clamps to the last index.
+        assert_eq!(order(&m), vec![1, 3, 2, 4]);
+
+        // MORE than one place is where they diverge, and it is what
+        // drag-to-reorder actually produces: the handler passes
+        // `target_index - active`, one coalesced mouse move can cross several
+        // segments, and an overshoot clamps to the last one. Everything the
+        // dragged tab passes slides back by one; nothing teleports.
+        m.active = 0;
         assert!(m.move_active_tab(3));
         assert_eq!(m.active, 3);
-        assert!(matches!(m.tabs[3].root, Node::Leaf(2)));
-        // No-op moves return false: zero delta, already at the right edge.
+        assert_eq!(
+            order(&m),
+            vec![3, 2, 4, 1],
+            "a multi-step move must slide the passed tabs, not swap the ends"
+        );
+
+        // Clamps past the right edge, and reports no-ops honestly.
         assert!(!m.move_active_tab(0));
         assert!(!m.move_active_tab(5));
         assert_eq!(m.active, 3);
-        // Move left clamps at 0.
+        assert_eq!(order(&m), vec![3, 2, 4, 1]);
+
+        // Move left clamps at 0, again sliding rather than swapping.
         assert!(m.move_active_tab(-100));
         assert_eq!(m.active, 0);
-        assert!(matches!(m.tabs[0].root, Node::Leaf(2)));
+        assert_eq!(order(&m), vec![1, 3, 2, 4]);
         // With < 2 tabs the move is a no-op (clamp still leaves us put).
         let mut single = Mux::new();
         single.tabs.push(Tab {
