@@ -902,10 +902,15 @@ impl KittyState {
         // `U=1` (possibly combined with `a=T`): store + register a virtual
         // placement, but draw nothing at the cursor.
         if first.get("U").map(|v| v == "1").unwrap_or(false) {
-            if id != 0 && !addressable {
-                // A virtual placement is resolved later by looking the image
-                // up by id, so registering one the store refused would leave
+            if !addressable {
+                // A virtual placement is resolved later by looking the image up
+                // by id, so registering one that cannot be looked up leaves
                 // placeholder cells compositing nothing forever.
+                //
+                // `id == 0` is that case too, not only a store refusal: an
+                // `i=0` transmission names no slot, so a `U=1` alongside it
+                // registers a placement nothing can ever resolve. Gating on
+                // `id != 0 && !addressable` let exactly that through.
                 return KittyOut::None;
             }
             let fz = first.get("z").and_then(|v| v.parse().ok()).unwrap_or(z);

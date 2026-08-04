@@ -125,8 +125,8 @@ struct CachedSlot {
 /// `CacheKey` (which can only be constructed from a loaded font face).
 ///
 /// This runs on the render thread, inside the frame that overflowed the cache,
-/// over as many as `MAX_GLYPH_SLOTS` (131,072) entries — while `n` is typically
-/// a few thousand. Fully sorting them to keep a prefix did `O(len log len)`
+/// over `MAX_GLYPH_SLOTS` (131,072) entries, with `n` = 16,384 — the single
+/// caller evicts down to 7/8 of capacity. Fully sorting them to keep a prefix did `O(len log len)`
 /// comparisons for an answer that needs `O(len)`: partition around the nth
 /// element and take what falls below it. `select_nth_unstable_by_key` is
 /// average linear and leaves the prefix unordered, which is all a victim list
@@ -674,9 +674,11 @@ impl GlyphPipeline {
         const MAX_GLYPH_SLOTS: usize = 131_072;
         if self.slots.len() >= MAX_GLYPH_SLOTS {
             // Evict down to 7/8 capacity rather than one slot at a time, so
-            // the O(n log n) age scan amortizes over the next ~16K misses
-            // instead of running on every single insert once the cache is
-            // steady-state at the cap.
+            // the age scan amortizes over the next ~16K misses instead of
+            // running on every single insert once the cache is steady-state at
+            // the cap. (The scan is linear, not `O(n log n)` — see
+            // `lru_victims`. This comment said otherwise for as long as the
+            // sort it described was there.)
             let target = MAX_GLYPH_SLOTS - MAX_GLYPH_SLOTS / 8;
             self.evict_lru(self.slots.len().saturating_sub(target));
         }

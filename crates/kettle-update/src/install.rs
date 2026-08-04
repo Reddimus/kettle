@@ -764,6 +764,15 @@ pub fn run_pending_update_helper() -> Result<(), UpdateError> {
     }
 }
 
+/// Is this a version string a kettle installer would have written?
+///
+/// A real semver, or the literal `unknown` that `scripts/install-unix.py` and
+/// `scripts/install.ps1` both write when they cannot determine one. Anything
+/// else did not come from an installer of ours.
+fn is_recorded_install_version(version: &str) -> bool {
+    version == "unknown" || semver::Version::parse(version).is_ok()
+}
+
 pub fn marker_json(version: &str) -> Result<String, UpdateError> {
     let target = current_target().ok_or(UpdateError::UnsupportedPlatform)?;
     let marker = InstallMarker {
@@ -1061,12 +1070,18 @@ fn detect_managed_install_at(executable: &Path) -> Result<ManagedInstall, Update
         || marker.managed_by != "kettle-installer"
         || marker.target != target
         // Every field of this record was validated except the one a human
-        // reads. `marker_json` only ever writes a real semver, so a value that
-        // is not one did not come from a kettle installer — and `install.json`
-        // is what support instructions, packaging scripts, and the user
-        // themselves consult to answer "what is installed here". An unchecked
-        // string there is a claim kettle makes and never verifies.
-        || semver::Version::parse(&marker.version).is_err()
+        // reads. `install.json` is what support instructions, packaging
+        // scripts, and the user themselves consult to answer "what is installed
+        // here", so an unchecked string there is a claim kettle makes and never
+        // verifies.
+        //
+        // `unknown` is accepted because the installers write it. Refusing
+        // anything but a semver reported those installations as UNMANAGED and
+        // broke `kettle update` outright for them — `scripts/install-unix.py`
+        // explicitly permits `unknown` when it cannot determine a version, and
+        // `scripts/install.ps1` substitutes the same word rather than failing.
+        // A validator has to accept what the writers actually write.
+        || !is_recorded_install_version(&marker.version)
     {
         return Err(UpdateError::UnmanagedInstall(
             "the installer marker does not match this kettle build".to_string(),
@@ -6078,6 +6093,36 @@ mod tests {
         // carrying a version no kettle installer would write is not this
         // build's marker.
         marker.channel = "stable".into();
+        // `unknown` is what the installers write when they cannot determine a
+        // version, so it has to verify. Refusing it reported those
+        // installations as unmanaged and broke `kettle update` for them
+        // outright — see `scripts/install-unix.py`, which permits exactly this
+        // string, and `scripts/install.ps1`, which substitutes it.
+        //
+        // On Linux the marker is itself a provenance-recorded file, so
+        // rewriting it invalidates the record that was seeded from its old
+        // bytes; re-seed so this measures the version rule and not a stale
+        // hash. (The negative cases below did not need it — they were already
+        // expected to fail, which is how a positive assertion here catches
+        // what they could not.)
+        marker.version = "unknown".into();
+        fs::write(&marker_path, serde_json::to_vec(&marker).unwrap()).unwrap();
+        #[cfg(target_os = "linux")]
+        seed_linux_install_provenance(&prefix);
+        if let Err(error) = detect_managed_install_at(&executable) {
+            panic!("an installer-written `unknown` version must stay managed: {error}");
+        }
+        // The rule itself, so both halves are pinned independently of the
+        // filesystem fixture above.
+        assert!(is_recorded_install_version("unknown"));
+        assert!(is_recorded_install_version("2.46.0"));
+        assert!(is_recorded_install_version("2.46.0-rc.1"));
+        for rejected in ["", "Unknown", "unknown ", "2.35", "v2.35.0", "latest"] {
+            assert!(
+                !is_recorded_install_version(rejected),
+                "{rejected:?} is not something a kettle installer writes"
+            );
+        }
         for bogus in ["", "not-a-version", "2.35", "v2.35.0", "../../etc/passwd"] {
             marker.version = bogus.into();
             fs::write(&marker_path, serde_json::to_vec(&marker).unwrap()).unwrap();
@@ -6092,7 +6137,15 @@ mod tests {
         // And a real one is still accepted, so the check is not simply "no".
         marker.version = "2.35.0".into();
         fs::write(&marker_path, serde_json::to_vec(&marker).unwrap()).unwrap();
-        assert!(detect_managed_install_at(&executable).is_ok());
+        // Re-seed for the same reason as above: on Linux the marker is a
+        // provenance-recorded file, so rewriting it invalidates the record
+        // that was seeded from its previous bytes. Without this the assertion
+        // failed on Linux for a reason that had nothing to do with the version.
+        #[cfg(target_os = "linux")]
+        seed_linux_install_provenance(&prefix);
+        if let Err(error) = detect_managed_install_at(&executable) {
+            panic!("a real semver must stay managed: {error}");
+        }
     }
 
     #[cfg(target_os = "linux")]
