@@ -219,16 +219,42 @@ try {
             -ExpectedBlue $descriptor.MarkerBlue `
             -MinimumPixelCount 200 -MinimumFrameFraction 0.05
     ) -Message 'synthetic painted marker was not detected'
+    # A renderer that is a few levels off must still be recognised -- Rio
+    # paints this marker's red channel two levels low and its blue three high,
+    # and an exact comparison aborted the whole comparator run over it.
+    Assert-KettlePerfStartupReadySelfTest -Condition (
+        Test-KettlePerfPaintedMarkerCapture `
+            -BgraBytes $frame -Width $width -Height $height `
+            -ExpectedRed ([Math]::Min(255, $descriptor.MarkerRed + 2)) `
+            -ExpectedGreen $descriptor.MarkerGreen `
+            -ExpectedBlue ([Math]::Max(0, $descriptor.MarkerBlue - 3)) `
+            -MinimumPixelCount 200 -MinimumFrameFraction 0.05
+    ) -Message 'capture rejected a marker a real renderer would produce'
+    # A DIFFERENT colour must still be rejected. The tolerance is a few levels,
+    # not a licence to match anything -- without this the check above could be
+    # satisfied by widening the band until every frame passes.
     Assert-KettlePerfStartupReadySelfTest -Condition (
         -not (
             Test-KettlePerfPaintedMarkerCapture `
                 -BgraBytes $frame -Width $width -Height $height `
-                -ExpectedRed ($descriptor.MarkerRed + 1) `
+                -ExpectedRed ([int]($descriptor.MarkerRed -bxor 0x80)) `
                 -ExpectedGreen $descriptor.MarkerGreen `
                 -ExpectedBlue $descriptor.MarkerBlue `
                 -MinimumPixelCount 200 -MinimumFrameFraction 0.05
         )
     ) -Message 'capture accepted the wrong marker RGB'
+    # And the tolerance is bounded: one level past it is a miss.
+    Assert-KettlePerfStartupReadySelfTest -Condition (
+        -not (
+            Test-KettlePerfPaintedMarkerCapture `
+                -BgraBytes $frame -Width $width -Height $height `
+                -ExpectedRed $descriptor.MarkerRed `
+                -ExpectedGreen $descriptor.MarkerGreen `
+                -ExpectedBlue $descriptor.MarkerBlue `
+                -MinimumPixelCount 200 -MinimumFrameFraction 0.05 `
+                -ChannelTolerance 0
+        ) -eq $false
+    ) -Message 'an exact-tolerance match of the exact colour must still pass'
     Assert-KettlePerfStartupReadySelfTest -Condition (
         -not (
             Test-KettlePerfPaintedMarkerCapture `

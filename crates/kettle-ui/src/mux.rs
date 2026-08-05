@@ -764,19 +764,36 @@ impl Node {
 
     /// Replace the leaf `id` with a split of itself and `new_id`.
     fn split_leaf(&mut self, id: u64, new_id: u64, dir: Dir) -> bool {
+        self.split_leaf_ordered(id, new_id, dir, false)
+    }
+
+    /// Split leaf `id`, placing `new_id` first when `new_first`.
+    ///
+    /// A plain split always appends, which is right when the user asked for
+    /// "split right" and the new pane belongs on the right. Moving a pane is
+    /// different: dropping it on the LEFT half of a target means it goes to the
+    /// left, and appending would silently put it on the other side of the pane
+    /// the user aimed at.
+    fn split_leaf_ordered(&mut self, id: u64, new_id: u64, dir: Dir, new_first: bool) -> bool {
         match self {
             Node::Leaf(x) if *x == id => {
+                let (a, b) = if new_first {
+                    (Node::Leaf(new_id), Node::Leaf(id))
+                } else {
+                    (Node::Leaf(id), Node::Leaf(new_id))
+                };
                 *self = Node::Split {
                     dir,
                     ratio: 0.5,
-                    a: Box::new(Node::Leaf(id)),
-                    b: Box::new(Node::Leaf(new_id)),
+                    a: Box::new(a),
+                    b: Box::new(b),
                 };
                 true
             }
             Node::Leaf(_) => false,
             Node::Split { a, b, .. } => {
-                a.split_leaf(id, new_id, dir) || b.split_leaf(id, new_id, dir)
+                a.split_leaf_ordered(id, new_id, dir, new_first)
+                    || b.split_leaf_ordered(id, new_id, dir, new_first)
             }
         }
     }
@@ -2217,6 +2234,53 @@ impl Mux {
             .and_then(|id| self.panes.get(&id))
             .map(|p| p.argv.clone())
             .unwrap_or_default()
+    }
+
+    /// Terminator parity: move a pane to a new position beside another pane in
+    /// the same tab — the tree half of dragging a terminal somewhere else.
+    ///
+    /// `moving` is lifted out (collapsing whatever split it leaves behind, the
+    /// same way closing it would) and re-grafted as a sibling of `target`,
+    /// split along `dir`, on the near side when `before`. Returns whether
+    /// anything moved.
+    ///
+    /// Refused, rather than half-done, when: the two are the same pane; either
+    /// is not a leaf of the active tab; or the tab has fewer than two panes.
+    /// The order matters — the lift has to happen before the graft, or a
+    /// `moving` that is `target`'s own sibling would be grafted onto a tree it
+    /// is still part of, and appear twice.
+    pub fn move_pane_beside(&mut self, moving: u64, target: u64, dir: Dir, before: bool) -> bool {
+        if moving == target {
+            return false;
+        }
+        let Some(tab) = self.tabs.get_mut(self.active) else {
+            return false;
+        };
+        if !tab.root.contains(moving) || !tab.root.contains(target) {
+            return false;
+        }
+        let root = std::mem::replace(&mut tab.root, Node::Leaf(moving));
+        let lifted = match root.remove_leaf(moving) {
+            Ok(tree) => tree,
+            // `Err` means the removal consumed the root: a tab of one pane, or
+            // one whose whole tree was the moving pane. Neither can also hold
+            // the target, and the `contains` checks above already excluded it,
+            // so this is unreachable in practice — restore and refuse rather
+            // than leave the tab holding the placeholder.
+            Err(Some(rest)) => rest,
+            Err(None) => return false,
+        };
+        tab.root = lifted;
+        if !tab.root.split_leaf_ordered(target, moving, dir, before) {
+            // The target vanished with the lift (it cannot, given the guards
+            // above) — put the pane back beside the first leaf rather than
+            // dropping it out of the tree entirely.
+            let anchor = tab.root.first_leaf();
+            tab.root.split_leaf_ordered(anchor, moving, dir, before);
+        }
+        tab.focus = moving;
+        tab.zoomed = false;
+        true
     }
 
     /// Terminator parity (`terminatorlib/window.py:rotate`): turn the active
@@ -4615,6 +4679,94 @@ mod node_tests {
             members.iter().any(|(_, g)| *g == Some("other")),
             "the fixture must contain a non-member group, or the filter is \
              untested"
+        );
+    }
+
+    /// Moving a pane is a lift followed by a graft, and the order is what makes
+    /// it correct: grafting first would attach the pane to a tree it is still
+    /// part of, and it would appear twice. The sibling case is the one that
+    /// catches it — there, the lift collapses the very split the target lives
+    /// in.
+    #[test]
+    fn moving_a_pane_lifts_it_before_grafting_it_beside_the_target() {
+        let leaves = |m: &Mux| {
+            let mut ids = m.tabs[0].root.leaf_ids();
+            ids.sort_unstable();
+            ids
+        };
+
+        // Split{ Split{1,2}, Split{3,4} }: move 1 next to 4. Panes 1 and 2 are
+        // siblings, so lifting 1 collapses their split to a bare Leaf(2).
+        let build = || Node::Split {
+            dir: Dir::Horizontal,
+            ratio: 0.5,
+            a: Box::new(Node::Split {
+                dir: Dir::Vertical,
+                ratio: 0.5,
+                a: Box::new(Node::Leaf(1)),
+                b: Box::new(Node::Leaf(2)),
+            }),
+            b: Box::new(Node::Split {
+                dir: Dir::Vertical,
+                ratio: 0.5,
+                a: Box::new(Node::Leaf(3)),
+                b: Box::new(Node::Leaf(4)),
+            }),
+        };
+        let mut m = Mux::new();
+        push_tab(&mut m, build(), 2);
+        assert!(m.move_pane_beside(1, 4, Dir::Horizontal, false));
+        assert_eq!(
+            leaves(&m),
+            vec![1, 2, 3, 4],
+            "every pane must survive the move exactly once -- a graft before \
+             the lift duplicates the moving pane"
+        );
+        assert_eq!(m.tabs[0].focus, 1, "the moved pane takes focus");
+
+        // Dropping on the near side puts it there, not on the far side of the
+        // pane the user aimed at.
+        let mut near = Mux::new();
+        push_tab(&mut near, build(), 1);
+        assert!(near.move_pane_beside(1, 4, Dir::Horizontal, true));
+        let order = near.tabs[0].root.leaf_ids();
+        let (i1, i4) = (
+            order.iter().position(|&x| x == 1).unwrap(),
+            order.iter().position(|&x| x == 4).unwrap(),
+        );
+        assert!(
+            i1 < i4,
+            "before=true must place the pane ahead of the target"
+        );
+        let mut far = Mux::new();
+        push_tab(&mut far, build(), 1);
+        assert!(far.move_pane_beside(1, 4, Dir::Horizontal, false));
+        let order = far.tabs[0].root.leaf_ids();
+        assert!(
+            order.iter().position(|&x| x == 1).unwrap()
+                > order.iter().position(|&x| x == 4).unwrap(),
+            "before=false must place it after"
+        );
+
+        // Refusals, rather than a half-applied move.
+        let mut solo = Mux::new();
+        push_tab(&mut solo, Node::Leaf(1), 1);
+        assert!(
+            !solo.move_pane_beside(1, 1, Dir::Horizontal, false),
+            "same pane"
+        );
+        assert!(
+            !solo.move_pane_beside(1, 99, Dir::Horizontal, false),
+            "unknown target"
+        );
+        assert!(
+            !solo.move_pane_beside(99, 1, Dir::Horizontal, false),
+            "unknown mover"
+        );
+        assert_eq!(
+            solo.tabs[0].root.leaf_ids(),
+            vec![1],
+            "a refused move must leave the tree exactly as it was"
         );
     }
 
