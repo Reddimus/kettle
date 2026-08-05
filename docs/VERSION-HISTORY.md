@@ -14,13 +14,13 @@ the version below is present in the changelog but not yet as a Git tag or a
 GitHub release. Git tags and GitHub releases remain authoritative for what has
 actually shipped.
 
-- Latest version in this tree: `v2.47.0` — carried by the changelog and the
+- Latest version in this tree: `v2.48.0` — carried by the changelog and the
   version-bearing source files. It becomes a release when release CI publishes
   the tag; until then the entry above it is the newest thing that actually
   shipped.
-- Current workspace version: `2.47.0`
-- Release records inspected: 151 Git tags and 151 changelog headings, from
-  `v0.1.0` through `v2.47.0`
+- Current workspace version: `2.48.0`
+- Release records inspected: 152 Git tags and 152 changelog headings, from
+  `v0.1.0` through `v2.48.0`
 - Version-bearing source files that must stay in lockstep: workspace
   `Cargo.toml`, `flake.nix`, and the changelog. Release CI renders the Homebrew
   formula and Arch `PKGBUILD` from verified archives so their checksums cannot
@@ -42,7 +42,7 @@ actually shipped.
 - `v2.21.0` to `v2.28.0` (2026-06-13 to 2026-06-19): GPU/background features,
   animated media, tab/theme settings, scrollbar work, and release packaging
   refreshes.
-- `v2.29.0` to `v2.47.0` (2026-06-19 to 2026-08-03): cwd-aware titles and
+- `v2.29.0` to `v2.48.0` (2026-06-19 to 2026-08-05): cwd-aware titles and
   shell integration, GPU device-loss resilience, Ubuntu titlebar fixes,
   keyboard text selection, package-template lockstep, bounded/private recording
   retention, graphics-resource accounting, hardened control/MCP and durable
