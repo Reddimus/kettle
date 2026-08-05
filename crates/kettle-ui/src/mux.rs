@@ -2260,13 +2260,20 @@ impl Mux {
             return false;
         }
         let root = std::mem::replace(&mut tab.root, Node::Leaf(moving));
+        // `remove_leaf` reports three outcomes, and two of them are ordinary:
+        //   `Ok(tree)`       the pane sat somewhere below the root; the tree
+        //                    comes back with its parent split collapsed.
+        //   `Err(Some(rest))` the pane was a DIRECT child of the root split, so
+        //                    the root itself collapsed and its sibling subtree
+        //                    is the new root. Normal, and the common case when
+        //                    a tab holds one split.
+        //   `Err(None)`      the pane WAS the whole tree. That means a tab of
+        //                    one pane, which cannot also contain the target —
+        //                    the `contains` guards above already excluded it —
+        //                    so it is unreachable here. Refuse rather than
+        //                    leave the tab holding the placeholder.
         let lifted = match root.remove_leaf(moving) {
             Ok(tree) => tree,
-            // `Err` means the removal consumed the root: a tab of one pane, or
-            // one whose whole tree was the moving pane. Neither can also hold
-            // the target, and the `contains` checks above already excluded it,
-            // so this is unreachable in practice — restore and refuse rather
-            // than leave the tab holding the placeholder.
             Err(Some(rest)) => rest,
             Err(None) => return false,
         };

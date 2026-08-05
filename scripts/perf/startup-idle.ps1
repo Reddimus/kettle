@@ -262,6 +262,13 @@ function Start-KettlePerfReadyLaunch {
         # client quantizes to whole character cells can land narrower than the
         # requested width, so this is reachable without anything being wrong
         # with the terminal.
+        #
+        # The timeout below reports a null capture as "no pixels were read at
+        # all" rather than naming a cause. The region not fitting is only one of
+        # several ways `CaptureWindowRegion` returns null -- `PrintWindow`
+        # refusing, or a device-context or bitmap allocation failing, are others
+        # -- and a diagnostic that asserts one cause sends the reader down one
+        # path. The geometry printed beside it is what tells them apart.
         # `CaptureWindow` reports the client it actually measured, which is the
         # same rect `CaptureWindowRegion` validates against. A failed
         # measurement is NOT fatal: `Set-WindowSize` above already proved the
@@ -351,7 +358,7 @@ function Start-KettlePerfReadyLaunch {
             "marker=$markerReady paint=$paintReady " +
             "(client ${clientWidth}x${clientHeight}, roi ${roiWidth}x${roiHeight}, " +
             "captures=$captureAttempts, last capture " +
-            "$(if ($null -eq $capture) { 'NULL -- the region never fit the client' } `
+            "$(if ($null -eq $capture) { 'NULL -- no pixels were read at all' } `
               else { 'ok, the marker pixels were not in it' }))"
         )
     } catch {

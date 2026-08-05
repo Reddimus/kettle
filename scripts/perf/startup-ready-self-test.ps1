@@ -243,18 +243,31 @@ try {
                 -MinimumPixelCount 200 -MinimumFrameFraction 0.05
         )
     ) -Message 'capture accepted the wrong marker RGB'
-    # And the tolerance is bounded: one level past it is a miss.
+    # The tolerance is a bound, not an opening. Drive it explicitly: at
+    # tolerance 4, a channel 4 levels off still matches and one 5 levels off
+    # does not. Without this pair the acceptance above could be satisfied by
+    # widening the band until every frame passes, which is the failure mode a
+    # tolerance invites.
+    Assert-KettlePerfStartupReadySelfTest -Condition (
+        Test-KettlePerfPaintedMarkerCapture `
+            -BgraBytes $frame -Width $width -Height $height `
+            -ExpectedRed ([Math]::Min(255, $descriptor.MarkerRed + 4)) `
+            -ExpectedGreen $descriptor.MarkerGreen `
+            -ExpectedBlue $descriptor.MarkerBlue `
+            -MinimumPixelCount 200 -MinimumFrameFraction 0.05 `
+            -ChannelTolerance 4
+    ) -Message 'a channel exactly at the tolerance must match'
     Assert-KettlePerfStartupReadySelfTest -Condition (
         -not (
             Test-KettlePerfPaintedMarkerCapture `
                 -BgraBytes $frame -Width $width -Height $height `
-                -ExpectedRed $descriptor.MarkerRed `
+                -ExpectedRed ([Math]::Min(255, $descriptor.MarkerRed + 5)) `
                 -ExpectedGreen $descriptor.MarkerGreen `
                 -ExpectedBlue $descriptor.MarkerBlue `
                 -MinimumPixelCount 200 -MinimumFrameFraction 0.05 `
-                -ChannelTolerance 0
-        ) -eq $false
-    ) -Message 'an exact-tolerance match of the exact colour must still pass'
+                -ChannelTolerance 4
+        )
+    ) -Message 'a channel one level past the tolerance must not match'
     Assert-KettlePerfStartupReadySelfTest -Condition (
         -not (
             Test-KettlePerfPaintedMarkerCapture `
