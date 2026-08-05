@@ -618,7 +618,9 @@ pub enum Node {
     Leaf(u64),
     Split {
         dir: Dir,
-        /// Fraction of the area given to child `a` (0.05..0.95).
+        /// Fraction of the area given to child `a`. Kept strictly inside
+        /// `(0, 1)`; how small a pane may actually get is decided in pixels by
+        /// [`split_extent_px`], not by this number.
         ratio: f32,
         a: Box<Node>,
         b: Box<Node>,
@@ -791,15 +793,14 @@ impl Node {
             Node::Leaf(id) => out.push((*id, rect)),
             Node::Split { dir, ratio, a, b } => {
                 let (x, y, w, h) = rect;
-                let r = ratio.clamp(0.05, 0.95);
                 match dir {
                     Dir::Horizontal => {
-                        let aw = (w * r).round();
+                        let aw = split_extent_px(w, *ratio);
                         a.layout((x, y, aw, h), out);
                         b.layout((x + aw, y, w - aw, h), out);
                     }
                     Dir::Vertical => {
-                        let ah = (h * r).round();
+                        let ah = split_extent_px(h, *ratio);
                         a.layout((x, y, w, ah), out);
                         b.layout((x, y + ah, w, h - ah), out);
                     }
@@ -815,13 +816,21 @@ impl Node {
     /// proportionally. Returns the subtree's leaf count. Pure tree math
     /// (unit-tested); the caller follows with `resize_all` to push the new
     /// geometry into the PTYs.
+    ///
+    /// The exact `la / (la + lb)` is stored, with no ratio band applied. A
+    /// balanced chain of N panes on one axis needs ratios of `1/N`, and the old
+    /// fixed `[0.05, 0.95]` clamp could not represent anything past twenty —
+    /// past that the outermost panes were handed more than their share and every
+    /// pane after them was starved, so "equalize" visibly stopped equalizing.
+    /// The floor that keeps a pane usable lives in `split_extent_px`, measured
+    /// in pixels against the space actually available.
     pub(crate) fn equalize(&mut self) -> usize {
         match self {
             Node::Leaf(_) => 1,
             Node::Split { a, b, ratio, .. } => {
                 let la = a.equalize();
                 let lb = b.equalize();
-                *ratio = (la as f32 / (la + lb) as f32).clamp(0.05, 0.95);
+                *ratio = la as f32 / (la + lb) as f32;
                 la + lb
             }
         }
@@ -841,7 +850,7 @@ impl Node {
                 return true;
             }
             if *d == dir && (a.contains(focus) || b.contains(focus)) {
-                *ratio = (*ratio + delta).clamp(0.05, 0.95);
+                *ratio = sane_ratio(*ratio + delta);
                 return true;
             }
         }
@@ -858,14 +867,13 @@ impl Node {
     fn dividers(&self, rect: Rect, path: &mut Vec<bool>, out: &mut Vec<SplitSeam>) {
         if let Node::Split { dir, ratio, a, b } = self {
             let (x, y, w, h) = rect;
-            let r = ratio.clamp(0.05, 0.95);
             let (a_rect, b_rect, pos) = match dir {
                 Dir::Horizontal => {
-                    let aw = (w * r).round();
+                    let aw = split_extent_px(w, *ratio);
                     ((x, y, aw, h), (x + aw, y, w - aw, h), x + aw)
                 }
                 Dir::Vertical => {
-                    let ah = (h * r).round();
+                    let ah = split_extent_px(h, *ratio);
                     ((x, y, w, ah), (x, y + ah, w, h - ah), y + ah)
                 }
             };
@@ -886,14 +894,15 @@ impl Node {
 
     /// Set the ratio of the split addressed by `path` (the a/b
     /// descent produced by `dividers`). Returns false if the path doesn't land
-    /// on a split (stale path after a layout change). The ratio is clamped to
-    /// the same [0.05, 0.95] band `layout` enforces, so a pane can't be dragged
-    /// to zero width.
+    /// on a split (stale path after a layout change). Callers that have the
+    /// split's rect (the drag handler, via `ratio_from_pos`) already hold the
+    /// divider `MIN_SPLIT_PX` away from either edge; this only rejects the
+    /// non-finite and out-of-range values a caller without a rect could pass.
     fn set_ratio_at(&mut self, path: &[bool], ratio: f32) -> bool {
         match self {
             Node::Split { ratio: r, a, b, .. } => match path.split_first() {
                 None => {
-                    *r = ratio.clamp(0.05, 0.95);
+                    *r = sane_ratio(ratio);
                     true
                 }
                 Some((&go_b, rest)) => {
@@ -923,27 +932,69 @@ pub struct SplitSeam {
     pub pos: f32,
 }
 
+/// Smallest extent, in pixels, either side of a split may be given.
+///
+/// This replaces a fixed `[0.05, 0.95]` ratio band that used to be re-applied at
+/// every layout and mutation site. A fixed fraction cannot express a balanced
+/// chain of more than twenty panes on one axis, and it scales the wrong way: on
+/// a 1900px-wide window it reserved 95px for a pane the user was trying to drag
+/// out of the way, while on a narrow window it reserved almost nothing. A pixel
+/// floor binds only when a pane would actually become too small to read or to
+/// grab by its divider, and stays out of the way otherwise.
+///
+/// Sized against what a pane needs to remain usable rather than pretty: roughly
+/// one cell of height or two of width at 96 DPI, and comfortably wider than the
+/// `seam_at` hit tolerance, so the divider of a pane squeezed to the floor can
+/// still be grabbed and dragged back.
+pub const MIN_SPLIT_PX: f32 = 16.0;
+
+/// Ratio guard for the paths that have no rect to measure against — keyboard
+/// resize, a restored session file, a control-plane request. It only keeps the
+/// ratio finite and strictly inside `(0, 1)`; the usable minimum is enforced in
+/// pixels by [`split_extent_px`] at layout time, where the space is known.
+pub fn sane_ratio(ratio: f32) -> f32 {
+    if ratio.is_finite() {
+        ratio.clamp(MIN_SPLIT_RATIO, 1.0 - MIN_SPLIT_RATIO)
+    } else {
+        0.5
+    }
+}
+
+/// Exactly representable, and small enough that it never rounds a legitimate
+/// `1/N` for any pane count a window can hold.
+const MIN_SPLIT_RATIO: f32 = 1.0 / 1024.0;
+
+/// Extent of a split's first child along the split axis, in pixels.
+///
+/// Both children keep at least [`MIN_SPLIT_PX`] whenever the split is big enough
+/// to afford it; below that the space is halved rather than handing one child
+/// everything. Every place that turns a ratio into geometry goes through this —
+/// `layout`, `dividers`, and the session restore path — so a divider is always
+/// drawn where the pane it separates actually starts.
+pub fn split_extent_px(total: f32, ratio: f32) -> f32 {
+    if !total.is_finite() || total <= 0.0 {
+        return 0.0;
+    }
+    let floor = MIN_SPLIT_PX.min(total / 2.0);
+    (total * sane_ratio(ratio))
+        .round()
+        .clamp(floor, total - floor)
+}
+
 /// The ratio a Horizontal/Vertical split should take so its divider
-/// sits under the cursor, clamped to the same band `layout` enforces.
+/// sits under the cursor, held far enough from either edge that both panes stay
+/// grabbable — the same [`MIN_SPLIT_PX`] floor `layout` enforces.
 pub fn ratio_from_pos(rect: Rect, dir: Dir, px: f32, py: f32) -> f32 {
     let (x, y, w, h) = rect;
-    let raw = match dir {
-        Dir::Horizontal => {
-            if w > 0.0 {
-                (px - x) / w
-            } else {
-                0.5
-            }
-        }
-        Dir::Vertical => {
-            if h > 0.0 {
-                (py - y) / h
-            } else {
-                0.5
-            }
-        }
+    let (total, offset) = match dir {
+        Dir::Horizontal => (w, px - x),
+        Dir::Vertical => (h, py - y),
     };
-    raw.clamp(0.05, 0.95)
+    if !total.is_finite() || total <= 0.0 || !offset.is_finite() {
+        return 0.5;
+    }
+    let floor = MIN_SPLIT_PX.min(total / 2.0);
+    sane_ratio(offset.clamp(floor, total - floor) / total)
 }
 
 /// Index of the first seam within `tol` px of the cursor (along the
@@ -1509,7 +1560,10 @@ impl Mux {
                     } else {
                         Dir::Horizontal
                     },
-                    ratio: *ratio,
+                    // The session file is on disk and hand-editable, so a
+                    // restored ratio is untrusted input: sanitize it here rather
+                    // than letting a NaN or a 12.0 reach the tree.
+                    ratio: sane_ratio(*ratio),
                     a: Box::new(a),
                     b: Box::new(b),
                 })
@@ -2013,7 +2067,8 @@ impl Mux {
 
     /// Set the ratio of the split addressed by `path` in `tab`.
     /// Returns whether a split was found (false on a stale path). The ratio is
-    /// clamped to layout's [0.05, 0.95] band.
+    /// kept finite and strictly inside `(0, 1)`; `layout` holds the divider
+    /// [`MIN_SPLIT_PX`] clear of either edge when it turns it into geometry.
     pub fn set_split_ratio(&mut self, tab: usize, path: &[bool], ratio: f32) -> bool {
         self.tabs
             .get_mut(tab)
@@ -4004,14 +4059,17 @@ mod node_tests {
         // pos→ratio: dragging the seam to x=150 over the 200-wide split → 0.75.
         let r = ratio_from_pos(seams[0].rect, seams[0].dir, 150.0, 50.0);
         assert!((r - 0.75).abs() < 1e-6, "ratio was {r}");
-        // Clamp: dragging past the edge pins to the band, never 0/1.
+        // Clamp: dragging past either edge leaves MIN_SPLIT_PX of pane behind,
+        // never 0/1 — measured in pixels against this 200-wide split, so the
+        // stop is the same physical distance whatever the window size.
+        let min_ratio = super::MIN_SPLIT_PX / 200.0;
         assert_eq!(
             ratio_from_pos(seams[0].rect, Dir::Horizontal, -50.0, 0.0),
-            0.05
+            min_ratio
         );
         assert_eq!(
             ratio_from_pos(seams[0].rect, Dir::Horizontal, 999.0, 0.0),
-            0.95
+            1.0 - min_ratio
         );
 
         // Nested tree: root Horizontal(0.5){ Leaf1, Vertical(0.5){Leaf2,Leaf3} }.
@@ -4040,6 +4098,119 @@ mod node_tests {
         assert_eq!(inner.pos, 80.0);
         // A path that doesn't land on a split returns false (stale path).
         assert!(!nested.set_ratio_at(&[false, true], 0.5)); // descends into Leaf1
+    }
+
+    /// Build the split tree that repeatedly splitting the newest pane produces:
+    /// `Split{ Leaf1, Split{ Leaf2, Split{ ... } } }`, `count` leaves deep.
+    fn chain(dir: Dir, count: usize) -> Node {
+        assert!(count >= 1, "a chain needs at least one pane");
+        let mut node = Node::Leaf(count as u64);
+        for id in (1..count).rev() {
+            node = Node::Split {
+                dir,
+                ratio: 0.5,
+                a: Box::new(Node::Leaf(id as u64)),
+                b: Box::new(node),
+            };
+        }
+        node
+    }
+
+    /// `equalize` used to clamp every ratio it computed into a fixed
+    /// `[0.05, 0.95]` band, so a chain needing `1/N < 0.05` could not be
+    /// represented: at 23 panes the widths came out 7,7,7,6,6,… and by 28 the
+    /// widest pane was 1.75x the narrowest. The band is gone; the only floor is
+    /// in pixels, and at these sizes it never binds.
+    #[test]
+    fn equalize_stays_exact_past_the_pane_count_a_ratio_band_could_hold() {
+        // Precondition: this test is only meaningful past the old band. A chain
+        // of 28 wants 1/28 at its outermost split, well under the old 0.05
+        // floor — if that stops being true the test has stopped testing.
+        let panes = 28;
+        assert!(
+            1.0 / panes as f32 <= 0.05,
+            "fixture no longer exercises the sub-band region"
+        );
+
+        for (dir, width, height) in [
+            (Dir::Horizontal, 1900.0_f32, 1000.0_f32),
+            (Dir::Vertical, 1000.0, 1900.0),
+        ] {
+            let mut root = chain(dir, panes);
+            assert_eq!(root.equalize(), panes);
+
+            let mut out = Vec::new();
+            root.layout((0.0, 0.0, width, height), &mut out);
+            assert_eq!(out.len(), panes);
+
+            let extent = |r: &Rect| if dir == Dir::Horizontal { r.2 } else { r.3 };
+            let sizes: Vec<f32> = out.iter().map(|(_, r)| extent(r)).collect();
+            let smallest = sizes.iter().cloned().fold(f32::INFINITY, f32::min);
+            let largest = sizes.iter().cloned().fold(0.0_f32, f32::max);
+            // Every pane within a pixel of every other: all that separates them
+            // is `layout`'s per-split rounding.
+            assert!(
+                largest - smallest <= 1.0,
+                "{dir:?} panes ranged {smallest}..{largest}, sizes {sizes:?}"
+            );
+            // And they still tile the area exactly, with no seam drift.
+            let total: f32 = sizes.iter().sum();
+            let axis = if dir == Dir::Horizontal {
+                width
+            } else {
+                height
+            };
+            assert!(
+                (total - axis).abs() < 1e-3,
+                "{dir:?} panes summed to {total}, not {axis}"
+            );
+        }
+    }
+
+    /// The pixel floor is what keeps a pane grabbable, so it has to bind when
+    /// the space really does run out — and it has to split what is left evenly
+    /// rather than handing one side everything.
+    #[test]
+    fn a_split_too_small_for_the_floor_is_halved_instead_of_collapsed() {
+        // Roomy: the ratio is honored outright.
+        assert_eq!(split_extent_px(1000.0, 0.25), 250.0);
+        // Extreme ratios still leave a grabbable pane on both sides.
+        assert_eq!(split_extent_px(1000.0, 0.0), MIN_SPLIT_PX);
+        assert_eq!(split_extent_px(1000.0, 1.0), 1000.0 - MIN_SPLIT_PX);
+        // Too small to seat two floors: halve rather than collapse.
+        let cramped = MIN_SPLIT_PX;
+        assert_eq!(split_extent_px(cramped, 0.9), cramped / 2.0);
+        // Degenerate input never escapes as a NaN rect.
+        assert_eq!(split_extent_px(f32::NAN, 0.5), 0.0);
+        assert_eq!(split_extent_px(0.0, 0.5), 0.0);
+        assert_eq!(split_extent_px(1000.0, f32::NAN), 500.0);
+    }
+
+    /// Keyboard resize used to clamp into the same `[0.05, 0.95]` band, which
+    /// meant that on a tab with many panes asking for a pane to get *smaller*
+    /// made it get bigger — the shrink landed below 0.05 and clamped back up.
+    #[test]
+    fn shrinking_a_pane_below_the_old_band_actually_shrinks_it() {
+        let mut root = chain(Dir::Horizontal, 28);
+        root.equalize();
+        let width_of = |root: &Node, id: u64| {
+            let mut out = Vec::new();
+            root.layout((0.0, 0.0, 1900.0, 1000.0), &mut out);
+            out.iter().find(|(i, _)| *i == id).unwrap().1.2
+        };
+        let before = width_of(&root, 1);
+        // Precondition: pane 1's share is under the old floor, so the old code
+        // could not have narrowed it at all.
+        assert!(
+            before / 1900.0 < 0.05,
+            "pane 1 held {before}px of 1900 — not below the old band"
+        );
+        assert!(root.resize(1, Dir::Horizontal, -0.01));
+        let after = width_of(&root, 1);
+        assert!(
+            after < before,
+            "shrink moved {before}px to {after}px — the wrong direction"
+        );
     }
 
     /// Drift guard. `compute_broadcast_targets` is the

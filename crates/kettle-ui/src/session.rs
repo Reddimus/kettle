@@ -88,13 +88,12 @@ impl SNode {
                     b,
                 } => {
                     let (x, y, width, height) = rect;
-                    let ratio = ratio.clamp(0.05, 0.95);
                     if *vertical {
-                        let first_height = (height * ratio).round();
+                        let first_height = crate::mux::split_extent_px(height, *ratio);
                         walk(a, (x, y, width, first_height), out);
                         walk(b, (x, y + first_height, width, height - first_height), out);
                     } else {
-                        let first_width = (width * ratio).round();
+                        let first_width = crate::mux::split_extent_px(width, *ratio);
                         walk(a, (x, y, first_width, height), out);
                         walk(b, (x + first_width, y, width - first_width, height), out);
                     }

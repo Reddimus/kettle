@@ -36,6 +36,38 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
     while every CPU test stayed green.
 
   ### Fixed
+  - **`equalize-splits` stopped equalizing once a tab held more than twenty
+    panes.** Every ratio in the split tree was clamped into a fixed
+    `[0.05, 0.95]` band at each of the six places a ratio was read or written.
+    A balanced chain of N panes on one axis needs ratios of `1/N`, so past
+    twenty the value it wanted could not be represented: 23 panes came out
+    7,7,7,6,6,…, and 28 panes ran 95px down to 63px — the widest pane half
+    again as wide as the narrowest, after asking for them to be equal.
+
+    The same band made keyboard resize run backwards on a crowded tab. A pane
+    already below the floor that was asked to get *smaller* landed under 0.05
+    and was clamped back up, so it grew. And it silently rewrote layouts on
+    restore: the session file's ratios went through the same clamp, so an
+    equalized many-pane workspace came back unequal.
+
+    The band is gone. What keeps a pane usable is now a floor measured in
+    pixels against the space actually available, applied in the one place that
+    turns a ratio into geometry — so it binds only when a pane would really
+    become too small to read or to grab by its divider, and a divider dragged
+    to the edge now stops the same physical distance from it whatever the
+    window size, instead of reserving 95px on a wide monitor and almost
+    nothing on a narrow one.
+
+  - **`split-auto` always split downward.** The dispatch arm read
+    `Action::SplitDown | Action::SplitAuto`, so "auto" was literally "down" —
+    on a pane wider than it is tall it stacked instead of splitting side by
+    side. Terminator splits along the pane's longer axis, and every
+    user-facing description in kettle already said the same: `docs/CONFIG.md`'s
+    "pick by aspect ratio", the palette entry, the context-menu row, and the
+    default `Ctrl+Shift+A` binding. Only the implementation disagreed. It now
+    reads the focused pane's rect and cuts the longer axis, ties going to a
+    vertical cut so a square pane behaves as it did before.
+
   - **Closing a window erased the named layout it was launched from.**
     `close_window` deliberately empties the mux before saving, so the session
     it writes is the empty one — "this window is finished, do not bring it
