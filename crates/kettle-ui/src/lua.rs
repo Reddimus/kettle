@@ -326,6 +326,10 @@ pub struct LuaEngine {
     /// (or an infinite `output` callback) froze the UI thread permanently —
     /// there was no CPU budget.
     hook_fires: Arc<AtomicU64>,
+    /// Set by the watchdog when it aborts a call, cleared by `arm_budget`.
+    /// Separate from the raised error because user Lua can `pcall` around its
+    /// own runaway and report success; this flag cannot be reached from Lua.
+    budget_tripped: Arc<AtomicBool>,
 }
 
 impl LuaEngine {
@@ -340,25 +344,33 @@ impl LuaEngine {
     /// not normally seen). Adding entries to the namespace is the
     /// happy path for future additions — extend this function.
     pub fn new(theme_name: &str) -> Result<Self> {
-        Self::new_with_sandbox(theme_name, true)
+        Self::new_with_sandbox(theme_name, kettle_config::LuaSandbox::Safe)
     }
 
     /// Terminator plugin parity (phase 12 of
-    /// docs/TERMINATOR-PLUGIN-DESIGN.md):
-    /// build a VM with the configured sandbox level. `safe = true`
-    /// nil's the Lua stdlib functions that can execute external
-    /// processes or open arbitrary files: `os.execute`, `os.exit`,
-    /// `os.remove`, `os.rename`, `io.open`, `io.popen`,
-    /// `io.lines`, `io.input`, `io.output`, `package.loadlib`,
-    /// `loadfile`, `dofile`. The rest of the stdlib (string, table,
-    /// math, os.date/os.time/os.getenv/os.difftime, io.read, ...)
-    /// stays usable.
+    /// docs/TERMINATOR-PLUGIN-DESIGN.md): build a VM at the configured trust
+    /// level.
     ///
-    /// Errors from setting these to nil are bubbled up — a Lua VM
-    /// where the standard globals can't be removed isn't safe to
-    /// proceed with.
-    pub fn new_with_sandbox(theme_name: &str, safe: bool) -> Result<Self> {
-        Self::new_inner(theme_name, safe, DEFAULT_MAX_HOOK_FIRES)
+    /// `Safe` and `Restricted` both nil the Lua stdlib functions that execute
+    /// external processes or open arbitrary files: `os.execute`, `os.exit`,
+    /// `os.remove`, `os.rename`, `io.open`, `io.popen`, `io.lines`,
+    /// `io.input`, `io.output`, `package.loadlib`, `loadfile`, `dofile`. The
+    /// rest of the stdlib (string, table, math, `os.date`/`os.time`/
+    /// `os.getenv`/`os.difftime`, `io.read`, ...) stays usable.
+    ///
+    /// **Nil'ing those is not what stops a plugin running commands.**
+    /// `kettle.send_text` types into the focused shell, and a newline in that
+    /// text runs what it typed — the documented example plugin clears the
+    /// screen by typing the word and a newline. `Safe` guards against a
+    /// careless plugin reaching the filesystem or spawning something behind
+    /// your back; it does not contain a hostile one. `Restricted` is the level
+    /// that does: it installs `send_text` and `exec_action` as refusals, so a
+    /// plugin can observe, notify and restyle but cannot drive the terminal.
+    ///
+    /// Errors from setting these to nil are bubbled up — a Lua VM where the
+    /// standard globals can't be removed isn't safe to proceed with.
+    pub fn new_with_sandbox(theme_name: &str, sandbox: kettle_config::LuaSandbox) -> Result<Self> {
+        Self::new_inner(theme_name, sandbox, DEFAULT_MAX_HOOK_FIRES)
     }
 
     /// Test-only constructor that dials the instruction budget down
@@ -366,15 +378,23 @@ impl LuaEngine {
     /// than the ~128 M production cap.
     #[cfg(test)]
     pub(crate) fn new_with_max_hook_fires(theme_name: &str, max_fires: u64) -> Result<Self> {
-        Self::new_inner(theme_name, true, max_fires)
+        Self::new_inner(theme_name, kettle_config::LuaSandbox::Safe, max_fires)
     }
 
     /// The real constructor. `max_fires` is the per-invocation
     /// instruction-budget cap (in hook fires), captured by value into the hook
     /// closure — fixed for the VM's life, so no shared field is needed.
-    fn new_inner(theme_name: &str, safe: bool, max_fires: u64) -> Result<Self> {
+    fn new_inner(
+        theme_name: &str,
+        sandbox: kettle_config::LuaSandbox,
+        max_fires: u64,
+    ) -> Result<Self> {
+        use kettle_config::LuaSandbox;
         let lua = Lua::new();
-        if safe {
+        // Whether this plugin may drive the terminal: type into a pane or
+        // dispatch an action. Everything else is available at every level.
+        let may_drive_terminal = !matches!(sandbox, LuaSandbox::Restricted);
+        if !matches!(sandbox, LuaSandbox::Trusted) {
             // Block dangerous APIs. Setting to nil is the canonical
             // sandbox pattern in mlua / WezTerm / Neovim plugins.
             let globals = lua.globals();
@@ -433,13 +453,22 @@ impl LuaEngine {
         // `StdLib::ALL_SAFE` excludes the `debug` library (so `debug.sethook`
         // is unreachable), and the hook is set from the Rust side here.
         let hook_fires = Arc::new(AtomicU64::new(0));
+        let budget_tripped = Arc::new(AtomicBool::new(false));
         {
             let fires = hook_fires.clone();
+            let tripped = budget_tripped.clone();
             lua.set_hook(
                 mlua::HookTriggers::new().every_nth_instruction(HOOK_INSTRUCTION_INTERVAL),
                 move |_lua, _debug| {
                     let n = fires.fetch_add(1, Ordering::Relaxed) + 1;
                     if n > max_fires {
+                        // Record the abort out of band as well as raising it.
+                        // The error alone is not enough to act on: user Lua can
+                        // `pcall` around its own runaway and swallow it, which
+                        // would leave the call reporting success while having
+                        // burned the entire budget. The flag cannot be reached
+                        // from Lua, so it survives that.
+                        tripped.store(true, Ordering::Relaxed);
                         Err(mlua::Error::RuntimeError(
                             "kettle: Lua script exceeded its instruction budget \
                              (possible infinite loop); aborted"
@@ -501,6 +530,13 @@ impl LuaEngine {
             .set(
                 "send_text",
                 lua.create_function(move |_, value: mlua::LuaString| {
+                    if !may_drive_terminal {
+                        log::warn!(
+                            "kettle.send_text: refused under `lua-sandbox = \
+                             restricted` (typing into a pane can run commands)"
+                        );
+                        return Ok(false);
+                    }
                     let len = value.as_bytes().len();
                     if len > MAX_LUA_SEND_TEXT_BYTES {
                         log::warn!(
@@ -523,6 +559,13 @@ impl LuaEngine {
             .set(
                 "exec_action",
                 lua.create_function(move |_, value: mlua::LuaString| {
+                    if !may_drive_terminal {
+                        log::warn!(
+                            "kettle.exec_action: refused under \
+                             `lua-sandbox = restricted`"
+                        );
+                        return Ok(false);
+                    }
                     let len = value.as_bytes().len();
                     if len > MAX_LUA_ACTION_NAME_BYTES {
                         log::warn!(
@@ -779,6 +822,7 @@ impl LuaEngine {
             pending,
             active_theme,
             hook_fires,
+            budget_tripped,
         })
     }
 
@@ -789,6 +833,17 @@ impl LuaEngine {
     /// point that runs user Lua.
     fn arm_budget(&self) {
         self.hook_fires.store(0, Ordering::Relaxed);
+        self.budget_tripped.store(false, Ordering::Relaxed);
+    }
+
+    /// Did the watchdog abort the call that just finished? Consumes the flag.
+    ///
+    /// Checked instead of the returned error because a `pcall` inside the
+    /// script can swallow the abort and return normally, and because the answer
+    /// decides whether the callback is worth calling again — see
+    /// [`LuaEngine::fire_event`].
+    fn budget_was_exhausted(&self) -> bool {
+        self.budget_tripped.swap(false, Ordering::Relaxed)
     }
 
     /// Synchronize `kettle.theme()` after App successfully applies a queued
@@ -938,8 +993,17 @@ impl LuaEngine {
     ///
     /// Errors from individual callbacks log::warn but DON'T abort
     /// kettle — one broken plugin can't take down the terminal.
+    ///
+    /// A callback that burns the whole instruction budget is **retired**: it is
+    /// removed from the event's list and never called again this session. The
+    /// budget is deliberately enormous (~128 M instructions), so exhausting it
+    /// means a loop that does not terminate, and the abort costs real wall time
+    /// — on a middling machine, seconds. Left registered, an `output` callback
+    /// that hangs pays that on every chunk of PTY output, which is a terminal
+    /// that has stopped working rather than one with a broken plugin. Retiring
+    /// it costs the stall exactly once and says so.
     pub fn fire_event(&self, event: &LuaEvent) {
-        self.arm_budget();
+        let mut runaways: Vec<usize> = Vec::new();
         let result: mlua::Result<()> = (|| {
             let events: mlua::Table = self.lua.named_registry_value("kettle_events")?;
             let name = event.name();
@@ -948,6 +1012,11 @@ impl LuaEngine {
                 let n = callbacks.len()?;
                 for i in 1..=n {
                     let cb: mlua::Function = callbacks.get(i)?;
+                    // Per callback, not per event: sharing one budget across
+                    // the list would let a heavy-but-honest first callback
+                    // starve the ones after it, and would blame whichever
+                    // happened to be running when the total ran out.
+                    self.arm_budget();
                     let call_result: mlua::Result<()> = match event {
                         LuaEvent::Startup => cb.call(()),
                         LuaEvent::TabAdd(idx) | LuaEvent::TabClose(idx) => cb.call(*idx),
@@ -975,7 +1044,13 @@ impl LuaEngine {
                         }
                         LuaEvent::UrlClicked(uri) => cb.call(uri.as_str()),
                     };
-                    if let Err(e) = call_result {
+                    if self.budget_was_exhausted() {
+                        runaways.push(i as usize);
+                        log::warn!(
+                            "lua event {name} callback {i} exceeded its instruction \
+                             budget and has been retired for this session"
+                        );
+                    } else if let Err(e) = call_result {
                         log::warn!("lua event {name} callback {i}: {e}");
                     }
                 }
@@ -985,6 +1060,58 @@ impl LuaEngine {
         if let Err(e) = result {
             log::warn!("lua fire_event({:?}): {e}", event.name());
         }
+        if !runaways.is_empty() {
+            self.retire_callbacks(event.name(), &runaways);
+        }
+    }
+
+    /// Drop the callbacks at `indices` (1-based, as Lua counts) from `event`'s
+    /// list, and tell the user once that it happened — a plugin silently
+    /// ceasing to work is its own kind of bug report.
+    fn retire_callbacks(&self, event: &str, indices: &[usize]) {
+        let rebuilt = (|| -> mlua::Result<usize> {
+            let events: mlua::Table = self.lua.named_registry_value("kettle_events")?;
+            let mlua::Value::Table(callbacks) = events.get::<mlua::Value>(event)? else {
+                return Ok(0);
+            };
+            let n = callbacks.len()? as usize;
+            let kept = self.lua.create_table()?;
+            let mut next = 1;
+            for i in 1..=n {
+                if indices.contains(&i) {
+                    continue;
+                }
+                kept.set(next, callbacks.get::<mlua::Value>(i)?)?;
+                next += 1;
+            }
+            events.set(event, kept)?;
+            Ok(n + 1 - next)
+        })();
+        let dropped = match rebuilt {
+            Ok(dropped) => dropped,
+            Err(e) => {
+                log::warn!("lua: could not retire runaway {event} callback(s): {e}");
+                return;
+            }
+        };
+        if dropped == 0 {
+            return;
+        }
+        let plural = if dropped == 1 { "" } else { "s" };
+        // A full queue means the user already has more pending notices than
+        // they can act on; dropping this one is the right call and the log
+        // above still records it.
+        let _ = bounded_push(
+            &self.pending,
+            LuaCommand::Notify {
+                title: "kettle: Lua callback stopped".to_string(),
+                body: format!(
+                    "{dropped} `{event}` callback{plural} ran too long and \
+                     will not be called again. Check your init.lua for a loop \
+                     that never finishes."
+                ),
+            },
+        );
     }
 
     /// Drain pending side-effect commands queued by Lua
@@ -1669,6 +1796,88 @@ mod tests {
         assert_eq!(eng.eval_str("return 1 + 1").unwrap(), "2");
     }
 
+    /// Aborting a runaway is not enough on its own. The budget is deliberately
+    /// enormous, so exhausting it costs real wall time — and an `output`
+    /// callback that never finishes is re-entered on every chunk of PTY output,
+    /// paying that stall again and again. That is not a terminal with a broken
+    /// plugin; it is a terminal that has stopped working. A callback that burns
+    /// the whole budget is retired, and the user is told.
+    #[test]
+    fn a_runaway_event_callback_is_retired_instead_of_stalling_every_event() {
+        let eng = LuaEngine::new_with_max_hook_fires("Default", 2).expect("init");
+        eng.eval_str(
+            "good_runs = 0\n\
+             kettle.on('bell', function(id) while true do end end)\n\
+             kettle.on('bell', function(id) good_runs = good_runs + 1 end)\n",
+        )
+        .expect("register callbacks");
+
+        eng.fire_event(&LuaEvent::Bell(1));
+        // The healthy callback after it still ran: one runaway must not
+        // cancel the rest of the list.
+        assert_eq!(
+            eng.eval_str("return good_runs").unwrap(),
+            "1",
+            "a runaway must not swallow the callbacks registered after it"
+        );
+        // The user hears about it once, through the ordinary notify channel.
+        let notices = eng
+            .drain_commands()
+            .into_iter()
+            .filter(|c| matches!(c, LuaCommand::Notify { .. }))
+            .count();
+        assert_eq!(
+            notices, 1,
+            "retiring a callback must be visible, not silent"
+        );
+
+        // The real assertion: a second event must not pay the stall again.
+        eng.fire_event(&LuaEvent::Bell(2));
+        assert_eq!(
+            eng.eval_str("return good_runs").unwrap(),
+            "2",
+            "the surviving callback keeps running"
+        );
+        assert_eq!(
+            eng.drain_commands()
+                .into_iter()
+                .filter(|c| matches!(c, LuaCommand::Notify { .. }))
+                .count(),
+            0,
+            "the retired callback must not run again, so there is nothing new \
+             to report"
+        );
+    }
+
+    /// A `pcall` around the runaway must not buy it a reprieve. The watchdog's
+    /// error is catchable Lua-side; what is not reachable from Lua is the flag
+    /// the watchdog also sets, which is what the retirement decision reads.
+    #[test]
+    fn wrapping_a_runaway_in_pcall_does_not_keep_it_registered() {
+        let eng = LuaEngine::new_with_max_hook_fires("Default", 2).expect("init");
+        eng.eval_str(
+            "swallowed = 0\n\
+             kettle.on('bell', function(id)\n\
+               swallowed = swallowed + 1\n\
+               pcall(function() while true do end end)\n\
+             end)\n",
+        )
+        .expect("register callback");
+
+        eng.fire_event(&LuaEvent::Bell(1));
+        assert_eq!(
+            eng.eval_str("return swallowed").unwrap(),
+            "1",
+            "precondition: the callback did run and did catch its own abort"
+        );
+        eng.fire_event(&LuaEvent::Bell(2));
+        assert_eq!(
+            eng.eval_str("return swallowed").unwrap(),
+            "1",
+            "a callback that hid its runaway behind pcall is still retired"
+        );
+    }
+
     /// The budget is per-invocation — a tight-but-finite loop that
     /// fits well under the cap runs to completion across repeated calls without
     /// a cumulative counter eventually tripping it.
@@ -1908,6 +2117,79 @@ mod tests {
         let _ = std::fs::remove_file(&path);
     }
 
+    /// `lua-sandbox = safe` nils `os.execute` and `io.popen`, which reads like
+    /// "a safe-mode plugin cannot run programs". It cannot: `kettle.send_text`
+    /// types into the focused shell, and a newline in that text runs what it
+    /// typed — the shipped example plugin clears the screen exactly that way.
+    /// Safe mode is a guard against a careless plugin, not a container for a
+    /// hostile one, and `restricted` is the level that actually holds: the two
+    /// APIs that drive the terminal refuse, and everything else still works.
+    #[test]
+    fn only_the_restricted_level_stops_a_plugin_driving_the_terminal() {
+        use kettle_config::LuaSandbox;
+
+        // Precondition: safe mode nils the obvious process-spawning API, so
+        // the point below is about what that guarantee does NOT cover.
+        let safe = LuaEngine::new_with_sandbox("Default", LuaSandbox::Safe).expect("init safe");
+        assert_eq!(safe.eval_str("return type(os.execute)").unwrap(), "nil");
+        // ...and yet it can type a command and press return.
+        assert_eq!(
+            safe.eval_str("return kettle.send_text('whoami\\n')")
+                .unwrap(),
+            "true",
+            "safe mode accepts terminal input — this is the documented API, \
+             not an oversight; it is why safe mode is not a containment level"
+        );
+        assert_eq!(
+            safe.eval_str("return kettle.exec_action('new_tab')")
+                .unwrap(),
+            "true"
+        );
+        assert_eq!(
+            safe.drain_commands().len(),
+            2,
+            "both side effects reached the queue"
+        );
+
+        // Restricted refuses both, and says so in the return value rather than
+        // pretending to have queued the work.
+        let restricted = LuaEngine::new_with_sandbox("Default", LuaSandbox::Restricted)
+            .expect("init restricted");
+        assert_eq!(
+            restricted
+                .eval_str("return kettle.send_text('whoami\\n')")
+                .unwrap(),
+            "false"
+        );
+        assert_eq!(
+            restricted
+                .eval_str("return kettle.exec_action('new_tab')")
+                .unwrap(),
+            "false"
+        );
+        assert!(
+            restricted.drain_commands().is_empty(),
+            "a refused call must queue nothing at all"
+        );
+        // The stdlib nils still apply — restricted is strictly stricter.
+        assert_eq!(
+            restricted.eval_str("return type(os.execute)").unwrap(),
+            "nil"
+        );
+        // And the rest of the API is untouched: a restricted plugin can still
+        // observe and report, which is the whole point of having the level.
+        assert_eq!(
+            restricted.eval_str("return type(kettle.version)").unwrap(),
+            "function"
+        );
+        assert_eq!(
+            restricted
+                .eval_str("return kettle.notify('title', 'body')")
+                .unwrap(),
+            "true"
+        );
+    }
+
     #[test]
     fn safe_sandbox_nils_dangerous_stdlib_apis() {
         // The safe-mode sandbox (default
@@ -1997,7 +2279,8 @@ mod tests {
         // opt-in trust is out-of-scope for sandbox-escape reports).
         // A future refactor that nils
         // these even in trusted mode silently breaks user scripts.
-        let eng = LuaEngine::new_with_sandbox("Default", false).expect("init (trusted sandbox)");
+        let eng = LuaEngine::new_with_sandbox("Default", kettle_config::LuaSandbox::Trusted)
+            .expect("init (trusted sandbox)");
         // os.execute exists in trusted mode (still a function).
         assert_eq!(eng.eval_str("return type(os.execute)").unwrap(), "function");
         // io.open exists in trusted mode.
@@ -2016,17 +2299,20 @@ mod tests {
     /// (`debug.getregistry` reaches into mlua's reference table,
     /// `debug.sethook` is an instruction-level DoS hook, `debug.set*`
     /// breaks opaque-userdata encapsulation) would silently become
-    /// reachable from user scripts. This test catches that on both
-    /// safe and trusted sandbox modes — neither is meant to expose
-    /// the debug surface.
+    /// reachable from user scripts. This test catches that at every
+    /// trust level — none of them is meant to expose the debug surface.
     #[test]
     fn lua_default_globals_exclude_debug_library() {
-        for safe in [true, false] {
-            let eng = LuaEngine::new_with_sandbox("Default", safe).expect("init");
+        for sandbox in [
+            kettle_config::LuaSandbox::Restricted,
+            kettle_config::LuaSandbox::Safe,
+            kettle_config::LuaSandbox::Trusted,
+        ] {
+            let eng = LuaEngine::new_with_sandbox("Default", sandbox).expect("init");
             assert_eq!(
                 eng.eval_str("return type(debug)").unwrap(),
                 "nil",
-                "safe={safe}: `debug` library must be nil at the global \
+                "{sandbox:?}: `debug` library must be nil at the global \
                  level — mlua's Lua::new() defaults exclude it. If a future \
                  refactor switches to Lua::unsafe_new() or loads StdLib::DEBUG, \
                  update SECURITY.md's Lua plugin sandbox escape notes accordingly"

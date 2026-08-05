@@ -32,7 +32,35 @@ __kettle_osc7() {
   done
   printf '\033]7;file://%s%s\007' "${HOSTNAME:-localhost}" "$out"
 }
-__kettle_pc() { printf '\033]133;D;%s\007\033]133;A\007' "$?"; __kettle_osc7; }
-PROMPT_COMMAND="__kettle_pc${PROMPT_COMMAND:+; $PROMPT_COMMAND}"
+# Capture the command's status FIRST, and hand it back on the way out.
+#
+# kettle deliberately runs first in PROMPT_COMMAND so its own `$?` read is the
+# real one — but it used to end on a successful `printf`, so every segment
+# chained after it saw `$?` as 0. Anything that colours a prompt by exit
+# status, or appends `[$?]`, silently reported success after a failing command
+# purely because kettle was installed. Returning the saved status makes this
+# hook transparent to whatever follows it.
+__kettle_pc() {
+  local __kettle_status=$?
+  printf '\033]133;D;%s\007\033]133;A\007' "$__kettle_status"
+  __kettle_osc7
+  return "$__kettle_status"
+}
+# bash 5.1 allows PROMPT_COMMAND to be an ARRAY. The string form below happens
+# to survive that — bash assigns a plain string to index 0 and leaves the later
+# elements alone, so they still run — but only by accident, and it rewrites the
+# user's first element into a compound string. Prepending in kind says what is
+# meant. Verified both ways against a real bash: every segment runs exactly
+# once.
+#
+# `declare -p` is checked rather than `${PROMPT_COMMAND@a}` because that
+# transformation is itself 5.1-only and is a parse error on the bash 5.0 Ubuntu
+# 20.04 ships and the 3.2 macOS ships. Converting a scalar to an array would be
+# worse than doing nothing, since bash below 5.1 ignores an array-valued
+# PROMPT_COMMAND entirely.
+case "$(declare -p PROMPT_COMMAND 2>/dev/null)" in
+  "declare -a"*) PROMPT_COMMAND=(__kettle_pc "${PROMPT_COMMAND[@]}") ;;
+  *) PROMPT_COMMAND="__kettle_pc${PROMPT_COMMAND:+; $PROMPT_COMMAND}" ;;
+esac
 PS1='\[\033]133;B\007\]'"$PS1"
 trap 'printf "\033]133;C\007"' DEBUG

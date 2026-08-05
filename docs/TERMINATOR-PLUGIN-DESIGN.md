@@ -202,6 +202,12 @@ Windows. Cross-platform out of the box.
   - **Optionally exposed (default off)**: `os.execute`, `io.open`,
     `io.popen`, `os.exit`. User opts in via config:
     `lua-sandbox = trusted` (default `safe`).
+  - **Withdrawn by `lua-sandbox = restricted`**: `kettle.send_text` and
+    `kettle.exec_action` — the two APIs that drive the terminal. Nil'ing
+    `os.execute` alone does not stop a plugin running a command: it can
+    type one and submit it, which is what `send_text` is *for*. A plugin
+    you have not read belongs at this level, where it can still observe,
+    notify and restyle.
   - **Never exposed**: `package.loadlib` (loads native shared
     libraries — would let a malicious plugin take over the process).
 

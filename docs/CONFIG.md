@@ -311,7 +311,12 @@ per-key audit against Terminator's source.
 | `background-image-align-vert` | enum | `middle` | `top` \| `middle` \| `bottom` |
 | `background-blur` | bool | `false` | CPU-side 3-pass separable box blur at decode (approximates Gaussian) |
 | `background-darkness` | float 0..1 | `0.5` | How opaque the terminal's own background colour is where it covers a `transparent` / `image` / `starfield` backdrop. **`0.0` = fully see-through** (the backdrop shows at full strength), **`1.0` = fully covered** (the backdrop is hidden behind the terminal background); default `0.5`. Matches Terminator, which assigns this straight to the background colour's alpha — lower it for more transparency. Only applies when `background-type` is not `solid`. *(This row previously described the scale backwards.)* |
+| `inactive-color-offset` / `inactive-bg-color-offset` | float 0..1 | `0.8` / `1.0` | How far an unfocused pane recedes. Both are read, together with `unfocused-split-opacity`, and the strongest of the three wins — setting two does not dim twice as hard as either alone. Not Terminator's exact model (it rescales the foreground palette per glyph); kettle composites an overlay, which reproduces the intent without re-shaping every unfocused pane on each frame |
 | `exit-action` | enum | `close` | What happens when the shell exits: `close` (default) \| `hold` (keep dead-pane visible) \| `restart` (re-spawn shell — spawns the same argv + cwd in a new tab, deduped so alacritty's `Exit` + `ChildExit` emit pair counts once) |
+| `broadcast-default` | `all`\|`group`\|`off` | `group` | Which scope the broadcast chord (`Super+G`, or `Ctrl+Shift+G` on Windows) turns on. `group` — the panes of the active tab, kettle's long-standing behaviour. `all` — every pane in the window. `off` — the chord cannot enable broadcast at all. Terminator stores this as the *initial* mode instead; kettle waits to be asked, because a window that started in `all` would mirror every keystroke everywhere before you touched anything. Their default behaves identically either way, since Terminator's `group` mode with no groups assigned types only into the focused pane |
+| `split-to-group` | bool | `false` | A new split joins the broadcast group of the pane it came from, so splitting a grouped pane widens the group instead of quietly dropping out of it |
+| `autoclean-groups` | bool | `true` | Forget a broadcast group once its last pane closes. Terminator prunes an explicit group list; kettle's groups are just the names its panes carry, so what this clears is a broadcast still aimed at a group nobody is in — which would otherwise keep the titlebar claiming it and sweep up the next pane given that name. Set `false` to keep the aim |
+| `always-split-with-profile` | bool | `false` | A new split repeats the parent pane's launch command instead of falling back to a shell. Only changes *direct* launches (`kettle -e vim`, an agent CLI) — an ordinary shell is cloned either way. Off, splitting an editor gives you somewhere to work; on, it gives you a second editor, which is what a Terminator profile with a custom command does |
 | `force-no-bell` | bool | `false` | Terminator `force_no_bell` parity. Silences EVERY bell flavor regardless of the `bell` mode — visual flash, audible (none today), window-attention, and the `tab_bar.bell` activity dot. Use when running in a meeting / library / next-to-a-baby setup |
 | `visible-bell` / `urgent-bell` | bool / bool | `—` | Terminator compat aliases for the unified `bell` key. Terminator splits the bell into two orthogonal bools; kettle's `bell = both` is `visible_bell + urgent_bell`, `bell = visual` is `visible_bell` alone, `bell = attention` is `urgent_bell` alone. The two arms compose at end-of-parse so file order doesn't matter. **Precedence:** if you set the canonical `bell = …` key explicitly, the Terminator aliases are ignored — canonical wins over alias on hybrid configs |
 | `log-strip-ansi` | bool | `false` | Strip ANSI escape sequences from the per-pane session log (`Action::ToggleSessionLog`) before writing. `true` → log is plain-text (CSI / OSC / single-char ESC all stripped); `false` → raw stream is preserved (`cat`-replayable in a terminal) |
@@ -326,7 +331,7 @@ per-key audit against Terminator's source.
 | `new-tab-after-current-tab` | bool | `false` | Insert vs append behavior when creating a new tab |
 | `detachable-tabs` | bool | `true` | Allow cross-window tab tear-off / re-dock and the `move_tab_to_new_window` action. `false` keeps in-window tab switching and reordering but disables detach |
 | `ask-before-closing` | enum | `multiple-terminals` | Close-confirmation policy: `always`, `multiple-terminals`, or `never`. Applies to close-window, close-tab, and close-pane actions; panes sitting idle at an integrated-shell prompt do not count as work to lose |
-| `lua-sandbox` | enum | `safe` | Lua plugin trust mode: `safe` (default) nils `os.execute` / `os.exit` / `io.open` / `io.popen` etc; `trusted` enables full stdlib. See [`docs/examples/init.lua`](examples/init.lua) for the `kettle.*` Lua API surface (URL handlers, event hooks, menu items) with Launchpad / APT URL handlers ported from Terminator's `url_handlers.py` |
+| `lua-sandbox` | enum | `safe` | Lua plugin trust level. `restricted` — `kettle.send_text` and `kettle.exec_action` refuse, so a plugin can observe, notify and restyle but cannot drive the terminal; use it for a plugin you have not read. `safe` (default) — nils `os.execute` / `os.exit` / `io.open` / `io.popen` etc, **but a plugin can still run commands by typing them**, since `send_text` reaches the shell and a newline submits the line (the shipped example clears the screen that way). Safe mode guards against a careless plugin, not a hostile one. `trusted` — full stdlib. See [`docs/examples/init.lua`](examples/init.lua) for the `kettle.*` Lua API surface (URL handlers, event hooks, menu items) with Launchpad / APT URL handlers ported from Terminator's `url_handlers.py` |
 
 `kettle --gpu-info` honors the GPU settings above, including `--config` and
 `--profile`, without opening a window. It reports the requested backend policy,
@@ -355,7 +360,6 @@ Terminator's. Each key falls into one of three buckets:
 | Key | Why it's a "no-op" but works |
 |---|---|
 | `sticky` (X11 _NET_WM_STATE_STICKY) | **macOS is fully wired** — `sticky = true` calls `app.rs::set_visible_on_all_spaces`, which sets `NSWindowCollectionBehavior::CanJoinAllSpaces \| Stationary` on the underlying NSWindow, pinning the window to every Space. **X11 / Wayland are not wired** — winit 0.30 exposes no portable "stick to all workspaces" API (the X11 `_NET_WM_STATE_STICKY` hint has no winit binding and Wayland has no equivalent), so on those platforms the key is logged (not silently dropped) and `always-on-top` is the closest available cross-platform substitute |
-| `inactive-color-offset` | Kettle's `unfocused-split-opacity` is the implemented variant. The exact math differs (Terminator: two separate fg + bg offsets; kettle: single opacity blend), but the user-visible effect — dim unfocused panes — is equivalent |
 
 #### Won't implement — by-design divergence from Terminator
 
@@ -363,7 +367,6 @@ Terminator's. Each key falls into one of three buckets:
 |---|---|
 | `cursor-color-default` | Terminator's two-key design (`cursor-color = X` + `cursor-color-default = true` overrides to ignore the X) is confusing. kettle's design: set `cursor-color = …` to override, REMOVE the line to revert to theme — no separate boolean needed |
 | `http-proxy` | Parsed for Terminator/plugin compatibility but not consumed today. Kettle's authenticated self-updater does make HTTPS requests, but its feed is process-wide and intentionally does not inherit this per-profile terminal setting |
-| `broadcast-default` | Was previously mis-mapped to "startup broadcast state" — kettle no longer starts with broadcast on by default. Terminator's intent is "scope when broadcast IS on (all / group / off)" which presupposes named groups; kettle's per-tab broadcast model doesn't have group scoping today (Bucket D, see `docs/TERMINATOR-AUDIT.md`) |
 
 #### Genuine future work — parsed for forward-compat
 
@@ -371,11 +374,8 @@ The remaining keys parse cleanly but are not yet wired. A future cycle wiring an
 
 | Key | What Terminator does with it | Why it's future-work |
 |---|---|---|
-| `always-split-with-profile` | New splits inherit the parent pane's profile | Needs the profile concept formalized first |
-| `autoclean-groups` | Auto-remove empty broadcast groups | Needs named broadcast groups (Bucket D) |
 | `extra-styling` | Render bold/italic with styled-font features even when palette lacks variants | Render glyph-attribute change |
 | `hide-from-taskbar` | Suppress from OS taskbar | winit Windows-only natively; cross-platform requires per-platform extensions |
-| `split-to-group` | New splits join the parent's broadcast group | Needs named broadcast groups (Bucket D) |
 | `title-font` / `title-use-system-font` / `use-system-font` / `use-theme-colors` | Per-pane titlebar font + theme-color overrides | Multi-cycle per-pane font system |
 
 ## Editing the config from inside kettle (Preferences submenu)
@@ -460,7 +460,9 @@ focused pane's exact argv + cwd into a right-side split.
 **Focus + resize**: `focus_next`, `focus_prev`,
 `goto_split:{up,down,left,right}`, `resize_{up,down,left,right}`,
 `toggle_zoom` (also `toggle_split_zoom`), `rotate_cw` / `rotate_ccw`
-(rotate the split layout).
+(turn the whole tab's split layout a quarter turn, the way Terminator does —
+every pane moves to where turning the screen would have put it, and the two
+directions undo each other).
 
 **Window**: `new_window` (opens another window **in this process** since
 v2.18 — tabs can move live between windows), `close_window`,
@@ -491,7 +493,10 @@ scrollback only; keep the visible screen unlike `reset`).
 
 **Broadcast**: `broadcast_all` (type to every pane in the window),
 `broadcast_off`, `broadcast_group` (type to every pane in the focused pane's
-named group).
+named group). The default `Super+G` / `Ctrl+Shift+G` chord is `broadcast_tab`,
+which **toggles** — pressing it again turns broadcast off, so you never have to
+reach for a second chord to stop. Which scope it turns *on* is
+`broadcast-default`.
 
 **Grouping** is separate from broadcasting, as it is in Terminator: you put
 panes in a group, and then choose whether to broadcast to that group.

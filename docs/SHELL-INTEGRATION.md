@@ -104,8 +104,25 @@ wrappers.
 
 ### bash — add to `~/.bashrc`
 
+The snippet below is the OSC 133 half only — enough for prompt marks,
+`jump_to_prompt`, and command-status colouring. The shipped
+`shell-integration/kettle.bash` *also* reports the working directory over
+OSC 7, which is what makes a new tab or split open where you already are, and
+what puts a directory name on a tab. If you want that too — and you probably
+do — source the shipped file instead of pasting this:
+
 ```bash
-__kettle_pc() { printf '\033]133;D;%s\007\033]133;A\007' "$?"; }
+source /path/to/kettle/shell-integration/kettle.bash
+```
+
+```bash
+# Capture the status first and hand it back, so anything chained after this
+# still sees the real exit code rather than the printf's.
+__kettle_pc() {
+  local __kettle_status=$?
+  printf '\033]133;D;%s\007\033]133;A\007' "$__kettle_status"
+  return "$__kettle_status"
+}
 PROMPT_COMMAND="__kettle_pc${PROMPT_COMMAND:+; $PROMPT_COMMAND}"
 PS1='\[\033]133;B\007\]'"$PS1"
 trap 'printf "\033]133;C\007"' DEBUG

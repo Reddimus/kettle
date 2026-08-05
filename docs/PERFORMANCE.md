@@ -67,6 +67,29 @@ evidence rejects `PATH`, `KETTLE_PERF_WT_EXE`, App Execution Alias, or other
 launcher indirection; standalone smoke probes retain ambient discovery only as
 explicitly advisory evidence.
 
+### Known blocker: Rio's startup-readiness probe
+
+As of 2026-08-05 a comparator run on the reference machine cannot complete.
+Rio 0.4.12 launches, creates a real window with a valid HWND, and publishes the
+READY marker — but the painted truecolor rectangle never appears in the
+`PrintWindow` capture within the 30 s budget, so the run aborts with
+`rio startup readiness timed out; marker=True paint=False`. Every other
+comparator passes.
+
+Rio cannot simply be dropped: a balanced schedule needs an even set of at least
+six terminals, and there is no seventh installed to take its place. So the run
+is blocked on one of two things, neither of which the harness can decide for
+itself:
+
+- **Upgrading Rio** (0.5.9 is available). The winget package installs a
+  system-scope MSI and needs elevation, so it cannot be applied unattended.
+- **Relaxing the six-terminal requirement**, which weakens the order-effect
+  balancing the release gate exists to provide. That is a change to the
+  evidence contract, not a workaround.
+
+Until one of those happens, treat the absence of comparator numbers as
+unmeasured rather than as a result.
+
 Kettle, Alacritty, WezTerm, Rio, and Tabby receive run-local configs with the
 same font, scrollback, colors, opacity, padding, cursor, and disabled effects.
 The installed Windows Terminal has no per-launch settings-file switch, so its

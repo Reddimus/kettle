@@ -6,6 +6,450 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+  Findings from an audit of `kettle-ui` — the largest crate, and the one
+  holding the UI/UX states and the AstroNvim / tmux / agent-CLI input surface —
+  the last of the render residuals from the 2.47.0 review, and a sweep through
+  the Terminator features that were present in name only: an action that did
+  something other than what it was called, keys that parsed and were never
+  read, a documented sandbox level that did not hold, and two settings that
+  changed nothing until you restarted.
+
+  ### Added
+  - **`lua-sandbox = restricted`**, a third trust level below `safe`:
+    `kettle.send_text` and `kettle.exec_action` refuse, so a plugin can observe,
+    notify and restyle but cannot type into your shell or dispatch actions. See
+    the `Fixed` entry below for why `safe` was never that level.
+
+  ### Performance
+  - **The starfield evaluated its whole model once per star per pixel.** The
+    hash, the angle, the radial ease, the colour lookup and the sRGB decode all
+    lived inside the fragment shader's per-star loop, and none of them depend on
+    the pixel being shaded — at 4K that was roughly 456 million star-iterations
+    a frame, about ten transcendentals apiece, recomputing 55 stars' worth of
+    values over and over.
+
+    Everything pixel-independent is hoisted out. The angle, phase and colour are
+    fixed for the life of the field and are computed once at startup; the radial
+    position, radii and brightness change with time and resolution and are
+    computed once per frame for 55 stars, then uploaded. What is left in the
+    shader is the part that genuinely varies per pixel: the distance to each
+    star and the two falloff terms, one `exp` instead of ten transcendentals.
+    Stars too dim to see are dropped before upload, so they no longer cost a
+    `continue` on every pixel.
+
+    The brightness curve is production code now rather than a copy kept in the
+    test module, so the tests that pin the visual contract drive the function
+    that actually runs. A GPU test renders a real frame and checks the stars
+    land where the CPU placed them, which is the only thing that can catch a
+    layout disagreement between the Rust uniform struct and the hand-written
+    WGSL — verified by swapping the struct's two members and watching it go red
+    while every CPU test stayed green.
+
+  ### Fixed
+  - **`equalize-splits` stopped equalizing once a tab held more than twenty
+    panes.** Every ratio in the split tree was clamped into a fixed
+    `[0.05, 0.95]` band at each of the six places a ratio was read or written.
+    A balanced chain of N panes on one axis needs ratios of `1/N`, so past
+    twenty the value it wanted could not be represented: 23 panes came out
+    7,7,7,6,6,…, and 28 panes ran 95px down to 63px — the widest pane half
+    again as wide as the narrowest, after asking for them to be equal.
+
+    The same band made keyboard resize run backwards on a crowded tab. A pane
+    already below the floor that was asked to get *smaller* landed under 0.05
+    and was clamped back up, so it grew. And it silently rewrote layouts on
+    restore: the session file's ratios went through the same clamp, so an
+    equalized many-pane workspace came back unequal.
+
+    The band is gone. What keeps a pane usable is now a floor measured in
+    pixels against the space actually available, applied in the one place that
+    turns a ratio into geometry — so it binds only when a pane would really
+    become too small to read or to grab by its divider, and a divider dragged
+    to the edge now stops the same physical distance from it whatever the
+    window size, instead of reserving 95px on a wide monitor and almost
+    nothing on a narrow one.
+
+  - **Two tests could fail without anything being wrong.** The MCP stall
+    detector's "a busy writer is not a stalled peer" fixture published progress
+    from a helper thread every 10 ms against a 50 ms budget — five missed
+    wake-ups of headroom, which a loaded CI runner spends routinely, so the
+    test failed on macOS having proven nothing about the code. Progress now
+    comes from inside the detector's own poll, which tests the same property
+    without asking the scheduler for a favour.
+
+    And the performance harness's Windows PowerShell 5.1 run died on a parse
+    error, because a file with no BOM is read as the ANSI code page there: an
+    em dash decodes to three characters, the last of which PowerShell accepts
+    as a closing quote, so a dash inside a string ended it and the parser
+    failed somewhere else entirely. Every harness script is ASCII now, and a
+    new self-test refuses any byte above `0x7F` — including a check that the
+    check itself still fires.
+
+  - **A session file replaced underneath kettle could be mistaken for its
+    own.** The write-skip that keeps a keybound action from costing tens of
+    milliseconds of durability syscalls remembered what this process last wrote
+    and confirmed it against the file's *size* — so a session replaced with
+    different contents of the same length read as unchanged and was never
+    corrected. Two kettle windows share `session.json` and a hand-edited file is
+    a supported thing to do, so that is a state you can actually be in. The
+    check now compares the file's bytes, which costs microseconds against the
+    write it decides whether to spend, and needs no remembered state at all.
+
+  - **The keybind-conflict question could not be answered.** Rebinding a key
+    onto a chord that is already taken raises a confirmation — from inside the
+    Settings overlay, which is where the keybind editor lives. But the Settings
+    arms claimed the keyboard first in both key routers, so every key, `y` and
+    `n` included, went to the panel and none reached the dialog. The panel's
+    dim backdrop covered the bar as well, which is what made it look like a
+    stacking bug rather than a dead one.
+
+    A modal question now outranks every overlay, including the one that asked
+    it, and the backdrop stops above the bar instead of greying out the thing
+    being asked.
+
+  - **A Lua callback stuck in a loop froze the terminal on every event, not
+    once.** The instruction-budget watchdog aborted a runaway, which is the
+    right first move, but then left the callback registered. The budget is
+    deliberately enormous — around 128 million instructions — so exhausting it
+    costs real wall time, and an `output` callback that never finishes is
+    re-entered on every chunk of PTY output. Each chunk paid the stall again.
+    That is not a terminal with a broken plugin in it; it is a terminal that
+    has stopped working.
+
+    A callback that burns the whole budget is now retired for the session and
+    the user is told, once, through the ordinary notification path — a plugin
+    silently ceasing to work is its own kind of bug. Wrapping the runaway in a
+    `pcall` does not buy it a reprieve: the watchdog records the abort somewhere
+    Lua cannot reach, so swallowing the error changes nothing. Each callback
+    also gets its own budget rather than sharing one per event, so a heavy but
+    honest callback can no longer starve the ones registered after it, or take
+    the blame for them.
+
+  - **Drag-to-reorder was dead on a vertical tab bar.** With
+    `tab-position = left` or `right` the segments stack down a shared column,
+    and the drag handler tested the cursor's **x** — which every segment
+    contains. The first one always matched, so dragging any tab moved tab 0, or
+    did nothing at all when tab 0 was the one being dragged. The ghost had the
+    same problem from the other side: it was pinned to the top of the strip and
+    slid sideways out of the bar as the cursor moved.
+
+    Both now follow the axis the strip is actually stacked on, read back off
+    the rendered segments so the drag cannot disagree with what is on screen.
+    The control plane reports `drag_cursor_y` alongside the existing
+    `drag_cursor_x`, so a live-UI check can see the vertical ghost.
+
+  - **Changing the scrollback budget did nothing until you restarted.** Both
+    `scrollback` and `scrollback-bytes` were read once, when a pane spawned.
+    Editing them — in the config file, or through the Settings overlay's two
+    scrollback rows — wrote the value, reloaded the config, and left every open
+    pane on its old cap, so the setting looked broken rather than deferred.
+
+    A reload now carries the budget into the panes that are already running. A
+    decrease is honoured, which is the opposite of what a *resize* is allowed
+    to do: a resize must never lower the cap, because nothing about dragging a
+    window wider means you want less history, whereas typing a smaller number
+    into the setting means precisely that.
+
+  - **`lua-sandbox = safe` did not mean what it read as, and there was no
+    level that did.** Safe mode nils `os.execute`, `io.popen`, `io.open` and
+    the rest, which reads as "a safe-mode plugin cannot run programs". It can:
+    `kettle.send_text` types into the focused shell and a newline submits the
+    line — that is the documented plugin API, and the shipped example clears
+    the screen exactly that way. So the two statements in the documentation
+    contradicted each other, and a user picking `safe` before running someone
+    else's plugin was misled about what they were getting.
+
+    Rather than break the API, kettle now says so plainly and adds the level
+    that was missing. `lua-sandbox = restricted` refuses `send_text` and
+    `exec_action` — the two calls that drive the terminal — while hooks,
+    queries, notifications and theme changes keep working, so a plugin you
+    have not read can still be useful without being able to type for you.
+    `safe` stays the default and stays honest about being a guard against a
+    careless plugin rather than a container for a hostile one; `SECURITY.md`
+    now scopes reports accordingly.
+
+  - **Four Terminator config keys parsed and did nothing.** `broadcast-default`,
+    `split-to-group`, `autoclean-groups` and `always-split-with-profile` were
+    accepted, validated, stored — and never read. Setting them changed nothing,
+    and `--check-config` reported them as fine. They are wired now:
+
+    - `broadcast-default` picks the scope the broadcast chord turns on:
+      `group` (the default) is the active tab, exactly what the chord has
+      always done; `all` is the whole window; `off` means the chord cannot
+      enable broadcast at all. Terminator stores this as the *initial* mode
+      instead — kettle waits to be asked, because a window that started in
+      `all` would mirror every keystroke into every pane before you touched
+      anything, which kettle shipped once by accident and had reported as a
+      bug. Terminator's own default behaves identically either way.
+    - `split-to-group` puts a new split in the broadcast group of the pane it
+      came from, instead of silently dropping out of it.
+    - `autoclean-groups` drops a broadcast still aimed at a group whose last
+      pane has closed. Terminator prunes a group registry; kettle's groups are
+      just the names its panes carry, so the thing that outlives its members is
+      the scope — which kept the titlebar claiming a group nobody was in, and
+      would have swept up the next pane given that name.
+    - `always-split-with-profile` makes a split repeat the parent's launch
+      command rather than falling back to a shell. It only affects direct
+      launches (`kettle -e vim`, an agent CLI); an ordinary shell was always
+      cloned.
+
+    The same chord is a toggle now. It used to *set* per-tab broadcast, so the
+    key that turned broadcasting on could not turn it off again and you had to
+    know a second one. Terminator has that pair too — `group_all` /
+    `ungroup_all` — plus a `group_all_toggle` that ships unbound; this is that
+    toggle, and the explicit off chord still works.
+
+  - **`rotate_cw` / `rotate_ccw` turned one split, and the two directions did
+    not undo each other.** Terminator's rotate turns the visible tab's whole
+    layout a quarter turn (`paned.py:rotate_recursive`); kettle flipped the axis
+    of the focused pane's parent split alone, swapped its children only when
+    rotating clockwise, and never mirrored the ratio. So a rotation moved one
+    pair of panes rather than the picture, an uneven split changed its
+    proportions on the way round, and clockwise-then-counter-clockwise did not
+    come back — it left the two panes swapped.
+
+    Rotation is now what the word means: every split turns, children swap with a
+    mirrored ratio exactly where the rectangles demand it, the two directions
+    are inverses, and four turns are the identity. The test asserts the pane
+    rectangles land where turning the screen would put them, which a
+    shape-only check could not have caught. Zoom is dropped first, as Terminator
+    does, so the result is visible; and because rotating changes every pane's
+    size, the PTYs are now resized and the new arrangement saved — previously
+    the layout was redrawn but every child process still believed its old
+    geometry.
+
+  - **`move_tab_left` / `move_tab_right` stopped dead at the ends of the tab
+    bar.** Terminator's `move_tab` wraps: left from the first tab sends it to
+    the end, right from the last brings it back to the front. kettle clamped, so
+    the keys silently did nothing on the tab most likely to be moved. They wrap
+    now, and reordering by keyboard is saved. The mouse path deliberately still
+    clamps — a drag that wrapped would fling the tab across the bar as soon as
+    the cursor overshot the last segment.
+
+  - **A workspace could come back with directories the user left an hour ago.**
+    `session.json` records each pane's working directory, each split's ratio and
+    each tab's title, but only a handful of gestures ever wrote it. A shell
+    `cd`, a dragged divider and a renamed tab all changed what the file should
+    say without saving it, so what came back depended on whether some *later*
+    gesture happened to save.
+
+    A sweep now writes the session when it has fallen behind. It costs nothing
+    at rest: it rides turns the event loop was already taking rather than arming
+    a timer — waking twice a second would have shown up in the idle-CPU figure
+    the perf suite publishes — and the write is skipped entirely when the
+    serialized text already matches what is on disk. A window with no tabs is
+    never swept, whatever the clock says: a window is empty exactly when it has
+    not opened yet or is on its way out, and writing that snapshot would put an
+    empty session over the one about to be restored.
+
+  - **`split-auto` always split downward.** The dispatch arm read
+    `Action::SplitDown | Action::SplitAuto`, so "auto" was literally "down" —
+    on a pane wider than it is tall it stacked instead of splitting side by
+    side. Terminator splits along the pane's longer axis, and every
+    user-facing description in kettle already said the same: `docs/CONFIG.md`'s
+    "pick by aspect ratio", the palette entry, the context-menu row, and the
+    default `Ctrl+Shift+A` binding. Only the implementation disagreed. It now
+    reads the focused pane's rect and cuts the longer axis, ties going to a
+    vertical cut so a square pane behaves as it did before.
+
+  - **Closing a window erased the named layout it was launched from.**
+    `close_window` deliberately empties the mux before saving, so the session
+    it writes is the empty one — "this window is finished, do not bring it
+    back". Routed at a named layout, that intent destroyed the workspace
+    instead: a layout measured at 2043 bytes came back as 65
+    (`{"tabs":[],"windows":[]}`) after one close, and the next
+    `--layout NAME` opened a single default pane. Terminator, whose layouts
+    this mirrors, only ever writes one from an explicit Add/Refresh —
+    launching a layout never modifies it.
+
+    An empty snapshot can no longer overwrite a named layout. The deliberate
+    clear still reaches `session.json`, which is where that intent belongs.
+    The routing is one function now with the whole truth table as its test.
+
+  - **Widening a pane permanently destroyed its scrollback.** The
+    `scrollback-bytes` budget was turned into a line cap by dividing it by a
+    worst-case per-row cost at the pane's *current* width, and any grid change
+    — including a width-only one — reassigned it. A wider pane therefore
+    produced a smaller cap, and the grid enforces a lowered cap by discarding
+    the oldest rows, immediately and with no way back.
+
+    Four ordinary gestures reached it: dragging a window wider, where every
+    intermediate width applied its own cap; decrease-font, which fits more
+    columns in the same pixels; closing a sibling split so the survivor doubles
+    in width; and un-zooming. Measured with the shipped defaults at 28 rows: 77
+    columns held 5202 lines, 126 held 3210, 241 held 1681 — and dragging back
+    to 77 restored none of them. One font-decrease step cost 997 lines; closing
+    one split cost 2013. A long agent-CLI transcript lost most of itself to a
+    mouse drag.
+
+    The cap is monotonic for the life of a pane now: it can rise, never fall.
+    Nothing about a resize means the user wants less history, so a resize is
+    not how a memory budget gets enforced — every other terminal bounds
+    scrollback in lines and none of them evicts on widening. The worst case
+    becomes the budget measured at the width the history was accumulated at,
+    which is bounded and is paid only by someone who actually widened.
+
+  - **Modes 1000 and 1003 both reported the wrong motion.** The gate asked
+    "not 1003, and no button held", which let 1000 — defined as press and
+    release only — emit drag reports whenever a button happened to be down;
+    `vim` with `ttymouse=xterm` enables 1000 alone and hit exactly that. In the
+    other direction, both motion call sites only ran with a button held, so
+    1003 never delivered the button-less `CSI < 35 ; x ; y M` that is its
+    entire purpose, while DECRQM still answered that the mode was set. Hover
+    handling in Neovim's `mousemoveevent`, lazygit, btop and fzf was silently
+    dead. The rule is stated per mode now, in one function the tests drive.
+
+  - **Every modified Delete lost its modifier, under the shipped default.**
+    `delete-binding` defaults to `escape-sequence`, and the remap that
+    implements it had no modifier guard, so it rewrote `Ctrl+Delete`,
+    `Shift+Delete` and `Alt+Delete` back to the plain `CSI 3 ~`. `Ctrl+Delete`
+    was byte-identical to `Delete`: readline's `kill-word` deleted one
+    character, and no `<C-Del>` / `<S-Del>` / `<M-Del>` mapping in an editor
+    could ever fire. It hit both input planes — real keystrokes and agent
+    `send_keys` — and the remap had no test of any kind.
+
+    The binding now replaces only the *unmodified* encoding, and decides that
+    by comparing the encoded bytes rather than inspecting modifier state.
+    Reasoning from modifiers is what went wrong in the first place: Backspace
+    guarded on control and alt, correct for its C0 forms, while Delete's
+    `CSI 3 ~` carries a parameter for shift, alt, control and super alike.
+    Comparing against the plain form cannot drift from the encoder, and it also
+    leaves `modifyOtherKeys` and kitty-protocol encodings alone — an
+    application that negotiated a precise encoding should not have it
+    overwritten by a legacy remap.
+
+  - **`Ctrl+Alt+<char>` dropped Control, and four of them wrote a bare escape
+    introducer into the terminal.** The Meta+Control form was special-cased for
+    `C-M-v` alone; every other chord fell through to the printable-Meta path,
+    so `C-M-f` ran `forward-word` instead of `forward-sexp` in Emacs and no
+    `\e\C-h` readline binding fired. Worse, that path emitted the character
+    verbatim after `ESC`, so `Ctrl+Alt+[`, `]`, `_` and `Shift+P` sent a CSI,
+    OSC, APC or DCS opener to the shell and the terminal then consumed
+    whatever was typed next as sequence parameters.
+
+    The whole C0 table takes the Meta+Control form now. The scoping had been
+    justified by AltGr on international layouts, but that hazard cannot reach
+    the branch: winit clears CONTROL *and* ALT whenever the layout has AltGr
+    and the right Alt is down, and on X11/Wayland AltGr is Mod5, never ALT. A
+    character outside the ASCII control table is unaffected either way.
+
+  - **Answering a close confirmation left the surviving panes' PTYs at their
+    pre-close size.** Every keybind and menu action ends with a resize; the
+    confirm dispatch is a separate entry point and did not. With
+    `ask-before-closing` on — which the ✕ and Alt+F4 prompts require — a
+    confirmed pane or tab close collapsed the layout and repainted it while the
+    shells kept their old rows and columns, so a tmux, vim or agent CLI drew
+    into part of its pane with dead space around it. Typing did not heal it;
+    only some later unrelated action did. The resize is now the dispatch's
+    tail, in one place, so a new arm cannot forget it.
+
+  - **The latency benchmark could never complete a single run.** `latency.ps1`
+    called the harness's nearest-rank percentile helper with `90`, `95` and
+    `99` while that function declares `[ValidateRange(0.0, 1.0)]`, so
+    PowerShell rejected every call at parameter binding — before the body ran
+    — with "The 90 argument is greater than the maximum allowed range of 1".
+    Every other caller in the harness already passed a fraction; this file was
+    the outlier, and it was also the only harness module with no self-test,
+    which is why it shipped. It has one now, and the self-test reads
+    `latency.ps1`'s own calls and drives each argument through the real
+    function rather than restating the arithmetic.
+
+  - **The display-topology probe leaked the monitor's device instance path
+    into published results.** A duplicate-identity warning interpolated the
+    value — something like `DISPLAY\DEL41A8\5&2b41c7ee&0&UID4353` — into a
+    free-text `issues` string, which lands in `benchmark-manifest.json`. The
+    sanitizer tokenizes that value everywhere it appears under its own
+    `instance_name` property, but `issues` is free text and never matched a
+    sensitive property name, so it was published verbatim. The message carries
+    the count now, which is the part that makes it actionable, and the
+    sanitizer's self-test refuses any issue message that interpolates a
+    machine-identifying value.
+
+  - **`kettle.bash` zeroed `$?` for everything chained after it.** The hook
+    deliberately runs first in `PROMPT_COMMAND` so its own exit-status read is
+    the real one, but it ended on a successful `printf` and never restored the
+    status — so any segment after it saw `0`. Anything colouring a prompt by
+    exit status, or appending `[$?]`, reported success after a failing command
+    purely because kettle's integration was installed. Verified against a real
+    bash: `false` now leaves `$?=1` for the next segment where it used to leave
+    `0`.
+
+  - **The online installer's Ed25519 verification had no test that could fail.**
+    Every signed-path test ran against a stub whose `openssl pkeyutl -verify`
+    returned success unconditionally, and no test ever made it fail — so the
+    entire verification block could have been deleted, or made to accept a
+    forged signature, without anything going red. The manifest is where the
+    archive's hash comes from, so that check is the only thing between a user
+    and an attacker-supplied hash. There is now a test for the refusal, and it
+    was confirmed by disabling the verification and watching the installer
+    happily install from an unauthenticated manifest.
+
+  - **Fifty source guards could not fail, and one of them had already rotted.**
+    A guard that reads its own file with `include_str!` also reads its own
+    assertions, so `src.contains("literal")` matches the needle written one
+    line above it and passes whether or not the production code exists. Both
+    `app.rs` and `mux.rs` now strip every `#[cfg(test)]` item before searching,
+    and every guard was moved onto that. Turning them on immediately caught
+    `recorder_output_flushed_before_reap_and_on_close`, which keyed on three
+    comment sentences and had been matching its own stale copy of one that was
+    reworded — the wiring was fine, the guard was not. It keys on the call
+    sites and their enclosing functions now.
+
+  - **Minimizing a window persisted it as a 160×120 stub.** The session
+    snapshot read the window's position and size with no minimized check, and
+    Win32 answers a minimized window with the `(-32000, -32000)` sentinel and a
+    0×0 client rect, which winit passes through verbatim. The restore clamp
+    could only rescue that as far as its floor, so the window came back
+    unusable. A window that cannot say where it will return to now saves no
+    geometry and restores at the default size.
+
+  - **Dragging a tab reordered the other tabs.** `move_active_tab` swapped,
+    which is only the same as moving when the distance is exactly one. The drag
+    handler passes `target_index - active`, Windows coalesces mouse motion so a
+    single event can cross several narrow segments, and an overshoot past the
+    edge clamps to the last one — so the tab at the destination teleported back
+    to the dragged tab's original slot. It relocates now, sliding whatever it
+    passes. The shipped test never asserted the order of the tabs it did not
+    drag, so it stayed green under both meanings; it compares the whole bar now.
+
+  - **The session file was rewritten, durably, on every keybound action.**
+    `handle_action`'s unconditional tail saves the session, and the save is an
+    atomic replace that stages the bytes, `sync_all()`s them, applies the
+    Windows DACL, renames, and fsyncs the parent directory — 30–100 ms,
+    synchronously, on the event-loop thread. Since most of the ~200 action arms
+    fall through to that tail, holding `Ctrl+Shift+Down` to scroll asked for
+    tens of blocking disk writes a second and the window stopped responding.
+
+    Serializing costs about a millisecond; it is the durability syscalls that
+    cost, and almost none of those actions change the session at all. An
+    unchanged session skips the write now. A real change is still written
+    immediately and synchronously, so no guarantee moved, and the memo is
+    re-checked against the file's size so a session deleted out from under the
+    process is rewritten rather than assumed.
+
+  - **Translucent backgrounds composited too bright, and translucent
+    screenshots were wrong in both directions.** Closing the last open item
+    from the 2.47.0 premultiplied-alpha fix. Every pipeline that draws over the
+    frame's clear treats the destination as premultiplied — `quad` and
+    `imgpipe` through `PREMULTIPLIED_ALPHA_BLENDING`, `glyphpipe` through
+    `ALPHA_BLENDING`, whose `OneMinusSrcAlpha` destination factor is the
+    premultiplied "over" operator. The clear is the one write in the frame that
+    does not pass through a blend, so it is the only one that has to
+    premultiply itself, and it wrote straight colour instead. Measured on the
+    GPU: a 50%-alpha black quad over a 50%-alpha white background reads back at
+    188 with the straight clear and 156 with the correct one.
+
+    The multiply belongs in linear space, because an sRGB attachment is decoded
+    before blending and re-encoded on write. Only `PreMultiplied` surfaces get
+    it: `Opaque` discards alpha at composite time, so scaling would only darken
+    the surface toward black, and `PostMultiplied` divides it back out.
+
+    The same chain ran into the capture paths, where it was worse: PNG stores
+    straight alpha, and both the offscreen `--screenshot` and the live-surface
+    `ctl screenshot` saved premultiplied pixels unconverted. Both now convert,
+    in the space matching the attachment's format — a plain `Unorm` surface
+    blends on the stored bytes, an sRGB one in linear, and applying either
+    reciprocal in the other's space leaves the capture visibly off.
+
 ## [2.47.0] — 2026-08-03
 
   Follow-through on the review of the 2.46.0 fixes: the defects that review

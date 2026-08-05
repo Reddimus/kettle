@@ -7,8 +7,18 @@
 --
 -- All paths through `kettle.*` are sandboxed by default
 -- (`lua-sandbox = safe` in config). The dangerous Lua stdlib
--- (os.execute, io.open, debug.*, ...) is nil'd. The Lua sandbox's
--- resource caps bound runaway scripts:
+-- (os.execute, io.open, debug.*, ...) is nil'd.
+--
+-- That is not the same as "a plugin cannot run commands". This very
+-- file runs one below, by typing it: `kettle.send_text("clear\n")`
+-- reaches the shell and the newline submits the line. Safe mode
+-- guards against a careless plugin touching the filesystem or
+-- spawning something behind your back; it does not contain a hostile
+-- one. For a plugin you have not read, set `lua-sandbox = restricted`,
+-- where `send_text` and `exec_action` refuse and everything else in
+-- this file still works.
+--
+-- The Lua sandbox's resource caps bound runaway scripts:
 --   - kettle.send_text(s): s ≤ 1 MiB
 --   - kettle.notify(t, b): each field ≤ 8 KiB
 --   - the cumulative command queue ≤ 1024 entries

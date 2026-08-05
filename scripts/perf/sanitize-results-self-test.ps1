@@ -1325,6 +1325,43 @@ try {
         }
     }
 
+    # Free text is the sanitizer's blind spot: it tokenizes by PROPERTY NAME,
+    # so a machine-identifying value pasted into a message escapes untouched.
+    # The display-topology probe used to interpolate a monitor's device
+    # instance path into an `issues` string while the same value was tokenized
+    # under its own `instance_name` property, and `issues` was published
+    # verbatim. Guard the source: no message the probe builds may carry one.
+    $win32Source = Get-Content -LiteralPath (
+        Join-Path $PSScriptRoot 'lib-win32.ps1'
+    ) -Raw
+    $issueAdds = [regex]::Matches(
+        $win32Source, '\[void\]\$issues\.Add\((?<body>[\s\S]*?)\r?\n\s*\)')
+    if ($issueAdds.Count -lt 1) {
+        throw (
+            'no $issues.Add(...) sites found in lib-win32.ps1 -- this guard ' +
+            'is looking in the wrong place and cannot fail'
+        )
+    }
+    foreach ($match in $issueAdds) {
+        # Using the identity as a dictionary KEY is fine -- what must never
+        # reach the message is the identity's VALUE. Blank the lookup first so
+        # the check is about interpolation, not about the word appearing.
+        $body = $match.Groups['body'].Value -replace `
+            '\$identityCounts\[\$identity\]', '<count>'
+        if (
+            $body -match '\$identity\b' -or
+            $body -match 'instance_name' -or
+            $body -match 'serial_number' -or
+            $body -match 'monitor_device_id'
+        ) {
+            throw (
+                'a display-topology issue message interpolates a ' +
+                'machine-identifying value; issues is free text, escapes ' +
+                "property-name tokenization, and is published verbatim:`n$body"
+            )
+        }
+    }
+
     Write-Host 'sanitize-results self-test: PASS'
 } finally {
     $scratchFull = [IO.Path]::GetFullPath($scratch)

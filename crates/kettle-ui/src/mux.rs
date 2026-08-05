@@ -614,11 +614,36 @@ pub(crate) fn is_reapable(closed: bool, held: bool, child_exited: bool) -> bool 
     closed || (!held && child_exited)
 }
 
+/// Whether a `Group` broadcast scope should be dropped after a pane removal:
+/// only when `autoclean-groups` is on and the group has no members left. Pure
+/// so the truth table can be driven directly — a `Pane` needs a real PTY, so a
+/// test that built one to check the keep-case would be an integration test
+/// pretending to be a unit test.
+pub(crate) fn group_scope_is_stale(autoclean: bool, group_populated: bool) -> bool {
+    autoclean && !group_populated
+}
+
+/// Whether splitting a pane launched as `argv` should start the configured
+/// shell instead of repeating that launch.
+///
+/// A pane with no argv is already the shell. Beyond that, kettle clones an
+/// ordinary shell launch but deliberately falls back for a *direct* one — an
+/// editor, an agent CLI — so the new pane is somewhere to work rather than a
+/// second copy of the program you were reading. Terminator has no such
+/// distinction: `always_split_with_profile` forces the new terminal onto the
+/// parent's profile, custom command and all (`paned.py`), and setting it here
+/// asks for exactly that.
+pub(crate) fn split_falls_back_to_shell(argv: &[String], always_with_profile: bool) -> bool {
+    argv.is_empty() || (!always_with_profile && direct_launch_splits_to_shell(argv))
+}
+
 pub enum Node {
     Leaf(u64),
     Split {
         dir: Dir,
-        /// Fraction of the area given to child `a` (0.05..0.95).
+        /// Fraction of the area given to child `a`. Kept strictly inside
+        /// `(0, 1)`; how small a pane may actually get is decided in pixels by
+        /// [`split_extent_px`], not by this number.
         ratio: f32,
         a: Box<Node>,
         b: Box<Node>,
@@ -791,15 +816,14 @@ impl Node {
             Node::Leaf(id) => out.push((*id, rect)),
             Node::Split { dir, ratio, a, b } => {
                 let (x, y, w, h) = rect;
-                let r = ratio.clamp(0.05, 0.95);
                 match dir {
                     Dir::Horizontal => {
-                        let aw = (w * r).round();
+                        let aw = split_extent_px(w, *ratio);
                         a.layout((x, y, aw, h), out);
                         b.layout((x + aw, y, w - aw, h), out);
                     }
                     Dir::Vertical => {
-                        let ah = (h * r).round();
+                        let ah = split_extent_px(h, *ratio);
                         a.layout((x, y, w, ah), out);
                         b.layout((x, y + ah, w, h - ah), out);
                     }
@@ -815,13 +839,21 @@ impl Node {
     /// proportionally. Returns the subtree's leaf count. Pure tree math
     /// (unit-tested); the caller follows with `resize_all` to push the new
     /// geometry into the PTYs.
+    ///
+    /// The exact `la / (la + lb)` is stored, with no ratio band applied. A
+    /// balanced chain of N panes on one axis needs ratios of `1/N`, and the old
+    /// fixed `[0.05, 0.95]` clamp could not represent anything past twenty —
+    /// past that the outermost panes were handed more than their share and every
+    /// pane after them was starved, so "equalize" visibly stopped equalizing.
+    /// The floor that keeps a pane usable lives in `split_extent_px`, measured
+    /// in pixels against the space actually available.
     pub(crate) fn equalize(&mut self) -> usize {
         match self {
             Node::Leaf(_) => 1,
             Node::Split { a, b, ratio, .. } => {
                 let la = a.equalize();
                 let lb = b.equalize();
-                *ratio = (la as f32 / (la + lb) as f32).clamp(0.05, 0.95);
+                *ratio = la as f32 / (la + lb) as f32;
                 la + lb
             }
         }
@@ -841,7 +873,7 @@ impl Node {
                 return true;
             }
             if *d == dir && (a.contains(focus) || b.contains(focus)) {
-                *ratio = (*ratio + delta).clamp(0.05, 0.95);
+                *ratio = sane_ratio(*ratio + delta);
                 return true;
             }
         }
@@ -858,14 +890,13 @@ impl Node {
     fn dividers(&self, rect: Rect, path: &mut Vec<bool>, out: &mut Vec<SplitSeam>) {
         if let Node::Split { dir, ratio, a, b } = self {
             let (x, y, w, h) = rect;
-            let r = ratio.clamp(0.05, 0.95);
             let (a_rect, b_rect, pos) = match dir {
                 Dir::Horizontal => {
-                    let aw = (w * r).round();
+                    let aw = split_extent_px(w, *ratio);
                     ((x, y, aw, h), (x + aw, y, w - aw, h), x + aw)
                 }
                 Dir::Vertical => {
-                    let ah = (h * r).round();
+                    let ah = split_extent_px(h, *ratio);
                     ((x, y, w, ah), (x, y + ah, w, h - ah), y + ah)
                 }
             };
@@ -886,14 +917,15 @@ impl Node {
 
     /// Set the ratio of the split addressed by `path` (the a/b
     /// descent produced by `dividers`). Returns false if the path doesn't land
-    /// on a split (stale path after a layout change). The ratio is clamped to
-    /// the same [0.05, 0.95] band `layout` enforces, so a pane can't be dragged
-    /// to zero width.
+    /// on a split (stale path after a layout change). Callers that have the
+    /// split's rect (the drag handler, via `ratio_from_pos`) already hold the
+    /// divider `MIN_SPLIT_PX` away from either edge; this only rejects the
+    /// non-finite and out-of-range values a caller without a rect could pass.
     fn set_ratio_at(&mut self, path: &[bool], ratio: f32) -> bool {
         match self {
             Node::Split { ratio: r, a, b, .. } => match path.split_first() {
                 None => {
-                    *r = ratio.clamp(0.05, 0.95);
+                    *r = sane_ratio(ratio);
                     true
                 }
                 Some((&go_b, rest)) => {
@@ -923,27 +955,69 @@ pub struct SplitSeam {
     pub pos: f32,
 }
 
+/// Smallest extent, in pixels, either side of a split may be given.
+///
+/// This replaces a fixed `[0.05, 0.95]` ratio band that used to be re-applied at
+/// every layout and mutation site. A fixed fraction cannot express a balanced
+/// chain of more than twenty panes on one axis, and it scales the wrong way: on
+/// a 1900px-wide window it reserved 95px for a pane the user was trying to drag
+/// out of the way, while on a narrow window it reserved almost nothing. A pixel
+/// floor binds only when a pane would actually become too small to read or to
+/// grab by its divider, and stays out of the way otherwise.
+///
+/// Sized against what a pane needs to remain usable rather than pretty: roughly
+/// one cell of height or two of width at 96 DPI, and comfortably wider than the
+/// `seam_at` hit tolerance, so the divider of a pane squeezed to the floor can
+/// still be grabbed and dragged back.
+pub const MIN_SPLIT_PX: f32 = 16.0;
+
+/// Ratio guard for the paths that have no rect to measure against — keyboard
+/// resize, a restored session file, a control-plane request. It only keeps the
+/// ratio finite and strictly inside `(0, 1)`; the usable minimum is enforced in
+/// pixels by [`split_extent_px`] at layout time, where the space is known.
+pub fn sane_ratio(ratio: f32) -> f32 {
+    if ratio.is_finite() {
+        ratio.clamp(MIN_SPLIT_RATIO, 1.0 - MIN_SPLIT_RATIO)
+    } else {
+        0.5
+    }
+}
+
+/// Exactly representable, and small enough that it never rounds a legitimate
+/// `1/N` for any pane count a window can hold.
+const MIN_SPLIT_RATIO: f32 = 1.0 / 1024.0;
+
+/// Extent of a split's first child along the split axis, in pixels.
+///
+/// Both children keep at least [`MIN_SPLIT_PX`] whenever the split is big enough
+/// to afford it; below that the space is halved rather than handing one child
+/// everything. Every place that turns a ratio into geometry goes through this —
+/// `layout`, `dividers`, and the session restore path — so a divider is always
+/// drawn where the pane it separates actually starts.
+pub fn split_extent_px(total: f32, ratio: f32) -> f32 {
+    if !total.is_finite() || total <= 0.0 {
+        return 0.0;
+    }
+    let floor = MIN_SPLIT_PX.min(total / 2.0);
+    (total * sane_ratio(ratio))
+        .round()
+        .clamp(floor, total - floor)
+}
+
 /// The ratio a Horizontal/Vertical split should take so its divider
-/// sits under the cursor, clamped to the same band `layout` enforces.
+/// sits under the cursor, held far enough from either edge that both panes stay
+/// grabbable — the same [`MIN_SPLIT_PX`] floor `layout` enforces.
 pub fn ratio_from_pos(rect: Rect, dir: Dir, px: f32, py: f32) -> f32 {
     let (x, y, w, h) = rect;
-    let raw = match dir {
-        Dir::Horizontal => {
-            if w > 0.0 {
-                (px - x) / w
-            } else {
-                0.5
-            }
-        }
-        Dir::Vertical => {
-            if h > 0.0 {
-                (py - y) / h
-            } else {
-                0.5
-            }
-        }
+    let (total, offset) = match dir {
+        Dir::Horizontal => (w, px - x),
+        Dir::Vertical => (h, py - y),
     };
-    raw.clamp(0.05, 0.95)
+    if !total.is_finite() || total <= 0.0 || !offset.is_finite() {
+        return 0.5;
+    }
+    let floor = MIN_SPLIT_PX.min(total / 2.0);
+    sane_ratio(offset.clamp(floor, total - floor) / total)
 }
 
 /// Index of the first seam within `tol` px of the cursor (along the
@@ -1193,6 +1267,15 @@ pub struct Mux {
     /// Bounded so a long-running session doesn't accumulate state.
     /// LIFO: `pop_back` returns the most-recently-closed tab.
     pub closed_tabs: std::collections::VecDeque<ClosedTab>,
+    /// Terminator's `autoclean_groups` (`terminator.py:group_hoover`): forget a
+    /// broadcast group once its last pane is gone. Terminator keeps an explicit
+    /// group list to prune; kettle's groups are just the names its panes carry,
+    /// so the only thing that can outlive its members is a broadcast *scope*
+    /// still aimed at the dead group — which would keep the titlebar claiming a
+    /// group that no longer exists and re-capture any pane later given the same
+    /// name. Mirrored from the config at window construction, alongside the
+    /// other process-wide flags above.
+    pub autoclean_groups: bool,
 }
 
 impl Mux {
@@ -1206,7 +1289,44 @@ impl Mux {
             record_lossless: false,
             osc52_copy_allowed: true,
             closed_tabs: std::collections::VecDeque::with_capacity(CLOSED_TAB_RING_CAP),
+            autoclean_groups: true,
         }
+    }
+
+    /// Terminator's `group_hoover`: drop a broadcast scope whose group has no
+    /// members left. Called after every pane removal.
+    ///
+    /// Without it, closing the last pane of a group leaves the window still
+    /// claiming to broadcast to it — the titlebar keeps showing the group, and
+    /// the moment any pane is later given that name it silently joins a
+    /// broadcast the user set up for panes that are gone.
+    fn hoover_groups(&mut self) {
+        let BroadcastScope::Group(name) = &self.broadcast else {
+            return;
+        };
+        let populated = self
+            .panes
+            .values()
+            .any(|pane| pane.group_name.as_deref() == Some(name.as_str()));
+        if group_scope_is_stale(self.autoclean_groups, populated) {
+            self.broadcast = BroadcastScope::Off;
+        }
+    }
+
+    /// Push an edited scrollback budget into every live pane. Returns how many
+    /// panes' effective cap actually moved — zero when the setting is unchanged
+    /// or already satisfied at this geometry.
+    ///
+    /// See [`kettle_core::Terminal::set_scrollback_limits`] for why a *setting*
+    /// change may lower a cap that a *resize* must not.
+    pub fn set_scrollback_limits(&mut self, lines: usize, bytes: usize) -> usize {
+        let mut changed = 0;
+        for pane in self.panes.values_mut() {
+            if pane.term.set_scrollback_limits(lines, bytes) {
+                changed += 1;
+            }
+        }
+        changed
     }
 
     pub fn set_osc52_copy_allowed(&mut self, allowed: bool) {
@@ -1509,7 +1629,10 @@ impl Mux {
                     } else {
                         Dir::Horizontal
                     },
-                    ratio: *ratio,
+                    // The session file is on disk and hand-editable, so a
+                    // restored ratio is untrusted input: sanitize it here rather
+                    // than letting a NaN or a 12.0 reach the tree.
+                    ratio: sane_ratio(*ratio),
                     a: Box::new(a),
                     b: Box::new(b),
                 })
@@ -1840,10 +1963,32 @@ impl Mux {
             Some(pane) => (pane.argv.clone(), pane.term.current_dir()),
             None => (Vec::new(), None),
         };
-        if argv.is_empty() || direct_launch_splits_to_shell(&argv) {
+        if split_falls_back_to_shell(&argv, cfg.always_split_with_profile) {
             argv = shell_argv(cfg);
         }
         launch_cwd(argv, raw_cwd)
+    }
+
+    /// Terminator's `split_to_group` (`paned.py`: `if widget.group and
+    /// self.config['split_to_group']`): put a freshly split pane in the same
+    /// broadcast group as the pane it came from, so splitting a grouped pane
+    /// widens the group instead of quietly dropping out of it.
+    ///
+    /// Must run BEFORE the graft — grafting moves focus to the new pane, and
+    /// the group being inherited is the *old* focus's.
+    fn inherit_split_group(&mut self, cfg: &Config, new_id: u64) {
+        if !cfg.split_to_group {
+            return;
+        }
+        let group = self
+            .active_focus()
+            .and_then(|id| self.panes.get(&id))
+            .and_then(|pane| pane.group_name.clone());
+        if let Some(group) = group
+            && let Some(pane) = self.panes.get_mut(&new_id)
+        {
+            pane.group_name = Some(group);
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1881,6 +2026,7 @@ impl Mux {
         // focused cwd. See `split_focused_launch`.
         let (argv, cwd) = self.split_focused_launch(cfg);
         let new_id = self.spawn_pane(cfg, geometry, waker, cwd.as_deref(), &argv)?;
+        self.inherit_split_group(cfg, new_id);
         let a = self.active;
         let grafted = self
             .tabs
@@ -1940,6 +2086,7 @@ impl Mux {
             return self.new_tab_with_geometry(cfg, geometry, waker, &argv, cwd.as_deref());
         }
         let new_id = self.spawn_pane(cfg, geometry, waker, cwd.as_deref(), &argv)?;
+        self.inherit_split_group(cfg, new_id);
         let a = self.active;
         let grafted = self
             .tabs
@@ -2013,7 +2160,8 @@ impl Mux {
 
     /// Set the ratio of the split addressed by `path` in `tab`.
     /// Returns whether a split was found (false on a stale path). The ratio is
-    /// clamped to layout's [0.05, 0.95] band.
+    /// kept finite and strictly inside `(0, 1)`; `layout` holds the divider
+    /// [`MIN_SPLIT_PX`] clear of either edge when it turns it into geometry.
     pub fn set_split_ratio(&mut self, tab: usize, path: &[bool], ratio: f32) -> bool {
         self.tabs
             .get_mut(tab)
@@ -2068,21 +2216,25 @@ impl Mux {
             .unwrap_or_default()
     }
 
-    /// Terminator parity, terminatorlib/terminal.py:key_rotate_cw:
-    /// rotate the focused leaf's parent split by flipping its direction
-    /// (Horizontal ↔ Vertical) and optionally swapping its children.
-    /// `clockwise = true` matches Terminator's rotate_cw (vertical→
-    /// horizontal-with-swap, horizontal→vertical-no-swap); `false`
-    /// is the inverse.
+    /// Terminator parity (`terminatorlib/window.py:rotate`): turn the active
+    /// tab's whole layout a quarter turn. Returns whether there was anything to
+    /// rotate — a single-pane tab has no splits and is left alone.
     ///
-    /// No-op when the focused leaf has no parent split (i.e., the
-    /// tab has a single pane).
-    pub fn rotate_focused_split(&mut self, clockwise: bool) -> bool {
+    /// Terminator rotates every pane in the visible tab, not just the one the
+    /// cursor happens to be in, and it leaves zoom first so the user sees the
+    /// result. Both are matched here.
+    pub fn rotate_layout(&mut self, clockwise: bool) -> bool {
         let Some(tab) = self.tabs.get_mut(self.active) else {
             return false;
         };
-        let focus = tab.focus;
-        rotate_node(&mut tab.root, focus, clockwise)
+        if matches!(tab.root, Node::Leaf(_)) {
+            return false;
+        }
+        // Rotating a tree the user cannot see would rearrange their panes
+        // behind a zoomed one, so drop zoom the way Terminator does.
+        tab.zoomed = false;
+        rotate_tree(&mut tab.root, clockwise);
+        true
     }
 
     /// 0-based index of the focused pane within its tab's
@@ -2244,22 +2396,60 @@ impl Mux {
         }
     }
 
-    /// Swap the active tab with its neighbor `delta` positions away.
-    /// `delta > 0` moves the tab right, `delta < 0` moves it left. Clamps
-    /// at the edges (no wrap, matching iTerm2 / Ghostty / WezTerm — wrap
-    /// would have the tab bar lurch across the bar on every press).
-    /// Returns `true` if the tab actually moved.
+    /// Move the active tab `delta` positions along the bar, sliding every tab
+    /// it passes over back by one. `delta > 0` moves the tab right, `delta <
+    /// 0` moves it left. Clamps at the edges — this is the *drag* path, where a
+    /// cursor that overshoots the last segment must stop there rather than
+    /// fling the tab back to the front. The keyboard path is
+    /// [`Mux::nudge_active_tab`], which wraps. Returns `true` if the tab
+    /// actually moved.
+    ///
+    /// This used to `swap`, which is only the same thing when `|delta| == 1`:
+    /// for anything larger the tab sitting at the destination teleported back
+    /// to the dragged tab's original slot. Drag-to-reorder reaches larger
+    /// deltas routinely — the drag handler passes
+    /// `tab_drag_target_index(cursor_x) - active`, Windows coalesces
+    /// `WM_MOUSEMOVE` so one event can cross several narrow segments, and an
+    /// overshoot past the right edge clamps to the LAST segment. So dragging
+    /// one tab silently reordered the others.
     pub fn move_active_tab(&mut self, delta: i32) -> bool {
         let n = self.tabs.len();
         if n < 2 || delta == 0 {
             return false;
         }
-        let from = self.active as i32;
-        let to = (from + delta).clamp(0, n as i32 - 1) as usize;
-        if to == self.active {
+        let to = (self.active as i32 + delta).clamp(0, n as i32 - 1) as usize;
+        self.relocate_active_tab(to)
+    }
+
+    /// `move_tab_left` / `move_tab_right`: shift the active tab one place and
+    /// wrap around the ends, which is what Terminator's `move_tab` does
+    /// (`window.py`: left from the first tab goes to the end, right from the
+    /// last comes back to the front).
+    ///
+    /// Separate from [`Mux::move_active_tab`] because the two callers want
+    /// different edge behaviour, and one function cannot have both: a keyboard
+    /// press that stops dead at the end of the bar feels broken, while a *drag*
+    /// that wraps would fling the tab across the bar the moment the cursor
+    /// overshot the last segment. Drag clamps; the keys wrap.
+    pub fn nudge_active_tab(&mut self, delta: i32) -> bool {
+        let n = self.tabs.len();
+        if n < 2 || delta == 0 {
             return false;
         }
-        self.tabs.swap(self.active, to);
+        let to = (self.active as i32 + delta).rem_euclid(n as i32) as usize;
+        self.relocate_active_tab(to)
+    }
+
+    /// Lift the active tab out of the bar and put it back down at `to`,
+    /// following it with the focus. Shared by the drag and keyboard paths so
+    /// they cannot drift apart on the part that actually reorders.
+    fn relocate_active_tab(&mut self, to: usize) -> bool {
+        let from = self.active;
+        if to == from || to >= self.tabs.len() {
+            return false;
+        }
+        let tab = self.tabs.remove(from);
+        self.tabs.insert(to, tab);
         self.active = to;
         true
     }
@@ -2333,6 +2523,7 @@ impl Mux {
                 }
             }
         }
+        self.hoover_groups();
         self.tabs.is_empty()
     }
 
@@ -2474,6 +2665,10 @@ impl Mux {
         // The user lands on whichever tab slid into focus; mark it seen so
         // its activity dot clears (same as every other tab-switch path).
         self.touch_active_tab_seen();
+        // The panes left this window entirely, so a group they were the last
+        // members of is gone from *here* even though it lives on in the window
+        // they land in.
+        self.hoover_groups();
         Some(DetachedTab { tab, panes })
     }
 
@@ -2555,6 +2750,7 @@ impl Mux {
             if (self.active >= self.tabs.len() || self.active > idx) && self.active > 0 {
                 self.active -= 1;
             }
+            self.hoover_groups();
         }
         self.tabs.is_empty()
     }
@@ -2723,6 +2919,9 @@ impl Mux {
             self.panes.remove(id);
         }
         Self::reap_tabs(&mut self.tabs, &mut self.active, &dead);
+        if !dead.is_empty() {
+            self.hoover_groups();
+        }
         self.tabs.is_empty()
     }
 
@@ -3198,35 +3397,34 @@ pub(crate) fn home_dir_string() -> Option<String> {
     std::env::var(key).ok().filter(|s| !s.is_empty())
 }
 
-/// Rotate the split that is the *immediate parent* of pane `target` (the split
-/// with `target` as a direct leaf child): flip its axis and, for a clockwise
-/// rotation, swap its children. Recurses to find that parent; returns whether a
-/// rotation happened. Extracted from `rotate_focused_split` as a free fn so the
-/// nested-tree behavior is unit-testable without standing up a Mux (audit,
-/// v2.26.0: the old guard fired for any ancestor split that merely had some leaf
-/// child, rotating the wrong split in nested trees).
-fn rotate_node(node: &mut Node, target: u64, clockwise: bool) -> bool {
-    if let Node::Split { dir, a, b, .. } = node {
-        if matches!(**a, Node::Leaf(x) if x == target)
-            || matches!(**b, Node::Leaf(x) if x == target)
-        {
-            *dir = match *dir {
-                Dir::Horizontal => Dir::Vertical,
-                Dir::Vertical => Dir::Horizontal,
-            };
-            if clockwise {
-                std::mem::swap(a, b);
-            }
-            return true;
-        }
-        if a.contains(target) && rotate_node(a, target, clockwise) {
-            return true;
-        }
-        if b.contains(target) && rotate_node(b, target, clockwise) {
-            return true;
+/// Turn a whole split tree a quarter turn, matching
+/// `terminatorlib/paned.py:rotate_recursive`.
+///
+/// Every split flips axis. Whether its children also swap — and its ratio
+/// inverts along with them — follows from where the rectangles land: rotating
+/// clockwise sends the left pane of a side-by-side pair to the top (same order,
+/// same ratio) and the top pane of a stacked pair to the right (reversed order,
+/// mirrored ratio). Counter-clockwise is the mirror of that, which is what makes
+/// the two directions exact inverses and four turns the identity — a property
+/// the previous "flip the focused pane's parent, swap only when clockwise"
+/// version had neither of, and one the tests now pin.
+fn rotate_tree(node: &mut Node, clockwise: bool) {
+    if let Node::Split { dir, ratio, a, b } = node {
+        rotate_tree(a, clockwise);
+        rotate_tree(b, clockwise);
+        let reverse = match *dir {
+            Dir::Horizontal => !clockwise,
+            Dir::Vertical => clockwise,
+        };
+        *dir = match *dir {
+            Dir::Horizontal => Dir::Vertical,
+            Dir::Vertical => Dir::Horizontal,
+        };
+        if reverse {
+            *ratio = 1.0 - *ratio;
+            std::mem::swap(a, b);
         }
     }
-    false
 }
 
 /// Apply the *post-spawn* tree mutation for a split: graft the new pane id
@@ -3479,6 +3677,28 @@ impl Default for Mux {
 #[cfg(test)]
 mod node_tests {
     use super::*;
+
+    /// The production half of this file: everything above the test module.
+    ///
+    /// A source guard that searches the WHOLE file also searches its own
+    /// assertions, so a plain `src.contains("…")` matches the needle written
+    /// one line above it and passes whether or not the production code is
+    /// there — and a `matches(…).count()` is inflated by one for the same
+    /// reason. Slicing the test module off first removes the class.
+    fn production_source() -> String {
+        let src = include_str!("mux.rs").replace("\r\n", "\n");
+        let marker = "\n#[cfg(test)]\nmod node_tests {";
+        let cut = src
+            .find(marker)
+            .expect("mux.rs must have a test module to slice off");
+        let production = src[..cut].to_string();
+        assert!(
+            !production.contains("fn production_source()"),
+            "the slice must exclude the test module, or every guard built on \
+             it still self-matches"
+        );
+        production
+    }
 
     #[test]
     fn pane_input_outcome_precedence_is_explicit() {
@@ -3921,7 +4141,7 @@ mod node_tests {
     /// the source level.
     #[test]
     fn build_node_reaps_orphan_panes_on_partial_restore_failure() {
-        let src = include_str!("mux.rs");
+        let src = production_source();
         assert!(
             src.contains("spawned: &mut Vec<u64>"),
             "build_node must thread a spawned-id accumulator so a partial \
@@ -3972,14 +4192,17 @@ mod node_tests {
         // pos→ratio: dragging the seam to x=150 over the 200-wide split → 0.75.
         let r = ratio_from_pos(seams[0].rect, seams[0].dir, 150.0, 50.0);
         assert!((r - 0.75).abs() < 1e-6, "ratio was {r}");
-        // Clamp: dragging past the edge pins to the band, never 0/1.
+        // Clamp: dragging past either edge leaves MIN_SPLIT_PX of pane behind,
+        // never 0/1 — measured in pixels against this 200-wide split, so the
+        // stop is the same physical distance whatever the window size.
+        let min_ratio = super::MIN_SPLIT_PX / 200.0;
         assert_eq!(
             ratio_from_pos(seams[0].rect, Dir::Horizontal, -50.0, 0.0),
-            0.05
+            min_ratio
         );
         assert_eq!(
             ratio_from_pos(seams[0].rect, Dir::Horizontal, 999.0, 0.0),
-            0.95
+            1.0 - min_ratio
         );
 
         // Nested tree: root Horizontal(0.5){ Leaf1, Vertical(0.5){Leaf2,Leaf3} }.
@@ -4010,8 +4233,239 @@ mod node_tests {
         assert!(!nested.set_ratio_at(&[false, true], 0.5)); // descends into Leaf1
     }
 
+    /// Build the split tree that repeatedly splitting the newest pane produces:
+    /// `Split{ Leaf1, Split{ Leaf2, Split{ ... } } }`, `count` leaves deep.
+    fn chain(dir: Dir, count: usize) -> Node {
+        assert!(count >= 1, "a chain needs at least one pane");
+        let mut node = Node::Leaf(count as u64);
+        for id in (1..count).rev() {
+            node = Node::Split {
+                dir,
+                ratio: 0.5,
+                a: Box::new(Node::Leaf(id as u64)),
+                b: Box::new(node),
+            };
+        }
+        node
+    }
+
+    /// `equalize` used to clamp every ratio it computed into a fixed
+    /// `[0.05, 0.95]` band, so a chain needing `1/N < 0.05` could not be
+    /// represented: at 23 panes the widths came out 7,7,7,6,6,… and by 28 the
+    /// widest pane was 1.75x the narrowest. The band is gone; the only floor is
+    /// in pixels, and at these sizes it never binds.
+    #[test]
+    fn equalize_stays_exact_past_the_pane_count_a_ratio_band_could_hold() {
+        // Precondition: this test is only meaningful past the old band. A chain
+        // of 28 wants 1/28 at its outermost split, well under the old 0.05
+        // floor — if that stops being true the test has stopped testing.
+        let panes = 28;
+        assert!(
+            1.0 / panes as f32 <= 0.05,
+            "fixture no longer exercises the sub-band region"
+        );
+
+        for (dir, width, height) in [
+            (Dir::Horizontal, 1900.0_f32, 1000.0_f32),
+            (Dir::Vertical, 1000.0, 1900.0),
+        ] {
+            let mut root = chain(dir, panes);
+            assert_eq!(root.equalize(), panes);
+
+            let mut out = Vec::new();
+            root.layout((0.0, 0.0, width, height), &mut out);
+            assert_eq!(out.len(), panes);
+
+            let extent = |r: &Rect| if dir == Dir::Horizontal { r.2 } else { r.3 };
+            let sizes: Vec<f32> = out.iter().map(|(_, r)| extent(r)).collect();
+            let smallest = sizes.iter().cloned().fold(f32::INFINITY, f32::min);
+            let largest = sizes.iter().cloned().fold(0.0_f32, f32::max);
+            // Every pane within a pixel of every other: all that separates them
+            // is `layout`'s per-split rounding.
+            assert!(
+                largest - smallest <= 1.0,
+                "{dir:?} panes ranged {smallest}..{largest}, sizes {sizes:?}"
+            );
+            // And they still tile the area exactly, with no seam drift.
+            let total: f32 = sizes.iter().sum();
+            let axis = if dir == Dir::Horizontal {
+                width
+            } else {
+                height
+            };
+            assert!(
+                (total - axis).abs() < 1e-3,
+                "{dir:?} panes summed to {total}, not {axis}"
+            );
+        }
+    }
+
+    /// The pixel floor is what keeps a pane grabbable, so it has to bind when
+    /// the space really does run out — and it has to split what is left evenly
+    /// rather than handing one side everything.
+    #[test]
+    fn a_split_too_small_for_the_floor_is_halved_instead_of_collapsed() {
+        // Roomy: the ratio is honored outright.
+        assert_eq!(split_extent_px(1000.0, 0.25), 250.0);
+        // Extreme ratios still leave a grabbable pane on both sides.
+        assert_eq!(split_extent_px(1000.0, 0.0), MIN_SPLIT_PX);
+        assert_eq!(split_extent_px(1000.0, 1.0), 1000.0 - MIN_SPLIT_PX);
+        // Too small to seat two floors: halve rather than collapse.
+        let cramped = MIN_SPLIT_PX;
+        assert_eq!(split_extent_px(cramped, 0.9), cramped / 2.0);
+        // Degenerate input never escapes as a NaN rect.
+        assert_eq!(split_extent_px(f32::NAN, 0.5), 0.0);
+        assert_eq!(split_extent_px(0.0, 0.5), 0.0);
+        assert_eq!(split_extent_px(1000.0, f32::NAN), 500.0);
+    }
+
+    /// Keyboard resize used to clamp into the same `[0.05, 0.95]` band, which
+    /// meant that on a tab with many panes asking for a pane to get *smaller*
+    /// made it get bigger — the shrink landed below 0.05 and clamped back up.
+    #[test]
+    fn shrinking_a_pane_below_the_old_band_actually_shrinks_it() {
+        let mut root = chain(Dir::Horizontal, 28);
+        root.equalize();
+        let width_of = |root: &Node, id: u64| {
+            let mut out = Vec::new();
+            root.layout((0.0, 0.0, 1900.0, 1000.0), &mut out);
+            out.iter().find(|(i, _)| *i == id).unwrap().1.2
+        };
+        let before = width_of(&root, 1);
+        // Precondition: pane 1's share is under the old floor, so the old code
+        // could not have narrowed it at all.
+        assert!(
+            before / 1900.0 < 0.05,
+            "pane 1 held {before}px of 1900 — not below the old band"
+        );
+        assert!(root.resize(1, Dir::Horizontal, -0.01));
+        let after = width_of(&root, 1);
+        assert!(
+            after < before,
+            "shrink moved {before}px to {after}px — the wrong direction"
+        );
+    }
+
     /// Drift guard. `compute_broadcast_targets` is the
     /// pure helper that maps a `BroadcastScope` + focused pane +
+    /// Terminator's `autoclean_groups`. kettle has no group registry to prune —
+    /// a group is just the name its panes carry — so the thing that can outlive
+    /// its members is the broadcast *scope*. Left behind, the titlebar goes on
+    /// claiming a group nobody is in, and the next pane given that name is
+    /// silently swept into a broadcast set up for panes that are gone.
+    #[test]
+    fn a_group_with_no_panes_left_stops_being_the_broadcast_scope() {
+        // The whole decision, both axes:
+        assert!(
+            group_scope_is_stale(true, false),
+            "empty group, cleaning on"
+        );
+        assert!(
+            !group_scope_is_stale(true, true),
+            "a group that still has members must survive the removal of one"
+        );
+        assert!(
+            !group_scope_is_stale(false, false),
+            "`autoclean-groups = false` keeps the scope, as Terminator does"
+        );
+        assert!(!group_scope_is_stale(false, true));
+
+        // And the Mux applies it: no panes at all means no members.
+        let mut m = Mux::new();
+        m.broadcast = BroadcastScope::Group("fleet".into());
+        m.hoover_groups();
+        assert_eq!(m.broadcast, BroadcastScope::Off);
+
+        let mut kept = Mux::new();
+        kept.autoclean_groups = false;
+        kept.broadcast = BroadcastScope::Group("fleet".into());
+        kept.hoover_groups();
+        assert_eq!(kept.broadcast, BroadcastScope::Group("fleet".into()));
+
+        // Off and Tab scopes are not group scopes and are never touched.
+        for scope in [
+            BroadcastScope::Off,
+            BroadcastScope::Tab,
+            BroadcastScope::All,
+        ] {
+            let mut m = Mux::new();
+            m.broadcast = scope.clone();
+            m.hoover_groups();
+            assert_eq!(m.broadcast, scope);
+        }
+
+        // And the whole thing is opt-out: `autoclean-groups = false` keeps the
+        // scope pointed at the empty group, which is what Terminator does.
+        let mut kept = Mux::new();
+        kept.autoclean_groups = false;
+        kept.broadcast = BroadcastScope::Group("fleet".into());
+        kept.hoover_groups();
+        assert_eq!(kept.broadcast, BroadcastScope::Group("fleet".into()));
+    }
+
+    /// Terminator's `always_split_with_profile`. Off (the default), splitting
+    /// `kettle -e vim` gives you a shell to work in; on, it gives you the same
+    /// launch again, which is what a Terminator profile with a custom command
+    /// does.
+    #[test]
+    fn always_split_with_profile_repeats_a_direct_launch_instead_of_dropping_to_a_shell() {
+        let argv =
+            |parts: &[&str]| -> Vec<String> { parts.iter().map(|s| (*s).to_string()).collect() };
+        let editor = argv(&["nvim", "notes.md"]);
+        // Precondition: this argv must be one kettle would otherwise refuse to
+        // repeat, or the test proves nothing about the flag.
+        assert!(
+            direct_launch_splits_to_shell(&editor),
+            "fixture must be a direct launch for the flag to have anything to do"
+        );
+        assert!(split_falls_back_to_shell(&editor, false));
+        assert!(!split_falls_back_to_shell(&editor, true));
+
+        // A pane with no argv IS the shell, whatever the flag says.
+        assert!(split_falls_back_to_shell(&[], false));
+        assert!(split_falls_back_to_shell(&[], true));
+
+        // An ordinary shell launch was always cloned; the flag doesn't
+        // change that.
+        let shell = argv(&["pwsh", "-NoLogo"]);
+        assert!(!direct_launch_splits_to_shell(&shell));
+        assert!(!split_falls_back_to_shell(&shell, false));
+        assert!(!split_falls_back_to_shell(&shell, true));
+    }
+
+    /// `split_to_group` has to be applied to the new pane BEFORE the graft,
+    /// because grafting moves focus onto it — after that, "the focused pane's
+    /// group" is the new pane's own (empty) one and the inheritance silently
+    /// does nothing. Both split entry points are checked: a new one that
+    /// forgets the call would ship a config key that works on one code path.
+    #[test]
+    fn both_split_paths_inherit_the_group_before_the_graft_moves_focus() {
+        let src = production_source();
+        let calls = src
+            .matches("self.inherit_split_group(cfg, new_id);")
+            .count();
+        assert_eq!(
+            calls, 2,
+            "expected the group inheritance on both split paths \
+             (split_geometry / split_with_geometry); found {calls}"
+        );
+        for (idx, _) in src.match_indices("self.inherit_split_group(cfg, new_id);") {
+            let after = &src[idx..];
+            let graft = after
+                .find("insert_split(tab, new_id, dir)")
+                .expect("each inheritance is followed by its graft");
+            let next_call = after[1..]
+                .find("self.inherit_split_group(cfg, new_id);")
+                .map(|i| i + 1)
+                .unwrap_or(usize::MAX);
+            assert!(
+                graft < next_call,
+                "the graft belonging to this inheritance must come before the \
+                 next split path begins"
+            );
+        }
+    }
+
     /// tab + window state to the set of target pane IDs.
     /// Phase 2 of the named-groups design.
     #[test]
@@ -4346,46 +4800,116 @@ mod node_tests {
         );
     }
 
+    /// A rotation is a rotation of the *picture*, so the honest test is
+    /// geometric: turn the tree, and every pane must be where turning the screen
+    /// would have put it. Checking the tree shape instead would pass for a
+    /// version that flips axes without reordering children or mirroring ratios —
+    /// which is exactly what kettle used to do.
     #[test]
-    fn rotate_node_targets_the_immediate_parent_in_nested_trees() {
-        use super::{Dir, Node, rotate_node};
-        // Split1{ a: Split2{L1,L2} (Horizontal), b: L3 } (Vertical), focus L1.
-        // L1's immediate parent is Split2 — rotating must flip Split2, NOT the
-        // outer Split1 (the audited bug rotated Split1 because its child L3 is a
-        // leaf).
-        let mut root = Node::Split {
+    fn rotating_the_layout_moves_every_pane_where_turning_the_screen_would() {
+        // Nested and lopsided on purpose: a shape-only check can't tell a real
+        // rotation from a flip, and an even ratio can't tell a mirrored ratio
+        // from an unmirrored one.
+        let tree = || Node::Split {
             dir: Dir::Vertical,
-            ratio: 0.5,
+            ratio: 0.25,
             a: Box::new(Node::Split {
                 dir: Dir::Horizontal,
-                ratio: 0.5,
+                ratio: 0.4,
                 a: Box::new(Node::Leaf(1)),
                 b: Box::new(Node::Leaf(2)),
             }),
             b: Box::new(Node::Leaf(3)),
         };
-        assert!(rotate_node(&mut root, 1, false));
-        match &root {
-            Node::Split { dir: outer, a, .. } => {
-                assert!(
-                    matches!(outer, Dir::Vertical),
-                    "outer split must NOT rotate"
-                );
+        // Square area so a rotated rect stays inside it and the coordinates are
+        // directly comparable.
+        let side = 800.0_f32;
+        let rects = |root: &Node| {
+            let mut out = Vec::new();
+            root.layout((0.0, 0.0, side, side), &mut out);
+            out.sort_by_key(|(id, _)| *id);
+            out
+        };
+
+        let before = rects(&tree());
+        let mut turned = tree();
+        rotate_tree(&mut turned, true);
+        let after = rects(&turned);
+
+        // Turning the picture clockwise sends (x, y) to (side - y - h, x).
+        for ((id, (x, y, w, h)), (rid, (rx, ry, rw, rh))) in before.iter().zip(&after) {
+            assert_eq!(id, rid, "pane order changed");
+            assert!(
+                (rx - (side - y - h)).abs() <= 1.0
+                    && (ry - x).abs() <= 1.0
+                    && (rw - h).abs() <= 1.0
+                    && (rh - w).abs() <= 1.0,
+                "pane {id} was ({x},{y},{w},{h}), turned to ({rx},{ry},{rw},{rh})"
+            );
+        }
+
+        // Clockwise then counter-clockwise is the identity, and so is four
+        // turns the same way. Neither held before: counter-clockwise used to be
+        // "flip the axis and don't swap", which is not the inverse of anything.
+        let mut round_trip = tree();
+        rotate_tree(&mut round_trip, true);
+        rotate_tree(&mut round_trip, false);
+        assert_eq!(rects(&round_trip), before, "cw then ccw must be a no-op");
+
+        let mut four = tree();
+        for _ in 0..4 {
+            rotate_tree(&mut four, true);
+        }
+        assert_eq!(rects(&four), before, "four clockwise turns must be a no-op");
+    }
+
+    /// Terminator rotates every pane in the visible tab, not just the split the
+    /// focused pane happens to sit in, and it leaves zoom on the way so the user
+    /// can see what happened.
+    #[test]
+    fn rotate_turns_the_whole_tab_and_leaves_zoom() {
+        let mut mux = Mux::new();
+        push_tab(
+            &mut mux,
+            Node::Split {
+                dir: Dir::Vertical,
+                ratio: 0.5,
+                a: Box::new(Node::Split {
+                    dir: Dir::Horizontal,
+                    ratio: 0.5,
+                    a: Box::new(Node::Leaf(1)),
+                    b: Box::new(Node::Leaf(2)),
+                }),
+                b: Box::new(Node::Leaf(3)),
+            },
+            1,
+        );
+        mux.tabs[0].zoomed = true;
+
+        assert!(mux.rotate_layout(true));
+        assert!(!mux.tabs[0].zoomed, "rotation must leave zoom");
+        // Both splits turned — the focused pane's parent AND the one above it.
+        match &mux.tabs[0].root {
+            Node::Split { dir, b, .. } => {
+                assert_eq!(*dir, Dir::Horizontal, "outer split must turn too");
                 assert!(
                     matches!(
-                        a.as_ref(),
+                        b.as_ref(),
                         Node::Split {
                             dir: Dir::Vertical,
                             ..
                         }
                     ),
-                    "inner split (L1's parent) flips H->V"
+                    "inner split must turn as well"
                 );
             }
-            _ => panic!("root should still be a split"),
+            Node::Leaf(_) => panic!("root should still be a split"),
         }
-        // Unknown target → no-op.
-        assert!(!rotate_node(&mut root, 999, false));
+
+        // A tab with nothing to rotate says so rather than reporting work.
+        let mut solo = Mux::new();
+        push_tab(&mut solo, Node::Leaf(1), 1);
+        assert!(!solo.rotate_layout(true));
     }
 
     #[test]
@@ -4746,10 +5270,15 @@ mod node_tests {
     }
 
     #[test]
-    fn move_active_tab_swaps_and_clamps() {
+    fn move_active_tab_relocates_and_clamps() {
         // Build a 4-tab mux without spawning real terminals; use the leaf
-        // ids as a fingerprint so we can verify the active tab actually
-        // moved (not just that the index changed).
+        // ids as a fingerprint so we can verify the WHOLE bar, not just the
+        // tab that moved.
+        //
+        // Asserting only the dragged tab is what let the `swap` bug ship:
+        // the old test checked the moved tab's new slot and never looked at
+        // the others, so it stayed green under both semantics. Every case
+        // below compares the entire order.
         let mut m = Mux::new();
         for id in 1..=4u64 {
             m.tabs.push(Tab {
@@ -4762,24 +5291,47 @@ mod node_tests {
                 bell: false,
             });
         }
-        // Move tab at index 1 (id=2) one place right → swap with id=3.
+        let order = |m: &Mux| -> Vec<u64> {
+            m.tabs
+                .iter()
+                .map(|tab| match tab.root {
+                    Node::Leaf(id) => id,
+                    _ => u64::MAX,
+                })
+                .collect()
+        };
+        assert_eq!(order(&m), vec![1, 2, 3, 4]);
+
+        // One place right is the case where relocating and swapping agree.
         m.active = 1;
         assert!(m.move_active_tab(1));
         assert_eq!(m.active, 2);
-        assert!(matches!(m.tabs[1].root, Node::Leaf(3)));
-        assert!(matches!(m.tabs[2].root, Node::Leaf(2)));
-        // Move the same tab three steps right — clamps to the last index.
+        assert_eq!(order(&m), vec![1, 3, 2, 4]);
+
+        // MORE than one place is where they diverge, and it is what
+        // drag-to-reorder actually produces: the handler passes
+        // `target_index - active`, one coalesced mouse move can cross several
+        // segments, and an overshoot clamps to the last one. Everything the
+        // dragged tab passes slides back by one; nothing teleports.
+        m.active = 0;
         assert!(m.move_active_tab(3));
         assert_eq!(m.active, 3);
-        assert!(matches!(m.tabs[3].root, Node::Leaf(2)));
-        // No-op moves return false: zero delta, already at the right edge.
+        assert_eq!(
+            order(&m),
+            vec![3, 2, 4, 1],
+            "a multi-step move must slide the passed tabs, not swap the ends"
+        );
+
+        // Clamps past the right edge, and reports no-ops honestly.
         assert!(!m.move_active_tab(0));
         assert!(!m.move_active_tab(5));
         assert_eq!(m.active, 3);
-        // Move left clamps at 0.
+        assert_eq!(order(&m), vec![3, 2, 4, 1]);
+
+        // Move left clamps at 0, again sliding rather than swapping.
         assert!(m.move_active_tab(-100));
         assert_eq!(m.active, 0);
-        assert!(matches!(m.tabs[0].root, Node::Leaf(2)));
+        assert_eq!(order(&m), vec![1, 3, 2, 4]);
         // With < 2 tabs the move is a no-op (clamp still leaves us put).
         let mut single = Mux::new();
         single.tabs.push(Tab {
@@ -4792,6 +5344,69 @@ mod node_tests {
             title_override: None,
         });
         assert!(!single.move_active_tab(1));
+    }
+
+    /// The keys wrap, the drag clamps. Both behaviours are wanted, which is why
+    /// they are two entry points rather than one — a `move_tab_right` on the
+    /// last tab that does nothing feels broken (Terminator brings it round to
+    /// the front), while a *drag* that wrapped would fling the tab across the
+    /// bar the instant the cursor overshot the last segment.
+    #[test]
+    fn the_tab_move_keys_wrap_where_a_drag_clamps() {
+        let mut m = Mux::new();
+        for id in 1..=4u64 {
+            m.tabs.push(Tab {
+                root: Node::Leaf(id),
+                focus: id,
+                title_override: None,
+                zoomed: false,
+                last_output_at: None,
+                last_seen_at: None,
+                bell: false,
+            });
+        }
+        let order = |m: &Mux| -> Vec<u64> {
+            m.tabs
+                .iter()
+                .map(|tab| match tab.root {
+                    Node::Leaf(id) => id,
+                    _ => u64::MAX,
+                })
+                .collect()
+        };
+
+        // Right from the last tab comes round to the front, taking focus along.
+        m.active = 3;
+        assert!(m.nudge_active_tab(1));
+        assert_eq!(m.active, 0);
+        assert_eq!(order(&m), vec![4, 1, 2, 3]);
+
+        // Left from the first goes to the end, and undoes the wrap exactly.
+        assert!(m.nudge_active_tab(-1));
+        assert_eq!(m.active, 3);
+        assert_eq!(order(&m), vec![1, 2, 3, 4]);
+
+        // The drag path over the same edge does not wrap.
+        m.active = 3;
+        assert!(!m.move_active_tab(1));
+        assert_eq!(order(&m), vec![1, 2, 3, 4]);
+        m.active = 0;
+        assert!(!m.move_active_tab(-1));
+        assert_eq!(order(&m), vec![1, 2, 3, 4]);
+
+        // A lone tab has nowhere to wrap to.
+        let mut single = Mux::new();
+        single.tabs.push(Tab {
+            root: Node::Leaf(1),
+            focus: 1,
+            title_override: None,
+            zoomed: false,
+            last_output_at: None,
+            last_seen_at: None,
+            bell: false,
+        });
+        assert!(!single.nudge_active_tab(1));
+        assert!(!single.nudge_active_tab(-1));
     }
 
     #[test]
@@ -5619,7 +6234,10 @@ mod node_tests {
     /// would have to add the reap to keep the count, or fail this guard).
     #[test]
     fn split_callers_reap_orphaned_pane_on_graft_failure() {
-        let src = include_str!("mux.rs");
+        // Counted over production only. Searching the whole file counted this
+        // test's own literal as a fourth site, so the guard was one short of
+        // what it claimed to require.
+        let src = production_source();
         let reaps = src.matches("self.panes.remove(&new_id)").count();
         assert!(
             reaps >= 3,

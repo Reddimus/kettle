@@ -102,25 +102,97 @@ held a third time. The instructive ones:
 - The marker-version check refused `unknown`, which both installers write, and
   so reported those installations as unmanaged.
 
+A fourth pass closed the first of the four items below and turned the middle
+two into recorded decisions.
+
+- ~~The premultiplied blend fix is correct locally, but `lib.rs`'s surface
+  clear still writes straight RGB under
+  `CompositeAlphaMode::PreMultiplied`.~~ **FIXED.** `surface_clear_color` owns
+  the multiply, in linear space, and only for `PreMultiplied` — `Opaque`
+  discards alpha at composite time and `PostMultiplied` divides it back out.
+  Chasing it found the same chain running into both capture paths, which is
+  the worse half: PNG stores straight alpha and neither the offscreen
+  `--screenshot` nor the live-surface `ctl screenshot` converted, so every
+  translucent capture was wrong in both directions at once. The GPU fixture
+  renders the scene twice, once per clear convention, and asserts they
+  disagree before asserting which is right — a translucent clear with nothing
+  drawn over it reads back identically either way, so a clear-only fixture
+  could not have failed.
+
 Still open on those same fixes:
 
-- The premultiplied blend fix is correct locally, but `lib.rs`'s surface clear
-  still writes straight RGB under `CompositeAlphaMode::PreMultiplied`. For a
-  translucent clear the two former bugs partly cancelled, so this combination
-  needs the clear fixed to be fully right.
-- `--write-default-config` still follows a **parent** junction; only the final
-  component is atomic. Redirecting creation to an absent destination remains
-  possible for an attacker who can replace a writable parent directory.
-- Rollback removes the directories the transaction created only when the
-  process that created them is the one rolling back. A process killed mid-update
-  leaves recovery to `recover_transaction`, which rebuilds the transaction from
-  the journal — and the journal does not record directory creations, because
-  widening its schema would make a journal unreadable to the release that might
-  have to recover it. Such a directory stays behind unowned.
 - Linux provenance now records the uid that PUBLISHED the files
   (`geteuid()`, matching `install-unix.py`) rather than the prefix owner. The
   two agree in every reachable case, so no test can distinguish them without
   root and an ACL-writable root-owned prefix; the assertion pins intent only.
+
+### Open — the AltGr substitute types the wrong character
+
+Pre-existing, and deliberately left alone by the `Ctrl+Alt` fix above rather
+than blind-fixed on a layout this machine cannot produce.
+
+winit neutralizes AltGr only for the RIGHT Alt
+(`has_alt_graph && key_pressed(VK_RMENU)`), but Windows also documents
+left-Ctrl + left-Alt as an AltGr substitute, and that arrives as plain
+`CONTROL|ALT`. On a German layout that chord is how `@` is typed. The
+`Key::Character` arm then emits `s`, the *logical* key, so kettle sends `ESC q`
+instead of the `@` the platform committed.
+
+The `Ctrl+Alt` fix is careful not to make this worse — a press that committed a
+printable character no longer claims the C0 table, so `@` is not turned into
+DC1/XON — but the character kettle finally emits is still the logical key. The
+real fix is for the `Character` arm to prefer `text` over the logical key when
+the platform committed a printable character, which is the same correction the
+uncombined-dead-key finding needs. It wants a real AltGr layout to test
+against; there is none here.
+
+### Verified, then consciously not fixed
+
+Both of these were traced to a working fix and then rejected on cost, which is
+a review outcome and is recorded so the next pass does not rebuild them.
+
+- **`--write-default-config` follows a parent junction.** Only the final
+  component is atomic: `create_new` refuses to follow a symlink at the leaf,
+  but every ancestor is still traversed by name, so an attacker who can replace
+  a writable parent directory redirects the creation. `--config PATH` accepts
+  an arbitrary path, so the parent is not always one kettle owns.
+
+  The machinery to close it already exists — `kettle-state`'s
+  `create_private_file_new` holds every ancestor open with
+  `FILE_FLAG_OPEN_REPARSE_POINT` / `O_NOFOLLOW`, creates relative to that
+  anchored parent, and re-verifies afterwards. Routing the config write through
+  it would also apply `require_trusted_directory_security`, which **refuses a
+  broadly writable parent** — and that would reject legitimate uses like a
+  config on a shared volume or in a synced folder, turning a working command
+  into a failing one. It would also make the config owner-only, a visible
+  permissions change to a file that is not a secret.
+
+  Weighed against what the primitive actually buys an attacker: creation only
+  (never clobbering, because `O_EXCL`/`CREATE_NEW` holds regardless of the
+  parent), of a fixed, shipped, fully commented-out template that contains
+  nothing private. That is an arbitrary-file-create with benign content at the
+  invoking user's privilege. The regression risk is larger than the finding.
+
+- **A directory created by a killed update stays behind unowned.** Rollback
+  removes the directories a transaction created only when the process that
+  created them is the one rolling back. A killed process leaves recovery to
+  `recover_transaction`, which rebuilds the transaction from the journal, and
+  the journal does not record directory creations.
+
+  A sidecar file keyed to the transaction id would work — `Journal` and
+  `JournalEntry` both carry `#[serde(deny_unknown_fields)]`, so widening the
+  schema really would make a new journal unreadable to an older release, but a
+  separate file next to it is invisible to that reader and costs no
+  compatibility. What it costs instead is a new write, a new read, and new
+  stale-file handling in the crash-recovery path of a **self-updater** — the
+  one code path whose failure mode is an unbootable installation, and the file
+  in this repository where three consecutive review rounds each found a fresh
+  defect in the previous round's fix.
+
+  The residue being cleaned up is an empty directory inside the install
+  prefix. It does not strand the installation, corrupt the record, or leak
+  anything; `uninstall` and the next transaction both tolerate it. Cleaning it
+  is not worth new risk in that path.
 
 ## Deferred — correctness
 
@@ -251,15 +323,89 @@ two implementations directly:
   `select_nth_unstable_by_key` answers the same question in average linear time:
   **217 ms → 43 ms over 50 rounds, 5×**.
 
+A fourth pass took the starfield:
+
+- ~~Starfield is `O(surface pixels × 55 stars)` with trig/pow/exp in the
+  fragment loop — roughly 456M star-iterations per 4K frame.~~ **FIXED.** The
+  work was never per-pixel work: the hash, angle, radial ease, colour lookup
+  and sRGB decode are all pixel-independent and were simply being recomputed.
+  The model is resolved on the CPU now — once at startup for what never
+  changes, once per frame for what tracks time and resolution — and the shader
+  keeps only the distance to each star and its two falloff terms. Per star per
+  pixel that is one `exp` where there were about ten transcendentals, and the
+  loop bound shrinks because stars below the visibility threshold are dropped
+  before upload rather than `continue`-ing on every pixel.
+
+  It also closed one of the "tests that cannot fail" below: the brightness
+  curve was a hand-copied Rust transcription in the test module, so the shader
+  it protected could drift away underneath it. The curve is production code
+  now and the tests drive it.
+
 Still deferred — these are rewrites that need their own change and their own
 measurement:
 
-- Starfield is `O(surface pixels × 55 stars)` with trig/pow/exp in the fragment
-  loop — roughly 456M star-iterations per 4K frame.
 - Animated backgrounds re-upload the whole texture every frame (~32 MiB per
   frame at 4K) and repeat it each loop.
+- ~~**Widening a window permanently destroys scrollback.**~~ **FIXED**, and it
+  was worse than first characterised: not one gesture but four, all ordinary —
+  a window drag (each intermediate width applying its own cap), decrease-font,
+  closing a sibling split (−2013 lines), and un-zooming. The cap is monotonic
+  per pane now.
+
+  A survey of the field settled the design question. xterm, Windows Terminal,
+  alacritty, WezTerm, kitty and VTE all bound scrollback in LINES, and none of
+  them evicts on widening. The one terminal with a real byte budget, Ghostty,
+  trims from the oldest end *as new output arrives* — a property of growth, not
+  of geometry. So enforcing a memory budget through a resize was the mistake,
+  not the budget itself.
+
+  Still open, and worth doing in the same release: enforce `scrollback-bytes`
+  against ACTUAL retained size on the growth path rather than as a
+  width-derived ceiling, so a widened pane converges back into budget as output
+  arrives instead of overshooting until it narrows again. Longer term, storing
+  history rows at their occupied length rather than padded to the column count
+  removes the trade-off entirely — a widen would then cost nothing and the
+  budget would measure real occupancy — but that is a change to the vendored
+  grid and it makes reflow harder.
+
+- **Superseded, kept for the measurements:** `kettle-core`'s
+  `effective_scrollback_lines` turns the `scrollback-bytes` budget into a LINE
+  cap by dividing it by a worst-case per-row cost at the *current* column
+  count, and `try_resize_geometry` recomputes that on any grid change —
+  including a width-only one. Wider pane, smaller cap, oldest rows evicted at
+  once and unrecoverably. Reproduced against a live pane with
+  `scrollback = 10000` and 30 000 emitted lines: history went 5202 → 3210 →
+  2134 → 1681 as the window was dragged from 77 to 241 columns, and narrowing
+  again did not bring any of it back. Every value matches
+  `(10_000_000 − (24·cols+64)·rows) / (24·cols+64)` exactly, so this is the
+  byte-budget recompute rather than reflow. Dragging a window wider once during
+  a long Claude Code or Codex session throws away most of the transcript.
+
+  Related, same arithmetic: the shipped `scrollback-bytes` default of 10 MB
+  binds before the documented `scrollback = 10000` at any ordinary width
+  (10 000 × (24·80+64) ≈ 19.8 MB), so the documented default is unreachable and
+  `--check-config` reports a number the terminal will not honour.
+
+  Not fixed here because there is no way to hold a hard byte ceiling *and*
+  never evict on widening — retained bytes genuinely grow with width. Choosing
+  between them is a design decision about what `scrollback` and
+  `scrollback-bytes` each promise, it changes a documented memory guarantee,
+  and it belongs in `kettle-core`'s grid with its own measurement rather than
+  bolted onto an unrelated batch.
 - Per-cell quad vectors and the GPU instance buffer keep their high-water
   capacity and are not charged against `GraphicsBudget`.
+
+## Load-sensitive fixtures
+
+`ctl_server::tests::eight_idle_peers_expire_and_a_fresh_request_is_served`
+fails as `connection N expired before all peers were admitted` when the machine
+is saturated — observed with nine kettle instances running concurrently — and
+passes in isolation. It asserts that eight peers are all admitted before the
+idle-expiry timer retires any of them, which is a race the fixture wins only
+when scheduling is prompt. CI runners are shared, so this will flake there too.
+The fix is to make admission observable rather than assumed, not to lengthen
+the timeout. Joins the two `kettle/tests/exec.rs` ConPTY timing fixtures, which
+have the same shape.
 
 ## Deferred — tests that cannot fail
 
@@ -270,8 +416,47 @@ parity work. The recurring shapes:
   to end-of-file so deleting the production call still passes.
 - GPU tests that convert adapter-resolution failure into `Ok(false)` and report
   "skipped", so a resolver regression keeps the pipeline test green.
-- Starfield tests that exercise a hand-copied Rust transcription of the
-  brightness formula rather than the WGSL that actually runs.
+- ~~Starfield tests that exercise a hand-copied Rust transcription of the
+  brightness formula rather than the WGSL that actually runs.~~ **CLOSED** by
+  the starfield rewrite above: the curve is production code the shader consumes,
+  and the tests drive it.
+- **A source guard that searches its own file matches its own assertion.** Any
+  `src.contains("<literal>")` where `src` came from `include_str!` of the same
+  file passes whether or not the production code exists, because the needle is
+  sitting one line above the search. `kettle-ui/src/app.rs` had **28** of these
+  across 11 tests and `mux.rs` had 4.
+
+  `split_divider_drag_is_wired` is the one that had already gone wrong: the
+  multi-window refactor threaded `ws` through `split_drag_at` and
+  `split_seam_hover_icon`, leaving the guard with zero production matches, and
+  it stayed green with the entire press-to-start-drag block deleted — rustc
+  reported both functions as dead code while their dedicated drift guard passed.
+  Its own comment shows the author knew the failure mode and applied the
+  reasoning to two of six assertions; those two were vacuous as well, because a
+  distinctive comment at the production site does not help when the test
+  repeats it as a string literal.
+
+  **CLOSED.** Both files now have a `production_source()` that REMOVES every
+  `#[cfg(test)]` item before any guard searches, and all 50 self-searching
+  guards were moved onto it — a scan for whole-file `contains` needles reports
+  zero in each file, against 22 and 4 before.
+
+  Removing rather than truncating matters: `app.rs` interleaves seven
+  `#[cfg(test)]` items with production code across 30,000 lines, so a first
+  attempt that sliced at the first one threw most of the production away and
+  failed all 48 guards for the opposite reason. The helper now asserts three
+  postconditions — that it excludes itself, that it still contains a known
+  production symbol, and that it kept more than half the file — so an
+  over-broad or under-broad cut fails loudly instead of quietly making every
+  guard meaningless in either direction.
+
+  Turning the guards on immediately found a second rotted one:
+  `recorder_output_flushed_before_reap_and_on_close` keyed on three comment
+  sentences, and one had been reworded when `close_window_now` grew its
+  `DropPanes` ordering explanation. The wiring was intact; the guard had been
+  matching its own stale copy of the sentence. It keys on the three call sites
+  and their enclosing functions now, plus an exact count, because a comment is
+  not a contract.
 - Tests that assert a *duplicated* expression instead of driving the production
   entry point (`update_cli` confirmation, shell-integration mapping,
   `--print-default-config` dispatch, man-page keybindings).

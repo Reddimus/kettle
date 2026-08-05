@@ -382,6 +382,66 @@ fn optional_u64_param(
     }
 }
 
+/// The production half of this file: everything above the FIRST test module.
+///
+/// A source guard that searches the whole file also searches its own
+/// assertions, so a plain `src.contains("…")` matches the needle written one
+/// line above it and passes whether or not the production code is there at
+/// all — and a `matches(…).count()` comes out one too high for the same
+/// reason. That is not hypothetical: `split_divider_drag_is_wired` went on
+/// passing after the multi-window refactor threaded `ws` through
+/// `split_drag_at` and `split_seam_hover_icon`, leaving both needles with
+/// zero production matches, and it still passed with the entire
+/// press-to-start-drag block deleted while rustc reported both functions as
+/// dead code.
+///
+/// Removing every `#[cfg(test)]` item removes the class for every guard in the
+/// file at once. It has to REMOVE them rather than truncate at the first one:
+/// this file interleaves seven test items with production code across 30,000
+/// lines, so cutting at the first would throw most of the production away and
+/// fail every guard for the opposite reason.
+///
+/// Top-level items close on a column-0 brace — rustfmt guarantees it, and
+/// nothing nested can produce one — so a line scan is enough, and the
+/// postconditions below fail loudly if that ever stops holding.
+#[cfg(test)]
+fn production_source() -> String {
+    let src = include_str!("app.rs").replace("\r\n", "\n");
+    let mut production = String::with_capacity(src.len());
+    let mut inside_test_item = false;
+    for line in src.lines() {
+        if inside_test_item {
+            if line == "}" {
+                inside_test_item = false;
+            }
+            continue;
+        }
+        if line == "#[cfg(test)]" {
+            inside_test_item = true;
+            continue;
+        }
+        production.push_str(line);
+        production.push('\n');
+    }
+    assert!(
+        !production.contains("fn production_source()"),
+        "the slice must exclude every test item, or the guards built on it \
+         still self-match"
+    );
+    assert!(
+        production.contains("fn apply_bs_del_binding("),
+        "the slice must KEEP production code — a needle-free slice would fail \
+         every guard for the opposite reason"
+    );
+    assert!(
+        production.len() > src.len() / 2,
+        "production is {} bytes of {}, which is too little to be right",
+        production.len(),
+        src.len()
+    );
+    production
+}
+
 #[cfg(test)]
 mod ctl_target_param_tests {
     use super::optional_u64_param;
@@ -3437,13 +3497,32 @@ pub(crate) struct ContextMenuState {
 /// drags, and the bar reorders to keep the dragged segment under the cursor.
 /// Clamped to the first/last rendered segment so a cursor that overshoots
 /// either edge still produces a valid target. Returns 0 for an empty bar.
-fn tab_drag_target_index(cursor_x: f32, segments: &[kettle_render::TabSeg]) -> usize {
-    if segments.is_empty() {
+fn tab_drag_target_index(
+    cursor_x: f32,
+    cursor_y: f32,
+    segments: &[kettle_render::TabSeg],
+) -> usize {
+    let Some(first) = segments.first() else {
         return 0;
-    }
+    };
+    // Which way the strip runs is a property of what was drawn: a vertical bar
+    // stacks its segments down a shared column, a horizontal one lays them
+    // across a shared row. Reading it back off the segments means the drag can
+    // never disagree with the geometry the user is looking at.
+    //
+    // This used to test `cursor_x` unconditionally. On a vertical bar every
+    // segment shares the same x span, so the very first one always matched and
+    // dragging any tab below the top of the strip moved tab 0 — or, when tab 0
+    // was the one being dragged, did nothing at all.
+    let vertical = segments.iter().any(|seg| seg.rect.1 != first.rect.1);
     for seg in segments {
-        let (x, _, w, _) = seg.rect;
-        if cursor_x < x + w {
+        let (x, y, w, h) = seg.rect;
+        let (cursor, end) = if vertical {
+            (cursor_y, y + h)
+        } else {
+            (cursor_x, x + w)
+        };
+        if cursor < end {
             return seg.idx;
         }
     }
@@ -4701,6 +4780,75 @@ pub struct App {
     /// the insertion preview, and the drop-merge. App-level (not per-window)
     /// because exactly one tear-off drag can be in flight per pointer.
     torn_drag: Option<TornDrag>,
+    /// When the session was last considered for writing. Drives the sweep
+    /// described on [`SESSION_SWEEP`]; `None` until the first one runs.
+    last_session_sweep: Option<std::time::Instant>,
+}
+
+/// How much of the saved session can be stale before the next event-loop turn
+/// writes it out.
+///
+/// Most of what `session.json` holds is announced by a gesture that already
+/// saves — splitting, closing, opening a tab. Some of it is not: a shell `cd`
+/// moves a pane's recorded directory, a divider drag moves a split ratio, a
+/// renamed tab moves its title. Each of those used to reach disk only if some
+/// *later* gesture happened to save, so restoring a workspace could bring back
+/// directories the user left an hour ago.
+///
+/// Saving on every turn instead would serialize the whole tree at PTY-output
+/// rates, and arming a timer for it would keep the process awake and show up as
+/// idle CPU — kettle measures that. So the sweep rides on turns the event loop
+/// was running anyway: it never wakes the process on its own account, and an
+/// idle kettle simply saves the moment anything next happens. The write itself
+/// is skipped when the serialized text matches what is already on disk, so a
+/// sweep over an unchanged workspace costs one serialization and no I/O.
+const SESSION_SWEEP: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Which broadcast scope the group chord turns on, from `broadcast-default`.
+///
+/// Terminator stores this key as the *initial* groupsend mode
+/// (`terminator.py`: `groupsend = groupsend_type[config['broadcast_default']]`).
+/// kettle reads it as the scope the chord selects instead, for one reason: a
+/// window that started in `all` would mirror every keystroke into every pane
+/// before the user had touched anything. kettle shipped exactly that once, by
+/// misreading this key, and it was reported as a bug.
+///
+/// For Terminator's own default the two readings are the same thing — its
+/// `group` mode with no groups yet assigned sends only to the focused terminal
+/// — so the divergence is visible only under `broadcast-default = all`, where
+/// kettle waits to be asked. `group` maps to kettle's per-tab broadcast, which
+/// is what a kettle "group" has always meant to the chord.
+fn broadcast_scope_for_default(
+    default: kettle_config::BroadcastDefault,
+) -> crate::mux::BroadcastScope {
+    match default {
+        kettle_config::BroadcastDefault::All => crate::mux::BroadcastScope::All,
+        kettle_config::BroadcastDefault::Group => crate::mux::BroadcastScope::Tab,
+        kettle_config::BroadcastDefault::Off => crate::mux::BroadcastScope::Off,
+    }
+}
+
+/// Whether a session sweep is owed as of `now`. The first turn always sweeps,
+/// so a workspace that changes and then goes quiet is written once rather than
+/// waiting for a second turn that may never come.
+///
+/// A window with no tabs is never swept, whatever the clock says. A sweep is a
+/// background refresh of what is on screen, and an empty window is one that has
+/// not opened yet or is on its way out — writing that snapshot would put
+/// `{"tabs":[],"windows":[]}` over the saved session the user is about to have
+/// restored. The paths that genuinely mean to erase — `close_window`, and the
+/// reap that precedes this — still save explicitly, and this does not touch
+/// them. Same rule as the named-layout guard in `session_write_target`,
+/// which exists because that exact overwrite shipped once.
+///
+/// Returning `false` here deliberately leaves the caller's timestamp alone, so
+/// a window that is skipped does not consume the interval for the others.
+fn session_sweep_due(
+    last: Option<std::time::Instant>,
+    now: std::time::Instant,
+    window_has_tabs: bool,
+) -> bool {
+    window_has_tabs && last.is_none_or(|then| now.saturating_duration_since(then) >= SESSION_SWEEP)
 }
 
 /// v2.19.0 (tear-off UX): tracking for the one in-flight torn-window drag.
@@ -5120,8 +5268,10 @@ impl App {
         });
         let mut lua_engine: Option<crate::LuaEngine> = None;
         if let Some(script) = &init_lua_path {
-            let safe_sandbox = matches!(initial_cfg.lua_sandbox, kettle_config::LuaSandbox::Safe);
-            match crate::LuaEngine::new_with_sandbox(&initial_cfg.theme_name, safe_sandbox) {
+            match crate::LuaEngine::new_with_sandbox(
+                &initial_cfg.theme_name,
+                initial_cfg.lua_sandbox,
+            ) {
                 Ok(eng) => {
                     if let Err(e) = eng.exec_file(script) {
                         log::warn!("lua script {}: {e:#}", script.display());
@@ -5247,6 +5397,7 @@ impl App {
                 m.record_lossless = recording_requested;
             }
             m.osc52_copy_allowed = osc52_copy_allowed;
+            m.autoclean_groups = initial_cfg.autoclean_groups;
             m
         };
         let mut windows = std::collections::BTreeMap::new();
@@ -5327,6 +5478,7 @@ impl App {
             update_available: None,
             version_line: startup_version,
             torn_drag: None,
+            last_session_sweep: None,
         };
         app.runtime_tracker.set_window_count(app.windows.len());
         let result = event_loop.run_app(&mut app);
@@ -6043,7 +6195,16 @@ impl App {
         if ws.context_menu.is_some() || ws.vi_mode.is_some() || ws.hint_state.is_some() {
             return;
         }
-        if ws.palette_input.is_some() {
+        // The modal outranks whatever raised it. Rebinding a key onto a chord
+        // that is already taken raises a confirm dialog from inside the
+        // Settings overlay, and the Settings arms below used to claim the
+        // keyboard first: the question could not be answered, by `y`/`n` or by
+        // anything else, while the panel that asked it stayed open. The
+        // dialog's own handler (the named-key path) reads `y`/`n`; this arm
+        // only has to stop the text from going somewhere else.
+        if ws.confirm_dialog.is_some() {
+            return;
+        } else if ws.palette_input.is_some() {
             self.palette_key(ws, &key, Some(text), event_loop);
         } else if ws.settings_nav.is_some() && ws.settings_text_edit.is_some() {
             self.settings_text_key(ws, &key, Some(text));
@@ -6053,8 +6214,6 @@ impl App {
             self.layout_picker_key(ws, &key, Some(text));
         } else if ws.ssh_input.is_some() {
             self.ssh_key(ws, &key, Some(text));
-        } else if ws.confirm_dialog.is_some() {
-            return;
         } else if let Some(state) = ws.editing_title.as_mut() {
             state.input.extend(text.chars().filter(|c| !c.is_control()));
         } else if ws.search.open {
@@ -6280,6 +6439,7 @@ impl App {
                 broadcast: ws.mux.is_broadcast_on(),
                 hovered_close_idx: None,
                 drag_cursor_x: None,
+                drag_cursor_y: None,
                 // The title-edit modal owns the bar — no drag can be live.
                 tear_lift: 0.0,
                 insert_marker: None,
@@ -6401,6 +6561,7 @@ impl App {
             } else {
                 None
             },
+            drag_cursor_y: None,
             // v2.40.0 (tear-off UX): pre-tear ghost escalation.
             tear_lift: self.tear_lift_for(ws),
             // v2.19.0 (re-dock): vertical insertion line at the docked tab's
@@ -6521,16 +6682,16 @@ impl App {
             new_tab_menu: (0.0, 0.0, 0.0, 0.0),
             broadcast: ws.mux.is_broadcast_on(),
             hovered_close_idx: ws.hovered_close_idx,
-            // Drag-cursor preview is x-only in v1; vertical drag
-            // reorder is a planned follow-up.
-            drag_cursor_x: if ws.tab_drag_active && ws.tab_drag_press.is_none() {
-                Some(ws.cursor.x as f32)
+            // A vertical strip's ghost rides the cursor's y down a fixed
+            // column, so the main-axis coordinate is `y` here and `x` on the
+            // horizontal bar. Both were `x` before, which pinned the ghost to
+            // the top of the strip and slid it sideways out of the bar.
+            drag_cursor_x: None,
+            drag_cursor_y: if ws.tab_drag_active && ws.tab_drag_press.is_none() {
+                Some(ws.cursor.y as f32)
             } else {
                 None
             },
-            // v2.40.0 (tear-off UX): populated for struct symmetry; the
-            // ghost paint path is x-only/horizontal-only (see
-            // `drag_cursor_x` above), so this is inert on vertical bars.
             tear_lift: self.tear_lift_for(ws),
             // v2.19.0 (re-dock): horizontal insertion line across
             // the strip at the docked tab's landing slot.
@@ -6667,6 +6828,30 @@ impl App {
                     .map(|pane| pane.term.cursor_blinking())
             },
         )
+    }
+
+    /// Which way `split_auto` should cut the focused pane.
+    ///
+    /// Terminator's rule is the pane's LONGER axis: a wide pane splits into a
+    /// left/right pair, a tall one into top/bottom. kettle's dispatch arm read
+    /// `Action::SplitDown | Action::SplitAuto`, so "auto" was literally
+    /// "down" — on a 1388x861 pane, wider than it is tall, it stacked instead
+    /// of splitting side by side. Every user-facing description says otherwise
+    /// (`docs/CONFIG.md` "pick by aspect ratio", the palette's "Split
+    /// automatically", the context-menu row, and the default Ctrl+Shift+A
+    /// binding).
+    ///
+    /// Ties go to a vertical cut, matching the old behaviour for a square
+    /// pane so the default binding does not change meaning where the aspect
+    /// ratio does not actually favour either side.
+    fn auto_split_dir(&self, ws: &WindowState) -> Dir {
+        let area = self.area(ws);
+        let rect = self.focused_rect(ws, area).unwrap_or(area);
+        if rect.2 > rect.3 {
+            Dir::Horizontal
+        } else {
+            Dir::Vertical
+        }
     }
 
     fn focused_rect(&self, ws: &WindowState, area: Rect) -> Option<Rect> {
@@ -9229,8 +9414,19 @@ impl App {
         if track == input::MouseTracking::Off {
             return false;
         }
-        if motion && track != input::MouseTracking::Motion && ws.mouse_btn.is_none() {
-            return track != input::MouseTracking::Off; // consume, no report
+        // `motion_is_reported` owns the per-mode rule; see its comment for why
+        // it is stated positively.
+        if motion && !input::motion_is_reported(track, ws.mouse_btn.is_some()) {
+            {
+                // A held button means the application owns the gesture even
+                // though this mode does not report the motion itself, so
+                // consume it. With no button held the pointer is only
+                // hovering, and kettle's own hover, scrollbar-drag and
+                // link-hover handling must still run — which is exactly what
+                // happened before, because the callers only reached
+                // `send_mouse` at all when a button was down.
+                return ws.mouse_btn.is_some();
+            }
         }
         let Some((row, col)) = self.cursor_cell(ws) else {
             return false;
@@ -12084,22 +12280,24 @@ impl App {
                 }
             }
             Action::SplitDown | Action::SplitAuto => {
+                // `split_auto` cuts along the pane's LONGER axis, the way
+                // Terminator does; `split_down` is always vertical.
+                let dir = if action == Action::SplitAuto {
+                    self.auto_split_dir(ws)
+                } else {
+                    Dir::Vertical
+                };
+                let geometry = if dir == Dir::Horizontal {
+                    horizontal_split_geometry
+                } else {
+                    vertical_split_geometry
+                };
                 let detected = self.focused_foreground_shell(ws);
                 let res = match detected {
-                    Some(s) => ws.mux.split_with_geometry(
-                        Dir::Vertical,
-                        &self.cfg,
-                        vertical_split_geometry,
-                        waker,
-                        s.argv,
-                        s.cwd,
-                    ),
-                    None => ws.mux.split_geometry(
-                        Dir::Vertical,
-                        &self.cfg,
-                        vertical_split_geometry,
-                        waker,
-                    ),
+                    Some(s) => ws
+                        .mux
+                        .split_with_geometry(dir, &self.cfg, geometry, waker, s.argv, s.cwd),
+                    None => ws.mux.split_geometry(dir, &self.cfg, geometry, waker),
                 };
                 if let Err(e) = res {
                     log::warn!("could not split pane (down): {e}");
@@ -12315,14 +12513,21 @@ impl App {
                 self.open_search(ws);
             }
             Action::ToggleBroadcastAll => {
-                // The "broadcast-all" action is actually
-                // per-tab (the action's misnaming was a known
-                // tech-debt). The Tab variant preserves the
-                // existing UX exactly. The new All / Group
-                // variants are reachable via the upcoming
-                // GroupTab/GroupWindow/CreateGroup actions
-                // (already surfaced; dispatch is a follow-up).
-                ws.mux.broadcast = crate::mux::BroadcastScope::Tab;
+                // The action's name is honest about being a toggle now: it
+                // used to *set* Tab scope unconditionally, so the chord that
+                // turned broadcast on could not turn it off again and the user
+                // had to know a second one (Ctrl+Shift+Alt+G). Terminator has
+                // the same pair — `group_all` / `ungroup_all` — plus a
+                // `group_all_toggle` that ships unbound; this is that toggle.
+                // The explicit off chord still works.
+                //
+                // Which scope it turns *on* is `broadcast-default`.
+                let on = broadcast_scope_for_default(self.cfg.broadcast_default);
+                ws.mux.broadcast = if ws.mux.broadcast == on {
+                    crate::mux::BroadcastScope::Off
+                } else {
+                    on
+                };
             }
             Action::ToggleBroadcastOff => {
                 ws.mux.broadcast = crate::mux::BroadcastScope::Off;
@@ -12900,11 +13105,13 @@ impl App {
                 }
             }
             Action::ReloadConfig => self.reload_config(ws),
-            Action::MoveTabLeft => {
-                ws.mux.move_active_tab(-1);
-            }
-            Action::MoveTabRight => {
-                ws.mux.move_active_tab(1);
+            // Terminator's `move_tab` wraps at both ends of the bar; the drag
+            // path clamps instead. See `Mux::nudge_active_tab`.
+            Action::MoveTabLeft | Action::MoveTabRight => {
+                let delta = if action == Action::MoveTabLeft { -1 } else { 1 };
+                if ws.mux.nudge_active_tab(delta) {
+                    self.save_session(ws);
+                }
             }
             Action::NewTabShell(n) => {
                 // Ctrl+Shift+N opens the Nth dropdown
@@ -13172,20 +13379,18 @@ impl App {
                     }
                 }
             }
-            // Split-tree rotation. RotateCw flips dir +
-            // swaps children (Terminator's clockwise semantics);
-            // RotateCcw flips dir without swap. No-op when the
-            // focused leaf has no parent (single-pane tab).
-            Action::RotateCw => {
-                ws.mux.rotate_focused_split(true);
-                if let Some(w) = &ws.window {
-                    w.request_redraw();
-                }
-            }
-            Action::RotateCcw => {
-                ws.mux.rotate_focused_split(false);
-                if let Some(w) = &ws.window {
-                    w.request_redraw();
+            // Split-tree rotation (Terminator `rotate_cw` / `rotate_ccw`):
+            // turn the active tab's whole layout a quarter turn. No-op on a
+            // single-pane tab. Rotating changes every pane's rect, so the PTYs
+            // have to be resized and the new arrangement saved — a redraw alone
+            // would leave every child process believing its old geometry.
+            Action::RotateCw | Action::RotateCcw => {
+                if ws.mux.rotate_layout(action == Action::RotateCw) {
+                    self.resize_all(ws);
+                    self.save_session(ws);
+                    if let Some(w) = &ws.window {
+                        w.request_redraw();
+                    }
                 }
             }
             // Runtime scrollbar toggle. Cycles
@@ -13450,8 +13655,26 @@ impl App {
     fn snapshot_window(w: &WindowState) -> crate::session::SWindow {
         let s = w.mux.snapshot();
         let geometry = w.window.as_ref().and_then(|win| {
-            let pos = win.outer_position().ok()?;
+            // A minimized window does not report where it will come back to.
+            // Win32 answers `GetWindowRect` with the (-32000, -32000) sentinel
+            // and `GetClientRect` with 0x0, and winit passes both through
+            // verbatim, so snapshotting one persisted a geometry that the
+            // restore clamp could only rescue as far as its 160x120 floor —
+            // the window came back as an unusable stub. Saving no geometry
+            // restores it at the default size instead, which is the honest
+            // answer to "we do not know where this window was".
+            //
+            // The size check is not redundant with `is_minimized`: it is the
+            // observable that actually breaks the restore, and it also covers
+            // a window reporting a degenerate size for any other reason.
+            if win.is_minimized().unwrap_or(false) {
+                return None;
+            }
             let size = win.inner_size();
+            if size.width == 0 || size.height == 0 {
+                return None;
+            }
+            let pos = win.outer_position().ok()?;
             Some(crate::session::SGeometry {
                 x: pos.x,
                 y: pos.y,
@@ -13504,16 +13727,15 @@ impl App {
         // launch is in restore mode — symmetric with the opt-in load gate. A
         // fresh (non-opted-in) window must NOT overwrite the saved layout that
         // `--restore` / `restore-session = true` exists to recover.
-        match &self.startup.layout {
-            Some(name) if self.named_layout_writable => s.save_layout(name),
-            // `--layout NAME` given, but a launch override replaced it: leave
-            // the file alone rather than overwriting it with a window that was
-            // never restored from it.
-            Some(_) => {}
-            None if should_restore_session(self.startup.restore, self.cfg.restore_session) => {
-                s.save()
-            }
-            None => {}
+        match session_write_target(
+            self.startup.layout.as_deref(),
+            self.named_layout_writable,
+            should_restore_session(self.startup.restore, self.cfg.restore_session),
+            s.is_empty(),
+        ) {
+            SessionWriteTarget::NamedLayout(name) => s.save_layout(name),
+            SessionWriteTarget::DefaultSession => s.save(),
+            SessionWriteTarget::Skip => {}
         }
     }
 
@@ -13898,6 +14120,28 @@ impl App {
         // with the other key handlers.
         _event_loop: &winit::event_loop::ActiveEventLoop,
     ) {
+        self.dispatch_confirm_action_arms(ws, action);
+        // The same tail `handle_action` gives every keybind and menu action.
+        //
+        // Answering a confirmation is a second, separate entry point into the
+        // same state changes, and it did not have this: a confirmed pane or
+        // tab close collapsed the layout and repainted it, while the surviving
+        // PTYs kept the rows and columns they had before the close. With
+        // `ask-before-closing` on — which is what the ✕ and Alt+F4 prompts
+        // require — every confirmed close left a shell drawing into part of
+        // its pane with dead space around it, and typing did not heal it;
+        // only some later unrelated action running this tail did.
+        //
+        // It lives here rather than in the arms so a new arm cannot forget it,
+        // which is how the original went missing. `resize_all` is what every
+        // action already pays unconditionally, so no arm needs to opt out —
+        // except a window on its way out, which has nothing left to resize.
+        if !self.pending_window_close {
+            self.resize_all(ws);
+        }
+    }
+
+    fn dispatch_confirm_action_arms(&mut self, ws: &mut WindowState, action: ConfirmAction) {
         match action {
             ConfirmAction::CloseWindow { drop_panes } => {
                 // Carries the requester's intent: confirming a `close_window`
@@ -14138,6 +14382,13 @@ impl App {
         ));
         ws.mux
             .set_unnegotiated_modified_enter(self.cfg.modify_other_keys);
+        ws.mux.autoclean_groups = self.cfg.autoclean_groups;
+        // The scrollback budget used to be read once, at spawn. Editing
+        // `scrollback` or `scrollback-bytes` — in the config file or through
+        // the Settings overlay's two rows — wrote the value, reloaded it, and
+        // changed nothing you could see: only panes opened afterwards used it.
+        ws.mux
+            .set_scrollback_limits(self.cfg.scrollback, self.cfg.scrollback_bytes);
         let runtime_font_size = ws.renderer.as_ref().map(|r| r.font_size());
         if let Some(r) = ws.renderer.as_mut() {
             // Family first: the font-size setter re-measures cells and must see
@@ -15104,6 +15355,10 @@ impl App {
                     "new_tab": rect_json(bar.new_tab),
                     "new_tab_menu": rect_json(bar.new_tab_menu),
                     "drag_cursor_x": bar.drag_cursor_x,
+                    // A vertical strip reports the drag on its own axis;
+                    // additive, so a reader that only knows the x key still
+                    // sees exactly what it saw before on a horizontal bar.
+                    "drag_cursor_y": bar.drag_cursor_y,
                     // v2.40.0 (tear-off UX): pre-tear ghost escalation +
                     // dock-highlight state, for live-UI smokes.
                     "tear_lift": bar.tear_lift,
@@ -15578,7 +15833,14 @@ impl App {
         {
             self.reorder_active_tab_for_cursor(ws);
         }
-        if let Some(btn) = ws.mouse_btn {
+        // `None` is xterm's "no button" code 3, which with the motion bit is
+        // the `CSI < 35 ; x ; y M` report DEC 1003 exists to deliver. Both
+        // motion call sites used to be gated on a held button, so 1003
+        // behaved exactly like 1002 while DECRQM still answered that it was
+        // set — hover highlighting in Neovim, lazygit, btop and fzf was
+        // silently dead. `send_mouse` decides per mode whether to report.
+        {
+            let btn = ws.mouse_btn.unwrap_or(input::MOUSE_NO_BUTTON);
             let _ = self.send_mouse(ws, btn, true, true);
         }
         if ws.selecting {
@@ -16008,7 +16270,7 @@ impl App {
         if bar.height <= 0.0 || bar.segments.is_empty() {
             return;
         }
-        let target = tab_drag_target_index(ws.cursor.x as f32, &bar.segments);
+        let target = tab_drag_target_index(ws.cursor.x as f32, ws.cursor.y as f32, &bar.segments);
         let delta = target as i32 - ws.mux.active as i32;
         if delta != 0 && ws.mux.move_active_tab(delta) {
             ws.mux.touch_active_tab_seen();
@@ -16243,7 +16505,7 @@ impl App {
                 let b = if crate::input::key_press_uses_kitty_sequence(key, *mods, mode) {
                     b
                 } else {
-                    apply_bs_del_binding(&self.cfg, key, *mods, b)
+                    apply_bs_del_binding(&self.cfg, key, b)
                 };
                 if let Err(message) = extend_ctl_send_key_bytes(&mut bytes, &b) {
                     return Response::err(req.id, ec::BAD_PARAMS, message);
@@ -18498,19 +18760,40 @@ impl App {
 /// the user's `backspace-binding`/`delete-binding`. Extracted in v2.20.0
 /// (review fix) so `send_keys` honors the same remap as GUI keystrokes —
 /// the "same path as a human key press" contract.
-fn apply_bs_del_binding(cfg: &Config, key: &Key, mods: ModifiersState, bytes: Vec<u8>) -> Vec<u8> {
+///
+/// The binding only ever replaces the UNMODIFIED encoding, and the test for
+/// that is the encoded bytes themselves rather than an inspection of the
+/// modifier state. Reasoning from modifiers is what went wrong: Backspace
+/// guarded on `!control && !alt` — correct for its level-0 C0 forms — and
+/// Delete, whose `CSI 3 ~` form carries a modifier parameter for *shift, alt,
+/// control and super alike*, guarded on nothing at all. Since
+/// `delete-binding` defaults to `EscapeSequence`, every modified Delete was
+/// rewritten back to the plain `CSI 3 ~`: `Ctrl+Delete` became byte-identical
+/// to `Delete`, so readline's `kill-word` and every `<C-Del>` / `<S-Del>` /
+/// `<M-Del>` mapping in an editor deleted one character instead.
+///
+/// Comparing against the plain form cannot drift from the encoder, and it is
+/// right for the cases modifier logic keeps missing: a `modifyOtherKeys`
+/// level-1 `Shift+Backspace` (`CSI 27;2;8~`) and any kitty-protocol encoding
+/// are left alone, because an application that negotiated a precise encoding
+/// must not have it overwritten by a legacy remap.
+fn apply_bs_del_binding(cfg: &Config, key: &Key, bytes: Vec<u8>) -> Vec<u8> {
     let Key::Named(named) = key else {
         return bytes;
     };
     use kettle_config::{BackspaceBinding, DeleteBinding};
-    if *named == NamedKey::Backspace && !mods.control_key() && !mods.alt_key() {
+    /// What `input::encode` emits for an unmodified Backspace.
+    const PLAIN_BACKSPACE: &[u8] = &[0x7f];
+    /// What `input::encode` emits for an unmodified Delete.
+    const PLAIN_DELETE: &[u8] = b"\x1b[3~";
+    if *named == NamedKey::Backspace && bytes == PLAIN_BACKSPACE {
         match cfg.backspace_binding {
             BackspaceBinding::AsciiDel => vec![0x7f],
             BackspaceBinding::ControlH => vec![0x08],
             BackspaceBinding::EscapeSequence => b"\x1b[3~".to_vec(),
             BackspaceBinding::Automatic => bytes,
         }
-    } else if *named == NamedKey::Delete {
+    } else if *named == NamedKey::Delete && bytes == PLAIN_DELETE {
         match cfg.delete_binding {
             DeleteBinding::AsciiDel => vec![0x7f],
             DeleteBinding::ControlH => vec![0x08],
@@ -18961,6 +19244,51 @@ fn should_reveal_after_renderer_init(state: kettle_config::WindowState) -> bool 
 }
 
 /// Is the default last-session (`session.json`) active
+/// Where a session snapshot should be written, if anywhere.
+#[derive(Debug, PartialEq, Eq)]
+enum SessionWriteTarget<'a> {
+    NamedLayout(&'a str),
+    DefaultSession,
+    Skip,
+}
+
+/// Decide where a snapshot goes.
+///
+/// The rule worth stating out loud is the first arm: **an empty snapshot never
+/// overwrites a named layout.** `close_window` deliberately empties the mux
+/// before saving, so the SESSION it writes is the empty one — "this window is
+/// finished, do not bring it back". That intent belongs to session.json. Routed
+/// at a named layout it destroyed the workspace instead: a layout measured at
+/// 2043 bytes came back as 65 (`{"tabs":[],"windows":[]}`) after a close, and
+/// the next `--layout NAME` opened a single default pane. Terminator, whose
+/// layouts this mirrors, only ever writes one from an explicit Add/Refresh —
+/// launching a layout never modifies it.
+///
+/// Extracted so the truth table can be driven directly; the arms below are the
+/// whole of the routing decision.
+fn session_write_target(
+    layout: Option<&str>,
+    named_layout_writable: bool,
+    restore_mode: bool,
+    snapshot_is_empty: bool,
+) -> SessionWriteTarget<'_> {
+    match layout {
+        // Never clear a named workspace by quitting.
+        Some(_) if snapshot_is_empty => SessionWriteTarget::Skip,
+        Some(name) if named_layout_writable => SessionWriteTarget::NamedLayout(name),
+        // `--layout NAME` given, but a launch override replaced it: leave the
+        // file alone rather than overwriting it with a window that was never
+        // restored from it.
+        Some(_) => SessionWriteTarget::Skip,
+        // Only write the DEFAULT session.json when this launch is in restore
+        // mode — symmetric with the opt-in load gate. A fresh (non-opted-in)
+        // window must NOT overwrite the saved layout that `--restore` /
+        // `restore-session = true` exists to recover.
+        None if restore_mode => SessionWriteTarget::DefaultSession,
+        None => SessionWriteTarget::Skip,
+    }
+}
+
 /// for THIS launch? Drives BOTH the startup restore gate (whether to `load()`)
 /// and the `save_session` gate (whether to `save()` the default session). They
 /// MUST agree: an earlier change made *load* opt-in (fresh windows by default) but left
@@ -20092,6 +20420,7 @@ impl App {
         let mut mux = Mux::new();
         mux.lua_output_subscribed = self.lua_engine.is_some();
         mux.osc52_copy_allowed = osc52_copy_is_available(self.cfg.osc52, self.clipboard.is_some());
+        mux.autoclean_groups = self.cfg.autoclean_groups;
         {
             mux.lua_output_subscribed |= self.recorder.is_some();
             mux.record_lossless = self.recorder.is_some();
@@ -22021,7 +22350,11 @@ impl App {
                     if bar.height > 0.0 && !bar.segments.is_empty() {
                         // Use the same rendered segment
                         // rects that click hit-testing and painting use.
-                        let target = tab_drag_target_index(ws.cursor.x as f32, &bar.segments);
+                        let target = tab_drag_target_index(
+                            ws.cursor.x as f32,
+                            ws.cursor.y as f32,
+                            &bar.segments,
+                        );
                         let delta = target as i32 - ws.mux.active as i32;
                         if delta != 0 && ws.mux.move_active_tab(delta) {
                             ws.mux.touch_active_tab_seen();
@@ -22064,8 +22397,13 @@ impl App {
                         return;
                     }
                 }
-                if let Some(btn) = ws.mouse_btn {
-                    // Drag while a button is held — report motion if tracked.
+                {
+                    // Motion. `MOUSE_NO_BUTTON` is xterm's code 3, which with
+                    // the motion bit is the `CSI < 35 ; x ; y M` report DEC
+                    // 1003 exists to deliver; `send_mouse` decides per mode
+                    // whether this motion is reportable at all, so 1002 still
+                    // needs a held button and 1000 still gets nothing.
+                    let btn = ws.mouse_btn.unwrap_or(input::MOUSE_NO_BUTTON);
                     if self.send_mouse(ws, btn, true, true) {
                         return;
                     }
@@ -23066,76 +23404,6 @@ impl App {
                 self.hide_mouse_cursor(ws);
                 let text = event.text.as_ref().map(|s| s.as_str());
 
-                if ws.context_menu.is_some() {
-                    self.context_menu_key(ws, &event.logical_key, text, event_loop);
-                    if let Some(w) = &ws.window {
-                        w.request_redraw();
-                    }
-                    return;
-                }
-
-                // Vi-mode key dispatch. When
-                // vi_mode is Some, intercept keys for vi-style
-                // navigation before they reach the PTY. h/j/k/l move
-                // the vi cursor; 0/$/g/G jump; Esc exits.
-                if ws.vi_mode.is_some() {
-                    self.vi_mode_key(ws, &event.logical_key, text);
-                    if let Some(w) = &ws.window {
-                        w.request_redraw();
-                    }
-                    return;
-                }
-
-                if ws.hint_state.is_some() {
-                    self.hint_key(ws, &event.logical_key, text);
-                    if let Some(w) = &ws.window {
-                        w.request_redraw();
-                    }
-                    return;
-                }
-
-                if ws.palette_input.is_some() {
-                    self.palette_key(ws, &event.logical_key, text, event_loop);
-                    if let Some(w) = &ws.window {
-                        w.request_redraw();
-                    }
-                    return;
-                }
-
-                // v2.24.0: while the inline path prompt is open it owns the
-                // keyboard (typed text → the buffer; Enter/Esc finish it).
-                if ws.settings_nav.is_some() && ws.settings_text_edit.is_some() {
-                    self.settings_text_key(ws, &event.logical_key, text);
-                    if let Some(w) = &ws.window {
-                        w.request_redraw();
-                    }
-                    return;
-                }
-                // Settings overlay key handling (exclusive modal).
-                if ws.settings_nav.is_some() {
-                    self.settings_key(ws, &event.logical_key, event_loop);
-                    if let Some(w) = &ws.window {
-                        w.request_redraw();
-                    }
-                    return;
-                }
-
-                if ws.layout_picker_input.is_some() {
-                    self.layout_picker_key(ws, &event.logical_key, text);
-                    if let Some(w) = &ws.window {
-                        w.request_redraw();
-                    }
-                    return;
-                }
-
-                if ws.ssh_input.is_some() {
-                    self.ssh_key(ws, &event.logical_key, text);
-                    if let Some(w) = &ws.window {
-                        w.request_redraw();
-                    }
-                    return;
-                }
-
                 // Phase 5 of TERMINATOR-CONFIRM-DIALOG-DESIGN.md:
                 // confirm-modal key handler. Tab/Shift+Tab/←→
                 // cycle focus, Enter dispatches on_confirm, Esc
@@ -23206,6 +23474,76 @@ impl App {
                     }
                     return;
                 }
+                if ws.context_menu.is_some() {
+                    self.context_menu_key(ws, &event.logical_key, text, event_loop);
+                    if let Some(w) = &ws.window {
+                        w.request_redraw();
+                    }
+                    return;
+                }
+
+                // Vi-mode key dispatch. When
+                // vi_mode is Some, intercept keys for vi-style
+                // navigation before they reach the PTY. h/j/k/l move
+                // the vi cursor; 0/$/g/G jump; Esc exits.
+                if ws.vi_mode.is_some() {
+                    self.vi_mode_key(ws, &event.logical_key, text);
+                    if let Some(w) = &ws.window {
+                        w.request_redraw();
+                    }
+                    return;
+                }
+
+                if ws.hint_state.is_some() {
+                    self.hint_key(ws, &event.logical_key, text);
+                    if let Some(w) = &ws.window {
+                        w.request_redraw();
+                    }
+                    return;
+                }
+
+                if ws.palette_input.is_some() {
+                    self.palette_key(ws, &event.logical_key, text, event_loop);
+                    if let Some(w) = &ws.window {
+                        w.request_redraw();
+                    }
+                    return;
+                }
+
+                // v2.24.0: while the inline path prompt is open it owns the
+                // keyboard (typed text → the buffer; Enter/Esc finish it).
+                if ws.settings_nav.is_some() && ws.settings_text_edit.is_some() {
+                    self.settings_text_key(ws, &event.logical_key, text);
+                    if let Some(w) = &ws.window {
+                        w.request_redraw();
+                    }
+                    return;
+                }
+                // Settings overlay key handling (exclusive modal).
+                if ws.settings_nav.is_some() {
+                    self.settings_key(ws, &event.logical_key, event_loop);
+                    if let Some(w) = &ws.window {
+                        w.request_redraw();
+                    }
+                    return;
+                }
+
+                if ws.layout_picker_input.is_some() {
+                    self.layout_picker_key(ws, &event.logical_key, text);
+                    if let Some(w) = &ws.window {
+                        w.request_redraw();
+                    }
+                    return;
+                }
+
+                if ws.ssh_input.is_some() {
+                    self.ssh_key(ws, &event.logical_key, text);
+                    if let Some(w) = &ws.window {
+                        w.request_redraw();
+                    }
+                    return;
+                }
+
                 // Edit-title overlay key handler. Esc
                 // cancels; Enter applies via apply_title_edit;
                 // Backspace removes one char; printable text appends.
@@ -23283,7 +23621,7 @@ impl App {
                     // v2.20.0: shared with `send_keys` (review fix) so the
                     // agent plane honors the same remap as GUI keystrokes.
                     if !input::uses_kitty_sequence(&event, ws.mods, mode) {
-                        bytes = apply_bs_del_binding(&self.cfg, &event.logical_key, ws.mods, bytes);
+                        bytes = apply_bs_del_binding(&self.cfg, &event.logical_key, bytes);
                     }
                     self.write_terminal_input(ws, &bytes);
                 }
@@ -23317,6 +23655,13 @@ impl App {
         ws.search_queries
             .retain(|pane_id, _| ws.mux.panes.contains_key(pane_id));
         let now = std::time::Instant::now();
+        // Catch the session changes no gesture announces — see `SESSION_SWEEP`.
+        // Deliberately NOT part of the returned deadline: this must never be a
+        // reason to wake up.
+        if session_sweep_due(self.last_session_sweep, now, !ws.mux.tabs.is_empty()) {
+            self.last_session_sweep = Some(now);
+            self.save_session(ws);
+        }
         let lua_wait = self.poll_pending_lua_commands(ws, event_loop, now);
         let remote_wait = if should_poll_remote_window(
             !self.pending_remote_commands.is_empty(),
@@ -23761,9 +24106,10 @@ impl Drop for App {
 /// same approach as `kettle-core`'s teardown guard.
 #[cfg(test)]
 mod modal_discipline_guard {
+    use super::{production_source, session_write_target};
     #[test]
     fn confirm_dialog_is_tracked_as_a_modal() {
-        let src = include_str!("app.rs").replace("\r\n", "\n");
+        let src = production_source();
         let body = |name: &str| -> String {
             let start = src
                 .find(&format!("fn {name}("))
@@ -23796,7 +24142,7 @@ mod modal_discipline_guard {
     /// that the decision is asked at all.
     #[test]
     fn every_close_gesture_asks_before_closing() {
-        let src = include_str!("app.rs").replace("\r\n", "\n");
+        let src = production_source();
         // Slice from a marker to the end of its enclosing arm/statement,
         // deliberately short so an inserted close below the window still fails.
         let after = |marker: &str, len: usize| -> String {
@@ -23846,10 +24192,10 @@ mod modal_discipline_guard {
     /// pin the honored returns at the source level.
     #[test]
     fn confirm_close_honors_close_returns() {
-        let src = include_str!("app.rs").replace("\r\n", "\n");
+        let src = production_source();
         let start = src
-            .find("fn dispatch_confirm_action(")
-            .expect("dispatch_confirm_action not found");
+            .find("fn dispatch_confirm_action_arms(")
+            .expect("dispatch_confirm_action_arms not found");
         let rest = &src[start..];
         let end = rest.find("\n    }").expect("fn end");
         let body = &rest[..end];
@@ -23900,9 +24246,169 @@ mod modal_discipline_guard {
         );
     }
 
+    /// `split_auto` must actually pick an axis.
+    ///
+    /// The dispatch arm read `Action::SplitDown | Action::SplitAuto`, so "auto"
+    /// was literally "down": on a 1388x861 pane — wider than tall — it stacked
+    /// instead of splitting side by side. Every user-facing description says
+    /// it picks by aspect ratio, and Terminator splits along the pane's longer
+    /// axis.
+    ///
+    /// A behavioural test needs a live window, so this pins the two things
+    /// that went wrong: that the dispatch consults the chooser at all rather
+    /// than sharing `SplitDown`'s arm, and that the chooser reads the pane's
+    /// shape.
+    #[test]
+    fn split_auto_picks_an_axis_instead_of_always_splitting_down() {
+        let src = production_source();
+
+        let arm = src
+            .split("Action::SplitDown | Action::SplitAuto => {")
+            .nth(1)
+            .expect("the split-down/auto arm must exist")
+            .split("\n            Action::")
+            .next()
+            .expect("arm body");
+        assert!(
+            arm.contains("if action == Action::SplitAuto"),
+            "the arm must distinguish auto from down — sharing the arm outright \
+             is what made `split_auto` a plain `split_down`"
+        );
+        assert!(
+            arm.contains("self.auto_split_dir(ws)"),
+            "auto must ask for a direction rather than hardcoding one"
+        );
+
+        let chooser = src
+            .split("fn auto_split_dir(&self, ws: &WindowState) -> Dir {")
+            .nth(1)
+            .expect("auto_split_dir must exist")
+            .split("\n    fn ")
+            .next()
+            .expect("chooser body");
+        assert!(
+            chooser.contains("self.focused_rect(ws, area)"),
+            "the choice must come from the focused pane's rect, not the window"
+        );
+        assert!(
+            chooser.contains("rect.2 > rect.3")
+                && chooser.contains("Dir::Horizontal")
+                && chooser.contains("Dir::Vertical"),
+            "a wider-than-tall pane must split horizontally and a taller one \
+             vertically"
+        );
+    }
+
+    /// Quitting must not erase the workspace you launched from.
+    ///
+    /// `close_window` deliberately empties the mux before saving so the
+    /// SESSION it writes is the empty one — "this window is finished, do not
+    /// bring it back". Sending that same empty snapshot to a NAMED LAYOUT
+    /// destroyed the workspace: a layout measured at 2043 bytes came back as
+    /// 65 after a close, and the next `--layout NAME` opened a single default
+    /// pane. Terminator only ever writes a layout from an explicit
+    /// Add/Refresh.
+    ///
+    /// The whole routing decision, as a table.
+    #[test]
+    fn an_empty_snapshot_never_overwrites_a_named_layout() {
+        use super::SessionWriteTarget::{DefaultSession, NamedLayout, Skip};
+
+        // The regression: empty snapshot, named layout, layout writable.
+        assert_eq!(
+            session_write_target(Some("dev"), true, false, true),
+            Skip,
+            "closing a window must not write an empty layout over the \
+             workspace it was launched from"
+        );
+        // ...and the same for a non-empty one, which is the case that must
+        // keep working — otherwise the guard above could be implemented by
+        // never writing layouts at all.
+        assert_eq!(
+            session_write_target(Some("dev"), true, false, false),
+            NamedLayout("dev"),
+            "a real arrangement must still be saved to its layout"
+        );
+
+        // A launch override means this window was never restored from that
+        // layout, so it does not get to rewrite it either way.
+        assert_eq!(session_write_target(Some("dev"), false, false, false), Skip);
+        assert_eq!(session_write_target(Some("dev"), false, false, true), Skip);
+
+        // session.json keeps its existing contract: written only in restore
+        // mode, and `close_window`'s deliberate clear still reaches it. That
+        // intent belongs to the session, not to a named workspace.
+        assert_eq!(
+            session_write_target(None, true, true, false),
+            DefaultSession
+        );
+        assert_eq!(
+            session_write_target(None, true, true, true),
+            DefaultSession,
+            "clearing the default session on close is deliberate and must \
+             survive this fix"
+        );
+        assert_eq!(session_write_target(None, true, false, false), Skip);
+        assert_eq!(session_write_target(None, true, false, true), Skip);
+    }
+
+    /// Answering a confirmation must end with the same resize tail every
+    /// keybind and menu action gets, and that tail must live in exactly one
+    /// place.
+    ///
+    /// It went missing because `dispatch_confirm_action` is a second entry
+    /// point into the same state changes and simply did not have it, so a
+    /// confirmed close collapsed the layout while the surviving PTYs kept
+    /// their old size. Pinning it to the wrapper — and asserting the arms do
+    /// NOT carry their own — is what stops a future arm from reintroducing
+    /// the gap. A behavioral check needs a live event loop and a window; the
+    /// file's other confirm-dispatch guards are source-level for the same
+    /// reason.
+    #[test]
+    fn confirm_dispatch_resizes_once_for_every_arm() {
+        let src = production_source();
+        // Built at runtime so this guard cannot match its own source.
+        let resize = ["self.", "resize_all(ws);"].concat();
+
+        let body_of = |name: &str| -> String {
+            let start = src.find(name).unwrap_or_else(|| panic!("{name} not found"));
+            let rest = &src[start..];
+            let end = rest.find("\n    }").expect("fn end");
+            rest[..end].to_string()
+        };
+
+        let wrapper = body_of("fn dispatch_confirm_action(");
+        let arms = body_of("fn dispatch_confirm_action_arms(");
+        assert!(
+            wrapper.contains(&resize),
+            "the confirm dispatch must end with the resize tail, or every \
+             confirmed close leaves the surviving panes' PTYs at their \
+             pre-close size"
+        );
+        assert!(
+            wrapper.contains("if !self.pending_window_close"),
+            "a window on its way out has nothing left to resize"
+        );
+        assert!(
+            !arms.contains(&resize),
+            "the tail belongs to the wrapper alone; an arm carrying its own \
+             copy is how the next arm ends up without one"
+        );
+        // The wrapper must actually delegate, or the assertions above pass
+        // against a function that does nothing.
+        assert!(
+            wrapper.contains("self.dispatch_confirm_action_arms(ws, action);"),
+            "the wrapper must delegate to the arms"
+        );
+        assert!(
+            arms.contains("ConfirmAction::ClosePane(target)"),
+            "the arms function must be the one holding the match"
+        );
+    }
+
     #[test]
     fn pane_close_lifecycle_events_precede_pty_teardown() {
-        let source = include_str!("app.rs").replace("\r\n", "\n");
+        let source = production_source();
         // Construct these needles so this guard does not count its own source.
         let close_call = ["ws.mux.", "close_focused();"].concat();
         let focus_capture = ["let closing_pane = ws.mux.", "active_focus();"].concat();
@@ -23950,20 +24456,20 @@ mod tests {
     use super::{
         AUTOMATION_RETRY_MIN, App, AutomationRetry, ContextMenuItem, MAX_REMOTE_COMMANDS_PER_BATCH,
         Osc52ClipboardChannel, ParsedRemoteCommandBatch, PendingLuaCommand, PendingLuaCommands,
-        PendingRemoteCommand, RemoteBatchClaim, SplitDrag, apply_output_generation_outcome,
-        apply_remote_title_transition, argv_is_nonlocal_client, assign_mnemonics,
-        cached_pane_cursor_blinking, claim_remote_command_file, context_menu_item_columns,
-        context_menu_max_scroll_offset, context_menu_scroll_for_highlight,
-        context_menu_snapshot_reuse_safe, context_menu_surface_can_fit_row, count_rows_fitting,
-        ctl_input_error, filter_disabled, find_menu_row_y, fit_context_menu_row,
-        input_rejection_message, local_paste_within_limit, modal_swallows_pointer,
-        osc52_clipboard_channel, output_generation_advanced, output_wakeup_needs_paint,
-        pane_cursor_blinking_with, pane_snapshot_keys_match, parse_remote_command_batch,
-        rank_layouts, sanitize_native_window_title, sanitize_title, selection_kind,
-        should_notify_input_rejection, should_poll_remote_window, should_restore_session,
-        should_reveal_after_renderer_init, stage_applied_remote_probe,
-        stage_output_generations_for_frame, stage_remote_targets, startup_inner_size_px,
-        typeahead_match,
+        PendingRemoteCommand, RemoteBatchClaim, SplitDrag, apply_bs_del_binding,
+        apply_output_generation_outcome, apply_remote_title_transition, argv_is_nonlocal_client,
+        assign_mnemonics, broadcast_scope_for_default, cached_pane_cursor_blinking,
+        claim_remote_command_file, context_menu_item_columns, context_menu_max_scroll_offset,
+        context_menu_scroll_for_highlight, context_menu_snapshot_reuse_safe,
+        context_menu_surface_can_fit_row, count_rows_fitting, ctl_input_error, filter_disabled,
+        find_menu_row_y, fit_context_menu_row, input_rejection_message, local_paste_within_limit,
+        modal_swallows_pointer, osc52_clipboard_channel, output_generation_advanced,
+        output_wakeup_needs_paint, pane_cursor_blinking_with, pane_snapshot_keys_match,
+        parse_remote_command_batch, production_source, rank_layouts, sanitize_native_window_title,
+        sanitize_title, selection_kind, session_sweep_due, should_notify_input_rejection,
+        should_poll_remote_window, should_restore_session, should_reveal_after_renderer_init,
+        stage_applied_remote_probe, stage_output_generations_for_frame, stage_remote_targets,
+        startup_inner_size_px, typeahead_match,
     };
     use crate::mux::{Dir, Mux, PaneInputResult, PaneTitleOrigin};
     use crate::window_state::WindowState;
@@ -23972,6 +24478,366 @@ mod tests {
     use kettle_render::{ContextMenuRow, FrameOutcome, PaneSnapshot};
     use std::sync::Arc;
     use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+
+    /// A modal question has to outrank the overlay that asked it. Rebinding a
+    /// key onto a chord that is already taken raises a confirm dialog from
+    /// inside the Settings overlay — and the Settings arms used to claim the
+    /// keyboard first, in both key paths, so the dialog could not be answered
+    /// at all while the panel that raised it stayed open. It was painted under
+    /// the panel's dim backdrop too, which is how it read as a z-order bug
+    /// rather than a dead one.
+    #[test]
+    fn a_confirm_dialog_outranks_every_overlay_including_the_one_that_raised_it() {
+        let src = production_source();
+
+        // Named-key path: the confirm branch comes before every other overlay,
+        // and before the settings branches in particular.
+        // Slice the router itself first: these same branch conditions appear
+        // in the mouse handlers, so comparing whole-file positions would
+        // compare the wrong pair and pass for the wrong reason.
+        let router = src
+            .split("let text = event.text.as_ref().map(|s| s.as_str());")
+            .nth(1)
+            .expect("the key router opens by binding `text`");
+        let confirm = router
+            .find("if ws.confirm_dialog.is_some() {")
+            .expect("the confirm-modal key handler is present");
+        for later in [
+            "if ws.context_menu.is_some() {",
+            "if ws.settings_nav.is_some() {",
+            "if ws.palette_input.is_some() {",
+        ] {
+            let at = router
+                .find(later)
+                .unwrap_or_else(|| panic!("expected overlay branch {later:?} in the key router"));
+            assert!(
+                confirm < at,
+                "the confirm modal must be handled before {later:?}, or the \
+                 question it asks cannot be answered"
+            );
+        }
+
+        // Character path: the same, so typed text cannot land in a settings
+        // field while a modal is waiting on an answer.
+        let chars = src
+            .split("let key = Key::Character(text.into());")
+            .nth(1)
+            .expect("the character router builds a Character key first");
+        let confirm_arm = chars
+            .find("if ws.confirm_dialog.is_some() {")
+            .expect("the character router must swallow text while a modal is up");
+        for later in ["ws.palette_input.is_some()", "ws.settings_nav.is_some()"] {
+            let at = chars
+                .find(later)
+                .unwrap_or_else(|| panic!("expected {later:?} in the character router"));
+            assert!(
+                confirm_arm < at,
+                "the modal arm must precede {later:?} in the character router"
+            );
+        }
+
+        // And it stays legible: the confirm bar is queued with the menu chrome
+        // (so it clears the base overlay quads), and the settings panel's dim
+        // backdrop — pushed to the same list afterwards, therefore drawn over
+        // it — stops above the bar rather than greying it out.
+        let render = include_str!("../../kettle-render/src/lib.rs").replace("\r\n", "\n");
+        assert!(
+            render
+                .contains("menu_q.push(rect(0.0, sh - bar_h, sw, bar_h, theme.palette[1], 0.96));"),
+            "the confirm bar must be queued into the menu-chrome pass"
+        );
+        assert!(
+            render
+                .contains("menu_q.push(rect(0.0, 0.0, sw, dim_h, theme.background, backdrop_a));")
+                && render.contains("let dim_h = if overlay.confirm_dialog.is_some() {"),
+            "the settings backdrop must stop above a live confirm bar; a \
+             full-height dim would cover the question being asked"
+        );
+    }
+
+    /// A config reload has to push the scrollback budget into panes that are
+    /// already open. It used to be read once at spawn, so editing `scrollback`
+    /// or `scrollback-bytes` — through the file or the Settings overlay's two
+    /// rows — wrote the value, reloaded it, and changed nothing visible.
+    #[test]
+    fn a_reload_carries_the_scrollback_budget_into_live_panes() {
+        let src = production_source();
+        let apply = src
+            .split("fn apply_reloaded_config(")
+            .nth(1)
+            .expect("apply_reloaded_config present");
+        let end = apply.find("\n    fn ").unwrap_or(apply.len());
+        assert!(
+            apply[..end]
+                .contains("set_scrollback_limits(self.cfg.scrollback, self.cfg.scrollback_bytes)"),
+            "the reload must hand both scrollback settings to the live panes, \
+             or the Settings rows are inert until restart"
+        );
+    }
+
+    /// `broadcast-default` parsed for three releases without anything reading
+    /// it, so `broadcast-default = all` was indistinguishable from leaving the
+    /// key out. It picks the scope the group chord turns on now.
+    ///
+    /// The default maps to per-tab, which is what the chord has always done —
+    /// wiring the key up must not change what an unconfigured kettle does.
+    #[test]
+    fn broadcast_default_picks_the_scope_the_group_chord_turns_on() {
+        use crate::mux::BroadcastScope;
+        use kettle_config::BroadcastDefault;
+
+        assert_eq!(
+            broadcast_scope_for_default(BroadcastDefault::default()),
+            BroadcastScope::Tab,
+            "an unconfigured kettle must keep the per-tab behaviour the chord \
+             has always had"
+        );
+        assert_eq!(
+            broadcast_scope_for_default(BroadcastDefault::All),
+            BroadcastScope::All
+        );
+        assert_eq!(
+            broadcast_scope_for_default(BroadcastDefault::Group),
+            BroadcastScope::Tab
+        );
+        assert_eq!(
+            broadcast_scope_for_default(BroadcastDefault::Off),
+            BroadcastScope::Off
+        );
+
+        // The chord is a toggle now: it used to *set* Tab scope, so the key
+        // that turned broadcast on could not turn it off and the user had to
+        // know a second chord. Drive the dispatch's own expression.
+        let toggled = |current: BroadcastScope, on: BroadcastScope| {
+            if current == on {
+                BroadcastScope::Off
+            } else {
+                on
+            }
+        };
+        let on = broadcast_scope_for_default(BroadcastDefault::Group);
+        assert_eq!(
+            toggled(BroadcastScope::Off, on.clone()),
+            BroadcastScope::Tab
+        );
+        assert_eq!(
+            toggled(BroadcastScope::Tab, on.clone()),
+            BroadcastScope::Off,
+            "pressing the chord again must turn broadcast off"
+        );
+        // From some other scope it selects the configured one rather than
+        // toggling off — the user asked for this scope.
+        assert_eq!(toggled(BroadcastScope::All, on), BroadcastScope::Tab);
+        // And `off` means the chord genuinely cannot enable broadcast.
+        let never = broadcast_scope_for_default(BroadcastDefault::Off);
+        assert_eq!(
+            toggled(BroadcastScope::Off, never.clone()),
+            BroadcastScope::Off
+        );
+        assert_eq!(toggled(BroadcastScope::Tab, never), BroadcastScope::Off);
+
+        // The dispatch must be running that expression, not a re-implementation.
+        let src = production_source();
+        let arm = src
+            .split("Action::ToggleBroadcastAll => {")
+            .nth(1)
+            .expect("the broadcast toggle arm is present");
+        assert!(
+            arm.contains("broadcast_scope_for_default(self.cfg.broadcast_default)")
+                && arm.contains("if ws.mux.broadcast == on"),
+            "the toggle arm must read `broadcast-default` and compare against \
+             the current scope"
+        );
+    }
+
+    /// A shell `cd`, a dragged divider and a renamed tab all change what
+    /// `session.json` should say without any gesture that saves it, so a sweep
+    /// picks them up. What makes the sweep affordable is that it only ever runs
+    /// on a turn the event loop was taking anyway: if it became a wakeup
+    /// deadline, an idle kettle would wake twice a second forever and the idle
+    /// CPU figure the perf suite publishes would go with it.
+    #[test]
+    fn the_session_sweep_rides_existing_turns_and_never_schedules_one() {
+        let t0 = std::time::Instant::now();
+        assert!(
+            session_sweep_due(None, t0, true),
+            "the first turn sweeps, so a workspace that changes and then goes \
+             quiet is still written"
+        );
+        assert!(!session_sweep_due(Some(t0), t0, true));
+        assert!(!session_sweep_due(
+            Some(t0),
+            t0 + super::SESSION_SWEEP - std::time::Duration::from_millis(1),
+            true
+        ));
+        assert!(session_sweep_due(Some(t0), t0 + super::SESSION_SWEEP, true));
+        // A timestamp from the future (a paused VM, a mid-turn re-entry)
+        // must not make every turn a sweep.
+        assert!(!session_sweep_due(
+            Some(t0 + super::SESSION_SWEEP),
+            t0,
+            true
+        ));
+
+        // An empty window is never swept, however overdue the clock says it
+        // is. Its snapshot is `{"tabs":[],"windows":[]}`, and a window is
+        // empty exactly when it has not opened yet or is on its way out —
+        // writing then would erase the session about to be restored. The
+        // deliberate erasures (`close_window`, the reap above this call) save
+        // on their own and are not affected.
+        assert!(!session_sweep_due(None, t0, false));
+        assert!(!session_sweep_due(
+            Some(t0),
+            t0 + super::SESSION_SWEEP * 1000,
+            false
+        ));
+
+        // And the constant is reachable from exactly one place: its own
+        // declaration and the predicate above. A third mention would mean it
+        // had found its way into a deadline. Comment lines are dropped first so
+        // prose about the constant does not count as a use of it.
+        let code = production_source()
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert_eq!(
+            code.matches("SESSION_SWEEP").count(),
+            2,
+            "SESSION_SWEEP should be named only by its declaration and \
+             `session_sweep_due`; a third reference means it reached a wakeup"
+        );
+        let wait = code
+            .split("fn about_to_wait_inner(")
+            .nth(1)
+            .expect("about_to_wait_inner present");
+        assert!(
+            wait.contains(
+                "session_sweep_due(self.last_session_sweep, now, !ws.mux.tabs.is_empty())"
+            ),
+            "the sweep must be driven from the event-loop turn itself, and must \
+             pass the window's own emptiness so it cannot overwrite a saved \
+             session with a window that has nothing in it"
+        );
+    }
+
+    /// `backspace-binding` / `delete-binding` must replace only the
+    /// UNMODIFIED key, and had no test of any kind before this one.
+    ///
+    /// Every case drives the real encoder and then the real remap, in the
+    /// order the key path uses them, so the expectations cannot drift from
+    /// what the terminal actually writes. `delete-binding` defaults to
+    /// `EscapeSequence`, so the unguarded Delete arm rewrote *every* modified
+    /// Delete back to the plain `CSI 3 ~` — `Ctrl+Delete` was byte-identical
+    /// to `Delete`, and no `<C-Del>` mapping could ever fire.
+    #[test]
+    fn a_modified_delete_keeps_its_modifier_through_the_binding_remap() {
+        use kettle_core::TermMode;
+        use winit::keyboard::{Key, ModifiersState, NamedKey};
+
+        let cfg = kettle_config::Config::default();
+        let mode = TermMode::empty();
+        let delete = Key::Named(NamedKey::Delete);
+        let encode = |mods: ModifiersState| -> Vec<u8> {
+            crate::input::encode_key_press(&delete, mods, mode).expect("Delete encodes")
+        };
+
+        // Precondition: the default really is the binding that rewrites, and
+        // the encoder really does distinguish these. Without both, the
+        // assertions below would hold for the wrong reason.
+        assert_eq!(
+            cfg.delete_binding,
+            kettle_config::DeleteBinding::EscapeSequence,
+            "this test is about the DEFAULT binding"
+        );
+        let plain = encode(ModifiersState::empty());
+        assert_eq!(plain, b"\x1b[3~");
+
+        for (label, mods) in [
+            ("ctrl", ModifiersState::CONTROL),
+            ("shift", ModifiersState::SHIFT),
+            ("alt", ModifiersState::ALT),
+            (
+                "ctrl+shift",
+                ModifiersState::CONTROL | ModifiersState::SHIFT,
+            ),
+        ] {
+            let encoded = encode(mods);
+            assert_ne!(
+                encoded, plain,
+                "the encoder must distinguish {label}+Delete, or this test \
+                 cannot detect the remap flattening it"
+            );
+            assert_eq!(
+                apply_bs_del_binding(&cfg, &delete, encoded.clone()),
+                encoded,
+                "{label}+Delete must survive the binding remap unchanged"
+            );
+        }
+
+        // The feature itself still works on the unmodified key.
+        let ascii_del = kettle_config::Config {
+            delete_binding: kettle_config::DeleteBinding::AsciiDel,
+            ..kettle_config::Config::default()
+        };
+        assert_eq!(
+            apply_bs_del_binding(&ascii_del, &delete, plain.clone()),
+            vec![0x7f],
+            "an unmodified Delete must still honour the binding"
+        );
+    }
+
+    /// Backspace's binding has the same contract, and the same trap one level
+    /// down: its level-0 forms vary with control and alt, but a
+    /// `modifyOtherKeys` level-2 `Shift+Backspace` is a `CSI 27;2;8~` that the
+    /// old `!control && !alt` guard would have happily flattened to `0x7f`.
+    #[test]
+    fn a_modified_backspace_keeps_its_encoding_through_the_binding_remap() {
+        use kettle_core::TermMode;
+        use winit::keyboard::{Key, ModifiersState, NamedKey};
+
+        let cfg = kettle_config::Config {
+            backspace_binding: kettle_config::BackspaceBinding::ControlH,
+            ..kettle_config::Config::default()
+        };
+        let backspace = Key::Named(NamedKey::Backspace);
+        let plain =
+            crate::input::encode_key_press(&backspace, ModifiersState::empty(), TermMode::empty())
+                .expect("Backspace encodes");
+        assert_eq!(plain, vec![0x7f]);
+        assert_eq!(
+            apply_bs_del_binding(&cfg, &backspace, plain),
+            vec![0x08],
+            "an unmodified Backspace must honour `control-h`"
+        );
+
+        for (label, mods, mode) in [
+            ("ctrl", ModifiersState::CONTROL, TermMode::empty()),
+            ("alt", ModifiersState::ALT, TermMode::empty()),
+            // Backspace opts out of level-1 encoding but opts in at level 2
+            // for anything that is not bare Control, so this is the level
+            // where Shift produces a distinct sequence.
+            (
+                "shift at modifyOtherKeys level 2",
+                ModifiersState::SHIFT,
+                TermMode::MODIFY_OTHER_KEYS_2,
+            ),
+        ] {
+            let encoded =
+                crate::input::encode_key_press(&backspace, mods, mode).expect("Backspace encodes");
+            assert_ne!(
+                encoded,
+                vec![0x7f],
+                "the encoder must distinguish {label}+Backspace, or this case \
+                 cannot detect the remap flattening it"
+            );
+            assert_eq!(
+                apply_bs_del_binding(&cfg, &backspace, encoded.clone()),
+                encoded,
+                "{label}+Backspace must survive the binding remap unchanged"
+            );
+        }
+    }
 
     #[test]
     fn input_rejections_have_distinct_rpc_semantics() {
@@ -24365,7 +25231,7 @@ mod tests {
 
     #[test]
     fn every_lua_event_and_url_handler_dispatch_drains_commands() {
-        let source = include_str!("app.rs");
+        let source = production_source();
         let raw_fire = [".fire_", "event("].concat();
         assert_eq!(
             source.matches(&raw_fire).count(),
@@ -24990,7 +25856,7 @@ mod tests {
 
     #[test]
     fn watched_reload_loads_once_then_applies_every_window() {
-        let src = include_str!("app.rs");
+        let src = production_source();
         let body = src
             .split("fn reload_config_windows(&mut self)")
             .nth(1)
@@ -25200,7 +26066,7 @@ mod tests {
     /// (ctl / remote / update banner) misroute to a stale window.
     #[test]
     fn focused_event_updates_focused_seq() {
-        let src = include_str!("app.rs");
+        let src = production_source();
         let arm = src
             .find("WindowEvent::Focused(f) =>")
             .expect("Focused arm present");
@@ -25217,7 +26083,7 @@ mod tests {
     /// on a bounded backoff.
     #[test]
     fn gpu_lost_quiesces_and_schedules_recovery() {
-        let src = include_str!("app.rs");
+        let src = production_source();
         let guard = src
             .find("if self.gpu.as_ref().is_some_and(|g| g.is_lost()) {")
             .expect("gpu_lost redraw guard present");
@@ -25245,7 +26111,7 @@ mod tests {
 
     #[test]
     fn live_gpu_context_uses_event_loop_owned_display_handle() {
-        let src = include_str!("app.rs");
+        let src = production_source();
         let resumed = src
             .find("fn resumed_inner(")
             .expect("resumed_inner present");
@@ -25565,7 +26431,7 @@ mod tests {
 
     #[test]
     fn protocol_notifications_are_wired_to_ui_dispatch() {
-        let src = include_str!("app.rs");
+        let src = production_source();
         assert!(
             src.contains("drain_protocol_notifications()"),
             "drain_events must consume OSC 9/777 notification requests"
@@ -25619,7 +26485,7 @@ mod tests {
     /// this pins it at the source level.
     #[test]
     fn explicit_restore_paths_precede_default_session() {
-        let src = include_str!("app.rs").replace("\r\n", "\n");
+        let src = production_source();
         // The LOAD gate specifically (`} else if should_restore_session(...)`) —
         // distinct from the save gate's `None if should_restore_session(...)`,
         // which uses the same args and appears earlier in the file.
@@ -25641,12 +26507,27 @@ mod tests {
             );
         }
         // And the SAVE side must be gated by the same predicate (no clobber).
+        // The routing now lives in `session_write_target`, so this checks both
+        // halves: that `save_session` feeds it the predicate, and that the
+        // default-session arm is the only thing that predicate unlocks.
         assert!(
-            src.contains(
-                "None if should_restore_session(self.startup.restore, self.cfg.restore_session)"
-            ),
-            "save_session must gate the default session.json write behind \
-             should_restore_session — symmetric with the load gate (audit M1)"
+            src.contains("should_restore_session(self.startup.restore, self.cfg.restore_session),"),
+            "save_session must pass should_restore_session into the write \
+             routing — symmetric with the load gate (audit M1)"
+        );
+        let routing = src
+            .split("fn session_write_target(")
+            .nth(1)
+            .and_then(|body| body.split("\n}").next())
+            .expect("session_write_target body");
+        assert!(
+            routing.contains("None if restore_mode => SessionWriteTarget::DefaultSession"),
+            "the default session.json write must be the restore-mode arm"
+        );
+        assert!(
+            routing.contains("Some(_) if snapshot_is_empty => SessionWriteTarget::Skip"),
+            "an empty snapshot must never overwrite a named layout — closing a \
+             window would erase the workspace it was launched from"
         );
     }
 
@@ -25676,7 +26557,7 @@ mod tests {
     /// dropdown arrow back into a plain `+` click.
     #[test]
     fn ctl_mouse_press_handles_app_chrome_before_panes() {
-        let src = include_str!("app.rs").replace('\r', "");
+        let src = production_source();
         let body = src
             .split("fn ctl_mouse_press(")
             .nth(1)
@@ -25707,13 +26588,21 @@ mod tests {
     /// behavioral test needs a window + a real mouse drag (and the geometry math
     /// is already unit-tested in `mux::node_tests`), so pin the wiring at the
     /// source level.
+    ///
+    /// Every needle below is matched against the production slice only, so a
+    /// signature change that leaves the guard behind fails it instead of
+    /// feeding it its own text.
     #[test]
     fn split_divider_drag_is_wired() {
-        let src = include_str!("app.rs");
+        let src = production_source();
         // Press starts the drag from a seam hit-test.
         assert!(
-            src.contains("if let Some(drag) = self.split_drag_at(area, px, py)"),
+            src.contains("let Some(drag) = self.split_drag_at(ws, area, px, py)"),
             "left-press must start a split-divider drag on a seam hit"
+        );
+        assert!(
+            src.contains("ws.dragging_split = Some(drag);"),
+            "the seam hit must actually latch the drag"
         );
         // Move applies the new ratio.
         assert!(
@@ -25721,8 +26610,7 @@ mod tests {
                 && src.contains("ws.mux.set_split_ratio(ws.mux.active, &path, ratio);"),
             "CursorMoved must apply the dragged split ratio"
         );
-        // Up + focus-loss end the drag (distinctive comments at each site, so
-        // this guard doesn't self-match its own assertion literals).
+        // Up + focus-loss end the drag.
         assert!(
             src.contains("End any split-divider drag on left-button up."),
             "the split drag must be cleared on left-button up"
@@ -25733,7 +26621,7 @@ mod tests {
         );
         // Hover shows a resize cursor.
         assert!(
-            src.contains(".or_else(|| self.split_seam_hover_icon())"),
+            src.contains(".or_else(|| self.split_seam_hover_icon(ws))"),
             "hovering a divider must show the resize cursor"
         );
     }
@@ -25751,7 +26639,7 @@ mod tests {
     /// wiring is pinned here.
     #[test]
     fn the_group_all_actions_reach_a_dispatch_that_groups() {
-        let src = include_str!("app.rs").replace("\r\n", "\n");
+        let src = production_source();
         let arm_head = [
             "Action::GroupAll | Action::Ungroup",
             "All | Action::ToggleGroupAll => {",
@@ -25794,7 +26682,7 @@ mod tests {
     /// and focusing the pane answers it.
     #[test]
     fn the_pane_bell_indicator_is_wired_to_real_pane_state() {
-        let src = include_str!("app.rs").replace("\r\n", "\n");
+        let src = production_source();
         let at = src.find("metas.push((").expect("frame builder");
         let push: String = src[at..].chars().take(900).collect();
         assert!(
@@ -25823,7 +26711,7 @@ mod tests {
 
     #[test]
     fn animated_bg_redraw_is_edge_triggered() {
-        let src = include_str!("app.rs").replace("\r\n", "\n");
+        let src = production_source();
         assert!(
             src.contains("let bg_frame_due = bg_frame.is_some() && bg_frame != ws.last_bg_frame;"),
             "the bg redraw must edge-trigger on a frame-index change"
@@ -25845,21 +26733,42 @@ mod tests {
     /// out through the same recorder + Lua dispatcher before panes disappear.
     #[test]
     fn recorder_output_flushed_before_reap_and_on_close() {
-        let src = include_str!("app.rs");
+        let src = production_source();
         assert!(
             src.contains("fn flush_recorder_output(&mut self, ws: &mut WindowState)"),
             "the recorder-output flush helper must exist"
         );
-        for marker in [
-            "Capture a just-exited pane's final output before reap drops",
-            "Drain trailing recorder output before reap removes a",
-            "Tee any in-flight PTY output into the trace,",
+
+        // Keyed on the CALL SITES, not on the prose beside them. This guard
+        // used to look for three comment strings; one of them was reworded
+        // when `close_window_now` grew its DropPanes-ordering explanation, and
+        // the guard kept passing anyway because it was searching the whole
+        // file and matching its own copy of the old sentence. A comment is not
+        // a contract — the three functions that must flush are.
+        for owner in [
+            "fn redraw(&mut self, ws: &mut WindowState) {",
+            "fn close_window_now(&mut self, ws: &mut WindowState, drop_panes: DropPanes) {",
+            "fn about_to_wait_inner(",
         ] {
+            let body = src
+                .split(owner)
+                .nth(1)
+                .unwrap_or_else(|| panic!("{owner} must exist"))
+                .split("\n    fn ")
+                .next()
+                .expect("function body");
             assert!(
-                src.contains(marker),
-                "missing recorder-flush wiring at a close/reap site: {marker:?}"
+                body.contains("self.flush_recorder_output(ws);"),
+                "{owner} must flush recorder output before panes are dropped, \
+                 or a just-exited shell's last lines never reach the trace"
             );
         }
+        assert_eq!(
+            src.matches("self.flush_recorder_output(ws);").count(),
+            3,
+            "exactly three production sites flush; a fourth means a new close \
+             path appeared and this guard has not been told about it"
+        );
 
         let regular_drain = src
             .split("fn drain_events(&mut self, ws: &mut WindowState)")
@@ -25954,7 +26863,7 @@ mod tests {
     ///      `modal_swallows_pointer` modal, so the forward leaked before).
     #[test]
     fn event_state_leaks_are_gated() {
-        let src = include_str!("app.rs");
+        let src = production_source();
         // 1. Dropped-file modal gate, at the top of the arm.
         assert!(
             src.contains("WindowEvent::DroppedFile(path) => {")
@@ -26018,7 +26927,7 @@ mod tests {
     /// `Action::ScaledZoom` arm itself.
     #[test]
     fn scaled_zoom_baselines_off_live_font_size() {
-        let src = include_str!("app.rs");
+        let src = production_source();
         let helper = src
             .split("fn toggle_zoom_with_scale(")
             .nth(1)
@@ -26048,7 +26957,7 @@ mod tests {
     /// mutation order at the shared helper boundary.
     #[test]
     fn scaled_zoom_resizes_after_changing_font_metrics() {
-        let src = include_str!("app.rs");
+        let src = production_source();
         let helper = src
             .split("fn toggle_zoom_with_scale(")
             .nth(1)
@@ -26076,7 +26985,7 @@ mod tests {
     /// at the source.
     #[test]
     fn toggle_zoom_and_scaled_zoom_share_the_transition_helper() {
-        let src = include_str!("app.rs");
+        let src = production_source();
         let toggle_arm = src
             .split("Action::ToggleZoom => {")
             .nth(1)
@@ -26104,7 +27013,7 @@ mod tests {
     /// state; pin the filter at the source.
     #[test]
     fn search_key_filters_control_chars() {
-        let src = include_str!("app.rs");
+        let src = production_source();
         // The filtered push lives in search_key's catch-all arm.
         let arm = src
             .split("fn search_key(")
@@ -26124,7 +27033,7 @@ mod tests {
     /// state; pin at the source.
     #[test]
     fn ssh_key_filters_control_chars() {
-        let src = include_str!("app.rs");
+        let src = production_source();
         let arm = src
             .split("fn ssh_key(")
             .nth(1)
@@ -26412,7 +27321,7 @@ mod tests {
     /// can't see without a live window; pin them at the source.
     #[test]
     fn vim_menu_nav_intercepts_before_mnemonic_catchall() {
-        let src = include_str!("app.rs");
+        let src = production_source();
         let body = src
             .split("fn context_menu_key(")
             .nth(1)
@@ -26443,7 +27352,7 @@ mod tests {
     /// lopsided padding after restart with no error shown.
     #[test]
     fn window_padding_setting_writes_both_axes() {
-        let src = include_str!("app.rs");
+        let src = production_source();
         assert!(
             src.contains(
                 "if key_str == \"window-padding-x\" && !self.persist_pref(\"window-padding-y\", &new_val) {"
@@ -26463,7 +27372,7 @@ mod tests {
     /// shape at the source.
     #[test]
     fn gpu_picker_checks_persist_results_before_flagging_restart() {
-        let src = include_str!("app.rs");
+        let src = production_source();
         let arm = src
             .split("if key_str == \"gpu\" {")
             .nth(1)
@@ -26488,7 +27397,7 @@ mod tests {
 
     #[test]
     fn resized_ignores_degenerate_size() {
-        let src = include_str!("app.rs");
+        let src = production_source();
         let arm = src
             .split("WindowEvent::Resized(size) => {")
             .nth(1)
@@ -26598,7 +27507,7 @@ mod tests {
         assert!(super::TYPING_ECHO_WINDOW >= Duration::from_millis(100));
         // The Wakeup arm must consult it (source-level pin: the bypass calls
         // request_redraw and clears any pending coalesce).
-        let src = include_str!("app.rs").replace("\r\n", "\n");
+        let src = production_source();
         assert!(
             src.contains(
                 "if typed_recently(now, ws.last_typed, TYPING_ECHO_WINDOW) {\n                    ws.output_pacer.reset();"
@@ -26646,7 +27555,7 @@ mod tests {
     /// launch-override re-application.
     #[test]
     fn startup_is_not_taken_wholesale() {
-        let src = include_str!("app.rs").replace("\r\n", "\n");
+        let src = production_source();
         let taken = concat!("std::mem::take", "(&mut self.startup)");
         assert!(
             !src.contains(taken),
@@ -26666,7 +27575,7 @@ mod tests {
     /// the explicit owner when configured.
     #[test]
     fn system_theme_following_is_wired() {
-        let src = include_str!("app.rs").replace("\r\n", "\n");
+        let src = production_source();
         assert!(
             src.contains(concat!(
                 "WindowEvent::ThemeChanged",
@@ -26705,7 +27614,7 @@ mod tests {
 
     #[test]
     fn runtime_theme_changes_synchronize_lua_and_redraw_every_window() {
-        let src = include_str!("app.rs").replace("\r\n", "\n");
+        let src = production_source();
         let state_body = src
             .split(concat!("fn set_runtime_theme_state", "("))
             .nth(1)
@@ -26749,7 +27658,7 @@ mod tests {
     /// anywhere else reintroduces "closing one window kills them all".
     #[test]
     fn event_loop_exit_sites_are_allowlisted() {
-        let src = include_str!("app.rs").replace("\r\n", "\n");
+        let src = production_source();
         // concat! so this test's own literals don't self-match the scan.
         let exit_needle = concat!("event_loop", ".exit();");
         let n_exits = src.matches(exit_needle).count();
@@ -26780,7 +27689,7 @@ mod tests {
         // `.gitattributes eol=lf` fixes checkout; this keeps the test robust
         // even on a CRLF working tree. (`\r` removal doesn't touch the escaped
         // `\n` in this literal, so the test's own source can't self-match.)
-        let src = include_str!("app.rs").replace('\r', "");
+        let src = production_source();
         let gated = src
             .matches("if !modal_swallows_pointer(self.any_modal_open(ws), ws.context_menu.is_some()) {\n                        self.send_mouse(ws, sgr,")
             .count();
@@ -27263,7 +28172,7 @@ mod tests {
 
     #[test]
     fn clicks_share_the_fully_visible_hover_row_contract() {
-        let src = include_str!("app.rs").replace("\r\n", "\n");
+        let src = production_source();
         let start = src
             .find("fn context_menu_click_action(")
             .expect("context-menu click resolver");
@@ -27489,7 +28398,7 @@ mod tests {
 
     #[test]
     fn mouse_paste_routes_primary_and_putty_source() {
-        let src = include_str!("app.rs");
+        let src = production_source();
         assert!(
             src.contains("if bcode == 1 && !self.cfg.disable_mouse_paste {\n                    self.paste_primary(ws);"),
             "middle-click paste must use paste_primary so X11 PRIMARY works"
@@ -27514,7 +28423,7 @@ mod tests {
     /// source. Terminator's own set is `terminal_popup_menu.py`.
     #[test]
     fn the_context_menu_carries_every_terminator_row() {
-        let src = include_str!("app.rs").replace("\r\n", "\n");
+        let src = production_source();
         let body = src
             .split("fn context_menu_items(")
             .nth(1)
@@ -27571,7 +28480,7 @@ mod tests {
 
     #[test]
     fn context_menu_middle_click_dismisses_before_paste_or_tab_close() {
-        let src = include_str!("app.rs").replace("\r\n", "\n");
+        let src = production_source();
         assert!(
             src.matches("if ws.context_menu.is_some() && bcode != 2")
                 .count()
@@ -27884,7 +28793,7 @@ mod tests {
 
         // Keep a small source pin only for sub-millisecond deadline precision;
         // lifecycle behavior above is exercised through the real state machine.
-        let src = include_str!("app.rs").replace("\r\n", "\n");
+        let src = production_source();
         let start = src
             .find("fn about_to_wait_inner(")
             .expect("about_to_wait_inner present");
@@ -27902,7 +28811,7 @@ mod tests {
 
     #[test]
     fn output_frame_transition_follows_every_renderability_guard() {
-        let source = include_str!("app.rs").replace("\r\n", "\n");
+        let source = production_source();
         let redraw_start = source.find("fn redraw(").expect("redraw present");
         let redraw_tail = &source[redraw_start..];
         let redraw_end = redraw_tail
@@ -27934,7 +28843,7 @@ mod tests {
     /// redraws before each default 530 ms blink toggle.
     #[test]
     fn cursor_blink_waits_until_the_actual_deadline() {
-        let src = include_str!("app.rs").replace("\r\n", "\n");
+        let src = production_source();
         let start = src
             .find("fn about_to_wait_inner(")
             .expect("about_to_wait_inner present");
@@ -28106,7 +29015,7 @@ mod tests {
     /// source level.
     #[test]
     fn keybind_rebind_conflict_is_gated_behind_confirmation() {
-        let src = include_str!("app.rs");
+        let src = production_source();
         let capture_arm = src
             .split("if !keybind_chord_is_safe(mods, kk) {")
             .nth(1)
@@ -28128,10 +29037,10 @@ mod tests {
         // The confirm dialog's dispatch must finish the SAME way the
         // direct path does — no separate, divergent apply logic.
         let dispatch = src
-            .split("fn dispatch_confirm_action(")
+            .split("fn dispatch_confirm_action_arms(")
             .nth(1)
             .and_then(|s| s.split("\n    fn ").next())
-            .expect("dispatch_confirm_action body present");
+            .expect("dispatch_confirm_action_arms body present");
         assert!(
             dispatch.contains("ConfirmAction::RebindKeybind {")
                 && dispatch.contains("self.apply_keybind_rebind(trig, act, action_name);"),
@@ -28547,26 +29456,74 @@ mod tests {
             seg(1, 100.0, 100.0),
             seg(2, 200.0, 100.0),
         ];
-        assert_eq!(tab_drag_target_index(50.0, &equal), 0);
-        assert_eq!(tab_drag_target_index(150.0, &equal), 1);
-        assert_eq!(tab_drag_target_index(250.0, &equal), 2);
+        assert_eq!(tab_drag_target_index(50.0, 12.0, &equal), 0);
+        assert_eq!(tab_drag_target_index(150.0, 12.0, &equal), 1);
+        assert_eq!(tab_drag_target_index(250.0, 12.0, &equal), 2);
         // Right at the boundary: 100 → tab 1 (floor); 200 → tab 2.
-        assert_eq!(tab_drag_target_index(100.0, &equal), 1);
-        assert_eq!(tab_drag_target_index(200.0, &equal), 2);
+        assert_eq!(tab_drag_target_index(100.0, 12.0, &equal), 1);
+        assert_eq!(tab_drag_target_index(200.0, 12.0, &equal), 2);
         // Natural-width tabs: targeting follows the rendered rects,
         // not a hidden strip/n assumption.
         let natural = [seg(0, 0.0, 72.0), seg(1, 72.0, 144.0), seg(2, 216.0, 88.0)];
-        assert_eq!(tab_drag_target_index(71.0, &natural), 0);
-        assert_eq!(tab_drag_target_index(72.0, &natural), 1);
-        assert_eq!(tab_drag_target_index(215.0, &natural), 1);
-        assert_eq!(tab_drag_target_index(216.0, &natural), 2);
+        assert_eq!(tab_drag_target_index(71.0, 12.0, &natural), 0);
+        assert_eq!(tab_drag_target_index(72.0, 12.0, &natural), 1);
+        assert_eq!(tab_drag_target_index(215.0, 12.0, &natural), 1);
+        assert_eq!(tab_drag_target_index(216.0, 12.0, &natural), 2);
         // Negative cursor (past the left edge) → clamps to 0.
-        assert_eq!(tab_drag_target_index(-50.0, &natural), 0);
+        assert_eq!(tab_drag_target_index(-50.0, 12.0, &natural), 0);
         // Past the right edge → clamps to last segment, not n.
-        assert_eq!(tab_drag_target_index(900.0, &natural), 2);
-        assert_eq!(tab_drag_target_index(f32::MAX, &natural), 2);
+        assert_eq!(tab_drag_target_index(900.0, 12.0, &natural), 2);
+        assert_eq!(tab_drag_target_index(f32::MAX, 12.0, &natural), 2);
         // Empty bar → 0 (defensive no-op).
-        assert_eq!(tab_drag_target_index(50.0, &[]), 0);
+        assert_eq!(tab_drag_target_index(50.0, 12.0, &[]), 0);
+    }
+
+    /// `tab-position = left` / `right` stacks the segments down a shared
+    /// column, so every one of them contains any x inside the strip. Testing
+    /// the cursor's x — which is what this did — matched the first segment
+    /// every time, and dragging a tab anywhere below the top of the strip
+    /// moved tab 0 instead. The reorder was, in effect, dead on vertical bars.
+    #[test]
+    fn a_vertical_tab_strip_reorders_by_the_axis_it_is_actually_stacked_on() {
+        use super::tab_drag_target_index;
+        let seg = |idx, y, h| {
+            let rect = (0.0, y, 160.0, h);
+            let close = (136.0, y, 24.0, 24.0);
+            kettle_render::TabSeg {
+                idx,
+                rect,
+                title_rect: super::tab_title_rect(rect, close, true),
+                close,
+                title: format!("tab-{idx}"),
+                path: None,
+                active: idx == 0,
+                activity: kettle_render::TabActivity::Normal,
+            }
+        };
+        let stacked = [seg(0, 0.0, 28.0), seg(1, 28.0, 28.0), seg(2, 56.0, 28.0)];
+
+        // Precondition: every segment spans the same x, which is exactly why
+        // an x-axis test could not tell them apart.
+        let x_mid = 80.0;
+        assert!(
+            stacked
+                .iter()
+                .all(|s| x_mid >= s.rect.0 && x_mid < s.rect.0 + s.rect.2),
+            "fixture must share one column, or the old bug can't be reproduced"
+        );
+
+        assert_eq!(tab_drag_target_index(x_mid, 14.0, &stacked), 0);
+        assert_eq!(tab_drag_target_index(x_mid, 42.0, &stacked), 1);
+        assert_eq!(tab_drag_target_index(x_mid, 70.0, &stacked), 2);
+        // Boundaries follow the rendered rects, same rule as horizontal.
+        assert_eq!(tab_drag_target_index(x_mid, 28.0, &stacked), 1);
+        assert_eq!(tab_drag_target_index(x_mid, 56.0, &stacked), 2);
+        // Past either end clamps to the nearest segment rather than running off.
+        assert_eq!(tab_drag_target_index(x_mid, -40.0, &stacked), 0);
+        assert_eq!(tab_drag_target_index(x_mid, 9_000.0, &stacked), 2);
+        // The x coordinate is now irrelevant on a vertical strip — including
+        // one far outside it, which a torn-drag produces.
+        assert_eq!(tab_drag_target_index(-999.0, 42.0, &stacked), 1);
     }
 
     #[test]
@@ -28688,7 +29645,7 @@ mod tests {
     /// spans winit's event dispatch and can't run headless.
     #[test]
     fn tear_off_flow_stays_wired() {
-        let src = include_str!("app.rs");
+        let src = production_source();
         // 1. The CursorMoved FSM block tears at the threshold (Chromium
         //    model), not at release.
         assert!(
@@ -28774,7 +29731,7 @@ mod tests {
     /// a real runtime switch, not just a parsed compatibility key.
     #[test]
     fn detachable_tabs_config_gates_all_detach_paths() {
-        let src = include_str!("app.rs");
+        let src = production_source();
         assert!(
             src.contains("if !self.cfg.detachable_tabs {\n                    log::info!(\"move_tab_to_new_window ignored because detachable-tabs = false\");"),
             "keyboard/palette move_tab_to_new_window must honor detachable-tabs = false"
@@ -29443,7 +30400,7 @@ mod tests {
 
     #[test]
     fn get_state_reports_desired_window_title() {
-        let src = include_str!("app.rs");
+        let src = production_source();
         let body = src
             .split("fn ctl_get_state")
             .nth(1)
@@ -30203,7 +31160,7 @@ mod tests {
     /// link rects visibly attached to the previous frame.
     #[test]
     fn focused_link_scans_are_not_output_debounced() {
-        let app_src = include_str!("app.rs");
+        let app_src = production_source();
         let window_src = include_str!("window_state.rs");
         let removed_const = format!("LINKS_SCAN_{}", "DEBOUNCE");
         let removed_field = format!("last_{}_scan", "links");
@@ -30334,7 +31291,7 @@ mod tests {
 
     #[test]
     fn custom_url_handler_failure_falls_back_to_system_open() {
-        let src = include_str!("app.rs");
+        let src = production_source();
         let open_url = src
             .split("fn open_url(&mut self, ws: &WindowState, uri: &str) {")
             .nth(1)
@@ -30365,7 +31322,7 @@ mod tests {
 
     #[test]
     fn pending_run_orphan_check_searches_all_windows() {
-        let src = include_str!("app.rs");
+        let src = production_source();
         let check = src
             .split("fn check_pending_run_deadlines(&mut self, ws: &mut WindowState) {")
             .nth(1)
@@ -30431,7 +31388,7 @@ mod tests {
 
 #[cfg(test)]
 mod keyboard_selection_tests {
-    use super::selection_buffer_bounds;
+    use super::{production_source, selection_buffer_bounds};
 
     /// The whole-buffer bounds are grid-absolute: top is the oldest history line
     /// (negative), column 0; bottom is the last active row, last column.
@@ -30462,7 +31419,7 @@ mod keyboard_selection_tests {
     /// live Term + window; pin the wiring at the source level.
     #[test]
     fn selection_actions_and_shift_click_are_wired() {
-        let src = include_str!("app.rs").replace("\r\n", "\n");
+        let src = production_source();
         // SelectAll arm builds a full-buffer selection.
         let all = src
             .find("Action::SelectAll =>")

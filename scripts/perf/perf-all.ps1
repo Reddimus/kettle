@@ -645,18 +645,56 @@ $directKettleConfig = if ($KettleConfig) {
 } else {
     [string]$isolatedProfile.terminals.kettle.config_file
 }
-if (
-    $Terminals.Count -lt 6 -or
-    ($Terminals.Count % 2) -ne 0 -or
-    ($StartupRuns % $Terminals.Count) -ne 0 -or
-    ($IdleSamples % $Terminals.Count) -ne 0 -or
-    ($LatencySamples % $LatencyBlockSize) -ne 0 -or
-    (([int]($LatencySamples / $LatencyBlockSize)) % $Terminals.Count) -ne 0 -or
-    ($ThroughputIterations % $Terminals.Count) -ne 0
+# Say which requirement failed, and by how much. These are six independent
+# conditions, and reporting them as one sentence sent more than one reader to
+# the source to find out whether the terminal list or a sample count was the
+# problem. The arithmetic is the same; only the diagnosis is new.
+$balanceFaults = [Collections.Generic.List[string]]::new()
+$terminalCount = $Terminals.Count
+if ($terminalCount -lt 6) {
+    $balanceFaults.Add(
+        "only $terminalCount terminal(s) selected; a balanced schedule needs " +
+        'at least six so order effects cancel'
+    )
+}
+if (($terminalCount % 2) -ne 0) {
+    $balanceFaults.Add(
+        "the terminal count ($terminalCount) is odd; the Williams square is " +
+        'defined for an even number of treatments'
+    )
+}
+foreach ($probe in @(
+    @{ Name = 'StartupRuns'; Value = $StartupRuns },
+    @{ Name = 'IdleSamples'; Value = $IdleSamples },
+    @{ Name = 'ThroughputIterations'; Value = $ThroughputIterations }
+)) {
+    if ($terminalCount -gt 0 -and ($probe.Value % $terminalCount) -ne 0) {
+        $balanceFaults.Add(
+            "-$($probe.Name) $($probe.Value) is not divisible by the " +
+            "$terminalCount terminals; each one must appear in every position"
+        )
+    }
+}
+if ($LatencyBlockSize -le 0 -or ($LatencySamples % $LatencyBlockSize) -ne 0) {
+    $balanceFaults.Add(
+        "-LatencySamples $LatencySamples is not divisible by " +
+        "-LatencyBlockSize $LatencyBlockSize, so the blocks are ragged"
+    )
+} elseif (
+    $terminalCount -gt 0 -and
+    (([int]($LatencySamples / $LatencyBlockSize)) % $terminalCount) -ne 0
 ) {
+    $blocks = [int]($LatencySamples / $LatencyBlockSize)
+    $balanceFaults.Add(
+        "-LatencySamples $LatencySamples gives $blocks latency block(s), " +
+        "which is not divisible by the $terminalCount terminals"
+    )
+}
+if ($balanceFaults.Count -gt 0) {
     throw (
-        'Balanced probes require at least six even terminals and complete ' +
-        'Williams cycles for startup, idle, latency blocks, and throughput'
+        "Balanced probes cannot be scheduled:`n  - " +
+        ($balanceFaults -join "`n  - ") +
+        "`nTerminals: " + ($Terminals -join ', ')
     )
 }
 $scheduleSeeds = [ordered]@{

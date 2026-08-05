@@ -957,6 +957,12 @@ pub struct TabBar {
     /// moved while the underlying segments snap into place via
     /// `Mux::move_active_tab`. `None` while no drag is active.
     pub drag_cursor_x: Option<f32>,
+    /// The same thing for a vertical (left/right) bar, where the strip runs
+    /// down the window and the ghost follows the cursor's **y**. Exactly one of
+    /// the two is ever `Some`, chosen by which bar was built. A single
+    /// "main-axis" field would have been tidier, but this one is reported over
+    /// the control plane under its own name, and agents already read it.
+    pub drag_cursor_y: Option<f32>,
     /// v2.40.0 (tear-off UX): 0.0..=1.0 — how far the drag has moved from
     /// the tab band toward the tear threshold. 0.0 at/inside the band,
     /// 1.0 at (or past) the distance `tear_threshold_crossed` fires at.
@@ -999,6 +1005,7 @@ impl TabBar {
             broadcast: false,
             hovered_close_idx: None,
             drag_cursor_x: None,
+            drag_cursor_y: None,
             tear_lift: 0.0,
             insert_marker: None,
             band: (0.0, 0.0, 0.0, 0.0),
@@ -1690,6 +1697,12 @@ struct PreparedScreenshot {
     unpadded_bytes_per_row: u32,
     padded_bytes_per_row: u32,
     format: wgpu::TextureFormat,
+    /// Whether the surface this was captured from holds premultiplied colour.
+    /// True exactly when the surface composites as `PreMultiplied`, because
+    /// that is when [`surface_clear_color`] premultiplies the clear and the
+    /// whole pass is then premultiplied. PNG stores straight alpha, so the
+    /// readback has to be converted back before it is saved.
+    premultiplied: bool,
     request: ScreenshotRequest,
 }
 
@@ -1944,8 +1957,14 @@ fn finish_live_screenshot(job: ScreenshotJob) -> Result<std::path::PathBuf, Stri
     drop(mapped);
     prepared.staging.unmap();
 
-    let (out_w, out_h, out_pixels) =
+    let (out_w, out_h, mut out_pixels) =
         crop_screenshot(prepared.width, prepared.height, rgba, prepared.request.crop)?;
+    // A `PreMultiplied` surface holds premultiplied colour, and PNG stores
+    // straight alpha. Converting after the crop touches only the pixels that
+    // are actually saved.
+    if prepared.premultiplied {
+        unpremultiply_rgba8(&mut out_pixels, prepared.format.is_srgb());
+    }
     use image::{ImageBuffer, Rgba};
     let image: ImageBuffer<Rgba<u8>, _> = ImageBuffer::from_raw(out_w, out_h, out_pixels)
         .ok_or_else(|| "screenshot image buffer shape is invalid".to_string())?;
@@ -3725,16 +3744,25 @@ impl Renderer {
             // to `over` (post-text) so the ghost sits above the live
             // segment text. Drawn only when both a drag is active
             // *and* there's an active segment to copy from.
-            if let Some(cx) = tabbar.drag_cursor_x
-                && let Some(active_seg) = tabbar.segments.iter().find(|s| s.active)
+            if let Some(active_seg) = tabbar.segments.iter().find(|s| s.active)
+                && let Some((ghost_x, ghost_y)) = {
+                    let (seg_x, _, seg_w, seg_h) = active_seg.rect;
+                    // Clamp the ghost so the box doesn't slide entirely off
+                    // either end of the strip — same idea as
+                    // `context_menu_geometry`'s anchor clamp. A vertical bar
+                    // rides the cursor's y down a fixed column; a horizontal
+                    // one rides x along a fixed row.
+                    tabbar
+                        .drag_cursor_x
+                        .map(|cx| ((cx - seg_w * 0.5).clamp(0.0, (sw - seg_w).max(0.0)), by))
+                        .or_else(|| {
+                            tabbar.drag_cursor_y.map(|cy| {
+                                (seg_x, (cy - seg_h * 0.5).clamp(0.0, (sh - seg_h).max(0.0)))
+                            })
+                        })
+                }
             {
                 let (_, _, seg_w, seg_h) = active_seg.rect;
-                // Clamp the ghost's left edge so the box doesn't slide
-                // entirely off either end of the bar — same idea as
-                // `context_menu_geometry`'s anchor clamp.
-                let half = seg_w * 0.5;
-                let max_x = (sw - seg_w).max(0.0);
-                let ghost_x = (cx - half).clamp(0.0, max_x);
                 // v2.40.0 (tear-off UX): pre-tear escalation — the ghost
                 // "lifts off" as the cursor approaches the tear threshold
                 // (bigger/darker shadow, fading body), so a release reads
@@ -3750,7 +3778,7 @@ impl Renderer {
                 // `menu_chrome_quads`'s context menu).
                 over.push(rect(
                     ghost_x + shadow_off,
-                    by + shadow_off,
+                    ghost_y + shadow_off,
                     seg_w,
                     seg_h,
                     Rgb::new(0, 0, 0),
@@ -3759,7 +3787,14 @@ impl Renderer {
                 // Ghost background — theme.background, translucent enough
                 // that the bar shows through and it reads as a floating
                 // preview rather than a real new tab.
-                over.push(rect(ghost_x, by, seg_w, seg_h, theme.background, bg_alpha));
+                over.push(rect(
+                    ghost_x,
+                    ghost_y,
+                    seg_w,
+                    seg_h,
+                    theme.background,
+                    bg_alpha,
+                ));
                 // Accent strip on the left edge, same color the live
                 // active segment uses (palette[3] yellow under
                 // broadcast, accent-color → palette[4]
@@ -3772,7 +3807,7 @@ impl Renderer {
                 };
                 over.push(rect(
                     ghost_x,
-                    by,
+                    ghost_y,
                     tab_drag::GHOST_ACCENT_W_PX,
                     seg_h,
                     accent,
@@ -4476,7 +4511,14 @@ impl Renderer {
             // Red-ish accent (palette[1]) to signal "destructive
             // confirmation pending" vs the palette/ssh/
             // edit-title yellows/blues/cyans.
-            quads.push(rect(0.0, sh - bar_h, sw, bar_h, theme.palette[1], 0.96));
+            //
+            // Queued with the menu chrome rather than the base overlay quads:
+            // the settings panel washes the whole surface in a dim backdrop
+            // from `menu_q`, which is drawn last, so a bar pushed to `quads`
+            // came out greyed under it. A modal question has to be the most
+            // legible thing on screen, and the one raised by rebinding onto an
+            // already-bound chord is raised from inside that very panel.
+            menu_q.push(rect(0.0, sh - bar_h, sw, bar_h, theme.palette[1], 0.96));
             let mut buttons_label = String::new();
             for (i, btn) in dlg.buttons.iter().enumerate() {
                 if !buttons_label.is_empty() {
@@ -5445,7 +5487,17 @@ impl Renderer {
                 .map(|c| c == "Background")
                 .unwrap_or(false);
             let backdrop_a = if on_bg_page { 0.30 } else { 0.55 };
-            menu_q.push(rect(0.0, 0.0, sw, sh, theme.background, backdrop_a));
+            // Stop the dim above a confirm bar when one is showing. The bar is
+            // pushed to this same list earlier in the frame, so a full-height
+            // backdrop lands on top of it and greys out the one thing that has
+            // to stay legible — and the dialog raised by rebinding onto an
+            // already-bound chord comes from inside this very panel.
+            let dim_h = if overlay.confirm_dialog.is_some() {
+                (sh - (ch + 10.0)).max(0.0)
+            } else {
+                sh
+            };
+            menu_q.push(rect(0.0, 0.0, sw, dim_h, theme.background, backdrop_a));
             // Panel background (near-opaque) + accent border.
             menu_q.push(rect(px, py, panel_w, panel_h, theme.background, 0.99));
             menu_q.push(rect(px, py, panel_w, 2.0, acc, 1.0));
@@ -5767,23 +5819,22 @@ impl Renderer {
                     view: &view,
                     resolve_target: None,
                     ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color {
-                            r: srgb(bg.r),
-                            g: srgb(bg.g),
-                            b: srgb(bg.b),
-                            // Terminator parity, terminatorlib/
-                            // config.py:106 + 117 `background_darkness` +
-                            // `background_type`: when bg-type=transparent,
-                            // compose the configured darkness with the
-                            // background-opacity. background_darkness
-                            // is documented as 0.0 = fully dark (no
-                            // transparency) .. 1.0 = no tint; we treat
-                            // 1.0 - darkness as the additional alpha-
-                            // reduction so a config like darkness=0.4
-                            // gives a 60% extra-transparent surface on
-                            // top of background-opacity.
-                            a: composed_bg_alpha(cfg),
-                        }),
+                        // Terminator parity, terminatorlib/config.py:106 +
+                        // 117 `background_darkness` + `background_type`:
+                        // when bg-type=transparent, compose the configured
+                        // darkness with the background-opacity.
+                        // `composed_bg_alpha` owns that composition.
+                        //
+                        // `surface_clear_color` owns the premultiply: the
+                        // pipelines drawing over this clear all treat the
+                        // attachment as premultiplied, so a straight clear
+                        // made every translucent background composite too
+                        // bright.
+                        load: wgpu::LoadOp::Clear(surface_clear_color(
+                            bg,
+                            composed_bg_alpha(cfg),
+                            self.config.alpha_mode,
+                        )),
                         store: wgpu::StoreOp::Store,
                     },
                     depth_slice: None,
@@ -5952,6 +6003,10 @@ impl Renderer {
             unpadded_bytes_per_row,
             padded_bytes_per_row,
             format: texture.format(),
+            premultiplied: matches!(
+                self.config.alpha_mode,
+                wgpu::CompositeAlphaMode::PreMultiplied
+            ),
             request,
         })
     }
@@ -9127,6 +9182,93 @@ fn srgb(c: u8) -> f64 {
     }
 }
 
+/// Inverse of [`srgb`]: encode a linear channel back to an 8-bit sRGB byte.
+fn srgb_encode(linear: f64) -> u8 {
+    let c = linear.clamp(0.0, 1.0);
+    let encoded = if c <= 0.003_130_8 {
+        c * 12.92
+    } else {
+        1.055 * c.powf(1.0 / 2.4) - 0.055
+    };
+    (encoded * 255.0).round().clamp(0.0, 255.0) as u8
+}
+
+/// The clear colour for a pass whose pipelines composite as if the destination
+/// were premultiplied.
+///
+/// Every draw layered over this clear treats the existing attachment contents
+/// as premultiplied: `quad` and `imgpipe` use `PREMULTIPLIED_ALPHA_BLENDING`
+/// (`src_factor: One`), and `glyphpipe`'s `ALPHA_BLENDING` pairs
+/// `src_factor: SrcAlpha` with `dst_factor: OneMinusSrcAlpha`, which is the
+/// premultiplied "over" operator with the source premultiplied on the fly. The
+/// clear is the one write in the chain that does not pass through a blend, so
+/// it is the only one that has to premultiply itself — and it did not, leaving
+/// a translucent background too bright by exactly the factor it skipped.
+///
+/// The multiply belongs in linear space: the attachment is an sRGB format, so
+/// the hardware decodes before blending and re-encodes on write, and the whole
+/// pass is linear. [`srgb`] already returns linear, so scaling its output is
+/// the correct place.
+///
+/// Only `PreMultiplied` gets scaled. `Opaque` discards alpha at composite time,
+/// so scaling would darken the surface toward black for no gain; under
+/// `PostMultiplied` the compositor divides alpha back out, so the straight
+/// value is the one it is asking for. `Inherit` and `Auto` are
+/// platform-defined and get the conservative straight value too.
+fn surface_clear_color(bg: Rgb, alpha: f64, mode: wgpu::CompositeAlphaMode) -> wgpu::Color {
+    let alpha = alpha.clamp(0.0, 1.0);
+    let scale = if matches!(mode, wgpu::CompositeAlphaMode::PreMultiplied) {
+        alpha
+    } else {
+        1.0
+    };
+    wgpu::Color {
+        r: srgb(bg.r) * scale,
+        g: srgb(bg.g) * scale,
+        b: srgb(bg.b) * scale,
+        a: alpha,
+    }
+}
+
+/// Undo premultiplication on an 8-bit RGBA/BGRA readback, in the space the GPU
+/// applied it in.
+///
+/// PNG stores straight (non-premultiplied) alpha, so a capture taken off a
+/// premultiplied target has to be converted before it is saved.
+///
+/// `srgb_encoded` selects the space, and it is not cosmetic. On an sRGB
+/// attachment the hardware decodes to linear before blending and re-encodes on
+/// write, so the stored texel is an sRGB encoding of a *linear* premultiplied
+/// value and the inverse has to decode, divide, and re-encode. On a plain
+/// `Unorm` attachment there is no decode, the multiply happened on the stored
+/// values themselves, and dividing the bytes directly is exactly right.
+/// Applying either reciprocal in the other's space leaves every translucent
+/// capture visibly off.
+///
+/// The alpha channel sits at index 3 in both RGBA and BGRA, and the operation
+/// is per-channel, so this runs correctly before or after a BGRA swizzle.
+///
+/// A fully transparent texel carries no colour to recover, so it stays zeroed;
+/// a fully opaque one is already straight and is left untouched.
+fn unpremultiply_rgba8(pixels: &mut [u8], srgb_encoded: bool) {
+    for texel in pixels.chunks_exact_mut(4) {
+        match texel[3] {
+            0 => texel[..3].fill(0),
+            u8::MAX => {}
+            a => {
+                let a = a as f64 / 255.0;
+                for channel in &mut texel[..3] {
+                    *channel = if srgb_encoded {
+                        srgb_encode(srgb(*channel) / a)
+                    } else {
+                        (*channel as f64 / a).round().clamp(0.0, 255.0) as u8
+                    };
+                }
+            }
+        }
+    }
+}
+
 /// Terminator parity, terminatorlib/config.py:106 + 117:
 /// compose the kettle background-opacity with Terminator's
 /// `background_darkness` + `background_type`. Logic:
@@ -10292,25 +10434,25 @@ pub fn capture_png_with_annotation(
                     view: &view,
                     resolve_target: None,
                     ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color {
-                            r: srgb(bg.r),
-                            g: srgb(bg.g),
-                            b: srgb(bg.b),
-                            // Route through composed_bg_alpha
-                            // so the screenshot path also honors
-                            // background-type + background-darkness,
-                            // and honor cfg.background_opacity
-                            // here too. The live-window clear op
-                            // already did (line ~862), but the
-                            // screenshot path hardcoded `a: 1.0` —
-                            // so `kettle --screenshot --config
-                            // /transparent.conf` produced an opaque
-                            // PNG regardless. PNG is RGBA8 and stores
-                            // the alpha channel directly; honoring
-                            // the config makes the screenshot match
-                            // what the live window shows.
-                            a: composed_bg_alpha(cfg),
-                        }),
+                        // Route through composed_bg_alpha so the screenshot
+                        // path also honors background-type +
+                        // background-darkness, and honor
+                        // cfg.background_opacity here too. The live-window
+                        // clear op already did, but the screenshot path
+                        // hardcoded `a: 1.0` — so `kettle --screenshot
+                        // --config /transparent.conf` produced an opaque PNG
+                        // regardless.
+                        //
+                        // This target is ours end to end, so it clears
+                        // premultiplied to match what the pipelines drawing
+                        // over it expect, and `unpremultiply_srgb8` converts
+                        // back to the straight alpha PNG stores before the
+                        // pixels are saved.
+                        load: wgpu::LoadOp::Clear(surface_clear_color(
+                            bg,
+                            composed_bg_alpha(cfg),
+                            wgpu::CompositeAlphaMode::PreMultiplied,
+                        )),
                         store: wgpu::StoreOp::Store,
                     },
                     depth_slice: None,
@@ -10378,6 +10520,13 @@ pub fn capture_png_with_annotation(
         }
         drop(data);
         readback.unmap();
+
+        // The pass composited premultiplied; PNG stores straight alpha. Ask
+        // the format which space the multiply happened in rather than assuming
+        // the one this function currently picks — the two have to stay in
+        // agreement, and a hardcoded answer would go quietly wrong if the
+        // capture target ever stopped being sRGB.
+        unpremultiply_rgba8(&mut pixels, format.is_srgb());
 
         let img = image::RgbaImage::from_raw(w, h, pixels)
             .ok_or_else(|| anyhow!("image buffer size mismatch"))?;
@@ -10679,6 +10828,511 @@ mod gpu_tests {
         drop(data);
         readback.unmap();
         Some(pixel)
+    }
+
+    /// The starfield's stars must land on the GPU where the CPU put them.
+    ///
+    /// The model used to be evaluated inside the fragment loop; it is resolved
+    /// once per frame on the CPU now and delivered through a hand-written
+    /// uniform array. Nothing about that layout is checked by the compiler —
+    /// a stride or alignment disagreement between the Rust struct and the WGSL
+    /// is not an error, it is a star read out of the wrong bytes and drawn
+    /// somewhere else. So this renders a real frame and looks for light where
+    /// the CPU said a star would be.
+    #[test]
+    fn starfield_stars_land_where_the_cpu_placed_them() {
+        let _serialized = gpu_test_guard();
+        let Some((luma, expected, side)) = pollster::block_on(render_starfield_frame()) else {
+            eprintln!("no GPU adapter on this host; skipped");
+            return;
+        };
+
+        assert!(
+            !expected.is_empty(),
+            "fixture must pick a time with visible stars"
+        );
+        let (brightest_index, &peak) = luma
+            .iter()
+            .enumerate()
+            .max_by_key(|&(_, &value)| value)
+            .expect("a non-empty frame");
+        let (x, y) = (brightest_index as u32 % side, brightest_index as u32 / side);
+        assert!(
+            peak > 24,
+            "the field rendered essentially black ({peak}), so either the \
+             shader did not compile the uniform array or nothing was uploaded"
+        );
+
+        // Positions are in pixels from the surface centre; the readback is in
+        // pixels from the top-left.
+        let centre = side as f32 * 0.5;
+        let nearest = expected
+            .iter()
+            .map(|star| {
+                let dx = (star[0] + centre) - x as f32;
+                let dy = (star[1] + centre) - y as f32;
+                (dx * dx + dy * dy).sqrt()
+            })
+            .fold(f32::INFINITY, f32::min);
+        assert!(
+            nearest <= 3.0,
+            "the brightest pixel sits {nearest:.1} px from the nearest star \
+             the CPU uploaded — the uniform block is being read at a \
+             different offset than it was written"
+        );
+
+        // The star PROFILE, not just its position. The falloff was rewritten
+        // in terms of squared distance and squared radii, and an algebra slip
+        // there still leaves light near the star — it just stops being a
+        // crisp core inside a soft halo.
+        //
+        // Measured globally rather than by sampling outward from the peak: a
+        // fixed direction runs into the neighbouring star that happens to lie
+        // that way, which is a property of where the field put its stars and
+        // not of the falloff. Core radii are under 1.5 px, so the pixels above
+        // half the peak are a handful per star; if the core term collapsed
+        // into the bloom the bright region would spread across the halo's
+        // 3–9 px instead.
+        let half_peak = peak / 2;
+        let bright = luma.iter().filter(|&&v| v > half_peak).count();
+        // A collapsed core would light the halo's 3–9 px radius instead —
+        // hundreds of pixels per star, an order of magnitude past this.
+        assert!(
+            bright <= 12 * expected.len(),
+            "{bright} pixels are above half the peak across {} stars — the \
+             core should be a few pixels each, not a soft orb",
+            expected.len()
+        );
+
+        // A starfield is sparse points on a black sky, not a wash. If the
+        // whole frame lifted, the accumulation is adding something it should
+        // not.
+        let lit = luma.iter().filter(|&&v| v > 8).count();
+        assert!(
+            lit * 4 < luma.len(),
+            "{lit} of {} pixels are lit — the sky should be mostly black",
+            luma.len()
+        );
+    }
+
+    /// Render one starfield frame offscreen at a time chosen to have stars on
+    /// screen, and return its luminance plane, the CPU's star positions, and
+    /// the square side used. `None` when the host has no usable adapter.
+    async fn render_starfield_frame() -> Option<(Vec<u8>, Vec<[f32; 2]>, u32)> {
+        let cfg = Config::default();
+        let (_instance, adapter) = resolve_headless_adapter(&cfg, "starfield_layout_test")
+            .await
+            .ok()?;
+        let (device, queue) = adapter
+            .request_device(&wgpu::DeviceDescriptor {
+                label: Some("kettle-starfield-test"),
+                ..Default::default()
+            })
+            .await
+            .ok()?;
+
+        let format = wgpu::TextureFormat::Rgba8UnormSrgb;
+        // 256 px keeps the readback small while staying wide enough that a
+        // star's few-pixel core is unambiguous, and 256*4 already meets the
+        // copy alignment exactly.
+        let side = 256_u32;
+        let bytes_per_row = side * 4;
+        let resolution = [side as f32, side as f32];
+        let time = 40.0_f32;
+
+        let pipeline = starfield::StarfieldPipeline::new(&device, format);
+        let expected = pipeline.frame_positions(resolution, time);
+        pipeline.upload(&queue, resolution, time);
+
+        let texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("kettle-starfield-target"),
+            size: wgpu::Extent3d {
+                width: side,
+                height: side,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let readback = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("kettle-starfield-readback"),
+            size: u64::from(bytes_per_row) * u64::from(side),
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+
+        let mut encoder =
+            device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("kettle-starfield-pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                        store: wgpu::StoreOp::Store,
+                    },
+                    depth_slice: None,
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            pipeline.draw(&mut pass);
+        }
+        encoder.copy_texture_to_buffer(
+            wgpu::TexelCopyTextureInfo {
+                texture: &texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::TexelCopyBufferInfo {
+                buffer: &readback,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(bytes_per_row),
+                    rows_per_image: Some(side),
+                },
+            },
+            wgpu::Extent3d {
+                width: side,
+                height: side,
+                depth_or_array_layers: 1,
+            },
+        );
+        queue.submit(std::iter::once(encoder.finish()));
+
+        let slice = readback.slice(..);
+        let (tx, rx) = std::sync::mpsc::channel();
+        slice.map_async(wgpu::MapMode::Read, move |result| {
+            let _ = tx.send(result);
+        });
+        let _ = device.poll(wgpu::PollType::wait_indefinitely());
+        rx.recv().ok()?.ok()?;
+        let data = slice.get_mapped_range().ok()?;
+        // Green dominates perceived luminance and every star colour carries
+        // it, so it is a fine single-channel proxy for this whole test.
+        let mut luma = vec![0_u8; (side * side) as usize];
+        for y in 0..side {
+            for x in 0..side {
+                luma[(y * side + x) as usize] = data[(y * bytes_per_row + x * 4) as usize + 1];
+            }
+        }
+        drop(data);
+        readback.unmap();
+        // Keep only the stars that can actually be on this surface, so the
+        // nearest-star search is not satisfied by one off screen.
+        let half = side as f32 * 0.5;
+        let visible = expected
+            .into_iter()
+            .filter(|s| s[0].abs() <= half && s[1].abs() <= half)
+            .collect();
+        Some((luma, visible, side))
+    }
+
+    /// `PreMultiplied` is the only mode that scales the clear.
+    ///
+    /// `Opaque` throws alpha away at composite time, so scaling would only
+    /// darken the surface toward black; `PostMultiplied` divides alpha back
+    /// out, so it wants the straight value.
+    #[test]
+    fn only_a_premultiplied_surface_scales_its_clear_by_alpha() {
+        let bg = Rgb {
+            r: 255,
+            g: 255,
+            b: 255,
+        };
+        let alpha = 0.5;
+        let linear = srgb(bg.r);
+        // Precondition: the scale has to be observable at all. A black
+        // background or a fully opaque alpha would make every mode agree and
+        // this test could not fail.
+        assert!(
+            linear > 0.0 && alpha < 1.0,
+            "fixture must use a non-black colour and a translucent alpha"
+        );
+
+        let premultiplied = surface_clear_color(bg, alpha, wgpu::CompositeAlphaMode::PreMultiplied);
+        assert!(
+            (premultiplied.r - linear * alpha).abs() < 1e-12,
+            "PreMultiplied must scale the linear colour by alpha, got {}",
+            premultiplied.r
+        );
+        assert!(
+            (premultiplied.a - alpha).abs() < 1e-12,
+            "the alpha channel itself is never scaled"
+        );
+
+        for mode in [
+            wgpu::CompositeAlphaMode::Opaque,
+            wgpu::CompositeAlphaMode::PostMultiplied,
+            wgpu::CompositeAlphaMode::Inherit,
+            wgpu::CompositeAlphaMode::Auto,
+        ] {
+            let straight = surface_clear_color(bg, alpha, mode);
+            assert!(
+                (straight.r - linear).abs() < 1e-12,
+                "{mode:?} must keep the straight colour, got {}",
+                straight.r
+            );
+        }
+    }
+
+    /// Un-premultiplying has to invert the multiply in the space the GPU
+    /// applied it in, and the two spaces disagree by far more than rounding.
+    #[test]
+    fn unpremultiply_inverts_the_multiply_in_the_matching_space() {
+        // A MID-GREY original, not white. Recovering white saturates the
+        // divide in either space, so a white fixture reports success for the
+        // wrong reason and cannot tell the two apart at all.
+        let original = 128_u8;
+        let byte_alpha = 128_u8;
+        let alpha = byte_alpha as f64 / 255.0;
+
+        // sRGB attachment: the GPU multiplied in LINEAR, so the stored byte is
+        // the sRGB encoding of linear(original) * alpha.
+        let stored = srgb_encode(srgb(original) * alpha);
+        assert!(
+            (stored as f64 / alpha) < 255.0,
+            "fixture must not saturate the byte-space divide, or the two \
+             spaces agree and this test cannot fail"
+        );
+
+        let mut srgb_texel = [stored, stored, stored, byte_alpha];
+        unpremultiply_rgba8(&mut srgb_texel, true);
+        for channel in &srgb_texel[..3] {
+            assert!(
+                channel.abs_diff(original) <= 2,
+                "linear-space un-premultiply must recover ~{original}, got {channel}"
+            );
+        }
+
+        // The same bytes read in the wrong space land nowhere near it — which
+        // is what makes the `srgb_encoded` flag load-bearing rather than
+        // decorative.
+        let mut wrong_space = [stored, stored, stored, byte_alpha];
+        unpremultiply_rgba8(&mut wrong_space, false);
+        assert!(
+            wrong_space[0].abs_diff(original) > 30,
+            "byte-space division on an sRGB texel should NOT recover \
+             {original}; got {}",
+            wrong_space[0]
+        );
+
+        // Plain `Unorm` attachment: the multiply happened on the stored bytes,
+        // so plain division is the inverse.
+        let mut unorm_texel = [64, 64, 64, byte_alpha];
+        unpremultiply_rgba8(&mut unorm_texel, false);
+        assert_eq!(unorm_texel[..3], [128, 128, 128]);
+
+        // Degenerate alphas: nothing to recover, and nothing to divide.
+        let mut transparent = [200, 200, 200, 0];
+        unpremultiply_rgba8(&mut transparent, true);
+        assert_eq!(transparent, [0, 0, 0, 0]);
+        let mut opaque = [200, 201, 202, 255];
+        unpremultiply_rgba8(&mut opaque, true);
+        assert_eq!(opaque, [200, 201, 202, 255]);
+    }
+
+    /// The clear is the one write in the frame that does not pass through a
+    /// blend, so it is the only one that has to premultiply itself — and a
+    /// straight clear is invisible until something blends over it.
+    ///
+    /// This renders the same scene twice, once with each clear convention, and
+    /// asserts they disagree before asserting which one is right. A fixture
+    /// that only checked the clear would pass either way: a translucent clear
+    /// with nothing drawn on it reads back identically in both conventions.
+    ///
+    /// White background at 50% alpha, one 50%-alpha black quad over it:
+    ///
+    /// - premultiplied clear → dst `(0.5, 0.5)`, blend leaves
+    ///   `rgb = 0 + 0.5·0.5 = 0.25` over `a = 0.75`; un-premultiplied that is
+    ///   `1/3` linear, which the sRGB target stores as ~156.
+    /// - straight clear → dst `(1.0, 0.5)`, blend leaves `rgb = 0.5`, stored
+    ///   as ~188 with no conversion — the value kettle actually shipped.
+    #[test]
+    fn a_translucent_background_composites_against_a_premultiplied_clear() {
+        let _serialized = gpu_test_guard();
+        let Some((premultiplied, straight)) =
+            pollster::block_on(render_black_quad_over_translucent_clear())
+        else {
+            eprintln!("no GPU adapter on this host; skipped");
+            return;
+        };
+
+        assert_ne!(
+            premultiplied[0], straight[0],
+            "the two clear conventions must produce different pixels, or this \
+             fixture cannot detect the bug it exists for"
+        );
+
+        let expected = 156_u8;
+        let shipped = 188_u8;
+        for (channel, value) in ["r", "g", "b"].into_iter().zip(premultiplied) {
+            assert!(
+                value.abs_diff(expected) <= 3,
+                "channel {channel} came back {value}, expected ~{expected}; \
+                 ~{shipped} means the clear was written straight while every \
+                 pipeline drawing over it treats the destination as \
+                 premultiplied"
+            );
+        }
+        assert!(
+            premultiplied[3].abs_diff(191) <= 2,
+            "alpha is stored linearly even on an sRGB target; got {}",
+            premultiplied[3]
+        );
+    }
+
+    /// Render one 50%-alpha black quad over a 50%-alpha white clear, once with
+    /// the premultiplied clear and once with the straight one, and return both
+    /// centre pixels already converted back to straight alpha. `None` when the
+    /// host has no usable adapter.
+    async fn render_black_quad_over_translucent_clear() -> Option<([u8; 4], [u8; 4])> {
+        let cfg = Config::default();
+        let (_instance, adapter) = resolve_headless_adapter(&cfg, "premultiplied_clear_test")
+            .await
+            .ok()?;
+        let (device, queue) = adapter
+            .request_device(&wgpu::DeviceDescriptor {
+                label: Some("kettle-premultiplied-clear-test"),
+                ..Default::default()
+            })
+            .await
+            .ok()?;
+
+        let format = wgpu::TextureFormat::Rgba8UnormSrgb;
+        let size = 8_u32;
+        let bg = Rgb {
+            r: 255,
+            g: 255,
+            b: 255,
+        };
+        let alpha = 0.5;
+
+        let render = |clear: wgpu::Color| -> Option<[u8; 4]> {
+            let mut quads = QuadPipeline::new(&device, format);
+            quads.upload(
+                &device,
+                &queue,
+                [size as f32, size as f32],
+                &[QuadInstance {
+                    pos: [0.0, 0.0],
+                    size: [size as f32, size as f32],
+                    color: [0.0, 0.0, 0.0, 0.5],
+                }],
+            );
+            let texture = device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("kettle-premultiplied-clear-target"),
+                size: wgpu::Extent3d {
+                    width: size,
+                    height: size,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+                view_formats: &[],
+            });
+            let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+            let bytes_per_row = 256_u32;
+            let readback = device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("kettle-premultiplied-clear-readback"),
+                size: u64::from(bytes_per_row) * u64::from(size),
+                usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+                mapped_at_creation: false,
+            });
+            let mut encoder =
+                device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+            {
+                let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("kettle-premultiplied-clear-pass"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: &view,
+                        resolve_target: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(clear),
+                            store: wgpu::StoreOp::Store,
+                        },
+                        depth_slice: None,
+                    })],
+                    depth_stencil_attachment: None,
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                    multiview_mask: None,
+                });
+                quads.draw(&mut pass);
+            }
+            encoder.copy_texture_to_buffer(
+                wgpu::TexelCopyTextureInfo {
+                    texture: &texture,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d::ZERO,
+                    aspect: wgpu::TextureAspect::All,
+                },
+                wgpu::TexelCopyBufferInfo {
+                    buffer: &readback,
+                    layout: wgpu::TexelCopyBufferLayout {
+                        offset: 0,
+                        bytes_per_row: Some(bytes_per_row),
+                        rows_per_image: Some(size),
+                    },
+                },
+                wgpu::Extent3d {
+                    width: size,
+                    height: size,
+                    depth_or_array_layers: 1,
+                },
+            );
+            queue.submit(std::iter::once(encoder.finish()));
+
+            let slice = readback.slice(..);
+            let (tx, rx) = std::sync::mpsc::channel();
+            slice.map_async(wgpu::MapMode::Read, move |result| {
+                let _ = tx.send(result);
+            });
+            let _ = device.poll(wgpu::PollType::wait_indefinitely());
+            rx.recv().ok()?.ok()?;
+            let data = slice.get_mapped_range().ok()?;
+            let offset = (size as usize / 2) * bytes_per_row as usize + (size as usize / 2) * 4;
+            let mut texel = [
+                data[offset],
+                data[offset + 1],
+                data[offset + 2],
+                data[offset + 3],
+            ];
+            drop(data);
+            readback.unmap();
+            // Convert exactly as the capture paths do, so this measures the
+            // pair of changes together rather than the clear alone.
+            unpremultiply_rgba8(&mut texel, true);
+            Some(texel)
+        };
+
+        let premultiplied = render(surface_clear_color(
+            bg,
+            alpha,
+            wgpu::CompositeAlphaMode::PreMultiplied,
+        ))?;
+        // The convention kettle shipped: straight colour, translucent alpha,
+        // saved without conversion.
+        let straight = render(wgpu::Color {
+            r: srgb(bg.r),
+            g: srgb(bg.g),
+            b: srgb(bg.b),
+            a: alpha,
+        })?;
+        Some((premultiplied, straight))
     }
 
     #[cfg(target_os = "windows")]

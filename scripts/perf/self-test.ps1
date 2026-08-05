@@ -78,7 +78,13 @@ $requiredTests = [string[]]@(
     'vtebench-channel-self-test.ps1',
     'sanitize-results-self-test.ps1',
     'score-self-test.ps1',
-    'release-score-self-test.ps1'
+    'release-score-self-test.ps1',
+    # latency.ps1 was the one module with no self-test, and it shipped a defect
+    # that made a latency run impossible to complete.
+    'latency-self-test.ps1',
+    # Runs first in spirit but last in the list: it is the only test whose
+    # subject is the other files' bytes rather than their behaviour.
+    'ascii-contract-self-test.ps1'
 )
 
 $shell = (Get-Process -Id $PID).Path
