@@ -2364,18 +2364,31 @@ impl Mux {
     /// tabs no-op implicitly: `layout` returns only the focused pane while
     /// zoomed, so the candidate loop is empty.
     pub fn focus_dir(&mut self, area: Rect, dx: i32, dy: i32) {
+        if let Some(id) = self.pane_in_direction(area, dx, dy)
+            && let Some(tab) = self.tabs.get_mut(self.active)
+        {
+            tab.focus = id;
+        }
+    }
+
+    /// The focused pane's nearest neighbour in a direction, by the same
+    /// geometry `focus_dir` navigates with: it must genuinely lie on that side
+    /// and overlap on the other axis, nearest gap wins, ties broken by
+    /// cross-axis centre distance.
+    ///
+    /// Shared rather than duplicated so moving a pane lands where focusing
+    /// would have gone. Two copies of this would eventually disagree about what
+    /// counts as "the pane to the left", and the user would meet the difference
+    /// as a pane that moves somewhere other than where they were looking.
+    pub fn pane_in_direction(&self, area: Rect, dx: i32, dy: i32) -> Option<u64> {
         // `layout` rounds split seams with `.round()`, so a shared border between
         // adjacent panes can drift by up to ~1px; admit that slack on the side
         // test and clamp a tiny negative gap to 0.
         const EPS: f32 = 1.0;
         let a = self.active;
         let rects = self.layout(a, area);
-        let Some(tab) = self.tabs.get_mut(a) else {
-            return;
-        };
-        let Some(&(_, (fx, fy, fw, fh))) = rects.iter().find(|(id, _)| *id == tab.focus) else {
-            return;
-        };
+        let tab = self.tabs.get(a)?;
+        let &(_, (fx, fy, fw, fh)) = rects.iter().find(|(id, _)| *id == tab.focus)?;
         let (fl, fr, ft, fb) = (fx, fx + fw, fy, fy + fh);
         let (fcx, fcy) = (fx + fw / 2.0, fy + fh / 2.0);
 
@@ -2434,9 +2447,7 @@ impl Mux {
                 best = Some((gap, perp, *id));
             }
         }
-        if let Some((_, _, id)) = best {
-            tab.focus = id;
-        }
+        best.map(|(_, _, id)| id)
     }
 
     pub fn focus_cycle(&mut self, area: Rect, forward: bool) {
