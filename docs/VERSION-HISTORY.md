@@ -19,8 +19,10 @@ actually shipped.
   the tag; until then the entry above it is the newest thing that actually
   shipped.
 - Current workspace version: `2.50.0`
-- Release records inspected: 154 Git tags and 154 changelog headings, from
-  `v0.1.0` through `v2.50.0`
+- Release records inspected: 153 Git tags and 154 changelog headings, from
+  `v0.1.0` through `v2.50.0`. The counts differ by one on purpose: the
+  newest heading is the release being prepared, and its tag is created
+  only once that change lands, per the note above.
 - Version-bearing source files that must stay in lockstep: workspace
   `Cargo.toml`, `flake.nix`, and the changelog. Release CI renders the Homebrew
   formula and Arch `PKGBUILD` from verified archives so their checksums cannot
