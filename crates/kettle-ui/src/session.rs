@@ -537,21 +537,6 @@ pub(crate) fn clamp_geometry_to_monitors(
     sanitized
 }
 
-// What this process last wrote to each session path, so an unchanged session
-// can skip the durable write. Bounded because `--layout NAME` lets the path
-// vary; a process realistically touches one or two.
-//
-// Thread-local rather than a global lock: every write comes from the winit
-// event-loop thread, and a memo that is merely empty on another thread costs
-// one redundant write, never a wrong one.
-thread_local! {
-    static LAST_WRITTEN: std::cell::RefCell<std::collections::HashMap<PathBuf, String>> =
-        std::cell::RefCell::new(std::collections::HashMap::new());
-}
-
-/// Upper bound on the memo above.
-const MAX_MEMOIZED_SESSION_PATHS: usize = 8;
-
 /// Durable private save. The shared state writer stages the complete JSON in
 /// the destination directory, syncs it, atomically replaces the old snapshot,
 /// and syncs the directory. The resulting file is private (`0600` on Unix).
@@ -572,22 +557,23 @@ const MAX_MEMOIZED_SESSION_PATHS: usize = 8;
 /// cost without weakening any guarantee — a real change is still written
 /// immediately and synchronously, exactly as before.
 ///
-/// The memo is re-checked against the file's current size, so a session file
-/// deleted or replaced out from under us is rewritten rather than assumed to
-/// still be there.
+/// The comparison is against the FILE, not against a memo of what this process
+/// last wrote. Remembering the last write and confirming it with the file's
+/// *size* was the first shape of this, and it had a hole: a session replaced
+/// with different contents of the same length read as unchanged and was never
+/// corrected. That is not hypothetical — two kettle windows share
+/// `session.json`, and a hand-edited file is a supported thing to do. Reading a
+/// few kilobytes costs microseconds against the tens of milliseconds of
+/// durability syscalls it decides whether to spend, so the accurate check is
+/// also the cheap one.
 pub(crate) fn save_to_path(s: &Session, p: &std::path::Path) -> std::io::Result<()> {
     if let Some(dir) = p.parent() {
         std::fs::create_dir_all(dir)?;
     }
     let text = serde_json::to_string_pretty(s)
         .map_err(|e| std::io::Error::other(format!("serialize session: {e}")))?;
-    let already_on_disk = LAST_WRITTEN.with(|memo| {
-        memo.borrow().get(p).is_some_and(|previous| {
-            *previous == text
-                && std::fs::metadata(p).is_ok_and(|meta| meta.len() == text.len() as u64)
-        })
-    });
-    if already_on_disk {
+    // A missing or unreadable file is simply "not what we are about to write".
+    if std::fs::read(p).is_ok_and(|on_disk| on_disk == text.as_bytes()) {
         return Ok(());
     }
     kettle_state::atomic_replace(
@@ -595,13 +581,6 @@ pub(crate) fn save_to_path(s: &Session, p: &std::path::Path) -> std::io::Result<
         text.as_bytes(),
         kettle_state::AtomicWriteOptions::PRIVATE,
     )?;
-    LAST_WRITTEN.with(|memo| {
-        let mut memo = memo.borrow_mut();
-        if memo.len() >= MAX_MEMOIZED_SESSION_PATHS && !memo.contains_key(p) {
-            memo.clear();
-        }
-        memo.insert(p.to_path_buf(), text);
-    });
     Ok(())
 }
 
@@ -837,7 +816,7 @@ mod tests {
     /// The memo must not stand in for the file. A session file deleted out
     /// from under the process has to be recreated, not assumed present.
     #[test]
-    fn a_deleted_session_file_is_rewritten_despite_the_memo() {
+    fn a_session_file_changed_underneath_us_is_rewritten() {
         let dir = private_tempdir();
         let path = dir.path().join("session.json");
         let session = Session {
@@ -847,13 +826,43 @@ mod tests {
             windows: Vec::new(),
         };
         save_to_path(&session, &path).expect("first write");
+        let ours = std::fs::read_to_string(&path).expect("read back");
+
+        // Gone entirely.
         std::fs::remove_file(&path).expect("remove");
         assert!(!path.exists(), "fixture must actually remove the file");
-
         save_to_path(&session, &path).expect("rewrite");
         assert!(
             path.exists(),
             "an identical session whose file is gone must still be written"
+        );
+
+        // Replaced with different content of exactly the SAME LENGTH. This is
+        // the case the first version of the skip missed: it confirmed its memo
+        // against the file's size, which a same-length replacement satisfies.
+        // Two kettle windows share session.json and a hand-edited file is
+        // supported, so "different bytes, same count" is a real state to be in.
+        let mut tampered: Vec<u8> = ours.clone().into_bytes();
+        let last = tampered.len() - 1;
+        tampered[last] = b' ';
+        assert_eq!(
+            tampered.len(),
+            ours.len(),
+            "the fixture must keep the length identical, or it tests nothing"
+        );
+        assert_ne!(
+            tampered.as_slice(),
+            ours.as_bytes(),
+            "and it must actually differ"
+        );
+        std::fs::write(&path, &tampered).expect("tamper");
+
+        save_to_path(&session, &path).expect("rewrite after tampering");
+        assert_eq!(
+            std::fs::read_to_string(&path).expect("read"),
+            ours,
+            "a same-length replacement must be corrected, not mistaken for our \
+             own last write"
         );
     }
 

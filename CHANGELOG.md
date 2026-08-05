@@ -84,6 +84,16 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
     new self-test refuses any byte above `0x7F` — including a check that the
     check itself still fires.
 
+  - **A session file replaced underneath kettle could be mistaken for its
+    own.** The write-skip that keeps a keybound action from costing tens of
+    milliseconds of durability syscalls remembered what this process last wrote
+    and confirmed it against the file's *size* — so a session replaced with
+    different contents of the same length read as unchanged and was never
+    corrected. Two kettle windows share `session.json` and a hand-edited file is
+    a supported thing to do, so that is a state you can actually be in. The
+    check now compares the file's bytes, which costs microseconds against the
+    write it decides whether to spend, and needs no remembered state at all.
+
   - **The keybind-conflict question could not be answered.** Rebinding a key
     onto a chord that is already taken raises a confirmation — from inside the
     Settings overlay, which is where the keybind editor lives. But the Settings

@@ -104,6 +104,17 @@ wrappers.
 
 ### bash — add to `~/.bashrc`
 
+The snippet below is the OSC 133 half only — enough for prompt marks,
+`jump_to_prompt`, and command-status colouring. The shipped
+`shell-integration/kettle.bash` *also* reports the working directory over
+OSC 7, which is what makes a new tab or split open where you already are, and
+what puts a directory name on a tab. If you want that too — and you probably
+do — source the shipped file instead of pasting this:
+
+```bash
+source /path/to/kettle/shell-integration/kettle.bash
+```
+
 ```bash
 # Capture the status first and hand it back, so anything chained after this
 # still sees the real exit code rather than the printf's.
