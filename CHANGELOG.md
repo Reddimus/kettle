@@ -113,6 +113,16 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
     only some later unrelated action did. The resize is now the dispatch's
     tail, in one place, so a new arm cannot forget it.
 
+  - **The online installer's Ed25519 verification had no test that could fail.**
+    Every signed-path test ran against a stub whose `openssl pkeyutl -verify`
+    returned success unconditionally, and no test ever made it fail — so the
+    entire verification block could have been deleted, or made to accept a
+    forged signature, without anything going red. The manifest is where the
+    archive's hash comes from, so that check is the only thing between a user
+    and an attacker-supplied hash. There is now a test for the refusal, and it
+    was confirmed by disabling the verification and watching the installer
+    happily install from an unauthenticated manifest.
+
   - **Fifty source guards could not fail, and one of them had already rotted.**
     A guard that reads its own file with `include_str!` also reads its own
     assertions, so `src.contains("literal")` matches the needle written one

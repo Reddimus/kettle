@@ -119,10 +119,22 @@ esac
         )
         script.chmod(0o755)
 
-    def _write_fake_openssl(self) -> None:
+    def _write_fake_openssl(self, *, verification_succeeds: bool = True) -> None:
+        """Stand-in for openssl.
+
+        `pkeyutl -verify` returns what `verification_succeeds` asks for. Every
+        test used to get an unconditional success, which meant the signed path
+        was exercised but the REFUSAL was not: removing the verification
+        entirely, or accepting a bad signature, failed nothing. The signature
+        is the only thing standing between a user and an attacker-supplied
+        hash, so the failing case needs a test at least as much as the passing
+        one.
+        """
+        verify_exit = "0" if verification_succeeds else "1"
         script = self.fake_bin / "openssl"
-        script.write_text(
-            """#!/bin/sh
+        # Plain string plus a substitution rather than an f-string: the body is
+        # shell, and `${1-}` would collide with f-string interpolation.
+        body = """#!/bin/sh
 set -eu
 if [ "$*" = "pkeyutl -verify -help" ]; then
   echo "Usage: pkeyutl -verify -rawin"
@@ -142,10 +154,12 @@ if [ "${1-}" = "base64" ]; then
   exit 0
 fi
 if [ "${1-}" = "pkeyutl" ] && [ "${2-}" = "-verify" ]; then
-  exit 0
+  exit @VERIFY_EXIT@
 fi
 exit 2
-""",
+"""
+        script.write_text(
+            body.replace("@VERIFY_EXIT@", verify_exit),
             encoding="ascii",
             newline="\n",
         )
@@ -303,6 +317,7 @@ fi
         sidecar: bytes | None = None,
         extra_environment: dict[str, str] | None = None,
         signed: bool = False,
+        signature_verifies: bool = True,
         manifest_size: int | None = None,
     ) -> subprocess.CompletedProcess[str]:
         if sidecar is not None:
@@ -314,7 +329,7 @@ fi
         manifest = self.root / "kettle-update-manifest.json"
         signature = self.root / "kettle-update-manifest.json.sig"
         if signed:
-            self._write_fake_openssl()
+            self._write_fake_openssl(verification_succeeds=signature_verifies)
             archive_size = archive.stat().st_size
             document = {
                 "schema": 1,
@@ -410,6 +425,35 @@ fi
         self.assertIn("Ed25519-signed manifest", result.stdout)
         self.assertNotIn("falling back", result.stderr)
         self.assertTrue((self.root / "prefix" / "bin" / "kettle").is_file())
+
+    def test_a_manifest_that_fails_ed25519_verification_is_refused(self):
+        """The signature must be load-bearing, not merely consulted.
+
+        Every other signed-path test ran against a stub whose
+        `pkeyutl -verify` always succeeded, so the whole verification block
+        could have been deleted — or made to accept a forged signature — and
+        nothing would have gone red. This is the case that gives the check its
+        meaning: the manifest is where the archive's hash comes from, so a
+        manifest kettle cannot authenticate must not be trusted for one.
+        """
+        result = self._run(
+            self._archive(include_manifest=True),
+            version="v2.36.0",
+            signed=True,
+            signature_verifies=False,
+        )
+        self.assertNotEqual(
+            result.returncode, 0, "an unverifiable manifest must not install"
+        )
+        self.assertIn("FAILED Ed25519 verification", result.stderr)
+        self.assertIn(
+            "Refusing to trust a hash from an unauthenticated manifest",
+            result.stderr,
+        )
+        # Fail CLOSED: no silent downgrade to the unsigned path, and nothing
+        # installed. A fallback here would make the signature decorative.
+        self.assertNotIn("falling back", result.stderr)
+        self.assertFalse((self.root / "prefix" / "bin" / "kettle").exists())
 
     def test_modern_archive_requires_the_inner_package_manifest(self):
         result = self._run(
