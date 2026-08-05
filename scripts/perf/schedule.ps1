@@ -165,6 +165,11 @@ function New-KettlePerfWilliamsSchedule {
     $schedule = [pscustomobject][ordered]@{
         schema_version = 1
         algorithm = 'williams-even-sha256-v1'
+        # Both generators carry this, so a reader never has to know which one
+        # produced a manifest to learn what its schedule controls. Adding it to
+        # only the rotation left `settings.schedule_balance` EMPTY on exactly
+        # the runs where balance is load-bearing -- release ones.
+        balance = 'position-balanced; predecessors balanced'
         namespace = $Namespace
         seed_sha256 = $random.seed_sha256
         terminals = [string[]]$Terminals
