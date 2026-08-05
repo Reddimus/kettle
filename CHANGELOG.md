@@ -4,6 +4,44 @@ All notable changes to kettle. Format roughly follows
 [Keep a Changelog](https://keepachangelog.com/); the project moves in small,
 durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
+## [2.50.0] — 2026-08-05
+
+  ### Added
+  - **Move a pane to another position in its tab.** Terminator rearranges panes
+    by dragging a terminal onto another one; kettle could only rotate or
+    equalize a split tree, never rearrange it. `move_split:{up,down,left,right}`
+    lifts the focused pane out — collapsing whatever split it leaves behind,
+    exactly as closing it would — and puts it beside its neighbour in that
+    direction, on that side. The neighbour is found by the same search
+    `goto_split` navigates with, so the pane lands where you were looking rather
+    than by a second, subtly different rule.
+
+    The mouse gesture itself is not implemented: it needs drop-target
+    hit-testing and a drag preview, which is interaction design rather than tree
+    surgery, and `docs/TERMINATOR-AUDIT.md` says so rather than implying the row
+    is closed.
+
+  ### Fixed
+  - **The benchmark harness could not run a comparator session, and it was not
+    the terminal's fault.** A run aborted at Rio's startup readiness reporting
+    `paint=False`, which reads as "the terminal never painted". Rio paints
+    perfectly well — it renders a truecolor background a few levels off the
+    colour it is handed (`48,89,94` comes back as `59,89,94`), and the readiness
+    check demanded a byte-exact match. Alacritty happens to be exact, which is
+    why this went unnoticed. The deviation is worst in the dark range, the shape
+    of a linear-space blend, so the check now allows a bounded per-channel
+    tolerance instead of assuming every renderer round-trips sRGB.
+
+    Behind it sat a second, unrelated defect: the run-local WezTerm config set a
+    field that WezTerm 20240203 rejects, and an unknown field makes WezTerm open
+    a configuration-error window *alongside* the terminal — so the launcher saw
+    two windows and refused the whole run as an ambiguous launch.
+
+    The readiness timeout now reports the client and region geometry, how many
+    captures it took, and whether the last one came back empty or merely lacked
+    the marker. That message is what identified the real cause after three wrong
+    theories, so it is the part most worth keeping.
+
 ## [2.49.0] — 2026-08-05
 
   ### Fixed

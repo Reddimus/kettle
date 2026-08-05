@@ -234,11 +234,17 @@ if [ -f docs/VERSION-HISTORY.md ] && grep -q "Current workspace version: \`${PRE
 fi
 if [ -f docs/VERSION-HISTORY.md ]; then
     RELEASE_DATE=$(awk -v ver="$VERSION" '$0 ~ "^## \\[" ver "\\] — " { print $4; exit }' CHANGELOG.md)
+    # The two counts are NOT equal at this point, and writing them as one number
+    # made the file contradict itself. This script runs after the changelog
+    # heading for $VERSION is committed but BEFORE its tag exists -- the tag is
+    # created by tag-release.sh once this lands -- so there is exactly one more
+    # heading than tag. The paragraph directly above the line already explains
+    # that; claiming a tag that does not exist argued with it.
     TAG_COUNT=$(git tag -l 'v[0-9]*' | wc -l | tr -d '[:space:]')
-    NEXT_TAG_COUNT=$((TAG_COUNT + 1))
+    HEADING_COUNT=$((TAG_COUNT + 1))
     echo "refreshing docs/VERSION-HISTORY.md release count/date"
     sed -i.bak -E \
-        "s/Release records inspected: [0-9]+ Git tags and [0-9]+ changelog headings/Release records inspected: ${NEXT_TAG_COUNT} Git tags and ${NEXT_TAG_COUNT} changelog headings/" \
+        "s/Release records inspected: [0-9]+ Git tags and [0-9]+ changelog headings/Release records inspected: ${TAG_COUNT} Git tags and ${HEADING_COUNT} changelog headings/" \
         docs/VERSION-HISTORY.md
     rm -f docs/VERSION-HISTORY.md.bak
     if [ -n "$RELEASE_DATE" ]; then
