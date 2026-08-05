@@ -380,7 +380,7 @@ foreach ($terminal in $Terminals) {
         $null
     }
     # `Get-KettlePerfNearestRankPercentile` takes a FRACTION, and its
-    # `[ValidateRange(0.0, 1.0)]` rejects a percentage at parameter binding —
+    # `[ValidateRange(0.0, 1.0)]` rejects a percentage at parameter binding --
     # before the function body runs. These four calls passed 90/95/99, so every
     # latency run threw "The 90 argument is greater than the maximum allowed
     # range of 1" and no latency measurement could ever complete. Every other

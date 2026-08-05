@@ -1338,12 +1338,12 @@ try {
         $win32Source, '\[void\]\$issues\.Add\((?<body>[\s\S]*?)\r?\n\s*\)')
     if ($issueAdds.Count -lt 1) {
         throw (
-            'no $issues.Add(...) sites found in lib-win32.ps1 — this guard ' +
+            'no $issues.Add(...) sites found in lib-win32.ps1 -- this guard ' +
             'is looking in the wrong place and cannot fail'
         )
     }
     foreach ($match in $issueAdds) {
-        # Using the identity as a dictionary KEY is fine — what must never
+        # Using the identity as a dictionary KEY is fine -- what must never
         # reach the message is the identity's VALUE. Blank the lookup first so
         # the check is about interpolation, not about the word appearing.
         $body = $match.Groups['body'].Value -replace `

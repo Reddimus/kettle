@@ -1362,7 +1362,7 @@ function Resolve-KettlePerfDisplayIdentity {
         if ($identityCounts[$identity] -gt 1) {
             # The identity itself must NOT go in here. `issues` is free text, so
             # the sanitizer's property-name matching never sees it, and it is
-            # published verbatim in benchmark-manifest.json — while the very
+            # published verbatim in benchmark-manifest.json -- while the very
             # same value is tokenized everywhere it appears under its own
             # `instance_name` property. A device instance path like
             # `DISPLAY\DEL41A8\5&2b41c7ee&0&UID4353` identifies the machine's

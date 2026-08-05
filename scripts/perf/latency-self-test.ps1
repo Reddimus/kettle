@@ -4,7 +4,7 @@
 # defect that made it impossible to complete a single run: it called
 # `Get-KettlePerfNearestRankPercentile` with 90 / 95 / 99 while that function
 # declares `[ValidateRange(0.0, 1.0)]`, so PowerShell rejected the call at
-# parameter binding — before the body ran — with "The 90 argument is greater
+# parameter binding -- before the body ran -- with "The 90 argument is greater
 # than the maximum allowed range of 1". Every other caller in the harness
 # already passed a fraction.
 #
@@ -39,14 +39,14 @@ $matches = [regex]::Matches(
     $latencySource, '-Percentile\s+(?<value>[0-9]+(?:\.[0-9]+)?)')
 Assert-KettlePerfSelfTest -Condition ($matches.Count -ge 4) `
     -Message ("latency.ps1 should pass at least four percentiles; found " +
-        "$($matches.Count) — if the summarisation moved, point this test at it")
+        "$($matches.Count) -- if the summarisation moved, point this test at it")
 
 foreach ($match in $matches) {
     $value = [double]$match.Groups['value'].Value
     Assert-KettlePerfSelfTest -Condition ($value -ge 0.0 -and $value -le 1.0) `
         -Message ("latency.ps1 passes -Percentile $value, but the function " +
             'takes a FRACTION in [0.0, 1.0] and rejects anything else at ' +
-            'parameter binding — no latency run could complete')
+            'parameter binding -- no latency run could complete')
 
     # Drive the real function with the real argument: the range check above is
     # necessary but not sufficient, and this is what actually proves the call

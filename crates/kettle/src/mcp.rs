@@ -925,22 +925,33 @@ mod tests {
         );
 
         // A writer that is WRITING, steadily, is also not stalled.
+        //
+        // Progress is published from inside the poll predicate rather than
+        // from a helper thread. The property under test is that a changing
+        // `completed` resets the stall timer — not the operating system's
+        // willingness to schedule a second thread within the limit. A helper
+        // ticking every 10ms against a 50ms budget has only five missed
+        // wake-ups of headroom, and a loaded macOS runner spends that
+        // routinely: the test failed in CI having proven nothing about the
+        // code. Driving the counter from the detector's own loop removes the
+        // race entirely and tests the same thing.
+        let progress = WriterProgress::default();
         progress.in_write.store(true, Ordering::Release);
-        let started = Instant::now();
-        std::thread::scope(|scope| {
-            scope.spawn(|| {
-                while started.elapsed() < Duration::from_millis(300) {
-                    std::thread::sleep(Duration::from_millis(10));
-                    progress.completed.fetch_add(1, Ordering::Release);
-                }
-            });
-            assert!(
-                wait_unless_stdout_stalled(&progress, Duration::from_millis(50), || {
-                    started.elapsed() >= Duration::from_millis(300)
-                }),
-                "a writer completing writes is making progress, not stalling"
-            );
-        });
+        let polls = std::cell::Cell::new(0u32);
+        assert!(
+            wait_unless_stdout_stalled(&progress, Duration::from_millis(50), || {
+                progress.completed.fetch_add(1, Ordering::Release);
+                polls.set(polls.get() + 1);
+                polls.get() >= 20
+            }),
+            "a writer completing writes is making progress, not stalling"
+        );
+        assert_eq!(
+            polls.get(),
+            20,
+            "the detector must have polled through every one of those writes \
+             rather than returning early"
+        );
 
         // Parked inside ONE write, with no completions, IS the peer.
         let progress = WriterProgress::default();

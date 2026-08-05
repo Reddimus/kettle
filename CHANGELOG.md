@@ -68,6 +68,22 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
     window size, instead of reserving 95px on a wide monitor and almost
     nothing on a narrow one.
 
+  - **Two tests could fail without anything being wrong.** The MCP stall
+    detector's "a busy writer is not a stalled peer" fixture published progress
+    from a helper thread every 10 ms against a 50 ms budget — five missed
+    wake-ups of headroom, which a loaded CI runner spends routinely, so the
+    test failed on macOS having proven nothing about the code. Progress now
+    comes from inside the detector's own poll, which tests the same property
+    without asking the scheduler for a favour.
+
+    And the performance harness's Windows PowerShell 5.1 run died on a parse
+    error, because a file with no BOM is read as the ANSI code page there: an
+    em dash decodes to three characters, the last of which PowerShell accepts
+    as a closing quote, so a dash inside a string ended it and the parser
+    failed somewhere else entirely. Every harness script is ASCII now, and a
+    new self-test refuses any byte above `0x7F` — including a check that the
+    check itself still fires.
+
   - **The keybind-conflict question could not be answered.** Rebinding a key
     onto a chord that is already taken raises a confirmation — from inside the
     Settings overlay, which is where the keybind editor lives. But the Settings
