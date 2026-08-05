@@ -1330,14 +1330,17 @@ pub struct Config {
     /// `use_custom_command =` in the file doesn't matter.
     pub use_custom_command: bool,
     /// Terminator parity (terminatorlib/config.py:84
-    /// `inactive_color_offset`): float 0.0-1.0 — unfocused-pane
-    /// FG color dimming. kettle's `unfocused-split-opacity`
-    /// applies to the whole pane; this is a separate FG-only
-    /// dim. No-op until wired into the render layer.
+    /// `inactive_color_offset`): float 0.0-1.0 — how far an unfocused pane's
+    /// foreground recedes. Read by `kettle-render`'s post-text overlay, which
+    /// takes the strongest of this, `inactive_bg_color_offset` and
+    /// `unfocused-split-opacity` rather than summing them, so setting two does
+    /// not dim twice as hard as either alone. Not Terminator's exact model —
+    /// it rescales the foreground palette per glyph — but the visible intent
+    /// is the same without re-shaping every unfocused pane.
     pub inactive_color_offset: f32,
     /// Terminator parity (terminatorlib/config.py:85
-    /// `inactive_bg_color_offset`): BG-only dim for unfocused
-    /// panes. No-op until wired into the render layer.
+    /// `inactive_bg_color_offset`): the background side of the same dim, and
+    /// composed with it — see [`Config::inactive_color_offset`].
     pub inactive_bg_color_offset: f32,
     /// Terminator parity (terminatorlib/config.py:99
     /// `split_to_group`): a new split joins the broadcast group of the pane it

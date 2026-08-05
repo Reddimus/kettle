@@ -8,7 +8,17 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
   Findings from an audit of `kettle-ui` — the largest crate, and the one
   holding the UI/UX states and the AstroNvim / tmux / agent-CLI input surface —
-  plus the last of the render residuals from the 2.47.0 review.
+  the last of the render residuals from the 2.47.0 review, and a sweep through
+  the Terminator features that were present in name only: an action that did
+  something other than what it was called, keys that parsed and were never
+  read, a documented sandbox level that did not hold, and two settings that
+  changed nothing until you restarted.
+
+  ### Added
+  - **`lua-sandbox = restricted`**, a third trust level below `safe`:
+    `kettle.send_text` and `kettle.exec_action` refuse, so a plugin can observe,
+    notify and restyle but cannot type into your shell or dispatch actions. See
+    the `Fixed` entry below for why `safe` was never that level.
 
   ### Performance
   - **The starfield evaluated its whole model once per star per pixel.** The
