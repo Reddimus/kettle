@@ -957,6 +957,12 @@ pub struct TabBar {
     /// moved while the underlying segments snap into place via
     /// `Mux::move_active_tab`. `None` while no drag is active.
     pub drag_cursor_x: Option<f32>,
+    /// The same thing for a vertical (left/right) bar, where the strip runs
+    /// down the window and the ghost follows the cursor's **y**. Exactly one of
+    /// the two is ever `Some`, chosen by which bar was built. A single
+    /// "main-axis" field would have been tidier, but this one is reported over
+    /// the control plane under its own name, and agents already read it.
+    pub drag_cursor_y: Option<f32>,
     /// v2.40.0 (tear-off UX): 0.0..=1.0 — how far the drag has moved from
     /// the tab band toward the tear threshold. 0.0 at/inside the band,
     /// 1.0 at (or past) the distance `tear_threshold_crossed` fires at.
@@ -999,6 +1005,7 @@ impl TabBar {
             broadcast: false,
             hovered_close_idx: None,
             drag_cursor_x: None,
+            drag_cursor_y: None,
             tear_lift: 0.0,
             insert_marker: None,
             band: (0.0, 0.0, 0.0, 0.0),
@@ -3737,16 +3744,25 @@ impl Renderer {
             // to `over` (post-text) so the ghost sits above the live
             // segment text. Drawn only when both a drag is active
             // *and* there's an active segment to copy from.
-            if let Some(cx) = tabbar.drag_cursor_x
-                && let Some(active_seg) = tabbar.segments.iter().find(|s| s.active)
+            if let Some(active_seg) = tabbar.segments.iter().find(|s| s.active)
+                && let Some((ghost_x, ghost_y)) = {
+                    let (seg_x, _, seg_w, seg_h) = active_seg.rect;
+                    // Clamp the ghost so the box doesn't slide entirely off
+                    // either end of the strip — same idea as
+                    // `context_menu_geometry`'s anchor clamp. A vertical bar
+                    // rides the cursor's y down a fixed column; a horizontal
+                    // one rides x along a fixed row.
+                    tabbar
+                        .drag_cursor_x
+                        .map(|cx| ((cx - seg_w * 0.5).clamp(0.0, (sw - seg_w).max(0.0)), by))
+                        .or_else(|| {
+                            tabbar.drag_cursor_y.map(|cy| {
+                                (seg_x, (cy - seg_h * 0.5).clamp(0.0, (sh - seg_h).max(0.0)))
+                            })
+                        })
+                }
             {
                 let (_, _, seg_w, seg_h) = active_seg.rect;
-                // Clamp the ghost's left edge so the box doesn't slide
-                // entirely off either end of the bar — same idea as
-                // `context_menu_geometry`'s anchor clamp.
-                let half = seg_w * 0.5;
-                let max_x = (sw - seg_w).max(0.0);
-                let ghost_x = (cx - half).clamp(0.0, max_x);
                 // v2.40.0 (tear-off UX): pre-tear escalation — the ghost
                 // "lifts off" as the cursor approaches the tear threshold
                 // (bigger/darker shadow, fading body), so a release reads
@@ -3762,7 +3778,7 @@ impl Renderer {
                 // `menu_chrome_quads`'s context menu).
                 over.push(rect(
                     ghost_x + shadow_off,
-                    by + shadow_off,
+                    ghost_y + shadow_off,
                     seg_w,
                     seg_h,
                     Rgb::new(0, 0, 0),
@@ -3771,7 +3787,14 @@ impl Renderer {
                 // Ghost background — theme.background, translucent enough
                 // that the bar shows through and it reads as a floating
                 // preview rather than a real new tab.
-                over.push(rect(ghost_x, by, seg_w, seg_h, theme.background, bg_alpha));
+                over.push(rect(
+                    ghost_x,
+                    ghost_y,
+                    seg_w,
+                    seg_h,
+                    theme.background,
+                    bg_alpha,
+                ));
                 // Accent strip on the left edge, same color the live
                 // active segment uses (palette[3] yellow under
                 // broadcast, accent-color → palette[4]
@@ -3784,7 +3807,7 @@ impl Renderer {
                 };
                 over.push(rect(
                     ghost_x,
-                    by,
+                    ghost_y,
                     tab_drag::GHOST_ACCENT_W_PX,
                     seg_h,
                     accent,

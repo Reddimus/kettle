@@ -58,6 +58,19 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
     window size, instead of reserving 95px on a wide monitor and almost
     nothing on a narrow one.
 
+  - **Drag-to-reorder was dead on a vertical tab bar.** With
+    `tab-position = left` or `right` the segments stack down a shared column,
+    and the drag handler tested the cursor's **x** — which every segment
+    contains. The first one always matched, so dragging any tab moved tab 0, or
+    did nothing at all when tab 0 was the one being dragged. The ghost had the
+    same problem from the other side: it was pinned to the top of the strip and
+    slid sideways out of the bar as the cursor moved.
+
+    Both now follow the axis the strip is actually stacked on, read back off
+    the rendered segments so the drag cannot disagree with what is on screen.
+    The control plane reports `drag_cursor_y` alongside the existing
+    `drag_cursor_x`, so a live-UI check can see the vertical ghost.
+
   - **Changing the scrollback budget did nothing until you restarted.** Both
     `scrollback` and `scrollback-bytes` were read once, when a pane spawned.
     Editing them — in the config file, or through the Settings overlay's two

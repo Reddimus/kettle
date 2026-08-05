@@ -3497,13 +3497,32 @@ pub(crate) struct ContextMenuState {
 /// drags, and the bar reorders to keep the dragged segment under the cursor.
 /// Clamped to the first/last rendered segment so a cursor that overshoots
 /// either edge still produces a valid target. Returns 0 for an empty bar.
-fn tab_drag_target_index(cursor_x: f32, segments: &[kettle_render::TabSeg]) -> usize {
-    if segments.is_empty() {
+fn tab_drag_target_index(
+    cursor_x: f32,
+    cursor_y: f32,
+    segments: &[kettle_render::TabSeg],
+) -> usize {
+    let Some(first) = segments.first() else {
         return 0;
-    }
+    };
+    // Which way the strip runs is a property of what was drawn: a vertical bar
+    // stacks its segments down a shared column, a horizontal one lays them
+    // across a shared row. Reading it back off the segments means the drag can
+    // never disagree with the geometry the user is looking at.
+    //
+    // This used to test `cursor_x` unconditionally. On a vertical bar every
+    // segment shares the same x span, so the very first one always matched and
+    // dragging any tab below the top of the strip moved tab 0 — or, when tab 0
+    // was the one being dragged, did nothing at all.
+    let vertical = segments.iter().any(|seg| seg.rect.1 != first.rect.1);
     for seg in segments {
-        let (x, _, w, _) = seg.rect;
-        if cursor_x < x + w {
+        let (x, y, w, h) = seg.rect;
+        let (cursor, end) = if vertical {
+            (cursor_y, y + h)
+        } else {
+            (cursor_x, x + w)
+        };
+        if cursor < end {
             return seg.idx;
         }
     }
@@ -6397,6 +6416,7 @@ impl App {
                 broadcast: ws.mux.is_broadcast_on(),
                 hovered_close_idx: None,
                 drag_cursor_x: None,
+                drag_cursor_y: None,
                 // The title-edit modal owns the bar — no drag can be live.
                 tear_lift: 0.0,
                 insert_marker: None,
@@ -6518,6 +6538,7 @@ impl App {
             } else {
                 None
             },
+            drag_cursor_y: None,
             // v2.40.0 (tear-off UX): pre-tear ghost escalation.
             tear_lift: self.tear_lift_for(ws),
             // v2.19.0 (re-dock): vertical insertion line at the docked tab's
@@ -6638,16 +6659,16 @@ impl App {
             new_tab_menu: (0.0, 0.0, 0.0, 0.0),
             broadcast: ws.mux.is_broadcast_on(),
             hovered_close_idx: ws.hovered_close_idx,
-            // Drag-cursor preview is x-only in v1; vertical drag
-            // reorder is a planned follow-up.
-            drag_cursor_x: if ws.tab_drag_active && ws.tab_drag_press.is_none() {
-                Some(ws.cursor.x as f32)
+            // A vertical strip's ghost rides the cursor's y down a fixed
+            // column, so the main-axis coordinate is `y` here and `x` on the
+            // horizontal bar. Both were `x` before, which pinned the ghost to
+            // the top of the strip and slid it sideways out of the bar.
+            drag_cursor_x: None,
+            drag_cursor_y: if ws.tab_drag_active && ws.tab_drag_press.is_none() {
+                Some(ws.cursor.y as f32)
             } else {
                 None
             },
-            // v2.40.0 (tear-off UX): populated for struct symmetry; the
-            // ghost paint path is x-only/horizontal-only (see
-            // `drag_cursor_x` above), so this is inert on vertical bars.
             tear_lift: self.tear_lift_for(ws),
             // v2.19.0 (re-dock): horizontal insertion line across
             // the strip at the docked tab's landing slot.
@@ -15311,6 +15332,10 @@ impl App {
                     "new_tab": rect_json(bar.new_tab),
                     "new_tab_menu": rect_json(bar.new_tab_menu),
                     "drag_cursor_x": bar.drag_cursor_x,
+                    // A vertical strip reports the drag on its own axis;
+                    // additive, so a reader that only knows the x key still
+                    // sees exactly what it saw before on a horizontal bar.
+                    "drag_cursor_y": bar.drag_cursor_y,
                     // v2.40.0 (tear-off UX): pre-tear ghost escalation +
                     // dock-highlight state, for live-UI smokes.
                     "tear_lift": bar.tear_lift,
@@ -16222,7 +16247,7 @@ impl App {
         if bar.height <= 0.0 || bar.segments.is_empty() {
             return;
         }
-        let target = tab_drag_target_index(ws.cursor.x as f32, &bar.segments);
+        let target = tab_drag_target_index(ws.cursor.x as f32, ws.cursor.y as f32, &bar.segments);
         let delta = target as i32 - ws.mux.active as i32;
         if delta != 0 && ws.mux.move_active_tab(delta) {
             ws.mux.touch_active_tab_seen();
@@ -22302,7 +22327,11 @@ impl App {
                     if bar.height > 0.0 && !bar.segments.is_empty() {
                         // Use the same rendered segment
                         // rects that click hit-testing and painting use.
-                        let target = tab_drag_target_index(ws.cursor.x as f32, &bar.segments);
+                        let target = tab_drag_target_index(
+                            ws.cursor.x as f32,
+                            ws.cursor.y as f32,
+                            &bar.segments,
+                        );
                         let delta = target as i32 - ws.mux.active as i32;
                         if delta != 0 && ws.mux.move_active_tab(delta) {
                             ws.mux.touch_active_tab_seen();
@@ -29306,26 +29335,74 @@ mod tests {
             seg(1, 100.0, 100.0),
             seg(2, 200.0, 100.0),
         ];
-        assert_eq!(tab_drag_target_index(50.0, &equal), 0);
-        assert_eq!(tab_drag_target_index(150.0, &equal), 1);
-        assert_eq!(tab_drag_target_index(250.0, &equal), 2);
+        assert_eq!(tab_drag_target_index(50.0, 12.0, &equal), 0);
+        assert_eq!(tab_drag_target_index(150.0, 12.0, &equal), 1);
+        assert_eq!(tab_drag_target_index(250.0, 12.0, &equal), 2);
         // Right at the boundary: 100 → tab 1 (floor); 200 → tab 2.
-        assert_eq!(tab_drag_target_index(100.0, &equal), 1);
-        assert_eq!(tab_drag_target_index(200.0, &equal), 2);
+        assert_eq!(tab_drag_target_index(100.0, 12.0, &equal), 1);
+        assert_eq!(tab_drag_target_index(200.0, 12.0, &equal), 2);
         // Natural-width tabs: targeting follows the rendered rects,
         // not a hidden strip/n assumption.
         let natural = [seg(0, 0.0, 72.0), seg(1, 72.0, 144.0), seg(2, 216.0, 88.0)];
-        assert_eq!(tab_drag_target_index(71.0, &natural), 0);
-        assert_eq!(tab_drag_target_index(72.0, &natural), 1);
-        assert_eq!(tab_drag_target_index(215.0, &natural), 1);
-        assert_eq!(tab_drag_target_index(216.0, &natural), 2);
+        assert_eq!(tab_drag_target_index(71.0, 12.0, &natural), 0);
+        assert_eq!(tab_drag_target_index(72.0, 12.0, &natural), 1);
+        assert_eq!(tab_drag_target_index(215.0, 12.0, &natural), 1);
+        assert_eq!(tab_drag_target_index(216.0, 12.0, &natural), 2);
         // Negative cursor (past the left edge) → clamps to 0.
-        assert_eq!(tab_drag_target_index(-50.0, &natural), 0);
+        assert_eq!(tab_drag_target_index(-50.0, 12.0, &natural), 0);
         // Past the right edge → clamps to last segment, not n.
-        assert_eq!(tab_drag_target_index(900.0, &natural), 2);
-        assert_eq!(tab_drag_target_index(f32::MAX, &natural), 2);
+        assert_eq!(tab_drag_target_index(900.0, 12.0, &natural), 2);
+        assert_eq!(tab_drag_target_index(f32::MAX, 12.0, &natural), 2);
         // Empty bar → 0 (defensive no-op).
-        assert_eq!(tab_drag_target_index(50.0, &[]), 0);
+        assert_eq!(tab_drag_target_index(50.0, 12.0, &[]), 0);
+    }
+
+    /// `tab-position = left` / `right` stacks the segments down a shared
+    /// column, so every one of them contains any x inside the strip. Testing
+    /// the cursor's x — which is what this did — matched the first segment
+    /// every time, and dragging a tab anywhere below the top of the strip
+    /// moved tab 0 instead. The reorder was, in effect, dead on vertical bars.
+    #[test]
+    fn a_vertical_tab_strip_reorders_by_the_axis_it_is_actually_stacked_on() {
+        use super::tab_drag_target_index;
+        let seg = |idx, y, h| {
+            let rect = (0.0, y, 160.0, h);
+            let close = (136.0, y, 24.0, 24.0);
+            kettle_render::TabSeg {
+                idx,
+                rect,
+                title_rect: super::tab_title_rect(rect, close, true),
+                close,
+                title: format!("tab-{idx}"),
+                path: None,
+                active: idx == 0,
+                activity: kettle_render::TabActivity::Normal,
+            }
+        };
+        let stacked = [seg(0, 0.0, 28.0), seg(1, 28.0, 28.0), seg(2, 56.0, 28.0)];
+
+        // Precondition: every segment spans the same x, which is exactly why
+        // an x-axis test could not tell them apart.
+        let x_mid = 80.0;
+        assert!(
+            stacked
+                .iter()
+                .all(|s| x_mid >= s.rect.0 && x_mid < s.rect.0 + s.rect.2),
+            "fixture must share one column, or the old bug can't be reproduced"
+        );
+
+        assert_eq!(tab_drag_target_index(x_mid, 14.0, &stacked), 0);
+        assert_eq!(tab_drag_target_index(x_mid, 42.0, &stacked), 1);
+        assert_eq!(tab_drag_target_index(x_mid, 70.0, &stacked), 2);
+        // Boundaries follow the rendered rects, same rule as horizontal.
+        assert_eq!(tab_drag_target_index(x_mid, 28.0, &stacked), 1);
+        assert_eq!(tab_drag_target_index(x_mid, 56.0, &stacked), 2);
+        // Past either end clamps to the nearest segment rather than running off.
+        assert_eq!(tab_drag_target_index(x_mid, -40.0, &stacked), 0);
+        assert_eq!(tab_drag_target_index(x_mid, 9_000.0, &stacked), 2);
+        // The x coordinate is now irrelevant on a vertical strip — including
+        // one far outside it, which a torn-drag produces.
+        assert_eq!(tab_drag_target_index(-999.0, 42.0, &stacked), 1);
     }
 
     #[test]
