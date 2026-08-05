@@ -7312,7 +7312,18 @@ impl App {
         }
         let text = text.as_str();
         let raw_target = if ws.mux.is_broadcast_on() {
+            // Ask every window the broadcast can reach, not just this one. A
+            // group member sitting at a shell prompt in a SECOND window is
+            // precisely the target the confirmation exists for — a newline in
+            // an unbracketed paste runs the line there — and consulting only
+            // the focused window would have suppressed the prompt for it.
             ws.mux.broadcast_paste_has_raw_writable_target()
+                || (crate::mux::Mux::scope_crosses_windows(&ws.mux.broadcast)
+                    && self.windows.values().any(|other| {
+                        other
+                            .mux
+                            .broadcast_paste_foreign_has_raw_writable_target(&ws.mux.broadcast)
+                    }))
         } else {
             !self
                 .focused_mode(ws)
@@ -12134,19 +12145,6 @@ impl App {
         ws.last_blink = std::time::Instant::now();
     }
 
-    /// Preferences submenu, C8: write a `key = value`
-    /// line to the user's active config file via the atomic
-    /// `persist_config_toggle` helper. Resolves the path the same way
-    /// Action::EditConfig
-    /// does (App::config_path → `Config::default_path` fallback).
-    /// Logs + ignores any I/O error so a transient FS issue doesn't
-    /// kill the menu dispatch; the in-memory toggle still applied,
-    /// so the user's next session will pick up the runtime change
-    /// once it persists.
-    /// Returns `true` iff the value was written to the
-    /// config file. Callers of user-initiated changes (theme picks, Settings)
-    /// notify the user on `false` so a change that's live this session but lost
-    /// on restart isn't silent.
     /// Send a broadcast from `ws`, and then to the panes in every OTHER window
     /// that the same scope selects.
     ///
@@ -12184,6 +12182,19 @@ impl App {
         result
     }
 
+    /// Preferences submenu, C8: write a `key = value`
+    /// line to the user's active config file via the atomic
+    /// `persist_config_toggle` helper. Resolves the path the same way
+    /// Action::EditConfig
+    /// does (App::config_path → `Config::default_path` fallback).
+    /// Logs + ignores any I/O error so a transient FS issue doesn't
+    /// kill the menu dispatch; the in-memory toggle still applied,
+    /// so the user's next session will pick up the runtime change
+    /// once it persists.
+    /// Returns `true` iff the value was written to the
+    /// config file. Callers of user-initiated changes (theme picks, Settings)
+    /// notify the user on `false` so a change that's live this session but lost
+    /// on restart isn't silent.
     fn persist_pref(&self, key: &str, value: &str) -> bool {
         let Some(path) = self
             .config_path
@@ -24613,6 +24624,43 @@ mod tests {
                 .contains("set_scrollback_limits(self.cfg.scrollback, self.cfg.scrollback_bytes)"),
             "the reload must hand both scrollback settings to the live panes, \
              or the Settings rows are inert until restart"
+        );
+    }
+
+    /// Widening where a paste GOES without widening what the safety check
+    /// LOOKS AT is how a protection quietly stops protecting.
+    ///
+    /// The confirmation fires when a multi-line paste can reach a pane with no
+    /// bracketed-paste mode, because a newline runs the line there. Once a
+    /// group paste crosses windows, the panes that answer that question live in
+    /// more than one of them — a group member at a shell prompt in a second
+    /// window is exactly the target the prompt exists for. Asking only the
+    /// focused window would have suppressed it for precisely that case.
+    #[test]
+    fn the_paste_prompt_asks_every_window_the_paste_can_reach() {
+        let src = production_source();
+        let gate = src
+            .split("let raw_target = if ws.mux.is_broadcast_on() {")
+            .nth(1)
+            .expect("the paste-confirmation raw-target gate is present");
+        let end = gate.find("\n        };").unwrap_or(gate.len());
+        let gate = &gate[..end];
+        assert!(
+            gate.contains("scope_crosses_windows(&ws.mux.broadcast)")
+                && gate.contains("broadcast_paste_foreign_has_raw_writable_target"),
+            "the raw-target question must be asked of every window the \
+             broadcast reaches, or a group member at a shell prompt in another \
+             window receives an unbracketed multi-line paste with no prompt"
+        );
+        // The delivery and the check must agree on WHICH windows are in scope.
+        // If one of them ever stops using the shared predicate, they can
+        // disagree about who is about to receive the paste.
+        assert_eq!(
+            src.matches("scope_crosses_windows(&ws.mux.broadcast)")
+                .count(),
+            3,
+            "the keystroke path, the paste path, and the paste PROMPT must all \
+             ask the same question about which windows are in scope"
         );
     }
 

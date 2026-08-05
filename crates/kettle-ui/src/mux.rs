@@ -3196,6 +3196,30 @@ impl Mux {
         self.paste_into(ids, text)
     }
 
+    /// Would a paste under ANOTHER window's scope land raw and executable in
+    /// one of this window's panes?
+    ///
+    /// The paste-protection prompt fires when a multi-line paste can reach a
+    /// pane with no bracketed-paste mode, because there the newline runs the
+    /// line. Once a group paste crosses windows, the panes that answer that
+    /// question live in more than one of them: a group member at a shell prompt
+    /// in a second window is exactly the target the prompt exists for, and
+    /// asking only the focused window would have suppressed it.
+    pub fn broadcast_paste_foreign_has_raw_writable_target(&self, scope: &BroadcastScope) -> bool {
+        self.foreign_target_ids(scope).into_iter().any(|id| {
+            self.panes.get(&id).is_some_and(|pane| {
+                !pane.read_only
+                    && !pane
+                        .term
+                        .term
+                        .lock()
+                        .ok()
+                        .map(|t| t.mode().contains(kettle_core::TermMode::BRACKETED_PASTE))
+                        .unwrap_or(false)
+            })
+        })
+    }
+
     /// Panes in THIS window that a scope owned by another window selects.
     fn foreign_target_ids(&self, scope: &BroadcastScope) -> Vec<u64> {
         let BroadcastScope::Group(name) = scope else {
