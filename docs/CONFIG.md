@@ -493,10 +493,15 @@ scrollback only; keep the visible screen unlike `reset`).
 
 **Broadcast**: `broadcast_all` (type to every pane in the window),
 `broadcast_off`, `broadcast_group` (type to every pane in the focused pane's
-named group). The default `Super+G` / `Ctrl+Shift+G` chord is `broadcast_tab`,
-which **toggles** — pressing it again turns broadcast off, so you never have to
-reach for a second chord to stop. Which scope it turns *on* is
-`broadcast-default`.
+named group — **in every window**, since a group is a set you declared and
+`group_all` already spans them; typing and pasting both follow it). The default
+`Super+G` / `Ctrl+Shift+G` chord is `broadcast_tab`, which **toggles** —
+pressing it again turns broadcast off, so you never have to reach for a second
+chord to stop. Which scope it turns *on* is `broadcast-default`.
+
+A second kettle *process* is its own broadcast domain. Terminator is
+single-process and has no equivalent, so this is not a gap against it — use one
+kettle with several windows if you want a group to span them.
 
 **Grouping** is separate from broadcasting, as it is in Terminator: you put
 panes in a group, and then choose whether to broadcast to that group.

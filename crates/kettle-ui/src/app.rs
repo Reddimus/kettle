@@ -6167,11 +6167,7 @@ impl App {
         self.hide_mouse_cursor(ws);
         ws.last_typed = Some(std::time::Instant::now());
         let result = if ws.mux.is_broadcast_on() {
-            if self.cfg.scroll_on_keystroke {
-                ws.mux.broadcast_write_with_scroll(bytes)
-            } else {
-                ws.mux.broadcast_write(bytes)
-            }
+            self.broadcast_input(ws, bytes, self.cfg.scroll_on_keystroke)
         } else if let Some(pane) = ws.mux.focused() {
             let result = pane.feed_input(bytes);
             if result.is_queued()
@@ -7358,7 +7354,15 @@ impl App {
         // different mode state), so the wrap is per-pane, not a
         // single shared payload.
         if ws.mux.is_broadcast_on() {
-            let result = ws.mux.broadcast_paste(text);
+            let mut result = ws.mux.broadcast_paste(text);
+            // A named group spans windows, and a paste is user input under the
+            // same scope as a keystroke — see `App::broadcast_input`.
+            if crate::mux::Mux::scope_crosses_windows(&ws.mux.broadcast) {
+                let scope = ws.mux.broadcast.clone();
+                for other in self.windows.values_mut() {
+                    result = result.merge(other.mux.broadcast_paste_foreign(&scope, text));
+                }
+            }
             self.report_input_result(result);
             return;
         }
@@ -12143,6 +12147,43 @@ impl App {
     /// config file. Callers of user-initiated changes (theme picks, Settings)
     /// notify the user on `false` so a change that's live this session but lost
     /// on restart isn't silent.
+    /// Send a broadcast from `ws`, and then to the panes in every OTHER window
+    /// that the same scope selects.
+    ///
+    /// A named broadcast group is a set the user declared, and `group_all`
+    /// already spans every window the way Terminator's does. The broadcast did
+    /// not — it stopped at whichever window was focused, so grouping panes
+    /// across two windows and typing reached only half of them, with nothing on
+    /// screen to say why: the other window's panes still wore the group in
+    /// their titlebars.
+    ///
+    /// Scopes that are defined by something window-local (`Tab`, and kettle's
+    /// own window-wide `All`) do not walk, so this costs a single enum test
+    /// when it does not apply.
+    fn broadcast_input(
+        &mut self,
+        ws: &mut WindowState,
+        bytes: &[u8],
+        scroll_to_bottom: bool,
+    ) -> PaneInputResult {
+        let mut result = if scroll_to_bottom {
+            ws.mux.broadcast_write_with_scroll(bytes)
+        } else {
+            ws.mux.broadcast_write(bytes)
+        };
+        if crate::mux::Mux::scope_crosses_windows(&ws.mux.broadcast) {
+            let scope = ws.mux.broadcast.clone();
+            for other in self.windows.values_mut() {
+                result = result.merge(other.mux.broadcast_write_foreign(
+                    &scope,
+                    bytes,
+                    scroll_to_bottom,
+                ));
+            }
+        }
+        result
+    }
+
     fn persist_pref(&self, key: &str, value: &str) -> bool {
         let Some(path) = self
             .config_path
@@ -24573,6 +24614,33 @@ mod tests {
             "the reload must hand both scrollback settings to the live panes, \
              or the Settings rows are inert until restart"
         );
+    }
+
+    /// Both user-input paths have to cross the window boundary, not just the
+    /// keystroke one. A paste is user input under the same scope as a
+    /// keystroke, and `broadcast_paste` had the identical window-local limit —
+    /// fixing only the typing path would have left a broadcast that types to
+    /// the whole group but pastes to half of it.
+    #[test]
+    fn typing_and_pasting_both_cross_the_window_boundary() {
+        let src = production_source();
+        for (path, entry) in [
+            ("keystroke", "fn broadcast_input("),
+            ("paste", "fn paste_text_confirmed("),
+        ] {
+            let body = src
+                .split(entry)
+                .nth(1)
+                .unwrap_or_else(|| panic!("{path} path: {entry} not found"));
+            let end = body.find("\n    fn ").unwrap_or(body.len());
+            let body = &body[..end];
+            assert!(
+                body.contains("scope_crosses_windows(&ws.mux.broadcast)")
+                    && body.contains("for other in self.windows.values_mut()"),
+                "the {path} path must walk the other windows when the scope \
+                 reaches across them"
+            );
+        }
     }
 
     /// `broadcast-default` parsed for three releases without anything reading
