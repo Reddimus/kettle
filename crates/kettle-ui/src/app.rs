@@ -4831,8 +4831,24 @@ fn broadcast_scope_for_default(
 /// Whether a session sweep is owed as of `now`. The first turn always sweeps,
 /// so a workspace that changes and then goes quiet is written once rather than
 /// waiting for a second turn that may never come.
-fn session_sweep_due(last: Option<std::time::Instant>, now: std::time::Instant) -> bool {
-    last.is_none_or(|then| now.saturating_duration_since(then) >= SESSION_SWEEP)
+///
+/// A window with no tabs is never swept, whatever the clock says. A sweep is a
+/// background refresh of what is on screen, and an empty window is one that has
+/// not opened yet or is on its way out — writing that snapshot would put
+/// `{"tabs":[],"windows":[]}` over the saved session the user is about to have
+/// restored. The paths that genuinely mean to erase — `close_window`, and the
+/// reap that precedes this — still save explicitly, and this does not touch
+/// them. Same rule as the named-layout guard in `session_write_target`,
+/// which exists because that exact overwrite shipped once.
+///
+/// Returning `false` here deliberately leaves the caller's timestamp alone, so
+/// a window that is skipped does not consume the interval for the others.
+fn session_sweep_due(
+    last: Option<std::time::Instant>,
+    now: std::time::Instant,
+    window_has_tabs: bool,
+) -> bool {
+    window_has_tabs && last.is_none_or(|then| now.saturating_duration_since(then) >= SESSION_SWEEP)
 }
 
 /// v2.19.0 (tear-off UX): tracking for the one in-flight torn-window drag.
@@ -23642,7 +23658,7 @@ impl App {
         // Catch the session changes no gesture announces — see `SESSION_SWEEP`.
         // Deliberately NOT part of the returned deadline: this must never be a
         // reason to wake up.
-        if session_sweep_due(self.last_session_sweep, now) {
+        if session_sweep_due(self.last_session_sweep, now, !ws.mux.tabs.is_empty()) {
             self.last_session_sweep = Some(now);
             self.save_session(ws);
         }
@@ -24644,19 +24660,37 @@ mod tests {
     fn the_session_sweep_rides_existing_turns_and_never_schedules_one() {
         let t0 = std::time::Instant::now();
         assert!(
-            session_sweep_due(None, t0),
+            session_sweep_due(None, t0, true),
             "the first turn sweeps, so a workspace that changes and then goes \
              quiet is still written"
         );
-        assert!(!session_sweep_due(Some(t0), t0));
+        assert!(!session_sweep_due(Some(t0), t0, true));
         assert!(!session_sweep_due(
             Some(t0),
-            t0 + super::SESSION_SWEEP - std::time::Duration::from_millis(1)
+            t0 + super::SESSION_SWEEP - std::time::Duration::from_millis(1),
+            true
         ));
-        assert!(session_sweep_due(Some(t0), t0 + super::SESSION_SWEEP));
+        assert!(session_sweep_due(Some(t0), t0 + super::SESSION_SWEEP, true));
         // A timestamp from the future (a paused VM, a mid-turn re-entry)
         // must not make every turn a sweep.
-        assert!(!session_sweep_due(Some(t0 + super::SESSION_SWEEP), t0));
+        assert!(!session_sweep_due(
+            Some(t0 + super::SESSION_SWEEP),
+            t0,
+            true
+        ));
+
+        // An empty window is never swept, however overdue the clock says it
+        // is. Its snapshot is `{"tabs":[],"windows":[]}`, and a window is
+        // empty exactly when it has not opened yet or is on its way out —
+        // writing then would erase the session about to be restored. The
+        // deliberate erasures (`close_window`, the reap above this call) save
+        // on their own and are not affected.
+        assert!(!session_sweep_due(None, t0, false));
+        assert!(!session_sweep_due(
+            Some(t0),
+            t0 + super::SESSION_SWEEP * 1000,
+            false
+        ));
 
         // And the constant is reachable from exactly one place: its own
         // declaration and the predicate above. A third mention would mean it
@@ -24678,8 +24712,12 @@ mod tests {
             .nth(1)
             .expect("about_to_wait_inner present");
         assert!(
-            wait.contains("session_sweep_due(self.last_session_sweep, now)"),
-            "the sweep must be driven from the event-loop turn itself"
+            wait.contains(
+                "session_sweep_due(self.last_session_sweep, now, !ws.mux.tabs.is_empty())"
+            ),
+            "the sweep must be driven from the event-loop turn itself, and must \
+             pass the window's own emptiness so it cannot overwrite a saved \
+             session with a window that has nothing in it"
         );
     }
 

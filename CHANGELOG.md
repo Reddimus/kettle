@@ -226,7 +226,10 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
     at rest: it rides turns the event loop was already taking rather than arming
     a timer — waking twice a second would have shown up in the idle-CPU figure
     the perf suite publishes — and the write is skipped entirely when the
-    serialized text already matches what is on disk.
+    serialized text already matches what is on disk. A window with no tabs is
+    never swept, whatever the clock says: a window is empty exactly when it has
+    not opened yet or is on its way out, and writing that snapshot would put an
+    empty session over the one about to be restored.
 
   - **`split-auto` always split downward.** The dispatch arm read
     `Action::SplitDown | Action::SplitAuto`, so "auto" was literally "down" —
