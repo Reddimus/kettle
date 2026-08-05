@@ -1328,24 +1328,24 @@ pub struct Config {
     /// panes. No-op until wired into the render layer.
     pub inactive_bg_color_offset: f32,
     /// Terminator parity (terminatorlib/config.py:99
-    /// `split_to_group`): new splits inherit the parent's broadcast
-    /// group. Parsed and validated for forward-compat (see
-    /// `docs/CONFIG.md`'s "genuine future work" table) but **not yet
-    /// read anywhere** — it needs kettle's named broadcast groups
-    /// (Bucket D) formalized first, so wiring it lives in
-    /// `kettle-ui`'s pane-split path alongside `BroadcastScope::Group`,
-    /// not here.
+    /// `split_to_group`): a new split joins the broadcast group of the pane it
+    /// came from, so splitting a grouped pane widens the group instead of
+    /// quietly dropping out of it. Read by `Mux::inherit_split_group`.
     pub split_to_group: bool,
     /// Terminator parity (terminatorlib/config.py:100
-    /// `autoclean_groups`): remove empty broadcast groups
-    /// automatically. Same forward-compat-stub status as
-    /// `split_to_group` above — parsed, not yet consumed.
+    /// `autoclean_groups`): forget a broadcast group once its last pane is
+    /// gone. Terminator prunes an explicit group list (`group_hoover`);
+    /// kettle's groups are just the names its panes carry, so what this cleans
+    /// is a broadcast scope still aimed at a group with no members. Read by
+    /// `Mux::hoover_groups`.
     pub autoclean_groups: bool,
     /// Terminator parity (terminatorlib/config.py:80
-    /// `always_split_with_profile`): new splits inherit the
-    /// parent pane's profile. Parsed for forward-compat only — needs
-    /// the profile concept formalized in the pane-split path first
-    /// (see `docs/CONFIG.md`); not yet read anywhere.
+    /// `always_split_with_profile`): a new split inherits the parent pane's
+    /// launch command. kettle already clones an ordinary shell; what this
+    /// changes is the direct-launch case (`kettle -e vim`, an agent CLI),
+    /// which otherwise splits to a plain shell so the new pane is useful
+    /// rather than a second copy of the editor. Read by
+    /// `Mux::split_focused_launch`.
     pub always_split_with_profile: bool,
     /// Terminator parity (terminatorlib/config.py:73
     /// `focus`): focus mode — click (default), sloppy (focus
@@ -7194,8 +7194,7 @@ cell-height = 1.2\n";
         );
     }
 
-    /// Drift guard: `split_to_group`, `autoclean_groups`,
-    /// `always_split_with_profile`, `cursor_color_default`,
+    /// Drift guard: `cursor_color_default`,
     /// `use_system_font`, `use_theme_colors`, `extra_styling`, and
     /// `http_proxy` are parsed, validated, and stored on `Config` but
     /// (as of this writing) never *read* anywhere outside this file's
@@ -7213,12 +7212,6 @@ cell-height = 1.2\n";
     fn dead_terminator_stub_fields_document_their_own_inertness() {
         let src = include_str!("lib.rs");
         for (field_decl, marker) in [
-            ("pub split_to_group: bool", "not yet\n    /// read anywhere"),
-            ("pub autoclean_groups: bool", "forward-compat-stub status"),
-            (
-                "pub always_split_with_profile: bool",
-                "not yet read anywhere",
-            ),
             (
                 "pub cursor_color_default: bool",
                 "permanently a no-op by design",
@@ -7252,6 +7245,47 @@ cell-height = 1.2\n";
                  contain {marker:?}, marking it as an intentionally inert \
                  Terminator-parity stub (see docs/CONFIG.md); doc comment \
                  window was: {window:?}"
+            );
+        }
+    }
+
+    /// The other side of that guard. `split_to_group`, `autoclean_groups` and
+    /// `always_split_with_profile` used to be on the inert list; they are wired
+    /// now, and each doc comment names the code that reads it. Pin that, so the
+    /// disclosure cannot drift back to "parsed, not yet consumed" while the
+    /// behaviour underneath still exists — a reader who believed it would go on
+    /// to "wire it up" a second time. The behaviour itself is tested in
+    /// `kettle-ui`, which is where the readers live.
+    #[test]
+    fn the_split_and_group_keys_name_the_code_that_reads_them() {
+        let src = include_str!("lib.rs");
+        for (field_decl, reader) in [
+            ("pub split_to_group: bool", "Mux::inherit_split_group"),
+            ("pub autoclean_groups: bool", "Mux::hoover_groups"),
+            (
+                "pub always_split_with_profile: bool",
+                "Mux::split_focused_launch",
+            ),
+        ] {
+            let decl_pos = src
+                .find(field_decl)
+                .unwrap_or_else(|| panic!("field declaration `{field_decl}` not found in lib.rs"));
+            let mut window_start = decl_pos.saturating_sub(700);
+            while window_start > 0 && !src.is_char_boundary(window_start) {
+                window_start -= 1;
+            }
+            let window = &src[window_start..decl_pos];
+            assert!(
+                window.contains(reader),
+                "the doc comment above `{field_decl}` should name `{reader}` as \
+                 its reader; window was: {window:?}"
+            );
+            assert!(
+                !window.contains("not yet read anywhere")
+                    && !window.contains("not yet consumed")
+                    && !window.contains("forward-compat only"),
+                "`{field_decl}` is wired — its doc comment must not still call \
+                 it inert"
             );
         }
     }

@@ -58,6 +58,37 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
     window size, instead of reserving 95px on a wide monitor and almost
     nothing on a narrow one.
 
+  - **Four Terminator config keys parsed and did nothing.** `broadcast-default`,
+    `split-to-group`, `autoclean-groups` and `always-split-with-profile` were
+    accepted, validated, stored — and never read. Setting them changed nothing,
+    and `--check-config` reported them as fine. They are wired now:
+
+    - `broadcast-default` picks the scope the broadcast chord turns on:
+      `group` (the default) is the active tab, exactly what the chord has
+      always done; `all` is the whole window; `off` means the chord cannot
+      enable broadcast at all. Terminator stores this as the *initial* mode
+      instead — kettle waits to be asked, because a window that started in
+      `all` would mirror every keystroke into every pane before you touched
+      anything, which kettle shipped once by accident and had reported as a
+      bug. Terminator's own default behaves identically either way.
+    - `split-to-group` puts a new split in the broadcast group of the pane it
+      came from, instead of silently dropping out of it.
+    - `autoclean-groups` drops a broadcast still aimed at a group whose last
+      pane has closed. Terminator prunes a group registry; kettle's groups are
+      just the names its panes carry, so the thing that outlives its members is
+      the scope — which kept the titlebar claiming a group nobody was in, and
+      would have swept up the next pane given that name.
+    - `always-split-with-profile` makes a split repeat the parent's launch
+      command rather than falling back to a shell. It only affects direct
+      launches (`kettle -e vim`, an agent CLI); an ordinary shell was always
+      cloned.
+
+    The same chord is a toggle now. It used to *set* per-tab broadcast, so the
+    key that turned broadcasting on could not turn it off again and you had to
+    know a second one. Terminator has that pair too — `group_all` /
+    `ungroup_all` — plus a `group_all_toggle` that ships unbound; this is that
+    toggle, and the explicit off chord still works.
+
   - **`rotate_cw` / `rotate_ccw` turned one split, and the two directions did
     not undo each other.** Terminator's rotate turns the visible tab's whole
     layout a quarter turn (`paned.py:rotate_recursive`); kettle flipped the axis

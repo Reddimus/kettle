@@ -614,6 +614,29 @@ pub(crate) fn is_reapable(closed: bool, held: bool, child_exited: bool) -> bool 
     closed || (!held && child_exited)
 }
 
+/// Whether a `Group` broadcast scope should be dropped after a pane removal:
+/// only when `autoclean-groups` is on and the group has no members left. Pure
+/// so the truth table can be driven directly — a `Pane` needs a real PTY, so a
+/// test that built one to check the keep-case would be an integration test
+/// pretending to be a unit test.
+pub(crate) fn group_scope_is_stale(autoclean: bool, group_populated: bool) -> bool {
+    autoclean && !group_populated
+}
+
+/// Whether splitting a pane launched as `argv` should start the configured
+/// shell instead of repeating that launch.
+///
+/// A pane with no argv is already the shell. Beyond that, kettle clones an
+/// ordinary shell launch but deliberately falls back for a *direct* one — an
+/// editor, an agent CLI — so the new pane is somewhere to work rather than a
+/// second copy of the program you were reading. Terminator has no such
+/// distinction: `always_split_with_profile` forces the new terminal onto the
+/// parent's profile, custom command and all (`paned.py`), and setting it here
+/// asks for exactly that.
+pub(crate) fn split_falls_back_to_shell(argv: &[String], always_with_profile: bool) -> bool {
+    argv.is_empty() || (!always_with_profile && direct_launch_splits_to_shell(argv))
+}
+
 pub enum Node {
     Leaf(u64),
     Split {
@@ -1244,6 +1267,15 @@ pub struct Mux {
     /// Bounded so a long-running session doesn't accumulate state.
     /// LIFO: `pop_back` returns the most-recently-closed tab.
     pub closed_tabs: std::collections::VecDeque<ClosedTab>,
+    /// Terminator's `autoclean_groups` (`terminator.py:group_hoover`): forget a
+    /// broadcast group once its last pane is gone. Terminator keeps an explicit
+    /// group list to prune; kettle's groups are just the names its panes carry,
+    /// so the only thing that can outlive its members is a broadcast *scope*
+    /// still aimed at the dead group — which would keep the titlebar claiming a
+    /// group that no longer exists and re-capture any pane later given the same
+    /// name. Mirrored from the config at window construction, alongside the
+    /// other process-wide flags above.
+    pub autoclean_groups: bool,
 }
 
 impl Mux {
@@ -1257,6 +1289,27 @@ impl Mux {
             record_lossless: false,
             osc52_copy_allowed: true,
             closed_tabs: std::collections::VecDeque::with_capacity(CLOSED_TAB_RING_CAP),
+            autoclean_groups: true,
+        }
+    }
+
+    /// Terminator's `group_hoover`: drop a broadcast scope whose group has no
+    /// members left. Called after every pane removal.
+    ///
+    /// Without it, closing the last pane of a group leaves the window still
+    /// claiming to broadcast to it — the titlebar keeps showing the group, and
+    /// the moment any pane is later given that name it silently joins a
+    /// broadcast the user set up for panes that are gone.
+    fn hoover_groups(&mut self) {
+        let BroadcastScope::Group(name) = &self.broadcast else {
+            return;
+        };
+        let populated = self
+            .panes
+            .values()
+            .any(|pane| pane.group_name.as_deref() == Some(name.as_str()));
+        if group_scope_is_stale(self.autoclean_groups, populated) {
+            self.broadcast = BroadcastScope::Off;
         }
     }
 
@@ -1894,10 +1947,32 @@ impl Mux {
             Some(pane) => (pane.argv.clone(), pane.term.current_dir()),
             None => (Vec::new(), None),
         };
-        if argv.is_empty() || direct_launch_splits_to_shell(&argv) {
+        if split_falls_back_to_shell(&argv, cfg.always_split_with_profile) {
             argv = shell_argv(cfg);
         }
         launch_cwd(argv, raw_cwd)
+    }
+
+    /// Terminator's `split_to_group` (`paned.py`: `if widget.group and
+    /// self.config['split_to_group']`): put a freshly split pane in the same
+    /// broadcast group as the pane it came from, so splitting a grouped pane
+    /// widens the group instead of quietly dropping out of it.
+    ///
+    /// Must run BEFORE the graft — grafting moves focus to the new pane, and
+    /// the group being inherited is the *old* focus's.
+    fn inherit_split_group(&mut self, cfg: &Config, new_id: u64) {
+        if !cfg.split_to_group {
+            return;
+        }
+        let group = self
+            .active_focus()
+            .and_then(|id| self.panes.get(&id))
+            .and_then(|pane| pane.group_name.clone());
+        if let Some(group) = group
+            && let Some(pane) = self.panes.get_mut(&new_id)
+        {
+            pane.group_name = Some(group);
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1935,6 +2010,7 @@ impl Mux {
         // focused cwd. See `split_focused_launch`.
         let (argv, cwd) = self.split_focused_launch(cfg);
         let new_id = self.spawn_pane(cfg, geometry, waker, cwd.as_deref(), &argv)?;
+        self.inherit_split_group(cfg, new_id);
         let a = self.active;
         let grafted = self
             .tabs
@@ -1994,6 +2070,7 @@ impl Mux {
             return self.new_tab_with_geometry(cfg, geometry, waker, &argv, cwd.as_deref());
         }
         let new_id = self.spawn_pane(cfg, geometry, waker, cwd.as_deref(), &argv)?;
+        self.inherit_split_group(cfg, new_id);
         let a = self.active;
         let grafted = self
             .tabs
@@ -2430,6 +2507,7 @@ impl Mux {
                 }
             }
         }
+        self.hoover_groups();
         self.tabs.is_empty()
     }
 
@@ -2571,6 +2649,10 @@ impl Mux {
         // The user lands on whichever tab slid into focus; mark it seen so
         // its activity dot clears (same as every other tab-switch path).
         self.touch_active_tab_seen();
+        // The panes left this window entirely, so a group they were the last
+        // members of is gone from *here* even though it lives on in the window
+        // they land in.
+        self.hoover_groups();
         Some(DetachedTab { tab, panes })
     }
 
@@ -2652,6 +2734,7 @@ impl Mux {
             if (self.active >= self.tabs.len() || self.active > idx) && self.active > 0 {
                 self.active -= 1;
             }
+            self.hoover_groups();
         }
         self.tabs.is_empty()
     }
@@ -2820,6 +2903,9 @@ impl Mux {
             self.panes.remove(id);
         }
         Self::reap_tabs(&mut self.tabs, &mut self.active, &dead);
+        if !dead.is_empty() {
+            self.hoover_groups();
+        }
         self.tabs.is_empty()
     }
 
@@ -4246,6 +4332,124 @@ mod node_tests {
 
     /// Drift guard. `compute_broadcast_targets` is the
     /// pure helper that maps a `BroadcastScope` + focused pane +
+    /// Terminator's `autoclean_groups`. kettle has no group registry to prune —
+    /// a group is just the name its panes carry — so the thing that can outlive
+    /// its members is the broadcast *scope*. Left behind, the titlebar goes on
+    /// claiming a group nobody is in, and the next pane given that name is
+    /// silently swept into a broadcast set up for panes that are gone.
+    #[test]
+    fn a_group_with_no_panes_left_stops_being_the_broadcast_scope() {
+        // The whole decision, both axes:
+        assert!(
+            group_scope_is_stale(true, false),
+            "empty group, cleaning on"
+        );
+        assert!(
+            !group_scope_is_stale(true, true),
+            "a group that still has members must survive the removal of one"
+        );
+        assert!(
+            !group_scope_is_stale(false, false),
+            "`autoclean-groups = false` keeps the scope, as Terminator does"
+        );
+        assert!(!group_scope_is_stale(false, true));
+
+        // And the Mux applies it: no panes at all means no members.
+        let mut m = Mux::new();
+        m.broadcast = BroadcastScope::Group("fleet".into());
+        m.hoover_groups();
+        assert_eq!(m.broadcast, BroadcastScope::Off);
+
+        let mut kept = Mux::new();
+        kept.autoclean_groups = false;
+        kept.broadcast = BroadcastScope::Group("fleet".into());
+        kept.hoover_groups();
+        assert_eq!(kept.broadcast, BroadcastScope::Group("fleet".into()));
+
+        // Off and Tab scopes are not group scopes and are never touched.
+        for scope in [
+            BroadcastScope::Off,
+            BroadcastScope::Tab,
+            BroadcastScope::All,
+        ] {
+            let mut m = Mux::new();
+            m.broadcast = scope.clone();
+            m.hoover_groups();
+            assert_eq!(m.broadcast, scope);
+        }
+
+        // And the whole thing is opt-out: `autoclean-groups = false` keeps the
+        // scope pointed at the empty group, which is what Terminator does.
+        let mut kept = Mux::new();
+        kept.autoclean_groups = false;
+        kept.broadcast = BroadcastScope::Group("fleet".into());
+        kept.hoover_groups();
+        assert_eq!(kept.broadcast, BroadcastScope::Group("fleet".into()));
+    }
+
+    /// Terminator's `always_split_with_profile`. Off (the default), splitting
+    /// `kettle -e vim` gives you a shell to work in; on, it gives you the same
+    /// launch again, which is what a Terminator profile with a custom command
+    /// does.
+    #[test]
+    fn always_split_with_profile_repeats_a_direct_launch_instead_of_dropping_to_a_shell() {
+        let argv =
+            |parts: &[&str]| -> Vec<String> { parts.iter().map(|s| (*s).to_string()).collect() };
+        let editor = argv(&["nvim", "notes.md"]);
+        // Precondition: this argv must be one kettle would otherwise refuse to
+        // repeat, or the test proves nothing about the flag.
+        assert!(
+            direct_launch_splits_to_shell(&editor),
+            "fixture must be a direct launch for the flag to have anything to do"
+        );
+        assert!(split_falls_back_to_shell(&editor, false));
+        assert!(!split_falls_back_to_shell(&editor, true));
+
+        // A pane with no argv IS the shell, whatever the flag says.
+        assert!(split_falls_back_to_shell(&[], false));
+        assert!(split_falls_back_to_shell(&[], true));
+
+        // An ordinary shell launch was always cloned; the flag doesn't
+        // change that.
+        let shell = argv(&["pwsh", "-NoLogo"]);
+        assert!(!direct_launch_splits_to_shell(&shell));
+        assert!(!split_falls_back_to_shell(&shell, false));
+        assert!(!split_falls_back_to_shell(&shell, true));
+    }
+
+    /// `split_to_group` has to be applied to the new pane BEFORE the graft,
+    /// because grafting moves focus onto it — after that, "the focused pane's
+    /// group" is the new pane's own (empty) one and the inheritance silently
+    /// does nothing. Both split entry points are checked: a new one that
+    /// forgets the call would ship a config key that works on one code path.
+    #[test]
+    fn both_split_paths_inherit_the_group_before_the_graft_moves_focus() {
+        let src = production_source();
+        let calls = src
+            .matches("self.inherit_split_group(cfg, new_id);")
+            .count();
+        assert_eq!(
+            calls, 2,
+            "expected the group inheritance on both split paths \
+             (split_geometry / split_with_geometry); found {calls}"
+        );
+        for (idx, _) in src.match_indices("self.inherit_split_group(cfg, new_id);") {
+            let after = &src[idx..];
+            let graft = after
+                .find("insert_split(tab, new_id, dir)")
+                .expect("each inheritance is followed by its graft");
+            let next_call = after[1..]
+                .find("self.inherit_split_group(cfg, new_id);")
+                .map(|i| i + 1)
+                .unwrap_or(usize::MAX);
+            assert!(
+                graft < next_call,
+                "the graft belonging to this inheritance must come before the \
+                 next split path begins"
+            );
+        }
+    }
+
     /// tab + window state to the set of target pane IDs.
     /// Phase 2 of the named-groups design.
     #[test]

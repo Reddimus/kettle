@@ -4785,6 +4785,30 @@ pub struct App {
 /// sweep over an unchanged workspace costs one serialization and no I/O.
 const SESSION_SWEEP: std::time::Duration = std::time::Duration::from_secs(2);
 
+/// Which broadcast scope the group chord turns on, from `broadcast-default`.
+///
+/// Terminator stores this key as the *initial* groupsend mode
+/// (`terminator.py`: `groupsend = groupsend_type[config['broadcast_default']]`).
+/// kettle reads it as the scope the chord selects instead, for one reason: a
+/// window that started in `all` would mirror every keystroke into every pane
+/// before the user had touched anything. kettle shipped exactly that once, by
+/// misreading this key, and it was reported as a bug.
+///
+/// For Terminator's own default the two readings are the same thing — its
+/// `group` mode with no groups yet assigned sends only to the focused terminal
+/// — so the divergence is visible only under `broadcast-default = all`, where
+/// kettle waits to be asked. `group` maps to kettle's per-tab broadcast, which
+/// is what a kettle "group" has always meant to the chord.
+fn broadcast_scope_for_default(
+    default: kettle_config::BroadcastDefault,
+) -> crate::mux::BroadcastScope {
+    match default {
+        kettle_config::BroadcastDefault::All => crate::mux::BroadcastScope::All,
+        kettle_config::BroadcastDefault::Group => crate::mux::BroadcastScope::Tab,
+        kettle_config::BroadcastDefault::Off => crate::mux::BroadcastScope::Off,
+    }
+}
+
 /// Whether a session sweep is owed as of `now`. The first turn always sweeps,
 /// so a workspace that changes and then goes quiet is written once rather than
 /// waiting for a second turn that may never come.
@@ -5336,6 +5360,7 @@ impl App {
                 m.record_lossless = recording_requested;
             }
             m.osc52_copy_allowed = osc52_copy_allowed;
+            m.autoclean_groups = initial_cfg.autoclean_groups;
             m
         };
         let mut windows = std::collections::BTreeMap::new();
@@ -12442,14 +12467,21 @@ impl App {
                 self.open_search(ws);
             }
             Action::ToggleBroadcastAll => {
-                // The "broadcast-all" action is actually
-                // per-tab (the action's misnaming was a known
-                // tech-debt). The Tab variant preserves the
-                // existing UX exactly. The new All / Group
-                // variants are reachable via the upcoming
-                // GroupTab/GroupWindow/CreateGroup actions
-                // (already surfaced; dispatch is a follow-up).
-                ws.mux.broadcast = crate::mux::BroadcastScope::Tab;
+                // The action's name is honest about being a toggle now: it
+                // used to *set* Tab scope unconditionally, so the chord that
+                // turned broadcast on could not turn it off again and the user
+                // had to know a second one (Ctrl+Shift+Alt+G). Terminator has
+                // the same pair — `group_all` / `ungroup_all` — plus a
+                // `group_all_toggle` that ships unbound; this is that toggle.
+                // The explicit off chord still works.
+                //
+                // Which scope it turns *on* is `broadcast-default`.
+                let on = broadcast_scope_for_default(self.cfg.broadcast_default);
+                ws.mux.broadcast = if ws.mux.broadcast == on {
+                    crate::mux::BroadcastScope::Off
+                } else {
+                    on
+                };
             }
             Action::ToggleBroadcastOff => {
                 ws.mux.broadcast = crate::mux::BroadcastScope::Off;
@@ -14304,6 +14336,7 @@ impl App {
         ));
         ws.mux
             .set_unnegotiated_modified_enter(self.cfg.modify_other_keys);
+        ws.mux.autoclean_groups = self.cfg.autoclean_groups;
         let runtime_font_size = ws.renderer.as_ref().map(|r| r.font_size());
         if let Some(r) = ws.renderer.as_mut() {
             // Family first: the font-size setter re-measures cells and must see
@@ -20331,6 +20364,7 @@ impl App {
         let mut mux = Mux::new();
         mux.lua_output_subscribed = self.lua_engine.is_some();
         mux.osc52_copy_allowed = osc52_copy_is_available(self.cfg.osc52, self.clipboard.is_some());
+        mux.autoclean_groups = self.cfg.autoclean_groups;
         {
             mux.lua_output_subscribed |= self.recorder.is_some();
             mux.record_lossless = self.recorder.is_some();
@@ -24364,8 +24398,8 @@ mod tests {
         Osc52ClipboardChannel, ParsedRemoteCommandBatch, PendingLuaCommand, PendingLuaCommands,
         PendingRemoteCommand, RemoteBatchClaim, SplitDrag, apply_bs_del_binding,
         apply_output_generation_outcome, apply_remote_title_transition, argv_is_nonlocal_client,
-        assign_mnemonics, cached_pane_cursor_blinking, claim_remote_command_file,
-        context_menu_item_columns, context_menu_max_scroll_offset,
+        assign_mnemonics, broadcast_scope_for_default, cached_pane_cursor_blinking,
+        claim_remote_command_file, context_menu_item_columns, context_menu_max_scroll_offset,
         context_menu_scroll_for_highlight, context_menu_snapshot_reuse_safe,
         context_menu_surface_can_fit_row, count_rows_fitting, ctl_input_error, filter_disabled,
         find_menu_row_y, fit_context_menu_row, input_rejection_message, local_paste_within_limit,
@@ -24384,6 +24418,81 @@ mod tests {
     use kettle_render::{ContextMenuRow, FrameOutcome, PaneSnapshot};
     use std::sync::Arc;
     use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+
+    /// `broadcast-default` parsed for three releases without anything reading
+    /// it, so `broadcast-default = all` was indistinguishable from leaving the
+    /// key out. It picks the scope the group chord turns on now.
+    ///
+    /// The default maps to per-tab, which is what the chord has always done —
+    /// wiring the key up must not change what an unconfigured kettle does.
+    #[test]
+    fn broadcast_default_picks_the_scope_the_group_chord_turns_on() {
+        use crate::mux::BroadcastScope;
+        use kettle_config::BroadcastDefault;
+
+        assert_eq!(
+            broadcast_scope_for_default(BroadcastDefault::default()),
+            BroadcastScope::Tab,
+            "an unconfigured kettle must keep the per-tab behaviour the chord \
+             has always had"
+        );
+        assert_eq!(
+            broadcast_scope_for_default(BroadcastDefault::All),
+            BroadcastScope::All
+        );
+        assert_eq!(
+            broadcast_scope_for_default(BroadcastDefault::Group),
+            BroadcastScope::Tab
+        );
+        assert_eq!(
+            broadcast_scope_for_default(BroadcastDefault::Off),
+            BroadcastScope::Off
+        );
+
+        // The chord is a toggle now: it used to *set* Tab scope, so the key
+        // that turned broadcast on could not turn it off and the user had to
+        // know a second chord. Drive the dispatch's own expression.
+        let toggled = |current: BroadcastScope, on: BroadcastScope| {
+            if current == on {
+                BroadcastScope::Off
+            } else {
+                on
+            }
+        };
+        let on = broadcast_scope_for_default(BroadcastDefault::Group);
+        assert_eq!(
+            toggled(BroadcastScope::Off, on.clone()),
+            BroadcastScope::Tab
+        );
+        assert_eq!(
+            toggled(BroadcastScope::Tab, on.clone()),
+            BroadcastScope::Off,
+            "pressing the chord again must turn broadcast off"
+        );
+        // From some other scope it selects the configured one rather than
+        // toggling off — the user asked for this scope.
+        assert_eq!(toggled(BroadcastScope::All, on), BroadcastScope::Tab);
+        // And `off` means the chord genuinely cannot enable broadcast.
+        let never = broadcast_scope_for_default(BroadcastDefault::Off);
+        assert_eq!(
+            toggled(BroadcastScope::Off, never.clone()),
+            BroadcastScope::Off
+        );
+        assert_eq!(toggled(BroadcastScope::Tab, never), BroadcastScope::Off);
+
+        // The dispatch must be running that expression, not a re-implementation.
+        let src = production_source();
+        let arm = src
+            .split("Action::ToggleBroadcastAll => {")
+            .nth(1)
+            .expect("the broadcast toggle arm is present");
+        assert!(
+            arm.contains("broadcast_scope_for_default(self.cfg.broadcast_default)")
+                && arm.contains("if ws.mux.broadcast == on"),
+            "the toggle arm must read `broadcast-default` and compare against \
+             the current scope"
+        );
+    }
 
     /// A shell `cd`, a dragged divider and a renamed tab all change what
     /// `session.json` should say without any gesture that saves it, so a sweep
