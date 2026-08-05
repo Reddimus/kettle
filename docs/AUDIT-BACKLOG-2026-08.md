@@ -402,11 +402,27 @@ parity work. The recurring shapes:
   distinctive comment at the production site does not help when the test
   repeats it as a string literal.
 
-  Fixed by giving the module a `production_source()` that slices the test
-  module off before any guard searches it, and rebuilding that guard against
-  the current signatures. The helper asserts it excludes itself, so it cannot
-  quietly stop cutting. The remaining guards in both files still search the
-  whole file and should be moved onto it.
+  **CLOSED.** Both files now have a `production_source()` that REMOVES every
+  `#[cfg(test)]` item before any guard searches, and all 50 self-searching
+  guards were moved onto it — a scan for whole-file `contains` needles reports
+  zero in each file, against 22 and 4 before.
+
+  Removing rather than truncating matters: `app.rs` interleaves seven
+  `#[cfg(test)]` items with production code across 30,000 lines, so a first
+  attempt that sliced at the first one threw most of the production away and
+  failed all 48 guards for the opposite reason. The helper now asserts three
+  postconditions — that it excludes itself, that it still contains a known
+  production symbol, and that it kept more than half the file — so an
+  over-broad or under-broad cut fails loudly instead of quietly making every
+  guard meaningless in either direction.
+
+  Turning the guards on immediately found a second rotted one:
+  `recorder_output_flushed_before_reap_and_on_close` keyed on three comment
+  sentences, and one had been reworded when `close_window_now` grew its
+  `DropPanes` ordering explanation. The wiring was intact; the guard had been
+  matching its own stale copy of the sentence. It keys on the three call sites
+  and their enclosing functions now, plus an exact count, because a comment is
+  not a contract.
 - Tests that assert a *duplicated* expression instead of driving the production
   entry point (`update_cli` confirmation, shell-integration mapping,
   `--print-default-config` dispatch, man-page keybindings).

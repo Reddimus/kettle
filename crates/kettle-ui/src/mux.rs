@@ -3490,6 +3490,28 @@ impl Default for Mux {
 mod node_tests {
     use super::*;
 
+    /// The production half of this file: everything above the test module.
+    ///
+    /// A source guard that searches the WHOLE file also searches its own
+    /// assertions, so a plain `src.contains("…")` matches the needle written
+    /// one line above it and passes whether or not the production code is
+    /// there — and a `matches(…).count()` is inflated by one for the same
+    /// reason. Slicing the test module off first removes the class.
+    fn production_source() -> String {
+        let src = include_str!("mux.rs").replace("\r\n", "\n");
+        let marker = "\n#[cfg(test)]\nmod node_tests {";
+        let cut = src
+            .find(marker)
+            .expect("mux.rs must have a test module to slice off");
+        let production = src[..cut].to_string();
+        assert!(
+            !production.contains("fn production_source()"),
+            "the slice must exclude the test module, or every guard built on \
+             it still self-matches"
+        );
+        production
+    }
+
     #[test]
     fn pane_input_outcome_precedence_is_explicit() {
         use PaneInputResult::{Backpressured, Failed, Oversize, Queued, ReadOnly};
@@ -3931,7 +3953,7 @@ mod node_tests {
     /// the source level.
     #[test]
     fn build_node_reaps_orphan_panes_on_partial_restore_failure() {
-        let src = include_str!("mux.rs");
+        let src = production_source();
         assert!(
             src.contains("spawned: &mut Vec<u64>"),
             "build_node must thread a spawned-id accumulator so a partial \
@@ -5657,7 +5679,10 @@ mod node_tests {
     /// would have to add the reap to keep the count, or fail this guard).
     #[test]
     fn split_callers_reap_orphaned_pane_on_graft_failure() {
-        let src = include_str!("mux.rs");
+        // Counted over production only. Searching the whole file counted this
+        // test's own literal as a fourth site, so the guard was one short of
+        // what it claimed to require.
+        let src = production_source();
         let reaps = src.matches("self.panes.remove(&new_id)").count();
         assert!(
             reaps >= 3,

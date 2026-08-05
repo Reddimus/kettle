@@ -382,6 +382,66 @@ fn optional_u64_param(
     }
 }
 
+/// The production half of this file: everything above the FIRST test module.
+///
+/// A source guard that searches the whole file also searches its own
+/// assertions, so a plain `src.contains("…")` matches the needle written one
+/// line above it and passes whether or not the production code is there at
+/// all — and a `matches(…).count()` comes out one too high for the same
+/// reason. That is not hypothetical: `split_divider_drag_is_wired` went on
+/// passing after the multi-window refactor threaded `ws` through
+/// `split_drag_at` and `split_seam_hover_icon`, leaving both needles with
+/// zero production matches, and it still passed with the entire
+/// press-to-start-drag block deleted while rustc reported both functions as
+/// dead code.
+///
+/// Removing every `#[cfg(test)]` item removes the class for every guard in the
+/// file at once. It has to REMOVE them rather than truncate at the first one:
+/// this file interleaves seven test items with production code across 30,000
+/// lines, so cutting at the first would throw most of the production away and
+/// fail every guard for the opposite reason.
+///
+/// Top-level items close on a column-0 brace — rustfmt guarantees it, and
+/// nothing nested can produce one — so a line scan is enough, and the
+/// postconditions below fail loudly if that ever stops holding.
+#[cfg(test)]
+fn production_source() -> String {
+    let src = include_str!("app.rs").replace("\r\n", "\n");
+    let mut production = String::with_capacity(src.len());
+    let mut inside_test_item = false;
+    for line in src.lines() {
+        if inside_test_item {
+            if line == "}" {
+                inside_test_item = false;
+            }
+            continue;
+        }
+        if line == "#[cfg(test)]" {
+            inside_test_item = true;
+            continue;
+        }
+        production.push_str(line);
+        production.push('\n');
+    }
+    assert!(
+        !production.contains("fn production_source()"),
+        "the slice must exclude every test item, or the guards built on it \
+         still self-match"
+    );
+    assert!(
+        production.contains("fn apply_bs_del_binding("),
+        "the slice must KEEP production code — a needle-free slice would fail \
+         every guard for the opposite reason"
+    );
+    assert!(
+        production.len() > src.len() / 2,
+        "production is {} bytes of {}, which is too little to be right",
+        production.len(),
+        src.len()
+    );
+    production
+}
+
 #[cfg(test)]
 mod ctl_target_param_tests {
     use super::optional_u64_param;
@@ -23822,9 +23882,10 @@ impl Drop for App {
 /// same approach as `kettle-core`'s teardown guard.
 #[cfg(test)]
 mod modal_discipline_guard {
+    use super::production_source;
     #[test]
     fn confirm_dialog_is_tracked_as_a_modal() {
-        let src = include_str!("app.rs").replace("\r\n", "\n");
+        let src = production_source();
         let body = |name: &str| -> String {
             let start = src
                 .find(&format!("fn {name}("))
@@ -23857,7 +23918,7 @@ mod modal_discipline_guard {
     /// that the decision is asked at all.
     #[test]
     fn every_close_gesture_asks_before_closing() {
-        let src = include_str!("app.rs").replace("\r\n", "\n");
+        let src = production_source();
         // Slice from a marker to the end of its enclosing arm/statement,
         // deliberately short so an inserted close below the window still fails.
         let after = |marker: &str, len: usize| -> String {
@@ -23907,7 +23968,7 @@ mod modal_discipline_guard {
     /// pin the honored returns at the source level.
     #[test]
     fn confirm_close_honors_close_returns() {
-        let src = include_str!("app.rs").replace("\r\n", "\n");
+        let src = production_source();
         let start = src
             .find("fn dispatch_confirm_action_arms(")
             .expect("dispatch_confirm_action_arms not found");
@@ -23975,7 +24036,7 @@ mod modal_discipline_guard {
     /// reason.
     #[test]
     fn confirm_dispatch_resizes_once_for_every_arm() {
-        let src = include_str!("app.rs").replace("\r\n", "\n");
+        let src = production_source();
         // Built at runtime so this guard cannot match its own source.
         let resize = ["self.", "resize_all(ws);"].concat();
 
@@ -24017,7 +24078,7 @@ mod modal_discipline_guard {
 
     #[test]
     fn pane_close_lifecycle_events_precede_pty_teardown() {
-        let source = include_str!("app.rs").replace("\r\n", "\n");
+        let source = production_source();
         // Construct these needles so this guard does not count its own source.
         let close_call = ["ws.mux.", "close_focused();"].concat();
         let focus_capture = ["let closing_pane = ws.mux.", "active_focus();"].concat();
@@ -24074,8 +24135,8 @@ mod tests {
         find_menu_row_y, fit_context_menu_row, input_rejection_message, local_paste_within_limit,
         modal_swallows_pointer, osc52_clipboard_channel, output_generation_advanced,
         output_wakeup_needs_paint, pane_cursor_blinking_with, pane_snapshot_keys_match,
-        parse_remote_command_batch, rank_layouts, sanitize_native_window_title, sanitize_title,
-        selection_kind, should_notify_input_rejection, should_poll_remote_window,
+        parse_remote_command_batch, production_source, rank_layouts, sanitize_native_window_title,
+        sanitize_title, selection_kind, should_notify_input_rejection, should_poll_remote_window,
         should_restore_session, should_reveal_after_renderer_init, stage_applied_remote_probe,
         stage_output_generations_for_frame, stage_remote_targets, startup_inner_size_px,
         typeahead_match,
@@ -24598,7 +24659,7 @@ mod tests {
 
     #[test]
     fn every_lua_event_and_url_handler_dispatch_drains_commands() {
-        let source = include_str!("app.rs");
+        let source = production_source();
         let raw_fire = [".fire_", "event("].concat();
         assert_eq!(
             source.matches(&raw_fire).count(),
@@ -25223,7 +25284,7 @@ mod tests {
 
     #[test]
     fn watched_reload_loads_once_then_applies_every_window() {
-        let src = include_str!("app.rs");
+        let src = production_source();
         let body = src
             .split("fn reload_config_windows(&mut self)")
             .nth(1)
@@ -25433,7 +25494,7 @@ mod tests {
     /// (ctl / remote / update banner) misroute to a stale window.
     #[test]
     fn focused_event_updates_focused_seq() {
-        let src = include_str!("app.rs");
+        let src = production_source();
         let arm = src
             .find("WindowEvent::Focused(f) =>")
             .expect("Focused arm present");
@@ -25450,7 +25511,7 @@ mod tests {
     /// on a bounded backoff.
     #[test]
     fn gpu_lost_quiesces_and_schedules_recovery() {
-        let src = include_str!("app.rs");
+        let src = production_source();
         let guard = src
             .find("if self.gpu.as_ref().is_some_and(|g| g.is_lost()) {")
             .expect("gpu_lost redraw guard present");
@@ -25478,7 +25539,7 @@ mod tests {
 
     #[test]
     fn live_gpu_context_uses_event_loop_owned_display_handle() {
-        let src = include_str!("app.rs");
+        let src = production_source();
         let resumed = src
             .find("fn resumed_inner(")
             .expect("resumed_inner present");
@@ -25798,7 +25859,7 @@ mod tests {
 
     #[test]
     fn protocol_notifications_are_wired_to_ui_dispatch() {
-        let src = include_str!("app.rs");
+        let src = production_source();
         assert!(
             src.contains("drain_protocol_notifications()"),
             "drain_events must consume OSC 9/777 notification requests"
@@ -25852,7 +25913,7 @@ mod tests {
     /// this pins it at the source level.
     #[test]
     fn explicit_restore_paths_precede_default_session() {
-        let src = include_str!("app.rs").replace("\r\n", "\n");
+        let src = production_source();
         // The LOAD gate specifically (`} else if should_restore_session(...)`) —
         // distinct from the save gate's `None if should_restore_session(...)`,
         // which uses the same args and appears earlier in the file.
@@ -25909,7 +25970,7 @@ mod tests {
     /// dropdown arrow back into a plain `+` click.
     #[test]
     fn ctl_mouse_press_handles_app_chrome_before_panes() {
-        let src = include_str!("app.rs").replace('\r', "");
+        let src = production_source();
         let body = src
             .split("fn ctl_mouse_press(")
             .nth(1)
@@ -25932,36 +25993,6 @@ mod tests {
                     < body.find("rect_contains(bar.new_tab, px, py)"),
             "ctl_mouse_press must check the new-tab dropdown arrow before the + button"
         );
-    }
-
-    /// The production half of this file: everything above the test module.
-    ///
-    /// A source guard that searches the WHOLE file also searches its own
-    /// assertions, so every plain `src.contains("…")` matches the needle
-    /// written one line above it and passes whether or not the production code
-    /// is there at all. That is not hypothetical here: `split_divider_drag_is_wired`
-    /// went on passing after the multi-window refactor threaded `ws` through
-    /// `split_drag_at` and `split_seam_hover_icon`, with zero production
-    /// matches for either needle — and it still passed with the entire
-    /// press-to-start-drag block deleted, while rustc reported both functions
-    /// as dead code.
-    ///
-    /// Cutting the test module off first removes the whole class instead of
-    /// patching one needle at a time. Guards that need to search their own
-    /// module's helpers can still use `include_str!` directly.
-    fn production_source() -> String {
-        let src = include_str!("app.rs").replace("\r\n", "\n");
-        let marker = "\n#[cfg(test)]\nmod tests {";
-        let cut = src
-            .find(marker)
-            .expect("app.rs must have a test module to slice off");
-        let production = src[..cut].to_string();
-        assert!(
-            !production.contains("fn production_source()"),
-            "the slice must exclude the test module, or every guard built on \
-             it still self-matches"
-        );
-        production
     }
 
     /// Drift guard. Mouse drag-to-resize of split dividers is
@@ -26021,7 +26052,7 @@ mod tests {
     /// wiring is pinned here.
     #[test]
     fn the_group_all_actions_reach_a_dispatch_that_groups() {
-        let src = include_str!("app.rs").replace("\r\n", "\n");
+        let src = production_source();
         let arm_head = [
             "Action::GroupAll | Action::Ungroup",
             "All | Action::ToggleGroupAll => {",
@@ -26064,7 +26095,7 @@ mod tests {
     /// and focusing the pane answers it.
     #[test]
     fn the_pane_bell_indicator_is_wired_to_real_pane_state() {
-        let src = include_str!("app.rs").replace("\r\n", "\n");
+        let src = production_source();
         let at = src.find("metas.push((").expect("frame builder");
         let push: String = src[at..].chars().take(900).collect();
         assert!(
@@ -26093,7 +26124,7 @@ mod tests {
 
     #[test]
     fn animated_bg_redraw_is_edge_triggered() {
-        let src = include_str!("app.rs").replace("\r\n", "\n");
+        let src = production_source();
         assert!(
             src.contains("let bg_frame_due = bg_frame.is_some() && bg_frame != ws.last_bg_frame;"),
             "the bg redraw must edge-trigger on a frame-index change"
@@ -26115,21 +26146,42 @@ mod tests {
     /// out through the same recorder + Lua dispatcher before panes disappear.
     #[test]
     fn recorder_output_flushed_before_reap_and_on_close() {
-        let src = include_str!("app.rs");
+        let src = production_source();
         assert!(
             src.contains("fn flush_recorder_output(&mut self, ws: &mut WindowState)"),
             "the recorder-output flush helper must exist"
         );
-        for marker in [
-            "Capture a just-exited pane's final output before reap drops",
-            "Drain trailing recorder output before reap removes a",
-            "Tee any in-flight PTY output into the trace,",
+
+        // Keyed on the CALL SITES, not on the prose beside them. This guard
+        // used to look for three comment strings; one of them was reworded
+        // when `close_window_now` grew its DropPanes-ordering explanation, and
+        // the guard kept passing anyway because it was searching the whole
+        // file and matching its own copy of the old sentence. A comment is not
+        // a contract — the three functions that must flush are.
+        for owner in [
+            "fn redraw(&mut self, ws: &mut WindowState) {",
+            "fn close_window_now(&mut self, ws: &mut WindowState, drop_panes: DropPanes) {",
+            "fn about_to_wait_inner(",
         ] {
+            let body = src
+                .split(owner)
+                .nth(1)
+                .unwrap_or_else(|| panic!("{owner} must exist"))
+                .split("\n    fn ")
+                .next()
+                .expect("function body");
             assert!(
-                src.contains(marker),
-                "missing recorder-flush wiring at a close/reap site: {marker:?}"
+                body.contains("self.flush_recorder_output(ws);"),
+                "{owner} must flush recorder output before panes are dropped, \
+                 or a just-exited shell's last lines never reach the trace"
             );
         }
+        assert_eq!(
+            src.matches("self.flush_recorder_output(ws);").count(),
+            3,
+            "exactly three production sites flush; a fourth means a new close \
+             path appeared and this guard has not been told about it"
+        );
 
         let regular_drain = src
             .split("fn drain_events(&mut self, ws: &mut WindowState)")
@@ -26224,7 +26276,7 @@ mod tests {
     ///      `modal_swallows_pointer` modal, so the forward leaked before).
     #[test]
     fn event_state_leaks_are_gated() {
-        let src = include_str!("app.rs");
+        let src = production_source();
         // 1. Dropped-file modal gate, at the top of the arm.
         assert!(
             src.contains("WindowEvent::DroppedFile(path) => {")
@@ -26288,7 +26340,7 @@ mod tests {
     /// `Action::ScaledZoom` arm itself.
     #[test]
     fn scaled_zoom_baselines_off_live_font_size() {
-        let src = include_str!("app.rs");
+        let src = production_source();
         let helper = src
             .split("fn toggle_zoom_with_scale(")
             .nth(1)
@@ -26318,7 +26370,7 @@ mod tests {
     /// mutation order at the shared helper boundary.
     #[test]
     fn scaled_zoom_resizes_after_changing_font_metrics() {
-        let src = include_str!("app.rs");
+        let src = production_source();
         let helper = src
             .split("fn toggle_zoom_with_scale(")
             .nth(1)
@@ -26346,7 +26398,7 @@ mod tests {
     /// at the source.
     #[test]
     fn toggle_zoom_and_scaled_zoom_share_the_transition_helper() {
-        let src = include_str!("app.rs");
+        let src = production_source();
         let toggle_arm = src
             .split("Action::ToggleZoom => {")
             .nth(1)
@@ -26374,7 +26426,7 @@ mod tests {
     /// state; pin the filter at the source.
     #[test]
     fn search_key_filters_control_chars() {
-        let src = include_str!("app.rs");
+        let src = production_source();
         // The filtered push lives in search_key's catch-all arm.
         let arm = src
             .split("fn search_key(")
@@ -26394,7 +26446,7 @@ mod tests {
     /// state; pin at the source.
     #[test]
     fn ssh_key_filters_control_chars() {
-        let src = include_str!("app.rs");
+        let src = production_source();
         let arm = src
             .split("fn ssh_key(")
             .nth(1)
@@ -26682,7 +26734,7 @@ mod tests {
     /// can't see without a live window; pin them at the source.
     #[test]
     fn vim_menu_nav_intercepts_before_mnemonic_catchall() {
-        let src = include_str!("app.rs");
+        let src = production_source();
         let body = src
             .split("fn context_menu_key(")
             .nth(1)
@@ -26713,7 +26765,7 @@ mod tests {
     /// lopsided padding after restart with no error shown.
     #[test]
     fn window_padding_setting_writes_both_axes() {
-        let src = include_str!("app.rs");
+        let src = production_source();
         assert!(
             src.contains(
                 "if key_str == \"window-padding-x\" && !self.persist_pref(\"window-padding-y\", &new_val) {"
@@ -26733,7 +26785,7 @@ mod tests {
     /// shape at the source.
     #[test]
     fn gpu_picker_checks_persist_results_before_flagging_restart() {
-        let src = include_str!("app.rs");
+        let src = production_source();
         let arm = src
             .split("if key_str == \"gpu\" {")
             .nth(1)
@@ -26758,7 +26810,7 @@ mod tests {
 
     #[test]
     fn resized_ignores_degenerate_size() {
-        let src = include_str!("app.rs");
+        let src = production_source();
         let arm = src
             .split("WindowEvent::Resized(size) => {")
             .nth(1)
@@ -26868,7 +26920,7 @@ mod tests {
         assert!(super::TYPING_ECHO_WINDOW >= Duration::from_millis(100));
         // The Wakeup arm must consult it (source-level pin: the bypass calls
         // request_redraw and clears any pending coalesce).
-        let src = include_str!("app.rs").replace("\r\n", "\n");
+        let src = production_source();
         assert!(
             src.contains(
                 "if typed_recently(now, ws.last_typed, TYPING_ECHO_WINDOW) {\n                    ws.output_pacer.reset();"
@@ -26916,7 +26968,7 @@ mod tests {
     /// launch-override re-application.
     #[test]
     fn startup_is_not_taken_wholesale() {
-        let src = include_str!("app.rs").replace("\r\n", "\n");
+        let src = production_source();
         let taken = concat!("std::mem::take", "(&mut self.startup)");
         assert!(
             !src.contains(taken),
@@ -26936,7 +26988,7 @@ mod tests {
     /// the explicit owner when configured.
     #[test]
     fn system_theme_following_is_wired() {
-        let src = include_str!("app.rs").replace("\r\n", "\n");
+        let src = production_source();
         assert!(
             src.contains(concat!(
                 "WindowEvent::ThemeChanged",
@@ -26975,7 +27027,7 @@ mod tests {
 
     #[test]
     fn runtime_theme_changes_synchronize_lua_and_redraw_every_window() {
-        let src = include_str!("app.rs").replace("\r\n", "\n");
+        let src = production_source();
         let state_body = src
             .split(concat!("fn set_runtime_theme_state", "("))
             .nth(1)
@@ -27019,7 +27071,7 @@ mod tests {
     /// anywhere else reintroduces "closing one window kills them all".
     #[test]
     fn event_loop_exit_sites_are_allowlisted() {
-        let src = include_str!("app.rs").replace("\r\n", "\n");
+        let src = production_source();
         // concat! so this test's own literals don't self-match the scan.
         let exit_needle = concat!("event_loop", ".exit();");
         let n_exits = src.matches(exit_needle).count();
@@ -27050,7 +27102,7 @@ mod tests {
         // `.gitattributes eol=lf` fixes checkout; this keeps the test robust
         // even on a CRLF working tree. (`\r` removal doesn't touch the escaped
         // `\n` in this literal, so the test's own source can't self-match.)
-        let src = include_str!("app.rs").replace('\r', "");
+        let src = production_source();
         let gated = src
             .matches("if !modal_swallows_pointer(self.any_modal_open(ws), ws.context_menu.is_some()) {\n                        self.send_mouse(ws, sgr,")
             .count();
@@ -27533,7 +27585,7 @@ mod tests {
 
     #[test]
     fn clicks_share_the_fully_visible_hover_row_contract() {
-        let src = include_str!("app.rs").replace("\r\n", "\n");
+        let src = production_source();
         let start = src
             .find("fn context_menu_click_action(")
             .expect("context-menu click resolver");
@@ -27759,7 +27811,7 @@ mod tests {
 
     #[test]
     fn mouse_paste_routes_primary_and_putty_source() {
-        let src = include_str!("app.rs");
+        let src = production_source();
         assert!(
             src.contains("if bcode == 1 && !self.cfg.disable_mouse_paste {\n                    self.paste_primary(ws);"),
             "middle-click paste must use paste_primary so X11 PRIMARY works"
@@ -27784,7 +27836,7 @@ mod tests {
     /// source. Terminator's own set is `terminal_popup_menu.py`.
     #[test]
     fn the_context_menu_carries_every_terminator_row() {
-        let src = include_str!("app.rs").replace("\r\n", "\n");
+        let src = production_source();
         let body = src
             .split("fn context_menu_items(")
             .nth(1)
@@ -27841,7 +27893,7 @@ mod tests {
 
     #[test]
     fn context_menu_middle_click_dismisses_before_paste_or_tab_close() {
-        let src = include_str!("app.rs").replace("\r\n", "\n");
+        let src = production_source();
         assert!(
             src.matches("if ws.context_menu.is_some() && bcode != 2")
                 .count()
@@ -28154,7 +28206,7 @@ mod tests {
 
         // Keep a small source pin only for sub-millisecond deadline precision;
         // lifecycle behavior above is exercised through the real state machine.
-        let src = include_str!("app.rs").replace("\r\n", "\n");
+        let src = production_source();
         let start = src
             .find("fn about_to_wait_inner(")
             .expect("about_to_wait_inner present");
@@ -28172,7 +28224,7 @@ mod tests {
 
     #[test]
     fn output_frame_transition_follows_every_renderability_guard() {
-        let source = include_str!("app.rs").replace("\r\n", "\n");
+        let source = production_source();
         let redraw_start = source.find("fn redraw(").expect("redraw present");
         let redraw_tail = &source[redraw_start..];
         let redraw_end = redraw_tail
@@ -28204,7 +28256,7 @@ mod tests {
     /// redraws before each default 530 ms blink toggle.
     #[test]
     fn cursor_blink_waits_until_the_actual_deadline() {
-        let src = include_str!("app.rs").replace("\r\n", "\n");
+        let src = production_source();
         let start = src
             .find("fn about_to_wait_inner(")
             .expect("about_to_wait_inner present");
@@ -28376,7 +28428,7 @@ mod tests {
     /// source level.
     #[test]
     fn keybind_rebind_conflict_is_gated_behind_confirmation() {
-        let src = include_str!("app.rs");
+        let src = production_source();
         let capture_arm = src
             .split("if !keybind_chord_is_safe(mods, kk) {")
             .nth(1)
@@ -28958,7 +29010,7 @@ mod tests {
     /// spans winit's event dispatch and can't run headless.
     #[test]
     fn tear_off_flow_stays_wired() {
-        let src = include_str!("app.rs");
+        let src = production_source();
         // 1. The CursorMoved FSM block tears at the threshold (Chromium
         //    model), not at release.
         assert!(
@@ -29044,7 +29096,7 @@ mod tests {
     /// a real runtime switch, not just a parsed compatibility key.
     #[test]
     fn detachable_tabs_config_gates_all_detach_paths() {
-        let src = include_str!("app.rs");
+        let src = production_source();
         assert!(
             src.contains("if !self.cfg.detachable_tabs {\n                    log::info!(\"move_tab_to_new_window ignored because detachable-tabs = false\");"),
             "keyboard/palette move_tab_to_new_window must honor detachable-tabs = false"
@@ -29713,7 +29765,7 @@ mod tests {
 
     #[test]
     fn get_state_reports_desired_window_title() {
-        let src = include_str!("app.rs");
+        let src = production_source();
         let body = src
             .split("fn ctl_get_state")
             .nth(1)
@@ -30473,7 +30525,7 @@ mod tests {
     /// link rects visibly attached to the previous frame.
     #[test]
     fn focused_link_scans_are_not_output_debounced() {
-        let app_src = include_str!("app.rs");
+        let app_src = production_source();
         let window_src = include_str!("window_state.rs");
         let removed_const = format!("LINKS_SCAN_{}", "DEBOUNCE");
         let removed_field = format!("last_{}_scan", "links");
@@ -30604,7 +30656,7 @@ mod tests {
 
     #[test]
     fn custom_url_handler_failure_falls_back_to_system_open() {
-        let src = include_str!("app.rs");
+        let src = production_source();
         let open_url = src
             .split("fn open_url(&mut self, ws: &WindowState, uri: &str) {")
             .nth(1)
@@ -30635,7 +30687,7 @@ mod tests {
 
     #[test]
     fn pending_run_orphan_check_searches_all_windows() {
-        let src = include_str!("app.rs");
+        let src = production_source();
         let check = src
             .split("fn check_pending_run_deadlines(&mut self, ws: &mut WindowState) {")
             .nth(1)
@@ -30701,7 +30753,7 @@ mod tests {
 
 #[cfg(test)]
 mod keyboard_selection_tests {
-    use super::selection_buffer_bounds;
+    use super::{production_source, selection_buffer_bounds};
 
     /// The whole-buffer bounds are grid-absolute: top is the oldest history line
     /// (negative), column 0; bottom is the last active row, last column.
@@ -30732,7 +30784,7 @@ mod keyboard_selection_tests {
     /// live Term + window; pin the wiring at the source level.
     #[test]
     fn selection_actions_and_shift_click_are_wired() {
-        let src = include_str!("app.rs").replace("\r\n", "\n");
+        let src = production_source();
         // SelectAll arm builds a full-buffer selection.
         let all = src
             .find("Action::SelectAll =>")

@@ -80,6 +80,17 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
     only some later unrelated action did. The resize is now the dispatch's
     tail, in one place, so a new arm cannot forget it.
 
+  - **Fifty source guards could not fail, and one of them had already rotted.**
+    A guard that reads its own file with `include_str!` also reads its own
+    assertions, so `src.contains("literal")` matches the needle written one
+    line above it and passes whether or not the production code exists. Both
+    `app.rs` and `mux.rs` now strip every `#[cfg(test)]` item before searching,
+    and every guard was moved onto that. Turning them on immediately caught
+    `recorder_output_flushed_before_reap_and_on_close`, which keyed on three
+    comment sentences and had been matching its own stale copy of one that was
+    reworded — the wiring was fine, the guard was not. It keys on the call
+    sites and their enclosing functions now.
+
   - **Minimizing a window persisted it as a 160×120 stub.** The session
     snapshot read the window's position and size with no minimized check, and
     Win32 answers a minimized window with the `(-32000, -32000)` sentinel and a
