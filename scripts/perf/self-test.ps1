@@ -78,7 +78,10 @@ $requiredTests = [string[]]@(
     'vtebench-channel-self-test.ps1',
     'sanitize-results-self-test.ps1',
     'score-self-test.ps1',
-    'release-score-self-test.ps1'
+    'release-score-self-test.ps1',
+    # latency.ps1 was the one module with no self-test, and it shipped a defect
+    # that made a latency run impossible to complete.
+    'latency-self-test.ps1'
 )
 
 $shell = (Get-Process -Id $PID).Path

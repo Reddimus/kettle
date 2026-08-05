@@ -113,6 +113,37 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
     only some later unrelated action did. The resize is now the dispatch's
     tail, in one place, so a new arm cannot forget it.
 
+  - **The latency benchmark could never complete a single run.** `latency.ps1`
+    called the harness's nearest-rank percentile helper with `90`, `95` and
+    `99` while that function declares `[ValidateRange(0.0, 1.0)]`, so
+    PowerShell rejected every call at parameter binding — before the body ran
+    — with "The 90 argument is greater than the maximum allowed range of 1".
+    Every other caller in the harness already passed a fraction; this file was
+    the outlier, and it was also the only harness module with no self-test,
+    which is why it shipped. It has one now, and the self-test reads
+    `latency.ps1`'s own calls and drives each argument through the real
+    function rather than restating the arithmetic.
+
+  - **The display-topology probe leaked the monitor's device instance path
+    into published results.** A duplicate-identity warning interpolated the
+    value — something like `DISPLAY\DEL41A8\5&2b41c7ee&0&UID4353` — into a
+    free-text `issues` string, which lands in `benchmark-manifest.json`. The
+    sanitizer tokenizes that value everywhere it appears under its own
+    `instance_name` property, but `issues` is free text and never matched a
+    sensitive property name, so it was published verbatim. The message carries
+    the count now, which is the part that makes it actionable, and the
+    sanitizer's self-test refuses any issue message that interpolates a
+    machine-identifying value.
+
+  - **`kettle.bash` zeroed `$?` for everything chained after it.** The hook
+    deliberately runs first in `PROMPT_COMMAND` so its own exit-status read is
+    the real one, but it ended on a successful `printf` and never restored the
+    status — so any segment after it saw `0`. Anything colouring a prompt by
+    exit status, or appending `[$?]`, reported success after a failing command
+    purely because kettle's integration was installed. Verified against a real
+    bash: `false` now leaves `$?=1` for the next segment where it used to leave
+    `0`.
+
   - **The online installer's Ed25519 verification had no test that could fail.**
     Every signed-path test ran against a stub whose `openssl pkeyutl -verify`
     returned success unconditionally, and no test ever made it fail — so the

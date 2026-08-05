@@ -1360,8 +1360,17 @@ function Resolve-KettlePerfDisplayIdentity {
         }
         $identity = [string]$screen.edid_monitor.instance_name
         if ($identityCounts[$identity] -gt 1) {
+            # The identity itself must NOT go in here. `issues` is free text, so
+            # the sanitizer's property-name matching never sees it, and it is
+            # published verbatim in benchmark-manifest.json — while the very
+            # same value is tokenized everywhere it appears under its own
+            # `instance_name` property. A device instance path like
+            # `DISPLAY\DEL41A8\5&2b41c7ee&0&UID4353` identifies the machine's
+            # hardware. The count is what makes the issue actionable; the
+            # identity is already recorded, tokenized, in the structured field.
             [void]$issues.Add(
-                "physical monitor identity $identity maps to multiple desktop screens"
+                ('a physical monitor identity maps to ' +
+                 "$($identityCounts[$identity]) desktop screens")
             )
             $screen.edid_backed = $false
             $screen.edid_match_count = $identityCounts[$identity]

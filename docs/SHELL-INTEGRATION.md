@@ -105,7 +105,13 @@ wrappers.
 ### bash — add to `~/.bashrc`
 
 ```bash
-__kettle_pc() { printf '\033]133;D;%s\007\033]133;A\007' "$?"; }
+# Capture the status first and hand it back, so anything chained after this
+# still sees the real exit code rather than the printf's.
+__kettle_pc() {
+  local __kettle_status=$?
+  printf '\033]133;D;%s\007\033]133;A\007' "$__kettle_status"
+  return "$__kettle_status"
+}
 PROMPT_COMMAND="__kettle_pc${PROMPT_COMMAND:+; $PROMPT_COMMAND}"
 PS1='\[\033]133;B\007\]'"$PS1"
 trap 'printf "\033]133;C\007"' DEBUG

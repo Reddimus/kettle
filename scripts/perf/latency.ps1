@@ -379,24 +379,31 @@ foreach ($terminal in $Terminals) {
     } else {
         $null
     }
+    # `Get-KettlePerfNearestRankPercentile` takes a FRACTION, and its
+    # `[ValidateRange(0.0, 1.0)]` rejects a percentage at parameter binding —
+    # before the function body runs. These four calls passed 90/95/99, so every
+    # latency run threw "The 90 argument is greater than the maximum allowed
+    # range of 1" and no latency measurement could ever complete. Every other
+    # caller in the harness already passes a fraction; this file was the
+    # outlier, and it is the only harness module with no self-test.
     $result.latency_ms_p90 = if ($sorted.Count) {
-        Get-KettlePerfNearestRankPercentile -Values $sorted -Percentile 90
+        Get-KettlePerfNearestRankPercentile -Values $sorted -Percentile 0.90
     } else {
         $null
     }
     $result.latency_ms_p95 = if ($sorted.Count) {
-        Get-KettlePerfNearestRankPercentile -Values $sorted -Percentile 95
+        Get-KettlePerfNearestRankPercentile -Values $sorted -Percentile 0.95
     } else {
         $null
     }
     $result.latency_ms_p99 = if ($sorted.Count) {
-        Get-KettlePerfNearestRankPercentile -Values $sorted -Percentile 99
+        Get-KettlePerfNearestRankPercentile -Values $sorted -Percentile 0.99
     } else {
         $null
     }
     $result.capture_ms_median = Get-KettlePerfMedian $captureSorted
     $result.capture_ms_p95 = Get-KettlePerfNearestRankPercentile `
-        -Values $captureSorted -Percentile 95
+        -Values $captureSorted -Percentile 0.95
     if ($result.misses -gt $MaxCensored) {
         $censorFailures.Add((
             "$terminal produced $($result.misses) censored latency samples; " +
