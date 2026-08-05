@@ -6179,7 +6179,16 @@ impl App {
         if ws.context_menu.is_some() || ws.vi_mode.is_some() || ws.hint_state.is_some() {
             return;
         }
-        if ws.palette_input.is_some() {
+        // The modal outranks whatever raised it. Rebinding a key onto a chord
+        // that is already taken raises a confirm dialog from inside the
+        // Settings overlay, and the Settings arms below used to claim the
+        // keyboard first: the question could not be answered, by `y`/`n` or by
+        // anything else, while the panel that asked it stayed open. The
+        // dialog's own handler (the named-key path) reads `y`/`n`; this arm
+        // only has to stop the text from going somewhere else.
+        if ws.confirm_dialog.is_some() {
+            return;
+        } else if ws.palette_input.is_some() {
             self.palette_key(ws, &key, Some(text), event_loop);
         } else if ws.settings_nav.is_some() && ws.settings_text_edit.is_some() {
             self.settings_text_key(ws, &key, Some(text));
@@ -6189,8 +6198,6 @@ impl App {
             self.layout_picker_key(ws, &key, Some(text));
         } else if ws.ssh_input.is_some() {
             self.ssh_key(ws, &key, Some(text));
-        } else if ws.confirm_dialog.is_some() {
-            return;
         } else if let Some(state) = ws.editing_title.as_mut() {
             state.input.extend(text.chars().filter(|c| !c.is_control()));
         } else if ws.search.open {
@@ -23381,76 +23388,6 @@ impl App {
                 self.hide_mouse_cursor(ws);
                 let text = event.text.as_ref().map(|s| s.as_str());
 
-                if ws.context_menu.is_some() {
-                    self.context_menu_key(ws, &event.logical_key, text, event_loop);
-                    if let Some(w) = &ws.window {
-                        w.request_redraw();
-                    }
-                    return;
-                }
-
-                // Vi-mode key dispatch. When
-                // vi_mode is Some, intercept keys for vi-style
-                // navigation before they reach the PTY. h/j/k/l move
-                // the vi cursor; 0/$/g/G jump; Esc exits.
-                if ws.vi_mode.is_some() {
-                    self.vi_mode_key(ws, &event.logical_key, text);
-                    if let Some(w) = &ws.window {
-                        w.request_redraw();
-                    }
-                    return;
-                }
-
-                if ws.hint_state.is_some() {
-                    self.hint_key(ws, &event.logical_key, text);
-                    if let Some(w) = &ws.window {
-                        w.request_redraw();
-                    }
-                    return;
-                }
-
-                if ws.palette_input.is_some() {
-                    self.palette_key(ws, &event.logical_key, text, event_loop);
-                    if let Some(w) = &ws.window {
-                        w.request_redraw();
-                    }
-                    return;
-                }
-
-                // v2.24.0: while the inline path prompt is open it owns the
-                // keyboard (typed text → the buffer; Enter/Esc finish it).
-                if ws.settings_nav.is_some() && ws.settings_text_edit.is_some() {
-                    self.settings_text_key(ws, &event.logical_key, text);
-                    if let Some(w) = &ws.window {
-                        w.request_redraw();
-                    }
-                    return;
-                }
-                // Settings overlay key handling (exclusive modal).
-                if ws.settings_nav.is_some() {
-                    self.settings_key(ws, &event.logical_key, event_loop);
-                    if let Some(w) = &ws.window {
-                        w.request_redraw();
-                    }
-                    return;
-                }
-
-                if ws.layout_picker_input.is_some() {
-                    self.layout_picker_key(ws, &event.logical_key, text);
-                    if let Some(w) = &ws.window {
-                        w.request_redraw();
-                    }
-                    return;
-                }
-
-                if ws.ssh_input.is_some() {
-                    self.ssh_key(ws, &event.logical_key, text);
-                    if let Some(w) = &ws.window {
-                        w.request_redraw();
-                    }
-                    return;
-                }
-
                 // Phase 5 of TERMINATOR-CONFIRM-DIALOG-DESIGN.md:
                 // confirm-modal key handler. Tab/Shift+Tab/←→
                 // cycle focus, Enter dispatches on_confirm, Esc
@@ -23521,6 +23458,76 @@ impl App {
                     }
                     return;
                 }
+                if ws.context_menu.is_some() {
+                    self.context_menu_key(ws, &event.logical_key, text, event_loop);
+                    if let Some(w) = &ws.window {
+                        w.request_redraw();
+                    }
+                    return;
+                }
+
+                // Vi-mode key dispatch. When
+                // vi_mode is Some, intercept keys for vi-style
+                // navigation before they reach the PTY. h/j/k/l move
+                // the vi cursor; 0/$/g/G jump; Esc exits.
+                if ws.vi_mode.is_some() {
+                    self.vi_mode_key(ws, &event.logical_key, text);
+                    if let Some(w) = &ws.window {
+                        w.request_redraw();
+                    }
+                    return;
+                }
+
+                if ws.hint_state.is_some() {
+                    self.hint_key(ws, &event.logical_key, text);
+                    if let Some(w) = &ws.window {
+                        w.request_redraw();
+                    }
+                    return;
+                }
+
+                if ws.palette_input.is_some() {
+                    self.palette_key(ws, &event.logical_key, text, event_loop);
+                    if let Some(w) = &ws.window {
+                        w.request_redraw();
+                    }
+                    return;
+                }
+
+                // v2.24.0: while the inline path prompt is open it owns the
+                // keyboard (typed text → the buffer; Enter/Esc finish it).
+                if ws.settings_nav.is_some() && ws.settings_text_edit.is_some() {
+                    self.settings_text_key(ws, &event.logical_key, text);
+                    if let Some(w) = &ws.window {
+                        w.request_redraw();
+                    }
+                    return;
+                }
+                // Settings overlay key handling (exclusive modal).
+                if ws.settings_nav.is_some() {
+                    self.settings_key(ws, &event.logical_key, event_loop);
+                    if let Some(w) = &ws.window {
+                        w.request_redraw();
+                    }
+                    return;
+                }
+
+                if ws.layout_picker_input.is_some() {
+                    self.layout_picker_key(ws, &event.logical_key, text);
+                    if let Some(w) = &ws.window {
+                        w.request_redraw();
+                    }
+                    return;
+                }
+
+                if ws.ssh_input.is_some() {
+                    self.ssh_key(ws, &event.logical_key, text);
+                    if let Some(w) = &ws.window {
+                        w.request_redraw();
+                    }
+                    return;
+                }
+
                 // Edit-title overlay key handler. Esc
                 // cancels; Enter applies via apply_title_edit;
                 // Backspace removes one char; printable text appends.
@@ -24455,6 +24462,82 @@ mod tests {
     use kettle_render::{ContextMenuRow, FrameOutcome, PaneSnapshot};
     use std::sync::Arc;
     use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+
+    /// A modal question has to outrank the overlay that asked it. Rebinding a
+    /// key onto a chord that is already taken raises a confirm dialog from
+    /// inside the Settings overlay — and the Settings arms used to claim the
+    /// keyboard first, in both key paths, so the dialog could not be answered
+    /// at all while the panel that raised it stayed open. It was painted under
+    /// the panel's dim backdrop too, which is how it read as a z-order bug
+    /// rather than a dead one.
+    #[test]
+    fn a_confirm_dialog_outranks_every_overlay_including_the_one_that_raised_it() {
+        let src = production_source();
+
+        // Named-key path: the confirm branch comes before every other overlay,
+        // and before the settings branches in particular.
+        // Slice the router itself first: these same branch conditions appear
+        // in the mouse handlers, so comparing whole-file positions would
+        // compare the wrong pair and pass for the wrong reason.
+        let router = src
+            .split("let text = event.text.as_ref().map(|s| s.as_str());")
+            .nth(1)
+            .expect("the key router opens by binding `text`");
+        let confirm = router
+            .find("if ws.confirm_dialog.is_some() {")
+            .expect("the confirm-modal key handler is present");
+        for later in [
+            "if ws.context_menu.is_some() {",
+            "if ws.settings_nav.is_some() {",
+            "if ws.palette_input.is_some() {",
+        ] {
+            let at = router
+                .find(later)
+                .unwrap_or_else(|| panic!("expected overlay branch {later:?} in the key router"));
+            assert!(
+                confirm < at,
+                "the confirm modal must be handled before {later:?}, or the \
+                 question it asks cannot be answered"
+            );
+        }
+
+        // Character path: the same, so typed text cannot land in a settings
+        // field while a modal is waiting on an answer.
+        let chars = src
+            .split("let key = Key::Character(text.into());")
+            .nth(1)
+            .expect("the character router builds a Character key first");
+        let confirm_arm = chars
+            .find("if ws.confirm_dialog.is_some() {")
+            .expect("the character router must swallow text while a modal is up");
+        for later in ["ws.palette_input.is_some()", "ws.settings_nav.is_some()"] {
+            let at = chars
+                .find(later)
+                .unwrap_or_else(|| panic!("expected {later:?} in the character router"));
+            assert!(
+                confirm_arm < at,
+                "the modal arm must precede {later:?} in the character router"
+            );
+        }
+
+        // And it stays legible: the confirm bar is queued with the menu chrome
+        // (so it clears the base overlay quads), and the settings panel's dim
+        // backdrop — pushed to the same list afterwards, therefore drawn over
+        // it — stops above the bar rather than greying it out.
+        let render = include_str!("../../kettle-render/src/lib.rs").replace("\r\n", "\n");
+        assert!(
+            render
+                .contains("menu_q.push(rect(0.0, sh - bar_h, sw, bar_h, theme.palette[1], 0.96));"),
+            "the confirm bar must be queued into the menu-chrome pass"
+        );
+        assert!(
+            render
+                .contains("menu_q.push(rect(0.0, 0.0, sw, dim_h, theme.background, backdrop_a));")
+                && render.contains("let dim_h = if overlay.confirm_dialog.is_some() {"),
+            "the settings backdrop must stop above a live confirm bar; a \
+             full-height dim would cover the question being asked"
+        );
+    }
 
     /// A config reload has to push the scrollback budget into panes that are
     /// already open. It used to be read once at spawn, so editing `scrollback`

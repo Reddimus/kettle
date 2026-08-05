@@ -58,6 +58,18 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
     window size, instead of reserving 95px on a wide monitor and almost
     nothing on a narrow one.
 
+  - **The keybind-conflict question could not be answered.** Rebinding a key
+    onto a chord that is already taken raises a confirmation — from inside the
+    Settings overlay, which is where the keybind editor lives. But the Settings
+    arms claimed the keyboard first in both key routers, so every key, `y` and
+    `n` included, went to the panel and none reached the dialog. The panel's
+    dim backdrop covered the bar as well, which is what made it look like a
+    stacking bug rather than a dead one.
+
+    A modal question now outranks every overlay, including the one that asked
+    it, and the backdrop stops above the bar instead of greying out the thing
+    being asked.
+
   - **A Lua callback stuck in a loop froze the terminal on every event, not
     once.** The instruction-budget watchdog aborted a runaway, which is the
     right first move, but then left the callback registered. The budget is

@@ -4511,7 +4511,14 @@ impl Renderer {
             // Red-ish accent (palette[1]) to signal "destructive
             // confirmation pending" vs the palette/ssh/
             // edit-title yellows/blues/cyans.
-            quads.push(rect(0.0, sh - bar_h, sw, bar_h, theme.palette[1], 0.96));
+            //
+            // Queued with the menu chrome rather than the base overlay quads:
+            // the settings panel washes the whole surface in a dim backdrop
+            // from `menu_q`, which is drawn last, so a bar pushed to `quads`
+            // came out greyed under it. A modal question has to be the most
+            // legible thing on screen, and the one raised by rebinding onto an
+            // already-bound chord is raised from inside that very panel.
+            menu_q.push(rect(0.0, sh - bar_h, sw, bar_h, theme.palette[1], 0.96));
             let mut buttons_label = String::new();
             for (i, btn) in dlg.buttons.iter().enumerate() {
                 if !buttons_label.is_empty() {
@@ -5480,7 +5487,17 @@ impl Renderer {
                 .map(|c| c == "Background")
                 .unwrap_or(false);
             let backdrop_a = if on_bg_page { 0.30 } else { 0.55 };
-            menu_q.push(rect(0.0, 0.0, sw, sh, theme.background, backdrop_a));
+            // Stop the dim above a confirm bar when one is showing. The bar is
+            // pushed to this same list earlier in the frame, so a full-height
+            // backdrop lands on top of it and greys out the one thing that has
+            // to stay legible — and the dialog raised by rebinding onto an
+            // already-bound chord comes from inside this very panel.
+            let dim_h = if overlay.confirm_dialog.is_some() {
+                (sh - (ch + 10.0)).max(0.0)
+            } else {
+                sh
+            };
+            menu_q.push(rect(0.0, 0.0, sw, dim_h, theme.background, backdrop_a));
             // Panel background (near-opaque) + accent border.
             menu_q.push(rect(px, py, panel_w, panel_h, theme.background, 0.99));
             menu_q.push(rect(px, py, panel_w, 2.0, acc, 1.0));
