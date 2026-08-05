@@ -1193,7 +1193,10 @@ flowchart TD
 ```
 
 `lua-sandbox = safe` (default) nils unsafe stdlib APIs (os.execute,
-io.open, etc); `trusted` mode opt-in. See
+io.open, etc); `trusted` mode opt-in. Neither of those is a containment
+boundary — `kettle.send_text` types into the shell and a newline runs the
+line — so `restricted` is the level for a plugin you have not read: it
+refuses `send_text` and `exec_action` and leaves the rest working. See
 [`docs/TERMINATOR-PLUGIN-DESIGN.md`](TERMINATOR-PLUGIN-DESIGN.md).
 
 ### Settings overlay + interactive keybind editor

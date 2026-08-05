@@ -492,8 +492,20 @@ pub enum ChromeBackground {
 /// out. `Trusted` exposes everything; user explicitly opts in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum LuaSandbox {
+    /// Hooks, queries, notifications and theme changes work; the plugin cannot
+    /// type into a pane or dispatch an action. The only level that actually
+    /// prevents a plugin from running commands — see `Safe`.
+    Restricted,
+    /// The Lua stdlib functions that spawn processes or open files are nil'd.
+    /// This is **not** a barrier against a hostile plugin: `kettle.send_text`
+    /// types into your shell, and a newline in that text runs what it typed.
+    /// It is a guard against a *careless* plugin reaching the filesystem or
+    /// spawning something behind your back, and it is the default because the
+    /// documented plugin API (`kettle.send_text("clear\n")`) depends on it.
+    /// For a plugin you have not read, use `Restricted`.
     #[default]
     Safe,
+    /// Full stdlib, including `os.execute` and `io.popen`.
     Trusted,
 }
 
@@ -3541,7 +3553,10 @@ impl Config {
                     "theme" | "auto" | "black" | "white"
                 ),
                 "lua-sandbox" | "lua_sandbox" => {
-                    matches!(v.to_ascii_lowercase().as_str(), "safe" | "trusted" | "unsafe")
+                    matches!(
+                        v.to_ascii_lowercase().as_str(),
+                        "restricted" | "safe" | "trusted" | "unsafe"
+                    )
                 }
                 // Enum-typed config values: each apply arm above has a
                 // `_ => DefaultVariant` fallthrough, so a typo (`bell =
@@ -4911,6 +4926,7 @@ impl Config {
                 "lua-sandbox" | "lua_sandbox" => {
                     cfg.lua_sandbox = match e.value.to_ascii_lowercase().as_str() {
                         "trusted" | "unsafe" => LuaSandbox::Trusted,
+                        "restricted" => LuaSandbox::Restricted,
                         _ => LuaSandbox::Safe,
                     };
                 }

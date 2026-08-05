@@ -68,6 +68,17 @@ Reports that fit any of these are welcome:
   kettle from a sandboxed script is in scope too. `lua-sandbox =
   trusted` is opt-in and explicitly carries the same surface as
   native Lua — out of scope.
+
+  **What `safe` does not mean.** It nils the stdlib routes to a
+  process, but `kettle.send_text` types into the focused shell and a
+  newline in that text runs what it typed — that is the documented
+  plugin API, and the shipped example uses it. Safe mode guards
+  against a *careless* plugin touching the filesystem or spawning
+  something behind your back; it does not contain a hostile one, so
+  a report that a safe-mode plugin ran a command **by typing it** is
+  working as designed rather than a sandbox escape. Run a plugin you
+  have not read under `lua-sandbox = restricted`, where `send_text`
+  and `exec_action` refuse; a bypass of *that* level is in scope.
 - **Detachable-tabs handoff** — `--tab-handoff PATH` and
   `--tab-handoff-fd FD` restore a JSON payload from
   another kettle process. A handoff payload that bypasses path

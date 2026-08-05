@@ -58,6 +58,24 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
     window size, instead of reserving 95px on a wide monitor and almost
     nothing on a narrow one.
 
+  - **`lua-sandbox = safe` did not mean what it read as, and there was no
+    level that did.** Safe mode nils `os.execute`, `io.popen`, `io.open` and
+    the rest, which reads as "a safe-mode plugin cannot run programs". It can:
+    `kettle.send_text` types into the focused shell and a newline submits the
+    line — that is the documented plugin API, and the shipped example clears
+    the screen exactly that way. So the two statements in the documentation
+    contradicted each other, and a user picking `safe` before running someone
+    else's plugin was misled about what they were getting.
+
+    Rather than break the API, kettle now says so plainly and adds the level
+    that was missing. `lua-sandbox = restricted` refuses `send_text` and
+    `exec_action` — the two calls that drive the terminal — while hooks,
+    queries, notifications and theme changes keep working, so a plugin you
+    have not read can still be useful without being able to type for you.
+    `safe` stays the default and stays honest about being a guard against a
+    careless plugin rather than a container for a hostile one; `SECURITY.md`
+    now scopes reports accordingly.
+
   - **Four Terminator config keys parsed and did nothing.** `broadcast-default`,
     `split-to-group`, `autoclean-groups` and `always-split-with-profile` were
     accepted, validated, stored — and never read. Setting them changed nothing,
