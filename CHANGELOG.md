@@ -36,6 +36,20 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
     while every CPU test stayed green.
 
   ### Fixed
+  - **Closing a window erased the named layout it was launched from.**
+    `close_window` deliberately empties the mux before saving, so the session
+    it writes is the empty one — "this window is finished, do not bring it
+    back". Routed at a named layout, that intent destroyed the workspace
+    instead: a layout measured at 2043 bytes came back as 65
+    (`{"tabs":[],"windows":[]}`) after one close, and the next
+    `--layout NAME` opened a single default pane. Terminator, whose layouts
+    this mirrors, only ever writes one from an explicit Add/Refresh —
+    launching a layout never modifies it.
+
+    An empty snapshot can no longer overwrite a named layout. The deliberate
+    clear still reaches `session.json`, which is where that intent belongs.
+    The routing is one function now with the whole truth table as its test.
+
   - **Widening a pane permanently destroyed its scrollback.** The
     `scrollback-bytes` budget was turned into a line cap by dividing it by a
     worst-case per-row cost at the pane's *current* width, and any grid change

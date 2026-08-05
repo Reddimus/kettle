@@ -13593,16 +13593,15 @@ impl App {
         // launch is in restore mode — symmetric with the opt-in load gate. A
         // fresh (non-opted-in) window must NOT overwrite the saved layout that
         // `--restore` / `restore-session = true` exists to recover.
-        match &self.startup.layout {
-            Some(name) if self.named_layout_writable => s.save_layout(name),
-            // `--layout NAME` given, but a launch override replaced it: leave
-            // the file alone rather than overwriting it with a window that was
-            // never restored from it.
-            Some(_) => {}
-            None if should_restore_session(self.startup.restore, self.cfg.restore_session) => {
-                s.save()
-            }
-            None => {}
+        match session_write_target(
+            self.startup.layout.as_deref(),
+            self.named_layout_writable,
+            should_restore_session(self.startup.restore, self.cfg.restore_session),
+            s.is_empty(),
+        ) {
+            SessionWriteTarget::NamedLayout(name) => s.save_layout(name),
+            SessionWriteTarget::DefaultSession => s.save(),
+            SessionWriteTarget::Skip => {}
         }
     }
 
@@ -19100,6 +19099,51 @@ fn should_reveal_after_renderer_init(state: kettle_config::WindowState) -> bool 
 }
 
 /// Is the default last-session (`session.json`) active
+/// Where a session snapshot should be written, if anywhere.
+#[derive(Debug, PartialEq, Eq)]
+enum SessionWriteTarget<'a> {
+    NamedLayout(&'a str),
+    DefaultSession,
+    Skip,
+}
+
+/// Decide where a snapshot goes.
+///
+/// The rule worth stating out loud is the first arm: **an empty snapshot never
+/// overwrites a named layout.** `close_window` deliberately empties the mux
+/// before saving, so the SESSION it writes is the empty one — "this window is
+/// finished, do not bring it back". That intent belongs to session.json. Routed
+/// at a named layout it destroyed the workspace instead: a layout measured at
+/// 2043 bytes came back as 65 (`{"tabs":[],"windows":[]}`) after a close, and
+/// the next `--layout NAME` opened a single default pane. Terminator, whose
+/// layouts this mirrors, only ever writes one from an explicit Add/Refresh —
+/// launching a layout never modifies it.
+///
+/// Extracted so the truth table can be driven directly; the arms below are the
+/// whole of the routing decision.
+fn session_write_target(
+    layout: Option<&str>,
+    named_layout_writable: bool,
+    restore_mode: bool,
+    snapshot_is_empty: bool,
+) -> SessionWriteTarget<'_> {
+    match layout {
+        // Never clear a named workspace by quitting.
+        Some(_) if snapshot_is_empty => SessionWriteTarget::Skip,
+        Some(name) if named_layout_writable => SessionWriteTarget::NamedLayout(name),
+        // `--layout NAME` given, but a launch override replaced it: leave the
+        // file alone rather than overwriting it with a window that was never
+        // restored from it.
+        Some(_) => SessionWriteTarget::Skip,
+        // Only write the DEFAULT session.json when this launch is in restore
+        // mode — symmetric with the opt-in load gate. A fresh (non-opted-in)
+        // window must NOT overwrite the saved layout that `--restore` /
+        // `restore-session = true` exists to recover.
+        None if restore_mode => SessionWriteTarget::DefaultSession,
+        None => SessionWriteTarget::Skip,
+    }
+}
+
 /// for THIS launch? Drives BOTH the startup restore gate (whether to `load()`)
 /// and the `save_session` gate (whether to `save()` the default session). They
 /// MUST agree: an earlier change made *load* opt-in (fresh windows by default) but left
@@ -23905,7 +23949,7 @@ impl Drop for App {
 /// same approach as `kettle-core`'s teardown guard.
 #[cfg(test)]
 mod modal_discipline_guard {
-    use super::production_source;
+    use super::{production_source, session_write_target};
     #[test]
     fn confirm_dialog_is_tracked_as_a_modal() {
         let src = production_source();
@@ -24043,6 +24087,59 @@ mod modal_discipline_guard {
             "the re-focus must come BEFORE the close, or the close still acts \
              on whatever happens to be focused"
         );
+    }
+
+    /// Quitting must not erase the workspace you launched from.
+    ///
+    /// `close_window` deliberately empties the mux before saving so the
+    /// SESSION it writes is the empty one — "this window is finished, do not
+    /// bring it back". Sending that same empty snapshot to a NAMED LAYOUT
+    /// destroyed the workspace: a layout measured at 2043 bytes came back as
+    /// 65 after a close, and the next `--layout NAME` opened a single default
+    /// pane. Terminator only ever writes a layout from an explicit
+    /// Add/Refresh.
+    ///
+    /// The whole routing decision, as a table.
+    #[test]
+    fn an_empty_snapshot_never_overwrites_a_named_layout() {
+        use super::SessionWriteTarget::{DefaultSession, NamedLayout, Skip};
+
+        // The regression: empty snapshot, named layout, layout writable.
+        assert_eq!(
+            session_write_target(Some("dev"), true, false, true),
+            Skip,
+            "closing a window must not write an empty layout over the \
+             workspace it was launched from"
+        );
+        // ...and the same for a non-empty one, which is the case that must
+        // keep working — otherwise the guard above could be implemented by
+        // never writing layouts at all.
+        assert_eq!(
+            session_write_target(Some("dev"), true, false, false),
+            NamedLayout("dev"),
+            "a real arrangement must still be saved to its layout"
+        );
+
+        // A launch override means this window was never restored from that
+        // layout, so it does not get to rewrite it either way.
+        assert_eq!(session_write_target(Some("dev"), false, false, false), Skip);
+        assert_eq!(session_write_target(Some("dev"), false, false, true), Skip);
+
+        // session.json keeps its existing contract: written only in restore
+        // mode, and `close_window`'s deliberate clear still reaches it. That
+        // intent belongs to the session, not to a named workspace.
+        assert_eq!(
+            session_write_target(None, true, true, false),
+            DefaultSession
+        );
+        assert_eq!(
+            session_write_target(None, true, true, true),
+            DefaultSession,
+            "clearing the default session on close is deliberate and must \
+             survive this fix"
+        );
+        assert_eq!(session_write_target(None, true, false, false), Skip);
+        assert_eq!(session_write_target(None, true, false, true), Skip);
     }
 
     /// Answering a confirmation must end with the same resize tail every
@@ -25958,12 +26055,27 @@ mod tests {
             );
         }
         // And the SAVE side must be gated by the same predicate (no clobber).
+        // The routing now lives in `session_write_target`, so this checks both
+        // halves: that `save_session` feeds it the predicate, and that the
+        // default-session arm is the only thing that predicate unlocks.
         assert!(
-            src.contains(
-                "None if should_restore_session(self.startup.restore, self.cfg.restore_session)"
-            ),
-            "save_session must gate the default session.json write behind \
-             should_restore_session — symmetric with the load gate (audit M1)"
+            src.contains("should_restore_session(self.startup.restore, self.cfg.restore_session),"),
+            "save_session must pass should_restore_session into the write \
+             routing — symmetric with the load gate (audit M1)"
+        );
+        let routing = src
+            .split("fn session_write_target(")
+            .nth(1)
+            .and_then(|body| body.split("\n}").next())
+            .expect("session_write_target body");
+        assert!(
+            routing.contains("None if restore_mode => SessionWriteTarget::DefaultSession"),
+            "the default session.json write must be the restore-mode arm"
+        );
+        assert!(
+            routing.contains("Some(_) if snapshot_is_empty => SessionWriteTarget::Skip"),
+            "an empty snapshot must never overwrite a named layout — closing a \
+             window would erase the workspace it was launched from"
         );
     }
 
