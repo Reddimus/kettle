@@ -58,6 +58,18 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
     window size, instead of reserving 95px on a wide monitor and almost
     nothing on a narrow one.
 
+  - **Changing the scrollback budget did nothing until you restarted.** Both
+    `scrollback` and `scrollback-bytes` were read once, when a pane spawned.
+    Editing them — in the config file, or through the Settings overlay's two
+    scrollback rows — wrote the value, reloaded the config, and left every open
+    pane on its old cap, so the setting looked broken rather than deferred.
+
+    A reload now carries the budget into the panes that are already running. A
+    decrease is honoured, which is the opposite of what a *resize* is allowed
+    to do: a resize must never lower the cap, because nothing about dragging a
+    window wider means you want less history, whereas typing a smaller number
+    into the setting means precisely that.
+
   - **`lua-sandbox = safe` did not mean what it read as, and there was no
     level that did.** Safe mode nils `os.execute`, `io.popen`, `io.open` and
     the rest, which reads as "a safe-mode plugin cannot run programs". It can:

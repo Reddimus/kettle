@@ -14339,6 +14339,12 @@ impl App {
         ws.mux
             .set_unnegotiated_modified_enter(self.cfg.modify_other_keys);
         ws.mux.autoclean_groups = self.cfg.autoclean_groups;
+        // The scrollback budget used to be read once, at spawn. Editing
+        // `scrollback` or `scrollback-bytes` — in the config file or through
+        // the Settings overlay's two rows — wrote the value, reloaded it, and
+        // changed nothing you could see: only panes opened afterwards used it.
+        ws.mux
+            .set_scrollback_limits(self.cfg.scrollback, self.cfg.scrollback_bytes);
         let runtime_font_size = ws.renderer.as_ref().map(|r| r.font_size());
         if let Some(r) = ws.renderer.as_mut() {
             // Family first: the font-size setter re-measures cells and must see
@@ -24420,6 +24426,26 @@ mod tests {
     use kettle_render::{ContextMenuRow, FrameOutcome, PaneSnapshot};
     use std::sync::Arc;
     use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+
+    /// A config reload has to push the scrollback budget into panes that are
+    /// already open. It used to be read once at spawn, so editing `scrollback`
+    /// or `scrollback-bytes` — through the file or the Settings overlay's two
+    /// rows — wrote the value, reloaded it, and changed nothing visible.
+    #[test]
+    fn a_reload_carries_the_scrollback_budget_into_live_panes() {
+        let src = production_source();
+        let apply = src
+            .split("fn apply_reloaded_config(")
+            .nth(1)
+            .expect("apply_reloaded_config present");
+        let end = apply.find("\n    fn ").unwrap_or(apply.len());
+        assert!(
+            apply[..end]
+                .contains("set_scrollback_limits(self.cfg.scrollback, self.cfg.scrollback_bytes)"),
+            "the reload must hand both scrollback settings to the live panes, \
+             or the Settings rows are inert until restart"
+        );
+    }
 
     /// `broadcast-default` parsed for three releases without anything reading
     /// it, so `broadcast-default = all` was indistinguishable from leaving the

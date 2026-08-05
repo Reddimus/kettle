@@ -1313,6 +1313,22 @@ impl Mux {
         }
     }
 
+    /// Push an edited scrollback budget into every live pane. Returns how many
+    /// panes' effective cap actually moved — zero when the setting is unchanged
+    /// or already satisfied at this geometry.
+    ///
+    /// See [`kettle_core::Terminal::set_scrollback_limits`] for why a *setting*
+    /// change may lower a cap that a *resize* must not.
+    pub fn set_scrollback_limits(&mut self, lines: usize, bytes: usize) -> usize {
+        let mut changed = 0;
+        for pane in self.panes.values_mut() {
+            if pane.term.set_scrollback_limits(lines, bytes) {
+                changed += 1;
+            }
+        }
+        changed
+    }
+
     pub fn set_osc52_copy_allowed(&mut self, allowed: bool) {
         self.osc52_copy_allowed = allowed;
         for pane in self.panes.values() {
