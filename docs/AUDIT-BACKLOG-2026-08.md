@@ -346,7 +346,29 @@ measurement:
 
 - Animated backgrounds re-upload the whole texture every frame (~32 MiB per
   frame at 4K) and repeat it each loop.
-- **Widening a window permanently destroys scrollback.** `kettle-core`'s
+- ~~**Widening a window permanently destroys scrollback.**~~ **FIXED**, and it
+  was worse than first characterised: not one gesture but four, all ordinary —
+  a window drag (each intermediate width applying its own cap), decrease-font,
+  closing a sibling split (−2013 lines), and un-zooming. The cap is monotonic
+  per pane now.
+
+  A survey of the field settled the design question. xterm, Windows Terminal,
+  alacritty, WezTerm, kitty and VTE all bound scrollback in LINES, and none of
+  them evicts on widening. The one terminal with a real byte budget, Ghostty,
+  trims from the oldest end *as new output arrives* — a property of growth, not
+  of geometry. So enforcing a memory budget through a resize was the mistake,
+  not the budget itself.
+
+  Still open, and worth doing in the same release: enforce `scrollback-bytes`
+  against ACTUAL retained size on the growth path rather than as a
+  width-derived ceiling, so a widened pane converges back into budget as output
+  arrives instead of overshooting until it narrows again. Longer term, storing
+  history rows at their occupied length rather than padded to the column count
+  removes the trade-off entirely — a widen would then cost nothing and the
+  budget would measure real occupancy — but that is a change to the vendored
+  grid and it makes reflow harder.
+
+- **Superseded, kept for the measurements:** `kettle-core`'s
   `effective_scrollback_lines` turns the `scrollback-bytes` budget into a LINE
   cap by dividing it by a worst-case per-row cost at the *current* column
   count, and `try_resize_geometry` recomputes that on any grid change —
@@ -372,6 +394,18 @@ measurement:
   bolted onto an unrelated batch.
 - Per-cell quad vectors and the GPU instance buffer keep their high-water
   capacity and are not charged against `GraphicsBudget`.
+
+## Load-sensitive fixtures
+
+`ctl_server::tests::eight_idle_peers_expire_and_a_fresh_request_is_served`
+fails as `connection N expired before all peers were admitted` when the machine
+is saturated — observed with nine kettle instances running concurrently — and
+passes in isolation. It asserts that eight peers are all admitted before the
+idle-expiry timer retires any of them, which is a race the fixture wins only
+when scheduling is prompt. CI runners are shared, so this will flake there too.
+The fix is to make admission observable rather than assumed, not to lengthen
+the timeout. Joins the two `kettle/tests/exec.rs` ConPTY timing fixtures, which
+have the same shape.
 
 ## Deferred — tests that cannot fail
 

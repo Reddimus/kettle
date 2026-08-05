@@ -19,6 +19,32 @@ pub enum MouseTracking {
     Motion,
 }
 
+/// Whether a pointer-motion event produces a report under `track`.
+///
+/// Stated per mode rather than as a negated special case, because the negated
+/// form ("not 1003, and no button held") let 1000 report drags whenever a
+/// button happened to be down — a mode that is defined as press-and-release
+/// only. `vim` with `ttymouse=xterm` enables 1000 alone and reached exactly
+/// that.
+pub fn motion_is_reported(track: MouseTracking, button_held: bool) -> bool {
+    match track {
+        // 1003 — all motion, button or not.
+        MouseTracking::Motion => true,
+        // 1002 — motion only while a button is down.
+        MouseTracking::Drag => button_held,
+        // 1000 — press and release only.
+        MouseTracking::Click | MouseTracking::Off => false,
+    }
+}
+
+/// xterm's "no button" code.
+///
+/// A release reports it in place of the real button, and a motion report with
+/// no button held reports it plus the motion bit — `3 + 32 = 35`, the
+/// `CSI < 35 ; x ; y M` that DEC 1003 delivers while the pointer merely
+/// hovers.
+pub const MOUSE_NO_BUTTON: u8 = 3;
+
 pub fn mouse_tracking(mode: TermMode) -> (MouseTracking, bool) {
     let sgr = mode.contains(TermMode::SGR_MOUSE);
     let t = if mode.contains(TermMode::MOUSE_MOTION) {
@@ -2297,6 +2323,82 @@ mod tests {
             mouse_tracking(TermMode::MOUSE_MOTION),
             (MouseTracking::Motion, false)
         ));
+    }
+
+    /// Each DEC mouse mode reports exactly the motion it is defined to report.
+    ///
+    /// Driven through the real classifier and the real rule, one row per mode,
+    /// with the button held and not held — so a mode that silently behaves
+    /// like its neighbour shows up as a row that disagrees. Two did: 1003
+    /// reported nothing without a button (its whole purpose), and 1000
+    /// reported drags whenever one happened to be down.
+    #[test]
+    fn each_mouse_mode_reports_exactly_the_motion_it_promises() {
+        use kettle_core::TermMode;
+
+        // (DEC mode, TermMode, motion with a button, motion without one)
+        let table = [
+            (
+                "1000 click-only",
+                TermMode::MOUSE_REPORT_CLICK,
+                false,
+                false,
+            ),
+            ("1002 drag", TermMode::MOUSE_DRAG, true, false),
+            ("1003 all motion", TermMode::MOUSE_MOTION, true, true),
+            ("off", TermMode::empty(), false, false),
+        ];
+        for (name, mode, held, hovering) in table {
+            let (track, _) = mouse_tracking(mode);
+            assert_eq!(
+                motion_is_reported(track, true),
+                held,
+                "{name}: motion with a button held"
+            );
+            assert_eq!(
+                motion_is_reported(track, false),
+                hovering,
+                "{name}: motion while only hovering"
+            );
+        }
+
+        // The three tracking modes must not be interchangeable — if any two
+        // rows above agreed on both columns, this table could not tell them
+        // apart and would pass with the modes confused.
+        let signature = |mode: TermMode| {
+            let (track, _) = mouse_tracking(mode);
+            (
+                motion_is_reported(track, true),
+                motion_is_reported(track, false),
+            )
+        };
+        let click = signature(TermMode::MOUSE_REPORT_CLICK);
+        let drag = signature(TermMode::MOUSE_DRAG);
+        let all = signature(TermMode::MOUSE_MOTION);
+        assert!(
+            click != drag && drag != all && click != all,
+            "1000/1002/1003 must be distinguishable: {click:?} {drag:?} {all:?}"
+        );
+    }
+
+    /// A hovering motion report carries xterm's no-button code, so 1003's
+    /// report is the `CSI < 35 ; x ; y M` applications match on.
+    #[test]
+    fn hovering_motion_reports_the_no_button_code() {
+        let seq = mouse_encode(
+            true,
+            MOUSE_NO_BUTTON,
+            true,
+            true,
+            9,
+            4,
+            ModifiersState::empty(),
+        );
+        assert_eq!(
+            String::from_utf8(seq).expect("utf8"),
+            "\x1b[<35;10;5M",
+            "1003 hover must report button 3 plus the motion bit"
+        );
     }
 
     #[test]

@@ -118,7 +118,7 @@ chrome-background = auto
 | `background-image-mode` | `stretch_and_fill` (default), `tile`, `center`, `scale` (aspect-preserving fit) |
 | `background-image-align-horiz` / `-vert` | position for `center` / `scale` |
 | `background-blur` | CPU 3-pass box blur at load (a soft, subtle backdrop) |
-| `background-darkness` | `0.0` fully dark … `1.0` no tint (default `0.5`) |
+| `background-darkness` | `0.0` fully see-through (backdrop at full strength) … `1.0` fully covered (backdrop hidden); default `0.5` |
 | `background-animation` | `always` (default), `when-focused` (battery-friendly), `off` (freeze on frame 1) — applies to the starfield and animated images alike |
 
 **Performance.** Frames decode once at load (bounded to 128 MiB / 128 frames; a

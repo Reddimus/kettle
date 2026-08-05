@@ -9289,8 +9289,19 @@ impl App {
         if track == input::MouseTracking::Off {
             return false;
         }
-        if motion && track != input::MouseTracking::Motion && ws.mouse_btn.is_none() {
-            return track != input::MouseTracking::Off; // consume, no report
+        // `motion_is_reported` owns the per-mode rule; see its comment for why
+        // it is stated positively.
+        if motion && !input::motion_is_reported(track, ws.mouse_btn.is_some()) {
+            {
+                // A held button means the application owns the gesture even
+                // though this mode does not report the motion itself, so
+                // consume it. With no button held the pointer is only
+                // hovering, and kettle's own hover, scrollbar-drag and
+                // link-hover handling must still run — which is exactly what
+                // happened before, because the callers only reached
+                // `send_mouse` at all when a button was down.
+                return ws.mouse_btn.is_some();
+            }
         }
         let Some((row, col)) = self.cursor_cell(ws) else {
             return false;
@@ -15678,7 +15689,14 @@ impl App {
         {
             self.reorder_active_tab_for_cursor(ws);
         }
-        if let Some(btn) = ws.mouse_btn {
+        // `None` is xterm's "no button" code 3, which with the motion bit is
+        // the `CSI < 35 ; x ; y M` report DEC 1003 exists to deliver. Both
+        // motion call sites used to be gated on a held button, so 1003
+        // behaved exactly like 1002 while DECRQM still answered that it was
+        // set — hover highlighting in Neovim, lazygit, btop and fzf was
+        // silently dead. `send_mouse` decides per mode whether to report.
+        {
+            let btn = ws.mouse_btn.unwrap_or(input::MOUSE_NO_BUTTON);
             let _ = self.send_mouse(ws, btn, true, true);
         }
         if ws.selecting {
@@ -22185,8 +22203,13 @@ impl App {
                         return;
                     }
                 }
-                if let Some(btn) = ws.mouse_btn {
-                    // Drag while a button is held — report motion if tracked.
+                {
+                    // Motion. `MOUSE_NO_BUTTON` is xterm's code 3, which with
+                    // the motion bit is the `CSI < 35 ; x ; y M` report DEC
+                    // 1003 exists to deliver; `send_mouse` decides per mode
+                    // whether this motion is reportable at all, so 1002 still
+                    // needs a held button and 1000 still gets nothing.
+                    let btn = ws.mouse_btn.unwrap_or(input::MOUSE_NO_BUTTON);
                     if self.send_mouse(ws, btn, true, true) {
                         return;
                     }

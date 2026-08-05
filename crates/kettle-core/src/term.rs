@@ -3510,6 +3510,39 @@ fn effective_scrollback_lines(
     configured_lines.min(byte_lines)
 }
 
+/// The scrollback cap a pane should carry after a geometry change.
+///
+/// Monotonic for the life of the pane: it can rise, never fall.
+///
+/// [`effective_scrollback_lines`] turns the byte budget into a line count by
+/// dividing it by a worst-case per-row cost at the CURRENT column count, so a
+/// wider pane yields a smaller number. Feeding that straight back to the grid
+/// meant every widen handed `Grid::update_history` a lower limit, and it trims
+/// from the oldest end — immediately, and with no way to get those rows back.
+/// Four ordinary gestures reached it: dragging a window wider (each
+/// intermediate width applying its own cap), decrease-font, closing a sibling
+/// split, and un-zooming.
+///
+/// Nothing about a resize means the user wants less history, so a resize must
+/// not be how the budget is enforced. Every other terminal bounds scrollback in
+/// LINES and none of them evicts on widening; the one with a real byte budget
+/// (Ghostty) trims from the oldest end as new output arrives, which is a
+/// property of growth rather than of geometry.
+fn scrollback_cap_after_resize(
+    current: usize,
+    configured_lines: usize,
+    configured_bytes: usize,
+    columns: usize,
+    screen_lines: usize,
+) -> usize {
+    current.max(effective_scrollback_lines(
+        configured_lines,
+        configured_bytes,
+        columns,
+        screen_lines,
+    ))
+}
+
 fn reported_current_dir(osc_cwd_seen: bool, cwd: Option<String>) -> Option<String> {
     osc_cwd_seen.then_some(cwd).flatten()
 }
@@ -5651,7 +5684,27 @@ impl Terminal {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let grid_options = if grid_changed {
-            self.term_config.scrolling_history = effective_scrollback_lines(
+            // The cap only ever RISES for the life of a pane.
+            //
+            // `effective_scrollback_lines` turns the byte budget into a line
+            // count by dividing it by a worst-case per-row cost at the current
+            // column count, so a wider pane yields a smaller cap. Assigning
+            // that unconditionally made every widen hand `Grid::update_history`
+            // a lower limit, and it trims from the oldest end — immediately and
+            // irreversibly. Four ordinary gestures reach it: dragging the
+            // window wider (each intermediate width applying its own cap),
+            // decrease-font, closing a sibling split, and un-zooming. Measured
+            // with the shipped defaults: 77 columns held 5202 lines, 241 held
+            // 1681, and dragging back to 77 did not restore one of them.
+            //
+            // Nothing about a resize means the user wants less history, so the
+            // budget must not be enforced by a resize. The ceiling still falls
+            // out of the same computation — it just cannot move down, which
+            // makes the worst case the budget measured at the width the
+            // history was accumulated at, bounded and paid only by a user who
+            // actually widened.
+            self.term_config.scrolling_history = scrollback_cap_after_resize(
+                self.term_config.scrolling_history,
                 self.scrollback_line_limit,
                 self.scrollback_byte_limit,
                 desired.columns,
@@ -9970,6 +10023,67 @@ mod teardown_tests {
             None
         );
         assert!(ring.is_empty());
+    }
+
+    /// Resizing a pane must never lower its scrollback cap.
+    ///
+    /// The cap is derived by dividing the byte budget by a worst-case per-row
+    /// cost at the current width, so it falls as a pane widens — and the grid
+    /// enforces a lowered cap by discarding the oldest rows, permanently.
+    /// Walked across the exact widths that were measured losing history: 77
+    /// columns held 5202 lines, 241 held 1681, and dragging back to 77 restored
+    /// none of them.
+    #[test]
+    fn widening_a_pane_never_lowers_its_scrollback_cap() {
+        const LINES: usize = 10_000;
+        const BYTES: usize = 10_000_000;
+        const ROWS: usize = 28;
+        let widths = [77usize, 126, 190, 241, 126, 77];
+
+        // Precondition: the underlying computation really does shrink across
+        // this walk. Without it the monotonic wrapper would have nothing to
+        // do and this test would pass on a machine where `Cell` was small
+        // enough that the budget never binds.
+        let raw: Vec<usize> = widths
+            .iter()
+            .map(|&columns| effective_scrollback_lines(LINES, BYTES, columns, ROWS))
+            .collect();
+        assert!(
+            raw[0] > raw[3],
+            "fixture must exercise a shrinking cap: {raw:?}"
+        );
+        assert!(
+            raw[3] < raw[5],
+            "and it must recover on narrowing, or the round-trip proves nothing"
+        );
+
+        let mut cap = raw[0];
+        let start = cap;
+        let mut seen = vec![cap];
+        for &columns in &widths[1..] {
+            let next = scrollback_cap_after_resize(cap, LINES, BYTES, columns, ROWS);
+            assert!(
+                next >= cap,
+                "cap fell from {cap} to {next} at {columns} columns — a resize \
+                 must never discard history"
+            );
+            cap = next;
+            seen.push(cap);
+        }
+        assert_eq!(
+            cap, start,
+            "a round trip back to the starting width must leave the cap where \
+             it began, not where the widest step left it: {seen:?}"
+        );
+
+        // A genuinely larger allowance still raises the ceiling — the cap is
+        // monotonic, not frozen.
+        let narrower = scrollback_cap_after_resize(cap, LINES, BYTES, 40, ROWS);
+        assert!(
+            narrower > cap,
+            "narrowing past the starting width must be allowed to raise the \
+             cap ({cap} -> {narrower})"
+        );
     }
 
     #[test]

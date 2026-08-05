@@ -36,6 +36,39 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
     while every CPU test stayed green.
 
   ### Fixed
+  - **Widening a pane permanently destroyed its scrollback.** The
+    `scrollback-bytes` budget was turned into a line cap by dividing it by a
+    worst-case per-row cost at the pane's *current* width, and any grid change
+    — including a width-only one — reassigned it. A wider pane therefore
+    produced a smaller cap, and the grid enforces a lowered cap by discarding
+    the oldest rows, immediately and with no way back.
+
+    Four ordinary gestures reached it: dragging a window wider, where every
+    intermediate width applied its own cap; decrease-font, which fits more
+    columns in the same pixels; closing a sibling split so the survivor doubles
+    in width; and un-zooming. Measured with the shipped defaults at 28 rows: 77
+    columns held 5202 lines, 126 held 3210, 241 held 1681 — and dragging back
+    to 77 restored none of them. One font-decrease step cost 997 lines; closing
+    one split cost 2013. A long agent-CLI transcript lost most of itself to a
+    mouse drag.
+
+    The cap is monotonic for the life of a pane now: it can rise, never fall.
+    Nothing about a resize means the user wants less history, so a resize is
+    not how a memory budget gets enforced — every other terminal bounds
+    scrollback in lines and none of them evicts on widening. The worst case
+    becomes the budget measured at the width the history was accumulated at,
+    which is bounded and is paid only by someone who actually widened.
+
+  - **Modes 1000 and 1003 both reported the wrong motion.** The gate asked
+    "not 1003, and no button held", which let 1000 — defined as press and
+    release only — emit drag reports whenever a button happened to be down;
+    `vim` with `ttymouse=xterm` enables 1000 alone and hit exactly that. In the
+    other direction, both motion call sites only ran with a button held, so
+    1003 never delivered the button-less `CSI < 35 ; x ; y M` that is its
+    entire purpose, while DECRQM still answered that the mode was set. Hover
+    handling in Neovim's `mousemoveevent`, lazygit, btop and fzf was silently
+    dead. The rule is stated per mode now, in one function the tests drive.
+
   - **Every modified Delete lost its modifier, under the shipped default.**
     `delete-binding` defaults to `escape-sequence`, and the remap that
     implements it had no modifier guard, so it rewrote `Ctrl+Delete`,
