@@ -179,6 +179,124 @@ function New-KettlePerfWilliamsSchedule {
     return $schedule
 }
 
+# A rotation schedule for the terminal sets a Williams square cannot express.
+#
+# Williams needs an even count of at least six, and refuses everything else --
+# correctly, because that is what makes it a Williams square. The consequence
+# was that a machine which cannot offer six comparators produced NO measurement
+# at all rather than a weaker one. Windows Terminal is single-instance, so a
+# session already open on the machine makes it unlaunchable, and the whole run
+# was lost over one busy terminal.
+#
+# This rotates the order by one position per round, so across a cycle every
+# terminal occupies every position exactly once. That controls POSITION and
+# warm-up order. It does NOT balance predecessors the way a Williams square
+# does -- each terminal follows the same neighbour every time -- so it cannot
+# separate a carry-over effect from a terminal effect.
+#
+# That limitation is why this is smoke-only and why the algorithm name travels
+# with the results: `-Mode release` still requires Williams, and refuses this.
+function New-KettlePerfRotationSchedule {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string[]]$Terminals,
+        [Parameter(Mandatory = $true)]
+        [AllowEmptyString()]
+        [string]$Seed,
+        [ValidateRange(1, 10000)]
+        [int]$Cycles = 1,
+        [ValidatePattern('^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$')]
+        [string]$Namespace = 'perf'
+    )
+
+    if ($Terminals.Count -lt 2 -or $Terminals.Count -gt 100) {
+        throw 'Rotation schedules require 2 to 100 terminals'
+    }
+    $sampleCount = (
+        [int64]$Cycles * [int64]$Terminals.Count * [int64]$Terminals.Count
+    )
+    if ($sampleCount -gt 1000000) {
+        throw 'Rotation schedules are capped at 1,000,000 samples'
+    }
+    $terminalSet = [Collections.Generic.HashSet[string]]::new(
+        [StringComparer]::Ordinal
+    )
+    foreach ($terminal in $Terminals) {
+        if (
+            -not $terminal -or
+            $terminal.Length -gt 128 -or
+            $terminal.Contains([char]0) -or
+            -not $terminalSet.Add($terminal)
+        ) {
+            throw 'Schedule terminal names must be unique, non-empty, and bounded'
+        }
+    }
+
+    $random = New-KettlePerfPinnedRandom -Seed $Seed
+    $rounds = [Collections.Generic.List[object]]::new()
+    $sampleId = 0
+    $roundId = 0
+    $sequenceId = 0
+    for ($cycle = 1; $cycle -le $Cycles; $cycle++) {
+        $cycleTerminals = @(
+            Invoke-KettlePerfDeterministicShuffle `
+                -Values $Terminals -Random $random
+        )
+        for ($rotation = 0; $rotation -lt $Terminals.Count; $rotation++) {
+            $roundId++
+            $sequenceId++
+            $sequence = @(
+                0..($Terminals.Count - 1) |
+                    ForEach-Object {
+                        $cycleTerminals[($_ + $rotation) % $Terminals.Count]
+                    }
+            )
+            $visits = [Collections.Generic.List[object]]::new()
+            for ($position = 1; $position -le $sequence.Count; $position++) {
+                $sampleId++
+                $visits.Add([pscustomobject][ordered]@{
+                    sample_id = $sampleId
+                    sample_key = (
+                        '{0}-c{1:d4}-r{2:d6}-p{3:d3}-s{4:d8}' -f
+                        $Namespace, $cycle, $roundId, $position, $sampleId
+                    )
+                    cycle = $cycle
+                    round = $roundId
+                    round_in_cycle = $rotation + 1
+                    position = $position
+                    sequence = $sequenceId
+                    williams_sequence = $rotation + 1
+                    terminal = $sequence[$position - 1]
+                })
+            }
+            $rounds.Add([pscustomobject][ordered]@{
+                cycle = $cycle
+                round = $roundId
+                round_in_cycle = $rotation + 1
+                sequence = $sequenceId
+                williams_sequence = $rotation + 1
+                terminals = [string[]]$sequence
+                visits = [object[]]$visits.ToArray()
+            })
+        }
+    }
+    return [pscustomobject][ordered]@{
+        schema_version = 1
+        algorithm = 'rotation-position-only-v1'
+        balance = 'position-balanced; predecessors NOT balanced (smoke only)'
+        namespace = $Namespace
+        seed_sha256 = $random.seed_sha256
+        terminals = [string[]]$Terminals
+        terminal_count = $Terminals.Count
+        cycles = $Cycles
+        rounds_per_cycle = $Terminals.Count
+        round_count = $rounds.Count
+        sample_count = $sampleId
+        rounds = [object[]]$rounds.ToArray()
+    }
+}
+
+
 function Get-KettlePerfScheduleProperty {
     param(
         $Object,

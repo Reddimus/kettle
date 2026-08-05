@@ -35,7 +35,12 @@ param(
     [ValidateRange(240, 16384)]
     [int]$WindowH = 800,
     [ValidateRange(0, 600)]
-    [int]$BlockCooldownSeconds = 2
+    [int]$BlockCooldownSeconds = 2,
+    # Smoke only: measure whatever comparators the machine can offer, with a
+    # position-balanced rotation instead of a Williams square.
+    [switch]$AllowUnbalanced,
+    # Smoke only; see startup-idle.ps1 for what this does and does not permit.
+    [switch]$AllowForeignInstances
 )
 
 $ErrorActionPreference = 'Stop'
@@ -45,8 +50,10 @@ $ErrorActionPreference = 'Stop'
 . "$PSScriptRoot\schedule.ps1"
 
 if (
-    $Terminals.Count -lt 6 -or
-    ($Terminals.Count % 2) -ne 0 -or
+    (-not $AllowUnbalanced -and (
+        $Terminals.Count -lt 6 -or ($Terminals.Count % 2) -ne 0
+    )) -or
+    $Terminals.Count -lt 2 -or
     ($Samples % $BlockSize) -ne 0
 ) {
     throw (
@@ -139,7 +146,10 @@ $latencyShell = (
 $latencyCommand = @($latencyShell, '/d', '/q', '/k', 'prompt $G')
 $latencyShellSha256 = Get-KettlePerfExecutableSha256 $latencyShell
 $cycles = [int]($blocksPerTerminal / $Terminals.Count)
-$schedule = New-KettlePerfWilliamsSchedule -Terminals $Terminals `
+$scheduleFor = if ($AllowUnbalanced -and (
+        $Terminals.Count -lt 6 -or ($Terminals.Count % 2) -ne 0
+    )) { 'New-KettlePerfRotationSchedule' } else { 'New-KettlePerfWilliamsSchedule' }
+$schedule = & $scheduleFor -Terminals $Terminals `
     -Seed $ScheduleSeed -Cycles $cycles -Namespace 'latency'
 
 $specs = [ordered]@{}
@@ -212,7 +222,8 @@ foreach ($round in $schedule.rounds) {
             $launched = Start-KettlePerfCommandWindow -Spec $spec `
                 -Command $latencyCommand -BeforeWindows $before `
                 -PreexistingPids $prePids `
-                -CommandWrapperDirectory $ResultsDir
+                -CommandWrapperDirectory $ResultsDir `
+                -AllowForeignInstances:$AllowForeignInstances
             if (-not (
                 Wait-KettlePerfWindowReady `
                     -Hwnd $launched.Hwnd -Width $WindowW -Height $WindowH `

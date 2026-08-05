@@ -11,6 +11,12 @@ $script:KettlePerfStartupReadyMaxMarkerBytes = 1024
 $script:KettlePerfStartupReadyMaxPayloadBytes = 4096
 $script:KettlePerfStartupReadyMaxPaintBytes = 4096
 
+
+# `Test-KettlePerfPaintedMarkerCapture` delegates its pixel walk to
+# `[KettlePerf.Native]::CountPixelsNearColor`. Sourced HERE rather than left to
+# the caller so the self-test, which loads only this file, gets the type too.
+# The Add-Type over there is guarded, so a second load is free.
+. "$PSScriptRoot\lib-win32.ps1"
 function Get-KettlePerfStartupReadyProperty {
     param(
         [Parameter(Mandatory = $true)]
@@ -685,20 +691,20 @@ function Test-KettlePerfPaintedMarkerCapture {
     # near miss still has to cover the same fraction of the frame. What the
     # tolerance removes is the assumption that every renderer round-trips sRGB
     # byte-for-byte.
-    $matchingPixels = 0L
-    for ($offset = 0L; $offset -lt $BgraBytes.LongLength; $offset += 4) {
-        if (
-            [Math]::Abs([int]$BgraBytes[$offset] - $ExpectedBlue) -le $ChannelTolerance -and
-            [Math]::Abs([int]$BgraBytes[$offset + 1] - $ExpectedGreen) -le $ChannelTolerance -and
-            [Math]::Abs([int]$BgraBytes[$offset + 2] - $ExpectedRed) -le $ChannelTolerance
-        ) {
-            $matchingPixels++
-            if ($matchingPixels -ge $required) {
-                return $true
-            }
-        }
-    }
-    return $false
+    # The walk itself is compiled (see `CountPixelsNearColor`). It has to be:
+    # the caller polls this until the window paints, and the not-yet-painted
+    # case is precisely the one that cannot stop early, so an interpreted walk
+    # over 393,216 pixels turned a 30s deadline into about eight attempts and
+    # reported a slow-painting terminal as one that never painted.
+    $matchingPixels = [KettlePerf.Native]::CountPixelsNearColor(
+        $BgraBytes,
+        $ExpectedBlue,
+        $ExpectedGreen,
+        $ExpectedRed,
+        $ChannelTolerance,
+        $required
+    )
+    return $matchingPixels -ge $required
 }
 
 function Remove-KettlePerfStartupReadyScratch {

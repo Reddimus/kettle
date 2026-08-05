@@ -293,6 +293,35 @@ pub(crate) struct SplitDrag {
     dir: Dir,
 }
 
+/// Terminator parity: live state for dragging a terminal to another position
+/// inside its tab, armed by a left-press on that pane's own titlebar.
+///
+/// The press is deliberately ambiguous until the pointer moves. A titlebar
+/// click already meant "focus this pane", and a second click on the focused
+/// pane meant "edit its title" — both of which have to keep working. So the
+/// press records what it *would* do, `live` records whether movement has since
+/// turned it into a drag, and the RELEASE picks between the two. Opening the
+/// title editor on press, as this path used to, put an editor over the pane the
+/// user had just started dragging.
+pub(crate) struct PaneDrag {
+    /// The pane being moved.
+    pub(crate) pane: u64,
+    /// Surface position of the press, the origin the slop radius is measured
+    /// from.
+    pub(crate) origin: (f32, f32),
+    /// Movement has cleared the slop radius: this is a drag, not a click.
+    pub(crate) live: bool,
+    /// A release that never became a drag opens the title editor. True only
+    /// when the press landed on the ALREADY-focused pane: a press that merely
+    /// moved focus is not by itself a request to rename anything.
+    pub(crate) rename_on_click: bool,
+    /// Latched drop target while `live`: the pane under the cursor, the half of
+    /// it the drop would take, and the `(dir, before)` pair that describes that
+    /// half to `Mux::move_pane_beside`. `None` while the cursor is over no pane
+    /// — over a seam, or outside the content area.
+    pub(crate) target: Option<(u64, Rect, Dir, bool)>,
+}
+
 /// An in-flight `run_command` awaiting its OSC-133
 /// completion. The control server wrote `cmd\n` to the pane; the next
 /// `CommandFinished` for that pane resolves the request with the exit code,
@@ -2306,6 +2335,7 @@ fn context_menu_snapshot_reuse_safe(ws: &WindowState) -> bool {
         && !ws.tab_drag_active
         && ws.tab_drag_press.is_none()
         && ws.drag_press.is_none()
+        && ws.pane_drag.is_none()
         && matches!(&ws.detach_drag, crate::detach::DragState::Idle)
 }
 
@@ -3537,6 +3567,17 @@ fn tab_drag_target_index(
 fn tab_reorder_drag_threshold_px(tab_bar_h: f32) -> f32 {
     (tab_bar_h * 0.5).clamp(8.0, 16.0)
 }
+
+/// Pixel distance a held per-pane-titlebar press must move before it becomes a
+/// pane drag rather than a click.
+///
+/// A flat constant, unlike [`tab_reorder_drag_threshold_px`], because the
+/// competing gesture is different: a tab press competes with a reorder along a
+/// strip whose height sets the natural scale, while a titlebar press competes
+/// with "click again to rename". Renaming is the destructive-to-undo one, so the
+/// slop is generous enough that ordinary hand jitter during a double click never
+/// picks the pane up.
+const PANE_DRAG_THRESHOLD_PX: f32 = 12.0;
 
 /// v2.19.0 (tear-off UX): Euclidean distance from a point to the nearest
 /// edge of a rect — `0.0` when the point is inside. The tear decision is
@@ -9828,6 +9869,15 @@ impl App {
             confirm_dialog,
             settings: settings_overlay,
             update_available: self.update_available.clone(),
+            // Terminator parity: only a LIVE drag with a latched target paints
+            // a hint. An armed-but-unmoved press is still a click, and a live
+            // drag over a seam has no target to preview.
+            pane_drop_hint: ws
+                .pane_drag
+                .as_ref()
+                .filter(|drag| drag.live)
+                .and_then(|drag| drag.target)
+                .map(|(_, rect, dir, before)| crate::mux::pane_drop_preview(rect, dir, before)),
         }
     }
 
@@ -10520,6 +10570,7 @@ impl App {
         ws.tab_pressed_idx = None;
         ws.detach_drag = crate::detach::DragState::default();
         ws.drag_press = None;
+        ws.pane_drag = None;
         if self.torn_drag.as_ref().is_some_and(|drag| {
             drag.seq == ws.seq
                 || drag.carrier == ws.seq
@@ -11217,6 +11268,7 @@ impl App {
         ws.tab_pressed_idx = None;
         ws.detach_drag = crate::detach::DragState::default();
         ws.drag_press = None;
+        ws.pane_drag = None;
         ws.reuse_pane_snapshots_once = false;
         if self.torn_drag.as_ref().is_some_and(|drag| {
             drag.seq == ws.seq
@@ -15405,6 +15457,21 @@ impl App {
                 "cell": cell,
                 "padding": {"x": self.cfg.padding_x, "y": self.cfg.padding_y},
                 "content": rect_json(self.area(target)),
+                // The active tab's pane rects, in the same surface coordinates
+                // `send_mouse` takes. Without these, automation can address the
+                // tab bar and the modals but has no way to point at a PANE, so
+                // anything pane-geometric (the drag gesture, split ratios after
+                // a resize) could only be checked by eye.
+                "panes": target
+                    .mux
+                    .layout(target.mux.active, self.area(target))
+                    .into_iter()
+                    .map(|(id, rect)| serde_json::json!({
+                        "id": id,
+                        "rect": rect_json(rect),
+                        "focused": target.mux.active_focus() == Some(id),
+                    }))
+                    .collect::<Vec<_>>(),
                 "modals": {
                     "search": target.search.open,
                     "palette": target.palette_input.is_some(),
@@ -15429,6 +15496,24 @@ impl App {
                 "tab_drag_active": target.tab_drag_active,
                 "tab_drag_armed": target.tab_drag_press.is_some(),
                 "tab_drag_visible": target.tab_drag_active && target.tab_drag_press.is_none(),
+                // Terminator parity: the pane-drag gesture, reported in the
+                // same armed/live shape as the tab drag above so a headless
+                // check can tell "the press was noticed" from "the pane is
+                // being carried" from "releasing here would move it".
+                "pane_drag_armed": target.pane_drag.is_some(),
+                "pane_drag_live": target.pane_drag.as_ref().is_some_and(|d| d.live),
+                "pane_drag_pane": target.pane_drag.as_ref().map(|d| d.pane),
+                "pane_drag_target": target.pane_drag.as_ref().and_then(|d| d.target).map(
+                    |(id, _, dir, before)| serde_json::json!({
+                        "pane": id,
+                        "edge": match (dir, before) {
+                            (Dir::Horizontal, true) => "left",
+                            (Dir::Horizontal, false) => "right",
+                            (Dir::Vertical, true) => "top",
+                            (Dir::Vertical, false) => "bottom",
+                        },
+                    }),
+                ),
                 "tab_bar": {
                     "height": bar.height,
                     "y": bar.y,
@@ -16086,6 +16171,7 @@ impl App {
             ws.tab_pressed_idx = None;
             ws.detach_drag = std::mem::take(&mut ws.detach_drag).on_mouse_up();
             ws.drag_press = None;
+            ws.pane_drag = None;
             handled = true;
         }
         handled
@@ -22444,6 +22530,47 @@ impl App {
                         }
                     }
                 }
+                // Terminator parity: a titlebar press that has since moved far
+                // enough is a pane drag. Recompute the drop target every move
+                // from the CURRENT layout rather than caching it at press time
+                // — a pane closing mid-drag reshuffles every rect, and a stale
+                // target would highlight a pane that is no longer there.
+                if ws.pane_drag.is_some() {
+                    let area = self.area(ws);
+                    let (cx, cy) = (ws.cursor.x as f32, ws.cursor.y as f32);
+                    let (ox, oy) = ws.pane_drag.as_ref().map(|d| d.origin).unwrap_or((cx, cy));
+                    let (dx, dy) = (cx - ox, cy - oy);
+                    let live = ws.pane_drag.as_ref().is_some_and(|d| d.live)
+                        || (dx * dx + dy * dy).sqrt() > PANE_DRAG_THRESHOLD_PX;
+                    let moving = ws.pane_drag.as_ref().map(|d| d.pane);
+                    // Computed before the &mut borrow below: `pane_rect_at`
+                    // needs `&ws.mux` and the write needs `&mut ws.pane_drag`.
+                    let target = if live {
+                        ws.mux.pane_rect_at(area, cx, cy).and_then(|(id, rect)| {
+                            // A pane cannot be dropped onto itself: the tree
+                            // half refuses it, so offering the hint would
+                            // promise a move that never happens.
+                            (Some(id) != moving)
+                                .then(|| {
+                                    crate::mux::pane_drop_zone(rect, cx, cy)
+                                        .map(|(dir, before)| (id, rect, dir, before))
+                                })
+                                .flatten()
+                        })
+                    } else {
+                        None
+                    };
+                    if let Some(drag) = ws.pane_drag.as_mut() {
+                        let changed = drag.live != live
+                            || drag.target.map(|t| t.0) != target.map(|t| t.0)
+                            || drag.target.map(|t| (t.2, t.3)) != target.map(|t| (t.2, t.3));
+                        drag.live = live;
+                        drag.target = target;
+                        if changed && let Some(w) = &ws.window {
+                            w.request_redraw();
+                        }
+                    }
+                }
                 // C6 (tear-off): drive the detach FSM from the press origin.
                 // Distance decides click-vs-drag; WINDOW-BOUNDS CONTAINMENT
                 // decides inside/outside — Windows' SetCapture keeps
@@ -22834,6 +22961,13 @@ impl App {
                 // focuses + opens the EditPaneTitle overlay. Two
                 // clicks model (focus first, edit second) avoids
                 // accidental title edits on focus transitions.
+                //
+                // The titlebar is also the grab handle for dragging the pane
+                // elsewhere in the tab, so the press only FOCUSES and arms the
+                // gesture; the release decides between editing the title and
+                // moving the pane. Opening the editor here, as this did before
+                // pane drag existed, put a text field over the pane the user had
+                // just picked up.
                 let (cx, cy) = (ws.cursor.x as f32, ws.cursor.y as f32);
                 if bcode == 0
                     && let Some(clicked_pane_id) = self.pane_at_titlebar_click(ws, cx, cy)
@@ -22842,9 +22976,13 @@ impl App {
                     let pre = self.focus_key(ws);
                     ws.mux.focus_at(area, cx, cy);
                     self.note_focus_change(ws, pre);
-                    if already_focused {
-                        self.handle_action(ws, Action::EditPaneTitle, event_loop);
-                    }
+                    ws.pane_drag = Some(PaneDrag {
+                        pane: clicked_pane_id,
+                        origin: (cx, cy),
+                        live: false,
+                        rename_on_click: already_focused,
+                        target: None,
+                    });
                     if let Some(w) = &ws.window {
                         w.request_redraw();
                     }
@@ -22979,6 +23117,38 @@ impl App {
                         ws.search.dragging_editor = false;
                     }
                     return;
+                }
+                // Terminator parity: the release is where a titlebar press
+                // finally means something. Moved past the slop -> move the pane
+                // to the latched drop target; never moved -> the
+                // second-click-renames behaviour the press deferred.
+                //
+                // FIRST among the left-release handlers, ahead of the tear-off
+                // and mouse-reporting branches that can return early. Those are
+                // all mutually exclusive with a pane drag today -- the titlebar
+                // press returns before `mouse_btn` is ever set -- but "today"
+                // is exactly the kind of reasoning that leaves a gesture armed
+                // when one of them grows a new early return.
+                if bcode == 0
+                    && let Some(drag) = ws.pane_drag.take()
+                {
+                    if drag.live {
+                        if let Some((target, _, dir, before)) = drag.target
+                            && ws.mux.move_pane_beside(drag.pane, target, dir, before)
+                        {
+                            // Same two follow-ups every tree edit needs:
+                            // re-size every PTY to its new rect, and persist the
+                            // layout so a restore brings the pane back where the
+                            // user put it.
+                            self.resize_all(ws);
+                            self.save_session(ws);
+                        }
+                    } else if drag.rename_on_click {
+                        self.handle_action(ws, Action::EditPaneTitle, event_loop);
+                    }
+                    if let Some(w) = &ws.window {
+                        w.request_redraw();
+                    }
                 }
                 // v2.19.0 (tear-off UX, D4): a left-release while a torn
                 // window is tracked is the DROP. Two shapes: (a) the
@@ -23246,6 +23416,7 @@ impl App {
                     // (the release will land on whatever window took focus).
                     ws.detach_drag = crate::detach::DragState::default();
                     ws.drag_press = None;
+                    ws.pane_drag = None;
                     // v2.19.0 note: torn-drag tracking deliberately survives
                     // this disarm — the tear itself moves OS focus to the
                     // torn window (firing Focused(false) on the source), and
@@ -23442,6 +23613,25 @@ impl App {
                     if let Some(rec) = self.recorder.as_mut() {
                         dev_record_key(rec, &event.logical_key, mods);
                     }
+                }
+                // Terminator parity: Esc abandons an in-flight pane drag, and
+                // is consumed like the tab-drag cancel below it. Only a LIVE
+                // drag claims the key — an armed-but-unmoved press is still
+                // just a click, and swallowing Esc for it would eat the key
+                // whenever the pointer happened to rest on a titlebar.
+                //
+                // Dropping the state is the whole cancel: nothing has been
+                // committed yet. The move only happens at release, off
+                // `pane_drag.target`, so a cleared gesture releases into a
+                // no-op with the tree untouched.
+                if ws.pane_drag.as_ref().is_some_and(|d| d.live)
+                    && matches!(&event.logical_key, Key::Named(NamedKey::Escape))
+                {
+                    ws.pane_drag = None;
+                    if let Some(w) = &ws.window {
+                        w.request_redraw();
+                    }
+                    return;
                 }
                 // C6 (tear-off): Esc cancels an in-flight tab drag and is
                 // consumed — it must not leak to the PTY or close a modal.
@@ -24535,18 +24725,19 @@ mod modal_discipline_guard {
 mod tests {
     use super::{
         AUTOMATION_RETRY_MIN, App, AutomationRetry, ContextMenuItem, MAX_REMOTE_COMMANDS_PER_BATCH,
-        Osc52ClipboardChannel, ParsedRemoteCommandBatch, PendingLuaCommand, PendingLuaCommands,
-        PendingRemoteCommand, RemoteBatchClaim, SplitDrag, apply_bs_del_binding,
-        apply_output_generation_outcome, apply_remote_title_transition, argv_is_nonlocal_client,
-        assign_mnemonics, broadcast_scope_for_default, cached_pane_cursor_blinking,
-        claim_remote_command_file, context_menu_item_columns, context_menu_max_scroll_offset,
-        context_menu_scroll_for_highlight, context_menu_snapshot_reuse_safe,
-        context_menu_surface_can_fit_row, count_rows_fitting, ctl_input_error, filter_disabled,
-        find_menu_row_y, fit_context_menu_row, input_rejection_message, local_paste_within_limit,
-        modal_swallows_pointer, osc52_clipboard_channel, output_generation_advanced,
-        output_wakeup_needs_paint, pane_cursor_blinking_with, pane_snapshot_keys_match,
-        parse_remote_command_batch, production_source, rank_layouts, sanitize_native_window_title,
-        sanitize_title, selection_kind, session_sweep_due, should_notify_input_rejection,
+        Osc52ClipboardChannel, PaneDrag, ParsedRemoteCommandBatch, PendingLuaCommand,
+        PendingLuaCommands, PendingRemoteCommand, RemoteBatchClaim, SplitDrag,
+        apply_bs_del_binding, apply_output_generation_outcome, apply_remote_title_transition,
+        argv_is_nonlocal_client, assign_mnemonics, broadcast_scope_for_default,
+        cached_pane_cursor_blinking, claim_remote_command_file, context_menu_item_columns,
+        context_menu_max_scroll_offset, context_menu_scroll_for_highlight,
+        context_menu_snapshot_reuse_safe, context_menu_surface_can_fit_row, count_rows_fitting,
+        ctl_input_error, filter_disabled, find_menu_row_y, fit_context_menu_row,
+        input_rejection_message, local_paste_within_limit, modal_swallows_pointer,
+        osc52_clipboard_channel, output_generation_advanced, output_wakeup_needs_paint,
+        pane_cursor_blinking_with, pane_snapshot_keys_match, parse_remote_command_batch,
+        production_source, rank_layouts, sanitize_native_window_title, sanitize_title,
+        selection_kind, session_sweep_due, should_notify_input_rejection,
         should_poll_remote_window, should_restore_session, should_reveal_after_renderer_init,
         stage_applied_remote_probe, stage_output_generations_for_frame, stage_remote_targets,
         startup_inner_size_px, typeahead_match,
@@ -25738,6 +25929,19 @@ mod tests {
         ws.drag_press = Some((0.0, 0.0));
         assert!(!context_menu_snapshot_reuse_safe(&ws));
         ws.drag_press = None;
+
+        // An ARMED pane drag counts, not just a live one: the press has already
+        // claimed the pointer, and the very next CursorMoved can promote it and
+        // rewrite the layout under a reused snapshot.
+        ws.pane_drag = Some(PaneDrag {
+            pane: 1,
+            origin: (0.0, 0.0),
+            live: false,
+            rename_on_click: false,
+            target: None,
+        });
+        assert!(!context_menu_snapshot_reuse_safe(&ws));
+        ws.pane_drag = None;
 
         ws.detach_drag = crate::detach::DragState::on_mouse_down_on_tab(0);
         assert!(!context_menu_snapshot_reuse_safe(&ws));

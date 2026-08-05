@@ -1057,6 +1057,60 @@ pub fn seam_at(seams: &[SplitSeam], px: f32, py: f32, tol: f32) -> Option<usize>
     })
 }
 
+/// Which edge of the pane at `rect` the cursor sits nearest, expressed as the
+/// `(dir, before)` pair [`Mux::move_pane_beside`] takes — the mouse half of
+/// dragging a terminal somewhere else (Terminator's `terminal.py` drag/drop).
+///
+/// The rect is split into four triangles by its diagonals, so every point
+/// inside belongs to exactly one edge and there is no dead centre where a drop
+/// would mean nothing. A quarter-band model was the alternative and was
+/// rejected for exactly that: it leaves a middle region with no defined action,
+/// and on a narrow pane the bands overlap and the middle vanishes instead.
+///
+/// `None` when the point is outside `rect` or the rect has no area — a caller
+/// with no target must draw no hint, not guess one.
+pub fn pane_drop_zone(rect: Rect, px: f32, py: f32) -> Option<(Dir, bool)> {
+    let (x, y, w, h) = rect;
+    if !(w > 0.0 && h > 0.0) || !px.is_finite() || !py.is_finite() {
+        return None;
+    }
+    if px < x || px >= x + w || py < y || py >= y + h {
+        return None;
+    }
+    // Normalised so the diagonals are the lines v = u and v = 1 - u whatever
+    // the pane's aspect ratio. Comparing raw pixels instead would tilt the
+    // triangles on any non-square pane, and a wide pane would answer "top" for
+    // most of its width.
+    let u = (px - x) / w;
+    let v = (py - y) / h;
+    // Ordered, with `<=` on the first two arms, so a point exactly on a
+    // diagonal resolves the same way every frame. An undecided boundary would
+    // flicker the hint between two zones as the pointer crawls along it.
+    Some(if v <= u && v <= 1.0 - u {
+        (Dir::Vertical, true) // top
+    } else if v >= u && v >= 1.0 - u {
+        (Dir::Vertical, false) // bottom
+    } else if u < v {
+        (Dir::Horizontal, true) // left
+    } else {
+        (Dir::Horizontal, false) // right
+    })
+}
+
+/// The sub-rect of `rect` a drop into `(dir, before)` would fill, for painting
+/// the hint. Half the pane along the split axis, matching the 50/50 ratio
+/// [`Mux::move_pane_beside`] grafts at, so the preview shows the real result
+/// rather than a decorative stripe.
+pub fn pane_drop_preview(rect: Rect, dir: Dir, before: bool) -> Rect {
+    let (x, y, w, h) = rect;
+    match (dir, before) {
+        (Dir::Horizontal, true) => (x, y, w / 2.0, h),
+        (Dir::Horizontal, false) => (x + w / 2.0, y, w / 2.0, h),
+        (Dir::Vertical, true) => (x, y, w, h / 2.0),
+        (Dir::Vertical, false) => (x, y + h / 2.0, w, h / 2.0),
+    }
+}
+
 pub struct Tab {
     pub root: Node,
     pub focus: u64,
@@ -2234,6 +2288,19 @@ impl Mux {
             .and_then(|id| self.panes.get(&id))
             .map(|p| p.argv.clone())
             .unwrap_or_default()
+    }
+
+    /// Which pane's rect contains `(px, py)`, with that rect — the drop-target
+    /// half of dragging a terminal.
+    ///
+    /// Deliberately not [`Mux::focus_at`], which snaps to the nearest pane so a
+    /// click on a seam still focuses something. A drag has no such obligation:
+    /// a point outside every pane must read as "no target here" so the drop hint
+    /// disappears, rather than naming a pane the cursor is not over.
+    pub fn pane_rect_at(&self, area: Rect, px: f32, py: f32) -> Option<(u64, Rect)> {
+        self.layout(self.active, area)
+            .into_iter()
+            .find(|&(_, (x, y, w, h))| px >= x && px < x + w && py >= y && py < y + h)
     }
 
     /// Terminator parity: move a pane to a new position beside another pane in
@@ -4785,6 +4852,171 @@ mod node_tests {
             solo.tabs[0].root.leaf_ids(),
             vec![1],
             "a refused move must leave the tree exactly as it was"
+        );
+    }
+
+    /// The four triangles must tile the pane: every interior point answers
+    /// exactly one edge, and the answer is the edge the point is nearest.
+    #[test]
+    fn pane_drop_zone_picks_the_nearest_edge() {
+        // Deliberately non-square (400x100): a pixel-distance model would call
+        // most of this pane's width "top", because every point is within 50px
+        // of the top edge while the left edge is 200px away at the centre.
+        let rect = (10.0f32, 20.0f32, 400.0f32, 100.0f32);
+        for &(px, py, want, what) in &[
+            (20.0, 70.0, (Dir::Horizontal, true), "left edge"),
+            (400.0, 70.0, (Dir::Horizontal, false), "right edge"),
+            (210.0, 25.0, (Dir::Vertical, true), "top edge"),
+            (210.0, 115.0, (Dir::Vertical, false), "bottom edge"),
+        ] {
+            assert_eq!(
+                pane_drop_zone(rect, px, py),
+                Some(want),
+                "({px}, {py}) is over the {what} of a 400x100 pane"
+            );
+        }
+        // The precondition the aspect-independence claim rests on: at the
+        // horizontal midpoint the cursor really is nearer the top in PIXELS,
+        // so a distance-based model would have answered Vertical here and this
+        // case would not distinguish the two models.
+        let (x, y, w, h) = rect;
+        let (px, py) = (x + w * 0.25, y + h * 0.5);
+        assert!(
+            (py - y) < (px - x),
+            "fixture must place the point nearer the top edge in raw pixels"
+        );
+        assert_eq!(
+            pane_drop_zone(rect, px, py),
+            Some((Dir::Horizontal, true)),
+            "a quarter of the way in, on the vertical midline, is the LEFT \
+             triangle -- the zones are normalised, not pixel-distance"
+        );
+    }
+
+    #[test]
+    fn pane_drop_zone_covers_every_point_exactly_once() {
+        let rect = (0.0f32, 0.0f32, 37.0f32, 23.0f32);
+        // `Dir` is not `Hash`, and giving it that derive purely for a test
+        // would widen the type's contract for no caller. A four-slot tally
+        // keyed by the same (dir, before) pair does the counting instead.
+        let slot = |(dir, before): (Dir, bool)| match (dir, before) {
+            (Dir::Vertical, true) => 0usize,
+            (Dir::Vertical, false) => 1,
+            (Dir::Horizontal, true) => 2,
+            (Dir::Horizontal, false) => 3,
+        };
+        let mut seen = [0usize; 4];
+        for iy in 0..23 {
+            for ix in 0..37 {
+                let z = pane_drop_zone(rect, ix as f32 + 0.5, iy as f32 + 0.5);
+                let z = z.unwrap_or_else(|| panic!("({ix}, {iy}) is inside the pane"));
+                seen[slot(z)] += 1;
+            }
+        }
+        assert!(
+            seen.iter().all(|&n| n > 0),
+            "all four zones must be reachable: {seen:?}"
+        );
+        assert_eq!(
+            seen.iter().sum::<usize>(),
+            37 * 23,
+            "the zones must tile the pane with no point counted twice"
+        );
+    }
+
+    #[test]
+    fn pane_drop_zone_refuses_points_outside_and_empty_rects() {
+        let rect = (10.0f32, 20.0f32, 40.0f32, 30.0f32);
+        assert_eq!(pane_drop_zone(rect, 9.0, 30.0), None, "left of the pane");
+        assert_eq!(
+            pane_drop_zone(rect, 50.0, 30.0),
+            None,
+            "past the right edge"
+        );
+        assert_eq!(
+            pane_drop_zone(rect, 20.0, 50.0),
+            None,
+            "past the bottom edge"
+        );
+        assert_eq!(pane_drop_zone(rect, f32::NAN, 30.0), None, "NaN cursor");
+        assert_eq!(
+            pane_drop_zone((10.0, 20.0, 0.0, 30.0), 10.0, 30.0),
+            None,
+            "a zero-width pane has no zones to be over"
+        );
+    }
+
+    /// The preview must be the half the pane would actually give up, so the
+    /// hint cannot promise one geometry and the drop deliver another.
+    #[test]
+    fn pane_drop_preview_is_the_half_the_split_would_take() {
+        let rect = (10.0f32, 20.0f32, 40.0f32, 30.0f32);
+        assert_eq!(
+            pane_drop_preview(rect, Dir::Horizontal, true),
+            (10.0, 20.0, 20.0, 30.0)
+        );
+        assert_eq!(
+            pane_drop_preview(rect, Dir::Horizontal, false),
+            (30.0, 20.0, 20.0, 30.0)
+        );
+        assert_eq!(
+            pane_drop_preview(rect, Dir::Vertical, true),
+            (10.0, 20.0, 40.0, 15.0)
+        );
+        assert_eq!(
+            pane_drop_preview(rect, Dir::Vertical, false),
+            (10.0, 35.0, 40.0, 15.0)
+        );
+        // Each preview must sit inside the pane and take exactly half its area.
+        for (dir, before) in [
+            (Dir::Horizontal, true),
+            (Dir::Horizontal, false),
+            (Dir::Vertical, true),
+            (Dir::Vertical, false),
+        ] {
+            let (px, py, pw, ph) = pane_drop_preview(rect, dir, before);
+            let (x, y, w, h) = rect;
+            assert!(
+                px >= x && py >= y && px + pw <= x + w && py + ph <= y + h,
+                "{dir:?}/{before} preview escapes the pane"
+            );
+            assert!(
+                (pw * ph - w * h / 2.0).abs() < 0.01,
+                "{dir:?}/{before} preview is not half the pane"
+            );
+        }
+    }
+
+    /// A drop hint must name the pane the cursor is genuinely over. `focus_at`
+    /// deliberately snaps to the nearest pane instead, which is right for a
+    /// click and wrong here.
+    #[test]
+    fn pane_rect_at_reports_only_a_pane_under_the_cursor() {
+        let mut m = Mux::new();
+        push_tab(
+            &mut m,
+            Node::Split {
+                dir: Dir::Horizontal,
+                ratio: 0.5,
+                a: Box::new(Node::Leaf(1)),
+                b: Box::new(Node::Leaf(2)),
+            },
+            1,
+        );
+        let area = (0.0f32, 0.0f32, 100.0f32, 50.0f32);
+        let rects = m.layout(m.active, area);
+        assert_eq!(rects.len(), 2, "fixture must lay out two panes");
+        assert_eq!(m.pane_rect_at(area, 10.0, 25.0).map(|(id, _)| id), Some(1));
+        assert_eq!(m.pane_rect_at(area, 90.0, 25.0).map(|(id, _)| id), Some(2));
+        assert_eq!(
+            m.pane_rect_at(area, -1.0, 25.0),
+            None,
+            "outside the area entirely -- no target, so no hint"
+        );
+        assert_eq!(
+            m.pane_rect_at(area, 50.0, 60.0),
+            None,
+            "below every pane -- no target, so no hint"
         );
     }
 

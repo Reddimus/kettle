@@ -1201,7 +1201,8 @@ These need a real display and are run by hand (or on real hardware):
     kettle_run to echo a marker"` — Claude Code drives the MCP tools end-to-end.
   - **Live renderer/UI diagnostics**: on a Linux desktop run
     `just live-render-smoke`, `just interaction-smoke`, `just tabbar-click-smoke`,
-    `just tearoff-smoke`, `just tab-title-smoke`, `just split-titlebar-smoke`,
+    `just pane-drag-smoke`, `just tearoff-smoke`, `just tab-title-smoke`,
+    `just split-titlebar-smoke`,
     `just zoom-keybind-smoke`, and `just underline-scroll-smoke`. Artifacts land under `target/diagnostics/*`
     for frame-by-frame review. The tearoff recipe is two-tier: a portable
     ctl tier proves the mouseless `move_tab_to_new_window` tear +
@@ -1224,6 +1225,14 @@ These need a real display and are run by hand (or on real hardware):
     titlebar/grid edge and focused/transmit, inactive, and receiving colors;
     the sample gutter excludes title glyphs, icons, and pane accents.
     `analysis.json` records every sample coordinate and grid boundary.
+    The pane-drag run builds a three-pane tab, grabs the focused pane by its own
+    titlebar, and walks press -> jitter inside the slop radius -> move onto a
+    neighbour's right quarter -> release, asserting the `pane_drag_armed` /
+    `pane_drag_live` / `pane_drag_target` triple at each step and that the drop
+    reorders `ui_geometry`'s `panes` without gaining or losing one. The drop-zone
+    geometry itself is unit-tested (`pane_drop_zone`, `pane_drop_preview` in
+    `mux.rs`, including a case that fails under the rejected pixel-distance
+    model); this smoke proves a titlebar press actually reaches it.
     Underline runs write
     `analysis.json` with the visible underlined sentinel sequence across down/up
     scrolling plus per-row SGR underline, plain-row, and autodetected `/` and

@@ -49,6 +49,55 @@ remotes, direct nonlocal clients, and nested WSL sessions never install a
 misleading host cwd. Split/duplicate reads the latest foreground-shell result
 from this cache instead of scanning on the input path.
 
+## Unreleased -- comparator smoke, four terminals
+
+Not release evidence, and the reasons are recorded rather than implied: a
+position-only rotation instead of a Williams square (`-AllowUnbalanced`), four
+terminals instead of six, and another session's Kettle running throughout
+(`-AllowForeignTerminalInstances`, PIDs in the manifest). Windows Terminal was
+excluded because it is single-instance and a session was open; Rio was excluded
+because it fails startup readiness on its SECOND launch of a run, reproducibly,
+for reasons not yet understood. Read these as a smoke reading on a busy machine,
+not as quiet-machine numbers.
+
+Medians, eight samples per terminal, zero misses. Startup is end-to-end: launch
+until a child shell has run inside the terminal and its painted marker is on
+screen, so it includes a constant child-startup cost common to all four.
+
+| metric | kettle | alacritty | wezterm | tabby | kettle's rank |
+|---|---|---|---|---|---|
+| input latency, median | **68.59 ms** | 94.23 | 135.01 | 76.88 | **1 of 4** |
+| input latency, p95 | **124.06 ms** | 175.16 | 204.17 | 200.47 | **1 of 4** |
+| input latency, p99 | **139.09 ms** | 197.52 | 244.72 | 225.52 | **1 of 4** |
+| idle CPU | **0.0000%** | 0.00 / 0.26 | 0.51 / 0.00 | 0.25 / 0.51 | **1 of 4** |
+| startup | 6883 / 5652 ms | 4995 / 3463 | 4637 / 3408 | 15737 / 11827 | 3 of 4 |
+| fresh working set | 335.8 / 335.9 MB | 147.7 / 147.5 | 203.3 / 203.4 | 741.2 / 745.0 | 3 of 4 |
+
+Two values mean two independent runs (`20260805-134952`, `20260805-142330`);
+latency was measured once, over 40 samples per terminal with nothing censored.
+
+What this says plainly:
+
+- **Input latency is Kettle's win, and it is not marginal.** It leads at every
+  percentile, and its p99 (139 ms) is better than every peer's p95. That is the
+  number a user meets on each keystroke.
+- **Idle CPU: Kettle measured exactly 0.0000% in both runs**, while Alacritty and
+  WezTerm each drifted above zero in one of the two.
+- **Startup and memory are behind, and not by a sampling accident.** Kettle's
+  FASTEST startup sample still trails Alacritty's and WezTerm's fastest by ~1.8s,
+  and the memory reading varies by under 4 MB across eight samples at 2.3x
+  Alacritty and 1.65x WezTerm. The startup phase split (first sample) puts about
+  half the gap before the window exists -- 3265 ms vs Alacritty's 1282 ms, but
+  level with WezTerm's 2968 ms, which points at GPU initialisation rather than
+  something peculiar to Kettle -- and about half in rendering the child's first
+  output (5224 ms vs 3075 ms).
+- **Throughput produced no data.** The channel between the probe and its workload
+  child timed out on connection. It is the one comparative metric missing here,
+  and it is not being claimed either way.
+
+So on the metrics that were measured, Kettle beats every peer on latency, ties
+best on idle CPU, and loses to two of three on startup and memory.
+
 ## Next release — paired six-terminal and physical-display gates
 
 The Windows harness measures Kettle, Windows Terminal, Alacritty, WezTerm, Rio,
@@ -81,10 +130,35 @@ Two harness defects used to make a run impossible here, and both are fixed:
   unknown field makes WezTerm open a configuration-error window alongside the
   terminal, so the launcher saw two windows and refused the run as ambiguous.
 
-What remains is an environmental precondition rather than a defect: the harness
-refuses to start if any comparator is **already running**, because it could not
-then attribute the new window unambiguously. Close every terminal -- including
-the Windows Terminal you may be reading this in -- before starting a run.
+Three more were found while getting a session to complete on a shared machine:
+
+- **Readiness spent its deadline scanning pixels in PowerShell.** The poll walks
+  the captured region for the marker colour; a match can stop early, a MISS
+  cannot -- and a miss is what every poll before the window paints is.
+  Interpreted, that walk over 1024x384 measured **2,585 ms** here, so a 30s
+  deadline bought about eight looks and a terminal that painted late was reported
+  as one that never painted. Compiled (`CountPixelsNearColor`) the same worst
+  case is **89.8 ms**, a 29x cut; the deadline now measures the terminal rather
+  than the harness. The timeout also reports the slowest capture and how much of
+  the deadline went on capturing, so the two failure modes stop looking alike.
+- **Two probes asserted a window reached the foreground on the next
+  instruction.** `SetForegroundWindow` is refusable and its effect is not
+  immediately observable, so that is a race -- and it loses whenever another
+  application owns the foreground. Startup and throughput now use a bounded
+  acquire-and-confirm helper.
+- **`pwsh -File perf-all.ps1 -Terminals a,b,c` passed one literal string.**
+  `-File` does not parse array syntax, and the resulting one-element list failed
+  hundreds of lines later inside the schedule generator. A `ValidateSet` now
+  rejects it at the boundary. Pass a real array under `pwsh -Command`.
+
+The remaining environmental precondition is narrower than it was. The harness
+refuses to start when a comparator is already running, because a terminal that
+joins a running instance opens no new window and the launch would fail as an
+unexplained timeout. That reasoning does not apply to terminals whose pinned
+launch arguments force a fresh process, so `-AllowForeignTerminalInstances`
+(smoke only) lifts it for exactly those, and the manifest records the tolerated
+PIDs -- attribution never depended on the process name, but contention is real
+and those samples are not quiet-machine numbers.
 
 Kettle, Alacritty, WezTerm, Rio, and Tabby receive run-local configs with the
 same font, scrollback, colors, opacity, padding, cursor, and disabled effects.
