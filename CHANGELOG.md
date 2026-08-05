@@ -4,7 +4,7 @@ All notable changes to kettle. Format roughly follows
 [Keep a Changelog](https://keepachangelog.com/); the project moves in small,
 durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
-## [Unreleased]
+## [2.51.0] — 2026-08-05
 
   ### Added
   - **Drag a terminal to another position in its tab, with the mouse.** v2.50.0
