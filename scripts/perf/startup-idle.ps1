@@ -249,8 +249,36 @@ function Start-KettlePerfReadyLaunch {
         $sizedFocusedMs = $timer.Elapsed.TotalMilliseconds
         [void](Publish-KettlePerfStartupReadyGo $descriptor)
         $goPublishedMs = $timer.Elapsed.TotalMilliseconds
-        $roiWidth = [Math]::Min(1024, $WindowW)
-        $roiHeight = [Math]::Min(384, $WindowH)
+        # Clamp the readiness region to the client the window ACTUALLY has, not
+        # to the size that was requested.
+        #
+        # `CaptureWindowRegion` refuses a region that does not fit inside the
+        # client rect -- correctly, it would read outside the bitmap -- and
+        # returns null. The poll below only evaluates the painted marker when
+        # the capture is non-null, so a region even one pixel too wide makes
+        # `paintReady` unreachable: the loop spins for the full 30s and reports
+        # `paint=False`, which reads as "the terminal never painted" when what
+        # actually happened is "the harness never looked". A terminal whose
+        # client quantizes to whole character cells can land narrower than the
+        # requested width, so this is reachable without anything being wrong
+        # with the terminal.
+        # `CaptureWindow` reports the client it actually measured, which is the
+        # same rect `CaptureWindowRegion` validates against. A failed
+        # measurement is NOT fatal: `Set-WindowSize` above already proved the
+        # client is exactly the requested size, so falling back to that is both
+        # correct and the status quo. This clamp exists for the case where the
+        # window later disagrees, not to add a new way to fail.
+        $clientWidth = 0
+        $clientHeight = 0
+        [void][KettlePerf.Native]::CaptureWindow(
+            $launched.Hwnd,
+            [ref]$clientWidth,
+            [ref]$clientHeight
+        )
+        if ($clientWidth -le 0) { $clientWidth = $WindowW }
+        if ($clientHeight -le 0) { $clientHeight = $WindowH }
+        $roiWidth = [Math]::Min(1024, [Math]::Min($WindowW, $clientWidth))
+        $roiHeight = [Math]::Min(384, [Math]::Min($WindowH, $clientHeight))
         $readyDeadline = (Get-Date).AddSeconds(30)
         $markerReady = $false
         $paintReady = $false
@@ -320,7 +348,11 @@ function Start-KettlePerfReadyLaunch {
         }
         throw (
             "$Terminal startup readiness timed out; " +
-            "marker=$markerReady paint=$paintReady"
+            "marker=$markerReady paint=$paintReady " +
+            "(client ${clientWidth}x${clientHeight}, roi ${roiWidth}x${roiHeight}, " +
+            "captures=$captureAttempts, last capture " +
+            "$(if ($null -eq $capture) { 'NULL -- the region never fit the client' } `
+              else { 'ok, the marker pixels were not in it' }))"
         )
     } catch {
         $timer.Stop()
