@@ -637,7 +637,9 @@ function Test-KettlePerfPaintedMarkerCapture {
         [ValidateRange(1, 10000000)]
         [int]$MinimumPixelCount = 256,
         [ValidateRange(0.000001, 1.0)]
-        [double]$MinimumFrameFraction = 0.0005
+        [double]$MinimumFrameFraction = 0.0005,
+        [ValidateRange(0, 24)]
+        [int]$ChannelTolerance = 16
     )
 
     $pixelCount = [int64]$Width * [int64]$Height
@@ -657,12 +659,38 @@ function Test-KettlePerfPaintedMarkerCapture {
     if ($required -gt $pixelCount) {
         return $false
     }
+    # Match within a small per-channel tolerance rather than exactly.
+    #
+    # A terminal is not obliged to hand back the bytes it was given. Rio
+    # renders this marker's `107,95,66` as `105,95,69` -- a colour-management
+    # difference of 2-3 per channel -- so an exact comparison failed its
+    # startup readiness for 30s and aborted the whole comparator run, for a
+    # reason that has nothing to do with performance. Alacritty happens to be
+    # byte-exact, which is why this went unnoticed.
+    #
+    # The deviation is not a constant offset -- Rio renders `48,89,94` as
+    # `59,89,94`, eleven levels of red, while `107,95,66` comes back two low.
+    # That is the shape of a linear-space blend, worst in the dark range, so the
+    # tolerance has to cover the widest case rather than the first one measured.
+    #
+    # 16 is bounded by arithmetic, not taste. The marker is `48 + n % 176` per
+    # channel, so it lives in 48..223. The pinned isolated-config background is
+    # 16,16,16 -- at least 32 from any possible marker, twice the tolerance --
+    # and the marker's own foreground text is 244, at least 21 above the
+    # brightest marker. A 16-level band therefore cannot be satisfied by either
+    # the background or the text, which are the only two colours guaranteed to
+    # be on screen before the marker paints.
+    #
+    # The check stays specific: the colour is nonce-derived per launch, and a
+    # near miss still has to cover the same fraction of the frame. What the
+    # tolerance removes is the assumption that every renderer round-trips sRGB
+    # byte-for-byte.
     $matchingPixels = 0L
     for ($offset = 0L; $offset -lt $BgraBytes.LongLength; $offset += 4) {
         if (
-            $BgraBytes[$offset] -eq $ExpectedBlue -and
-            $BgraBytes[$offset + 1] -eq $ExpectedGreen -and
-            $BgraBytes[$offset + 2] -eq $ExpectedRed
+            [Math]::Abs([int]$BgraBytes[$offset] - $ExpectedBlue) -le $ChannelTolerance -and
+            [Math]::Abs([int]$BgraBytes[$offset + 1] - $ExpectedGreen) -le $ChannelTolerance -and
+            [Math]::Abs([int]$BgraBytes[$offset + 2] - $ExpectedRed) -le $ChannelTolerance
         ) {
             $matchingPixels++
             if ($matchingPixels -ge $required) {

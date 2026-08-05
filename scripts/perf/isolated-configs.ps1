@@ -455,7 +455,12 @@ return {
   show_tabs_in_tab_bar = true,
   show_tab_index_in_tab_bar = false,
   show_new_tab_button_in_tab_bar = false,
-  show_close_tab_button_in_tabs = false,
+  -- `show_close_tab_button_in_tabs` deliberately omitted. It postdates the
+  -- WezTerm releases this harness supports (20240203 rejects it), and an
+  -- unknown field does not merely warn: WezTerm opens a configuration-error
+  -- window ALONGSIDE the terminal, the launcher sees two related windows, and
+  -- the whole comparator run aborts as an ambiguous launch. A close button in
+  -- the tab bar does not affect any measurement; being launchable does.
   cursor_blink_rate = 0,
   default_cursor_style = 'SteadyBlock',
   audible_bell = 'Disabled',

@@ -85,6 +85,10 @@ pub fn commands() -> Vec<(&'static str, Action)> {
         // Terminator-parity entries.
         ("Rotate panes clockwise", RotateCw),
         ("Rotate panes counter-clockwise", RotateCcw),
+        ("Move pane left", MovePaneLeft),
+        ("Move pane right", MovePaneRight),
+        ("Move pane up", MovePaneUp),
+        ("Move pane down", MovePaneDown),
         ("Toggle scrollbar visibility", ToggleScrollbar),
         ("Next profile", NextProfile),
         ("Previous profile", PrevProfile),
@@ -324,6 +328,10 @@ mod tests {
             // parametric like GotoTab (the dropdown + Ctrl+Shift+N reach it).
             About,
             NewTabShell(0),
+            MovePaneLeft,
+            MovePaneRight,
+            MovePaneUp,
+            MovePaneDown,
         ];
         // Compile-time exhaustiveness check: if a new Action variant is
         // added, this match must be updated, which forces the developer
@@ -443,6 +451,10 @@ mod tests {
                 | OpenUpdate
                 | DismissUpdate
                 | TogglePaneReadOnly
+                | MovePaneLeft
+                | MovePaneRight
+                | MovePaneUp
+                | MovePaneDown
                 | GotoTab(_)
                 | NewTabShell(_)
                 | About => {}

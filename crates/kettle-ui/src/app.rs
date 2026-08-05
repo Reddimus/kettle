@@ -12485,6 +12485,34 @@ impl App {
             Action::FocusPrev => ws.mux.focus_cycle(area, false),
             Action::FocusLeft => ws.mux.focus_dir(area, -1, 0),
             Action::FocusRight => ws.mux.focus_dir(area, 1, 0),
+            // Terminator rearranges panes by dragging a terminal onto another.
+            // This is the same rearrangement addressed by direction: take the
+            // focused pane and put it beside whichever pane focus would have
+            // moved to, on that side. The neighbour search is the one
+            // `goto_split` uses, so the pane lands where you were looking.
+            Action::MovePaneLeft
+            | Action::MovePaneRight
+            | Action::MovePaneUp
+            | Action::MovePaneDown => {
+                let (dx, dy, dir, before) = match action {
+                    Action::MovePaneLeft => (-1, 0, Dir::Horizontal, true),
+                    Action::MovePaneRight => (1, 0, Dir::Horizontal, false),
+                    Action::MovePaneUp => (0, -1, Dir::Vertical, true),
+                    _ => (0, 1, Dir::Vertical, false),
+                };
+                if let Some(target) = ws.mux.pane_in_direction(area, dx, dy)
+                    && let Some(moving) = ws.mux.active_focus()
+                    && ws.mux.move_pane_beside(moving, target, dir, before)
+                {
+                    // The rearrangement changes every pane's rect, so the PTYs
+                    // have to hear about it, and the layout is worth keeping.
+                    self.resize_all(ws);
+                    self.save_session(ws);
+                    if let Some(w) = &ws.window {
+                        w.request_redraw();
+                    }
+                }
+            }
             Action::FocusUp => ws.mux.focus_dir(area, 0, -1),
             Action::FocusDown => ws.mux.focus_dir(area, 0, 1),
             Action::ResizeLeft => ws.mux.resize_focus(Dir::Horizontal, -0.03),

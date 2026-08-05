@@ -67,28 +67,24 @@ evidence rejects `PATH`, `KETTLE_PERF_WT_EXE`, App Execution Alias, or other
 launcher indirection; standalone smoke probes retain ambient discovery only as
 explicitly advisory evidence.
 
-### Known blocker: Rio's startup-readiness probe
+### Running a comparator session on a working machine
 
-As of 2026-08-05 a comparator run on the reference machine cannot complete.
-Rio 0.4.12 launches, creates a real window with a valid HWND, and publishes the
-READY marker — but the painted truecolor rectangle never appears in the
-`PrintWindow` capture within the 30 s budget, so the run aborts with
-`rio startup readiness timed out; marker=True paint=False`. Every other
-comparator passes.
+Two harness defects used to make a run impossible here, and both are fixed:
 
-Rio cannot simply be dropped: a balanced schedule needs an even set of at least
-six terminals, and there is no seventh installed to take its place. So the run
-is blocked on one of two things, neither of which the harness can decide for
-itself:
+- **The readiness check demanded a byte-exact marker colour.** Rio renders a
+  truecolor background a few levels off what it was given -- `48,89,94` comes
+  back as `59,89,94` -- so readiness timed out after 30s and aborted the run for
+  a reason unrelated to performance. Alacritty is byte-exact, which is why it
+  went unnoticed. The check now allows a bounded per-channel tolerance; see
+  `Test-KettlePerfPaintedMarkerCapture` for why 16 is the number.
+- **The isolated WezTerm config set a field that WezTerm 20240203 rejects.** An
+  unknown field makes WezTerm open a configuration-error window alongside the
+  terminal, so the launcher saw two windows and refused the run as ambiguous.
 
-- **Upgrading Rio** (0.5.9 is available). The winget package installs a
-  system-scope MSI and needs elevation, so it cannot be applied unattended.
-- **Relaxing the six-terminal requirement**, which weakens the order-effect
-  balancing the release gate exists to provide. That is a change to the
-  evidence contract, not a workaround.
-
-Until one of those happens, treat the absence of comparator numbers as
-unmeasured rather than as a result.
+What remains is an environmental precondition rather than a defect: the harness
+refuses to start if any comparator is **already running**, because it could not
+then attribute the new window unambiguously. Close every terminal -- including
+the Windows Terminal you may be reading this in -- before starting a run.
 
 Kettle, Alacritty, WezTerm, Rio, and Tabby receive run-local configs with the
 same font, scrollback, colors, opacity, padding, cursor, and disabled effects.
