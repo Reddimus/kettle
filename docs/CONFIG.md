@@ -460,7 +460,9 @@ focused pane's exact argv + cwd into a right-side split.
 **Focus + resize**: `focus_next`, `focus_prev`,
 `goto_split:{up,down,left,right}`, `resize_{up,down,left,right}`,
 `toggle_zoom` (also `toggle_split_zoom`), `rotate_cw` / `rotate_ccw`
-(rotate the split layout).
+(turn the whole tab's split layout a quarter turn, the way Terminator does —
+every pane moves to where turning the screen would have put it, and the two
+directions undo each other).
 
 **Window**: `new_window` (opens another window **in this process** since
 v2.18 — tabs can move live between windows), `close_window`,

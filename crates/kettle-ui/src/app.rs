@@ -4761,6 +4761,35 @@ pub struct App {
     /// the insertion preview, and the drop-merge. App-level (not per-window)
     /// because exactly one tear-off drag can be in flight per pointer.
     torn_drag: Option<TornDrag>,
+    /// When the session was last considered for writing. Drives the sweep
+    /// described on [`SESSION_SWEEP`]; `None` until the first one runs.
+    last_session_sweep: Option<std::time::Instant>,
+}
+
+/// How much of the saved session can be stale before the next event-loop turn
+/// writes it out.
+///
+/// Most of what `session.json` holds is announced by a gesture that already
+/// saves — splitting, closing, opening a tab. Some of it is not: a shell `cd`
+/// moves a pane's recorded directory, a divider drag moves a split ratio, a
+/// renamed tab moves its title. Each of those used to reach disk only if some
+/// *later* gesture happened to save, so restoring a workspace could bring back
+/// directories the user left an hour ago.
+///
+/// Saving on every turn instead would serialize the whole tree at PTY-output
+/// rates, and arming a timer for it would keep the process awake and show up as
+/// idle CPU — kettle measures that. So the sweep rides on turns the event loop
+/// was running anyway: it never wakes the process on its own account, and an
+/// idle kettle simply saves the moment anything next happens. The write itself
+/// is skipped when the serialized text matches what is already on disk, so a
+/// sweep over an unchanged workspace costs one serialization and no I/O.
+const SESSION_SWEEP: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Whether a session sweep is owed as of `now`. The first turn always sweeps,
+/// so a workspace that changes and then goes quiet is written once rather than
+/// waiting for a second turn that may never come.
+fn session_sweep_due(last: Option<std::time::Instant>, now: std::time::Instant) -> bool {
+    last.is_none_or(|then| now.saturating_duration_since(then) >= SESSION_SWEEP)
 }
 
 /// v2.19.0 (tear-off UX): tracking for the one in-flight torn-window drag.
@@ -5387,6 +5416,7 @@ impl App {
             update_available: None,
             version_line: startup_version,
             torn_drag: None,
+            last_session_sweep: None,
         };
         app.runtime_tracker.set_window_count(app.windows.len());
         let result = event_loop.run_app(&mut app);
@@ -12997,11 +13027,13 @@ impl App {
                 }
             }
             Action::ReloadConfig => self.reload_config(ws),
-            Action::MoveTabLeft => {
-                ws.mux.move_active_tab(-1);
-            }
-            Action::MoveTabRight => {
-                ws.mux.move_active_tab(1);
+            // Terminator's `move_tab` wraps at both ends of the bar; the drag
+            // path clamps instead. See `Mux::nudge_active_tab`.
+            Action::MoveTabLeft | Action::MoveTabRight => {
+                let delta = if action == Action::MoveTabLeft { -1 } else { 1 };
+                if ws.mux.nudge_active_tab(delta) {
+                    self.save_session(ws);
+                }
             }
             Action::NewTabShell(n) => {
                 // Ctrl+Shift+N opens the Nth dropdown
@@ -13269,20 +13301,18 @@ impl App {
                     }
                 }
             }
-            // Split-tree rotation. RotateCw flips dir +
-            // swaps children (Terminator's clockwise semantics);
-            // RotateCcw flips dir without swap. No-op when the
-            // focused leaf has no parent (single-pane tab).
-            Action::RotateCw => {
-                ws.mux.rotate_focused_split(true);
-                if let Some(w) = &ws.window {
-                    w.request_redraw();
-                }
-            }
-            Action::RotateCcw => {
-                ws.mux.rotate_focused_split(false);
-                if let Some(w) = &ws.window {
-                    w.request_redraw();
+            // Split-tree rotation (Terminator `rotate_cw` / `rotate_ccw`):
+            // turn the active tab's whole layout a quarter turn. No-op on a
+            // single-pane tab. Rotating changes every pane's rect, so the PTYs
+            // have to be resized and the new arrangement saved — a redraw alone
+            // would leave every child process believing its old geometry.
+            Action::RotateCw | Action::RotateCcw => {
+                if ws.mux.rotate_layout(action == Action::RotateCw) {
+                    self.resize_all(ws);
+                    self.save_session(ws);
+                    if let Some(w) = &ws.window {
+                        w.request_redraw();
+                    }
                 }
             }
             // Runtime scrollbar toggle. Cycles
@@ -23531,6 +23561,13 @@ impl App {
         ws.search_queries
             .retain(|pane_id, _| ws.mux.panes.contains_key(pane_id));
         let now = std::time::Instant::now();
+        // Catch the session changes no gesture announces — see `SESSION_SWEEP`.
+        // Deliberately NOT part of the returned deadline: this must never be a
+        // reason to wake up.
+        if session_sweep_due(self.last_session_sweep, now) {
+            self.last_session_sweep = Some(now);
+            self.save_session(ws);
+        }
         let lua_wait = self.poll_pending_lua_commands(ws, event_loop, now);
         let remote_wait = if should_poll_remote_window(
             !self.pending_remote_commands.is_empty(),
@@ -24335,10 +24372,10 @@ mod tests {
         modal_swallows_pointer, osc52_clipboard_channel, output_generation_advanced,
         output_wakeup_needs_paint, pane_cursor_blinking_with, pane_snapshot_keys_match,
         parse_remote_command_batch, production_source, rank_layouts, sanitize_native_window_title,
-        sanitize_title, selection_kind, should_notify_input_rejection, should_poll_remote_window,
-        should_restore_session, should_reveal_after_renderer_init, stage_applied_remote_probe,
-        stage_output_generations_for_frame, stage_remote_targets, startup_inner_size_px,
-        typeahead_match,
+        sanitize_title, selection_kind, session_sweep_due, should_notify_input_rejection,
+        should_poll_remote_window, should_restore_session, should_reveal_after_renderer_init,
+        stage_applied_remote_probe, stage_output_generations_for_frame, stage_remote_targets,
+        startup_inner_size_px, typeahead_match,
     };
     use crate::mux::{Dir, Mux, PaneInputResult, PaneTitleOrigin};
     use crate::window_state::WindowState;
@@ -24347,6 +24384,55 @@ mod tests {
     use kettle_render::{ContextMenuRow, FrameOutcome, PaneSnapshot};
     use std::sync::Arc;
     use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+
+    /// A shell `cd`, a dragged divider and a renamed tab all change what
+    /// `session.json` should say without any gesture that saves it, so a sweep
+    /// picks them up. What makes the sweep affordable is that it only ever runs
+    /// on a turn the event loop was taking anyway: if it became a wakeup
+    /// deadline, an idle kettle would wake twice a second forever and the idle
+    /// CPU figure the perf suite publishes would go with it.
+    #[test]
+    fn the_session_sweep_rides_existing_turns_and_never_schedules_one() {
+        let t0 = std::time::Instant::now();
+        assert!(
+            session_sweep_due(None, t0),
+            "the first turn sweeps, so a workspace that changes and then goes \
+             quiet is still written"
+        );
+        assert!(!session_sweep_due(Some(t0), t0));
+        assert!(!session_sweep_due(
+            Some(t0),
+            t0 + super::SESSION_SWEEP - std::time::Duration::from_millis(1)
+        ));
+        assert!(session_sweep_due(Some(t0), t0 + super::SESSION_SWEEP));
+        // A timestamp from the future (a paused VM, a mid-turn re-entry)
+        // must not make every turn a sweep.
+        assert!(!session_sweep_due(Some(t0 + super::SESSION_SWEEP), t0));
+
+        // And the constant is reachable from exactly one place: its own
+        // declaration and the predicate above. A third mention would mean it
+        // had found its way into a deadline. Comment lines are dropped first so
+        // prose about the constant does not count as a use of it.
+        let code = production_source()
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert_eq!(
+            code.matches("SESSION_SWEEP").count(),
+            2,
+            "SESSION_SWEEP should be named only by its declaration and \
+             `session_sweep_due`; a third reference means it reached a wakeup"
+        );
+        let wait = code
+            .split("fn about_to_wait_inner(")
+            .nth(1)
+            .expect("about_to_wait_inner present");
+        assert!(
+            wait.contains("session_sweep_due(self.last_session_sweep, now)"),
+            "the sweep must be driven from the event-loop turn itself"
+        );
+    }
 
     /// `backspace-binding` / `delete-binding` must replace only the
     /// UNMODIFIED key, and had no test of any kind before this one.

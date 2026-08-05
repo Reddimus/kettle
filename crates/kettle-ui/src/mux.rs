@@ -2123,21 +2123,25 @@ impl Mux {
             .unwrap_or_default()
     }
 
-    /// Terminator parity, terminatorlib/terminal.py:key_rotate_cw:
-    /// rotate the focused leaf's parent split by flipping its direction
-    /// (Horizontal ↔ Vertical) and optionally swapping its children.
-    /// `clockwise = true` matches Terminator's rotate_cw (vertical→
-    /// horizontal-with-swap, horizontal→vertical-no-swap); `false`
-    /// is the inverse.
+    /// Terminator parity (`terminatorlib/window.py:rotate`): turn the active
+    /// tab's whole layout a quarter turn. Returns whether there was anything to
+    /// rotate — a single-pane tab has no splits and is left alone.
     ///
-    /// No-op when the focused leaf has no parent split (i.e., the
-    /// tab has a single pane).
-    pub fn rotate_focused_split(&mut self, clockwise: bool) -> bool {
+    /// Terminator rotates every pane in the visible tab, not just the one the
+    /// cursor happens to be in, and it leaves zoom first so the user sees the
+    /// result. Both are matched here.
+    pub fn rotate_layout(&mut self, clockwise: bool) -> bool {
         let Some(tab) = self.tabs.get_mut(self.active) else {
             return false;
         };
-        let focus = tab.focus;
-        rotate_node(&mut tab.root, focus, clockwise)
+        if matches!(tab.root, Node::Leaf(_)) {
+            return false;
+        }
+        // Rotating a tree the user cannot see would rearrange their panes
+        // behind a zoomed one, so drop zoom the way Terminator does.
+        tab.zoomed = false;
+        rotate_tree(&mut tab.root, clockwise);
+        true
     }
 
     /// 0-based index of the focused pane within its tab's
@@ -2301,9 +2305,11 @@ impl Mux {
 
     /// Move the active tab `delta` positions along the bar, sliding every tab
     /// it passes over back by one. `delta > 0` moves the tab right, `delta <
-    /// 0` moves it left. Clamps at the edges (no wrap, matching iTerm2 /
-    /// Ghostty / WezTerm — wrap would have the tab bar lurch across the bar on
-    /// every press). Returns `true` if the tab actually moved.
+    /// 0` moves it left. Clamps at the edges — this is the *drag* path, where a
+    /// cursor that overshoots the last segment must stop there rather than
+    /// fling the tab back to the front. The keyboard path is
+    /// [`Mux::nudge_active_tab`], which wraps. Returns `true` if the tab
+    /// actually moved.
     ///
     /// This used to `swap`, which is only the same thing when `|delta| == 1`:
     /// for anything larger the tab sitting at the destination teleported back
@@ -2318,9 +2324,35 @@ impl Mux {
         if n < 2 || delta == 0 {
             return false;
         }
+        let to = (self.active as i32 + delta).clamp(0, n as i32 - 1) as usize;
+        self.relocate_active_tab(to)
+    }
+
+    /// `move_tab_left` / `move_tab_right`: shift the active tab one place and
+    /// wrap around the ends, which is what Terminator's `move_tab` does
+    /// (`window.py`: left from the first tab goes to the end, right from the
+    /// last comes back to the front).
+    ///
+    /// Separate from [`Mux::move_active_tab`] because the two callers want
+    /// different edge behaviour, and one function cannot have both: a keyboard
+    /// press that stops dead at the end of the bar feels broken, while a *drag*
+    /// that wraps would fling the tab across the bar the moment the cursor
+    /// overshot the last segment. Drag clamps; the keys wrap.
+    pub fn nudge_active_tab(&mut self, delta: i32) -> bool {
+        let n = self.tabs.len();
+        if n < 2 || delta == 0 {
+            return false;
+        }
+        let to = (self.active as i32 + delta).rem_euclid(n as i32) as usize;
+        self.relocate_active_tab(to)
+    }
+
+    /// Lift the active tab out of the bar and put it back down at `to`,
+    /// following it with the focus. Shared by the drag and keyboard paths so
+    /// they cannot drift apart on the part that actually reorders.
+    fn relocate_active_tab(&mut self, to: usize) -> bool {
         let from = self.active;
-        let to = (from as i32 + delta).clamp(0, n as i32 - 1) as usize;
-        if to == from {
+        if to == from || to >= self.tabs.len() {
             return false;
         }
         let tab = self.tabs.remove(from);
@@ -3263,35 +3295,34 @@ pub(crate) fn home_dir_string() -> Option<String> {
     std::env::var(key).ok().filter(|s| !s.is_empty())
 }
 
-/// Rotate the split that is the *immediate parent* of pane `target` (the split
-/// with `target` as a direct leaf child): flip its axis and, for a clockwise
-/// rotation, swap its children. Recurses to find that parent; returns whether a
-/// rotation happened. Extracted from `rotate_focused_split` as a free fn so the
-/// nested-tree behavior is unit-testable without standing up a Mux (audit,
-/// v2.26.0: the old guard fired for any ancestor split that merely had some leaf
-/// child, rotating the wrong split in nested trees).
-fn rotate_node(node: &mut Node, target: u64, clockwise: bool) -> bool {
-    if let Node::Split { dir, a, b, .. } = node {
-        if matches!(**a, Node::Leaf(x) if x == target)
-            || matches!(**b, Node::Leaf(x) if x == target)
-        {
-            *dir = match *dir {
-                Dir::Horizontal => Dir::Vertical,
-                Dir::Vertical => Dir::Horizontal,
-            };
-            if clockwise {
-                std::mem::swap(a, b);
-            }
-            return true;
-        }
-        if a.contains(target) && rotate_node(a, target, clockwise) {
-            return true;
-        }
-        if b.contains(target) && rotate_node(b, target, clockwise) {
-            return true;
+/// Turn a whole split tree a quarter turn, matching
+/// `terminatorlib/paned.py:rotate_recursive`.
+///
+/// Every split flips axis. Whether its children also swap — and its ratio
+/// inverts along with them — follows from where the rectangles land: rotating
+/// clockwise sends the left pane of a side-by-side pair to the top (same order,
+/// same ratio) and the top pane of a stacked pair to the right (reversed order,
+/// mirrored ratio). Counter-clockwise is the mirror of that, which is what makes
+/// the two directions exact inverses and four turns the identity — a property
+/// the previous "flip the focused pane's parent, swap only when clockwise"
+/// version had neither of, and one the tests now pin.
+fn rotate_tree(node: &mut Node, clockwise: bool) {
+    if let Node::Split { dir, ratio, a, b } = node {
+        rotate_tree(a, clockwise);
+        rotate_tree(b, clockwise);
+        let reverse = match *dir {
+            Dir::Horizontal => !clockwise,
+            Dir::Vertical => clockwise,
+        };
+        *dir = match *dir {
+            Dir::Horizontal => Dir::Vertical,
+            Dir::Vertical => Dir::Horizontal,
+        };
+        if reverse {
+            *ratio = 1.0 - *ratio;
+            std::mem::swap(a, b);
         }
     }
-    false
 }
 
 /// Apply the *post-spawn* tree mutation for a split: graft the new pane id
@@ -4549,46 +4580,116 @@ mod node_tests {
         );
     }
 
+    /// A rotation is a rotation of the *picture*, so the honest test is
+    /// geometric: turn the tree, and every pane must be where turning the screen
+    /// would have put it. Checking the tree shape instead would pass for a
+    /// version that flips axes without reordering children or mirroring ratios —
+    /// which is exactly what kettle used to do.
     #[test]
-    fn rotate_node_targets_the_immediate_parent_in_nested_trees() {
-        use super::{Dir, Node, rotate_node};
-        // Split1{ a: Split2{L1,L2} (Horizontal), b: L3 } (Vertical), focus L1.
-        // L1's immediate parent is Split2 — rotating must flip Split2, NOT the
-        // outer Split1 (the audited bug rotated Split1 because its child L3 is a
-        // leaf).
-        let mut root = Node::Split {
+    fn rotating_the_layout_moves_every_pane_where_turning_the_screen_would() {
+        // Nested and lopsided on purpose: a shape-only check can't tell a real
+        // rotation from a flip, and an even ratio can't tell a mirrored ratio
+        // from an unmirrored one.
+        let tree = || Node::Split {
             dir: Dir::Vertical,
-            ratio: 0.5,
+            ratio: 0.25,
             a: Box::new(Node::Split {
                 dir: Dir::Horizontal,
-                ratio: 0.5,
+                ratio: 0.4,
                 a: Box::new(Node::Leaf(1)),
                 b: Box::new(Node::Leaf(2)),
             }),
             b: Box::new(Node::Leaf(3)),
         };
-        assert!(rotate_node(&mut root, 1, false));
-        match &root {
-            Node::Split { dir: outer, a, .. } => {
-                assert!(
-                    matches!(outer, Dir::Vertical),
-                    "outer split must NOT rotate"
-                );
+        // Square area so a rotated rect stays inside it and the coordinates are
+        // directly comparable.
+        let side = 800.0_f32;
+        let rects = |root: &Node| {
+            let mut out = Vec::new();
+            root.layout((0.0, 0.0, side, side), &mut out);
+            out.sort_by_key(|(id, _)| *id);
+            out
+        };
+
+        let before = rects(&tree());
+        let mut turned = tree();
+        rotate_tree(&mut turned, true);
+        let after = rects(&turned);
+
+        // Turning the picture clockwise sends (x, y) to (side - y - h, x).
+        for ((id, (x, y, w, h)), (rid, (rx, ry, rw, rh))) in before.iter().zip(&after) {
+            assert_eq!(id, rid, "pane order changed");
+            assert!(
+                (rx - (side - y - h)).abs() <= 1.0
+                    && (ry - x).abs() <= 1.0
+                    && (rw - h).abs() <= 1.0
+                    && (rh - w).abs() <= 1.0,
+                "pane {id} was ({x},{y},{w},{h}), turned to ({rx},{ry},{rw},{rh})"
+            );
+        }
+
+        // Clockwise then counter-clockwise is the identity, and so is four
+        // turns the same way. Neither held before: counter-clockwise used to be
+        // "flip the axis and don't swap", which is not the inverse of anything.
+        let mut round_trip = tree();
+        rotate_tree(&mut round_trip, true);
+        rotate_tree(&mut round_trip, false);
+        assert_eq!(rects(&round_trip), before, "cw then ccw must be a no-op");
+
+        let mut four = tree();
+        for _ in 0..4 {
+            rotate_tree(&mut four, true);
+        }
+        assert_eq!(rects(&four), before, "four clockwise turns must be a no-op");
+    }
+
+    /// Terminator rotates every pane in the visible tab, not just the split the
+    /// focused pane happens to sit in, and it leaves zoom on the way so the user
+    /// can see what happened.
+    #[test]
+    fn rotate_turns_the_whole_tab_and_leaves_zoom() {
+        let mut mux = Mux::new();
+        push_tab(
+            &mut mux,
+            Node::Split {
+                dir: Dir::Vertical,
+                ratio: 0.5,
+                a: Box::new(Node::Split {
+                    dir: Dir::Horizontal,
+                    ratio: 0.5,
+                    a: Box::new(Node::Leaf(1)),
+                    b: Box::new(Node::Leaf(2)),
+                }),
+                b: Box::new(Node::Leaf(3)),
+            },
+            1,
+        );
+        mux.tabs[0].zoomed = true;
+
+        assert!(mux.rotate_layout(true));
+        assert!(!mux.tabs[0].zoomed, "rotation must leave zoom");
+        // Both splits turned — the focused pane's parent AND the one above it.
+        match &mux.tabs[0].root {
+            Node::Split { dir, b, .. } => {
+                assert_eq!(*dir, Dir::Horizontal, "outer split must turn too");
                 assert!(
                     matches!(
-                        a.as_ref(),
+                        b.as_ref(),
                         Node::Split {
                             dir: Dir::Vertical,
                             ..
                         }
                     ),
-                    "inner split (L1's parent) flips H->V"
+                    "inner split must turn as well"
                 );
             }
-            _ => panic!("root should still be a split"),
+            Node::Leaf(_) => panic!("root should still be a split"),
         }
-        // Unknown target → no-op.
-        assert!(!rotate_node(&mut root, 999, false));
+
+        // A tab with nothing to rotate says so rather than reporting work.
+        let mut solo = Mux::new();
+        push_tab(&mut solo, Node::Leaf(1), 1);
+        assert!(!solo.rotate_layout(true));
     }
 
     #[test]
@@ -5023,6 +5124,69 @@ mod node_tests {
             title_override: None,
         });
         assert!(!single.move_active_tab(1));
+    }
+
+    /// The keys wrap, the drag clamps. Both behaviours are wanted, which is why
+    /// they are two entry points rather than one — a `move_tab_right` on the
+    /// last tab that does nothing feels broken (Terminator brings it round to
+    /// the front), while a *drag* that wrapped would fling the tab across the
+    /// bar the instant the cursor overshot the last segment.
+    #[test]
+    fn the_tab_move_keys_wrap_where_a_drag_clamps() {
+        let mut m = Mux::new();
+        for id in 1..=4u64 {
+            m.tabs.push(Tab {
+                root: Node::Leaf(id),
+                focus: id,
+                title_override: None,
+                zoomed: false,
+                last_output_at: None,
+                last_seen_at: None,
+                bell: false,
+            });
+        }
+        let order = |m: &Mux| -> Vec<u64> {
+            m.tabs
+                .iter()
+                .map(|tab| match tab.root {
+                    Node::Leaf(id) => id,
+                    _ => u64::MAX,
+                })
+                .collect()
+        };
+
+        // Right from the last tab comes round to the front, taking focus along.
+        m.active = 3;
+        assert!(m.nudge_active_tab(1));
+        assert_eq!(m.active, 0);
+        assert_eq!(order(&m), vec![4, 1, 2, 3]);
+
+        // Left from the first goes to the end, and undoes the wrap exactly.
+        assert!(m.nudge_active_tab(-1));
+        assert_eq!(m.active, 3);
+        assert_eq!(order(&m), vec![1, 2, 3, 4]);
+
+        // The drag path over the same edge does not wrap.
+        m.active = 3;
+        assert!(!m.move_active_tab(1));
+        assert_eq!(order(&m), vec![1, 2, 3, 4]);
+        m.active = 0;
+        assert!(!m.move_active_tab(-1));
+        assert_eq!(order(&m), vec![1, 2, 3, 4]);
+
+        // A lone tab has nowhere to wrap to.
+        let mut single = Mux::new();
+        single.tabs.push(Tab {
+            root: Node::Leaf(1),
+            focus: 1,
+            title_override: None,
+            zoomed: false,
+            last_output_at: None,
+            last_seen_at: None,
+            bell: false,
+        });
+        assert!(!single.nudge_active_tab(1));
+        assert!(!single.nudge_active_tab(-1));
     }
 
     #[test]

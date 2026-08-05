@@ -58,6 +58,46 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
     window size, instead of reserving 95px on a wide monitor and almost
     nothing on a narrow one.
 
+  - **`rotate_cw` / `rotate_ccw` turned one split, and the two directions did
+    not undo each other.** Terminator's rotate turns the visible tab's whole
+    layout a quarter turn (`paned.py:rotate_recursive`); kettle flipped the axis
+    of the focused pane's parent split alone, swapped its children only when
+    rotating clockwise, and never mirrored the ratio. So a rotation moved one
+    pair of panes rather than the picture, an uneven split changed its
+    proportions on the way round, and clockwise-then-counter-clockwise did not
+    come back — it left the two panes swapped.
+
+    Rotation is now what the word means: every split turns, children swap with a
+    mirrored ratio exactly where the rectangles demand it, the two directions
+    are inverses, and four turns are the identity. The test asserts the pane
+    rectangles land where turning the screen would put them, which a
+    shape-only check could not have caught. Zoom is dropped first, as Terminator
+    does, so the result is visible; and because rotating changes every pane's
+    size, the PTYs are now resized and the new arrangement saved — previously
+    the layout was redrawn but every child process still believed its old
+    geometry.
+
+  - **`move_tab_left` / `move_tab_right` stopped dead at the ends of the tab
+    bar.** Terminator's `move_tab` wraps: left from the first tab sends it to
+    the end, right from the last brings it back to the front. kettle clamped, so
+    the keys silently did nothing on the tab most likely to be moved. They wrap
+    now, and reordering by keyboard is saved. The mouse path deliberately still
+    clamps — a drag that wrapped would fling the tab across the bar as soon as
+    the cursor overshot the last segment.
+
+  - **A workspace could come back with directories the user left an hour ago.**
+    `session.json` records each pane's working directory, each split's ratio and
+    each tab's title, but only a handful of gestures ever wrote it. A shell
+    `cd`, a dragged divider and a renamed tab all changed what the file should
+    say without saving it, so what came back depended on whether some *later*
+    gesture happened to save.
+
+    A sweep now writes the session when it has fallen behind. It costs nothing
+    at rest: it rides turns the event loop was already taking rather than arming
+    a timer — waking twice a second would have shown up in the idle-CPU figure
+    the perf suite publishes — and the write is skipped entirely when the
+    serialized text already matches what is on disk.
+
   - **`split-auto` always split downward.** The dispatch arm read
     `Action::SplitDown | Action::SplitAuto`, so "auto" was literally "down" —
     on a pane wider than it is tall it stacked instead of splitting side by

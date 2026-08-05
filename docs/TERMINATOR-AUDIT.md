@@ -465,7 +465,7 @@ The full feature-by-feature ledger. Rows flip from B/C → ✅ A as cycles land.
 
 | Terminator feature | source | kettle status | Status |
 |---|---|---|---|
-| ~~`rotate_cw` / `rotate_ccw`~~ (rotate panes) | paned.py + keybinds | ✅ `Action::RotateCw` / `RotateCcw` (split-tree rotation; flip dir + swap-children for CW) | — |
+| ~~`rotate_cw` / `rotate_ccw`~~ (rotate panes) | paned.py + keybinds | ✅ `Action::RotateCw` / `RotateCcw` — turns the visible tab's whole layout a quarter turn, matching `rotate_recursive`: every split flips axis, and swaps children with a mirrored ratio where the rectangles demand it, so the two directions are exact inverses. Leaves zoom first, then resizes the PTYs and saves. | — |
 | ~~`hide_window`~~ (Ctrl+Shift+Alt+A; toggle window visibility) | keybinds | ✅ `Action::ToggleWindowVisibility` (wires the file-based IPC path directly) | — |
 | ~~`group_tab` / `ungroup_tab` / `group_win` / `ungroup_win`~~ | keybinds | A | Complete end-to-end and deployed. `BroadcastScope { Off, Tab, All, Group(String) }` enum; `compute_broadcast_targets` pure helper; `mux.broadcast` field migrated bool → enum; `GroupTab/Window` open the title-edit overlay with bulk-apply; `UngroupTab/Window` directly clear group_name on every pane in scope; `ToggleBroadcastGroup/Window` actions switch scope at runtime; pane titlebar shows `[group_name]` pill. The cross-window case (via the file-based IPC) is the only remaining gap. |
 | ~~`create_group`~~ | keybinds | A | `Action::CreateGroup` shares dispatch with `EditPaneGroup` (title-edit overlay with `TitleEditScope::Group`). A follow-up added right-click context-menu entries: "Set Group…" / "Group This Tab…" / "Ungroup This Tab". |
