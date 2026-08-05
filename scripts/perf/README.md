@@ -288,6 +288,34 @@ sample. The schedule and seed hash are part of the manifest and baseline
 compatibility contract. Throughput also rotates the ASCII/SGR/Unicode order
 inside each visit.
 
+The square is defined for an even number of treatments and needs at least six
+to be worth running, which is a hard floor on a machine that cannot offer six
+comparators. `-AllowUnbalanced` (smoke only; `-Mode release` refuses it) drops
+to `rotation-position-only-v1`: the order rotates by one slot each round, so
+across a complete set every terminal starts in every position exactly once.
+That controls position and warm-up order and nothing else — each terminal
+follows the same neighbour every round, so a carry-over effect cannot be
+separated from a terminal difference. The generator name and the sentence
+`position-balanced; predecessors NOT balanced (smoke only)` travel with the
+results, so a reader is never left to infer which schedule produced them. Pass
+the terminal list as a real array (`-Terminals @('kettle','alacritty')` under
+`pwsh -Command`); `pwsh -File` does not parse `a,b,c` and hands it over as one
+name, which the parameter's `ValidateSet` now rejects outright.
+
+A launch is refused outright when another instance of that terminal is already
+running, because a terminal that joins a running instance opens no new window
+and the launch would otherwise fail as an unexplained timeout.
+`-AllowForeignTerminalInstances` (smoke only; `-Mode release` refuses it) lifts
+that for terminals whose pinned launch arguments force a NEW process — read off
+those arguments, so a spec that stops forcing one stops being tolerated.
+Attribution is unaffected either way: the new window is found by diffing the
+window set and skipping pre-existing PIDs, its owner's SHA-256 must equal the
+launched executable's, the benchmark command must appear as a descendant of that
+PID, and CPU/memory walk that tree. What a foreign instance *does* affect is
+contention, so the manifest records `foreign_terminal_instances` (terminal names
+and PIDs, no titles or command lines) whether or not the switch is set, and
+those samples must not be read as quiet-machine numbers.
+
 Throughput is not writer-acceptance time. The workload cannot begin until the
 parent has attributed, sized, focused, and verified the exact terminal window,
 then publishes a read-only locked GO capability whose unpredictable token the

@@ -782,6 +782,13 @@ pub struct Overlay {
     /// bottom bar — any real modal (search/palette/…) takes the bar instead,
     /// and it returns when they close. Dismissed with Esc, opened with Enter.
     pub update_available: Option<(String, String)>,
+    /// Terminator parity (drag a terminal elsewhere in its tab): `Some(rect)`
+    /// while a live pane drag has a drop target latched. The rect is the half
+    /// of the target pane the dropped terminal would take, washed in accent
+    /// with a border — the same UI-computes-geometry contract as
+    /// [`TabBar::insert_marker`], so the renderer never has to know how splits
+    /// are laid out.
+    pub pane_drop_hint: Option<Rect4>,
 }
 
 #[inline]
@@ -4213,6 +4220,43 @@ impl Renderer {
                         over.push(rect(bx, ry + ty, bar_w, th, theme.foreground, thumb_a));
                     }
                 }
+            }
+        }
+
+        // Terminator parity: the drop hint for a pane being dragged elsewhere
+        // in its tab. Pushed to `over` — above pane content and the unfocused
+        // dim, below the tab bar and every modal — so it reads as a preview of
+        // the layout rather than a piece of chrome. Same wash-plus-border
+        // treatment as the tab-bar dock target, so the two drag affordances
+        // look like the same idea.
+        if let Some((hx, hy, hw, hh)) = overlay.pane_drop_hint
+            && hw > 0.0
+            && hh > 0.0
+        {
+            let accent = self.ui_accent(cfg, theme);
+            over.push(rect(
+                hx,
+                hy,
+                hw,
+                hh,
+                accent,
+                tab_drag::DOCK_HIGHLIGHT_WASH_ALPHA,
+            ));
+            // A border on all four sides, unlike the tab bar's single
+            // pane-facing edge: this rect floats inside a pane rather than
+            // sitting against the window edge, so one edge would not read as an
+            // outline at all. Clamped so a hint narrower than two borders still
+            // paints something instead of two overlapping bars.
+            let bp = tab_drag::DOCK_HIGHLIGHT_BORDER_PX
+                .min(hw / 2.0)
+                .min(hh / 2.0);
+            for (bx, by, bw, bh) in [
+                (hx, hy, hw, bp),
+                (hx, hy + hh - bp, hw, bp),
+                (hx, hy, bp, hh),
+                (hx + hw - bp, hy, bp, hh),
+            ] {
+                over.push(rect(bx, by, bw, bh, accent, 1.0));
             }
         }
 

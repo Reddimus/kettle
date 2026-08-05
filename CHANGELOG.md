@@ -4,6 +4,94 @@ All notable changes to kettle. Format roughly follows
 [Keep a Changelog](https://keepachangelog.com/); the project moves in small,
 durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
+## [Unreleased]
+
+  ### Added
+  - **Drag a terminal to another position in its tab, with the mouse.** v2.50.0
+    landed the tree surgery and said plainly that the gesture was missing; this
+    finishes it. Press a pane's own titlebar and move past a slop radius and the
+    pane is picked up; the pane under the cursor shows, washed in accent, the
+    half of itself the drop would take; releasing puts it there. Esc abandons the
+    drag, and so does anything that takes the pointer away — a modal opening, the
+    window losing focus.
+
+    Which half is decided by splitting the target pane along its diagonals, so
+    every point inside it means exactly one edge. The obvious alternative — a
+    band along each edge — leaves a dead middle where a drop means nothing, and
+    on a narrow pane the bands overlap and the middle disappears entirely.
+
+    The press had to become ambiguous for this to work. A titlebar click already
+    meant "focus this pane", and clicking the focused pane meant "rename it", so
+    the press now only focuses and arms; the *release* picks between renaming and
+    moving. Opening the title editor on press, as it did before, put a text field
+    over the pane the user had just picked up.
+
+  ### Fixed
+  - **The benchmark harness refused every terminal list spelled on the command
+    line.** `pwsh -File perf-all.ps1 -Terminals a,b,c` hands the whole
+    comma-joined text over as ONE literal argument — `-File` does not parse array
+    syntax — and the resulting one-element list failed several hundred lines
+    later, inside the schedule generator, complaining that a schedule needs at
+    least two terminals. Nothing in that message points at how the list was
+    spelled. The parameter now takes the same `ValidateSet` the terminal
+    resolver uses, so an unusable name is rejected at the boundary.
+  - **Two benchmark probes asserted a window reached the foreground on the very
+    next instruction.** `SetForegroundWindow` is documented to be refusable, and
+    even when granted the switch is not observable immediately — so a single
+    call followed by an instant `GetForegroundWindow` comparison is a race, and
+    it loses whenever another application happens to own the foreground. The
+    startup and throughput probes did exactly that and aborted the whole run.
+    That two sibling probes had already met this and bolted on flat 3 s and
+    500 ms sleeps is what says it is a race rather than a real refusal. Those
+    two now use a bounded acquire-and-confirm helper that re-issues the call and
+    polls, so the usual case costs one poll rather than a fixed wait; a window
+    that genuinely never reaches the foreground still fails the sample. The
+    latency and menu-hover sleeps stay as they are — they are not waiting to
+    acquire the foreground but letting the window settle before input is
+    injected into it, which the helper does not replace.
+  - **Startup readiness spent its deadline scanning pixels in PowerShell, then
+    blamed the terminal.** The readiness poll walks the captured region looking
+    for the marker colour. A match stops early; a MISS cannot — and a miss is
+    exactly what every poll before the window paints is. Interpreted, that walk
+    over a 1024x384 region costs **2,585 ms** measured on this machine, so a 30 s
+    deadline bought about eight looks rather than hundreds, and a terminal that
+    painted a little late was reported as one that never painted at all. The walk
+    now runs in the harness's compiled helper (`CountPixelsNearColor`): **89.8 ms**
+    for the same worst case, a 29x cut, with identical tolerance semantics. The
+    deadline now measures the terminal instead of the harness. The timeout
+    message also reports the slowest capture and how much of the deadline went
+    on capturing, so "the terminal was slow" and "the poll was slow" stop looking
+    the same from the outside.
+  - **A smoke run could name a schedule nobody walked.** The probes choose
+    between the Williams square and the position-only rotation from one
+    predicate; the manifest preview that records the choice still called Williams
+    unconditionally. A five-terminal smoke run would therefore have written
+    `williams-*` into the manifest while every probe walked a rotation — the
+    reader could not tell. Both now apply the same predicate.
+
+  ### Changed
+  - **The benchmark can now run on a machine somebody else is using.** A launch
+    is refused when another instance of that terminal is already up, which is
+    right for a terminal that joins a running instance — no new window appears
+    and the launch would otherwise die as an unexplained timeout. It was applied
+    by process NAME to every terminal, including the ones whose pinned launch
+    arguments force a fresh process, so an unrelated session's window made the
+    whole suite unrunnable. `-AllowForeignTerminalInstances` (smoke only;
+    release refuses it) lifts the refusal for exactly those, decided by reading
+    the pinned arguments rather than a hardcoded list. Attribution never
+    depended on the name — the measured window is found by diffing the window
+    set, its owner's SHA-256 must match the launched executable, and CPU and
+    memory walk that process tree — but contention is real, so the manifest
+    records `foreign_terminal_instances` (names and PIDs, never titles or
+    command lines) whether or not the switch is set.
+  - **`-AllowUnbalanced` runs the comparators a machine can actually offer.**
+    Release evidence needs a Williams square over an even set of at least six
+    terminals, and a machine that cannot spare six could previously measure
+    nothing at all. The switch drops to a rotation that balances *position* —
+    each terminal starts in each slot once — and states in the results that
+    predecessors are not balanced, which is the property the square adds and the
+    reason `-Mode release` still refuses the switch outright.
+
 ## [2.50.0] — 2026-08-05
 
   ### Added

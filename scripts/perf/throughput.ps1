@@ -32,7 +32,12 @@ param(
     [ValidateRange(6, 1000)]
     [int]$Iterations = 6,
     [ValidateRange(0, 600)]
-    [int]$VisitCooldownSeconds = 2
+    [int]$VisitCooldownSeconds = 2,
+    # Smoke only: measure whatever comparators the machine can offer, with a
+    # position-balanced rotation instead of a Williams square.
+    [switch]$AllowUnbalanced,
+    # Smoke only; see startup-idle.ps1 for what this does and does not permit.
+    [switch]$AllowForeignInstances
 )
 
 $ErrorActionPreference = 'Stop'
@@ -80,8 +85,10 @@ function Assert-KettlePerfThroughputRunnerEvidence {
 }
 
 if (
-    $Terminals.Count -lt 6 -or
-    ($Terminals.Count % 2) -ne 0 -or
+    (-not $AllowUnbalanced -and (
+        $Terminals.Count -lt 6 -or ($Terminals.Count % 2) -ne 0
+    )) -or
+    $Terminals.Count -lt 2 -or
     ($Iterations % $Terminals.Count) -ne 0
 ) {
     throw (
@@ -157,7 +164,10 @@ try {
     }
 
 $cycles = [int]($Iterations / $Terminals.Count)
-$schedule = New-KettlePerfWilliamsSchedule -Terminals $Terminals `
+$scheduleFor = if ($AllowUnbalanced -and (
+        $Terminals.Count -lt 6 -or ($Terminals.Count % 2) -ne 0
+    )) { 'New-KettlePerfRotationSchedule' } else { 'New-KettlePerfWilliamsSchedule' }
+$schedule = & $scheduleFor -Terminals $Terminals `
     -Seed $ScheduleSeed -Cycles $cycles -Namespace 'throughput'
 
 $specs = [ordered]@{}
@@ -279,7 +289,8 @@ foreach ($round in $schedule.rounds) {
             $launched = Start-KettlePerfCommandWindow -Spec $spec `
                 -Command $inner -BeforeWindows $before `
                 -PreexistingPids $prePids `
-                -CommandWrapperDirectory $ResultsDir
+                -CommandWrapperDirectory $ResultsDir `
+                -AllowForeignInstances:$AllowForeignInstances
             Set-WindowSize $launched.Hwnd $WindowW $WindowH `
                 $TargetScreenDevice
             if (-not (
@@ -289,10 +300,8 @@ foreach ($round in $schedule.rounds) {
             )) {
                 throw "$terminal throughput window never reached exact placement"
             }
-            [void][KettlePerf.Native]::SetForegroundWindow($launched.Hwnd)
             if (
-                [KettlePerf.Native]::GetForegroundWindow() -ne
-                    $launched.Hwnd
+                -not (Confirm-KettlePerfForegroundWindow -Hwnd $launched.Hwnd)
             ) {
                 throw "$terminal throughput window did not retain foreground"
             }

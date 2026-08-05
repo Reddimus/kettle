@@ -36,7 +36,16 @@ param(
     [ValidateRange(240, 16384)]
     [int]$WindowH = 800,
     [ValidateRange(0, 600)]
-    [int]$SampleCooldownSeconds = 2
+    [int]$SampleCooldownSeconds = 2,
+    # Smoke only: measure whatever comparators the machine can actually offer,
+    # with a position-balanced rotation instead of a Williams square. Release
+    # mode rejects this -- see perf-all.ps1.
+    [switch]$AllowUnbalanced,
+    # Smoke only: measure even though another instance of a measured terminal
+    # is already running. Safe only for launches that force a new process --
+    # `Start-KettlePerfCommandWindow` checks that and records the tolerated
+    # PIDs, because those processes still contend for CPU and GPU.
+    [switch]$AllowForeignInstances
 )
 
 $ErrorActionPreference = 'Stop'
@@ -47,8 +56,10 @@ $ErrorActionPreference = 'Stop'
 . "$PSScriptRoot\startup-ready.ps1"
 
 if (
-    $Terminals.Count -lt 6 -or
-    ($Terminals.Count % 2) -ne 0 -or
+    (-not $AllowUnbalanced -and (
+        $Terminals.Count -lt 6 -or ($Terminals.Count % 2) -ne 0
+    )) -or
+    $Terminals.Count -lt 2 -or
     ($StartupRuns % $Terminals.Count) -ne 0 -or
     ($IdleSamples % $Terminals.Count) -ne 0
 ) {
@@ -88,11 +99,14 @@ if (Test-Path -LiteralPath $scratchParent) {
 }
 $scratchParent = (Resolve-Path -LiteralPath $scratchParent).Path
 
-$startupSchedule = New-KettlePerfWilliamsSchedule `
+$scheduleFor = if ($AllowUnbalanced -and (
+        $Terminals.Count -lt 6 -or ($Terminals.Count % 2) -ne 0
+    )) { 'New-KettlePerfRotationSchedule' } else { 'New-KettlePerfWilliamsSchedule' }
+$startupSchedule = & $scheduleFor `
     -Terminals $Terminals -Seed $StartupScheduleSeed `
     -Cycles ([int]($StartupRuns / $Terminals.Count)) `
     -Namespace 'startup'
-$idleSchedule = New-KettlePerfWilliamsSchedule `
+$idleSchedule = & $scheduleFor `
     -Terminals $Terminals -Seed $IdleScheduleSeed `
     -Cycles ([int]($IdleSamples / $Terminals.Count)) `
     -Namespace 'idle'
@@ -238,12 +252,12 @@ function Start-KettlePerfReadyLaunch {
             -Command $descriptor.Command -BeforeWindows $before `
             -PreexistingPids $preexistingPids `
             -CommandWrapperDirectory $ResultsDir `
+            -AllowForeignInstances:$AllowForeignInstances `
             -DeferTargetAttribution
         $windowDiscoveredMs = $timer.Elapsed.TotalMilliseconds
         Set-WindowSize $launched.Hwnd $WindowW $WindowH `
             $TargetScreenDevice
-        [void][KettlePerf.Native]::SetForegroundWindow($launched.Hwnd)
-        if ([KettlePerf.Native]::GetForegroundWindow() -ne $launched.Hwnd) {
+        if (-not (Confirm-KettlePerfForegroundWindow -Hwnd $launched.Hwnd)) {
             throw "$Terminal startup-readiness window did not take foreground"
         }
         $sizedFocusedMs = $timer.Elapsed.TotalMilliseconds
@@ -353,11 +367,29 @@ function Start-KettlePerfReadyLaunch {
             }
             Start-Sleep -Milliseconds 10
         }
+        # Report how long the polling itself cost, not just how many times it
+        # ran. A low attempt count means one of two very different things --
+        # the terminal was slow, or the poll was -- and without the per-attempt
+        # cost the message reads as an accusation against the terminal either
+        # way. That is not hypothetical: an interpreted pixel walk once made
+        # each miss cost ~2.6s, so a 30s deadline bought eight looks and
+        # reported a slow-painting terminal as one that never painted.
+        $slowestCaptureMs = if ($captureMs.Count -gt 0) {
+            [Math]::Round(($captureMs | Measure-Object -Maximum).Maximum, 1)
+        } else {
+            0
+        }
+        $totalCaptureMs = if ($captureMs.Count -gt 0) {
+            [Math]::Round(($captureMs | Measure-Object -Sum).Sum, 1)
+        } else {
+            0
+        }
         throw (
             "$Terminal startup readiness timed out; " +
             "marker=$markerReady paint=$paintReady " +
             "(client ${clientWidth}x${clientHeight}, roi ${roiWidth}x${roiHeight}, " +
-            "captures=$captureAttempts, last capture " +
+            "captures=$captureAttempts, slowest ${slowestCaptureMs}ms, " +
+            "${totalCaptureMs}ms of the deadline spent capturing, last capture " +
             "$(if ($null -eq $capture) { 'NULL -- no pixels were read at all' } `
               else { 'ok, the marker pixels were not in it' }))"
         )
@@ -541,7 +573,18 @@ try {
                     -Terminal $terminal -Spec $specs[$terminal] `
                     -SampleKey $visit.sample_key
                 $hwnd = $context.Launched.Hwnd
-                if ([KettlePerf.Native]::GetForegroundWindow() -ne $hwnd) {
+                # Re-ACQUIRE rather than merely assert. The launch already took
+                # the foreground, but readiness then polls for up to 30s, and
+                # anything on the machine can take it during that window -- so a
+                # bare assertion here fails for reasons that have nothing to do
+                # with the terminal being measured.
+                #
+                # This does not weaken the property that matters. Whether the
+                # terminal SURRENDERS the foreground is asserted by the in-loop
+                # check below, which runs throughout the measurement and is left
+                # exactly as it was; this line only establishes the precondition
+                # the measurement needs before it starts.
+                if (-not (Confirm-KettlePerfForegroundWindow -Hwnd $hwnd)) {
                     throw "$terminal lost foreground before idle measurement"
                 }
                 $beforeStats = Get-ProcessTreeStats `

@@ -841,6 +841,14 @@ tabbar-click-smoke: release
 tabbar-click-smoke:
     python scripts/check-live-ui-smoke.py --cargo-release tabbar
 
+# Terminator parity: drag a terminal to another position in its tab. Drives the
+# press/move/release through the control plane and checks the gesture reaches
+# the tree -- the pure drop-zone geometry is unit-tested in mux.rs, but only a
+# live window shows that a titlebar press ever gets there.
+[unix]
+pane-drag-smoke: release
+    KETTLE_BIN=./target/release/kettle ./scripts/check-pane-drag-smoke.sh
+
 # v2.40.0 (tear-off UX): tear-off regression guards, two tiers. The ctl tier
 # proves the mouseless move_tab_to_new_window tear + tab_moved broadcast; the
 # live tier drives xdotool REAL pointer input through the full gesture

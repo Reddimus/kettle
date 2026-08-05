@@ -7,9 +7,26 @@
 param(
     [ValidatePattern('^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$')]
     [string]$Label = (Get-Date -Format 'yyyyMMdd-HHmmss'),
+    # ValidateSet, not a bare [string[]]: `pwsh -File perf-all.ps1 -Terminals
+    # a,b,c` hands the whole comma-joined text over as ONE literal argument --
+    # -File does not parse array syntax -- and a one-element list then fails
+    # deep inside the schedule generator, whose message says nothing about how
+    # the list was spelled. Reject the unknown name here, where it is fixable.
+    [ValidateSet('kettle', 'wt', 'alacritty', 'wezterm', 'rio', 'tabby')]
     [string[]]$Terminals = @('kettle', 'wt', 'alacritty', 'wezterm', 'rio', 'tabby'),
     [ValidateSet('release', 'smoke')]
     [string]$Mode = 'release',
+    # Smoke only. Measures the comparators the machine can actually offer,
+    # using a position-balanced rotation where a Williams square is impossible.
+    [switch]$AllowUnbalanced,
+    # Smoke only. Measure even though another instance of a measured terminal
+    # is already running -- someone else's session on a shared machine, which
+    # is not ours to close. Only honoured for terminals whose pinned launch
+    # arguments force a NEW process, since everything downstream is attributed
+    # by PID and executable hash rather than by process name. The tolerated
+    # PIDs land in the manifest: they still contend for CPU and GPU, so the
+    # samples are not quiet-machine numbers and must not be read as such.
+    [switch]$AllowForeignTerminalInstances,
     [ValidatePattern('^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$')]
     [string]$BenchmarkSeed = 'kettle-windows-release-v1',
     [ValidateSet('current', 'baseline')]
@@ -33,6 +50,12 @@ param(
     [string]$VtebenchRevision = 'ead80032e57dee2e75f0b51f2ea67528647d9944',
     [switch]$SkipVtebench,
     [switch]$SkipLatency,
+    # Smoke only, like every other Skip switch. Startup/idle was the one probe
+    # that could not be skipped, so a throughput-only run was impossible -- and
+    # on a machine somebody else is using, startup/idle is the probe most likely
+    # to abort the run before throughput is ever reached, because it is the one
+    # that needs exclusive foreground and an exact client size per sample.
+    [switch]$SkipStartupIdle,
     [switch]$SkipMenuHover,
     [switch]$SkipNativeDisplay,
     [switch]$SkipMonitorTransition,
@@ -149,6 +172,7 @@ if ($Mode -eq 'release') {
         $ManifestOnly -or
         $SkipVtebench -or
         $SkipLatency -or
+        $SkipStartupIdle -or
         $SkipMenuHover -or
         $SkipNativeDisplay -or
         $SkipMonitorTransition -or
@@ -161,6 +185,25 @@ if ($Mode -eq 'release') {
     }
     if ($KettleConfig) {
         throw 'Release mode requires the generated isolated Kettle configuration'
+    }
+    if ($AllowForeignTerminalInstances) {
+        throw (
+            'Release mode requires a quiet machine with no other instance of ' +
+            'a measured terminal running; -AllowForeignTerminalInstances is ' +
+            'smoke-only'
+        )
+    }
+    if ($AllowUnbalanced) {
+        # Release evidence rests on the Williams square controlling PREDECESSOR
+        # effects as well as position. A rotation balances position only -- each
+        # terminal follows the same neighbour every round -- so it cannot
+        # separate a carry-over from a terminal difference. Useful for a smoke
+        # reading on a machine that cannot offer six comparators; not something
+        # a release claim may rest on.
+        throw (
+            'Release mode requires a Williams-balanced schedule; ' +
+            '-AllowUnbalanced is smoke-only'
+        )
     }
     $comparatorOverrides = [Collections.Generic.List[string]]::new()
     foreach ($override in ([ordered]@{
@@ -651,13 +694,13 @@ $directKettleConfig = if ($KettleConfig) {
 # problem. The arithmetic is the same; only the diagnosis is new.
 $balanceFaults = [Collections.Generic.List[string]]::new()
 $terminalCount = $Terminals.Count
-if ($terminalCount -lt 6) {
+if (-not $AllowUnbalanced -and $terminalCount -lt 6) {
     $balanceFaults.Add(
         "only $terminalCount terminal(s) selected; a balanced schedule needs " +
         'at least six so order effects cancel'
     )
 }
-if (($terminalCount % 2) -ne 0) {
+if (-not $AllowUnbalanced -and ($terminalCount % 2) -ne 0) {
     $balanceFaults.Add(
         "the terminal count ($terminalCount) is odd; the Williams square is " +
         'defined for an even number of treatments'
@@ -703,20 +746,27 @@ $scheduleSeeds = [ordered]@{
     latency = "${BenchmarkSeed}:latency"
     throughput = "${BenchmarkSeed}:throughput"
 }
+# The manifest records the schedule the probes actually walk. Each probe picks
+# its generator from the same predicate, so this preview has to apply that same
+# predicate rather than assuming Williams -- otherwise the manifest would name an
+# algorithm nobody ran.
+$scheduleFor = if ($AllowUnbalanced -and (
+        $Terminals.Count -lt 6 -or ($Terminals.Count % 2) -ne 0
+    )) { 'New-KettlePerfRotationSchedule' } else { 'New-KettlePerfWilliamsSchedule' }
 $schedulePreviews = [ordered]@{
-    startup = New-KettlePerfWilliamsSchedule -Terminals $Terminals `
+    startup = & $scheduleFor -Terminals $Terminals `
         -Seed $scheduleSeeds.startup `
         -Cycles ([int]($StartupRuns / $Terminals.Count)) `
         -Namespace 'startup'
-    idle = New-KettlePerfWilliamsSchedule -Terminals $Terminals `
+    idle = & $scheduleFor -Terminals $Terminals `
         -Seed $scheduleSeeds.idle `
         -Cycles ([int]($IdleSamples / $Terminals.Count)) `
         -Namespace 'idle'
-    latency = New-KettlePerfWilliamsSchedule -Terminals $Terminals `
+    latency = & $scheduleFor -Terminals $Terminals `
         -Seed $scheduleSeeds.latency `
         -Cycles ([int](($LatencySamples / $LatencyBlockSize) / $Terminals.Count)) `
         -Namespace 'latency'
-    throughput = New-KettlePerfWilliamsSchedule -Terminals $Terminals `
+    throughput = & $scheduleFor -Terminals $Terminals `
         -Seed $scheduleSeeds.throughput `
         -Cycles ([int]($ThroughputIterations / $Terminals.Count)) `
         -Namespace 'throughput'
@@ -957,6 +1007,7 @@ if ($Mode -eq 'release') {
 }
 
 $terminalManifest = @()
+$terminalWindowProcessNames = [ordered]@{}
 foreach ($terminal in $Terminals) {
     $isolatedConfig = Get-KettlePerfIsolatedConfigEntry `
         -ConfigProfile $isolatedProfile -Name $terminal
@@ -974,6 +1025,7 @@ foreach ($terminal in $Terminals) {
         -AlacrittyExe $AlacrittyExe `
         -WeztermExe $WeztermExe -RioExe $RioExe -TabbyExe $TabbyExe `
         -VersionOverride $versionOverride -IsolatedConfig $isolatedConfig
+    $terminalWindowProcessNames[$terminal] = [string[]]@($spec.WindowProcessNames)
     $terminalRecord = [ordered]@{
         name = $terminal
         available = $spec.Available
@@ -1055,6 +1107,37 @@ foreach ($terminal in $Terminals) {
     }
     $terminalManifest += $terminalRecord
 }
+
+# Which measured terminals ALREADY have an instance running, sampled before
+# anything is launched. Recorded whether or not the run tolerates them, so a
+# reader can see the machine the samples came from rather than having to infer
+# it from a switch. Names and PIDs only -- window titles and command lines can
+# carry private data and have no business in a shareable artifact.
+$foreignTerminalInstances = @(
+    foreach ($terminal in $Terminals) {
+        $names = $terminalWindowProcessNames[$terminal]
+        if (-not $names) { continue }
+        $running = @(Get-Process -Name $names -ErrorAction SilentlyContinue)
+        if ($running.Count -gt 0) {
+            [pscustomobject][ordered]@{
+                terminal = $terminal
+                pids = [int[]]@($running.Id | Sort-Object)
+                process_names = [string[]]@(
+                    $running.ProcessName | Sort-Object -Unique
+                )
+            }
+        }
+    }
+)
+if ($foreignTerminalInstances.Count -gt 0) {
+    Write-Host (
+        'note: another instance of these terminals is already running: ' +
+        (($foreignTerminalInstances | ForEach-Object {
+            "$($_.terminal) [$($_.pids -join ', ')]"
+        }) -join '; ')
+    )
+}
+
 $computer = Get-CimInstance Win32_ComputerSystem -ErrorAction SilentlyContinue
 $manufacturer = $null
 $model = $null
@@ -1391,6 +1474,14 @@ $manifest = [ordered]@{
         vtebench_revision = $VtebenchRevision.ToLowerInvariant()
         unidentified_display_allowed = [bool]$AllowUnidentifiedDisplay
         kettle_build_skipped = [bool]$SkipKettleBuild
+        startup_idle_enabled = -not [bool]$SkipStartupIdle
+        schedule_balance = [string]$schedulePreviews.startup.balance
+        foreign_terminal_instances_allowed = [bool]$AllowForeignTerminalInstances
+        # A reader must be able to see WHICH terminals had another instance
+        # running while they were measured, not just that the switch was on.
+        # Names and PIDs only -- window titles and command lines can carry
+        # private data and have no business in a shareable artifact.
+        foreign_terminal_instances = [object[]]@($foreignTerminalInstances)
     }
     terminals = $terminalManifest
 }
@@ -1503,8 +1594,11 @@ function Add-KettlePerfDisplayCheckpoint {
     return $snapshot
 }
 
+if (-not $SkipStartupIdle) {
 Write-Host "--- startup / fresh memory / idle CPU ---"
 & "$PSScriptRoot\startup-idle.ps1" @terminalArgs `
+    -AllowUnbalanced:$AllowUnbalanced `
+    -AllowForeignInstances:$AllowForeignTerminalInstances `
     -Terminals $Terminals `
     -StartupRuns $StartupRuns -IdleSamples $IdleSamples `
     -IdleSeconds $IdleSeconds `
@@ -1513,10 +1607,13 @@ Write-Host "--- startup / fresh memory / idle CPU ---"
     -WindowW $WindowW -WindowH $WindowH
 Start-KettlePerfProbeCooldown 'startup/idle'
 [void](Add-KettlePerfDisplayCheckpoint -Phase 'after-startup-idle')
+}
 
 if (-not $SkipLatency) {
     Write-Host "--- input latency probe ---"
     & "$PSScriptRoot\latency.ps1" @terminalArgs `
+    -AllowUnbalanced:$AllowUnbalanced `
+    -AllowForeignInstances:$AllowForeignTerminalInstances `
         -Terminals $Terminals `
         -Samples $LatencySamples -BlockSize $LatencyBlockSize `
         -MaxCensored $MaxLatencyCensored `
@@ -1567,6 +1664,8 @@ if (-not $SkipMonitorTransition) {
 
 Write-Host "--- throughput (console write through parser-drain response) ---"
 & "$PSScriptRoot\throughput.ps1" @terminalArgs `
+    -AllowUnbalanced:$AllowUnbalanced `
+    -AllowForeignInstances:$AllowForeignTerminalInstances `
     -Terminals $Terminals `
     -PowerShellExe $throughputPowerShell `
     -WindowW $WindowW -WindowH $WindowH `

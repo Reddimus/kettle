@@ -118,6 +118,10 @@ and **WezTerm** into one tool.
 - **Drag-and-drop files** — drop any file onto the window and its
   shell-quoted path is inserted at the cursor (with a trailing space, so
   `cat ` + drop + Enter works). Honors broadcast mode.
+- **Rearrange panes by dragging** — grab a pane by its own titlebar and drop it
+  on another pane; the half it will take lights up as you move, and `Esc`
+  abandons the drag. `move_split:{up,down,left,right}` does the same from the
+  keyboard.
 - **Session restore (opt-in)** — new windows open fresh by default (like every
   mainstream terminal); enable `restore-session = true` (or pass `--restore`) to
   reopen **every window** from the previous session — tab/split trees, per-pane

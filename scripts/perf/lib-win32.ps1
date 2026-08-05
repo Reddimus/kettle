@@ -601,6 +601,42 @@ public static class Native {
         }
     }
 
+    // Count BGRA pixels within `tol` of the expected colour on every channel,
+    // stopping as soon as `required` of them have been seen.
+    //
+    // Compiled rather than looped in PowerShell because the caller polls this
+    // until a window paints, and the NOT-YET-PAINTED case is the one that walks
+    // every pixel: a match can stop early, a miss cannot. In PowerShell a miss
+    // over a 1024x384 region is 393,216 interpreted iterations and costs
+    // seconds, so a 30s readiness deadline bought roughly EIGHT attempts rather
+    // than hundreds -- and a terminal that painted a little late was reported as
+    // never having painted at all. Here the same walk is sub-millisecond, so the
+    // deadline measures the terminal instead of the harness.
+    public static long CountPixelsNearColor(
+        byte[] bgra,
+        int expectedBlue,
+        int expectedGreen,
+        int expectedRed,
+        int tol,
+        long required
+    ) {
+        if (bgra == null || required <= 0) return 0;
+        long found = 0;
+        for (long i = 0; i + 3 < bgra.LongLength; i += 4) {
+            int db = (int)bgra[i] - expectedBlue;
+            if (db < 0) db = -db;
+            if (db > tol) continue;
+            int dg = (int)bgra[i + 1] - expectedGreen;
+            if (dg < 0) dg = -dg;
+            if (dg > tol) continue;
+            int dr = (int)bgra[i + 2] - expectedRed;
+            if (dr < 0) dr = -dr;
+            if (dr > tol) continue;
+            if (++found >= required) return found;
+        }
+        return found;
+    }
+
     // Capture only a bounded client-area region. The viewport offset clips
     // PrintWindow into the small destination bitmap, avoiding full-frame BGRA
     // allocation and transfer during high-resolution polling.
@@ -2038,6 +2074,46 @@ function Wait-KettlePerfDescendant {
     return $null
 }
 
+# Bring a window to the foreground and CONFIRM it got there, within a bounded
+# deadline. Returns whether it did; the caller decides what a failure means.
+#
+# `SetForegroundWindow` is documented to be refusable -- Windows only grants the
+# change to a process that owns the foreground window, received the last input,
+# or is otherwise privileged -- and even when granted, the switch is not
+# observable on the very next instruction. A single call followed by an
+# immediate `GetForegroundWindow` comparison is therefore a race that fails for
+# reasons having nothing to do with the terminal under test, most reliably when
+# some other application owns the foreground. Two sibling call sites had already
+# concluded a settle was needed and bolted on fixed sleeps of 3s and 500ms; this
+# retries instead, so the common case costs one poll rather than a flat wait.
+#
+# This does not weaken the check. A window that never reaches the foreground
+# still reports failure, and the caller still refuses the sample.
+function Confirm-KettlePerfForegroundWindow {
+    param(
+        [Parameter(Mandatory)] [IntPtr]$Hwnd,
+        [ValidateRange(1, 60000)]
+        [int]$TimeoutMs = 3000,
+        [ValidateRange(1, 5000)]
+        [int]$PollMs = 50
+    )
+
+    if ($Hwnd -eq [IntPtr]::Zero) {
+        return $false
+    }
+    $deadline = [Diagnostics.Stopwatch]::StartNew()
+    while ($true) {
+        [void][KettlePerf.Native]::SetForegroundWindow($Hwnd)
+        if ([KettlePerf.Native]::GetForegroundWindow() -eq $Hwnd) {
+            return $true
+        }
+        if ($deadline.Elapsed.TotalMilliseconds -ge $TimeoutMs) {
+            return $false
+        }
+        Start-Sleep -Milliseconds $PollMs
+    }
+}
+
 function Start-KettlePerfCommandWindow {
     param(
         [Parameter(Mandatory)] $Spec,
@@ -2045,7 +2121,11 @@ function Start-KettlePerfCommandWindow {
         [Parameter(Mandatory)] [System.Collections.Generic.HashSet[IntPtr]]$BeforeWindows,
         [Parameter(Mandatory)] [System.Collections.Generic.HashSet[int]]$PreexistingPids,
         [string]$CommandWrapperDirectory = '',
-        [switch]$DeferTargetAttribution
+        [switch]$DeferTargetAttribution,
+        # Smoke only, threaded down from perf-all's
+        # -AllowForeignTerminalInstances. See the refusal below for what it
+        # does and does not make safe.
+        [switch]$AllowForeignInstances
     )
 
     if (-not $Spec.Available -or -not $Spec.SupportsCommand) {
@@ -2066,10 +2146,48 @@ function Start-KettlePerfCommandWindow {
         Get-Process -Name $Spec.WindowProcessNames -ErrorAction SilentlyContinue |
             Where-Object { $PreexistingPids.Contains($_.Id) }
     )
+    # A terminal that JOINS a running instance produces no new window at all
+    # when one is already up, so the launch below would fail as an obscure
+    # "window never appeared" timeout. Refusing here says what to do instead.
+    #
+    # That reasoning does not apply to a spec whose pinned launch arguments
+    # force a fresh process -- read off those arguments rather than hardcoded
+    # per terminal, so a spec that stops forcing one stops being tolerated.
+    # Everything downstream is attributed by PID and by executable hash, not by
+    # process name: the new window is found by diffing $BeforeWindows and
+    # skipping $PreexistingPids, its owner's SHA-256 must equal the launched
+    # executable's, the benchmark command must appear as a descendant of that
+    # PID, and CPU/memory walk that tree. A foreign instance therefore cannot be
+    # mistaken for the measured one.
+    #
+    # What it CAN do is add background load, which is a measurement-quality
+    # problem rather than an attribution one -- so this stays a refusal by
+    # default, the opt-in is smoke-only, and the tolerated PIDs are recorded in
+    # the manifest instead of being quietly ignored.
+    $forcesNewProcess = (
+        (@($Spec.StartupArgs) -join ' ') -match '(^|\s)--(always-)?new-process(\s|$)' -and
+        (@($Spec.CommandPrefix) -join ' ') -match '(^|\s)--(always-)?new-process(\s|$)'
+    )
+    $toleratedForeignPids = @()
     if ($preexistingOwners.Count -gt 0) {
-        throw (
+        if (-not ($AllowForeignInstances -and $forcesNewProcess)) {
+            $why = if ($AllowForeignInstances) {
+                '; its launch does not force a new process, so a running ' +
+                'instance would capture it'
+            } else {
+                '; close it before benchmarking'
+            }
+            throw (
+                "$($Spec.Name) is already running in pid(s) " +
+                "$($preexistingOwners.Id -join ', ')" + $why
+            )
+        }
+        $toleratedForeignPids = @($preexistingOwners.Id)
+        Write-Warning (
             "$($Spec.Name) is already running in pid(s) " +
-            "$($preexistingOwners.Id -join ', '); close it before benchmarking"
+            "$($toleratedForeignPids -join ', '); measuring anyway because the " +
+            'launch forces a new process. Those processes still contend for ' +
+            'CPU and GPU, so these samples are not quiet-machine numbers.'
         )
     }
     $effectiveCommand = $Command
@@ -2169,6 +2287,7 @@ function Start-KettlePerfCommandWindow {
             TargetExecutable = $targetExecutable
             TargetAttributionDeferred = [bool]$DeferTargetAttribution
             ExpectedTargetExecutable = [string]$Command[0]
+            ForeignOwnerPids = [int[]]$toleratedForeignPids
         }
     } catch {
         if ($window -and $window -ne [IntPtr]::Zero) {

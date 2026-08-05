@@ -22,8 +22,8 @@ use winit::window::{CursorIcon, Window};
 use kettle_render::Renderer;
 
 use crate::app::{
-    ConfirmDialogState, ContextMenuState, HintTarget, LinksScanKey, SplitDrag, TitleEditState,
-    ViState,
+    ConfirmDialogState, ContextMenuState, HintTarget, LinksScanKey, PaneDrag, SplitDrag,
+    TitleEditState, ViState,
 };
 use crate::mux::Mux;
 use crate::search_input::SearchState;
@@ -607,6 +607,12 @@ pub(crate) struct WindowState {
     /// `detach_drag` — the origin the FSM's click-vs-drag distance is
     /// measured from. `None` while no tear-off gesture is armed.
     pub(crate) drag_press: Option<(f32, f32)>,
+    /// Terminator parity: drag a terminal to another position within its tab.
+    /// `Some(_)` from a left-press on a per-pane titlebar until the matching
+    /// release. Armed, not live: the press only becomes a move once the pointer
+    /// clears the slop radius, so a plain click on the titlebar still means
+    /// "focus, then edit the title".
+    pub(crate) pane_drag: Option<PaneDrag>,
     /// v2.19.0 (tear-off UX, re-dock): `Some(insertion index)` while a
     /// torn-off window is hovering this window's tab band. Draws the
     /// accent insertion marker, and — key affordance — MATERIALIZES the
@@ -806,6 +812,7 @@ impl WindowState {
             tab_pressed_idx: None,
             detach_drag: crate::detach::DragState::default(),
             drag_press: None,
+            pane_drag: None,
             dock_preview: None,
             hovered_close_idx: None,
             vi_mode: None,

@@ -295,7 +295,7 @@ per-key audit against Terminator's source.
 | `borderless` | bool | `false` | Hide OS chrome (`winit::WindowAttributes::with_decorations(false)`). Useful for tiling WMs |
 | `always-on-top` | bool | `false` | Keep window above others (`winit::Window::set_window_level(AlwaysOnTop)`) |
 | `hide-on-lose-focus` | bool | `false` | Quake-style auto-hide. Wayland defers to compositor; Linux X11 + macOS + Windows hide directly |
-| `show-titlebar` | bool | `true` | Per-pane titlebar; renders only when a tab has >1 pane (a single-pane tab uses the OS window title instead) |
+| `show-titlebar` | bool | `true` | Per-pane titlebar; renders only when a tab has >1 pane (a single-pane tab uses the OS window title instead). Also the grab handle for dragging a pane elsewhere in its tab — with it off, use `move_split:{up,down,left,right}` |
 | `title-at-bottom` | bool | `false` | Per-pane titlebar position |
 | `title-hide-sizetext` | bool | `false` | Hide the `WxH` size annotation in the titlebar |
 | `icon-bell` | bool | `true` | Render a bell glyph in the titlebar when the pane ringed BEL |
