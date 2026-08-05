@@ -407,6 +407,61 @@ The fix is to make admission observable rather than assumed, not to lengthen
 the timeout. Joins the two `kettle/tests/exec.rs` ConPTY timing fixtures, which
 have the same shape.
 
+## Fixed — an empty channel was mistaken for a fully-read PTY
+
+**This is a product race, not a fixture problem, and it appears to be the root
+cause of two separate long-standing macOS intermittents.**
+
+`crates/kettle/src/exec.rs:1069` decides the child is finished and it is safe to
+wrap up when
+
+```rust
+gone.elapsed() >= SETTLE && orx.is_empty()
+```
+
+`SETTLE` is 60 ms and `orx` is the raw PTY output channel, filled by the reader
+thread. **An empty channel is not evidence that the PTY has been read to EOF.**
+It is equally consistent with the reader thread not having been scheduled yet.
+For a child that writes a little and exits at once — `echo` — the exit status
+can be observed, 60 ms can elapse, and the output can still be in flight. The
+loop then calls `recorder.begin_finish()` and closes `output`, and the bytes
+arrive with nowhere to go.
+
+Two symptoms, one cause, because `drain_output_slice` feeds the recorder and
+stdout from that same channel behind that same gate:
+
+- `exec_record_writes_replayable_asciicast` fails with a recording containing
+  only its asciicast header. Observed on macOS CI 2026-08-05. The file looks
+  structurally valid, which is what makes this data loss rather than an error:
+  `kettle exec --record` can silently produce a trace missing the command's
+  entire output.
+- `exec_streams_stdout_and_exits_zero` returning exit 0 with empty stdout —
+  the older macOS intermittent, whose description matches this mechanism
+  exactly.
+
+**The shape of the fix.** A *disconnected* channel is conclusive where an empty
+one is not: the reader drops the sender only after the PTY reaches EOF, so
+`try_recv() == Err(Disconnected)` is positive evidence. Prefer it, and keep a
+time bound as the fallback for platforms where the reader outlives the child
+(Windows ConPTY), so the loop still cannot hang. Lengthening `SETTLE` is not a
+fix — it moves the race rather than removing it.
+
+**Fixed.** `try_recv` already distinguished the two cases and the code was
+throwing the distinction away with `let Ok(bytes) = ... else`. The drain now
+latches EOF only on `Disconnected`, and wrap-up requires that latch — with the
+elapsed-time arm (`PTY_DRAIN_GRACE`) kept purely as the bound for ConPTY, whose
+reader holds its handle open past the child. On Unix the master read fails as
+soon as the child closes the slave, so the disconnect arrives immediately and
+nothing waits.
+
+The initial call was to defer this — one observation, on an unrelated PR, in the
+riskiest file in the repository, with no macOS loop to verify against. The
+evidence then changed: the very next run failed the *other* test in the family,
+which is what the shared-gate theory predicts and what raised it from a
+plausible reading of the code to a confirmed mechanism. The unit test pins the
+distinction directly rather than through a PTY, and was verified red by
+conflating `Empty` with `Disconnected` again.
+
 ## Deferred — tests that cannot fail
 
 The audits found **24** of these, on top of the ones already fixed during the

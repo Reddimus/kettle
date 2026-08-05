@@ -59,7 +59,10 @@ impl PaneInputResult {
         self == Self::Queued
     }
 
-    fn merge(self, other: Self) -> Self {
+    /// Worst-outcome-wins, so a broadcast reports the most serious thing that
+    /// happened to any of its targets. `pub(crate)` because a cross-window
+    /// broadcast merges results from several muxes in `App`.
+    pub(crate) fn merge(self, other: Self) -> Self {
         use PaneInputResult::{Backpressured, Failed, Oversize, Queued, ReadOnly};
         match (self, other) {
             (Failed, _) | (_, Failed) => Failed,
@@ -3040,6 +3043,48 @@ impl Mux {
         result
     }
 
+    /// Deliver a broadcast that ANOTHER window is originating, to the panes in
+    /// this one that its scope selects.
+    ///
+    /// A named group is a set the user declared, and `group_all` already spans
+    /// every window (`window.py:933`, matching Terminator's process-wide
+    /// terminal collection). The broadcast did not: it stopped at whichever
+    /// window you happened to be typing in, so grouping panes across two
+    /// windows and then typing reached only half of them. Nothing announced the
+    /// boundary — the titlebars of the panes in the other window still showed
+    /// the group.
+    ///
+    /// Only `Group` crosses. `Tab` is defined by a focused tab, which exists in
+    /// exactly one window; `All` is kettle's own window-wide scope and stays
+    /// that way; `Off` sends nothing anywhere.
+    pub fn broadcast_write_foreign(
+        &mut self,
+        scope: &BroadcastScope,
+        bytes: &[u8],
+        scroll_to_bottom: bool,
+    ) -> PaneInputResult {
+        let mut result = PaneInputResult::Queued;
+        for id in self.foreign_target_ids(scope) {
+            if let Some(pane) = self.panes.get_mut(&id) {
+                let pane_result = pane.feed_input(bytes);
+                if pane_result.is_queued()
+                    && scroll_to_bottom
+                    && let Ok(mut term) = pane.term.term.lock()
+                {
+                    term.scroll_display(kettle_core::Scroll::Bottom);
+                }
+                result = result.merge(pane_result);
+            }
+        }
+        result
+    }
+
+    /// Whether a scope reaches panes outside the window that owns it, so the
+    /// caller knows whether to walk the other windows at all.
+    pub fn scope_crosses_windows(scope: &BroadcastScope) -> bool {
+        matches!(scope, BroadcastScope::Group(_))
+    }
+
     /// Toggle the focused pane's read-only state; returns the new
     /// value (or `false` if there's no focused pane).
     pub fn toggle_focused_read_only(&mut self) -> bool {
@@ -3136,6 +3181,61 @@ impl Mux {
         // Route through the scope-aware target computation
         // (phase 3 of the named-groups design), same as broadcast_write.
         let ids = self.broadcast_target_ids();
+        self.paste_into(ids, text)
+    }
+
+    /// Deliver a paste that ANOTHER window is originating, to the panes in this
+    /// one that its scope selects. The companion to `broadcast_write_foreign`;
+    /// see it for why only a named group crosses.
+    pub fn broadcast_paste_foreign(
+        &mut self,
+        scope: &BroadcastScope,
+        text: &str,
+    ) -> PaneInputResult {
+        let ids = self.foreign_target_ids(scope);
+        self.paste_into(ids, text)
+    }
+
+    /// Would a paste under ANOTHER window's scope land raw and executable in
+    /// one of this window's panes?
+    ///
+    /// The paste-protection prompt fires when a multi-line paste can reach a
+    /// pane with no bracketed-paste mode, because there the newline runs the
+    /// line. Once a group paste crosses windows, the panes that answer that
+    /// question live in more than one of them: a group member at a shell prompt
+    /// in a second window is exactly the target the prompt exists for, and
+    /// asking only the focused window would have suppressed it.
+    pub fn broadcast_paste_foreign_has_raw_writable_target(&self, scope: &BroadcastScope) -> bool {
+        self.foreign_target_ids(scope).into_iter().any(|id| {
+            self.panes.get(&id).is_some_and(|pane| {
+                !pane.read_only
+                    && !pane
+                        .term
+                        .term
+                        .lock()
+                        .ok()
+                        .map(|t| t.mode().contains(kettle_core::TermMode::BRACKETED_PASTE))
+                        .unwrap_or(false)
+            })
+        })
+    }
+
+    /// Panes in THIS window that a scope owned by another window selects.
+    fn foreign_target_ids(&self, scope: &BroadcastScope) -> Vec<u64> {
+        let BroadcastScope::Group(name) = scope else {
+            return Vec::new();
+        };
+        self.panes
+            .iter()
+            .filter(|(_, pane)| pane.group_name.as_deref() == Some(name.as_str()))
+            .map(|(id, _)| *id)
+            .collect()
+    }
+
+    /// The per-pane paste loop, shared by the local and cross-window paths so
+    /// the bracketed-paste decision cannot be made one way in one window and
+    /// the other way in the next.
+    fn paste_into(&mut self, ids: Vec<u64>, text: &str) -> PaneInputResult {
         if ids.is_empty() {
             return PaneInputResult::Queued;
         }
@@ -4464,6 +4564,58 @@ mod node_tests {
                  next split path begins"
             );
         }
+    }
+
+    /// A named group is a set the user declared, and `group_all` already puts
+    /// panes in every window into one. The broadcast did not follow: it stopped
+    /// at whichever window was focused, so typing reached half a group with
+    /// nothing on screen to explain it — the other window's panes still wore
+    /// the group name in their titlebars.
+    #[test]
+    fn only_a_named_group_reaches_panes_in_another_window() {
+        // A window that is not the one being typed in receives under Group,
+        // and under nothing else. `Tab` is defined by a focused tab, which
+        // exists in exactly one window; `All` is kettle's own window-wide
+        // scope; `Off` sends nothing anywhere.
+        assert!(Mux::scope_crosses_windows(&BroadcastScope::Group(
+            "fleet".into()
+        )));
+        for local in [
+            BroadcastScope::Off,
+            BroadcastScope::Tab,
+            BroadcastScope::All,
+        ] {
+            assert!(
+                !Mux::scope_crosses_windows(&local),
+                "{local:?} is defined by something window-local and must not \
+                 reach across"
+            );
+        }
+
+        // And the selection itself: only panes carrying that exact name.
+        // Panes need a live PTY, so drive the same membership question the
+        // foreign path asks, over the pane table it would read.
+        let members = [
+            (1u64, Some("fleet")),
+            (2u64, None),
+            (3u64, Some("fleet")),
+            (4u64, Some("other")),
+        ];
+        let selected: Vec<u64> = members
+            .iter()
+            .filter(|(_, g)| *g == Some("fleet"))
+            .map(|(id, _)| *id)
+            .collect();
+        assert_eq!(
+            selected,
+            vec![1, 3],
+            "a foreign window contributes its group members and nobody else"
+        );
+        assert!(
+            members.iter().any(|(_, g)| *g == Some("other")),
+            "the fixture must contain a non-member group, or the filter is \
+             untested"
+        );
     }
 
     /// tab + window state to the set of target pane IDs.

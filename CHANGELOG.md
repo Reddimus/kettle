@@ -4,6 +4,49 @@ All notable changes to kettle. Format roughly follows
 [Keep a Changelog](https://keepachangelog.com/); the project moves in small,
 durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
+## [Unreleased]
+
+  ### Fixed
+  - **A broadcast group stopped at the window edge.** `group_all` already put
+    panes in *every* window into one group, matching Terminator's process-wide
+    terminal collection — but the broadcast itself only reached the window you
+    were typing in. So grouping panes across two windows and then typing hit
+    half of them, with nothing on screen to explain it: the other window's panes
+    still wore the group name in their titlebars.
+
+    A named group now reaches every window in the process, for typing and for
+    pasting alike — a paste is user input under the same scope as a keystroke,
+    and fixing only the typing path would have left a broadcast that types to
+    the whole group and pastes to half of it. The per-pane bracketed-paste
+    decision is shared between the two paths rather than duplicated, so they
+    cannot disagree about how to wrap the same payload in different windows.
+
+    Scopes defined by something window-local do not travel: `tab` is a focused
+    tab, which exists in exactly one window, and `all` remains kettle's own
+    window-wide scope. A second kettle *process* is still its own broadcast
+    domain, which is not a divergence — Terminator is single-process.
+
+    The paste-protection prompt widened with it. It fires when a multi-line
+    paste can reach a pane with no bracketed-paste mode, because a newline runs
+    the line there — and it now asks every window the broadcast reaches, not
+    just the focused one. A group member sitting at a shell prompt in a second
+    window is exactly the case that prompt exists for.
+
+  - **`kettle exec` could lose the command's output entirely.** The lifecycle
+    loop treated an empty raw PTY channel as proof the output had all been
+    read. It is not: the reader thread owns the only sender and drops it after
+    EOF, so a *disconnected* channel is proof, while an empty one is equally
+    consistent with the reader not having been scheduled yet. For a command
+    that writes a little and exits at once, the exit could be observed and the
+    settle window elapse while the bytes were still in flight; the recorder was
+    then finished and stdout closed, and they arrived with nowhere to go.
+
+    One bug behind two failures that looked unrelated, because a single gate
+    feeds both stdout and the recorder: a command reporting success with no
+    output, and `--record` writing a structurally valid trace containing only
+    its header. The second is the worse one — a recording missing everything it
+    was asked to capture gives no sign that anything went wrong.
+
 ## [2.48.0] — 2026-08-05
 
   Findings from an audit of `kettle-ui` — the largest crate, and the one
