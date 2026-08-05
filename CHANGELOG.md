@@ -58,6 +58,24 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
     window size, instead of reserving 95px on a wide monitor and almost
     nothing on a narrow one.
 
+  - **A Lua callback stuck in a loop froze the terminal on every event, not
+    once.** The instruction-budget watchdog aborted a runaway, which is the
+    right first move, but then left the callback registered. The budget is
+    deliberately enormous — around 128 million instructions — so exhausting it
+    costs real wall time, and an `output` callback that never finishes is
+    re-entered on every chunk of PTY output. Each chunk paid the stall again.
+    That is not a terminal with a broken plugin in it; it is a terminal that
+    has stopped working.
+
+    A callback that burns the whole budget is now retired for the session and
+    the user is told, once, through the ordinary notification path — a plugin
+    silently ceasing to work is its own kind of bug. Wrapping the runaway in a
+    `pcall` does not buy it a reprieve: the watchdog records the abort somewhere
+    Lua cannot reach, so swallowing the error changes nothing. Each callback
+    also gets its own budget rather than sharing one per event, so a heavy but
+    honest callback can no longer starve the ones registered after it, or take
+    the blame for them.
+
   - **Drag-to-reorder was dead on a vertical tab bar.** With
     `tab-position = left` or `right` the segments stack down a shared column,
     and the drag handler tested the cursor's **x** — which every segment
