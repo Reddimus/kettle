@@ -4,7 +4,7 @@ All notable changes to kettle. Format roughly follows
 [Keep a Changelog](https://keepachangelog.com/); the project moves in small,
 durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
-## [Unreleased]
+## [2.48.0] — 2026-08-05
 
   Findings from an audit of `kettle-ui` — the largest crate, and the one
   holding the UI/UX states and the AstroNvim / tmux / agent-CLI input surface —
