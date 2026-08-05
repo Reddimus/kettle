@@ -6729,6 +6729,30 @@ impl App {
         )
     }
 
+    /// Which way `split_auto` should cut the focused pane.
+    ///
+    /// Terminator's rule is the pane's LONGER axis: a wide pane splits into a
+    /// left/right pair, a tall one into top/bottom. kettle's dispatch arm read
+    /// `Action::SplitDown | Action::SplitAuto`, so "auto" was literally
+    /// "down" — on a 1388x861 pane, wider than it is tall, it stacked instead
+    /// of splitting side by side. Every user-facing description says otherwise
+    /// (`docs/CONFIG.md` "pick by aspect ratio", the palette's "Split
+    /// automatically", the context-menu row, and the default Ctrl+Shift+A
+    /// binding).
+    ///
+    /// Ties go to a vertical cut, matching the old behaviour for a square
+    /// pane so the default binding does not change meaning where the aspect
+    /// ratio does not actually favour either side.
+    fn auto_split_dir(&self, ws: &WindowState) -> Dir {
+        let area = self.area(ws);
+        let rect = self.focused_rect(ws, area).unwrap_or(area);
+        if rect.2 > rect.3 {
+            Dir::Horizontal
+        } else {
+            Dir::Vertical
+        }
+    }
+
     fn focused_rect(&self, ws: &WindowState, area: Rect) -> Option<Rect> {
         let f = ws.mux.active_focus()?;
         ws.mux
@@ -12155,22 +12179,24 @@ impl App {
                 }
             }
             Action::SplitDown | Action::SplitAuto => {
+                // `split_auto` cuts along the pane's LONGER axis, the way
+                // Terminator does; `split_down` is always vertical.
+                let dir = if action == Action::SplitAuto {
+                    self.auto_split_dir(ws)
+                } else {
+                    Dir::Vertical
+                };
+                let geometry = if dir == Dir::Horizontal {
+                    horizontal_split_geometry
+                } else {
+                    vertical_split_geometry
+                };
                 let detected = self.focused_foreground_shell(ws);
                 let res = match detected {
-                    Some(s) => ws.mux.split_with_geometry(
-                        Dir::Vertical,
-                        &self.cfg,
-                        vertical_split_geometry,
-                        waker,
-                        s.argv,
-                        s.cwd,
-                    ),
-                    None => ws.mux.split_geometry(
-                        Dir::Vertical,
-                        &self.cfg,
-                        vertical_split_geometry,
-                        waker,
-                    ),
+                    Some(s) => ws
+                        .mux
+                        .split_with_geometry(dir, &self.cfg, geometry, waker, s.argv, s.cwd),
+                    None => ws.mux.split_geometry(dir, &self.cfg, geometry, waker),
                 };
                 if let Err(e) = res {
                     log::warn!("could not split pane (down): {e}");
@@ -24086,6 +24112,59 @@ mod modal_discipline_guard {
             refocus < pane_close,
             "the re-focus must come BEFORE the close, or the close still acts \
              on whatever happens to be focused"
+        );
+    }
+
+    /// `split_auto` must actually pick an axis.
+    ///
+    /// The dispatch arm read `Action::SplitDown | Action::SplitAuto`, so "auto"
+    /// was literally "down": on a 1388x861 pane — wider than tall — it stacked
+    /// instead of splitting side by side. Every user-facing description says
+    /// it picks by aspect ratio, and Terminator splits along the pane's longer
+    /// axis.
+    ///
+    /// A behavioural test needs a live window, so this pins the two things
+    /// that went wrong: that the dispatch consults the chooser at all rather
+    /// than sharing `SplitDown`'s arm, and that the chooser reads the pane's
+    /// shape.
+    #[test]
+    fn split_auto_picks_an_axis_instead_of_always_splitting_down() {
+        let src = production_source();
+
+        let arm = src
+            .split("Action::SplitDown | Action::SplitAuto => {")
+            .nth(1)
+            .expect("the split-down/auto arm must exist")
+            .split("\n            Action::")
+            .next()
+            .expect("arm body");
+        assert!(
+            arm.contains("if action == Action::SplitAuto"),
+            "the arm must distinguish auto from down — sharing the arm outright \
+             is what made `split_auto` a plain `split_down`"
+        );
+        assert!(
+            arm.contains("self.auto_split_dir(ws)"),
+            "auto must ask for a direction rather than hardcoding one"
+        );
+
+        let chooser = src
+            .split("fn auto_split_dir(&self, ws: &WindowState) -> Dir {")
+            .nth(1)
+            .expect("auto_split_dir must exist")
+            .split("\n    fn ")
+            .next()
+            .expect("chooser body");
+        assert!(
+            chooser.contains("self.focused_rect(ws, area)"),
+            "the choice must come from the focused pane's rect, not the window"
+        );
+        assert!(
+            chooser.contains("rect.2 > rect.3")
+                && chooser.contains("Dir::Horizontal")
+                && chooser.contains("Dir::Vertical"),
+            "a wider-than-tall pane must split horizontally and a taller one \
+             vertically"
         );
     }
 
