@@ -51,6 +51,16 @@ const SETTLE: Duration = Duration::from_millis(60);
 /// lifecycle loop polling during this window so cancellation and deadlines
 /// remain enforceable.
 const CHILD_EXIT_STATUS_WAIT: Duration = Duration::from_millis(250);
+/// How long to keep waiting for the PTY reader to reach EOF after the child is
+/// gone, before concluding it never will.
+///
+/// Only the platforms whose reader outlives the child spend this: on Unix the
+/// master read fails once the child closes the slave, so the reader exits, the
+/// channel disconnects, and wrap-up proceeds immediately. Windows ConPTY keeps
+/// its handle open, so there the bound is the real path. Generous because
+/// spending it is invisible (the child has already exited and its output has
+/// already been printed) while cutting it short costs the tail of the output.
+const PTY_DRAIN_GRACE: Duration = Duration::from_millis(750);
 /// Semantic events emitted by the VT parser. A full queue is a fail-command
 /// condition because silently dropping a reply request can deadlock the child.
 const PTY_EVENT_QUEUE_DEPTH: usize = 1024;
@@ -490,10 +500,28 @@ pub fn run_exec_with(
 /// A bounded channel alone does not make an unbounded `try_recv` loop fair:
 /// the producer can refill each slot as soon as the owner removes it. Both a
 /// message and byte budget keep lifecycle checks reachable under that race.
+/// `pty_reached_eof` is latched when the raw channel reports *disconnected*
+/// rather than merely empty.
+///
+/// That distinction is the whole point. An empty channel is not evidence the
+/// PTY has been read to the end — it is equally consistent with the reader
+/// thread not having been scheduled yet, which is routine on a loaded machine.
+/// A disconnected one IS evidence: the reader owns the only sender and drops it
+/// on the way out of its loop, after EOF.
+///
+/// Treating "empty" as "finished" cost the child's output. For a command that
+/// writes a little and exits at once, the exit status could be observed and the
+/// settle window elapse while the bytes were still in flight; the loop then
+/// finished the recorder and closed stdout, and they arrived with nowhere to
+/// go. It showed up as two macOS intermittents that looked unrelated —
+/// `exec_streams_stdout_and_exits_zero` returning exit 0 with empty stdout, and
+/// `exec_record_writes_replayable_asciicast` writing a trace containing only its
+/// header — because one gate feeds both stdout and the recorder.
 fn drain_output_slice(
     receiver: &Receiver<Vec<u8>>,
     recorder: &mut Option<kettle_core::record::Recorder>,
     output: &mut dyn ExecOutput,
+    pty_reached_eof: &std::cell::Cell<bool>,
 ) -> OutputResult<bool> {
     let mut bytes_drained = 0usize;
     for _ in 0..OUTPUT_SLICE_MESSAGES {
@@ -503,8 +531,13 @@ fn drain_output_slice(
         if !output.ready()? {
             return Ok(true);
         }
-        let Ok(bytes) = receiver.try_recv() else {
-            return Ok(false);
+        let bytes = match receiver.try_recv() {
+            Ok(bytes) => bytes,
+            Err(crossbeam_channel::TryRecvError::Empty) => return Ok(false),
+            Err(crossbeam_channel::TryRecvError::Disconnected) => {
+                pty_reached_eof.set(true);
+                return Ok(false);
+            }
         };
         bytes_drained = bytes_drained.saturating_add(bytes.len());
         record_chunk(recorder, &bytes);
@@ -633,6 +666,10 @@ fn run_exec_engine(
     let (tx, rx): (Sender<TermEvent>, Receiver<TermEvent>) =
         crossbeam_channel::bounded(PTY_EVENT_QUEUE_DEPTH);
     let (otx, orx): (Sender<Vec<u8>>, Receiver<Vec<u8>>) = crossbeam_channel::bounded(4);
+    // Latched once the raw channel reports disconnected rather than empty --
+    // see `drain_output_slice`. A `Cell` because the lifecycle loop is single
+    // threaded and this is only ever set from inside it.
+    let pty_reached_eof = std::cell::Cell::new(false);
     let (stdin_tx, stdin_rx) = crossbeam_channel::bounded::<StdinPumpEvent>(4);
     let (pty_reply_tx, pty_reply_rx) = crossbeam_channel::bounded::<Vec<u8>>(64);
     let pty_reply_gate = Arc::new(Mutex::new(()));
@@ -852,7 +889,12 @@ fn run_exec_engine(
 
         // Drain output first, but keep the slice finite. A continuously
         // refilled queue must not hide timeout/cancellation indefinitely.
-        let output_backlog = output_or_stop!(drain_output_slice(&orx, &mut recorder, output));
+        let output_backlog = output_or_stop!(drain_output_slice(
+            &orx,
+            &mut recorder,
+            output,
+            &pty_reached_eof
+        ));
         if trace_lifecycle {
             log::debug!("kettle exec lifecycle output slice returned: backlog={output_backlog}");
         }
@@ -1017,7 +1059,12 @@ fn run_exec_engine(
             process_tree.terminate(&term);
             let _ = wait_for_exit_code(&term);
             std::thread::sleep(SETTLE);
-            let _ = output_or_stop!(drain_output_slice(&orx, &mut recorder, output));
+            let _ = output_or_stop!(drain_output_slice(
+                &orx,
+                &mut recorder,
+                output,
+                &pty_reached_eof
+            ));
             finish_recording(&mut recorder, Duration::ZERO);
             let _ = output.finish(
                 EXIT_INTERNAL,
@@ -1040,7 +1087,12 @@ fn run_exec_engine(
                 process_tree.terminate(&term);
                 let _ = wait_for_exit_code(&term);
                 std::thread::sleep(SETTLE);
-                let _ = output_or_stop!(drain_output_slice(&orx, &mut recorder, output));
+                let _ = output_or_stop!(drain_output_slice(
+                    &orx,
+                    &mut recorder,
+                    output,
+                    &pty_reached_eof
+                ));
                 finish_recording(&mut recorder, Duration::ZERO);
                 let _ = output.finish(
                     EXIT_INTERNAL,
@@ -1065,9 +1117,18 @@ fn run_exec_engine(
             child_gone_at = Some(Instant::now());
             child_exit_code = term.child_exit_code().map(clamp_code);
         }
+        // Wrap-up needs the PTY to be *finished*, not merely quiet. The reader
+        // drops its sender only after EOF, so a disconnected channel proves it;
+        // an empty one proves nothing, because the reader may simply not have
+        // run yet. The elapsed-time arm stays as the bound for platforms where
+        // the reader outlives the child — Windows ConPTY holds its handle open
+        // — so this can still never wait forever.
+        let pty_finished = pty_reached_eof.get()
+            || child_gone_at.is_some_and(|gone| gone.elapsed() >= SETTLE + PTY_DRAIN_GRACE);
         if let Some(gone) = child_gone_at
             && gone.elapsed() >= SETTLE
             && orx.is_empty()
+            && pty_finished
         {
             // The VT `Exit` event can arrive before the OS exposes an
             // authoritative status. Poll it from normal lifecycle turns rather
@@ -1079,8 +1140,12 @@ fn run_exec_engine(
                 // Final drain in case something landed in the settle window.
                 // `drained` also waits for every command already admitted to
                 // the stdout worker; an empty raw channel alone is insufficient.
-                let final_output_backlog =
-                    output_or_stop!(drain_output_slice(&orx, &mut recorder, output));
+                let final_output_backlog = output_or_stop!(drain_output_slice(
+                    &orx,
+                    &mut recorder,
+                    output,
+                    &pty_reached_eof
+                ));
                 if !final_output_backlog && orx.is_empty() && output_or_stop!(output.drained()) {
                     if let Some(recorder) = recorder.as_mut() {
                         recorder.begin_finish();
@@ -2545,12 +2610,69 @@ mod tests {
         let mut recorder = None;
         let mut sink = Vec::new();
         let mut output = DirectOutput::new(OutputMode::Raw, &mut sink);
+        let eof = std::cell::Cell::new(false);
 
-        assert!(drain_output_slice(&receiver, &mut recorder, &mut output).unwrap());
+        assert!(drain_output_slice(&receiver, &mut recorder, &mut output, &eof).unwrap());
         assert_eq!(receiver.len(), 1);
-        assert!(!drain_output_slice(&receiver, &mut recorder, &mut output).unwrap());
+        assert!(!drain_output_slice(&receiver, &mut recorder, &mut output, &eof).unwrap());
         drop(output);
         assert_eq!(sink.len(), OUTPUT_SLICE_MESSAGES + 1);
+    }
+
+    /// An empty channel and a finished PTY are different facts, and the
+    /// lifecycle loop used to act on the first while meaning the second.
+    ///
+    /// The reader thread owns the only sender and drops it after EOF, so
+    /// "disconnected" is proof the output is complete; "empty" is equally
+    /// consistent with the reader simply not having run yet — routine on a
+    /// loaded machine. Conflating them lost the child's output: for a command
+    /// that writes a little and exits at once, the exit could be seen and the
+    /// settle window elapse while the bytes were still in flight.
+    ///
+    /// Two macOS intermittents that looked unrelated were this one bug, because
+    /// a single gate feeds both stdout and the recorder:
+    /// `exec_streams_stdout_and_exits_zero` seeing empty stdout, and
+    /// `exec_record_writes_replayable_asciicast` writing a header-only trace.
+    #[test]
+    fn a_quiet_channel_is_not_a_finished_pty() {
+        let mut recorder = None;
+        let mut sink = Vec::new();
+        let mut output = DirectOutput::new(OutputMode::Raw, &mut sink);
+
+        // Sender alive, nothing queued yet: this is the reader that has not
+        // been scheduled. It must NOT read as end-of-output.
+        let (sender, receiver) = crossbeam_channel::unbounded::<Vec<u8>>();
+        let eof = std::cell::Cell::new(false);
+        assert!(!drain_output_slice(&receiver, &mut recorder, &mut output, &eof).unwrap());
+        assert!(
+            !eof.get(),
+            "an empty channel with a live reader must not latch EOF -- that is \
+             precisely the moment the output is still in flight"
+        );
+
+        // The bytes arrive late, exactly as they did in the race.
+        sender.send(b"recmark-9z".to_vec()).unwrap();
+        assert!(!drain_output_slice(&receiver, &mut recorder, &mut output, &eof).unwrap());
+        assert!(
+            !eof.get(),
+            "delivering output is not EOF either; the reader may have more"
+        );
+
+        // Now the reader exits and drops its sender. THAT is end-of-output.
+        drop(sender);
+        assert!(!drain_output_slice(&receiver, &mut recorder, &mut output, &eof).unwrap());
+        assert!(
+            eof.get(),
+            "a disconnected channel is the reader having finished, and is the \
+             only thing that proves the output is complete"
+        );
+
+        drop(output);
+        assert_eq!(
+            sink, b"recmark-9z",
+            "and the late bytes still reached stdout rather than being dropped \
+             on the way to the conclusion"
+        );
     }
 
     #[test]
@@ -2563,8 +2685,9 @@ mod tests {
         let mut recorder = None;
         let mut sink = Vec::new();
         let mut output = DirectOutput::new(OutputMode::Raw, &mut sink);
+        let eof = std::cell::Cell::new(false);
 
-        assert!(drain_output_slice(&receiver, &mut recorder, &mut output).unwrap());
+        assert!(drain_output_slice(&receiver, &mut recorder, &mut output, &eof).unwrap());
         drop(output);
         assert_eq!(sink.len(), chunk_len * 2);
         assert_eq!(receiver.len(), 1);

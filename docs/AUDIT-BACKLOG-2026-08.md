@@ -407,7 +407,7 @@ The fix is to make admission observable rather than assumed, not to lengthen
 the timeout. Joins the two `kettle/tests/exec.rs` ConPTY timing fixtures, which
 have the same shape.
 
-## Open — an empty channel is mistaken for a fully-read PTY
+## Fixed — an empty channel was mistaken for a fully-read PTY
 
 **This is a product race, not a fixture problem, and it appears to be the root
 cause of two separate long-standing macOS intermittents.**
@@ -446,13 +446,21 @@ time bound as the fallback for platforms where the reader outlives the child
 (Windows ConPTY), so the loop still cannot hang. Lengthening `SETTLE` is not a
 fix — it moves the race rather than removing it.
 
-**Why it is not fixed here.** `exec`'s lifecycle loop is the highest-risk code
-in the repository, this machine has no macOS loop to verify against (see the
-project notes), and the failure only manifests under scheduling pressure on the
-platform that cannot be reproduced locally. A change made blind here is how the
-ConPTY saturation regression happened. It needs its own change, with the fix
-verified red against a fixture that starves the reader deliberately rather than
-waiting for CI to lose the race again.
+**Fixed.** `try_recv` already distinguished the two cases and the code was
+throwing the distinction away with `let Ok(bytes) = ... else`. The drain now
+latches EOF only on `Disconnected`, and wrap-up requires that latch — with the
+elapsed-time arm (`PTY_DRAIN_GRACE`) kept purely as the bound for ConPTY, whose
+reader holds its handle open past the child. On Unix the master read fails as
+soon as the child closes the slave, so the disconnect arrives immediately and
+nothing waits.
+
+The initial call was to defer this — one observation, on an unrelated PR, in the
+riskiest file in the repository, with no macOS loop to verify against. The
+evidence then changed: the very next run failed the *other* test in the family,
+which is what the shared-gate theory predicts and what raised it from a
+plausible reading of the code to a confirmed mechanism. The unit test pins the
+distinction directly rather than through a PTY, and was verified red by
+conflating `Empty` with `Disconnected` again.
 
 ## Deferred — tests that cannot fail
 
