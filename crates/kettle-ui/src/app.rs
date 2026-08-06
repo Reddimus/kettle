@@ -10329,7 +10329,7 @@ impl App {
                             }
                             ws.window_shown = true;
                             log::info!(
-                                "startup: window revealed at first paint, working set {:.1} MB",
+                                "startup: window revealed at first paint, working set {:.1} MiB",
                                 process_working_set_mb()
                             );
                         }
@@ -20014,8 +20014,19 @@ fn set_window_background_brush(_hwnd: isize, _rgb: kettle_config::Rgb) -> bool {
 fn process_working_set_mb() -> f64 {
     use windows::Win32::System::ProcessStatus::{GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS};
     use windows::Win32::System::Threading::GetCurrentProcess;
-    let mut counters = PROCESS_MEMORY_COUNTERS::default();
-    let size = u32::try_from(std::mem::size_of::<PROCESS_MEMORY_COUNTERS>()).unwrap_or(0);
+    let Ok(size) = u32::try_from(std::mem::size_of::<PROCESS_MEMORY_COUNTERS>()) else {
+        // A zero size would be accepted by the signature and rejected -- or
+        // worse, partially honoured -- by the API. Refuse instead of asking for
+        // a struct of no bytes.
+        return 0.0;
+    };
+    let mut counters = PROCESS_MEMORY_COUNTERS {
+        // `cb` is an in-parameter: the API uses it to decide how much of the
+        // struct it may write. `Default` leaves it 0, which is not a smaller
+        // request, it is a malformed one.
+        cb: size,
+        ..Default::default()
+    };
     unsafe {
         if GetProcessMemoryInfo(GetCurrentProcess(), &mut counters, size).is_ok() {
             return counters.WorkingSetSize as f64 / (1024.0 * 1024.0);
@@ -21850,7 +21861,7 @@ impl App {
             }
         };
         log::info!(
-            "startup: working set after gpu init {:.1} MB",
+            "startup: working set after gpu init {:.1} MiB",
             process_working_set_mb()
         );
         log::info!(

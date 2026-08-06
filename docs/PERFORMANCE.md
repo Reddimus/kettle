@@ -98,9 +98,12 @@ What this says plainly:
   | starfield pipeline | +46 MB |
   | glyph pipeline | +21 MB |
 
-  312 MB of the 318 arrives during GPU initialisation; the terminal itself adds
-  about 7 MB after it. The 182 MB step is the DX12 shader compiler being loaded
-  and run for the first time — not an allocation Kettle makes.
+  The steps come from one run and the 321.5 MB from another, so they total to
+  that run's own final figure (~318 MB) rather than to 321.5 exactly; the spread
+  between runs is a few MB. What matters is the SHAPE, and it is stable: about
+  312 of those ~318 MB arrive during GPU initialisation, and the terminal itself
+  adds only ~7 MB after it. The 182 MB step is the DX12 shader compiler being
+  loaded and run for the first time — not an allocation Kettle makes.
 
   Four plausible causes are ruled out, so nobody re-suspects them: scrollback
   (10000 -> 100 moved the total by ~0; history grows lazily, as in Alacritty),
