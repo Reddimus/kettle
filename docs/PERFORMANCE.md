@@ -83,14 +83,35 @@ What this says plainly:
   number a user meets on each keystroke.
 - **Idle CPU: Kettle measured exactly 0.0000% in both runs**, while Alacritty and
   WezTerm each drifted above zero in one of the two.
-- **Startup and memory are behind, and not by a sampling accident.** Kettle's
-  FASTEST startup sample still trails Alacritty's and WezTerm's fastest by ~1.8s,
-  and the memory reading varies by under 4 MB across eight samples at 2.3x
-  Alacritty and 1.65x WezTerm. The startup phase split (first sample) puts about
-  half the gap before the window exists -- 3265 ms vs Alacritty's 1282 ms, but
-  level with WezTerm's 2968 ms, which points at GPU initialisation rather than
-  something peculiar to Kettle -- and about half in rendering the child's first
-  output (5224 ms vs 3075 ms).
+- **Startup and memory are behind.** Memory is the plainer of the two: 336 MB
+  against Alacritty's 148 MB and WezTerm's 203 MB, varying by under 4 MB across
+  eight samples, so it is a stable characteristic rather than sampling noise.
+
+  Startup needs care, because the suite's number is an end-to-end readiness
+  figure and a reader will mistake it for "time until a window appears". A direct
+  window-appearance probe on a quiet machine, three runs each with these same
+  configs, gives the narrower truth:
+
+  | | Alacritty | WezTerm | Kettle |
+  |---|---|---|---|
+  | window visible, median | 502 ms | 696 ms | 1068 ms |
+
+  Kettle is still last, by ~370-570 ms rather than by seconds. Its own phase
+  timings (`RUST_LOG=info`, added for exactly this question) account for it:
+  pre-main ~40-106 ms, `create_window` ~17 ms, accessibility ~4 ms, **GPU init
+  ~730 ms** (adapter ~440, device ~100, pipelines+atlas ~190), first paint and
+  reveal ~100 ms. `FontSystem::new()` was the obvious suspect and is not the
+  problem at 24-30 ms, including with this profile's `font-family = Cascadia
+  Mono`, which forces a system-font lookup the bundled default never exercises.
+
+  So roughly two thirds of Kettle's startup is GPU initialisation, and the window
+  is deliberately hidden for all of it -- Alacritty and WezTerm show a window
+  before their renderer is ready, Kettle waits for the first painted frame to
+  avoid a flash of unstyled window. That is a defensible trade, but it is the
+  trade being measured, and it is what `docs/`-tracked follow-up work targets.
+
+  One caveat for anyone re-measuring: the FIRST launch after a driver shader-cache
+  reset measured pipelines+atlas at 4218 ms against 165 ms warm. Discard it.
 - **Throughput produced no data.** The channel between the probe and its workload
   child timed out on connection. It is the one comparative metric missing here,
   and it is not being claimed either way.

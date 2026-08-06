@@ -10328,6 +10328,7 @@ impl App {
                                 w.set_visible(true);
                             }
                             ws.window_shown = true;
+                            log::info!("startup: window revealed at first paint");
                         }
                         ws.last_paint = Some(std::time::Instant::now());
                         ws.output_pacer.presented();
@@ -21615,6 +21616,11 @@ impl App {
                 .with_position(winit::dpi::PhysicalPosition::new(geometry.x, geometry.y))
                 .with_inner_size(winit::dpi::PhysicalSize::new(geometry.w, geometry.h));
         }
+        // Startup is measured, not guessed: the window is created HIDDEN and
+        // revealed at the first paint, so everything between here and that
+        // reveal is time the user spends looking at nothing. A comparator
+        // benchmark can only report the total.
+        let t_startup = std::time::Instant::now();
         let window = match event_loop.create_window(attrs) {
             Ok(w) => Arc::new(w),
             Err(e) => {
@@ -21623,9 +21629,12 @@ impl App {
                 return;
             }
         };
+        let create_window_ms = t_startup.elapsed().as_secs_f64() * 1000.0;
         self.apply_post_create(&window);
+        let t_a11y = std::time::Instant::now();
         let accessibility =
             Self::new_accessibility_adapter(event_loop, &window, ws.seq, self.proxy.clone());
+        let a11y_ms = t_a11y.elapsed().as_secs_f64() * 1000.0;
         let size = window.inner_size();
         let scale = window.scale_factor() as f32;
         // Guard the synchronous GPU init against a hung
@@ -21686,6 +21695,11 @@ impl App {
                 return;
             }
         };
+        log::info!(
+            "startup: create_window {create_window_ms:.1}ms, accessibility {a11y_ms:.1}ms,              gpu {:.1}ms (cumulative {:.1}ms)",
+            t_startup.elapsed().as_secs_f64() * 1000.0 - create_window_ms - a11y_ms,
+            t_startup.elapsed().as_secs_f64() * 1000.0
+        );
         // C4: cache the shared GPU context for open_window (windows 2..N).
         self.gpu = Some(renderer.gpu().clone());
         ws.renderer = Some(renderer);
