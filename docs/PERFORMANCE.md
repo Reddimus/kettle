@@ -83,9 +83,35 @@ What this says plainly:
   number a user meets on each keystroke.
 - **Idle CPU: Kettle measured exactly 0.0000% in both runs**, while Alacritty and
   WezTerm each drifted above zero in one of the two.
-- **Startup and memory are behind.** Memory is the plainer of the two: 336 MB
-  against Alacritty's 148 MB and WezTerm's 203 MB, varying by under 4 MB across
-  eight samples, so it is a stable characteristic rather than sampling noise.
+- **Memory is where Kettle is still behind.** Measured directly, root process
+  only, same workload: **Kettle 321.5 MB, Alacritty 121.1 MB, WezTerm 152.8 MB.**
+
+  Sampling the working set every 25 ms and aligning it against the phase log
+  attributes it, and the answer is not what a terminal's memory usually implies:
+
+  | phase | delta |
+  |---|---|
+  | process/runtime init | +21 MB |
+  | | +17 MB |
+  | adapter selection (DX12) | +21 MB |
+  | glyphon `Cache::new` — the FIRST pipeline creation | **+182 MB** |
+  | starfield pipeline | +46 MB |
+  | glyph pipeline | +21 MB |
+
+  312 MB of the 318 arrives during GPU initialisation; the terminal itself adds
+  about 7 MB after it. The 182 MB step is the DX12 shader compiler being loaded
+  and run for the first time — not an allocation Kettle makes.
+
+  Four plausible causes are ruled out, so nobody re-suspects them: scrollback
+  (10000 -> 100 moved the total by ~0; history grows lazily, as in Alacritty),
+  config and features (a minimal profile measured within 1 MB of the full one),
+  the font system (~25-30 ms and small), and the glyph atlas (glyphon starts at
+  256x256 and grows on demand).
+
+  What IS closable: the starfield pipeline costs a measured 46 MB and is built
+  unconditionally, though every use of it is already gated on
+  `background-type = starfield`. Not compiling shaders a session will never use
+  is right on principle; it is tracked, and it does not change the ranking.
 
   Startup needs care, because the suite's number is an end-to-end readiness
   figure and a reader will mistake it for "time until a window appears". A direct
