@@ -70,7 +70,7 @@ screen, so it includes a constant child-startup cost common to all four.
 | input latency, p95 | **124.06 ms** | 175.16 | 204.17 | 200.47 | **1 of 4** |
 | input latency, p99 | **139.09 ms** | 197.52 | 244.72 | 225.52 | **1 of 4** |
 | idle CPU | **0.0000%** | 0.00 / 0.26 | 0.51 / 0.00 | 0.25 / 0.51 | **1 of 4** |
-| startup | 6883 / 5652 ms | 4995 / 3463 | 4637 / 3408 | 15737 / 11827 | 3 of 4 |
+| startup (see below) | 6883 / 5652 ms | 4995 / 3463 | 4637 / 3408 | 15737 / 11827 | 3 of 4 |
 | fresh working set | 335.8 / 335.9 MB | 147.7 / 147.5 | 203.3 / 203.4 | 741.2 / 745.0 | 3 of 4 |
 
 Two values mean two independent runs (`20260805-134952`, `20260805-142330`);
@@ -83,20 +83,66 @@ What this says plainly:
   number a user meets on each keystroke.
 - **Idle CPU: Kettle measured exactly 0.0000% in both runs**, while Alacritty and
   WezTerm each drifted above zero in one of the two.
-- **Startup and memory are behind, and not by a sampling accident.** Kettle's
-  FASTEST startup sample still trails Alacritty's and WezTerm's fastest by ~1.8s,
-  and the memory reading varies by under 4 MB across eight samples at 2.3x
-  Alacritty and 1.65x WezTerm. The startup phase split (first sample) puts about
-  half the gap before the window exists -- 3265 ms vs Alacritty's 1282 ms, but
-  level with WezTerm's 2968 ms, which points at GPU initialisation rather than
-  something peculiar to Kettle -- and about half in rendering the child's first
-  output (5224 ms vs 3075 ms).
+- **Startup and memory are behind.** Memory is the plainer of the two: 336 MB
+  against Alacritty's 148 MB and WezTerm's 203 MB, varying by under 4 MB across
+  eight samples, so it is a stable characteristic rather than sampling noise.
+
+  Startup needs care, because the suite's number is an end-to-end readiness
+  figure and a reader will mistake it for "time until a window appears". A direct
+  window-appearance probe on a quiet machine, three runs each with these same
+  configs, gives the narrower truth:
+
+  | | Alacritty | WezTerm | Kettle |
+  |---|---|---|---|
+  | window visible, median, BEFORE | 502 ms | 696 ms | 1068 ms |
+  | window visible, median, AFTER | 407 ms | 524 ms | **215 ms** |
+
+  Kettle was last by ~370-570 ms. It is now first, and the fix was not to make
+  renderer init faster -- it was to stop hiding the window through it. Its own phase
+  timings (`RUST_LOG=info`, added for exactly this question) account for it:
+  pre-main ~40-106 ms, window create + post-create setup ~17 ms, accessibility
+  ~5 ms, **GPU init ~700 ms** (adapter ~390, device ~85, and ~172 ms for
+  everything after the device -- surface, fonts and pipelines together), first
+  paint and reveal ~100 ms. `FontSystem::new()` was the obvious suspect and is
+  not the problem at ~46 ms, including with this profile's `font-family =
+  Cascadia Mono`, which forces a system-font lookup the bundled default never
+  exercises; loading the bundled font on top of it is unmeasurable.
+
+  Those phase boundaries are worth stating precisely, because a review caught
+  all three being sloppy: the window figure stopped before post-create setup
+  while the GPU figure was derived by subtraction (so that setup was charged to
+  the GPU), the post-device figure silently contained the separately-logged font
+  time (inviting a double-count), and the "font system" figure covered the
+  bundled-font load as well as the constructor the analysis singled out.
+
+  Roughly two thirds of that was GPU initialisation with the window hidden for
+  all of it. Kettle hid for a good reason: a window shown before its first
+  painted frame shows the class's stock WHITE brush, and most of a second of
+  white is a worse greeting than a late window.
+
+  The window is now revealed immediately -- but only when the configured
+  background is within 24 levels of black on every channel, because an unpainted
+  window is BLACK and that is the only case where the pre-paint frame cannot be
+  told from what follows. `#101010` against black is four levels on one channel.
+  Anything with visible colour, light or dark, keeps the old hide-until-painted
+  path unchanged, and light-theme startup is accordingly still ~839-920 ms.
+
+  Setting the window class background brush to the terminal's own colour was
+  tried first and is kept as a best effort, but the reveal deliberately does NOT
+  depend on it: with `#f0e8d8` configured the pre-paint window still sampled
+  `0,0,0`, because winit owns `WM_ERASEBKGND`. Trusting the brush would have
+  handed light-theme users a black flash instead of a white one.
+
+  One caveat for anyone re-measuring: the FIRST launch after a driver shader-cache
+  reset measured pipelines+atlas at 4218 ms against 165 ms warm. Discard it.
 - **Throughput produced no data.** The channel between the probe and its workload
   child timed out on connection. It is the one comparative metric missing here,
   and it is not being claimed either way.
 
 So on the metrics that were measured, Kettle beats every peer on latency, ties
-best on idle CPU, and loses to two of three on startup and memory.
+best on idle CPU, now leads time-to-window (see the startup section below --
+these suite figures predate that change and are an end-to-end readiness number,
+not time-to-window), and trails on memory.
 
 ## Next release — paired six-terminal and physical-display gates
 

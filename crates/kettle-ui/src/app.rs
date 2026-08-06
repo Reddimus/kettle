@@ -10328,6 +10328,7 @@ impl App {
                                 w.set_visible(true);
                             }
                             ws.window_shown = true;
+                            log::info!("startup: window revealed at first paint");
                         }
                         ws.last_paint = Some(std::time::Instant::now());
                         ws.output_pacer.presented();
@@ -19944,6 +19945,93 @@ fn set_window_alpha(hwnd: isize, alpha: u8) {
     }
 }
 
+/// Paint a freshly created window's background in the configured terminal
+/// background colour, and report whether it took.
+///
+/// This exists so the window can be REVEALED before the GPU is ready. Kettle
+/// used to keep it hidden through renderer init -- about 730ms of the ~1070ms
+/// it took to put anything on screen -- because a window shown before the first
+/// painted frame shows the window class's stock brush, which is white. A white
+/// rectangle for most of a second is a worse greeting than a late window, so
+/// hiding was the right call while the background was white.
+///
+/// It stops being the right call once the background is CORRECT. Win32 erases a
+/// window with its class brush on `WM_ERASEBKGND`, so setting that brush to the
+/// terminal's own background means the very first thing composited is the colour
+/// the terminal is about to paint anyway. The wgpu surface then takes over with
+/// no visible transition.
+///
+/// Returns false if any step fails, and the caller keeps the old
+/// hide-until-painted behaviour -- a late window is recoverable, a white flash
+/// on every launch is not.
+#[cfg(target_os = "windows")]
+fn set_window_background_brush(hwnd: isize, rgb: kettle_config::Rgb) -> bool {
+    use windows::Win32::Foundation::{COLORREF, HWND};
+    use windows::Win32::Graphics::Gdi::{CreateSolidBrush, DeleteObject, HBRUSH, HGDIOBJ};
+    use windows::Win32::UI::WindowsAndMessaging::{GCLP_HBRBACKGROUND, SetClassLongPtrW};
+
+    let kettle_config::Rgb { r, g, b } = rgb;
+    // COLORREF is 0x00BBGGRR, not RGB order.
+    let colorref = COLORREF(u32::from(r) | (u32::from(g) << 8) | (u32::from(b) << 16));
+    let h = HWND(hwnd as *mut core::ffi::c_void);
+    unsafe {
+        let brush = CreateSolidBrush(colorref);
+        if brush.is_invalid() {
+            return false;
+        }
+        // Replaces the class brush and hands back the previous one. The class
+        // outlives the window, but every kettle window wants the same colour and
+        // a later window re-sets it, so leaking the stock brush is not a concern
+        // -- the OLD brush is destroyed below when it was one of ours.
+        let previous = SetClassLongPtrW(h, GCLP_HBRBACKGROUND, brush.0 as isize);
+        if previous != 0 {
+            let _ = DeleteObject(HGDIOBJ(previous as *mut core::ffi::c_void));
+        }
+        let _ = HBRUSH(brush.0);
+        true
+    }
+}
+
+/// Non-Windows platforms have no equivalent cheap guarantee that the first
+/// composited frame is the right colour, so they keep hiding until painted.
+#[cfg(not(target_os = "windows"))]
+fn set_window_background_brush(_hwnd: isize, _rgb: kettle_config::Rgb) -> bool {
+    false
+}
+
+/// May the window be shown BEFORE the first painted frame?
+///
+/// Only when the terminal's background is dark enough that the difference from
+/// black is imperceptible, because black is what an unpainted window actually
+/// shows. That was measured, not assumed: with a light background configured
+/// (`#f0e8d8`) the pre-paint window still sampled `0,0,0`, so the class brush
+/// set alongside this does NOT decide what appears -- winit owns
+/// `WM_ERASEBKGND`. Revealing a light-themed window early would therefore trade
+/// a late window for a black flash, which is the same bad deal as the white
+/// flash the hide-until-painted policy was written to avoid.
+///
+/// Dark backgrounds have no such trade. `#101010` against black is four levels
+/// on one channel; nobody can see that, and it buys the ~730ms of renderer init
+/// that kettle used to spend showing nothing at all -- which is most of why it
+/// reached the screen at 1068ms against Alacritty's 502ms and WezTerm's 696ms.
+///
+/// The threshold is deliberately strict. This is not "dark theme" detection; it
+/// is "indistinguishable from black", so anything with visible colour keeps the
+/// old, safe behaviour.
+fn background_is_dark_enough_to_reveal_early(bg: kettle_config::Rgb) -> bool {
+    // Windows only, because the premise was verified on Windows only. "An
+    // unpainted window is black" is an observation about what DWM composites
+    // for a window whose client has not drawn yet -- it is NOT a portable
+    // fact, and on another compositor the pre-paint frame could as easily be
+    // white or transparent. Revealing early elsewhere would be trading a
+    // measured win on one platform for an unmeasured flash on two.
+    if !cfg!(target_os = "windows") {
+        return false;
+    }
+    const MAX_CHANNEL: u8 = 24;
+    bg.r <= MAX_CHANNEL && bg.g <= MAX_CHANNEL && bg.b <= MAX_CHANNEL
+}
+
 /// `WS_EX_LAYERED` as the isize `GetWindowLongPtrW` works in.
 #[cfg(target_os = "windows")]
 const WS_EX_LAYERED_BIT: isize = 0x0008_0000;
@@ -21615,6 +21703,11 @@ impl App {
                 .with_position(winit::dpi::PhysicalPosition::new(geometry.x, geometry.y))
                 .with_inner_size(winit::dpi::PhysicalSize::new(geometry.w, geometry.h));
         }
+        // Startup is measured, not guessed: the window is created HIDDEN and
+        // revealed at the first paint, so everything between here and that
+        // reveal is time the user spends looking at nothing. A comparator
+        // benchmark can only report the total.
+        let t_startup = std::time::Instant::now();
         let window = match event_loop.create_window(attrs) {
             Ok(w) => Arc::new(w),
             Err(e) => {
@@ -21624,8 +21717,48 @@ impl App {
             }
         };
         self.apply_post_create(&window);
+        // Measured AFTER apply_post_create, because the gpu figure below is
+        // derived by subtraction -- stopping the clock before it charged that
+        // setup to the GPU and skewed every number quoted from this line.
+        let create_window_ms = t_startup.elapsed().as_secs_f64() * 1000.0;
+        let t_a11y = std::time::Instant::now();
         let accessibility =
             Self::new_accessibility_adapter(event_loop, &window, ws.seq, self.proxy.clone());
+        let a11y_ms = t_a11y.elapsed().as_secs_f64() * 1000.0;
+
+        // AFTER the accessibility adapter, not before: AccessKit's winit
+        // adapter panics outright if the window has already been shown when it
+        // is constructed ("must be created before the window is shown (made
+        // visible) for the first time"). Revealing first crashed kettle at
+        // startup. The reveal has to be the LAST thing before renderer init,
+        // and this ordering is load-bearing rather than incidental.
+        // Reveal BEFORE the GPU is ready, if -- and only if -- the window can be
+        // made the right colour first.
+        //
+        // Renderer init is ~730ms of the ~1070ms kettle took to put anything on
+        // screen, and the window was hidden for all of it, so kettle showed up
+        // roughly twice as late as Alacritty (502ms) and WezTerm (696ms) even
+        // though it was doing nothing unusual. It hid because a window shown
+        // before its first painted frame shows the class's stock WHITE brush,
+        // and most of a second of white is worse than a late window.
+        //
+        // Painting the class brush in the terminal's own background colour
+        // removes the reason to hide: the first thing composited is the colour
+        // the renderer is about to draw anyway. If that fails we keep hiding --
+        // `window_shown` stays false and the first-paint reveal still runs.
+        // Best effort; see the helper. It cannot be RELIED on -- winit owns
+        // WM_ERASEBKGND, and a light-background probe showed the pre-paint
+        // window is black whatever the class brush says -- so the reveal
+        // decision below does not depend on it.
+        if let Some(h) = window_hwnd(&window) {
+            set_window_background_brush(h, self.cfg.theme.background);
+        }
+        let early_reveal = should_reveal_after_renderer_init(self.cfg.window_state)
+            && background_is_dark_enough_to_reveal_early(self.cfg.theme.background);
+        if early_reveal {
+            window.set_visible(true);
+            ws.window_shown = true;
+        }
         let size = window.inner_size();
         let scale = window.scale_factor() as f32;
         // Guard the synchronous GPU init against a hung
@@ -21686,6 +21819,11 @@ impl App {
                 return;
             }
         };
+        log::info!(
+            "startup: window create+setup {create_window_ms:.1}ms, accessibility {a11y_ms:.1}ms,              gpu {:.1}ms (cumulative {:.1}ms)",
+            t_startup.elapsed().as_secs_f64() * 1000.0 - create_window_ms - a11y_ms,
+            t_startup.elapsed().as_secs_f64() * 1000.0
+        );
         // C4: cache the shared GPU context for open_window (windows 2..N).
         self.gpu = Some(renderer.gpu().clone());
         ws.renderer = Some(renderer);
@@ -24728,16 +24866,16 @@ mod tests {
         Osc52ClipboardChannel, PaneDrag, ParsedRemoteCommandBatch, PendingLuaCommand,
         PendingLuaCommands, PendingRemoteCommand, RemoteBatchClaim, SplitDrag,
         apply_bs_del_binding, apply_output_generation_outcome, apply_remote_title_transition,
-        argv_is_nonlocal_client, assign_mnemonics, broadcast_scope_for_default,
-        cached_pane_cursor_blinking, claim_remote_command_file, context_menu_item_columns,
-        context_menu_max_scroll_offset, context_menu_scroll_for_highlight,
-        context_menu_snapshot_reuse_safe, context_menu_surface_can_fit_row, count_rows_fitting,
-        ctl_input_error, filter_disabled, find_menu_row_y, fit_context_menu_row,
-        input_rejection_message, local_paste_within_limit, modal_swallows_pointer,
-        osc52_clipboard_channel, output_generation_advanced, output_wakeup_needs_paint,
-        pane_cursor_blinking_with, pane_snapshot_keys_match, parse_remote_command_batch,
-        production_source, rank_layouts, sanitize_native_window_title, sanitize_title,
-        selection_kind, session_sweep_due, should_notify_input_rejection,
+        argv_is_nonlocal_client, assign_mnemonics, background_is_dark_enough_to_reveal_early,
+        broadcast_scope_for_default, cached_pane_cursor_blinking, claim_remote_command_file,
+        context_menu_item_columns, context_menu_max_scroll_offset,
+        context_menu_scroll_for_highlight, context_menu_snapshot_reuse_safe,
+        context_menu_surface_can_fit_row, count_rows_fitting, ctl_input_error, filter_disabled,
+        find_menu_row_y, fit_context_menu_row, input_rejection_message, local_paste_within_limit,
+        modal_swallows_pointer, osc52_clipboard_channel, output_generation_advanced,
+        output_wakeup_needs_paint, pane_cursor_blinking_with, pane_snapshot_keys_match,
+        parse_remote_command_batch, production_source, rank_layouts, sanitize_native_window_title,
+        sanitize_title, selection_kind, session_sweep_due, should_notify_input_rejection,
         should_poll_remote_window, should_restore_session, should_reveal_after_renderer_init,
         stage_applied_remote_probe, stage_output_generations_for_frame, stage_remote_targets,
         startup_inner_size_px, typeahead_match,
@@ -25892,6 +26030,90 @@ mod tests {
             0,
             "validated snapshot lookup must not fall through to the live Term"
         );
+    }
+
+    /// The early reveal exists to buy back renderer-init time, but only where
+    /// the pre-paint frame is indistinguishable from what will be painted.
+    /// A light theme must keep the old hide-until-painted behaviour: revealing
+    /// it early trades a late window for a BLACK flash, which is the same bad
+    /// deal the policy was written to avoid.
+    #[test]
+    fn only_a_background_indistinguishable_from_black_reveals_early() {
+        use kettle_config::Rgb;
+        let dark = [
+            (Rgb { r: 0, g: 0, b: 0 }, "pure black"),
+            (
+                Rgb {
+                    r: 16,
+                    g: 16,
+                    b: 16,
+                },
+                "#101010, the benchmark profile",
+            ),
+            (
+                Rgb {
+                    r: 24,
+                    g: 24,
+                    b: 24,
+                },
+                "the threshold itself",
+            ),
+        ];
+        for (bg, what) in dark {
+            assert_eq!(
+                background_is_dark_enough_to_reveal_early(bg),
+                cfg!(target_os = "windows"),
+                "{what} is imperceptible against black, so it reveals early on                  Windows -- and nowhere else, because that is the only platform                  where the pre-paint frame was measured to be black"
+            );
+        }
+        let keep_hiding = [
+            (
+                Rgb {
+                    r: 240,
+                    g: 232,
+                    b: 216,
+                },
+                "a light/solarized background",
+            ),
+            (
+                Rgb {
+                    r: 255,
+                    g: 255,
+                    b: 255,
+                },
+                "pure white",
+            ),
+            (
+                Rgb {
+                    r: 25,
+                    g: 24,
+                    b: 24,
+                },
+                "one level past the threshold",
+            ),
+            (
+                Rgb {
+                    r: 16,
+                    g: 16,
+                    b: 120,
+                },
+                "dark on two channels, blue on one",
+            ),
+            (
+                Rgb {
+                    r: 40,
+                    g: 44,
+                    b: 52,
+                },
+                "a typical dark-but-visible theme",
+            ),
+        ];
+        for (bg, what) in keep_hiding {
+            assert!(
+                !background_is_dark_enough_to_reveal_early(bg),
+                "{what} would flash black; it must wait for the first paint"
+            );
+        }
     }
 
     #[test]
