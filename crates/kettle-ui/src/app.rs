@@ -10328,7 +10328,10 @@ impl App {
                                 w.set_visible(true);
                             }
                             ws.window_shown = true;
-                            log::info!("startup: window revealed at first paint");
+                            log::info!(
+                                "startup: window revealed at first paint, working set {:.1} MiB",
+                                process_working_set_mb()
+                            );
                         }
                         ws.last_paint = Some(std::time::Instant::now());
                         ws.output_pacer.presented();
@@ -19999,6 +20002,44 @@ fn set_window_background_brush(_hwnd: isize, _rgb: kettle_config::Rgb) -> bool {
     false
 }
 
+/// Current process working set in MiB, for startup phase accounting.
+///
+/// Kettle's resident footprint measured 321.5 MB against Alacritty's 121.1 and
+/// WezTerm's 152.8 on the same machine and workload, and varying scrollback,
+/// font and features barely moved it -- so it is a FIXED cost, and the only way
+/// to attribute it is to sample across the phases that allocate.
+///
+/// `0.0` where unavailable; this is diagnostics, never control flow.
+#[cfg(target_os = "windows")]
+fn process_working_set_mb() -> f64 {
+    use windows::Win32::System::ProcessStatus::{GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS};
+    use windows::Win32::System::Threading::GetCurrentProcess;
+    let Ok(size) = u32::try_from(std::mem::size_of::<PROCESS_MEMORY_COUNTERS>()) else {
+        // A zero size would be accepted by the signature and rejected -- or
+        // worse, partially honoured -- by the API. Refuse instead of asking for
+        // a struct of no bytes.
+        return 0.0;
+    };
+    let mut counters = PROCESS_MEMORY_COUNTERS {
+        // `cb` is an in-parameter: the API uses it to decide how much of the
+        // struct it may write. `Default` leaves it 0, which is not a smaller
+        // request, it is a malformed one.
+        cb: size,
+        ..Default::default()
+    };
+    unsafe {
+        if GetProcessMemoryInfo(GetCurrentProcess(), &mut counters, size).is_ok() {
+            return counters.WorkingSetSize as f64 / (1024.0 * 1024.0);
+        }
+    }
+    0.0
+}
+
+#[cfg(not(target_os = "windows"))]
+fn process_working_set_mb() -> f64 {
+    0.0
+}
+
 /// May the window be shown BEFORE the first painted frame?
 ///
 /// Only when the terminal's background is dark enough that the difference from
@@ -21819,6 +21860,10 @@ impl App {
                 return;
             }
         };
+        log::info!(
+            "startup: working set after gpu init {:.1} MiB",
+            process_working_set_mb()
+        );
         log::info!(
             "startup: window create+setup {create_window_ms:.1}ms, accessibility {a11y_ms:.1}ms,              gpu {:.1}ms (cumulative {:.1}ms)",
             t_startup.elapsed().as_secs_f64() * 1000.0 - create_window_ms - a11y_ms,
