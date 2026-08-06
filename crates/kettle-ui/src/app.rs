@@ -20019,6 +20019,15 @@ fn set_window_background_brush(_hwnd: isize, _rgb: kettle_config::Rgb) -> bool {
 /// is "indistinguishable from black", so anything with visible colour keeps the
 /// old, safe behaviour.
 fn background_is_dark_enough_to_reveal_early(bg: kettle_config::Rgb) -> bool {
+    // Windows only, because the premise was verified on Windows only. "An
+    // unpainted window is black" is an observation about what DWM composites
+    // for a window whose client has not drawn yet -- it is NOT a portable
+    // fact, and on another compositor the pre-paint frame could as easily be
+    // white or transparent. Revealing early elsewhere would be trading a
+    // measured win on one platform for an unmeasured flash on two.
+    if !cfg!(target_os = "windows") {
+        return false;
+    }
     const MAX_CHANNEL: u8 = 24;
     bg.r <= MAX_CHANNEL && bg.g <= MAX_CHANNEL && bg.b <= MAX_CHANNEL
 }
@@ -26041,9 +26050,10 @@ mod tests {
             ),
         ];
         for (bg, what) in dark {
-            assert!(
+            assert_eq!(
                 background_is_dark_enough_to_reveal_early(bg),
-                "{what} is imperceptible against black and must reveal early"
+                cfg!(target_os = "windows"),
+                "{what} is imperceptible against black, so it reveals early on                  Windows -- and nowhere else, because that is the only platform                  where the pre-paint frame was measured to be black"
             );
         }
         let keep_hiding = [
