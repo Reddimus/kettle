@@ -21716,8 +21716,22 @@ impl App {
                 return;
             }
         };
-        let create_window_ms = t_startup.elapsed().as_secs_f64() * 1000.0;
         self.apply_post_create(&window);
+        // Measured AFTER apply_post_create, because the gpu figure below is
+        // derived by subtraction -- stopping the clock before it charged that
+        // setup to the GPU and skewed every number quoted from this line.
+        let create_window_ms = t_startup.elapsed().as_secs_f64() * 1000.0;
+        let t_a11y = std::time::Instant::now();
+        let accessibility =
+            Self::new_accessibility_adapter(event_loop, &window, ws.seq, self.proxy.clone());
+        let a11y_ms = t_a11y.elapsed().as_secs_f64() * 1000.0;
+
+        // AFTER the accessibility adapter, not before: AccessKit's winit
+        // adapter panics outright if the window has already been shown when it
+        // is constructed ("must be created before the window is shown (made
+        // visible) for the first time"). Revealing first crashed kettle at
+        // startup. The reveal has to be the LAST thing before renderer init,
+        // and this ordering is load-bearing rather than incidental.
         // Reveal BEFORE the GPU is ready, if -- and only if -- the window can be
         // made the right colour first.
         //
@@ -21745,10 +21759,6 @@ impl App {
             window.set_visible(true);
             ws.window_shown = true;
         }
-        let t_a11y = std::time::Instant::now();
-        let accessibility =
-            Self::new_accessibility_adapter(event_loop, &window, ws.seq, self.proxy.clone());
-        let a11y_ms = t_a11y.elapsed().as_secs_f64() * 1000.0;
         let size = window.inner_size();
         let scale = window.scale_factor() as f32;
         // Guard the synchronous GPU init against a hung
@@ -21810,7 +21820,7 @@ impl App {
             }
         };
         log::info!(
-            "startup: create_window {create_window_ms:.1}ms, accessibility {a11y_ms:.1}ms,              gpu {:.1}ms (cumulative {:.1}ms)",
+            "startup: window create+setup {create_window_ms:.1}ms, accessibility {a11y_ms:.1}ms,              gpu {:.1}ms (cumulative {:.1}ms)",
             t_startup.elapsed().as_secs_f64() * 1000.0 - create_window_ms - a11y_ms,
             t_startup.elapsed().as_secs_f64() * 1000.0
         );

@@ -95,16 +95,25 @@ What this says plainly:
   | | Alacritty | WezTerm | Kettle |
   |---|---|---|---|
   | window visible, median, BEFORE | 502 ms | 696 ms | 1068 ms |
-  | window visible, median, AFTER | 758 ms | 1313 ms | **447 ms** |
+  | window visible, median, AFTER | 407 ms | 524 ms | **215 ms** |
 
   Kettle was last by ~370-570 ms. It is now first, and the fix was not to make
   renderer init faster -- it was to stop hiding the window through it. Its own phase
   timings (`RUST_LOG=info`, added for exactly this question) account for it:
-  pre-main ~40-106 ms, `create_window` ~17 ms, accessibility ~4 ms, **GPU init
-  ~730 ms** (adapter ~440, device ~100, pipelines+atlas ~190), first paint and
-  reveal ~100 ms. `FontSystem::new()` was the obvious suspect and is not the
-  problem at 24-30 ms, including with this profile's `font-family = Cascadia
-  Mono`, which forces a system-font lookup the bundled default never exercises.
+  pre-main ~40-106 ms, window create + post-create setup ~17 ms, accessibility
+  ~5 ms, **GPU init ~700 ms** (adapter ~390, device ~85, and ~172 ms for
+  everything after the device -- surface, fonts and pipelines together), first
+  paint and reveal ~100 ms. `FontSystem::new()` was the obvious suspect and is
+  not the problem at ~46 ms, including with this profile's `font-family =
+  Cascadia Mono`, which forces a system-font lookup the bundled default never
+  exercises; loading the bundled font on top of it is unmeasurable.
+
+  Those phase boundaries are worth stating precisely, because a review caught
+  all three being sloppy: the window figure stopped before post-create setup
+  while the GPU figure was derived by subtraction (so that setup was charged to
+  the GPU), the post-device figure silently contained the separately-logged font
+  time (inviting a double-count), and the "font system" figure covered the
+  bundled-font load as well as the constructor the analysis singled out.
 
   Roughly two thirds of that was GPU initialisation with the window hidden for
   all of it. Kettle hid for a good reason: a window shown before its first

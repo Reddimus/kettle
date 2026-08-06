@@ -2425,11 +2425,15 @@ impl Renderer {
             gpu_fault,
         };
         let device_ms = t_device.elapsed().as_secs_f64() * 1000.0;
-        let t_pipelines = std::time::Instant::now();
+        let t_rest = std::time::Instant::now();
         let built = Self::with_gpu_and_surface(gpu, surface, width, height, scale, cfg);
+        // Named for what it actually spans: everything after device creation.
+        // That INCLUDES the font-system time logged separately just below, so
+        // the two must not be added together -- the earlier `pipelines+atlas`
+        // label invited exactly that double-count.
         log::info!(
-            "renderer init: adapter {adapter_ms:.1}ms, device {device_ms:.1}ms,              pipelines+atlas {:.1}ms, total {:.1}ms",
-            t_pipelines.elapsed().as_secs_f64() * 1000.0,
+            "renderer init: adapter {adapter_ms:.1}ms, device {device_ms:.1}ms,              surface+fonts+pipelines {:.1}ms (font init logged separately is              part of it), total {:.1}ms",
+            t_rest.elapsed().as_secs_f64() * 1000.0,
             t_start.elapsed().as_secs_f64() * 1000.0
         );
         built
@@ -2539,12 +2543,16 @@ impl Renderer {
         };
         surface.configure(&device, &config);
 
-        let t_fonts = std::time::Instant::now();
+        let t_font_system = std::time::Instant::now();
         let mut font_system = FontSystem::new();
+        let font_system_ms = t_font_system.elapsed().as_secs_f64() * 1000.0;
+        let t_bundled = std::time::Instant::now();
         load_bundled_font(&mut font_system, kettle_config::font::REGULAR);
+        // Split, because `FontSystem::new()` is the one people suspect (it
+        // enumerates system fonts) and a combined figure cannot exonerate it.
         log::info!(
-            "renderer init: font system {:.1}ms",
-            t_fonts.elapsed().as_secs_f64() * 1000.0
+            "renderer init: FontSystem::new {font_system_ms:.1}ms, bundled font {:.1}ms",
+            t_bundled.elapsed().as_secs_f64() * 1000.0
         );
 
         let swash = SwashCache::new();
