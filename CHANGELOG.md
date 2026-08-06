@@ -4,6 +4,47 @@ All notable changes to kettle. Format roughly follows
 [Keep a Changelog](https://keepachangelog.com/); the project moves in small,
 durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
+## [2.52.0] — 2026-08-06
+
+  ### Changed
+  - **Kettle reaches the screen first now.** It used to be last: a window
+    appeared after ~1068 ms against Alacritty's 502 ms and WezTerm's 696 ms, and
+    the reason was not extra work. Renderer init is ~700 ms of that and the
+    window was HIDDEN for all of it — because a window shown before its first
+    painted frame shows the window class's stock WHITE brush, and most of a
+    second of white is a worse greeting than a late window.
+
+    The window is now revealed immediately, but only where the pre-paint frame
+    cannot be told from what follows. Setting the class background brush to the
+    terminal's own colour was tried first and does NOT decide what appears —
+    with a light background configured the pre-paint window still sampled
+    `0,0,0`, because winit owns `WM_ERASEBKGND`. Trusting it would have handed
+    light-theme users a black flash instead of a white one.
+
+    So the reveal rests on arithmetic instead: an unpainted window is black, so
+    reveal early only when the configured background is within 24 levels of
+    black on every channel. `#101010` against black is four levels on one
+    channel. Anything with visible colour, light or dark, keeps the previous
+    hide-until-painted behaviour exactly, and Windows only — that black-window
+    premise was measured on Windows and is not portable.
+
+    Measured, warmed, quiet machine, time until the window is visible:
+
+    | | Alacritty | WezTerm | Kettle |
+    |---|---|---|---|
+    | before | 502 ms | 696 ms | 1068 ms |
+    | after | 370-408 ms | 507-525 ms | **205-227 ms** |
+
+  ### Added
+  - **Renderer and startup phase timings** under `RUST_LOG=info`: adapter,
+    device, everything-after-device, `FontSystem::new()` and the bundled-font
+    load separately, plus window create, accessibility, GPU and the reveal. Two
+    findings recorded so they are not re-derived: `FontSystem::new()` is ~46 ms
+    and not the problem even with `font-family = Cascadia Mono` forcing a
+    system-font lookup, and the first launch after a driver shader-cache reset
+    measures the post-device phase at 4218 ms against 165 ms warm — always
+    discard it.
+
 ## [2.51.0] — 2026-08-05
 
   ### Added
