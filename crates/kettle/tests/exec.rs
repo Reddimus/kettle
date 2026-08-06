@@ -336,7 +336,17 @@ fn exec_streams_stdout_and_exits_zero() {
         return;
     }
     assert_eq!(code, 0, "stderr: {err}");
-    assert!(out.contains("agent-marker-7f3"), "stdout was: {out:?}");
+    // Print STDERR too. This assertion has failed intermittently on macOS CI
+    // with empty stdout, and stderr is where the answer lives -- the one
+    // captured instance carried "asciicast capture stopped (recording I/O
+    // failed or finalization exceeded its bound)" immediately before, which is
+    // the difference between "the child produced nothing" and "we stopped
+    // reading too early". Without it the failure report says only that stdout
+    // was empty, which is the symptom every candidate cause shares.
+    assert!(
+        out.contains("agent-marker-7f3"),
+        "stdout was: {out:?}; stderr was: {err:?}"
+    );
 }
 
 #[test]
