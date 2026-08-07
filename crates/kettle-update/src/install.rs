@@ -4629,7 +4629,13 @@ impl Transaction {
         )
     }
 
-    #[cfg(test)]
+    // Both callers are the Linux crash-seam fixtures
+    // (`interrupted_managed_linux_install` and
+    // `published_executable_has_final_mode_before_installed_journal_state`), so
+    // this helper must carry their target gate too. Under a bare `cfg(test)` it
+    // is dead code on every other platform, and `-D warnings` turns that into a
+    // hard build failure on the Windows CI leg.
+    #[cfg(all(test, target_os = "linux"))]
     fn install_bytes_with_post_publish(
         &mut self,
         relative: &Path,
