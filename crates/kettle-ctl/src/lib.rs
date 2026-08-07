@@ -72,9 +72,13 @@ pub(crate) fn unix_dir_is_safe_for_endpoint(is_dir: bool, uid: u32, mode: u32) -
 /// us. The attack this must stop is another local user pre-creating the
 /// predictable, uid-derived endpoint directory and then removing or replacing
 /// the socket inside it. See [`unix_dir_is_safe_for_endpoint`].
+///
+/// Unix-only: the Windows transport uses a named pipe, which has no directory
+/// to secure, so an unconditional definition is dead code there and
+/// `clippy -D warnings` rejects it.
+#[cfg(unix)]
 pub(crate) fn ensure_owned_dir(dir: &std::path::Path) -> std::io::Result<()> {
     std::fs::create_dir_all(dir)?;
-    #[cfg(unix)]
     {
         use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
 
