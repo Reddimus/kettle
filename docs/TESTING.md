@@ -329,6 +329,8 @@ discipline here.
   first-write backups, and symlinked dotfile targets while refusing
   non-regular/oversized files, newly malformed edits, and external changes
   observed by the final pre-stage comparison;
+  CLI `--check-config` exercises the same bounded reader against a resolved
+  default-path FIFO and oversized file, and verifies UTF-16LE/BE BOM decoding;
   session load/save atomic + corruption-backup contracts;
   empty-value resets for every string-config key;
   `clamp_font_size` bounds.
@@ -398,9 +400,13 @@ discipline here.
   expired/future signed metadata and strict RFC 3339 parsing. Post-update
   integration tests require the installed script to match the verified archive
   bytes and retain it against replacement through execution. Transaction tests
-  prove rollback preserves a post-update conflicting write and its recovery
-  evidence, while committed last-known-good bytes remain until the target
-  version reaches managed startup.
+  interrupt backup streaming, backup sync, prepared-entry persistence, and
+  replacement publication after an earlier destination was installed. They
+  prove every boundary rolls back, foreign unjournaled evidence still fails
+  closed, Linux startup and explicit update recover before provenance checking,
+  rollback preserves a post-update conflicting write and its recovery evidence,
+  and committed last-known-good bytes remain until the target version reaches
+  managed startup.
 
 - **kettle-core VT conformance** (150+ tests): drives the *real*
   vte + alacritty_terminal path used by the PTY reader and asserts

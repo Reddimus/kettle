@@ -272,18 +272,11 @@ impl AnsiStripper {
                         StripState::Ground
                     }
                 },
-                StripState::Escape => match b {
-                    b'[' => Self::csi(),
-                    b']' => Self::string(true),
-                    b'P' | b'X' | b'^' | b'_' => Self::string(false),
-                    0x20..=0x2f => StripState::EscapeIntermediate {
-                        remaining: MAX_CONTROL_SEQUENCE_BYTES,
-                    },
-                    0x1b => StripState::Escape,
-                    _ => StripState::Ground,
-                },
+                StripState::Escape => Self::after_escape(b),
                 StripState::EscapeIntermediate { remaining } => {
-                    if b == 0x1b {
+                    if matches!(b, 0x18 | 0x1a) {
+                        StripState::Ground
+                    } else if b == 0x1b {
                         StripState::Escape
                     } else if (0x30..=0x7e).contains(&b) || remaining <= 1 {
                         StripState::Ground
@@ -294,7 +287,9 @@ impl AnsiStripper {
                     }
                 }
                 StripState::Csi { remaining } => {
-                    if b == 0x1b {
+                    if matches!(b, 0x18 | 0x1a) {
+                        StripState::Ground
+                    } else if b == 0x1b {
                         StripState::Escape
                     } else if (0x40..=0x7e).contains(&b) || remaining <= 1 {
                         StripState::Ground
@@ -309,8 +304,14 @@ impl AnsiStripper {
                     escaped,
                     remaining,
                 } => {
-                    if b == 0x9c || (bel_terminated && b == 0x07) || (escaped && b == b'\\') {
+                    if matches!(b, 0x18 | 0x1a)
+                        || b == 0x9c
+                        || (bel_terminated && b == 0x07)
+                        || (escaped && b == b'\\')
+                    {
                         StripState::Ground
+                    } else if escaped && !bel_terminated {
+                        Self::after_escape(b)
                     } else if remaining <= 1 {
                         // Forced resynchronization: an unterminated control
                         // string cannot hold the stream hostage, so it ends
@@ -334,6 +335,19 @@ impl AnsiStripper {
     fn csi() -> StripState {
         StripState::Csi {
             remaining: MAX_CONTROL_SEQUENCE_BYTES,
+        }
+    }
+
+    fn after_escape(b: u8) -> StripState {
+        match b {
+            b'[' => Self::csi(),
+            b']' => Self::string(true),
+            b'P' | b'X' | b'^' | b'_' => Self::string(false),
+            0x20..=0x2f => StripState::EscapeIntermediate {
+                remaining: MAX_CONTROL_SEQUENCE_BYTES,
+            },
+            0x1b => StripState::Escape,
+            _ => StripState::Ground,
         }
     }
 
@@ -2870,6 +2884,75 @@ mod tests {
         let mut out = Vec::new();
         stripper.push(b"a\x90dcs\x9cb\x9dapc\x07c\x9b31md", &mut out);
         assert_eq!(out, b"abcd");
+    }
+
+    #[test]
+    fn ansi_stripper_cancellation_and_nested_escape_end_every_sibling_state() {
+        for (label, input, expected) in [
+            ("CAN cancels CSI", &b"\x1b[31\x18hello"[..], &b"hello"[..]),
+            ("SUB cancels CSI", &b"\x1b[31\x1ahello"[..], &b"hello"[..]),
+            (
+                "CAN cancels escape intermediate",
+                &b"\x1b(\x18hello"[..],
+                &b"hello"[..],
+            ),
+            (
+                "SUB cancels escape intermediate",
+                &b"\x1b(\x1ahello"[..],
+                &b"hello"[..],
+            ),
+            (
+                "CAN cancels DCS",
+                &b"\x1bPpayload\x18hello"[..],
+                &b"hello"[..],
+            ),
+            (
+                "SUB cancels SOS",
+                &b"\x1bXpayload\x1ahello"[..],
+                &b"hello"[..],
+            ),
+            (
+                "CAN cancels PM",
+                &b"\x1b^payload\x18hello"[..],
+                &b"hello"[..],
+            ),
+            (
+                "SUB cancels APC",
+                &b"\x1b_payload\x1ahello"[..],
+                &b"hello"[..],
+            ),
+            (
+                "CAN cancels after a pending string ESC",
+                &b"\x1b^payload\x1b\x18hello"[..],
+                &b"hello"[..],
+            ),
+            (
+                "single-character ESC aborts a control string",
+                &b"\x1b^payload\x1bchello"[..],
+                &b"hello"[..],
+            ),
+            (
+                "nested CSI replaces a control string",
+                &b"\x1b^payload\x1b[31mhello"[..],
+                &b"hello"[..],
+            ),
+            (
+                "nested OSC replaces a control string",
+                &b"\x1b^payload\x1b]title\x07hello"[..],
+                &b"hello"[..],
+            ),
+        ] {
+            for split in 0..=input.len() {
+                let mut stripper = AnsiStripper::default();
+                let mut out = Vec::new();
+                stripper.push(&input[..split], &mut out);
+                stripper.push(&input[split..], &mut out);
+                assert_eq!(
+                    out, expected,
+                    "{label} split at byte {split} must preserve the visible suffix"
+                );
+            }
+        }
     }
 
     #[test]

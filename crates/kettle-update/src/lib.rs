@@ -15,7 +15,8 @@ pub use feed::{
 pub use install::{
     InstallDisposition, InstallOutcome, ManagedInstall, ProcessStart, RunningInstallGuard,
     detect_managed_install, install_update, is_pending_update_helper_invocation, marker_json,
-    prepare_process_start, run_pending_update_helper, write_atomic_file,
+    prepare_managed_install_for_update, prepare_process_start, run_pending_update_helper,
+    write_atomic_file,
 };
 
 /// Stable release feed published as GitHub release assets.

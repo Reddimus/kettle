@@ -1369,29 +1369,14 @@ fn main() -> anyhow::Result<()> {
         // spot; this extracts the helper because the same gap existed at
         // every other site.
         let path = resolve_config_path(&cli);
-        // Surface read errors explicitly. Pre-fix,
-        // `load_from_with_diagnostics` silently returned defaults on
-        // any read error (permission denied, ENOENT-after-stat-race,
-        // I/O error) — the warn went to stderr but `--check-config`'s
-        // stdout said "status: OK" and exited 0, making the user
-        // think their config loaded. Now: probe `read_to_string`
-        // directly and turn a read failure into a malformed entry
-        // so it lands in the issues list with a non-zero exit code.
-        // A follow-up to that read-error fix: drive parse_collect /
-        // detect_malformed_values directly from the text we already
-        // read, rather than calling `load_from_with_diagnostics`
-        // which reads the file a SECOND time internally. The
-        // first take did the read twice (once for the error probe,
-        // once inside load_from_with_diagnostics). Harmless but
-        // wasteful; now the read happens once.
+        // Surface read errors explicitly while sharing the hardened single-read
+        // path used by startup and reload. This must not regress to a raw
+        // `read_to_string`: the resolved default path has not gone through the
+        // explicit `--config` regular-file precheck, and configs may be UTF-16.
         let mut read_error: Option<String> = None;
         let (cfg, unknown, malformed) = match &path {
-            Some(p) if p.exists() => match std::fs::read_to_string(p) {
-                Ok(text) => {
-                    let (cfg, unknown) = kettle_config::Config::parse_collect(&text);
-                    let malformed = kettle_config::Config::detect_malformed_values(&text);
-                    (cfg, unknown, malformed)
-                }
+            Some(p) if p.exists() => match kettle_config::Config::read_from_with_diagnostics(p) {
+                Ok(loaded) => (loaded.config, loaded.unknown_keys, loaded.malformed_values),
                 Err(e) => {
                     read_error = Some(format!("could not read {}: {e}", p.display()));
                     (kettle_config::Config::default(), Vec::new(), Vec::new())
@@ -2163,7 +2148,7 @@ fn extra_check_config_lines(cfg: &kettle_config::Config) -> Vec<String> {
     if !cfg.inert_keys.is_empty() {
         lines.push(format!(
             "inert:   {} (accepted and validated, but kettle does not act on \
-             {} yet)",
+             {})",
             cfg.inert_keys.join(", "),
             if cfg.inert_keys.len() == 1 {
                 "it"
@@ -3500,6 +3485,22 @@ mod tests {
             extra_check_config_lines(&cfg)
                 .iter()
                 .any(|l| l == "status-bar: Bottom")
+        );
+    }
+
+    #[test]
+    fn check_config_inert_line_covers_permanent_noops() {
+        let cfg = kettle_config::Config::parse_text(
+            "cursor-color-default = true\nhttp-proxy = http://proxy.invalid\n\
+             enabled-plugins = example\naudible-bell = true\n",
+        );
+        assert_eq!(
+            extra_check_config_lines(&cfg),
+            vec![
+                "inert:   cursor-color-default, http-proxy, enabled-plugins, audible-bell \
+                 (accepted and validated, but kettle does not act on them)"
+                    .to_string()
+            ]
         );
     }
 

@@ -713,14 +713,10 @@ pub fn prepare_process_start() -> Result<ProcessStart, UpdateError> {
     }
     #[cfg(target_os = "linux")]
     {
-        if let Ok(install) = detect_managed_install()
-            && let Some(_update_lock) = kettle_state::ExclusiveFileLock::try_acquire(
-                &install.prefix.join(".kettle-update.lock"),
-            )?
-        {
+        if let Ok(executable) = std::env::current_exe() {
             let running_version = semver::Version::parse(env!("CARGO_PKG_VERSION"))
                 .expect("the crate package version is valid semver");
-            confirm_committed_transaction(&install.prefix, &running_version)?;
+            prepare_linux_process_start_at(&executable, &running_version)?;
         }
         Ok(ProcessStart::Ready {
             guard: RunningInstallGuard {},
@@ -734,6 +730,29 @@ pub fn prepare_process_start() -> Result<ProcessStart, UpdateError> {
             warning: None,
         })
     }
+}
+
+#[cfg(target_os = "linux")]
+fn prepare_linux_process_start_at(
+    executable: &Path,
+    running_version: &semver::Version,
+) -> Result<(), UpdateError> {
+    let install = match locate_managed_install_at(executable) {
+        Ok(install) => install,
+        Err(_) => return Ok(()),
+    };
+    let Some(_update_lock) =
+        kettle_state::ExclusiveFileLock::try_acquire(&install.prefix.join(".kettle-update.lock"))?
+    else {
+        return Ok(());
+    };
+    confirm_committed_transaction(&install.prefix, running_version)?;
+    recover_transaction(&install.prefix)?;
+    // Startup remains available for an installation whose ordinary provenance
+    // is invalid, but recovery must run before that content check can classify
+    // an interrupted update as unmanaged.
+    let _ = read_linux_install_provenance(&install.prefix);
+    Ok(())
 }
 
 /// Apply the fixed pending-update record beside this helper executable.
@@ -1022,6 +1041,14 @@ pub fn detect_managed_install() -> Result<ManagedInstall, UpdateError> {
 
 #[cfg(any(windows, target_os = "linux"))]
 fn detect_managed_install_at(executable: &Path) -> Result<ManagedInstall, UpdateError> {
+    let install = locate_managed_install_at(executable)?;
+    #[cfg(target_os = "linux")]
+    let _ = read_linux_install_provenance(&install.prefix)?;
+    Ok(install)
+}
+
+#[cfg(any(windows, target_os = "linux"))]
+fn locate_managed_install_at(executable: &Path) -> Result<ManagedInstall, UpdateError> {
     let executable = executable.canonicalize().map_err(|e| {
         UpdateError::UnmanagedInstall(format!("cannot resolve {}: {e}", executable.display()))
     })?;
@@ -1061,6 +1088,9 @@ fn detect_managed_install_at(executable: &Path) -> Result<ManagedInstall, Update
         let marker = prefix.join("share/kettle/install.json");
         (prefix, marker)
     };
+
+    #[cfg(target_os = "linux")]
+    let _trusted_prefix = open_trusted_linux_install_prefix(&prefix)?;
 
     let bytes = read_bounded_regular(&marker_path, 16 * 1024).map_err(|e| {
         UpdateError::UnmanagedInstall(format!(
@@ -1108,8 +1138,6 @@ fn detect_managed_install_at(executable: &Path) -> Result<ManagedInstall, Update
             marker.channel
         )));
     }
-    #[cfg(target_os = "linux")]
-    let _ = read_linux_install_provenance(&prefix)?;
     Ok(ManagedInstall {
         prefix,
         executable,
@@ -1122,7 +1150,7 @@ pub fn install_update(
     client: &FeedClient,
     update: &AvailableUpdate,
 ) -> Result<InstallOutcome, UpdateError> {
-    let install = detect_managed_install()?;
+    let install = prepare_managed_install_for_update()?;
     install_update_into(client, update, &install)
 }
 
@@ -1131,6 +1159,28 @@ pub fn install_update(
     _client: &FeedClient,
     _update: &AvailableUpdate,
 ) -> Result<InstallOutcome, UpdateError> {
+    Err(UpdateError::UnsupportedPlatform)
+}
+
+#[cfg(any(windows, target_os = "linux"))]
+pub fn prepare_managed_install_for_update() -> Result<ManagedInstall, UpdateError> {
+    #[cfg(windows)]
+    {
+        detect_managed_install()
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let executable = std::env::current_exe()?;
+        let install = locate_managed_install_at(&executable)?;
+        let running_version = semver::Version::parse(env!("CARGO_PKG_VERSION"))
+            .map_err(|error| UpdateError::InvalidCurrentVersion(error.to_string()))?;
+        let _lock = prepare_update_transaction(&install, &running_version)?;
+        Ok(install)
+    }
+}
+
+#[cfg(not(any(windows, target_os = "linux")))]
+pub fn prepare_managed_install_for_update() -> Result<ManagedInstall, UpdateError> {
     Err(UpdateError::UnsupportedPlatform)
 }
 
@@ -1153,11 +1203,7 @@ fn install_update_into(
             "selected artifact does not match this platform".to_string(),
         ));
     }
-    let lock_path = install.prefix.join(".kettle-update.lock");
-    let _lock = kettle_state::ExclusiveFileLock::try_acquire(&lock_path)?
-        .ok_or(UpdateError::UpdateLocked)?;
-    confirm_committed_transaction(&install.prefix, &running_version)?;
-    recover_transaction(&install.prefix)?;
+    let _lock = prepare_update_transaction(install, &running_version)?;
 
     #[cfg(windows)]
     let transaction_id = unique_suffix();
@@ -1222,6 +1268,21 @@ fn install_update_into(
             disposition: InstallDisposition::Applied,
         })
     }
+}
+
+#[cfg(any(windows, target_os = "linux"))]
+fn prepare_update_transaction(
+    install: &ManagedInstall,
+    running_version: &semver::Version,
+) -> Result<kettle_state::ExclusiveFileLock, UpdateError> {
+    let lock_path = install.prefix.join(".kettle-update.lock");
+    let lock = kettle_state::ExclusiveFileLock::try_acquire(&lock_path)?
+        .ok_or(UpdateError::UpdateLocked)?;
+    confirm_committed_transaction(&install.prefix, running_version)?;
+    recover_transaction(&install.prefix)?;
+    #[cfg(target_os = "linux")]
+    let _ = read_linux_install_provenance(&install.prefix)?;
+    Ok(lock)
 }
 
 #[cfg(windows)]
@@ -3373,9 +3434,20 @@ enum JournalPhase {
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 enum JournalEntryState {
+    BackingUp,
     Prepared,
     Installed,
     Restored,
+    BackupDiscarded,
+}
+
+#[cfg(any(windows, target_os = "linux"))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TransactionProgress {
+    BackupStreaming,
+    BackupSynced,
+    EntryPrepared,
+    Published,
 }
 
 #[cfg(any(windows, target_os = "linux"))]
@@ -4333,6 +4405,7 @@ fn same_transaction_file_identity(left: &File, right: &File) -> Result<bool, Upd
 fn stream_transaction_backup(
     source: &mut File,
     destination: &Path,
+    progress: &mut impl FnMut(TransactionProgress),
 ) -> Result<(u64, String), UpdateError> {
     source.rewind()?;
     let expected_size = source.metadata()?.len();
@@ -4356,6 +4429,7 @@ fn stream_transaction_backup(
             }
             hash.update(&buffer[..count]);
             backup.write_all(&buffer[..count])?;
+            progress(TransactionProgress::BackupStreaming);
         }
         if total != expected_size {
             return Err(UpdateError::Transaction(
@@ -4546,14 +4620,38 @@ impl Transaction {
         bytes: &[u8],
         unix_mode: Option<u32>,
     ) -> Result<(), UpdateError> {
-        self.install_bytes_with_post_publish(relative, bytes, unix_mode, || Ok(()))
+        self.install_bytes_with_progress_and_post_publish(
+            relative,
+            bytes,
+            unix_mode,
+            |_| {},
+            || Ok(()),
+        )
     }
 
+    #[cfg(test)]
     fn install_bytes_with_post_publish(
         &mut self,
         relative: &Path,
         bytes: &[u8],
         unix_mode: Option<u32>,
+        post_publish: impl FnOnce() -> Result<(), UpdateError>,
+    ) -> Result<(), UpdateError> {
+        self.install_bytes_with_progress_and_post_publish(
+            relative,
+            bytes,
+            unix_mode,
+            |_| {},
+            post_publish,
+        )
+    }
+
+    fn install_bytes_with_progress_and_post_publish(
+        &mut self,
+        relative: &Path,
+        bytes: &[u8],
+        unix_mode: Option<u32>,
+        mut progress: impl FnMut(TransactionProgress),
         post_publish: impl FnOnce() -> Result<(), UpdateError>,
     ) -> Result<(), UpdateError> {
         validate_relative(relative)?;
@@ -4605,19 +4703,17 @@ impl Transaction {
         let existed = snapshot.file.is_some();
         let previous_unix_mode = snapshot.previous_unix_mode;
         let (previous_size, previous_sha256) = if let Some(previous) = snapshot.file.as_mut() {
-            let backup_relative = Path::new(&self.journal.backup_dir).join(relative);
-            let (_backup_parent, backup) =
-                anchored_destination(&self.prefix, &backup_relative, true)?;
-            let (size, sha256) = stream_transaction_backup(previous, &backup)?;
+            let size = previous.metadata()?.len();
+            if size > MAX_UNPACKED_BYTES {
+                return Err(UpdateError::Transaction(
+                    "backup exceeds the safety limit".into(),
+                ));
+            }
+            let sha256 = sha256_open_file(previous)?;
             (Some(size), Some(sha256))
         } else {
             (None, None)
         };
-        // The snapshot's no-write/no-delete handle protected the exact previous
-        // object through quota validation and backup. Drop it only after the
-        // durable backup exists; atomic_replace performs its own anchored
-        // destination identity checks for the publication itself.
-        drop(snapshot);
         if self.journal.phase == JournalPhase::Prepared {
             self.journal.phase = JournalPhase::Applying;
         }
@@ -4626,13 +4722,43 @@ impl Transaction {
             existed,
             previous_unix_mode,
             previous_size,
-            previous_sha256,
+            previous_sha256: previous_sha256.clone(),
             replacement_size: bytes.len() as u64,
             replacement_sha256: sha256_bytes(bytes),
-            state: JournalEntryState::Prepared,
+            state: if existed {
+                JournalEntryState::BackingUp
+            } else {
+                JournalEntryState::Prepared
+            },
         });
         self.persist_journal()?;
+
+        if let Some(previous) = snapshot.file.as_mut() {
+            let backup_relative = Path::new(&self.journal.backup_dir).join(relative);
+            let (_backup_parent, backup) =
+                anchored_destination(&self.prefix, &backup_relative, true)?;
+            let (size, sha256) = stream_transaction_backup(previous, &backup, &mut progress)?;
+            if Some(size) != previous_size || previous_sha256.as_deref() != Some(sha256.as_str()) {
+                return Err(UpdateError::Transaction(
+                    "transaction source changed while it was backed up".into(),
+                ));
+            }
+            progress(TransactionProgress::BackupSynced);
+            self.journal
+                .entries
+                .last_mut()
+                .expect("entry was just appended")
+                .state = JournalEntryState::Prepared;
+            self.persist_journal()?;
+        }
+        progress(TransactionProgress::EntryPrepared);
+        // The snapshot's no-write/no-delete handle protected the exact previous
+        // object through quota validation and backup. Drop it only after the
+        // durable backup exists; atomic_replace performs its own anchored
+        // destination identity checks for the publication itself.
+        drop(snapshot);
         atomic_write(&destination, bytes, unix_mode)?;
+        progress(TransactionProgress::Published);
         // A process can be terminated after the durable publication but
         // before the Installed journal state is persisted. Keep this seam
         // explicit so the crash boundary remains regression-testable.
@@ -4725,8 +4851,19 @@ impl Transaction {
 
     fn restore_entries(&mut self) -> Result<(), UpdateError> {
         for index in (0..self.journal.entries.len()).rev() {
-            if self.journal.entries[index].state == JournalEntryState::Restored {
-                continue;
+            match self.journal.entries[index].state {
+                JournalEntryState::Restored | JournalEntryState::BackupDiscarded => continue,
+                JournalEntryState::BackingUp => {
+                    discard_incomplete_backup(
+                        &self.prefix,
+                        &self.backup_dir,
+                        &self.journal.entries[index],
+                    )?;
+                    self.journal.entries[index].state = JournalEntryState::BackupDiscarded;
+                    self.persist_journal()?;
+                    continue;
+                }
+                JournalEntryState::Prepared | JournalEntryState::Installed => {}
             }
             restore_entry(&self.prefix, &self.backup_dir, &self.journal.entries[index])?;
             self.journal.entries[index].state = JournalEntryState::Restored;
@@ -4820,6 +4957,7 @@ fn recover_transaction(prefix: &Path) -> Result<(), UpdateError> {
     let journal: Journal = serde_json::from_slice(&bytes)?;
     validate_journal(&journal)?;
     let backup_dir = prefix.join(&journal.backup_dir);
+    validate_incomplete_backup_destinations(prefix, &journal)?;
     validate_backup_tree(prefix, &backup_dir, &journal)?;
     let mut transaction = Transaction {
         prefix: prefix.to_path_buf(),
@@ -4911,18 +5049,7 @@ fn rollback_entry_requires_restore(
         return Ok(true);
     }
     if entry.state == JournalEntryState::Prepared {
-        let previous_matches = match (
-            current.file.as_mut(),
-            entry.previous_size,
-            entry.previous_sha256.as_deref(),
-        ) {
-            (None, None, None) if !entry.existed => true,
-            (Some(file), Some(size), Some(hash)) if entry.existed => {
-                file.metadata().is_ok_and(|metadata| metadata.len() == size)
-                    && sha256_open_file(file).is_ok_and(|current| current == hash)
-            }
-            _ => false,
-        };
+        let previous_matches = transaction_destination_matches_previous(&mut current, entry);
         if previous_matches {
             // A crash can leave the write-ahead entry prepared before its
             // publication. The previous object is already the desired result.
@@ -4933,6 +5060,140 @@ fn rollback_entry_requires_restore(
         "rollback conflict for {}: current bytes are not the replacement recorded by the update",
         relative.display()
     )))
+}
+
+#[cfg(any(windows, target_os = "linux"))]
+fn transaction_destination_matches_previous(
+    current: &mut PreflightDestination,
+    entry: &JournalEntry,
+) -> bool {
+    match (
+        current.file.as_mut(),
+        entry.previous_size,
+        entry.previous_sha256.as_deref(),
+    ) {
+        (None, None, None) if !entry.existed => true,
+        (Some(file), Some(size), Some(hash)) if entry.existed => {
+            file.metadata().is_ok_and(|metadata| metadata.len() == size)
+                && sha256_open_file(file).is_ok_and(|current| current == hash)
+        }
+        _ => false,
+    }
+}
+
+#[cfg(any(windows, target_os = "linux"))]
+fn validate_incomplete_backup_destinations(
+    prefix: &Path,
+    journal: &Journal,
+) -> Result<(), UpdateError> {
+    for entry in journal.entries.iter().filter(|entry| {
+        matches!(
+            entry.state,
+            JournalEntryState::BackingUp | JournalEntryState::BackupDiscarded
+        )
+    }) {
+        let relative = Path::new(&entry.relative);
+        let mut current = snapshot_transaction_destination(prefix, relative)?;
+        if !transaction_destination_matches_previous(&mut current, entry) {
+            return Err(UpdateError::Transaction(format!(
+                "incomplete backup destination changed before recovery: {}",
+                entry.relative
+            )));
+        }
+    }
+    Ok(())
+}
+
+#[cfg(any(windows, target_os = "linux"))]
+fn discard_incomplete_backup(
+    prefix: &Path,
+    backup_dir: &Path,
+    entry: &JournalEntry,
+) -> Result<(), UpdateError> {
+    let relative = Path::new(&entry.relative);
+    let mut current = snapshot_transaction_destination(prefix, relative)?;
+    if !transaction_destination_matches_previous(&mut current, entry) {
+        return Err(UpdateError::Transaction(format!(
+            "refusing to discard an incomplete backup after its live destination changed: {}",
+            entry.relative
+        )));
+    }
+
+    let backup_root = backup_dir.strip_prefix(prefix).map_err(|_| {
+        UpdateError::Transaction("backup directory escaped the install prefix".into())
+    })?;
+    let backup_relative = backup_root.join(relative);
+    #[cfg(windows)]
+    match open_windows_held_file(prefix, &backup_relative) {
+        Ok(held) => {
+            mark_windows_handle_for_deletion(&held.file)?;
+            drop(held);
+        }
+        Err(UpdateError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error),
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let (_parent, backup) = match anchored_destination(prefix, &backup_relative, false) {
+            Ok(backup) => backup,
+            Err(UpdateError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
+                return remove_empty_backup_parents(prefix, backup_root, relative);
+            }
+            Err(error) => return Err(error),
+        };
+        match open_regular_nofollow(&backup) {
+            Ok(file) => kettle_state::remove_open_private_file(file, &backup)?,
+            Err(UpdateError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+        if let Some(parent) = backup.parent() {
+            sync_parent(parent)?;
+        }
+    }
+    remove_empty_backup_parents(prefix, backup_root, relative)
+}
+
+#[cfg(any(windows, target_os = "linux"))]
+fn remove_empty_backup_parents(
+    prefix: &Path,
+    backup_root: &Path,
+    relative: &Path,
+) -> Result<(), UpdateError> {
+    let mut parents = Vec::new();
+    let mut parent = relative.parent();
+    while let Some(path) = parent {
+        if path.as_os_str().is_empty() {
+            break;
+        }
+        parents.push(path.to_path_buf());
+        parent = path.parent();
+    }
+    for parent in parents {
+        let backup_relative = backup_root.join(parent);
+        let (_anchor, path) = match anchored_destination(prefix, &backup_relative, false) {
+            Ok(anchored) => anchored,
+            Err(UpdateError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
+                continue;
+            }
+            Err(error) => return Err(error),
+        };
+        match fs::remove_dir(&path) {
+            Ok(()) => {}
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::NotFound | std::io::ErrorKind::DirectoryNotEmpty
+                ) => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
+    sync_parent(backup_dir_from_root(prefix, backup_root)?.as_path())
+}
+
+#[cfg(any(windows, target_os = "linux"))]
+fn backup_dir_from_root(prefix: &Path, backup_root: &Path) -> Result<PathBuf, UpdateError> {
+    validate_relative(backup_root)?;
+    Ok(prefix.join(backup_root))
 }
 
 #[cfg(any(windows, target_os = "linux"))]
@@ -4989,7 +5250,7 @@ fn validate_journal(journal: &Journal) -> Result<(), UpdateError> {
     let mut replacement_total = 0_u64;
     let mut backup_total = 0_u64;
     let mut backup_count = 0_usize;
-    for entry in &journal.entries {
+    for (index, entry) in journal.entries.iter().enumerate() {
         let relative = Path::new(&entry.relative);
         validate_relative(relative)?;
         if !destinations.insert(entry.relative.to_ascii_lowercase())
@@ -5002,6 +5263,17 @@ fn validate_journal(journal: &Journal) -> Result<(), UpdateError> {
                 .previous_sha256
                 .as_deref()
                 .is_some_and(|hash| !is_sha256(hash))
+            || matches!(entry.state, JournalEntryState::BackingUp)
+                && (!entry.existed
+                    || index + 1 != journal.entries.len()
+                    || !matches!(
+                        journal.phase,
+                        JournalPhase::Applying | JournalPhase::RollingBack
+                    ))
+            || matches!(entry.state, JournalEntryState::BackupDiscarded)
+                && (!entry.existed || journal.phase != JournalPhase::RollingBack)
+            || matches!(entry.state, JournalEntryState::Restored)
+                && journal.phase != JournalPhase::RollingBack
         {
             return Err(UpdateError::Transaction(format!(
                 "invalid update journal entry {}",
@@ -5061,9 +5333,13 @@ fn validate_backup_tree(
     let mut expected = std::collections::HashMap::new();
     expected.insert(
         BACKUP_MARKER_FILE.to_ascii_lowercase(),
-        (None::<u64>, None::<String>),
+        (None::<u64>, None::<String>, true, false),
     );
-    for entry in journal.entries.iter().filter(|entry| entry.existed) {
+    for entry in journal
+        .entries
+        .iter()
+        .filter(|entry| entry.existed && entry.state != JournalEntryState::BackupDiscarded)
+    {
         let size = entry.previous_size.ok_or_else(|| {
             UpdateError::Transaction(format!(
                 "backup entry {} has no previous size",
@@ -5078,7 +5354,12 @@ fn validate_backup_tree(
         })?;
         expected.insert(
             entry.relative.to_ascii_lowercase(),
-            (Some(size), Some(hash)),
+            (
+                Some(size),
+                Some(hash),
+                entry.state != JournalEntryState::BackingUp,
+                entry.state == JournalEntryState::BackingUp,
+            ),
         );
     }
 
@@ -5121,7 +5402,7 @@ fn validate_backup_tree(
     }
 
     let files = collect_files(backup_dir)?;
-    if files.len() != expected.len() || files.len() > MAX_ARCHIVE_ENTRIES {
+    if files.len() > expected.len() || files.len() > MAX_ARCHIVE_ENTRIES {
         return Err(UpdateError::Transaction(
             "backup tree does not exactly cover the update journal".into(),
         ));
@@ -5134,7 +5415,7 @@ fn validate_backup_tree(
         })?;
         let relative = relative_to_string(relative)?;
         let key = relative.to_ascii_lowercase();
-        let Some((expected_size, expected_hash)) = expected.get(&key) else {
+        let Some((expected_size, expected_hash, _, allow_partial)) = expected.get(&key) else {
             return Err(UpdateError::Transaction(format!(
                 "backup tree contains an unjournaled file {relative}"
             )));
@@ -5153,15 +5434,28 @@ fn validate_backup_tree(
                 "backup tree exceeds the safety limit".into(),
             ));
         }
-        if let Some(expected_size) = expected_size
-            && (size != *expected_size
-                || expected_hash.as_deref() != Some(sha256_file(&file)?.as_str()))
-        {
-            return Err(UpdateError::Transaction(format!(
-                "backup integrity check failed for {}",
-                file.display()
-            )));
+        if let Some(expected_size) = expected_size {
+            let invalid = if *allow_partial {
+                size > *expected_size
+            } else {
+                size != *expected_size
+                    || expected_hash.as_deref() != Some(sha256_file(&file)?.as_str())
+            };
+            if invalid {
+                return Err(UpdateError::Transaction(format!(
+                    "backup integrity check failed for {}",
+                    file.display()
+                )));
+            }
         }
+    }
+    if expected
+        .iter()
+        .any(|(path, (_, _, required, _))| *required && !seen.contains(path))
+    {
+        return Err(UpdateError::Transaction(
+            "backup tree does not cover every durable journal entry".into(),
+        ));
     }
     Ok(())
 }
@@ -5181,7 +5475,7 @@ fn remove_validated_backup_tree(
         let mut expected = journal
             .entries
             .iter()
-            .filter(|entry| entry.existed)
+            .filter(|entry| entry.existed && entry.state != JournalEntryState::BackupDiscarded)
             .map(|entry| {
                 (
                     entry.relative.to_ascii_lowercase(),
@@ -5235,7 +5529,11 @@ fn remove_validated_backup_tree(
     #[cfg(not(windows))]
     {
         let mut directories = std::collections::BTreeSet::new();
-        for entry in journal.entries.iter().filter(|entry| entry.existed) {
+        for entry in journal
+            .entries
+            .iter()
+            .filter(|entry| entry.existed && entry.state != JournalEntryState::BackupDiscarded)
+        {
             let relative = Path::new(&entry.relative);
             let backup_relative = backup_root.join(relative);
             let (_parent, backup) = anchored_destination(prefix, &backup_relative, false)?;
@@ -6039,6 +6337,59 @@ mod tests {
         fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
     }
 
+    #[cfg(target_os = "linux")]
+    fn interrupted_managed_linux_install() -> (tempfile::TempDir, PathBuf, PathBuf) {
+        let root = test_tempdir();
+        let prefix = root.path().join("kettle");
+        let executable = prefix.join("bin/kettle");
+        let marker = prefix.join("share/kettle/install.json");
+        fs::create_dir_all(marker.parent().unwrap()).unwrap();
+        fs::write(&marker, marker_json("2.35.0").unwrap()).unwrap();
+        seed_linux_install_provenance(&prefix);
+
+        let mut transaction = Transaction::begin(&prefix, "99.0.0").unwrap();
+        let stopped = transaction
+            .install_bytes_with_post_publish(
+                Path::new("share/kettle/install.sh"),
+                b"updated installer\n",
+                Some(0o755),
+                || Err(UpdateError::Transaction("simulated process stop".into())),
+            )
+            .unwrap_err();
+        assert!(stopped.to_string().contains("simulated process stop"));
+        std::mem::forget(transaction);
+        assert!(detect_managed_install_at(&executable).is_err());
+        assert!(prefix.join(".kettle-update-journal.json").is_file());
+        (root, prefix, executable)
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_startup_and_update_entrypoints_recover_before_provenance_verification() {
+        let (_startup_root, startup_prefix, startup_executable) =
+            interrupted_managed_linux_install();
+        prepare_linux_process_start_at(&startup_executable, &semver::Version::new(2, 35, 0))
+            .unwrap();
+        assert_eq!(
+            fs::read(startup_prefix.join("share/kettle/install.sh")).unwrap(),
+            b"#!/bin/sh\n"
+        );
+        detect_managed_install_at(&startup_executable)
+            .expect("startup recovery must restore a managed installation");
+
+        let (_update_root, update_prefix, update_executable) = interrupted_managed_linux_install();
+        let install = locate_managed_install_at(&update_executable)
+            .expect("structural detection must remain available during recovery");
+        let _lock = prepare_update_transaction(&install, &semver::Version::new(2, 35, 0))
+            .expect("the next update must recover before checking content provenance");
+        assert_eq!(
+            fs::read(update_prefix.join("share/kettle/install.sh")).unwrap(),
+            b"#!/bin/sh\n"
+        );
+        detect_managed_install_at(&update_executable)
+            .expect("update recovery must restore a managed installation");
+    }
+
     #[test]
     fn marker_is_explicit_and_target_bound() {
         if let Some(target) = current_target() {
@@ -6456,6 +6807,58 @@ mod tests {
         }
         recover_transaction(root.path()).unwrap();
         assert_eq!(fs::read(root.path().join("value")).unwrap(), b"before");
+    }
+
+    #[cfg(any(windows, target_os = "linux"))]
+    #[test]
+    fn recovery_handles_every_backup_and_publication_crash_boundary() {
+        for stage in [
+            TransactionProgress::BackupStreaming,
+            TransactionProgress::BackupSynced,
+            TransactionProgress::EntryPrepared,
+            TransactionProgress::Published,
+        ] {
+            let root = test_tempdir();
+            fs::write(root.path().join("first"), b"old-first").unwrap();
+            fs::write(root.path().join("second"), vec![b'x'; 128 * 1024]).unwrap();
+            let mut transaction = Transaction::begin(root.path(), "99.0.0").unwrap();
+            transaction
+                .install_bytes(Path::new("first"), b"new-first", None)
+                .unwrap();
+
+            let stopped = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                transaction
+                    .install_bytes_with_progress_and_post_publish(
+                        Path::new("second"),
+                        b"new-second",
+                        None,
+                        |progress| {
+                            if progress == stage {
+                                panic!("simulated process stop at {stage:?}");
+                            }
+                        },
+                        || Ok(()),
+                    )
+                    .unwrap();
+            }));
+            assert!(stopped.is_err(), "the {stage:?} seam must be reached");
+            assert_eq!(fs::read(root.path().join("first")).unwrap(), b"new-first");
+            std::mem::forget(transaction);
+
+            recover_transaction(root.path())
+                .unwrap_or_else(|error| panic!("recovery failed after {stage:?}: {error}"));
+            assert_eq!(
+                fs::read(root.path().join("first")).unwrap(),
+                b"old-first",
+                "an earlier publication must roll back after {stage:?}"
+            );
+            assert_eq!(
+                fs::read(root.path().join("second")).unwrap(),
+                vec![b'x'; 128 * 1024],
+                "the interrupted destination must retain its prior bytes after {stage:?}"
+            );
+            assert!(!root.path().join(".kettle-update-journal.json").exists());
+        }
     }
 
     #[cfg(target_os = "linux")]
