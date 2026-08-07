@@ -636,6 +636,21 @@ linux-perf:
     @echo "On Windows use: pwsh -File scripts/perf/perf-all.ps1 -Label after"
     @echo "then:          pwsh -File scripts/perf/score.ps1 -ResultsDir target/perf-results/after"
 
+# Compare Kettle against installed macOS peer terminals using Hyperfine, native
+# max-RSS accounting, quiet-window CPU samples, and a top-half rank gate. This
+# is desktop-local by design and writes target/perf-results/macos-local/.
+[macos]
+macos-perf:
+    ./scripts/perf/macos-compare.sh
+
+[linux]
+macos-perf:
+    @echo "macos-perf is a macOS desktop benchmark."
+
+[windows]
+macos-perf:
+    @echo "macos-perf is a macOS desktop benchmark."
+
 # === Install / uninstall ===========================================
 
 # Drop a build under ~/.local/ (scripts/install.sh — Linux
