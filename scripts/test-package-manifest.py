@@ -244,6 +244,21 @@ class PackageManifestTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "duplicate|alias"):
                 paths.insert("readme", False)
 
+            case_probe = root / "case-probe"
+            case_probe.mkdir()
+            upper = case_probe / "README"
+            lower = case_probe / "readme"
+            upper.write_bytes(b"upper\n")
+            lower.write_bytes(b"lower\n")
+            try:
+                if not os.path.samefile(upper, lower):
+                    with self.assertRaisesRegex(ValueError, "duplicate|alias"):
+                        MODULE.build_manifest(root, WINDOWS_TARGET, VERSION)
+            finally:
+                lower.unlink(missing_ok=True)
+                upper.unlink(missing_ok=True)
+                case_probe.rmdir()
+
     def test_verifier_requires_canonical_manifest(self):
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw)
@@ -266,6 +281,25 @@ class ArchiveExtractionTests(unittest.TestCase):
         "kettle": (b"linux-binary\n", 0o755),
         "shell-integration/kettle.sh": (b"printf kettle\n", 0o644),
     }
+
+    def test_output_parent_is_canonicalized_once_before_creation(self):
+        with tempfile.TemporaryDirectory() as raw:
+            temporary = Path(raw)
+            real_parent = temporary / "real"
+            real_parent.mkdir()
+            alias_parent = temporary / "alias"
+            try:
+                alias_parent.symlink_to(real_parent, target_is_directory=True)
+            except OSError as error:
+                if os.name == "nt" and getattr(error, "winerror", None) == 1314:
+                    self.skipTest("creating a directory symlink requires Windows privilege")
+                raise
+
+            output, identity = MODULE._prepare_output_root(alias_parent / "output")
+            self.assertEqual(output, real_parent.resolve() / "output")
+            self.assertEqual((output.lstat().st_dev, output.lstat().st_ino), identity)
+            self.assertFalse(output.is_symlink())
+            output.rmdir()
 
     def test_extracts_flat_windows_zip(self):
         with tempfile.TemporaryDirectory() as raw:
