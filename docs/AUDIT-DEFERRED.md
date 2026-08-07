@@ -93,6 +93,38 @@ tracked here so they are not lost.
 - Per-window `FontSystem` sharing; lazy system-font load on first frame. Both are
   speculative — profile on the maintainer's machine before implementing.
 
+## Deferred from the 2026-08-07 full-repo audit
+
+- **One shared streaming control-state kernel for the three ANSI parsers.** The
+  `kettle exec` stripper, the session-log scrubber, and the VT extractor have now
+  drifted from each other **three separate times**, and the 2026-08-07 audit found
+  holes in all three simultaneously — each in a *different* state, each already
+  fixed in one parser and not the others. The 2026-08-07 pass fixed the holes but
+  deliberately did not unify them: two of the parsers were being repaired
+  concurrently and a unifying refactor would have collided with that work.
+
+  A shared kernel must cover ground/pass, ESC, escape intermediates, CSI,
+  OSC, DCS/SOS/PM/APC, 7-bit and C1 introducers and terminators, OSC BEL, raw ST,
+  CAN/SUB, ESC-from-anywhere redispatch, split ESC/ST/UTF-8 input across feed
+  boundaries, bounded recovery, and explicit UTF-8 lead ownership. Policy hooks
+  decide forwarding versus suppression, protocol extraction, size budgets, and
+  session resets, so the three consumers share state semantics without sharing
+  output behavior.
+
+  Until this lands, treat any fix to one of the three as incomplete until the
+  same input has been checked against the other two. The
+  `ansi_stripper_control_events_cover_every_state_cross_product` test added in
+  this pass is the shape the shared kernel's conformance matrix should take.
+
+- **`scroll_page_up` did not enter scrollback in one macOS live-probe run.**
+  `scripts/perf/kettle-live-probes.py` seeds 1600 lines and then asserts
+  `display_offset > 0` after `perform_action scroll_page_up`; that assertion
+  failed once during macOS comparator development. It was observed on a heavily
+  loaded machine and has not been reproduced deliberately, so it is recorded as
+  **unconfirmed** rather than diagnosed: it is either a real scrollback defect or
+  probe flakiness under contention. Reproduce on a quiet machine before
+  investigating — do not assume which.
+
 ## Search follow-up and platform evidence
 
 The two-track search audit is recorded in
