@@ -6287,6 +6287,27 @@ mod tests {
         kettle_test_support::private_tempdir("kettle-update-test-")
     }
 
+    /// Create fixture directories with the public installer mode instead of
+    /// inheriting the test runner's umask.
+    #[cfg(target_os = "linux")]
+    fn create_linux_install_dir_all(prefix: &Path, path: &Path) {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        fs::create_dir_all(path).unwrap();
+        let relative = path
+            .strip_prefix(prefix)
+            .expect("fixture install directory must stay beneath its prefix");
+        let mut current = prefix.to_path_buf();
+        fs::set_permissions(&current, fs::Permissions::from_mode(0o755)).unwrap();
+        for component in relative.components() {
+            let Component::Normal(name) = component else {
+                panic!("fixture install directory must be normalized");
+            };
+            current.push(name);
+            fs::set_permissions(&current, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+    }
+
     #[cfg(any(windows, target_os = "linux"))]
     fn fake_update() -> AvailableUpdate {
         AvailableUpdate {
@@ -6321,11 +6342,10 @@ mod tests {
     fn seed_linux_install_provenance_with(prefix: &Path, extra: &[(&str, &[u8], u32)]) {
         use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
 
-        fs::create_dir_all(prefix).unwrap();
-        fs::set_permissions(prefix, fs::Permissions::from_mode(0o755)).unwrap();
+        create_linux_install_dir_all(prefix, prefix);
         for (relative, contents, mode) in extra.iter().copied() {
             let path = prefix.join(relative);
-            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            create_linux_install_dir_all(prefix, path.parent().unwrap());
             fs::write(&path, contents).unwrap();
             fs::set_permissions(&path, fs::Permissions::from_mode(mode)).unwrap();
         }
@@ -6348,7 +6368,7 @@ mod tests {
             ("share/kettle/install.json", b"{}\n".as_slice(), 0o644),
         ] {
             let path = prefix.join(relative);
-            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            create_linux_install_dir_all(prefix, path.parent().unwrap());
             if !path.exists() {
                 fs::write(&path, contents).unwrap();
             }
@@ -7247,7 +7267,8 @@ mod tests {
 
         let root = test_tempdir();
         let outside = test_tempdir();
-        fs::create_dir_all(root.path().join("share/kettle")).unwrap();
+        let share = root.path().join("share");
+        create_linux_install_dir_all(&share, &share.join("kettle"));
         fs::write(root.path().join("share/kettle/value"), b"before").unwrap();
         {
             let mut tx = Transaction::begin(root.path(), "99.0.0").unwrap();
@@ -7677,6 +7698,8 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn linux_update_owns_the_directories_it_creates_and_rollback_removes_them() {
+        use std::os::unix::fs::PermissionsExt as _;
+
         // Directories the fixture prefix does not have and the archive needs.
         let fresh = [
             "share/doc/kettle",
@@ -7729,6 +7752,15 @@ mod tests {
             assert!(
                 prefix.join(relative).is_dir(),
                 "{relative} must exist after the update"
+            );
+            assert_eq!(
+                fs::metadata(prefix.join(relative))
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o755,
+                "the updater must give {relative} an umask-independent mode"
             );
             assert!(
                 owned.contains(relative),

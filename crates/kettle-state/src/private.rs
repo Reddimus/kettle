@@ -761,11 +761,32 @@ mod unix {
         {
             return Ok(());
         }
+        let parent_path = path.parent().unwrap_or(Path::new("/"));
+        let detail = if !trusted_identity(parent.uid()) {
+            format!(
+                "parent {} is owned by uid {}; expected uid {} or 0",
+                parent_path.display(),
+                parent.uid(),
+                current_user()
+            )
+        } else if !sticky {
+            format!(
+                "parent {} has mode {:04o}; group/other write bits are unsafe (set an explicit directory mode instead of relying on the process umask)",
+                parent_path.display(),
+                parent.mode() & 0o7777
+            )
+        } else {
+            format!(
+                "sticky parent {} contains a child owned by untrusted uid {}",
+                parent_path.display(),
+                child.uid()
+            )
+        };
         Err(io::Error::new(
             io::ErrorKind::PermissionDenied,
             format!(
-                "private path crosses an untrusted writable directory edge: {}",
-                path.display()
+                "private path crosses an untrusted directory edge at {}: {detail}",
+                path.display(),
             ),
         ))
     }
@@ -3257,6 +3278,27 @@ mod windows {
 mod tests {
     use super::*;
     use std::io::Write as _;
+
+    #[cfg(unix)]
+    #[test]
+    fn writable_parent_diagnostic_identifies_the_parent_mode_and_umask_risk() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let dir = crate::test_tempdir();
+        let writable = dir.path().join("install");
+        let child = writable.join("share");
+        std::fs::create_dir_all(&child).unwrap();
+        std::fs::set_permissions(&writable, std::fs::Permissions::from_mode(0o775)).unwrap();
+        std::fs::set_permissions(&child, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let error = guard_private_parent(&child.join("state.json"))
+            .err()
+            .expect("a group-writable parent must be rejected");
+        let message = error.to_string();
+        assert!(message.contains(&format!("parent {}", writable.display())));
+        assert!(message.contains("mode 0775"));
+        assert!(message.contains("process umask"));
+    }
 
     #[test]
     fn private_create_and_reopen_are_owner_only() {
