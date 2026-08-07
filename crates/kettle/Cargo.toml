@@ -104,4 +104,5 @@ winresource = "0.1"
 ignored = ["winresource"]
 
 [dev-dependencies]
+kettle-test-support.workspace = true
 tempfile = "3"

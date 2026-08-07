@@ -10641,25 +10641,8 @@ split_horiz = <Control><Shift>j
 
     // Drift guards for `persist_config_toggle`.
 
-    fn tempdir_for(test_name: &str) -> std::path::PathBuf {
-        #[cfg(windows)]
-        let scratch = std::env::var_os("LOCALAPPDATA")
-            .or_else(|| std::env::var_os("USERPROFILE"))
-            .map(std::path::PathBuf::from)
-            .expect("Windows tests require LOCALAPPDATA or USERPROFILE");
-        #[cfg(not(windows))]
-        let scratch = std::env::temp_dir();
-        let p = scratch.join(format!(
-            "kettle-cfg-{}-{}-{}",
-            test_name,
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_nanos())
-                .unwrap_or(0)
-        ));
-        std::fs::create_dir_all(&p).expect("mkdir tmp");
-        p
+    fn tempdir_for(test_name: &str) -> kettle_test_support::PrivateTempDir {
+        kettle_test_support::private_tempdir(&format!("kettle-cfg-{test_name}-"))
     }
 
     /// `append_keybind` appends a repeatable `keybind` line, the

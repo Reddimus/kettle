@@ -6222,20 +6222,8 @@ mod tests {
     #[cfg(windows)]
     use ed25519_dalek::{Signer as _, SigningKey};
 
-    #[cfg(windows)]
-    fn test_tempdir() -> tempfile::TempDir {
-        let base = std::env::var_os("LOCALAPPDATA")
-            .or_else(|| std::env::var_os("USERPROFILE"))
-            .expect("Windows tests require LOCALAPPDATA or USERPROFILE");
-        tempfile::Builder::new()
-            .prefix("kettle-update-test-")
-            .tempdir_in(base)
-            .expect("create test directory in the user-private profile")
-    }
-
-    #[cfg(not(windows))]
-    fn test_tempdir() -> tempfile::TempDir {
-        tempfile::tempdir().expect("create test directory")
+    fn test_tempdir() -> kettle_test_support::PrivateTempDir {
+        kettle_test_support::private_tempdir("kettle-update-test-")
     }
 
     #[cfg(any(windows, target_os = "linux"))]
@@ -6272,6 +6260,8 @@ mod tests {
     fn seed_linux_install_provenance_with(prefix: &Path, extra: &[(&str, &[u8], u32)]) {
         use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
 
+        fs::create_dir_all(prefix).unwrap();
+        fs::set_permissions(prefix, fs::Permissions::from_mode(0o755)).unwrap();
         for (relative, contents, mode) in extra.iter().copied() {
             let path = prefix.join(relative);
             fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -6344,7 +6334,8 @@ mod tests {
     }
 
     #[cfg(target_os = "linux")]
-    fn interrupted_managed_linux_install() -> (tempfile::TempDir, PathBuf, PathBuf) {
+    fn interrupted_managed_linux_install() -> (kettle_test_support::PrivateTempDir, PathBuf, PathBuf)
+    {
         let root = test_tempdir();
         let prefix = root.path().join("kettle");
         let executable = prefix.join("bin/kettle");

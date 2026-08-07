@@ -857,11 +857,9 @@ mod tests {
     fn registry_rejects_symlink_leaf_and_untrusted_records() {
         use std::os::unix::fs::{PermissionsExt as _, symlink};
 
-        let root = crate::test_scratch_root()
-            .join(format!("kettle-ctl-registry-guards-{}", std::process::id()));
+        let root = kettle_test_support::private_tempdir("kettle-ctl-registry-guards-");
         let dir = root.join("ctl");
         let redirected = root.join("redirected");
-        let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&redirected).unwrap();
         symlink(&redirected, &dir).unwrap();
         let entry = RegistryEntry::registering("gui", 321, default_endpoint(&dir, 321), "x", 1);
@@ -884,7 +882,6 @@ mod tests {
         std::fs::remove_file(&path).unwrap();
         symlink(&target, &path).unwrap();
         assert!(list(&dir).is_empty(), "symlink records are ignored");
-        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[cfg(unix)]

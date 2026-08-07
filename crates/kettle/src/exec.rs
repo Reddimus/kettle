@@ -3255,7 +3255,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn requested_recording_failure_prevents_the_child_from_starting() {
-        let temp = crate::private_test_tempdir("kettle-exec-recording-failure-");
+        let temp = kettle_test_support::private_tempdir("kettle-exec-recording-failure-");
         let record = temp.path().join("active.cast");
         let marker = temp.path().join("child-started");
         let active = kettle_core::record::Recorder::start(&record, 80, 24, false).unwrap();
@@ -3455,7 +3455,7 @@ mod tests {
 
     #[test]
     fn cancellable_capture_kills_child_and_finishes_recorder_promptly() {
-        let dir = crate::private_test_tempdir("kettle-exec-cancel-");
+        let dir = kettle_test_support::private_tempdir("kettle-exec-cancel-");
         let record = dir.path().join("cancel.cast");
         #[cfg(unix)]
         let argv = vec![

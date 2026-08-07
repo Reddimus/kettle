@@ -20,25 +20,9 @@
 //! hints (Ctrl+Shift+H). Modal state is coordinated through
 //! `close_all_modals()` / `any_modal_open()` so they don't stack.
 
-#[cfg(all(test, windows))]
-pub(crate) fn test_scratch_root() -> std::path::PathBuf {
-    std::env::var_os("LOCALAPPDATA")
-        .or_else(|| std::env::var_os("USERPROFILE"))
-        .map(std::path::PathBuf::from)
-        .expect("Windows tests require LOCALAPPDATA or USERPROFILE")
-}
-
-#[cfg(all(test, not(windows)))]
-pub(crate) fn test_scratch_root() -> std::path::PathBuf {
-    std::env::temp_dir()
-}
-
 #[cfg(test)]
-pub(crate) fn test_tempdir() -> tempfile::TempDir {
-    tempfile::Builder::new()
-        .prefix("kettle-ui-test-")
-        .tempdir_in(test_scratch_root())
-        .expect("create test directory in the private scratch root")
+pub(crate) fn test_tempdir() -> kettle_test_support::PrivateTempDir {
+    kettle_test_support::private_tempdir("kettle-ui-test-")
 }
 
 mod activation_server;

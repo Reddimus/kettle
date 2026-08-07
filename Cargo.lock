@@ -1903,6 +1903,7 @@ dependencies = [
  "kettle-ctl",
  "kettle-render",
  "kettle-state",
+ "kettle-test-support",
  "kettle-ui",
  "kettle-update",
  "libc",
@@ -1922,6 +1923,7 @@ version = "2.53.0"
 dependencies = [
  "bitflags 2.13.1",
  "kettle-state",
+ "kettle-test-support",
  "libc",
  "log",
  "regex",
@@ -1937,6 +1939,7 @@ dependencies = [
  "crossbeam-channel",
  "fs4",
  "kettle-state",
+ "kettle-test-support",
  "kettle-vt",
  "libc",
  "log",
@@ -1944,7 +1947,6 @@ dependencies = [
  "regex",
  "regex-automata",
  "serde_json",
- "tempfile",
  "windows-sys 0.61.2",
  "winreg 0.56.0",
 ]
@@ -1954,6 +1956,7 @@ name = "kettle-ctl"
 version = "2.53.0"
 dependencies = [
  "kettle-state",
+ "kettle-test-support",
  "libc",
  "log",
  "serde",
@@ -1981,6 +1984,7 @@ dependencies = [
  "kettle-config",
  "kettle-core",
  "kettle-state",
+ "kettle-test-support",
  "log",
  "pollster",
  "raw-window-handle",
@@ -1996,9 +2000,16 @@ name = "kettle-state"
 version = "2.53.0"
 dependencies = [
  "fs4",
+ "kettle-test-support",
  "libc",
- "tempfile",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "kettle-test-support"
+version = "2.53.0"
+dependencies = [
+ "tempfile",
 ]
 
 [[package]]
@@ -2018,6 +2029,7 @@ dependencies = [
  "kettle-remote",
  "kettle-render",
  "kettle-state",
+ "kettle-test-support",
  "kettle-update",
  "libc",
  "log",
@@ -2049,6 +2061,7 @@ dependencies = [
  "fs4",
  "hex",
  "kettle-state",
+ "kettle-test-support",
  "libc",
  "log",
  "semver",

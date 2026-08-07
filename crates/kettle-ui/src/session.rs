@@ -725,21 +725,8 @@ mod tests {
     /// untrusted principal, and `atomic_replace` refuses to create a private
     /// file under a parent like that. `kettle-state`'s own tests solve this
     /// the same way, by staging under the user-private profile instead.
-    fn private_tempdir() -> tempfile::TempDir {
-        #[cfg(windows)]
-        {
-            let base = std::env::var_os("LOCALAPPDATA")
-                .or_else(|| std::env::var_os("USERPROFILE"))
-                .expect("Windows tests require LOCALAPPDATA or USERPROFILE");
-            tempfile::Builder::new()
-                .prefix("kettle-session-test-")
-                .tempdir_in(base)
-                .expect("create test directory in the user-private profile")
-        }
-        #[cfg(not(windows))]
-        {
-            tempfile::tempdir().expect("create test directory")
-        }
+    fn private_tempdir() -> kettle_test_support::PrivateTempDir {
+        kettle_test_support::private_tempdir("kettle-session-test-")
     }
 
     /// An unchanged session must not be written again, and a changed one must.
@@ -995,17 +982,8 @@ mod tests {
         assert_eq!(sanitize_layout_name("/\\:").as_deref(), Some("___"));
     }
 
-    fn tmp_dir(label: &str) -> std::path::PathBuf {
-        let p = crate::test_scratch_root().join(format!(
-            "kettle-session-{label}-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_nanos())
-                .unwrap_or(0)
-        ));
-        std::fs::create_dir_all(&p).unwrap();
-        p
+    fn tmp_dir(label: &str) -> kettle_test_support::PrivateTempDir {
+        kettle_test_support::private_tempdir(&format!("kettle-session-{label}-"))
     }
 
     #[test]
@@ -1199,7 +1177,7 @@ mod tests {
     #[test]
     fn save_to_path_creates_private_session_file() {
         use std::os::unix::fs::PermissionsExt as _;
-        let dir = tempfile::tempdir().unwrap();
+        let dir = private_tempdir();
         let path = dir.path().join("session.json");
         let session = Session::default();
         save_to_path(&session, &path).unwrap();
@@ -1214,7 +1192,7 @@ mod tests {
     fn save_to_path_tightens_a_legacy_world_readable_session_file() {
         use std::os::unix::fs::PermissionsExt as _;
 
-        let dir = tempfile::tempdir().unwrap();
+        let dir = private_tempdir();
         let path = dir.path().join("session.json");
         std::fs::write(&path, b"legacy").unwrap();
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();

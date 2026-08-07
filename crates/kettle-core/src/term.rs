@@ -7952,18 +7952,7 @@ mod home_dir_tests {
 
     #[test]
     fn session_log_target_open_is_deferred_to_the_persistence_worker() {
-        #[cfg(windows)]
-        let temp = {
-            let base = std::env::var_os("LOCALAPPDATA")
-                .or_else(|| std::env::var_os("USERPROFILE"))
-                .expect("Windows tests require LOCALAPPDATA or USERPROFILE");
-            tempfile::Builder::new()
-                .prefix("kettle-session-log-test-")
-                .tempdir_in(base)
-                .unwrap()
-        };
-        #[cfg(not(windows))]
-        let temp = tempfile::tempdir().unwrap();
+        let temp = kettle_test_support::private_tempdir("kettle-session-log-test-");
         let path = temp.path().join("deferred-session.log");
         let sink = LazySessionLogWriter::new(path.clone());
         assert!(

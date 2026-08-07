@@ -2086,20 +2086,8 @@ fn crop_screenshot(
 mod live_screenshot_tests {
     use super::{create_private_screenshot_file, crop_screenshot};
 
-    #[cfg(windows)]
-    fn test_tempdir() -> tempfile::TempDir {
-        let base = std::env::var_os("LOCALAPPDATA")
-            .or_else(|| std::env::var_os("USERPROFILE"))
-            .expect("Windows tests require LOCALAPPDATA or USERPROFILE");
-        tempfile::Builder::new()
-            .prefix("kettle-render-test-")
-            .tempdir_in(base)
-            .expect("create test directory in the user-private profile")
-    }
-
-    #[cfg(not(windows))]
-    fn test_tempdir() -> tempfile::TempDir {
-        tempfile::tempdir().expect("tempdir")
+    fn test_tempdir() -> kettle_test_support::PrivateTempDir {
+        kettle_test_support::private_tempdir("kettle-render-test-")
     }
 
     fn pixels(width: u32, height: u32) -> Vec<u8> {

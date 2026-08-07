@@ -210,8 +210,23 @@ replace_first_line Cargo.toml "version = \"${PREV}\"" "version = \"${VERSION}\""
 # including majors — resolves cleanly. The crates are never published to
 # crates.io (no `publish`/badge), so the version is only a resolver hint.
 echo "bumping inter-crate version pins → ${VERSION}"
-sed -i.bak -E "s|(path = \"crates/kettle-[a-z]+\", version = \")[^\"]*|\1${VERSION}|" Cargo.toml
+# The character class must admit `-`: `kettle-test-support` has two hyphens and
+# a `kettle-[a-z]+` class silently skipped it, leaving that one pin behind at
+# the previous version while every sibling advanced. That is precisely the
+# internally-inconsistent Cargo.toml described above, and it aborts the release
+# at the Cargo.lock refresh rather than at the edit that caused it.
+sed -i.bak -E "s|(path = \"crates/kettle-[a-z-]+\", version = \")[^\"]*|\1${VERSION}|" Cargo.toml
 rm -f Cargo.toml.bak
+
+# Fail loudly if any inter-crate pin did not reach ${VERSION}. A silent miss
+# here surfaces much later as an opaque cargo resolver error.
+if grep -E 'path = "crates/kettle[^"]*", version = "' Cargo.toml \
+    | grep -v "version = \"${VERSION}\"" >/dev/null; then
+    echo "::error::inter-crate version pins were not all bumped to ${VERSION}:" >&2
+    grep -E 'path = "crates/kettle[^"]*", version = "' Cargo.toml \
+        | grep -v "version = \"${VERSION}\"" >&2
+    exit 1
+fi
 
 # Durable lockstep with flake.nix. The Nix-side
 # version had drifted 39 releases (v1.3.5 → v1.42.0)

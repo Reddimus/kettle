@@ -1,6 +1,7 @@
 [workspace]
 resolver = "2"
 members = [
+    "crates/kettle-test-support",
     "crates/kettle-state",
     "crates/kettle-update",
     "crates/kettle-config",
@@ -77,6 +78,7 @@ categories = ["command-line-utilities"]
 # bump update one line instead of ten.
 kettle-config = { path = "crates/kettle-config", version = "2.53.0" }
 kettle-state = { path = "crates/kettle-state", version = "2.53.0" }
+kettle-test-support = { path = "crates/kettle-test-support", version = "2.53.0" }
 kettle-update = { path = "crates/kettle-update", version = "2.53.0" }
 kettle-core = { path = "crates/kettle-core", version = "2.53.0" }
 kettle-vt = { path = "crates/kettle-vt", version = "2.53.0" }
