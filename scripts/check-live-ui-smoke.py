@@ -3764,6 +3764,47 @@ def live_helper_selftest() -> None:
     assert left_marker not in split_command
     assert right_marker not in split_command
 
+    # LazyVCS leg. These are pure string builders, so the shape they produce is
+    # checkable on every platform even though the live probe needs a window.
+    lazyvcs_marker = "KETTLE_LAZYVCS_RUNTIME"
+    lazyvcs_repo = "/tmp/kettle-smoke-lazyvcs"
+    setup_posix = lazyvcs_repo_setup_command(lazyvcs_repo, windows=False)
+    assert "git init -q ." in setup_posix
+    # An unstaged edit is the whole point: without it the sidebar renders no
+    # changed files and no gutter signs, and the probe would assert nothing.
+    assert "git commit -q -m base" in setup_posix
+    assert setup_posix.count("tracked.txt") >= 3
+    setup_windows = lazyvcs_repo_setup_command(lazyvcs_repo, windows=True)
+    assert "Set-Content" in setup_windows and "Invoke-Git init -q ." in setup_windows
+
+    sidebar_posix = lazyvcs_sidebar_command(
+        lazyvcs_repo, lazyvcs_marker, windows=False
+    )
+    # `nvim -n`, not `--clean`: the configured runtime is what has LazyVCS.
+    assert "nvim -n" in sidebar_posix and "--clean" not in sidebar_posix
+    assert "+LazyVCS sidebar open" in sidebar_posix
+    # The marker must reach the buffer as an expression, never as a literal, or
+    # `wait_for_text` matches the command echo instead of the rendered buffer.
+    assert lazyvcs_marker not in sidebar_posix
+    # Discovery is asynchronous; without this wait the probe races the render.
+    assert "lazyvcs_discovering" in sidebar_posix
+    assert "vim.wait(30000" in sidebar_posix
+    # The marker must be conditional. Written unconditionally, the probe passes
+    # when `:LazyVCS` is missing, the plugin fails to load, or discovery times
+    # out -- Neovim reports the error and runs the next `+` command anyway.
+    assert "pcall(require, 'lazyvcs.source_control.native')" in sidebar_posix
+    assert "rendered and" in sidebar_posix
+    assert "KETTLE_LAZYVCS_SIDEBAR_ABSENT" in sidebar_posix
+    # A failure string that CONTAINED the marker would still satisfy
+    # `wait_for_text`, turning the failure branch back into a false pass.
+    assert lazyvcs_marker not in "KETTLE_LAZYVCS_SIDEBAR_ABSENT"
+
+    # PowerShell: `$ErrorActionPreference` does not cover native executables, so
+    # each git call needs an explicit exit-code check or a failed setup reaches
+    # `Pop-Location` looking like success.
+    assert "$LASTEXITCODE" in setup_windows
+    assert "finally { Pop-Location }" in setup_windows
+
     first_socket = new_tmux_socket_name()
     second_socket = new_tmux_socket_name()
     assert first_socket != second_socket
@@ -3945,6 +3986,92 @@ def nvim_marker_command(
     return (
         f'{base} "+set termguicolors" '
         f'"+call setline(1, {marker_expression})" '
+        '"+normal! gg"'
+    )
+
+
+def lazyvcs_repo_setup_command(repo: str, *, windows: Optional[bool] = None) -> str:
+    """Shell command creating a one-file Git repository with an unstaged edit.
+
+    The edit is what makes the probe meaningful: LazyVCS only draws gutter
+    signs and a populated sidebar when something has actually changed.
+    """
+    quoted = shell_quote(repo, windows=windows)
+    if windows:
+        # `$ErrorActionPreference='Stop'` does not apply to native executables,
+        # so each `git` is followed by an explicit `$LASTEXITCODE` check --
+        # otherwise a failed `git init` still reaches `Pop-Location` and the
+        # harness cannot tell a partial repository from a complete one. The
+        # `finally` guarantees the location is restored either way.
+        return (
+            "$ErrorActionPreference='Stop'; "
+            "function Invoke-Git { git @args; "
+            "if ($LASTEXITCODE -ne 0) { throw \"git $args failed: $LASTEXITCODE\" } }; "
+            f"New-Item -ItemType Directory -Force {quoted} | Out-Null; "
+            f"Push-Location {quoted}; "
+            "try { "
+            "Invoke-Git init -q .; "
+            "Invoke-Git config user.name kettle-smoke; "
+            "Invoke-Git config user.email kettle-smoke@example.invalid; "
+            "Set-Content -Path tracked.txt -Value 'first','second','third'; "
+            "Invoke-Git add tracked.txt; Invoke-Git commit -q -m base; "
+            "Set-Content -Path tracked.txt -Value 'first','CHANGED','third' "
+            "} finally { Pop-Location }"
+        )
+    return (
+        f"mkdir -p {quoted} && cd {quoted} && "
+        "git init -q . && "
+        "git config user.name kettle-smoke && "
+        "git config user.email kettle-smoke@example.invalid && "
+        "printf 'first\\nsecond\\nthird\\n' > tracked.txt && "
+        "git add tracked.txt && git commit -q -m base && "
+        "printf 'first\\nCHANGED\\nthird\\n' > tracked.txt"
+    )
+
+
+def lazyvcs_sidebar_command(
+    repo: str, marker: str, *, windows: Optional[bool] = None
+) -> str:
+    """Open a file with LazyVCS loaded, show the sidebar, and print a marker.
+
+    Exercises the parts of LazyVCS that depend on the terminal rather than on
+    Neovim: the sidebar's Nerd Font icons, the box-drawing gutter sign glyphs
+    (default add/change is U+2503), and inline blame virtual text. Kettle
+    bundles JetBrains Mono Nerd Font, so a missing glyph here is a kettle
+    rendering defect rather than a font-installation problem on the runner.
+
+    Discovery is asynchronous, so the sidebar's first frame reads
+    "Discovering repositories..." -- wait for it to settle before printing the
+    marker, or the probe races the very rendering it means to check.
+    """
+    marker_expression = nvim_string_expression(marker, windows=windows)
+    tracked = shell_quote(os.path.join(repo, "tracked.txt"), windows=windows)
+    # The marker is written ONLY when the sidebar really rendered a repository.
+    #
+    # Writing it unconditionally after the wait would make the probe pass when
+    # `:LazyVCS` does not exist, when the plugin fails to load, or when
+    # discovery times out -- Neovim reports the error and carries on to the next
+    # `+` command regardless, so `wait_for_text` would find the marker and
+    # conclude the sidebar rendered. A distinct failure string is written
+    # instead, so the timeout that follows carries the reason in the captured
+    # grid rather than just "marker not found".
+    check = (
+        "+lua local ok, native = pcall(require, 'lazyvcs.source_control.native'); "
+        "local s = ok and native._state() or nil; "
+        "local settled = s ~= nil and vim.wait(30000, function() "
+        "return s.lazyvcs_discovering ~= true and s.lazyvcs_repo_specs ~= nil "
+        "end, 25); "
+        "local rendered = settled and #(s.lazyvcs_repo_specs or {}) > 0 "
+        "and vim.api.nvim_buf_is_valid(s.bufnr) "
+        f"and #vim.api.nvim_buf_get_lines(s.bufnr, 0, -1, false) > 1; "
+        f"vim.fn.setline(1, rendered and {marker_expression} "
+        "or ('KETTLE_LAZYVCS_SIDEBAR_ABSENT ok=' .. tostring(ok) "
+        ".. ' state=' .. tostring(s ~= nil) .. ' settled=' .. tostring(settled)))"
+    )
+    return (
+        f'nvim -n {tracked} "+set termguicolors" '
+        '"+LazyVCS sidebar open" '
+        f'"{check}" '
         '"+normal! gg"'
     )
 
@@ -4954,6 +5081,7 @@ def run_agent_tui(
             for label in (
                 "nvim-clean",
                 "nvim-configured",
+                "nvim-lazyvcs-sidebar",
                 "nvim-split-clean",
                 "nvim-split-configured",
             ):
@@ -5024,6 +5152,71 @@ def run_agent_tui(
                     shell_marker,
                 )
                 probes.append({"name": label, "status": "ok"})
+            # LazyVCS leg. Only meaningful against the configured runtime,
+            # because that is what has the plugin; skipped otherwise rather
+            # than silently passing.
+            if not configured_nvim_available:
+                probes.append(
+                    {
+                        "name": "nvim-lazyvcs-sidebar",
+                        "status": "skipped",
+                        "reason": (
+                            "no configured Neovim/AstroNvim directory at "
+                            f"{shell_target.nvim_config_source()}"
+                        ),
+                    }
+                )
+            else:
+                lazyvcs_repo = str(Path(sandbox_path) / "lazyvcs-smoke-repo")
+                live.ctl(
+                    "send_text",
+                    params={
+                        "text": lazyvcs_repo_setup_command(
+                            lazyvcs_repo, windows=shell_target.powershell
+                        )
+                    },
+                )
+                live.ctl("send_keys", params={"keys": ["enter"]})
+                setup_marker = "KETTLE_LAZYVCS_REPO_READY"
+                ready_probe = (
+                    f"Write-Output {setup_marker}"
+                    if shell_target.powershell
+                    else f"printf '{setup_marker}\\n'"
+                )
+                live.ctl("send_text", params={"text": ready_probe})
+                live.ctl("send_keys", params={"keys": ["enter"]})
+                live.wait_for_text(setup_marker, timeout_ms=60000, quiet_ms=500)
+
+                marker = "KETTLE_AGENT_TUI_LAZYVCS_SMOKE"
+                live.ctl(
+                    "send_text",
+                    params={
+                        "text": lazyvcs_sidebar_command(
+                            lazyvcs_repo,
+                            marker,
+                            windows=shell_target.powershell,
+                        )
+                    },
+                )
+                live.ctl("send_keys", params={"keys": ["enter"]})
+                # Same budget as `nvim-configured`: a copied AstroNvim tree may
+                # bootstrap its plugins into the disposable XDG data dir first.
+                live.wait_for_text(marker, timeout_ms=120000, quiet_ms=500)
+                states.append(
+                    capture_live_state(live, out, "nvim-lazyvcs-sidebar")
+                )
+                exit_nvim_to_shell(
+                    live,
+                    shell_target,
+                    sandbox_path,
+                    (
+                        "Write-Output lazyvcs-exited"
+                        if shell_target.powershell
+                        else "printf 'lazyvcs-exited\\n'"
+                    ),
+                    f"{marker}_EXITED",
+                )
+                probes.append({"name": "nvim-lazyvcs-sidebar", "status": "ok"})
             for label, configured in (
                 ("nvim-split-clean", False),
                 ("nvim-split-configured", True),
