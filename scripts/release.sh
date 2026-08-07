@@ -145,20 +145,61 @@ if remote_tag=$(git ls-remote --tags origin "refs/tags/v${VERSION}" 2>/dev/null)
     exit 1
 fi
 
+# Replace the FIRST line equal to $2 in file $1 with $3, and fail if there was
+# no such line.
+#
+# This used to be `sed -i.bak "0,/re/s//replacement/"`. Both halves are GNU
+# extensions that BSD sed -- macOS's /usr/bin/sed -- does not implement:
+#
+#   * the `0,/re/` address range starts at line 0, which BSD sed accepts and
+#     then silently matches nothing, exiting 0;
+#   * `s//repl/` reuses the previous regular expression, which BSD sed rejects
+#     with "first RE may not be empty".
+#
+# The workspace version bump therefore no-opped on macOS while the inter-crate
+# pins below (a portable `-E s|...|`) bumped correctly, leaving Cargo.toml
+# internally inconsistent -- `kettle-update` requiring `kettle-state ^2.53.0`
+# against a still-2.52.0 crate -- so the Cargo.lock refresh failed and the
+# release aborted. Silently, until you read the cargo error closely.
+#
+# awk with an exact string comparison is portable, needs no regex escaping at
+# all, and can report a miss instead of pretending to succeed.
+replace_first_line() {
+    local file="$1" want="$2" repl="$3"
+    awk -v want="${want}" -v repl="${repl}" '
+        !done && $0 == want { print repl; done = 1; next }
+        { print }
+        END { exit(done ? 0 : 1) }
+    ' "${file}" >"${file}.tmp" || {
+        rm -f "${file}.tmp"
+        echo "::error::${file} has no line matching: ${want}" >&2
+        exit 1
+    }
+    # Remove the temporary file on a failed rename too. `release.sh` refuses to
+    # start on a dirty tree, so a stranded `.tmp` would block the next run with
+    # a confusing diagnostic about uncommitted changes rather than the real
+    # cause.
+    mv "${file}.tmp" "${file}" || {
+        rm -f "${file}.tmp"
+        echo "::error::could not replace ${file}" >&2
+        exit 1
+    }
+}
+
 # Bump Cargo.toml workspace version. The workspace's leading
 # `[workspace.package]` block has the single `version = "X.Y.Z"`
 # line; per-crate Cargo.tomls inherit via `version.workspace = true`.
 PREV=$(awk -F\" '/^version = "/ { print $2; exit }' Cargo.toml)
-# Escape BRE metacharacters before splicing PREV into the sed *address*
-# patterns below. A plain `X.Y.Z` semver works either way (the dots only
-# ever match their literal selves in Cargo.toml), but a pre-release tag
-# like `1.0.0-rc.1+build` carries chars BRE would misinterpret — escaping
-# keeps the match exact regardless of the version shape.
+# Escape BRE metacharacters before splicing PREV into the remaining sed
+# substitutions (the `vX.Y.Z` doc bumps). A plain `X.Y.Z` semver works either
+# way — the dots only ever match their literal selves — but a pre-release tag
+# like `1.0.0-rc.1+build` carries chars BRE would misinterpret. The two
+# line-replacements above need no escaping at all: `replace_first_line`
+# compares strings, not patterns.
 PREV_RE=$(printf '%s' "${PREV}" | sed 's/[.[\*^$/]/\\&/g')
 echo "bumping Cargo.toml: ${PREV} → ${VERSION}"
 MUTATIONS_STARTED=1
-sed -i.bak "0,/^version = \"${PREV_RE}\"\$/s//version = \"${VERSION}\"/" Cargo.toml
-rm -f Cargo.toml.bak
+replace_first_line Cargo.toml "version = \"${PREV}\"" "version = \"${VERSION}\""
 
 # Durable lockstep for the inter-crate path-dep version
 # requirements in `[workspace.dependencies]`. They were pinned at a fixed
@@ -180,13 +221,15 @@ rm -f Cargo.toml.bak
 #
 #     version = "1.42.0";
 #
-# (4 leading spaces + version + ; + maybe a trailing comment).
-# Use the same 0,/pattern/ form so we only touch the first match
-# (the package version, not any cargo-vendor-deps version etc.).
+# (10 leading spaces + version + ;).
+# `replace_first_line` matches the whole line exactly and stops at the first
+# hit, so only the package version is touched -- not any cargo-vendor-deps
+# version further down.
 if [ -f flake.nix ]; then
     echo "bumping flake.nix:  ${PREV} → ${VERSION}"
-    sed -i.bak "0,/^          version = \"${PREV_RE}\";\$/s//          version = \"${VERSION}\";/" flake.nix
-    rm -f flake.nix.bak
+    replace_first_line flake.nix \
+        "          version = \"${PREV}\";" \
+        "          version = \"${VERSION}\";"
 fi
 # Durable lockstep for the user-facing install docs. README.md's
 # status banner and docs/INSTALL.md's "current latest" line + example
