@@ -3775,7 +3775,7 @@ def live_helper_selftest() -> None:
     assert "git commit -q -m base" in setup_posix
     assert setup_posix.count("tracked.txt") >= 3
     setup_windows = lazyvcs_repo_setup_command(lazyvcs_repo, windows=True)
-    assert "Set-Content" in setup_windows and "git init -q ." in setup_windows
+    assert "Set-Content" in setup_windows and "Invoke-Git init -q ." in setup_windows
 
     sidebar_posix = lazyvcs_sidebar_command(
         lazyvcs_repo, lazyvcs_marker, windows=False
@@ -3789,6 +3789,21 @@ def live_helper_selftest() -> None:
     # Discovery is asynchronous; without this wait the probe races the render.
     assert "lazyvcs_discovering" in sidebar_posix
     assert "vim.wait(30000" in sidebar_posix
+    # The marker must be conditional. Written unconditionally, the probe passes
+    # when `:LazyVCS` is missing, the plugin fails to load, or discovery times
+    # out -- Neovim reports the error and runs the next `+` command anyway.
+    assert "pcall(require, 'lazyvcs.source_control.native')" in sidebar_posix
+    assert "rendered and" in sidebar_posix
+    assert "KETTLE_LAZYVCS_SIDEBAR_ABSENT" in sidebar_posix
+    # A failure string that CONTAINED the marker would still satisfy
+    # `wait_for_text`, turning the failure branch back into a false pass.
+    assert lazyvcs_marker not in "KETTLE_LAZYVCS_SIDEBAR_ABSENT"
+
+    # PowerShell: `$ErrorActionPreference` does not cover native executables, so
+    # each git call needs an explicit exit-code check or a failed setup reaches
+    # `Pop-Location` looking like success.
+    assert "$LASTEXITCODE" in setup_windows
+    assert "finally { Pop-Location }" in setup_windows
 
     first_socket = new_tmux_socket_name()
     second_socket = new_tmux_socket_name()
@@ -3983,16 +3998,25 @@ def lazyvcs_repo_setup_command(repo: str, *, windows: Optional[bool] = None) -> 
     """
     quoted = shell_quote(repo, windows=windows)
     if windows:
+        # `$ErrorActionPreference='Stop'` does not apply to native executables,
+        # so each `git` is followed by an explicit `$LASTEXITCODE` check --
+        # otherwise a failed `git init` still reaches `Pop-Location` and the
+        # harness cannot tell a partial repository from a complete one. The
+        # `finally` guarantees the location is restored either way.
         return (
+            "$ErrorActionPreference='Stop'; "
+            "function Invoke-Git { git @args; "
+            "if ($LASTEXITCODE -ne 0) { throw \"git $args failed: $LASTEXITCODE\" } }; "
             f"New-Item -ItemType Directory -Force {quoted} | Out-Null; "
             f"Push-Location {quoted}; "
-            "git init -q .; "
-            "git config user.name kettle-smoke; "
-            "git config user.email kettle-smoke@example.invalid; "
+            "try { "
+            "Invoke-Git init -q .; "
+            "Invoke-Git config user.name kettle-smoke; "
+            "Invoke-Git config user.email kettle-smoke@example.invalid; "
             "Set-Content -Path tracked.txt -Value 'first','second','third'; "
-            "git add tracked.txt; git commit -q -m base; "
-            "Set-Content -Path tracked.txt -Value 'first','CHANGED','third'; "
-            "Pop-Location"
+            "Invoke-Git add tracked.txt; Invoke-Git commit -q -m base; "
+            "Set-Content -Path tracked.txt -Value 'first','CHANGED','third' "
+            "} finally { Pop-Location }"
         )
     return (
         f"mkdir -p {quoted} && cd {quoted} && "
@@ -4022,17 +4046,32 @@ def lazyvcs_sidebar_command(
     """
     marker_expression = nvim_string_expression(marker, windows=windows)
     tracked = shell_quote(os.path.join(repo, "tracked.txt"), windows=windows)
-    wait = (
-        "+lua local s = require('lazyvcs.source_control.native')._state(); "
-        "if s then vim.wait(30000, function() "
+    # The marker is written ONLY when the sidebar really rendered a repository.
+    #
+    # Writing it unconditionally after the wait would make the probe pass when
+    # `:LazyVCS` does not exist, when the plugin fails to load, or when
+    # discovery times out -- Neovim reports the error and carries on to the next
+    # `+` command regardless, so `wait_for_text` would find the marker and
+    # conclude the sidebar rendered. A distinct failure string is written
+    # instead, so the timeout that follows carries the reason in the captured
+    # grid rather than just "marker not found".
+    check = (
+        "+lua local ok, native = pcall(require, 'lazyvcs.source_control.native'); "
+        "local s = ok and native._state() or nil; "
+        "local settled = s ~= nil and vim.wait(30000, function() "
         "return s.lazyvcs_discovering ~= true and s.lazyvcs_repo_specs ~= nil "
-        "end, 25) end"
+        "end, 25); "
+        "local rendered = settled and #(s.lazyvcs_repo_specs or {}) > 0 "
+        "and vim.api.nvim_buf_is_valid(s.bufnr) "
+        f"and #vim.api.nvim_buf_get_lines(s.bufnr, 0, -1, false) > 1; "
+        f"vim.fn.setline(1, rendered and {marker_expression} "
+        "or ('KETTLE_LAZYVCS_SIDEBAR_ABSENT ok=' .. tostring(ok) "
+        ".. ' state=' .. tostring(s ~= nil) .. ' settled=' .. tostring(settled)))"
     )
     return (
         f'nvim -n {tracked} "+set termguicolors" '
         '"+LazyVCS sidebar open" '
-        f'"{wait}" '
-        f'"+call setline(1, {marker_expression})" '
+        f'"{check}" '
         '"+normal! gg"'
     )
 
