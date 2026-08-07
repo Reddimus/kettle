@@ -14590,6 +14590,7 @@ impl App {
                 runtime_font_size,
             ));
             r.set_cell_scale(self.cfg.cell_width, self.cfg.cell_height);
+            r.set_background_compositing(&self.cfg);
         }
         // A configured size change invalidates the pre-scaled-zoom baseline;
         // a no-op reload must preserve both it and the live runtime zoom.

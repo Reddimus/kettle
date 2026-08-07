@@ -150,11 +150,47 @@ fn box_blur(img: &mut BgImage, radius: u32) -> bool {
         return false;
     }
     scratch.resize(img.rgba.len(), 0);
+    premultiply_linear_rgba8(&mut img.rgba);
     for _ in 0..3 {
         box_blur_axis(img, r, true, &mut scratch);
         box_blur_axis(img, r, false, &mut scratch);
     }
+    unpremultiply_linear_rgba8(&mut img.rgba);
     true
+}
+
+fn premultiply_linear_rgba8(rgba: &mut [u8]) {
+    for pixel in rgba.chunks_exact_mut(4) {
+        let alpha = pixel[3] as f64 / 255.0;
+        for channel in &mut pixel[..3] {
+            let srgb = *channel as f64 / 255.0;
+            let linear = if srgb <= 0.04045 {
+                srgb / 12.92
+            } else {
+                ((srgb + 0.055) / 1.055).powf(2.4)
+            };
+            *channel = (linear * alpha * 255.0).round().clamp(0.0, 255.0) as u8;
+        }
+    }
+}
+
+fn unpremultiply_linear_rgba8(rgba: &mut [u8]) {
+    for pixel in rgba.chunks_exact_mut(4) {
+        let alpha = pixel[3] as f64 / 255.0;
+        if alpha == 0.0 {
+            pixel[..3].fill(0);
+            continue;
+        }
+        for channel in &mut pixel[..3] {
+            let linear = (*channel as f64 / 255.0 / alpha).clamp(0.0, 1.0);
+            let srgb = if linear <= 0.003_130_8 {
+                linear * 12.92
+            } else {
+                1.055 * linear.powf(1.0 / 2.4) - 0.055
+            };
+            *channel = (srgb * 255.0).round().clamp(0.0, 255.0) as u8;
+        }
+    }
 }
 
 /// One separable box-blur pass along the horizontal (`horizontal == true`) or
@@ -542,6 +578,7 @@ mod tests {
             return;
         }
         let r = (radius.min(16)) as i32;
+        premultiply_linear_rgba8(&mut img.rgba);
         let pass = |img: &mut BgImage, horizontal: bool| {
             let w = img.width as i32;
             let h = img.height as i32;
@@ -576,6 +613,7 @@ mod tests {
             pass(img, true);
             pass(img, false);
         }
+        unpremultiply_linear_rgba8(&mut img.rgba);
     }
 
     /// Drift guard: the O(W·H) sliding-window blur must be
@@ -605,6 +643,34 @@ mod tests {
                 assert_eq!(a.rgba, b.rgba, "blur mismatch at {w}x{h} r={r}");
             }
         }
+    }
+
+    #[test]
+    fn blur_preserves_white_chroma_across_a_transparent_edge() {
+        let mut image = BgImage {
+            width: 9,
+            height: 1,
+            rgba: (0..9)
+                .flat_map(|x| {
+                    if x == 4 {
+                        [255, 255, 255, 255]
+                    } else {
+                        [0, 0, 0, 0]
+                    }
+                })
+                .collect(),
+        };
+
+        assert!(box_blur(&mut image, 1));
+        let fringe = image
+            .rgba
+            .chunks_exact(4)
+            .find(|pixel| pixel[3] > 0 && pixel[3] < 255)
+            .expect("blur must create a partially transparent fringe");
+        assert!(
+            fringe[..3].iter().all(|&channel| channel >= 245),
+            "premultiplied linear filtering must preserve white chroma, got {fringe:?}"
+        );
     }
 
     /// v2.21.x: the animated-background clock loops through frames per their

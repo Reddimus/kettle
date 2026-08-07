@@ -102,6 +102,22 @@ pub struct QuadPipeline {
 
 impl QuadPipeline {
     pub fn new(device: &wgpu::Device, format: wgpu::TextureFormat) -> Self {
+        Self::new_with_blend(
+            device,
+            format,
+            Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING),
+        )
+    }
+
+    pub fn new_replace(device: &wgpu::Device, format: wgpu::TextureFormat) -> Self {
+        Self::new_with_blend(device, format, None)
+    }
+
+    fn new_with_blend(
+        device: &wgpu::Device,
+        format: wgpu::TextureFormat,
+        blend: Option<wgpu::BlendState>,
+    ) -> Self {
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("kettle-quad"),
             source: wgpu::ShaderSource::Wgsl(SHADER.into()),
@@ -165,7 +181,7 @@ impl QuadPipeline {
                     // translucent image, panel, highlight, and separator.
                     // (`glyphpipe` deliberately returns STRAIGHT alpha and
                     // correctly keeps `ALPHA_BLENDING`.)
-                    blend: Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING),
+                    blend,
                     write_mask: wgpu::ColorWrites::ALL,
                 })],
             }),
