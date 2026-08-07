@@ -2107,6 +2107,13 @@ impl PendingWrite {
     }
 }
 
+fn priority_reply_may_start(
+    reply_current: &Option<PendingWrite>,
+    stdin_current: &Option<PendingWrite>,
+) -> bool {
+    reply_current.is_none() && stdin_current.is_none()
+}
+
 fn process_stdin_event(
     event: StdinPumpEvent,
     current: &mut Option<PendingWrite>,
@@ -2176,7 +2183,7 @@ fn spawn_pty_writer_arbiter(
             let never_stdin = crossbeam_channel::never::<StdinPumpEvent>();
 
             loop {
-                if reply_current.is_none() && replies_open {
+                if priority_reply_may_start(&reply_current, &stdin_current) && replies_open {
                     match replies.try_recv() {
                         Ok(bytes) => reply_current = PendingWrite::new(bytes),
                         Err(crossbeam_channel::TryRecvError::Empty) => {}
@@ -2240,7 +2247,6 @@ fn spawn_pty_writer_arbiter(
                     }
                 }
 
-                let writing_reply = reply_current.is_some();
                 let write_result = if let Some(reply) = reply_current.as_ref() {
                     Some(pty_stdin.try_write(reply.remaining()))
                 } else {
@@ -2252,23 +2258,9 @@ fn spawn_pty_writer_arbiter(
                     match result {
                         Ok(0) => {
                             // Unix PTY capacity is temporarily exhausted.
-                            // Wait briefly for a newly generated high-priority
-                            // reply before retrying the pending frame.
-                            if replies_open && !writing_reply {
-                                match replies.recv_timeout(Duration::from_millis(1)) {
-                                    Ok(bytes) => {
-                                        reply_current = PendingWrite::new(bytes);
-                                    }
-                                    Err(crossbeam_channel::RecvTimeoutError::Disconnected) => {
-                                        replies_open = false;
-                                    }
-                                    Err(crossbeam_channel::RecvTimeoutError::Timeout) => {}
-                                }
-                            } else {
-                                std::thread::sleep(Duration::from_millis(1));
-                            }
+                            std::thread::sleep(Duration::from_millis(1));
                         }
-                        Ok(written) if writing_reply => {
+                        Ok(written) if reply_current.is_some() => {
                             if reply_current
                                 .as_mut()
                                 .is_some_and(|reply| reply.advance(written))
@@ -3187,6 +3179,19 @@ mod tests {
         assert_eq!(error.kind(), std::io::ErrorKind::Other);
         assert!(error.to_string().contains("synthetic thread exhaustion"));
         assert!(!ran.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn priority_reply_waits_for_a_started_stdin_message() {
+        let none = None;
+        let pending_stdin = PendingWrite::new(vec![b'u'; 8192]);
+        assert!(priority_reply_may_start(&none, &none));
+        assert!(
+            !priority_reply_may_start(&none, &pending_stdin),
+            "a reply arriving after a partial stdin write must wait for that message"
+        );
+        let pending_reply = PendingWrite::new(b"reply".to_vec());
+        assert!(!priority_reply_may_start(&pending_reply, &none));
     }
 
     #[test]
