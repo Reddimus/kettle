@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Deliberately empty.
+
+  Entitlements are exceptions to the hardened runtime, not a feature list, and
+  kettle needs none of them. Notarization requires Developer ID signing, the
+  hardened runtime, and a secure timestamp; those are `codesign` flags, not
+  entitlements. Specifically NOT claimed here, with the reason each is absent:
+
+    com.apple.security.app-sandbox
+        kettle is not sandboxed. A terminal spawns arbitrary user programs and
+        reads arbitrary paths; sandboxing it would be theatre.
+
+    com.apple.security.cs.allow-jit
+    com.apple.security.cs.allow-unsigned-executable-memory
+        Metal shader compilation happens inside Apple's own frameworks, which
+        carry their own entitlements. kettle maps no executable memory itself.
+
+    com.apple.security.cs.disable-library-validation
+        kettle loads no third-party plugin dylibs. The Lua surface is
+        interpreted, not native.
+
+    com.apple.security.cs.allow-dyld-environment-variables
+        Nothing needs DYLD_* preserved across the signature boundary.
+
+    com.apple.security.get-task-allow
+        Debug-only, and it makes a build ineligible for notarization.
+
+  `forkpty(3)` and process spawning need no entitlement at all.
+
+  If a future change genuinely requires one, add it here WITH the reason, and
+  expect the notarization service to scrutinise it.
+-->
+<plist version="1.0">
+<dict/>
+</plist>

@@ -308,7 +308,117 @@ jobs:
           # without needing the source tree. Same content as the
           # binary's embedded copies.
           cp -r shell-integration "$APP/Contents/Resources/"
-          (cd dist && zip -r ../${{ matrix.artifact }} kettle.app)
+
+      # Sign, notarize, and staple.
+      #
+      # Gated on the secrets being present so forks and PR builds still produce
+      # a working (unsigned) bundle. An OFFICIAL release must never silently
+      # ship unsigned under the official filename, so the verification step
+      # below fails closed when this one was skipped on the canonical repo.
+      #
+      # Ordering is load-bearing: the bundle is zipped only AFTER stapling,
+      # because stapling rewrites the bundle, and the SHA-256 sidecar is
+      # generated from that final zip further down.
+      - name: Sign and notarize (macOS)
+        if: runner.os == 'macOS' && env.APPLE_CERT_P12 != ''
+        env:
+          APPLE_CERT_P12: ${{ secrets.APPLE_CERT_P12 }}
+          APPLE_CERT_PASSWORD: ${{ secrets.APPLE_CERT_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+        run: |
+          set -euo pipefail
+          APP=dist/kettle.app
+
+          # Ephemeral keychain: the certificate never touches the login
+          # keychain, and the cleanup step below removes it even on failure.
+          KEYCHAIN="${RUNNER_TEMP}/kettle-signing.keychain-db"
+          KEYCHAIN_PASSWORD="$(openssl rand -hex 32)"
+          echo "KEYCHAIN=${KEYCHAIN}" >>"${GITHUB_ENV}"
+          security create-keychain -p "${KEYCHAIN_PASSWORD}" "${KEYCHAIN}"
+          security set-keychain-settings -lut 3600 "${KEYCHAIN}"
+          security unlock-keychain -p "${KEYCHAIN_PASSWORD}" "${KEYCHAIN}"
+
+          printf '%s' "${APPLE_CERT_P12}" | base64 --decode >"${RUNNER_TEMP}/cert.p12"
+          security import "${RUNNER_TEMP}/cert.p12" -k "${KEYCHAIN}" \
+            -P "${APPLE_CERT_PASSWORD}" -T /usr/bin/codesign
+          rm -f "${RUNNER_TEMP}/cert.p12"
+          # Let codesign use the key without an interactive prompt.
+          security set-key-partition-list -S apple-tool:,apple: \
+            -s -k "${KEYCHAIN_PASSWORD}" "${KEYCHAIN}" >/dev/null
+          # Prepend the ephemeral keychain to the user search list, keeping the
+          # existing entries. Word splitting is intended here: each existing
+          # keychain path is a separate argument.
+          # shellcheck disable=SC2046
+          security list-keychains -d user -s "${KEYCHAIN}" $(security list-keychains -d user | tr -d '"')
+
+          # Inside-out: every nested Mach-O must be signed before the bundle
+          # that contains it, or the outer signature seals an unsigned nested
+          # binary and verification fails.
+          find "$APP/Contents" -type f -perm -u+x -print0 |
+            while IFS= read -r -d '' candidate; do
+              if file -b "$candidate" | grep -q 'Mach-O'; then
+                codesign --force --timestamp --options runtime \
+                  --entitlements packaging/macos/kettle.entitlements \
+                  --sign "${APPLE_SIGNING_IDENTITY}" --keychain "${KEYCHAIN}" \
+                  "$candidate"
+              fi
+            done
+          codesign --force --timestamp --options runtime \
+            --entitlements packaging/macos/kettle.entitlements \
+            --sign "${APPLE_SIGNING_IDENTITY}" --keychain "${KEYCHAIN}" "$APP"
+
+          codesign --verify --deep --strict --verbose=2 "$APP"
+
+          # `ditto --keepParent` is the only archiver whose output notarytool
+          # accepts for a .app; `zip` loses the bundle structure it expects.
+          ditto -c -k --keepParent "$APP" "${RUNNER_TEMP}/notarize.zip"
+          xcrun notarytool submit "${RUNNER_TEMP}/notarize.zip" \
+            --apple-id "${APPLE_ID}" \
+            --team-id "${APPLE_TEAM_ID}" \
+            --password "${APPLE_APP_PASSWORD}" \
+            --wait --timeout 30m
+          rm -f "${RUNNER_TEMP}/notarize.zip"
+
+          # Staple so the bundle validates without a network round trip on
+          # first launch.
+          xcrun stapler staple "$APP"
+          xcrun stapler validate "$APP"
+          # The real user-facing check: would Gatekeeper let this run?
+          spctl --assess --type execute --verbose=4 "$APP"
+          echo "KETTLE_MACOS_SIGNED=1" >>"${GITHUB_ENV}"
+
+      # An official tag must not publish an unsigned bundle under the official
+      # filename. Forks and PR builds are explicitly allowed to.
+      - name: Require a signed bundle for an official release
+        if: runner.os == 'macOS'
+        run: |
+          set -euo pipefail
+          if [ "${KETTLE_MACOS_SIGNED:-}" = "1" ]; then
+            echo "macOS bundle is signed, notarized, and stapled."
+            exit 0
+          fi
+          if [ "${GITHUB_REPOSITORY}" = "Reddimus/kettle" ] && [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            echo "::error::Apple signing secrets are absent, so this tag would publish an unsigned .app. Set APPLE_CERT_P12, APPLE_CERT_PASSWORD, APPLE_SIGNING_IDENTITY, APPLE_ID, APPLE_TEAM_ID and APPLE_APP_PASSWORD."
+            exit 1
+          fi
+          echo "::warning::Building an UNSIGNED macOS bundle (no signing secrets available)."
+
+      - name: Package (macOS zip)
+        if: runner.os == 'macOS'
+        run: (cd dist && zip -qry "../${{ matrix.artifact }}" kettle.app)
+
+      # `always()` so a failed signing run cannot leave the certificate in a
+      # keychain on the runner.
+      - name: Remove the ephemeral signing keychain
+        if: always() && runner.os == 'macOS'
+        run: |
+          if [ -n "${KEYCHAIN:-}" ] && [ -f "${KEYCHAIN}" ]; then
+            security delete-keychain "${KEYCHAIN}" || true
+          fi
+          rm -f "${RUNNER_TEMP}/cert.p12" "${RUNNER_TEMP}/notarize.zip" || true
 
       - name: Package (Windows)
         if: runner.os == 'Windows'
