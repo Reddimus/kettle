@@ -669,14 +669,14 @@ impl ImagePipeline {
         queue: &wgpu::Queue,
         screen: [f32; 2],
         items: &[ImageItem],
-    ) {
+    ) -> bool {
         let key = retained_upload_key(screen, items);
         if self.retained_key == Some(key) {
-            return;
+            return true;
         }
-        self.retained_key = self
-            .upload_inner(device, queue, screen, items)
-            .then_some(key);
+        let complete = self.upload_inner(device, queue, screen, items);
+        self.retained_key = complete.then_some(key);
+        complete
     }
 
     fn upload_inner(

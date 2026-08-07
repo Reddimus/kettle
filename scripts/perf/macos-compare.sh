@@ -46,10 +46,11 @@ optional iTerm2. Missing or undriveable peers are explicit skips in the score
 JSON. AppleScript-launched peers are skipped for RSS because /usr/bin/time -l
 cannot attribute their detached GUI process.
 
-For each measured metric, lower is better and Kettle is top-half when its rank
-is <= ceil(N/2). The run passes when Kettle is top-half on at least 3 measured
-metrics. Input latency is deliberately out of scope and is recorded as not
-measured in macos-score.json.
+For each eligible metric, lower is better and Kettle is top-half when its rank
+is <= ceil(N/2). A metric is eligible only when Kettle and at least one real
+competitor were both measured. The run passes when Kettle is top-half on at
+least 3 eligible metrics. Input latency is deliberately out of scope and is
+recorded as not measured in macos-score.json.
 EOF
 }
 
@@ -1036,20 +1037,30 @@ def score_metric(metric, unit, values):
         for name, value in sorted(values.items(), key=lambda item: (item[1], item[0]))
     ]
     terminal_count = len(values)
+    competitor_count = sum(name != "kettle" for name in values)
     cutoff = (terminal_count + 1) // 2
     if "kettle" in values:
         kettle_value = values["kettle"]
         kettle_rank = 1 + sum(value < kettle_value for value in values.values())
-        top_half = kettle_rank <= cutoff
     else:
         kettle_rank = None
-        top_half = False
+    eligible = kettle_rank is not None and competitor_count >= 1
+    top_half = eligible and kettle_rank <= cutoff
+    if kettle_rank is None:
+        eligibility_reason = "Kettle was not successfully measured"
+    elif competitor_count == 0:
+        eligibility_reason = "no real competitor was successfully measured"
+    else:
+        eligibility_reason = None
     return {
         "unit": unit,
         "values": values,
         "ranking": ranking,
         "kettle_rank": kettle_rank,
         "terminal_count": terminal_count,
+        "competitor_count": competitor_count,
+        "eligible_for_pass": eligible,
+        "ineligible_reason": eligibility_reason,
         "top_half_cutoff": cutoff,
         "kettle_top_half": top_half,
         "skipped": skipped_for(metric, values),
@@ -1106,9 +1117,21 @@ idle_path.write_text(
 )
 
 measured = [name for name, data in metrics.items() if data["kettle_rank"] is not None]
-top_half = [name for name in measured if metrics[name]["kettle_top_half"]]
+eligible = [name for name, data in metrics.items() if data["eligible_for_pass"]]
+ineligible = [name for name in measured if not metrics[name]["eligible_for_pass"]]
+top_half = [name for name in eligible if metrics[name]["kettle_top_half"]]
 passed = len(top_half) >= 3
-failures = [] if passed else [f"kettle was top-half on {len(top_half)} of {len(measured)} measured metrics; 3 required"]
+failures = []
+if not passed:
+    failures.append(
+        f"kettle was top-half on {len(top_half)} of {len(eligible)} eligible metrics; "
+        "3 required"
+    )
+    if ineligible:
+        failures.append(
+            f"{len(ineligible)} Kettle-measured metric(s) were ineligible because no real "
+            "competitor was successfully measured"
+        )
 warnings = []
 
 try:
@@ -1136,6 +1159,8 @@ summary = {
     "kettle_live_json": str(live_path),
     "intended_metric_count": 5,
     "measured_metric_count": len(measured),
+    "eligible_metric_count": len(eligible),
+    "ineligible_metric_count": len(ineligible),
     "top_half_metric_count": len(top_half),
     "metrics": metrics,
     "kettle_live": live_summary,
@@ -1147,8 +1172,9 @@ summary = {
     },
     "rules": {
         "metric_rank": "lower is better; ties share Kettle's rank via count of strictly lower values",
-        "top_half": "kettle rank <= ceil(N / 2), where N is the number of terminals with a result",
-        "pass": "kettle is top-half on at least 3 measured metrics",
+        "eligibility": "Kettle and at least one real competitor must both have a result",
+        "top_half": "on eligible metrics, kettle rank <= ceil(N / 2), where N is the number of terminals with a result",
+        "pass": "kettle is top-half on at least 3 eligible metrics",
         "kettle_live": "advisory Kettle-only resize/scrollback medians; probe failure is recorded but is not part of the rank gate",
         "input_latency": "deliberately not measured and is not a pass",
     },
@@ -1172,6 +1198,10 @@ print("macOS terminal ranking (lower is better)")
 for metric, data in metrics.items():
     print("")
     print(metric)
+    print(
+        f"  Measured terminals: {data['terminal_count']}; "
+        f"real competitors measured: {data['competitor_count']}"
+    )
     print(f"  {'rank':>4}  {'terminal':<12} {'value':>12}")
     for row in data["ranking"]:
         print(
@@ -1181,7 +1211,12 @@ for metric, data in metrics.items():
     for skipped in data["skipped"]:
         print(f"  SKIP  {skipped['terminal']:<12} {skipped['reason']}")
     if data["kettle_rank"] is None:
-        print("  Kettle: not measured")
+        print("  Kettle: INELIGIBLE - not measured; this metric does not count toward pass")
+    elif not data["eligible_for_pass"]:
+        print(
+            f"  Kettle: rank {data['kettle_rank']}/{data['terminal_count']}; "
+            "INELIGIBLE - 0 real competitors measured; this metric does not count toward pass"
+        )
     else:
         result = "YES" if data["kettle_top_half"] else "NO"
         print(
@@ -1191,7 +1226,11 @@ for metric, data in metrics.items():
 
 print("")
 print(f"Measured {len(measured)} of 5 intended metrics.")
-print(f"Kettle was top-half on {len(top_half)} of {len(measured)} measured metrics.")
+print(
+    f"Eligible comparison metrics: {len(eligible)}; "
+    f"excluded for having no measured competitor: {len(ineligible)}."
+)
+print(f"Kettle was top-half on {len(top_half)} of {len(eligible)} eligible metrics.")
 print("input_latency: NOT MEASURED (deliberately out of scope; absence is not a pass).")
 if warnings:
     print("WARNINGS:")

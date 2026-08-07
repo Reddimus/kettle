@@ -195,6 +195,10 @@ impl PresentationPipeline {
         self.target.as_ref().map(|target| &target.view)
     }
 
+    pub(crate) fn discard_target(&mut self) {
+        self.target = None;
+    }
+
     pub(crate) fn draw(&self, pass: &mut wgpu::RenderPass<'_>) {
         let Some(target) = self.target.as_ref() else {
             return;

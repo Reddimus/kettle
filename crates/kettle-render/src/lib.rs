@@ -1334,6 +1334,10 @@ struct BgImageAnim {
     /// texture cache (keyed by `Arc::as_ptr`) reuses one GPU texture per frame
     /// and only re-uploads when the displayed frame index actually changes.
     frames: Vec<kettle_core::ImageData>,
+    /// Whether every source texel in each parallel frame has alpha 255.
+    /// Computed once when the decoded result enters the cache, not by scanning
+    /// a 4K wallpaper again on every redraw.
+    opaque_frames: Vec<bool>,
     /// Per-frame dwell time (ms), parallel to `frames`.
     gaps: Vec<u32>,
     /// Wall-clock origin for the playback loop (`bg_current_frame`).
@@ -3187,19 +3191,26 @@ impl Renderer {
                 continue;
             }
             self.bg_image_pending = None;
-            let (frames, gaps): (Vec<kettle_core::ImageData>, Vec<u32>) = result
-                .frames
-                .into_iter()
-                .filter_map(|f| {
-                    kettle_core::ImageData::new_with_budget(
-                        f.image.width,
-                        f.image.height,
-                        f.image.rgba,
-                        &self.graphics_budget,
-                    )
-                    .map(|img| (img, f.gap_ms))
-                })
-                .unzip();
+            let mut frames = Vec::with_capacity(result.frames.len());
+            let mut opaque_frames = Vec::with_capacity(result.frames.len());
+            let mut gaps = Vec::with_capacity(result.frames.len());
+            for frame in result.frames {
+                let opaque = frame
+                    .image
+                    .rgba
+                    .chunks_exact(4)
+                    .all(|pixel| pixel[3] == 255);
+                if let Some(image) = kettle_core::ImageData::new_with_budget(
+                    frame.image.width,
+                    frame.image.height,
+                    frame.image.rgba,
+                    &self.graphics_budget,
+                ) {
+                    frames.push(image);
+                    opaque_frames.push(opaque);
+                    gaps.push(frame.gap_ms);
+                }
+            }
             // On failure, throttle the next retry; on success, clear it so
             // the loaded wallpaper never re-decodes.
             self.bg_image_retry_at = if frames.is_empty() {
@@ -3211,6 +3222,7 @@ impl Renderer {
                 path: result.path,
                 blur: result.blur_radius,
                 frames,
+                opaque_frames,
                 gaps,
                 started: std::time::Instant::now(),
             });
@@ -3458,6 +3470,7 @@ impl Renderer {
         // so the allocation is trivial; high-water pooling is reserved for the
         // large per-cell `quads` / `spans` buffers where it actually pays off.
         // The asymmetry is deliberate, not an oversight.
+        use kettle_config::BackgroundType;
         let mut menu_q: Vec<QuadInstance> = Vec::with_capacity(64);
         // Drawn *after* text: unfocused-pane dimming + scrollbar thumbs.
         let mut over: Vec<QuadInstance> = Vec::with_capacity(panes.len() * 4 + 8);
@@ -3470,6 +3483,11 @@ impl Renderer {
         // currently-displayed wallpaper frame, used to tint the chrome strips.
         // Computed once from the displayed frame below (only when auto is set).
         let mut bg_frame_avg: Option<Rgb> = None;
+        // Starfield's fragment shader writes alpha 1 over the whole surface.
+        // Image backgrounds prove this separately from the selected frame's
+        // cached alpha scan and its destination geometry below.
+        let mut opaque_wallpaper_covers_surface =
+            matches!(cfg.background_type, BackgroundType::Starfield);
         let mut bg_live: std::collections::HashSet<usize> = std::collections::HashSet::new();
         let mut inline_live: std::collections::HashSet<usize> = std::collections::HashSet::new();
 
@@ -3479,7 +3497,6 @@ impl Renderer {
         // renders at the back. The `decode_bg_image_frames_with_blur`
         // helper handles the file-not-found / decode-error paths
         // gracefully.
-        use kettle_config::BackgroundType;
         if matches!(cfg.background_type, BackgroundType::Image) && !cfg.background_image.is_empty()
         {
             let want = cfg.background_image.clone();
@@ -3535,7 +3552,7 @@ impl Renderer {
             // still shows the time-correct frame, no jump) — focus only gates
             // whether the render loop PROACTIVELY wakes to animate, via
             // `background_is_animating` feeding the anim tick.
-            let bg_frame: Option<&kettle_core::ImageData> = self
+            let bg_frame: Option<(&kettle_core::ImageData, bool)> = self
                 .bg_image_cache
                 .as_ref()
                 .filter(|c| !c.frames.is_empty())
@@ -3547,9 +3564,13 @@ impl Renderer {
                     } else {
                         0
                     };
-                    &c.frames[idx.min(c.frames.len() - 1)]
+                    let idx = idx.min(c.frames.len() - 1);
+                    (
+                        &c.frames[idx],
+                        c.opaque_frames.get(idx).copied().unwrap_or(false),
+                    )
                 });
-            if let Some(data) = bg_frame {
+            if let Some((data, frame_is_opaque)) = bg_frame {
                 // v2.23.0: sample the displayed frame's average color for
                 // `chrome-background = auto`. Sampled + alpha-aware, so it's a
                 // few microseconds even on a 4K frame; only when auto is set.
@@ -3577,8 +3598,9 @@ impl Renderer {
                 bg_live.insert(data.allocation_key());
                 if cfg.background_image_mode == "tile" {
                     bg_img_items.push(imgpipe::ImageItem::tiled(sw, sh, data.clone()));
+                    opaque_wallpaper_covers_surface = frame_is_opaque;
                 } else {
-                    let [x, y, w, h] = background_image_rect(
+                    let rect @ [x, y, w, h] = background_image_rect(
                         cfg.background_image_mode.as_str(),
                         cfg.background_image_align_horiz.as_str(),
                         cfg.background_image_align_vert.as_str(),
@@ -3586,6 +3608,8 @@ impl Renderer {
                         [img_w, img_h],
                     );
                     bg_img_items.push(imgpipe::ImageItem::full(x, y, w, h, data.clone()));
+                    opaque_wallpaper_covers_surface =
+                        frame_is_opaque && rect_covers_surface(rect, [sw, sh]);
                 }
             }
         } else if self.bg_image_cache.is_some() {
@@ -5815,8 +5839,13 @@ impl Renderer {
         // the per-window/process GPU budgets; visible entries remain pinned.
         self.bg_imgs.gc(&bg_live);
         self.imgs.gc(&inline_live);
-        self.bg_imgs
-            .upload_retained(&self.gpu.device, &self.gpu.queue, [sw, sh], &bg_img_items);
+        let wallpaper_upload_complete = self.bg_imgs.upload_retained(
+            &self.gpu.device,
+            &self.gpu.queue,
+            [sw, sh],
+            &bg_img_items,
+        );
+        opaque_wallpaper_covers_surface &= wallpaper_upload_complete;
         // v2.24.0: refresh the procedural starfield's per-frame uniform (just
         // resolution + the continuous `time` clock; the look is baked into the
         // shader as of v2.24.1) when it's the active wallpaper.
@@ -5877,11 +5906,16 @@ impl Renderer {
         let surface_view = frame
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
-        let postmultiplied = matches!(
-            self.config.alpha_mode,
-            wgpu::CompositeAlphaMode::PostMultiplied
-        );
-        if postmultiplied
+        let scene_is_opaque = final_scene_is_uniformly_opaque(cfg, opaque_wallpaper_covers_surface);
+        let needs_presentation =
+            needs_postmultiplied_presentation(self.config.alpha_mode, scene_is_opaque);
+        if !needs_presentation {
+            // A target retained from a previous translucent configuration or
+            // animation frame should not keep a full-surface texture charged
+            // while the completed scene is provably alpha 1 everywhere.
+            self.presentation.discard_target();
+        }
+        if needs_presentation
             && !self
                 .presentation
                 .ensure_target(&self.gpu.device, target_size[0], target_size[1])
@@ -5890,7 +5924,7 @@ impl Renderer {
                 "GPU graphics budget exhausted while creating the presentation target"
             ));
         }
-        let scene_view = if postmultiplied {
+        let scene_view = if needs_presentation {
             self.presentation
                 .scene_view()
                 .expect("presentation target ensured above")
@@ -5962,7 +5996,7 @@ impl Renderer {
                     .render(&self.atlas, &self.viewport, &mut pass)?;
             }
         }
-        if postmultiplied {
+        if needs_presentation {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("kettle-presentation-pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -6958,6 +6992,20 @@ fn background_image_rect(
         _ => (sh - h) * 0.5,
     };
     [x, y, w, h]
+}
+
+fn rect_covers_surface(rect: [f32; 4], surface: [f32; 2]) -> bool {
+    let [x, y, width, height] = rect;
+    let [surface_width, surface_height] = surface;
+    rect.into_iter().chain(surface).all(f32::is_finite)
+        && surface_width > 0.0
+        && surface_height > 0.0
+        && width > 0.0
+        && height > 0.0
+        && x <= 0.0
+        && y <= 0.0
+        && x + width >= surface_width
+        && y + height >= surface_height
 }
 
 fn font_features(cfg: &Config) -> FontFeatures {
@@ -9491,17 +9539,25 @@ fn resolved_cell_foreground(
     cfg: &kettle_config::Config,
     theme: &kettle_config::Theme,
 ) -> Rgb {
-    let (fg, painted_bg) = match highlight {
-        CellHighlight::Search(true) => (
+    match highlight {
+        CellHighlight::Search(true) => attributed_foreground(
             cfg.search_foreground.unwrap_or(theme.background),
             cfg.search_background.unwrap_or(theme.palette[3]),
+            false,
+            false,
+            cfg,
+            theme,
         ),
-        CellHighlight::Search(false) | CellHighlight::Selection => {
-            (theme.selection_foreground, theme.selection_background)
-        }
-        CellHighlight::None => (fg, bg),
-    };
-    attributed_foreground(fg, painted_bg, dim, bold, cfg, theme)
+        CellHighlight::Search(false) | CellHighlight::Selection => attributed_foreground(
+            theme.selection_foreground,
+            theme.selection_background,
+            false,
+            false,
+            cfg,
+            theme,
+        ),
+        CellHighlight::None => attributed_foreground(fg, bg, dim, bold, cfg, theme),
+    }
 }
 
 fn composed_bg_alpha(cfg: &kettle_config::Config) -> f64 {
@@ -9522,6 +9578,31 @@ fn background_has_wallpaper(cfg: &kettle_config::Config) -> bool {
         cfg.background_type,
         kettle_config::BackgroundType::Image | kettle_config::BackgroundType::Starfield
     )
+}
+
+/// Whether the back-most content proves alpha 1 at every surface pixel.
+/// Once an opaque base covers the surface, source-over compositing cannot make
+/// any later pixel translucent, regardless of the alpha of panes, glyphs,
+/// inline images, or overlays.
+fn final_scene_is_uniformly_opaque(
+    cfg: &kettle_config::Config,
+    opaque_wallpaper_covers_surface: bool,
+) -> bool {
+    if background_has_wallpaper(cfg) {
+        opaque_wallpaper_covers_surface
+    } else {
+        composed_bg_alpha(cfg) >= 1.0
+    }
+}
+
+/// A premultiplied scene needs the fullscreen unpremultiply pass only for a
+/// PostMultiplied surface and only while alpha can differ from one. At alpha 1,
+/// straight and premultiplied RGB are identical.
+fn needs_postmultiplied_presentation(
+    alpha_mode: wgpu::CompositeAlphaMode,
+    scene_is_uniformly_opaque: bool,
+) -> bool {
+    matches!(alpha_mode, wgpu::CompositeAlphaMode::PostMultiplied) && !scene_is_uniformly_opaque
 }
 
 fn desired_alpha_mode(
@@ -14380,7 +14461,7 @@ mod update_banner_top_tests {
 
 #[cfg(test)]
 mod background_image_geometry_tests {
-    use super::background_image_rect;
+    use super::{background_image_rect, rect_covers_surface};
 
     #[test]
     fn oversized_center_wallpaper_keeps_natural_size_and_crops() {
@@ -14392,6 +14473,24 @@ mod background_image_geometry_tests {
             background_image_rect("center", "right", "bottom", [100.0, 80.0], [140.0, 120.0]),
             [-40.0, -40.0, 140.0, 120.0]
         );
+    }
+
+    #[test]
+    fn wallpaper_coverage_requires_all_four_surface_edges() {
+        let surface = [100.0, 80.0];
+        assert!(rect_covers_surface([0.0, 0.0, 100.0, 80.0], surface));
+        assert!(rect_covers_surface([-20.0, -10.0, 140.0, 100.0], surface));
+        for rect in [
+            [1.0, 0.0, 100.0, 80.0],
+            [0.0, 1.0, 100.0, 80.0],
+            [0.0, 0.0, 99.0, 80.0],
+            [0.0, 0.0, 100.0, 79.0],
+        ] {
+            assert!(
+                !rect_covers_surface(rect, surface),
+                "a wallpaper missing any surface edge is not an opaque base: {rect:?}"
+            );
+        }
     }
 }
 
@@ -14705,11 +14804,75 @@ mod attributed_foreground_tests {
             );
         }
     }
+
+    #[test]
+    fn search_and_selection_foregrounds_ignore_underlying_dim_and_bold_attributes() {
+        let mut theme = Theme {
+            selection_background: Rgb::new(10, 20, 30),
+            selection_foreground: Rgb::new(90, 100, 110),
+            ..Theme::default()
+        };
+        // If BOLD reaches the highlight foreground, bold-is-bright remaps this
+        // exact search colour to the deliberately distinct bright slot.
+        theme.palette[2] = Rgb::new(20, 80, 20);
+        theme.palette[10] = Rgb::new(180, 250, 180);
+        let cfg = Config {
+            bold_is_bright: true,
+            search_background: Some(Rgb::new(40, 50, 60)),
+            search_foreground: Some(theme.palette[2]),
+            ..Config::default()
+        };
+        let base_fg = Rgb::new(200, 210, 220);
+        let base_bg = Rgb::new(1, 2, 3);
+
+        for (name, highlight, expected) in [
+            (
+                "active search",
+                CellHighlight::Search(true),
+                cfg.search_foreground.expect("search foreground"),
+            ),
+            (
+                "inactive search",
+                CellHighlight::Search(false),
+                theme.selection_foreground,
+            ),
+            (
+                "selection",
+                CellHighlight::Selection,
+                theme.selection_foreground,
+            ),
+        ] {
+            for (dim, bold) in [(false, false), (true, false), (false, true), (true, true)] {
+                assert_eq!(
+                    resolved_cell_foreground(base_fg, base_bg, highlight, dim, bold, &cfg, &theme,),
+                    expected,
+                    "{name} must override the cell's DIM={dim} BOLD={bold} attributes"
+                );
+            }
+        }
+
+        assert_ne!(
+            color::dim(
+                cfg.search_foreground.unwrap(),
+                cfg.search_background.unwrap()
+            ),
+            cfg.search_foreground.unwrap(),
+            "the DIM fixture must visibly change the configured search foreground"
+        );
+        assert_ne!(
+            color::bright_for_bold(cfg.search_foreground.unwrap(), &theme),
+            cfg.search_foreground.unwrap(),
+            "the bold-is-bright fixture must visibly remap the configured search foreground"
+        );
+    }
 }
 
 #[cfg(test)]
 mod background_darkness_tests {
-    use super::{composed_bg_alpha, desired_alpha_mode};
+    use super::{
+        composed_bg_alpha, desired_alpha_mode, final_scene_is_uniformly_opaque,
+        needs_postmultiplied_presentation,
+    };
     use kettle_config::{BackgroundType, Config};
 
     /// `background-darkness` runs see-through → covered, and the docs must say
@@ -14810,6 +14973,56 @@ mod background_darkness_tests {
         assert!(
             src.contains(&refresh),
             "frame ingress must apply a changed effective-alpha mode before acquisition"
+        );
+    }
+
+    #[test]
+    fn postmultiplied_presentation_skips_only_provably_opaque_scenes() {
+        let image = Config {
+            background_type: BackgroundType::Image,
+            background_opacity: 1.0,
+            background_darkness: 1.0,
+            ..Config::default()
+        };
+        let post = wgpu::CompositeAlphaMode::PostMultiplied;
+
+        let opaque_image = final_scene_is_uniformly_opaque(&image, true);
+        assert!(
+            opaque_image,
+            "an opaque fullscreen wallpaper proves alpha 1"
+        );
+        assert!(
+            !needs_postmultiplied_presentation(post, opaque_image),
+            "opaque wallpaper must skip the fullscreen allocation and conversion pass"
+        );
+
+        for reason in [
+            "transparent source texel",
+            "wallpaper does not cover the surface",
+        ] {
+            let possibly_translucent = final_scene_is_uniformly_opaque(&image, false);
+            assert!(
+                !possibly_translucent,
+                "fixture must be non-opaque: {reason}"
+            );
+            assert!(
+                needs_postmultiplied_presentation(post, possibly_translucent),
+                "{reason}: a premultiplied scene must still be converted before a PostMultiplied surface"
+            );
+        }
+
+        let translucent_solid = Config {
+            background_type: BackgroundType::Solid,
+            background_opacity: 0.5,
+            ..Config::default()
+        };
+        assert!(needs_postmultiplied_presentation(
+            post,
+            final_scene_is_uniformly_opaque(&translucent_solid, false)
+        ));
+        assert!(
+            !needs_postmultiplied_presentation(wgpu::CompositeAlphaMode::PreMultiplied, false),
+            "a PreMultiplied surface consumes the scene directly even when translucent"
         );
     }
 }

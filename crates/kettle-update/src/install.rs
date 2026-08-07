@@ -3444,6 +3444,7 @@ enum JournalEntryState {
 #[cfg(any(windows, target_os = "linux"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TransactionProgress {
+    ParentDirectoriesPersisted,
     BackupStreaming,
     BackupSynced,
     EntryPrepared,
@@ -3459,6 +3460,12 @@ struct Journal {
     target_version: String,
     phase: JournalPhase,
     backup_dir: String,
+    /// Prefix-relative directories created by this transaction. `default`
+    /// keeps schema-2 journals written before this field was introduced
+    /// recoverable; omitting the empty map also preserves their wire shape
+    /// until a transaction actually creates a directory.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    created_directories: std::collections::BTreeMap<String, u32>,
     entries: Vec<JournalEntry>,
 }
 
@@ -3544,11 +3551,18 @@ fn anchored_parent(
     relative: &Path,
     create_missing: bool,
 ) -> Result<AnchoredParent, UpdateError> {
-    anchored_parent_recording(prefix, relative, create_missing, &mut Vec::new())
+    anchored_parent_recording(
+        prefix,
+        relative,
+        create_missing,
+        &mut Vec::new(),
+        &mut |_| Ok(()),
+    )
 }
 
-/// As [`anchored_parent`], additionally appending each prefix-relative
-/// directory this call actually created to `created`.
+/// As [`anchored_parent`], calling `before_create` with each missing
+/// prefix-relative directory before its filesystem mutation, then appending
+/// each directory this call actually created to `created`.
 ///
 /// `fs::create_dir` returning `Ok(())` — as opposed to `AlreadyExists` — is the
 /// only authoritative answer to "did we create this?". Sampling `try_exists`
@@ -3560,6 +3574,7 @@ fn anchored_parent_recording(
     relative: &Path,
     create_missing: bool,
     created: &mut Vec<String>,
+    before_create: &mut impl FnMut(&str) -> Result<(), UpdateError>,
 ) -> Result<AnchoredParent, UpdateError> {
     validate_relative(relative)?;
     let mut directory = open_anchored_directory(prefix).map_err(|error| {
@@ -3588,15 +3603,22 @@ fn anchored_parent_recording(
                 {
                     use std::os::unix::fs::PermissionsExt as _;
 
+                    let created_relative = relative_to_string(&walked)?;
+                    before_create(&created_relative)?;
                     match fs::create_dir(&candidate) {
                         Ok(()) => {
                             fs::set_permissions(&candidate, fs::Permissions::from_mode(0o755))?;
                             // Persist each new directory entry before a journal
                             // can refer to content below it.
                             directory.sync_all()?;
-                            created.push(relative_to_string(&walked)?);
+                            created.push(created_relative);
                         }
-                        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+                        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                            return Err(UpdateError::Transaction(format!(
+                                "install path appeared while its creation was being journaled: {}",
+                                candidate.display()
+                            )));
+                        }
                         Err(error) => return Err(error.into()),
                     }
                     open_anchored_directory(&candidate)?
@@ -4038,11 +4060,18 @@ fn anchored_parent(
     relative: &Path,
     create_missing: bool,
 ) -> Result<AnchoredParent, UpdateError> {
-    anchored_parent_recording(prefix, relative, create_missing, &mut Vec::new())
+    anchored_parent_recording(
+        prefix,
+        relative,
+        create_missing,
+        &mut Vec::new(),
+        &mut |_| Ok(()),
+    )
 }
 
-/// As [`anchored_parent`], additionally appending each prefix-relative
-/// directory this call actually created to `created`.
+/// As [`anchored_parent`], calling `before_create` with each missing
+/// prefix-relative directory before its filesystem mutation, then appending
+/// each directory this call actually created to `created`.
 ///
 /// `fs::create_dir` returning `Ok(())` — as opposed to `AlreadyExists` — is the
 /// only authoritative answer to "did we create this?". Sampling `try_exists`
@@ -4054,6 +4083,7 @@ fn anchored_parent_recording(
     relative: &Path,
     create_missing: bool,
     created: &mut Vec<String>,
+    before_create: &mut impl FnMut(&str) -> Result<(), UpdateError>,
 ) -> Result<AnchoredParent, UpdateError> {
     validate_relative(relative)?;
     let prefix = std::path::absolute(prefix)?;
@@ -4098,9 +4128,16 @@ fn anchored_parent_recording(
                 Err(UpdateError::Io(error))
                     if create_missing && error.kind() == std::io::ErrorKind::NotFound =>
                 {
+                    let created_relative = relative_to_string(&walked)?;
+                    before_create(&created_relative)?;
                     match fs::create_dir(&path) {
-                        Ok(()) => created.push(relative_to_string(&walked)?),
-                        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+                        Ok(()) => created.push(created_relative),
+                        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                            return Err(UpdateError::Transaction(format!(
+                                "install path appeared while its creation was being journaled: {}",
+                                path.display()
+                            )));
+                        }
                         Err(error) => return Err(error.into()),
                     }
                     open_anchored_directory(&path)?
@@ -4458,17 +4495,6 @@ struct Transaction {
     backup_dir: PathBuf,
     journal: Journal,
     preflight: Option<std::collections::HashMap<String, PreflightDestination>>,
-    /// Prefix-relative directories this transaction created, and the mode they
-    /// were created with.
-    ///
-    /// Publishing a file creates its missing parents. Nothing recorded that, so
-    /// a transaction that created a directory and then rolled back left it on
-    /// disk: the file was restored, the directory was not, and the Linux
-    /// provenance regeneration on the next attempt saw it as pre-existing and
-    /// never claimed it. Rollback removes these (deepest first, only while
-    /// empty) and the provenance writer reads them, so "who created this
-    /// directory" has one answer instead of a guess made before the writes.
-    created_directories: std::collections::BTreeMap<String, u32>,
 }
 
 #[cfg(any(windows, target_os = "linux"))]
@@ -4533,10 +4559,10 @@ impl Transaction {
                 target_version: target_version.to_string(),
                 phase: JournalPhase::Prepared,
                 backup_dir: backup_name,
+                created_directories: std::collections::BTreeMap::new(),
                 entries: Vec::new(),
             },
             preflight: None,
-            created_directories: std::collections::BTreeMap::new(),
         };
         if let Err(error) = transaction.persist_journal() {
             let _ = remove_new_backup_dir_checked(prefix, &transaction.backup_dir);
@@ -4679,18 +4705,48 @@ impl Transaction {
                 "transaction replacement exceeds the safety quota".into(),
             ));
         }
-        // Record what the walk created BEFORE propagating any error from it.
+        // Record each missing parent durably BEFORE creating it, and record
+        // what the walk actually created before propagating any error from it.
         //
-        // `?` on the walk discarded the vector, so a failure partway through a
-        // multi-level create — ENOSPC on the second component of
-        // `share/icons/hicolor/16x16`, say — left the first component on disk
-        // with nothing recording it, which is exactly the orphan this whole
-        // mechanism exists to prevent. Measured on an inode-capped tmpfs: 7
-        // directories leaked with 6 recorded.
+        // Persisting only after the walk returned left a process-kill window
+        // between `create_dir` and the journal write. A write-ahead intent is
+        // safe to replay: if creation never happened there is nothing to
+        // remove, and rollback removes a present directory only after file
+        // restoration and only while it is empty.
         let mut created = Vec::new();
-        let anchored = anchored_parent_recording(&self.prefix, relative, true, &mut created);
-        for path in created {
-            self.created_directories.insert(path, 0o755);
+        let prefix = self.prefix.clone();
+        let anchored = {
+            let mut persist_creation_intent = |path: &str| {
+                if self.journal.created_directories.contains_key(path) {
+                    return Ok(());
+                }
+                if self.journal.created_directories.len() >= MAX_ARCHIVE_ENTRIES {
+                    return Err(UpdateError::Transaction(
+                        "transaction directory set exceeds the safety limit".into(),
+                    ));
+                }
+                self.journal
+                    .created_directories
+                    .insert(path.to_string(), 0o755);
+                if let Err(error) = self.persist_journal() {
+                    self.journal.created_directories.remove(path);
+                    return Err(error);
+                }
+                Ok(())
+            };
+            anchored_parent_recording(
+                &prefix,
+                relative,
+                true,
+                &mut created,
+                &mut persist_creation_intent,
+            )
+        };
+        if !created.is_empty() {
+            // The map was already fsync-backed before each corresponding
+            // create. This seam exists specifically to simulate a kill after
+            // the filesystem mutation and before destination publication.
+            progress(TransactionProgress::ParentDirectoriesPersisted);
         }
         let destination_parent = anchored?;
         let destination = destination_parent.destination(relative)?;
@@ -4787,7 +4843,7 @@ impl Transaction {
     /// in path order, with the mode they were created with.
     #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     fn created_directories(&self) -> &std::collections::BTreeMap<String, u32> {
-        &self.created_directories
+        &self.journal.created_directories
     }
 
     fn rollback(&mut self) -> Result<(), UpdateError> {
@@ -4824,14 +4880,11 @@ impl Transaction {
     /// protect; `remove_dir` refuses that case for us. Any other failure leaves
     /// the directory exactly as it is, which is the pre-existing behaviour.
     ///
-    /// Residual: this covers rollback within the process that did the writing.
-    /// A process killed mid-update leaves its creations to `recover_transaction`,
-    /// which rebuilds the transaction from the journal — and the journal does not
-    /// record them, because widening its schema to carry them would make a
-    /// journal unreadable to the release that might have to recover it. Such a
-    /// directory stays behind unowned, exactly as it did before this existed.
     fn remove_created_directories(&mut self) {
-        let created = std::mem::take(&mut self.created_directories);
+        // Do not persist the in-memory take: if recovery is interrupted while
+        // removing the deepest directories, the on-disk journal must retain the
+        // complete idempotent removal set for the next startup.
+        let created = std::mem::take(&mut self.journal.created_directories);
         // Deepest first: `share/kettle/shell-integration` has to go before
         // `share/kettle`, and reverse path order gives that for free because a
         // parent is a prefix of its children.
@@ -4923,9 +4976,6 @@ fn confirm_committed_transaction(
         backup_dir,
         journal,
         preflight: None,
-        // Recovery reconstructs a transaction from its journal, which does not
-        // record directory creations; see `remove_created_directories`.
-        created_directories: std::collections::BTreeMap::new(),
     };
     transaction.finish_cleanup()?;
     Ok(true)
@@ -4971,9 +5021,6 @@ fn recover_transaction(prefix: &Path) -> Result<(), UpdateError> {
         backup_dir,
         journal,
         preflight: None,
-        // Recovery reconstructs a transaction from its journal, which does not
-        // record directory creations; see `remove_created_directories`.
-        created_directories: std::collections::BTreeMap::new(),
     };
     if transaction.journal.phase == JournalPhase::Committed {
         Err(UpdateError::Transaction(format!(
@@ -5251,6 +5298,20 @@ fn validate_journal(journal: &Journal) -> Result<(), UpdateError> {
         return Err(UpdateError::Transaction(
             "update journal failed validation".to_string(),
         ));
+    }
+    if journal.created_directories.len() > MAX_ARCHIVE_ENTRIES {
+        return Err(UpdateError::Transaction(
+            "update journal directory set exceeds the safety limit".into(),
+        ));
+    }
+    let mut directory_destinations = std::collections::HashSet::new();
+    for (relative, mode) in &journal.created_directories {
+        validate_relative(Path::new(relative))?;
+        if *mode != 0o755 || !directory_destinations.insert(relative.to_ascii_lowercase()) {
+            return Err(UpdateError::Transaction(format!(
+                "invalid created-directory journal entry {relative}"
+            )));
+        }
     }
     let mut destinations = std::collections::HashSet::new();
     let mut replacement_total = 0_u64;
@@ -6813,6 +6874,77 @@ mod tests {
         }
         recover_transaction(root.path()).unwrap();
         assert_eq!(fs::read(root.path().join("value")).unwrap(), b"before");
+    }
+
+    #[cfg(any(windows, target_os = "linux"))]
+    #[test]
+    fn crash_recovery_removes_every_persisted_created_parent_and_preserves_preexisting_siblings() {
+        let root = test_tempdir();
+        fs::create_dir(root.path().join("existing")).unwrap();
+        fs::create_dir(root.path().join("unrelated-empty")).unwrap();
+
+        let mut transaction = Transaction::begin(root.path(), "99.0.0").unwrap();
+        let stopped = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            transaction
+                .install_bytes_with_progress_and_post_publish(
+                    Path::new("existing/new/deep/value"),
+                    b"replacement",
+                    None,
+                    |progress| {
+                        if progress == TransactionProgress::ParentDirectoriesPersisted {
+                            panic!("simulated stop after destination parents were persisted");
+                        }
+                    },
+                    || Ok(()),
+                )
+                .unwrap();
+        }));
+        assert!(
+            stopped.is_err(),
+            "the directory-persistence seam must be reached"
+        );
+        assert!(root.path().join("existing/new/deep").is_dir());
+        assert!(!root.path().join("existing/new/deep/value").exists());
+
+        let persisted: Journal = serde_json::from_slice(
+            &fs::read(root.path().join(".kettle-update-journal.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            persisted
+                .created_directories
+                .keys()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            ["existing/new", "existing/new/deep"],
+            "every newly created ancestor, and no pre-existing ancestor, must be durable"
+        );
+        std::mem::forget(transaction);
+
+        recover_transaction(root.path()).unwrap();
+        assert!(root.path().join("existing").is_dir());
+        assert!(!root.path().join("existing/new").exists());
+        assert!(
+            root.path().join("unrelated-empty").is_dir(),
+            "rollback must not infer ownership from emptiness"
+        );
+        assert!(!root.path().join(".kettle-update-journal.json").exists());
+    }
+
+    #[cfg(any(windows, target_os = "linux"))]
+    #[test]
+    fn schema_two_journal_without_created_directories_remains_recoverable() {
+        let root = test_tempdir();
+        let mut transaction = Transaction::begin(root.path(), "99.0.0").unwrap();
+        let mut legacy_shape = serde_json::to_value(&transaction.journal).unwrap();
+        legacy_shape
+            .as_object_mut()
+            .unwrap()
+            .remove("created_directories");
+        let decoded: Journal = serde_json::from_value(legacy_shape).unwrap();
+        assert!(decoded.created_directories.is_empty());
+        validate_journal(&decoded).unwrap();
+        transaction.rollback().unwrap();
     }
 
     #[cfg(any(windows, target_os = "linux"))]
