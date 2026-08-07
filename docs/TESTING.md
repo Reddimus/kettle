@@ -35,6 +35,13 @@ stubs. It prints other-OS legs as explicitly not applicable and claims only a
 current-OS pass; cross-platform release evidence still requires the native CI
 matrix.
 
+Shell-integration changes also run `just shell-integration-check`. Unlike the
+CLI smoke's source-text checks, this executes the shipped snippets: macOS uses
+interactive `zsh -f` with `PROMPT_SUBST` off and its system Bash 3.2, while
+Windows runs the PowerShell prompt-status and PSReadLine binding fixture under
+each installed PowerShell host. Other hosts run the interpreters they have and
+print explicit skips for native legs that belong to the CI matrix.
+
 The three patched crates under `vendor/` are explicitly excluded from the
 product workspace, so the root gates exercise their public Kettle integration
 but do not run package-owned unit targets. A separate validation workspace and
@@ -1292,12 +1299,14 @@ name the shape of bug each pass caught.
 - The **`--screenshot` end-to-end** +
   **`--screenshot-menu` visual regression** smokes on Linux
   (both run the release binary under `LIBGL_ALWAYS_SOFTWARE=1`).
+- Native shell-integration fixtures: stock interactive `zsh -f` and system
+  Bash 3.2 on macOS, plus PowerShell prompt/Enter behavior on Windows.
 - A CLI smoke on every OS: `--version` SHA-regex,
   `--check-config` lead line, `--config-path`, `--list-themes`
   > 400, `--list-actions` > 50, `--list-keybinds` > 40,
   `--list-ssh-hosts` empty fallback, `--print-default-config`
-  round-trip, `--shell-integration <bash|zsh|fish>` snippets,
-  `--print-completions <bash|zsh|fish>` scripts,
+  round-trip, `--shell-integration <bash|zsh|fish|powershell>` snippets,
+  `--print-completions <bash|zsh|fish|powershell>` scripts,
   `--config /<typo>` + `--working-directory /<typo>` hard-fail
   exit codes, happy-path basename round-trip
   (Windows path-translation parity).

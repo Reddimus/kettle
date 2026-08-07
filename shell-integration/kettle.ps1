@@ -37,6 +37,18 @@ if (-not $global:__kettle_prompt_installed) {
     $global:__kettle_original_prompt = (Get-Item function:prompt -ErrorAction SilentlyContinue).ScriptBlock
 
     function global:prompt {
+        # Invoke the user's prompt before doing anything that changes `$?`.
+        # Starship, oh-my-posh, and other prompts read it as their first
+        # operation to distinguish a failed command from a successful one.
+        try {
+            $rendered = & $global:__kettle_original_prompt
+        } catch {
+            $rendered = $null
+        }
+        if ($null -eq $rendered) {
+            $rendered = "PS $($ExecutionContext.SessionState.Path.CurrentLocation)$('>' * ($NestedPromptLevel + 1)) "
+        }
+
         $code = $LASTEXITCODE
         if ($null -eq $code) { $code = 0 }
         $esc = [char]27
@@ -61,32 +73,32 @@ if (-not $global:__kettle_prompt_installed) {
             if (-not $enc.StartsWith('/')) { $enc = "/$enc" }
             [Console]::Write("$esc]7;file://$env:COMPUTERNAME$enc$bel")
         }
-        # Render the user's original prompt (or PowerShell's built-in default
-        # if none was set). Guarded: a prompt that THROWS would otherwise make
-        # PowerShell re-invoke it endlessly (no prompt, no input), so on any
-        # failure fall back to the built-in default rather than loop.
-        $default = "PS $($ExecutionContext.SessionState.Path.CurrentLocation)$('>' * ($NestedPromptLevel + 1)) "
-        $rendered = if ($null -ne $global:__kettle_original_prompt) {
-            try { & $global:__kettle_original_prompt } catch { $default }
-        } else {
-            $default
-        }
         # B = end of prompt / input start. Emitted after the rendered
         # prompt text so the marker lands right where the user starts
-        # typing.
-        [Console]::Write("$esc]133;B$bel")
-        return $rendered
+        # typing. Returning it with the prompt is necessary: Console.Write
+        # runs before PowerShell displays the function's returned text.
+        return "$rendered$esc]133;B$bel"
     }
 
     # C = command started executing. PSReadLine (the default in
     # PowerShell 5.1+ since Windows 10 1809; bundled with PS 7) fires
-    # AcceptLine when the user hits Enter — hook it to emit OSC 133;C
-    # right before the command runs. Silently skipped if PSReadLine
-    # isn't loaded (rare; the user would have disabled it on purpose).
+    # AcceptLine when the user hits Enter — hook the stock binding to emit
+    # OSC 133;C right before the command runs. PSReadLine reports a custom
+    # binding's name but cannot return its ScriptBlock, so replacing one
+    # would be irreversible; leave every non-stock Enter binding untouched.
+    # Silently skipped if PSReadLine isn't loaded (rare; the user would have
+    # disabled it on purpose).
     if (Get-Module -ListAvailable PSReadLine) {
-        Set-PSReadLineKeyHandler -Key Enter -ScriptBlock {
-            [Console]::Write([char]27 + ']133;C' + [char]7)
-            [Microsoft.PowerShell.PSConsoleReadLine]::AcceptLine()
+        & {
+            $enterHandler = Get-PSReadLineKeyHandler -Bound |
+                Where-Object { $_.Key -eq 'Enter' } |
+                Select-Object -First 1
+            if ($null -ne $enterHandler -and $enterHandler.Function -eq 'AcceptLine') {
+                Set-PSReadLineKeyHandler -Key Enter -ScriptBlock {
+                    [Console]::Write([char]27 + ']133;C' + [char]7)
+                    [Microsoft.PowerShell.PSConsoleReadLine]::AcceptLine()
+                }
+            }
         }
     }
 
