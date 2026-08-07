@@ -9,6 +9,8 @@ use accesskit::{
     DeactivationHandler, Node, NodeId, Role, TextPosition, TextSelection, Tree, TreeId, TreeUpdate,
 };
 use anyhow::Result;
+#[cfg(any(target_os = "macos", test))]
+use kettle_config::MacosOptionAsAlt;
 use kettle_config::{
     Action, Bindings, Config, Key as KKey, Mods, Osc52, StatusBarMode, TabBarMode, TabBarPos,
     Trigger,
@@ -46,6 +48,51 @@ const ACCESSIBILITY_UPDATE_INTERVAL: std::time::Duration = std::time::Duration::
 
 fn osc52_copy_is_available(policy: Osc52, clipboard_available: bool) -> bool {
     policy.can_copy() && clipboard_available
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn macos_effective_modifiers(
+    mut raw: ModifiersState,
+    policy: MacosOptionAsAlt,
+    left_option_pressed: bool,
+    right_option_pressed: bool,
+) -> ModifiersState {
+    if !raw.alt_key() || raw.control_key() || raw.super_key() {
+        return raw;
+    }
+    let option_is_alt = match policy {
+        MacosOptionAsAlt::None => false,
+        MacosOptionAsAlt::Left => left_option_pressed,
+        MacosOptionAsAlt::Right => right_option_pressed,
+        MacosOptionAsAlt::Both => true,
+    };
+    if !option_is_alt {
+        raw.remove(ModifiersState::ALT);
+    }
+    raw
+}
+
+#[cfg(target_os = "macos")]
+fn set_macos_option_as_alt(window: &Window, policy: MacosOptionAsAlt) {
+    use winit::platform::macos::{OptionAsAlt, WindowExtMacOS as _};
+
+    let policy = match policy {
+        MacosOptionAsAlt::None => OptionAsAlt::None,
+        MacosOptionAsAlt::Left => OptionAsAlt::OnlyLeft,
+        MacosOptionAsAlt::Right => OptionAsAlt::OnlyRight,
+        MacosOptionAsAlt::Both => OptionAsAlt::Both,
+    };
+    window.set_option_as_alt(policy);
+}
+
+#[cfg(target_os = "macos")]
+fn refresh_macos_modifiers(ws: &mut WindowState, policy: MacosOptionAsAlt) {
+    ws.mods = macos_effective_modifiers(
+        ws.macos_raw_mods,
+        policy,
+        ws.macos_left_option_pressed,
+        ws.macos_right_option_pressed,
+    );
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -14512,6 +14559,13 @@ impl App {
     }
 
     fn apply_reloaded_config(&mut self, ws: &mut WindowState, font_size_changed: bool) {
+        #[cfg(target_os = "macos")]
+        {
+            refresh_macos_modifiers(ws, self.cfg.macos_option_as_alt);
+            if let Some(window) = &ws.window {
+                set_macos_option_as_alt(window, self.cfg.macos_option_as_alt);
+            }
+        }
         ws.mux.set_osc52_copy_allowed(osc52_copy_is_available(
             self.cfg.osc52,
             self.clipboard.is_some(),
@@ -20604,6 +20658,8 @@ impl App {
     #[cfg_attr(not(target_os = "macos"), allow(unused_variables))]
     fn apply_post_create(&self, window: &Window) {
         window.set_ime_allowed(true);
+        #[cfg(target_os = "macos")]
+        set_macos_option_as_alt(window, self.cfg.macos_option_as_alt);
         // Terminator parity, terminatorlib/config.py:81
         // `sticky`: show window on every workspace. macOS exposes
         // this as a Window-level method via `WindowExtMacOS`, so
@@ -22428,7 +22484,19 @@ impl App {
                 self.apply_os_theme_preference(ws, theme);
             }
             WindowEvent::ModifiersChanged(m) => {
-                ws.mods = m.state();
+                #[cfg(not(target_os = "macos"))]
+                {
+                    ws.mods = m.state();
+                }
+                #[cfg(target_os = "macos")]
+                {
+                    use winit::keyboard::ModifiersKeyState;
+
+                    ws.macos_raw_mods = m.state();
+                    ws.macos_left_option_pressed = m.lalt_state() == ModifiersKeyState::Pressed;
+                    ws.macos_right_option_pressed = m.ralt_state() == ModifiersKeyState::Pressed;
+                    refresh_macos_modifiers(ws, self.cfg.macos_option_as_alt);
+                }
                 // Modifier change can flip the URL hover affordance from
                 // text-I-beam to pointing-hand without the mouse moving
                 // (Ctrl held = "this click would open"). Re-sync the
@@ -24917,13 +24985,14 @@ mod tests {
         context_menu_scroll_for_highlight, context_menu_snapshot_reuse_safe,
         context_menu_surface_can_fit_row, count_rows_fitting, ctl_input_error, filter_disabled,
         find_menu_row_y, fit_context_menu_row, input_rejection_message, local_paste_within_limit,
-        modal_swallows_pointer, osc52_clipboard_channel, output_generation_advanced,
-        output_wakeup_needs_paint, pane_cursor_blinking_with, pane_snapshot_keys_match,
-        parse_remote_command_batch, production_source, rank_layouts, sanitize_native_window_title,
-        sanitize_title, selection_kind, session_sweep_due, should_notify_input_rejection,
-        should_poll_remote_window, should_restore_session, should_reveal_after_renderer_init,
-        stage_applied_remote_probe, stage_output_generations_for_frame, stage_remote_targets,
-        startup_inner_size_px, typeahead_match,
+        macos_effective_modifiers, modal_swallows_pointer, osc52_clipboard_channel,
+        output_generation_advanced, output_wakeup_needs_paint, pane_cursor_blinking_with,
+        pane_snapshot_keys_match, parse_remote_command_batch, production_source, rank_layouts,
+        sanitize_native_window_title, sanitize_title, selection_kind, session_sweep_due,
+        should_notify_input_rejection, should_poll_remote_window, should_restore_session,
+        should_reveal_after_renderer_init, stage_applied_remote_probe,
+        stage_output_generations_for_frame, stage_remote_targets, startup_inner_size_px,
+        typeahead_match,
     };
     use crate::mux::{Dir, Mux, PaneInputResult, PaneTitleOrigin};
     use crate::window_state::WindowState;
@@ -24932,6 +25001,56 @@ mod tests {
     use kettle_render::{ContextMenuRow, FrameOutcome, PaneSnapshot};
     use std::sync::Arc;
     use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+
+    #[test]
+    fn macos_option_modifier_is_masked_per_side_and_mode() {
+        use kettle_config::MacosOptionAsAlt;
+        use winit::keyboard::ModifiersState;
+
+        let raw = ModifiersState::ALT | ModifiersState::SHIFT;
+        let masked = ModifiersState::SHIFT;
+        for (policy, left, right, expected) in [
+            (MacosOptionAsAlt::None, true, false, masked),
+            (MacosOptionAsAlt::None, false, true, masked),
+            (MacosOptionAsAlt::Left, true, false, raw),
+            (MacosOptionAsAlt::Left, false, true, masked),
+            (MacosOptionAsAlt::Right, true, false, masked),
+            (MacosOptionAsAlt::Right, false, true, raw),
+            (MacosOptionAsAlt::Both, true, false, raw),
+            (MacosOptionAsAlt::Both, false, true, raw),
+        ] {
+            assert_eq!(
+                macos_effective_modifiers(raw, policy, left, right),
+                expected,
+                "policy={policy:?}, left={left}, right={right}"
+            );
+        }
+    }
+
+    #[test]
+    fn control_and_super_keep_option_available_for_chords() {
+        use kettle_config::MacosOptionAsAlt;
+        use winit::keyboard::ModifiersState;
+
+        for chord in [
+            ModifiersState::CONTROL | ModifiersState::ALT,
+            ModifiersState::SUPER | ModifiersState::ALT,
+            ModifiersState::CONTROL | ModifiersState::SUPER | ModifiersState::ALT,
+        ] {
+            for policy in [
+                MacosOptionAsAlt::None,
+                MacosOptionAsAlt::Left,
+                MacosOptionAsAlt::Right,
+                MacosOptionAsAlt::Both,
+            ] {
+                assert_eq!(
+                    macos_effective_modifiers(chord, policy, false, false),
+                    chord,
+                    "Ctrl/Super suppresses Option composition for {policy:?}"
+                );
+            }
+        }
+    }
 
     /// A modal question has to outrank the overlay that asked it. Rebinding a
     /// key onto a chord that is already taken raises a confirm dialog from

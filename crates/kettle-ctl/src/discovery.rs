@@ -31,6 +31,8 @@ use windows_sys::Win32::Security::{PSECURITY_DESCRIPTOR, PSID};
 /// corrupt same-user file cannot turn discovery into an unbounded allocation.
 const MAX_REGISTRY_ENTRY_BYTES: usize = 16 * 1024;
 const MAX_VERSION_BYTES: usize = 256;
+#[cfg(unix)]
+const MAX_UNIX_SOCKET_PATH_BYTES: usize = 100;
 /// A normal desktop has only a handful of live control servers. Bound the
 /// directory walk so a corrupt or hostile same-user registry cannot make
 /// every discovery attempt enumerate an arbitrarily large directory.
@@ -147,26 +149,68 @@ pub fn default_endpoint(dir: &std::path::Path, pid: u32) -> String {
     }
     #[cfg(unix)]
     {
-        use std::os::unix::ffi::OsStrExt as _;
-
         let direct = dir.join(format!("ctl-{pid}.sock"));
         // Leave headroom below the tightest known sun_path capacity (104 on
         // BSD/macOS) for the NUL terminator, matching activation.rs's margin.
-        if direct.as_os_str().as_bytes().len() <= 100 {
+        if unix_socket_path_fits(&direct) {
             return direct.to_string_lossy().into_owned();
         }
-        let hash = stable_hash(
-            dir.as_os_str()
-                .as_bytes()
-                .iter()
-                .copied()
-                .chain(pid.to_le_bytes()),
-        );
-        private_temp_ctl_dir()
-            .join(format!("ctl-{hash:016x}.sock"))
+        fallback_ctl_endpoint(dir, pid, &private_temp_ctl_dir())
             .to_string_lossy()
             .into_owned()
     }
+}
+
+/// Whether `path` still fits `sun_path` AFTER the lossy conversion this module
+/// performs on the way out.
+///
+/// Measuring only the raw `OsStr` bytes is not sufficient: the endpoint is
+/// returned as a `String` via `to_string_lossy`, and every invalid UTF-8 byte
+/// expands to the three-byte replacement character. A `TMPDIR` carrying enough
+/// non-UTF-8 bytes could therefore pass a raw-length check and still yield an
+/// overlong -- and different -- path to `bind(2)`. Check both so the returned
+/// endpoint is the thing that was actually validated.
+#[cfg(unix)]
+fn unix_socket_path_fits(path: &std::path::Path) -> bool {
+    use std::os::unix::ffi::OsStrExt as _;
+
+    path.as_os_str().as_bytes().len() <= MAX_UNIX_SOCKET_PATH_BYTES
+        && path.to_string_lossy().len() <= MAX_UNIX_SOCKET_PATH_BYTES
+}
+
+#[cfg(unix)]
+fn fallback_ctl_endpoint(
+    dir: &std::path::Path,
+    pid: u32,
+    private_temp_dir: &std::path::Path,
+) -> PathBuf {
+    use std::os::unix::ffi::OsStrExt as _;
+
+    let hash = stable_hash(
+        dir.as_os_str()
+            .as_bytes()
+            .iter()
+            .copied()
+            .chain(pid.to_le_bytes()),
+    );
+    let file = format!("ctl-{hash:016x}.sock");
+    let candidate = private_temp_dir.join(&file);
+    if unix_socket_path_fits(&candidate) {
+        return candidate;
+    }
+
+    // TMPDIR is user-controlled and can itself be too long for sun_path. The
+    // fixed Unix temp root gives the same uid-private directory semantics while
+    // keeping the completed endpoint short; validate it too so neither branch
+    // can silently hand an overlong path to bind(2).
+    let short = PathBuf::from("/tmp")
+        .join(format!("kettle-{}", unsafe { libc::geteuid() }))
+        .join(file);
+    assert!(
+        unix_socket_path_fits(&short),
+        "built-in control socket fallback exceeds sun_path"
+    );
+    short
 }
 
 /// The private, uid-namespaced temp dir used for the length-fallback socket
@@ -630,6 +674,34 @@ fn path_owner_sid(path: &std::path::Path) -> Option<OwnedSid> {
 
 #[cfg(test)]
 mod tests {
+
+    // The raw bytes fit sun_path, but `to_string_lossy` expands each invalid
+    // byte to a three-byte replacement character, so the path that would
+    // actually reach bind(2) is longer than the one that was measured.
+    #[cfg(unix)]
+    #[test]
+    fn non_utf8_paths_are_measured_after_lossy_conversion() {
+        use std::ffi::OsString;
+        use std::os::unix::ffi::OsStringExt as _;
+
+        let mut raw = b"/tmp/".to_vec();
+        raw.extend(std::iter::repeat_n(0xffu8, 90));
+        let path = PathBuf::from(OsString::from_vec(raw));
+
+        use std::os::unix::ffi::OsStrExt as _;
+        assert!(
+            path.as_os_str().as_bytes().len() <= MAX_UNIX_SOCKET_PATH_BYTES,
+            "fixture must fit the raw byte budget"
+        );
+        assert!(
+            path.to_string_lossy().len() > MAX_UNIX_SOCKET_PATH_BYTES,
+            "fixture must overflow once converted"
+        );
+        assert!(
+            !unix_socket_path_fits(&path),
+            "a path that overflows after lossy conversion must be rejected"
+        );
+    }
     use super::*;
 
     #[test]
@@ -908,6 +980,34 @@ mod tests {
         // Distinct dirs must not collide on the same fallback socket path.
         let other_long = long.join("nested-but-still-way-too-long-for-a-unix-socket-path");
         assert_ne!(endpoint, default_endpoint(&other_long, 123456));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn fallback_endpoint_stays_within_sun_path_when_tmpdir_is_long() {
+        let registry = std::path::PathBuf::from(
+            "/home/example.com/first.last/.local/state/kettle/ctl-with-an-overlong-registry-path",
+        );
+        let injected_private_temp = std::path::PathBuf::from("/tmp")
+            .join("an-unusually-long-tmpdir-component".repeat(4))
+            .join("kettle-1234");
+        let unchecked = injected_private_temp.join("ctl-0123456789abcdef.sock");
+        assert!(
+            !unix_socket_path_fits(&unchecked),
+            "test TMPDIR fixture must overflow sun_path"
+        );
+
+        let endpoint = fallback_ctl_endpoint(&registry, 123456, &injected_private_temp);
+        assert!(
+            unix_socket_path_fits(&endpoint),
+            "completed fallback must fit sun_path: {endpoint:?}"
+        );
+        assert!(
+            endpoint.starts_with(
+                std::path::Path::new("/tmp").join(format!("kettle-{}", unsafe { libc::geteuid() }))
+            ),
+            "an overlong TMPDIR must fall back to the fixed short Unix temp root"
+        );
     }
 
     #[cfg(windows)]

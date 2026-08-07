@@ -486,6 +486,12 @@ pub(crate) struct WindowState {
     /// local query without persisting terminal contents to disk.
     pub(crate) search_queries: std::collections::HashMap<u64, String>,
     pub(crate) mods: ModifiersState,
+    #[cfg(target_os = "macos")]
+    pub(crate) macos_raw_mods: ModifiersState,
+    #[cfg(target_os = "macos")]
+    pub(crate) macos_left_option_pressed: bool,
+    #[cfg(target_os = "macos")]
+    pub(crate) macos_right_option_pressed: bool,
     /// Physical keys whose press was consumed by Kettle UI/keybindings. Their
     /// matching release must not leak to a Kitty-protocol client after the UI
     /// state that consumed the press has already closed.
@@ -776,6 +782,12 @@ impl WindowState {
             search: SearchState::default(),
             search_queries: std::collections::HashMap::new(),
             mods: ModifiersState::empty(),
+            #[cfg(target_os = "macos")]
+            macos_raw_mods: ModifiersState::empty(),
+            #[cfg(target_os = "macos")]
+            macos_left_option_pressed: false,
+            #[cfg(target_os = "macos")]
+            macos_right_option_pressed: false,
             suppressed_key_releases: std::collections::HashSet::new(),
             ime_preedit: None,
             ime_preedit_owner: None,

@@ -713,31 +713,7 @@ fn stable_hash(bytes: impl IntoIterator<Item = u8>) -> u64 {
     })
 }
 
-fn ensure_private_dir(dir: &Path) -> io::Result<()> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::{DirBuilderExt as _, MetadataExt as _, PermissionsExt as _};
-
-        if let Some(parent) = dir.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        std::fs::DirBuilder::new()
-            .recursive(true)
-            .mode(0o700)
-            .create(dir)?;
-        let metadata = std::fs::symlink_metadata(dir)?;
-        if !metadata.file_type().is_dir() || metadata.uid() != unsafe { libc::geteuid() } {
-            return Err(io::Error::new(
-                io::ErrorKind::PermissionDenied,
-                "activation directory is not owned by the current user",
-            ));
-        }
-        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?;
-    }
-    #[cfg(not(unix))]
-    std::fs::create_dir_all(dir)?;
-    Ok(())
-}
+use crate::ensure_private_dir;
 
 #[cfg(test)]
 mod tests {

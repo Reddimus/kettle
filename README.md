@@ -307,17 +307,26 @@ commands, environment values, or user paths. `RUST_LOG` controls both `log` and
 | Split (auto-pick) | `Ctrl+Shift+A` | New window | `Ctrl+Shift+I` |
 | Focus next/prev pane | `Ctrl+Shift+N` / `P` | Close window | `Ctrl+Shift+Q` |
 | Next/prev tab | `Ctrl+PgDn` / `PgUp` | Move tab left/right | `Ctrl+Shift+PgUp` / `PgDn` |
-| Goto tab 1..9 | `Alt+1..9` | Zoom / unzoom pane | `Ctrl+Shift+X` |
+| Goto tab 1..9 | `Alt+1..9` (`Cmd+1..9` on macOS) | Zoom / unzoom pane | `Ctrl+Shift+X` |
 | Copy / Paste | `Ctrl+Shift+C` / `V` | **Search** | **`Ctrl+Shift+F`** |
 | **SSH launcher** | **`Ctrl+Shift+S`** | **Command palette** | **`Ctrl+Shift+K`** |
 | **Quick-select hints** | **`Ctrl+Shift+H`** | Fullscreen | `F11` |
 | Jump prev/next prompt | `Ctrl+Up` / `Down` | Resize split | `Shift+Arrows` |
-| Directional focus | `Alt+Arrows` | Scroll to top/bottom | `Ctrl+Home` / `End` |
+| Directional focus | `Alt+Arrows` (`Ctrl+Cmd+Arrows` on macOS) | Scroll to top/bottom | `Ctrl+Home` / `End` |
 | Select to top/bottom | `Shift+Home` / `End` | Select all | command palette (`select_all`) |
 | Scroll line / page | `Ctrl+Shift+Up/Down` / `Shift+PgUp/PgDn` | Reset font size | `Ctrl+0` |
-| Font bigger / smaller | `Ctrl+` `+` / `-` | Broadcast on/off | `Super+G` / `Shift+Super+G` (`Ctrl+Shift+G` on Windows, where `Win+G` opens Game Bar) |
+| Font bigger / smaller | `Ctrl+` `+` / `-` | Broadcast on/off | `Ctrl+Cmd+B` / `Ctrl+Shift+Cmd+B` (macOS), `Ctrl+Shift+G` / `Shift+Super+G` (Windows), `Super+G` / `Shift+Super+G` (elsewhere) |
 | Reload config | `Ctrl+Shift+M` | Reset terminal | `Ctrl+Shift+R` |
 | New tab: Nth dropdown shell | `Ctrl+Shift+1..9` | Settings panel | `Ctrl+,` |
+
+On macOS, native Cmd chords are additive; every portable `Ctrl+Shift` default
+above remains bound too. Cmd+C/V copy and paste, Cmd+T opens a tab, Cmd+N opens
+a window, Cmd+W closes the focused pane/surface, Cmd+F searches, Cmd+K opens the
+command palette, Cmd+, opens Settings, Cmd+=/Cmd++/Cmd+-/Cmd+0 change font size,
+Cmd+1..9 selects a tab, and Cmd+Up/Down jumps between shell prompts. Bare
+Option+arrows are left to the PTY for word motion. Set
+`macos-option-as-alt = left|right|both` when one or both Option keys should act
+as terminal Alt instead of composing macOS text; the default is `none`.
 
 Full effective keymap with your `--config` applied: `kettle --list-keybinds`.
 `Ctrl+Shift+I` opens the new window **in-process** (one kettle hosts them
