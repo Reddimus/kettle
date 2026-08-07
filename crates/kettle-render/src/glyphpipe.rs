@@ -229,17 +229,75 @@ impl AtlasAllocator {
         let Some(height) = h.checked_add(GUTTER) else {
             return;
         };
-        self.free.push(FreeRect {
+        let mut reclaimed = FreeRect {
             x,
             y,
             width,
             height,
-        });
+        };
+        // Repeatedly fold every full-edge neighbor into the reclaimed
+        // rectangle. Eviction commonly returns adjacent shelf slots one at a
+        // time; without this, their combined area could never satisfy a wider
+        // or taller glyph even after every cold glyph had been evicted.
+        let mut index = 0;
+        while index < self.free.len() {
+            if let Some(merged) = merge_free_rects(reclaimed, self.free[index]) {
+                reclaimed = merged;
+                self.free.swap_remove(index);
+                // A merge can expose a neighbor earlier in the vector (A+B
+                // may now touch C), so rescan to reach the transitive fixed
+                // point rather than depending on eviction order.
+                index = 0;
+            } else {
+                index += 1;
+            }
+        }
+        self.free.push(reclaimed);
     }
 
     fn grow_height(&mut self, height: u32) {
         self.height = height;
     }
+}
+
+fn merge_free_rects(left: FreeRect, right: FreeRect) -> Option<FreeRect> {
+    if left.y == right.y && left.height == right.height {
+        if left.x.checked_add(left.width) == Some(right.x) {
+            return Some(FreeRect {
+                x: left.x,
+                y: left.y,
+                width: left.width.checked_add(right.width)?,
+                height: left.height,
+            });
+        }
+        if right.x.checked_add(right.width) == Some(left.x) {
+            return Some(FreeRect {
+                x: right.x,
+                y: left.y,
+                width: right.width.checked_add(left.width)?,
+                height: left.height,
+            });
+        }
+    }
+    if left.x == right.x && left.width == right.width {
+        if left.y.checked_add(left.height) == Some(right.y) {
+            return Some(FreeRect {
+                x: left.x,
+                y: left.y,
+                width: left.width,
+                height: left.height.checked_add(right.height)?,
+            });
+        }
+        if right.y.checked_add(right.height) == Some(left.y) {
+            return Some(FreeRect {
+                x: left.x,
+                y: right.y,
+                width: left.width,
+                height: right.height.checked_add(left.height)?,
+            });
+        }
+    }
+    None
 }
 
 /// A single-format atlas texture with a shelf packer plus reclaimed rectangles.
@@ -1189,6 +1247,64 @@ mod tests {
             .alloc(3, 3)
             .expect("an evicted glyph must render again without clearing the atlas");
         assert_eq!(revisited, second);
+    }
+
+    #[test]
+    fn atlas_coalesces_every_full_edge_sibling_without_merging_partial_edges() {
+        // Horizontal siblings: two 4x4 allocated rectangles (3x3 glyph plus
+        // gutter) must become one 8x4 rectangle for a wider replacement.
+        let mut horizontal = AtlasAllocator::new(8, 4);
+        let left = horizontal.alloc(3, 3).expect("left slot");
+        let right = horizontal.alloc(3, 3).expect("right slot");
+        assert_eq!(horizontal.alloc(7, 3), None);
+        horizontal.free(left.0, left.1, 3, 3);
+        horizontal.free(right.0, right.1, 3, 3);
+        assert_eq!(
+            horizontal.alloc(7, 3),
+            Some((0, 0)),
+            "horizontal cold siblings must satisfy one wider glyph"
+        );
+
+        // Vertical siblings are the same geometry rotated: max-height atlases
+        // must recover a taller slot too.
+        let mut vertical = AtlasAllocator::new(4, 8);
+        let top = vertical.alloc(3, 3).expect("top slot");
+        let bottom = vertical.alloc(3, 3).expect("bottom slot");
+        vertical.free(top.0, top.1, 3, 3);
+        vertical.free(bottom.0, bottom.1, 3, 3);
+        assert_eq!(
+            vertical.alloc(3, 7),
+            Some((0, 0)),
+            "vertical cold siblings must satisfy one taller glyph"
+        );
+
+        // Eviction order cannot matter. Free the outside rectangles first so
+        // the middle rectangle has to merge transitively with both.
+        let mut transitive = AtlasAllocator::new(12, 4);
+        let first = transitive.alloc(3, 3).expect("first slot");
+        let middle = transitive.alloc(3, 3).expect("middle slot");
+        let last = transitive.alloc(3, 3).expect("last slot");
+        transitive.free(first.0, first.1, 3, 3);
+        transitive.free(last.0, last.1, 3, 3);
+        transitive.free(middle.0, middle.1, 3, 3);
+        assert_eq!(
+            transitive.alloc(11, 3),
+            Some((0, 0)),
+            "coalescing must reach a fixed point across three siblings"
+        );
+
+        // Touching only part of an edge is not a rectangle union. Merging
+        // these would hand the allocator pixels it never owned.
+        let mut partial = AtlasAllocator::new(8, 4);
+        let tall = partial.alloc(3, 3).expect("tall slot");
+        let short = partial.alloc(3, 1).expect("short slot");
+        partial.free(tall.0, tall.1, 3, 3);
+        partial.free(short.0, short.1, 3, 1);
+        assert_eq!(
+            partial.alloc(7, 3),
+            None,
+            "partial-edge neighbors must remain distinct"
+        );
     }
 
     #[test]

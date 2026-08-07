@@ -180,7 +180,7 @@ pub struct AnsiStripper {
     utf8_emitted: bool,
 }
 
-#[derive(Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 enum StripState {
     #[default]
     Ground,
@@ -310,7 +310,13 @@ impl AnsiStripper {
                         || (escaped && b == b'\\')
                     {
                         StripState::Ground
-                    } else if escaped && !bel_terminated {
+                    } else if escaped {
+                        // ESC starts a fresh escape sequence from every control
+                        // string. OSC used to be the lone exception because
+                        // its BEL terminator was folded into this condition:
+                        // `ESC ] title ESC c` therefore swallowed all later
+                        // text while DCS/APC/PM/SOS correctly dispatched `c`.
+                        // The terminators above still win for ESC \\ and BEL.
                         Self::after_escape(b)
                     } else if remaining <= 1 {
                         // Forced resynchronization: an unterminated control
@@ -2879,7 +2885,7 @@ mod tests {
     }
 
     #[test]
-    fn ansi_stripper_cancellation_and_nested_escape_end_every_sibling_state() {
+    fn ansi_stripper_cancellation_and_nested_escape_recover_control_sequences() {
         for (label, input, expected) in [
             ("CAN cancels CSI", &b"\x1b[31\x18hello"[..], &b"hello"[..]),
             ("SUB cancels CSI", &b"\x1b[31\x1ahello"[..], &b"hello"[..]),
@@ -2924,6 +2930,11 @@ mod tests {
                 &b"hello"[..],
             ),
             (
+                "single-character ESC aborts OSC too",
+                &b"\x1b]0;title\x1bchello"[..],
+                &b"hello"[..],
+            ),
+            (
                 "nested CSI replaces a control string",
                 &b"\x1b^payload\x1b[31mhello"[..],
                 &b"hello"[..],
@@ -2945,6 +2956,175 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// Every parser-state sibling crossed with every cancellation/termination
+    /// event. Some pairs deliberately do not terminate: BEL is data in a
+    /// DCS/APC-style string, while BEL and raw ST are parameter/intermediate
+    /// bytes in CSI and ESC-intermediate states. The expected-state matrix
+    /// pins those distinctions instead of making the test name promise more
+    /// than it proves.
+    #[test]
+    fn ansi_stripper_control_events_cover_every_state_cross_product() {
+        #[derive(Clone, Copy)]
+        enum StateCase {
+            Ground,
+            Escape,
+            EscapeIntermediate,
+            Csi,
+            OscString,
+            DcsApcString,
+        }
+
+        impl StateCase {
+            fn name(self) -> &'static str {
+                match self {
+                    Self::Ground => "Ground",
+                    Self::Escape => "Escape",
+                    Self::EscapeIntermediate => "EscapeIntermediate",
+                    Self::Csi => "Csi",
+                    Self::OscString => "OSC-string",
+                    Self::DcsApcString => "DCS/APC-string",
+                }
+            }
+
+            fn state(self) -> StripState {
+                match self {
+                    Self::Ground => StripState::Ground,
+                    Self::Escape => StripState::Escape,
+                    Self::EscapeIntermediate => StripState::EscapeIntermediate {
+                        remaining: MAX_CONTROL_SEQUENCE_BYTES,
+                    },
+                    Self::Csi => StripState::Csi {
+                        remaining: MAX_CONTROL_SEQUENCE_BYTES,
+                    },
+                    Self::OscString => StripState::String {
+                        bel_terminated: true,
+                        escaped: false,
+                        remaining: MAX_CONTROL_SEQUENCE_BYTES,
+                    },
+                    Self::DcsApcString => StripState::String {
+                        bel_terminated: false,
+                        escaped: false,
+                        remaining: MAX_CONTROL_SEQUENCE_BYTES,
+                    },
+                }
+            }
+        }
+
+        #[derive(Clone, Copy)]
+        enum Event {
+            Can,
+            Sub,
+            FreshEscapeDispatch,
+            EscBackslash,
+            Bel,
+            RawSt,
+        }
+
+        impl Event {
+            fn name(self) -> &'static str {
+                match self {
+                    Self::Can => "CAN",
+                    Self::Sub => "SUB",
+                    Self::FreshEscapeDispatch => "fresh ESC + dispatch",
+                    Self::EscBackslash => "ESC \\",
+                    Self::Bel => "BEL",
+                    Self::RawSt => "raw ST 0x9c",
+                }
+            }
+
+            fn bytes(self) -> &'static [u8] {
+                match self {
+                    Self::Can => b"\x18",
+                    Self::Sub => b"\x1a",
+                    Self::FreshEscapeDispatch => b"\x1bc",
+                    Self::EscBackslash => b"\x1b\\",
+                    Self::Bel => b"\x07",
+                    Self::RawSt => b"\x9c",
+                }
+            }
+        }
+
+        fn remains_open(state: StateCase, event: Event) -> bool {
+            matches!(
+                (state, event),
+                (
+                    StateCase::EscapeIntermediate | StateCase::Csi,
+                    Event::Bel | Event::RawSt
+                ) | (StateCase::DcsApcString, Event::Bel)
+            )
+        }
+
+        fn is_open(state: &StripState) -> bool {
+            !matches!(state, StripState::Ground)
+        }
+
+        let states = [
+            StateCase::Ground,
+            StateCase::Escape,
+            StateCase::EscapeIntermediate,
+            StateCase::Csi,
+            StateCase::OscString,
+            StateCase::DcsApcString,
+        ];
+        let events = [
+            Event::Can,
+            Event::Sub,
+            Event::FreshEscapeDispatch,
+            Event::EscBackslash,
+            Event::Bel,
+            Event::RawSt,
+        ];
+        let mut covered = 0;
+        for state in states {
+            for event in events {
+                let bytes = event.bytes();
+                for split in 0..=bytes.len() {
+                    let mut stripper = AnsiStripper {
+                        state: state.state(),
+                        ..AnsiStripper::default()
+                    };
+                    let mut out = Vec::new();
+                    stripper.push(&bytes[..split], &mut out);
+                    stripper.push(&bytes[split..], &mut out);
+
+                    assert_eq!(
+                        is_open(&stripper.state),
+                        remains_open(state, event),
+                        "{} x {} split at {split} reached {:?}",
+                        state.name(),
+                        event.name(),
+                        stripper.state
+                    );
+
+                    // Finish the deliberately-open combinations, then prove
+                    // the parser returns to visible output rather than merely
+                    // reaching a superficially plausible enum variant.
+                    if is_open(&stripper.state) {
+                        stripper.push(b"\x18", &mut out);
+                    }
+                    stripper.push(b"VISIBLE", &mut out);
+                    let control_prefix: &[u8] = match (state, event) {
+                        (StateCase::Ground, Event::Can) => b"\x18",
+                        (StateCase::Ground, Event::Sub) => b"\x1a",
+                        (StateCase::Ground, Event::Bel) => b"\x07",
+                        _ => b"",
+                    };
+                    let mut expected = control_prefix.to_vec();
+                    expected.extend_from_slice(b"VISIBLE");
+                    assert_eq!(
+                        out,
+                        expected,
+                        "{} x {} split at {split} must preserve the visible suffix",
+                        state.name(),
+                        event.name()
+                    );
+                }
+                covered += 1;
+            }
+        }
+        assert_eq!(covered, 6 * 6, "the full state/event cross product changed");
     }
 
     #[test]
