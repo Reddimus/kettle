@@ -262,6 +262,30 @@ impl Osc52 {
     }
 }
 
+/// Which macOS Option key should behave as a terminal Alt modifier.
+///
+/// Unselected Option keys keep macOS text composition semantics instead: their
+/// composed text reaches the terminal without an Alt/Meta prefix.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum MacosOptionAsAlt {
+    #[default]
+    None,
+    Left,
+    Right,
+    Both,
+}
+
+impl MacosOptionAsAlt {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::Left => "left",
+            Self::Right => "right",
+            Self::Both => "both",
+        }
+    }
+}
+
 /// Kettle's modified-Enter fallback before keyboard-protocol negotiation.
 ///
 /// Xterm levels remain application-owned so enabling the fallback cannot turn
@@ -1117,6 +1141,8 @@ pub struct Config {
     pub bell: BellMode,
     /// OSC 52 clipboard policy (default: writes only).
     pub osc52: Osc52,
+    /// Which macOS Option key acts as terminal Alt. Parsed but inert elsewhere.
+    pub macos_option_as_alt: MacosOptionAsAlt,
     /// Kettle's modified-Enter fallback before a client negotiates key encoding.
     pub modify_other_keys: ModifyOtherKeysMode,
     /// Paste a clipboard file list (e.g. a file copied in Explorer) as a
@@ -2569,6 +2595,7 @@ impl Default for Config {
             cursor_blink: true,
             bell: BellMode::Both,
             osc52: Osc52::Copy,
+            macos_option_as_alt: MacosOptionAsAlt::None,
             modify_other_keys: ModifyOtherKeysMode::Enter,
             paste_files: PasteFiles::On,
             paste_images: PasteImages::On,
@@ -3607,6 +3634,10 @@ impl Config {
                         | "true"
                         | "copy"
                 ),
+                "macos-option-as-alt" | "macos_option_as_alt" => matches!(
+                    v.to_ascii_lowercase().as_str(),
+                    "none" | "left" | "right" | "both"
+                ),
                 "modify-other-keys" | "modify_other_keys" => matches!(
                     v.to_ascii_lowercase().as_str(),
                     "enter" | "off"
@@ -3820,7 +3851,7 @@ impl Config {
     /// Keys kettle ACCEPTS but does not act on.
     ///
     /// Each of these parses, passes `--check-config`, and is documented — and
-    /// has no consumer anywhere outside this crate. Silently accepting a
+    /// has no consumer on the current target. Silently accepting a
     /// setting that does nothing is the worst of the three options: rejecting
     /// them would break configs that load today, and implementing five
     /// unrelated features is not a config change. So they stay accepted and
@@ -3829,6 +3860,8 @@ impl Config {
     /// Removing a key from this list means either implementing it or deciding
     /// it should be rejected; it must not simply be dropped.
     pub const INERT_KEYS: &'static [&'static str] = &[
+        #[cfg(not(target_os = "macos"))]
+        "macos-option-as-alt",
         "extra-styling",
         "title-font",
         "title-use-system-font",
@@ -4223,6 +4256,14 @@ impl Config {
                         "paste" | "read" => Osc52::Paste,
                         "both" | "all" | "true" => Osc52::Both,
                         _ => Osc52::Copy,
+                    }
+                }
+                "macos-option-as-alt" | "macos_option_as_alt" => {
+                    cfg.macos_option_as_alt = match e.value.to_ascii_lowercase().as_str() {
+                        "left" => MacosOptionAsAlt::Left,
+                        "right" => MacosOptionAsAlt::Right,
+                        "both" => MacosOptionAsAlt::Both,
+                        _ => MacosOptionAsAlt::None,
                     }
                 }
                 "modify-other-keys" | "modify_other_keys" => {
@@ -5500,6 +5541,7 @@ bold-is-bright = true\n\
 clear-select-on-copy = true\n\
 invert-search = true\n\
 modify-other-keys = enter\n\
+macos-option-as-alt = none\n\
 backspace-binding = ascii-del\n\
 delete-binding = escape-sequence\n\
 login-shell = true\n\
@@ -6817,6 +6859,39 @@ cell-height = 1.2\n";
         assert_eq!(Config::parse_text("osc52 = bogus").osc52, Osc52::Copy);
         assert!(!Osc52::Off.can_copy() && !Osc52::Off.can_paste());
         assert!(Osc52::Both.can_copy() && Osc52::Both.can_paste());
+    }
+
+    #[test]
+    fn macos_option_as_alt_parsing_validation_and_default() {
+        assert_eq!(
+            Config::default().macos_option_as_alt,
+            MacosOptionAsAlt::None
+        );
+        for (value, expected) in [
+            ("none", MacosOptionAsAlt::None),
+            ("left", MacosOptionAsAlt::Left),
+            ("right", MacosOptionAsAlt::Right),
+            ("both", MacosOptionAsAlt::Both),
+        ] {
+            let cfg = Config::parse_text(&format!("macos-option-as-alt = {value}"));
+            assert_eq!(cfg.macos_option_as_alt, expected);
+            assert_eq!(expected.as_str(), value);
+        }
+        assert_eq!(
+            Config::parse_text("macos_option_as_alt = RIGHT").macos_option_as_alt,
+            MacosOptionAsAlt::Right
+        );
+        assert!(Config::detect_malformed_values("macos-option-as-alt = both").is_empty());
+        assert_eq!(
+            Config::detect_malformed_values("macos-option-as-alt = maybe").len(),
+            1
+        );
+
+        #[cfg(not(target_os = "macos"))]
+        assert_eq!(
+            Config::parse_text("macos-option-as-alt = left").inert_keys,
+            vec!["macos-option-as-alt"]
+        );
     }
 
     #[test]
@@ -8216,6 +8291,8 @@ split_horiz = <Control><Shift>j
             ("background_type", "image"),
             ("text-renderer", "grid"),
             ("text_renderer", "grid"),
+            ("macos-option-as-alt", "none"),
+            ("macos_option_as_alt", "left"),
             ("modify-other-keys", "enter"),
             ("modify_other_keys", "enter"),
             // The three F2 background-image placement enums (+ snake_case).

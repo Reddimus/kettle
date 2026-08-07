@@ -4,6 +4,55 @@ All notable changes to kettle. Format roughly follows
 [Keep a Changelog](https://keepachangelog.com/); the project moves in small,
 durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
+## [Unreleased]
+
+### Added
+
+- **Native macOS keyboard defaults and configurable Option behavior.** Cmd
+  shortcuts now supplement the existing portable Ctrl+Shift map for copy,
+  paste, tabs, windows, search, clearing the scrollback, the command palette,
+  Settings, font size, prompt jumps, and tab selection. `Cmd+W` closes the tab
+  and `Shift+Cmd+D` the split, matching Apple Terminal rather than kettle's
+  portable meaning, and `Cmd+K` clears the scrollback as it does in Terminal
+  and iTerm2. Bare Option+arrows now reach the PTY so word-wise motion works,
+  with directional pane focus on Ctrl+Cmd+arrows.
+
+  `macos-option-as-alt = none|left|right|both` chooses which Option side, if
+  any, produces terminal Alt/Meta. The default `none` matches macOS itself.
+  Previously Option was unconditionally Meta: winit reports `ALT` whether or
+  not Option is acting as Alt — it only swaps the event's characters — so every
+  Option chord emitted `ESC` followed by the composed character, and typing
+  `å`, `é` or `—` was impossible. `Alt+1..9` never selected a tab either, since
+  Option+1 is `¡`.
+
+  `Cmd+G` and `Cmd+Shift+G` are now free for the system's Find Next/Previous.
+  They previously toggled broadcast-to-all-panes, where mistaking one for Find
+  duplicated every later keystroke into every pane; broadcast moved to
+  Ctrl+Cmd+B.
+
+### Fixed
+
+- **Control discovery validates its completed Unix-socket fallback.** A long
+  `TMPDIR` could turn the supposedly short fallback into another path beyond
+  the BSD/macOS `sun_path` limit. The check is also applied after the lossy
+  UTF-8 conversion the endpoint goes through, since each invalid byte expands
+  to a three-byte replacement character.
+- **Control sockets refuse a directory this user does not own.** The endpoint
+  directory is predictable from the uid, so another local user could pre-create
+  it and then remove or replace the socket inside. Creation now verifies a real
+  directory — not a symlink — that is either owned by the effective uid or is a
+  root-owned sticky shared root such as `/tmp`, where the sticky bit already
+  prevents one user unlinking another's entries. Anything else fails closed.
+  The mode is tightened to `0700` best-effort rather than required, because a
+  legitimate shared temp root cannot always be chmod'd: macOS's per-user
+  `$TMPDIR` returns `EPERM`.
+- **Large high-DPI windows keep their real dimensions.** The renderer requests
+  the adapter's full 2D texture limit instead of wgpu's default 8192, so a
+  window spanning several 4K displays no longer has its right or bottom edge
+  left without a matching surface. It is still clamped to what the device can
+  actually present: configuring past that limit fails validation outright and
+  leaves a surface that paints nothing, which is worse than clipping.
+
 ## [2.52.0] — 2026-08-06
 
   ### Changed

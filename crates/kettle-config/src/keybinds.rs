@@ -1231,9 +1231,9 @@ pub fn defaults_audit() -> (Bindings, Vec<Trigger>) {
     let c = Mods::CTRL;
     let cs = Mods::CTRL | Mods::SHIFT;
     let a = Mods::ALT;
-    // `su` (Super alone) is only used for the non-Windows broadcast
-    // toggle below; on Windows the chord is Ctrl+Shift+G (Game Bar owns
-    // Win+G), so gate the binding to avoid an unused-variable warning.
+    // `su` (Super alone) is used by the non-Windows defaults below. On
+    // Windows the broadcast chord is Ctrl+Shift+G (Game Bar owns Win+G), so
+    // gate the binding to avoid an unused-variable warning.
     #[cfg(not(windows))]
     let su = Mods::SUPER;
     let sus = Mods::SUPER | Mods::SHIFT;
@@ -1255,10 +1255,21 @@ pub fn defaults_audit() -> (Bindings, Vec<Trigger>) {
     bind(cs, Char('i'), NewWindow);
     bind(cs, Char('n'), FocusNext);
     bind(cs, Char('p'), FocusPrev);
-    bind(a, Up, FocusUp);
-    bind(a, Down, FocusDown);
-    bind(a, Left, FocusLeft);
-    bind(a, Right, FocusRight);
+    #[cfg(not(target_os = "macos"))]
+    {
+        bind(a, Up, FocusUp);
+        bind(a, Down, FocusDown);
+        bind(a, Left, FocusLeft);
+        bind(a, Right, FocusRight);
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let ctrl_cmd = Mods::CTRL | Mods::SUPER;
+        bind(ctrl_cmd, Up, FocusUp);
+        bind(ctrl_cmd, Down, FocusDown);
+        bind(ctrl_cmd, Left, FocusLeft);
+        bind(ctrl_cmd, Right, FocusRight);
+    }
     // Resize splits with Shift+Arrows only — `Ctrl+Shift+Up/Down` is
     // taken for `ScrollLineUp/Down`, so binding
     // `Ctrl+Shift+Left/Right` to Resize alone would have given an
@@ -1296,18 +1307,25 @@ pub fn defaults_audit() -> (Bindings, Vec<Trigger>) {
     bind(c, Char('0'), ResetFontSize);
     bind(cs, Char('x'), ToggleZoom);
     bind(cs, Char('r'), Reset);
-    // Broadcast toggle. Default chord is Super+G everywhere EXCEPT
-    // Windows, where Win+G is captured by the Windows Game Bar (the OS
-    // intercepts it before kettle's window ever sees the key) — so the
-    // broadcast toggle would silently never fire. Use Ctrl+Shift+G on
-    // Windows instead (verified free: no other Ctrl+Shift default binds
-    // `g`). The Super+Shift+G "broadcast off" partner stays as-is; it's
-    // only reachable once broadcast is already on.
+    // Broadcast toggle. Windows uses Ctrl+Shift+G because Game Bar owns Win+G.
+    // macOS uses Ctrl+Cmd+B: Cmd+G / Cmd+Shift+G are Find Next / Previous, and
+    // accidentally enabling broadcast from Find would duplicate later input
+    // into every pane. Ctrl+Cmd+B has no standard macOS system meaning, keeps
+    // the mnemonic, and is free in this map.
     #[cfg(windows)]
     bind(cs, Char('g'), ToggleBroadcastAll);
-    #[cfg(not(windows))]
+    #[cfg(all(not(windows), not(target_os = "macos")))]
     bind(su, Char('g'), ToggleBroadcastAll);
+    #[cfg(target_os = "macos")]
+    bind(Mods::CTRL | Mods::SUPER, Char('b'), ToggleBroadcastAll);
+    #[cfg(not(target_os = "macos"))]
     bind(sus, Char('g'), ToggleBroadcastOff);
+    #[cfg(target_os = "macos")]
+    bind(
+        Mods::CTRL | Mods::SHIFT | Mods::SUPER,
+        Char('b'),
+        ToggleBroadcastOff,
+    );
     bind(Mods::empty(), F(11), ToggleFullscreen);
     bind(cs, Char('m'), ReloadConfig);
     // Ctrl+, opens the Settings overlay (VS Code / common
@@ -1319,6 +1337,39 @@ pub fn defaults_audit() -> (Bindings, Vec<Trigger>) {
     bind(cs, Char('s'), OpenSsh);
     bind(cs, Char('k'), CommandPalette);
     bind(cs, Char('h'), HintMode);
+    #[cfg(target_os = "macos")]
+    {
+        // Native macOS chords are additive: the portable Ctrl+Shift map above
+        // remains available for users sharing one config across platforms.
+        bind(su, Char('c'), Copy);
+        bind(su, Char('v'), Paste);
+        bind(su, Char('t'), NewTab);
+        bind(su, Char('n'), NewWindow);
+        // Apple Terminal semantics, not kettle's portable ones: Cmd+W is Close
+        // Tab and Shift+Cmd+D is Close Split Pane. Binding Cmd+W to ClosePane
+        // would silently close only the focused split of a split tab, which is
+        // not what the standard close chord means on this platform.
+        bind(su, Char('w'), CloseTab);
+        bind(sus, Char('d'), ClosePane);
+        bind(su, Char('f'), StartSearch);
+        // Cmd+K clears the scrollback in Apple Terminal and iTerm2; the command
+        // palette keeps its portable Ctrl+Shift+K and gains Shift+Cmd+P, the
+        // chord every VS Code user already has in their fingers.
+        bind(su, Char('k'), ClearHistory);
+        bind(sus, Char('p'), CommandPalette);
+        bind(su, Char(','), OpenSettings);
+        bind(su, Char('='), IncreaseFontSize);
+        bind(su, Char('+'), IncreaseFontSize);
+        bind(sus, Char('='), IncreaseFontSize);
+        bind(sus, Char('+'), IncreaseFontSize);
+        bind(su, Char('-'), DecreaseFontSize);
+        bind(su, Char('0'), ResetFontSize);
+        bind(su, Up, JumpPrevPrompt);
+        bind(su, Down, JumpNextPrompt);
+        for n in 1u8..=9 {
+            bind(su, Char((b'0' + n) as char), GotoTab(n - 1));
+        }
+    }
     // Ctrl+Shift+Space toggles vi-mode (Alacritty default). This change
     // ships the entry + visible block cursor + Esc exit;
     // h/j/k/l movement + visual selection + yank come in a follow-up.
@@ -1670,6 +1721,56 @@ mod tests {
                 d.get(&trig)
             );
         }
+
+        // The list above is portable by construction, so on its own it would
+        // still pass if every macOS Cmd default vanished. Pin the documented
+        // macOS chords on the leg that actually has them.
+        #[cfg(target_os = "macos")]
+        {
+            let su = Mods::SUPER;
+            let sus = Mods::SUPER | Mods::SHIFT;
+            let ctrl_cmd = Mods::CTRL | Mods::SUPER;
+            let mac_pairs: &[(Mods, Key, Action)] = &[
+                (su, Key::Char('c'), Copy),
+                (su, Key::Char('v'), Paste),
+                (su, Key::Char('t'), NewTab),
+                (su, Key::Char('n'), NewWindow),
+                (su, Key::Char('w'), CloseTab),
+                (sus, Key::Char('d'), ClosePane),
+                (su, Key::Char('f'), StartSearch),
+                (su, Key::Char('k'), ClearHistory),
+                (sus, Key::Char('p'), CommandPalette),
+                (su, Key::Char(','), OpenSettings),
+                (su, Key::Char('0'), ResetFontSize),
+                (su, Key::Char('1'), GotoTab(0)),
+                (su, Key::Char('9'), GotoTab(8)),
+                (ctrl_cmd, Key::Char('b'), ToggleBroadcastAll),
+                (ctrl_cmd, Key::Left, FocusLeft),
+            ];
+            for (mods, k, want) in mac_pairs {
+                let trig = Trigger::new(*mods, *k);
+                assert_eq!(
+                    d.get(&trig),
+                    Some(want),
+                    "README claims {} → {want:?} on macOS; bound to {:?} instead",
+                    trig.label(),
+                    d.get(&trig)
+                );
+            }
+
+            // Additive, not replacing: a config shared with Linux/Windows must
+            // keep working on this machine too.
+            assert_eq!(
+                d.get(&Trigger::new(cs, Key::Char('c'))),
+                Some(&Copy),
+                "the portable Ctrl+Shift+C must stay bound on macOS"
+            );
+            // Cmd+G is Find Next on macOS; broadcast must never sit there.
+            assert!(
+                !d.contains_key(&Trigger::new(su, Key::Char('g'))),
+                "Cmd+G is the system Find Next chord and must stay unbound"
+            );
+        }
     }
 
     #[test]
@@ -1711,14 +1812,15 @@ mod tests {
 
     #[test]
     fn broadcast_toggle_default_is_platform_correct() {
-        // Win+G is captured by the Windows Game Bar before kettle sees
-        // it, so on Windows the broadcast toggle must default to a free
-        // chord (Ctrl+Shift+G) instead of Super+G. Elsewhere Super+G is
-        // the canonical Terminator-style chord. Pin both so a future
-        // edit can't silently put the toggle back onto a dead key.
+        // Win+G is captured by the Windows Game Bar before kettle sees it, and
+        // macOS reserves Cmd+G for Find Next. Pin all three platform choices so
+        // a future edit cannot silently put broadcast back on a system chord.
         let d = defaults();
+        #[cfg(not(target_os = "macos"))]
         let cs = Mods::CTRL | Mods::SHIFT;
         let su = Mods::SUPER;
+        #[cfg(target_os = "macos")]
+        let ctrl_cmd = Mods::CTRL | Mods::SUPER;
         #[cfg(windows)]
         {
             assert_eq!(
@@ -1732,7 +1834,7 @@ mod tests {
                 "Super+G must NOT be bound on Windows (Game Bar swallows it)"
             );
         }
-        #[cfg(not(windows))]
+        #[cfg(all(not(windows), not(target_os = "macos")))]
         {
             assert_eq!(
                 d.get(&Trigger::new(su, Key::Char('g'))),
@@ -1745,10 +1847,35 @@ mod tests {
                 "Ctrl+Shift+G is only the Windows fallback"
             );
         }
-        // The Super+Shift+G "broadcast off" partner is unchanged on
-        // every platform.
+        #[cfg(target_os = "macos")]
+        {
+            assert_eq!(
+                d.get(&Trigger::new(ctrl_cmd, Key::Char('b'))),
+                Some(&Action::ToggleBroadcastAll),
+                "macOS broadcast toggle must avoid the system Find chords"
+            );
+            assert_eq!(
+                d.get(&Trigger::new(su, Key::Char('g'))),
+                None,
+                "Cmd+G must remain available for Find Next"
+            );
+            assert_eq!(
+                d.get(&Trigger::new(Mods::SUPER | Mods::SHIFT, Key::Char('g'))),
+                None,
+                "Cmd+Shift+G must remain available for Find Previous"
+            );
+        }
+        #[cfg(not(target_os = "macos"))]
         assert_eq!(
             d.get(&Trigger::new(Mods::SUPER | Mods::SHIFT, Key::Char('g'))),
+            Some(&Action::ToggleBroadcastOff),
+        );
+        #[cfg(target_os = "macos")]
+        assert_eq!(
+            d.get(&Trigger::new(
+                Mods::CTRL | Mods::SHIFT | Mods::SUPER,
+                Key::Char('b'),
+            )),
             Some(&Action::ToggleBroadcastOff),
         );
     }
@@ -2110,6 +2237,54 @@ mod tests {
         // user to bind manually if they want "last tab" semantics).
         let t0 = Trigger::new(Mods::ALT, Key::Char('0'));
         assert!(!d.contains_key(&t0), "Alt+0 should be free");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_cmd_digit_keys_go_to_tab() {
+        let d = defaults();
+        for n in 1u8..=9 {
+            let trigger = Trigger::new(Mods::SUPER, Key::Char((b'0' + n) as char));
+            assert_eq!(
+                d.get(&trigger),
+                Some(&Action::GotoTab(n - 1)),
+                "Cmd+{n} must select tab {n}"
+            );
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_option_arrows_reach_the_pty_and_directional_focus_stays_bound() {
+        let d = defaults();
+        for key in [Key::Up, Key::Down, Key::Left, Key::Right] {
+            let trigger = Trigger::new(Mods::ALT, key);
+            assert!(
+                !d.contains_key(&trigger),
+                "bare Option+{} must remain available for terminal word motion",
+                trigger.label()
+            );
+        }
+        let ctrl_cmd = Mods::CTRL | Mods::SUPER;
+        for (key, action) in [
+            (Key::Up, Action::FocusUp),
+            (Key::Down, Action::FocusDown),
+            (Key::Left, Action::FocusLeft),
+            (Key::Right, Action::FocusRight),
+        ] {
+            assert_eq!(d.get(&Trigger::new(ctrl_cmd, key)), Some(&action));
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_default_map_has_no_shadow_collisions() {
+        let (bindings, triggers) = defaults_audit();
+        assert_eq!(
+            bindings.len(),
+            triggers.len(),
+            "every macOS default trigger must be unique"
+        );
     }
 
     #[test]

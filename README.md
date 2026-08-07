@@ -307,17 +307,41 @@ commands, environment values, or user paths. `RUST_LOG` controls both `log` and
 | Split (auto-pick) | `Ctrl+Shift+A` | New window | `Ctrl+Shift+I` |
 | Focus next/prev pane | `Ctrl+Shift+N` / `P` | Close window | `Ctrl+Shift+Q` |
 | Next/prev tab | `Ctrl+PgDn` / `PgUp` | Move tab left/right | `Ctrl+Shift+PgUp` / `PgDn` |
-| Goto tab 1..9 | `Alt+1..9` | Zoom / unzoom pane | `Ctrl+Shift+X` |
+| Goto tab 1..9 | `Alt+1..9` (`Cmd+1..9` on macOS) | Zoom / unzoom pane | `Ctrl+Shift+X` |
 | Copy / Paste | `Ctrl+Shift+C` / `V` | **Search** | **`Ctrl+Shift+F`** |
 | **SSH launcher** | **`Ctrl+Shift+S`** | **Command palette** | **`Ctrl+Shift+K`** |
 | **Quick-select hints** | **`Ctrl+Shift+H`** | Fullscreen | `F11` |
 | Jump prev/next prompt | `Ctrl+Up` / `Down` | Resize split | `Shift+Arrows` |
-| Directional focus | `Alt+Arrows` | Scroll to top/bottom | `Ctrl+Home` / `End` |
+| Directional focus | `Alt+Arrows` (`Ctrl+Cmd+Arrows` on macOS) | Scroll to top/bottom | `Ctrl+Home` / `End` |
 | Select to top/bottom | `Shift+Home` / `End` | Select all | command palette (`select_all`) |
 | Scroll line / page | `Ctrl+Shift+Up/Down` / `Shift+PgUp/PgDn` | Reset font size | `Ctrl+0` |
-| Font bigger / smaller | `Ctrl+` `+` / `-` | Broadcast on/off | `Super+G` / `Shift+Super+G` (`Ctrl+Shift+G` on Windows, where `Win+G` opens Game Bar) |
+| Font bigger / smaller | `Ctrl+` `+` / `-` | Broadcast on/off | `Ctrl+Cmd+B` / `Ctrl+Shift+Cmd+B` (macOS), `Ctrl+Shift+G` / `Shift+Super+G` (Windows), `Super+G` / `Shift+Super+G` (elsewhere) |
 | Reload config | `Ctrl+Shift+M` | Reset terminal | `Ctrl+Shift+R` |
 | New tab: Nth dropdown shell | `Ctrl+Shift+1..9` | Settings panel | `Ctrl+,` |
+
+On macOS, native Cmd chords are additive; every portable `Ctrl+Shift` default
+above remains bound too. Where Apple Terminal's meaning differs from kettle's
+portable one, macOS follows Apple:
+
+| Chord | Action | | Chord | Action |
+| --- | --- | --- | --- | --- |
+| `Cmd+C` / `Cmd+V` | Copy / Paste | | `Cmd+T` | New tab |
+| `Cmd+N` | New window | | `Cmd+W` | Close **tab** |
+| `Shift+Cmd+D` | Close **split pane** | | `Cmd+F` | Search |
+| `Cmd+K` | Clear scrollback | | `Shift+Cmd+P` | Command palette |
+| `Cmd+,` | Settings | | `Cmd+1..9` | Goto tab |
+| `Cmd+=` / `+` / `-` / `0` | Font size | | `Cmd+Up` / `Down` | Jump prev/next prompt |
+| `Ctrl+Cmd+Arrows` | Directional focus | | `Ctrl+Cmd+B` | Broadcast on |
+
+`Cmd+W` closes the tab and `Shift+Cmd+D` the split, as in Apple Terminal —
+binding `Cmd+W` to close a pane would silently close one split of a split tab.
+`Cmd+K` clears the scrollback there and in iTerm2, so the command palette takes
+`Shift+Cmd+P` alongside its portable `Ctrl+Shift+K`. `Cmd+G` and `Cmd+Shift+G`
+are deliberately left unbound for the system's Find Next/Previous.
+
+Bare Option+arrows are left to the PTY for word motion. Set
+`macos-option-as-alt = left|right|both` when one or both Option keys should act
+as terminal Alt instead of composing macOS text; the default is `none`.
 
 Full effective keymap with your `--config` applied: `kettle --list-keybinds`.
 `Ctrl+Shift+I` opens the new window **in-process** (one kettle hosts them

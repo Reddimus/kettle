@@ -2,6 +2,14 @@
 
 ## Done
 
+- [x] **Native macOS keyboard input and defaults.** `macos-option-as-alt`
+      selects neither, either, or both Option keys as terminal Alt while the
+      unselected sides retain macOS composed-text input without Meta prefixes.
+      Additive Cmd defaults cover the native tab/window/clipboard/search/font
+      conventions, Cmd+G stays Find Next, and bare Option+arrows reach terminal
+      word-motion bindings. The same pass hardened overlong control-socket temp
+      fallbacks and removed the renderer's 8192-pixel live-surface clipping.
+
 - [x] Cargo workspace, MIT, CI matrix (Linux/macOS/Windows)
 - [x] PTY + `alacritty_terminal` + `vte` core, with one bounded blocking pump,
       parser worker, and input worker per pane

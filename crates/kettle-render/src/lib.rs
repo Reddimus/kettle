@@ -2261,6 +2261,28 @@ mod bg_image_worker_tests {
     }
 }
 
+fn live_device_limits(adapter_limits: wgpu::Limits) -> wgpu::Limits {
+    wgpu::Limits {
+        max_texture_dimension_2d: adapter_limits.max_texture_dimension_2d,
+        ..Default::default()
+    }
+}
+
+/// Clamp a window size into the range `Surface::configure` will accept.
+///
+/// Zero panics, and anything above the device's announced
+/// `max_texture_dimension_2d` fails validation and leaves a stale surface that
+/// paints nothing. Raising the REQUESTED limit at device creation (see
+/// [`live_device_limits`]) lifts this ceiling to whatever the hardware really
+/// supports, so an 8K or multi-display window keeps its true size instead of
+/// being clipped at wgpu's default 8192 -- but the clamp itself has to stay.
+/// Dropping it would turn a gracefully clipped window into a broken surface on
+/// any adapter whose genuine limit is smaller than the window.
+fn live_surface_dimensions(width: u32, height: u32, max_dimension: u32) -> (u32, u32) {
+    let max = max_dimension.max(1);
+    (width.clamp(1, max), height.clamp(1, max))
+}
+
 impl Renderer {
     /// Compatibility constructor for embedders that only provide a window.
     ///
@@ -2403,9 +2425,15 @@ impl Renderer {
         .await?;
         let adapter_ms = t_start.elapsed().as_secs_f64() * 1000.0;
         let t_device = std::time::Instant::now();
+        // wgpu's default requested limit is 8192 even when the adapter can
+        // present a larger surface. Request the adapter's real 2D limit up
+        // front so later high-DPI or multi-display resizes can configure the
+        // swapchain at the window's actual physical dimensions.
+        let required_limits = live_device_limits(adapter.limits());
         let (device, queue) = adapter
             .request_device(&wgpu::DeviceDescriptor {
                 label: Some("kettle-device"),
+                required_limits,
                 ..Default::default()
             })
             .await
@@ -2530,12 +2558,14 @@ impl Renderer {
         if caps.usages.contains(wgpu::TextureUsages::COPY_SRC) {
             usage |= wgpu::TextureUsages::COPY_SRC;
         }
+        let (width, height) =
+            live_surface_dimensions(width, height, device.limits().max_texture_dimension_2d);
         let config = wgpu::SurfaceConfiguration {
             usage,
             format,
             color_space: wgpu::SurfaceColorSpace::Auto,
-            width: width.max(1),
-            height: height.max(1),
+            width,
+            height,
             present_mode: wgpu::PresentMode::AutoVsync,
             alpha_mode,
             view_formats: vec![],
@@ -2792,21 +2822,23 @@ impl Renderer {
         // per-frame recompute" contract documented so a future
         // contributor sees that the per-frame recompute IS the impl.
         //
-        // Floor at 1 (`surface.configure(0, …)` panics) and ceiling
-        // at the device's max-texture-dimension-2d. The default wgpu
-        // Limits cap that at 8192 px; an oversized window (stretched
-        // across multiple 4K monitors, an 8K display, or a tiling
-        // WM tile that exceeds the surface limit) used to make
-        // `surface.configure` silently fail validation, leaving a
-        // stale surface that paints nothing on the next frame. Clip
-        // the surface to the device's announced limit so we still
-        // render the visible top-left region cleanly even if the
-        // user has unusually large geometry. Sibling to
-        // `cap_axis_cells` (which fixed the same
-        // class of bug on the `--screenshot` path).
-        let max = self.gpu.device.limits().max_texture_dimension_2d.max(1);
-        self.config.width = width.clamp(1, max);
-        self.config.height = height.clamp(1, max);
+        // Floor at 1 (`surface.configure(0, ...)` panics) and ceiling at the
+        // device's max-texture-dimension-2d. The device is now created with the
+        // ADAPTER's full 2D limit rather than wgpu's default 8192, so a window
+        // stretched across multiple 4K monitors keeps its real physical size on
+        // hardware that can present it -- but the ceiling stays, because on an
+        // adapter whose genuine limit is smaller than the window, configuring
+        // past it fails validation and leaves a stale surface that paints
+        // nothing at all. Clipping to the visible top-left region is the better
+        // failure. Sibling to `cap_axis_cells` (same bug class on the
+        // `--screenshot` path).
+        let (width, height) = live_surface_dimensions(
+            width,
+            height,
+            self.gpu.device.limits().max_texture_dimension_2d,
+        );
+        self.config.width = width;
+        self.config.height = height;
         self.surface.configure(&self.gpu.device, &self.config);
     }
 
@@ -12219,6 +12251,47 @@ mod pick_titlebar_bg_tests {
             pick_titlebar_bg(&cfg, &theme, cfg.resolved_accent(&theme), false, true),
             accent
         );
+    }
+}
+
+#[cfg(test)]
+mod live_surface_dimension_tests {
+    use super::{live_device_limits, live_surface_dimensions};
+
+    // wgpu's DEFAULT requested limit is 8192; a capable adapter reports more.
+    // Requesting the adapter's real limit is what lets a large window keep its
+    // true size.
+    #[test]
+    fn live_surface_keeps_real_window_dimensions_when_the_device_allows_them() {
+        assert_eq!(
+            live_surface_dimensions(12_000, 9_000, 16_384),
+            (12_000, 9_000)
+        );
+        assert_eq!(live_surface_dimensions(0, 0, 16_384), (1, 1));
+    }
+
+    // The regression this guards: dropping the clamp made `Surface::configure`
+    // reject an oversized window outright, leaving a surface that paints
+    // nothing. Clipping to the visible top-left region is the better failure.
+    #[test]
+    fn live_surface_clips_to_a_device_that_cannot_present_the_window() {
+        assert_eq!(
+            live_surface_dimensions(10_000, 9_000, 8_192),
+            (8_192, 8_192)
+        );
+        assert_eq!(live_surface_dimensions(4_000, 9_000, 8_192), (4_000, 8_192));
+        // A degenerate limit must still produce a configurable surface.
+        assert_eq!(live_surface_dimensions(4_000, 4_000, 0), (1, 1));
+    }
+
+    #[test]
+    fn live_device_requests_the_adapters_full_texture_dimension_limit() {
+        let adapter = wgpu::Limits {
+            max_texture_dimension_2d: 16_384,
+            ..Default::default()
+        };
+        let requested = live_device_limits(adapter);
+        assert_eq!(requested.max_texture_dimension_2d, 16_384);
     }
 }
 

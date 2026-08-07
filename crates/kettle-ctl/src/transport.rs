@@ -1060,9 +1060,10 @@ mod imp {
             // Clear a stale socket file from a previous (dead) instance.
             let _ = std::fs::remove_file(endpoint);
             if let Some(parent) = std::path::Path::new(endpoint).parent() {
-                std::fs::create_dir_all(parent)?;
-                // Best-effort 0700 on the parent dir.
-                let _ = std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700));
+                // Fail closed rather than binding inside a directory another
+                // local user pre-created: the length-overflow fallback path is
+                // fully predictable from the uid, so it can be squatted.
+                crate::ensure_owned_dir(parent)?;
             }
             let inner = UnixListener::bind(endpoint)?;
             std::fs::set_permissions(endpoint, std::fs::Permissions::from_mode(0o600))?;
