@@ -106,6 +106,11 @@ jobs:
         run: |
           just --summary
           just --list
+      - name: Shell integration snippets — native interpreters
+        # The source/CLI string checks below cannot see interpreter behavior.
+        # macOS supplies stock zsh with PROMPT_SUBST off and /bin/bash 3.2;
+        # Windows supplies Windows PowerShell 5.1 and PowerShell 7.
+        run: just shell-integration-check
       - name: Packaging smoke — macOS .icns
         # The release.yml's iconutil step only fires on a
         # `v*` tag push, so a regression like "remove a PNG from

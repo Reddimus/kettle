@@ -303,12 +303,24 @@ release:
 
 # === Verification gauntlet =========================================
 
+# Execute the shipped snippets rather than merely checking that their source
+# text is non-empty. macOS supplies the stock zsh configuration and Bash 3.2
+# needed for those regressions; Windows runs each installed PowerShell host.
+[unix]
+shell-integration-check:
+    python3 scripts/check-shell-integration.py
+
+[windows]
+shell-integration-check:
+    python scripts/check-shell-integration.py
+
 # The CI matrix job's core Rust gate (fmt/clippy/build/test/doc) plus
-# the live-UI-helper self-test. This is the fast pre-commit loop; run
+# the live-UI-helper and native shell-integration fixtures. This is the fast
+# pre-commit loop; run
 # it before every commit. It does NOT cover the packaging/installer/
 # update-manifest/GPU-render checks ci.yml also runs — see
 # `gauntlet-full` below for those.
-gauntlet: live-ui-helper-selftest
+gauntlet: live-ui-helper-selftest shell-integration-check
     cargo fmt --all --check
     cargo clippy --workspace --all-targets -- -D warnings
     # Feature unification hides a crate that leans on an optional dependency,

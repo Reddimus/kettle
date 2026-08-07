@@ -131,9 +131,12 @@ trap 'printf "\033]133;C\007"' DEBUG
 ### zsh — add to `~/.zshrc`
 
 ```zsh
-precmd()  { print -Pn '\e]133;D;%?\a\e]133;A\a'; }
-preexec() { print -Pn '\e]133;C\a'; }
-PS1='%{$(print -Pn "\e]133;B\a")%}'"$PS1"
+autoload -Uz add-zsh-hook
+__kettle_precmd()  { print -Pn '\e]133;D;%?\a\e]133;A\a'; }
+__kettle_preexec() { print -Pn '\e]133;C\a'; }
+add-zsh-hook precmd __kettle_precmd
+add-zsh-hook preexec __kettle_preexec
+PS1=$'%{\e]133;B\a%}'"$PS1"
 ```
 
 ### fish — add to `~/.config/fish/config.fish`
@@ -191,6 +194,11 @@ The generated snippet guards itself with a
 `$global:__kettle_prompt_installed` flag, so re-sourcing `$PROFILE`
 (after a config tweak, after a new shell session loads it) won't
 stack multiple prompt wrappers.
+
+When PSReadLine's Enter key still uses its stock `AcceptLine` function, the
+snippet wraps it to emit OSC 133;C. If the profile or another module installed
+a different Enter binding, Kettle leaves that binding intact; PSReadLine does
+not expose a previously registered ScriptBlock that Kettle could safely call.
 
 ## Marks
 
