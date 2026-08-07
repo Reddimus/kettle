@@ -239,11 +239,10 @@ class PackageManifestTests(unittest.TestCase):
                     MODULE.build_manifest(root, WINDOWS_TARGET, VERSION)
                 link.unlink()
 
-            if os.name != "nt":
-                (root / "README").write_text("one", encoding="ascii")
-                (root / "readme").write_text("two", encoding="ascii")
-                with self.assertRaisesRegex(ValueError, "duplicate|alias"):
-                    MODULE.build_manifest(root, LINUX_TARGET, VERSION)
+            paths = MODULE.ArchivePaths()
+            paths.insert("README", False)
+            with self.assertRaisesRegex(ValueError, "duplicate|alias"):
+                paths.insert("readme", False)
 
     def test_verifier_requires_canonical_manifest(self):
         with tempfile.TemporaryDirectory() as raw:

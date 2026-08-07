@@ -696,7 +696,17 @@ def _require_real_directory(path: Path) -> None:
 
 
 def _prepare_output_root(root: Path) -> tuple[Path, tuple[int, int]]:
-    output = Path(os.path.abspath(os.fspath(root)))
+    requested = Path(os.path.abspath(os.fspath(root)))
+    if os.path.lexists(requested):
+        raise ValueError(f"output root must not already exist: {requested}")
+
+    # Pin the existing parent to its canonical location before validating or
+    # writing. macOS exposes its temporary directory through /var, which is a
+    # system alias for /private/var; retaining the alias would make the
+    # no-link ancestor check reject every normal temporary extraction. All
+    # later operations use the resolved path, so they never traverse the
+    # alias again.
+    output = requested.parent.resolve(strict=True) / requested.name
     if os.path.lexists(output):
         raise ValueError(f"output root must not already exist: {output}")
 

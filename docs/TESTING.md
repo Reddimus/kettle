@@ -940,6 +940,11 @@ trust root, canonical manifest bytes and sidecars, no-follow same-handle
 artifact hashing, exact local-to-GitHub name/size/SHA-256 binding, bounded
 archive structure and extraction, modern no-downgrade behavior, compatible
 legacy sidecars, and hostile archive/network/parser fixtures.
+Extraction canonicalizes its already-existing output parent before the
+no-link walk, so the macOS `/var` to `/private/var` temporary-directory alias
+is pinned once rather than rejected or traversed again during writes. The
+case-alias regression drives the portable path registry directly, independent
+of whether the host filesystem permits case-distinct directory entries.
 
 Release CI keeps the two capabilities separate: the protected signer has the
 Ed25519 secret and read-only repository permission, while the publisher has
