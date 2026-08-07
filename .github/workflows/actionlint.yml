@@ -54,11 +54,38 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          pattern='^\s*(?:-\s*)?uses:\s+(?!\./)(?![^@[:space:]]+@[0-9a-f]{40}(?:[[:space:]]|$))'
-          if rg --line-number --pcre2 "$pattern" .github/workflows; then
-            echo '::error::external actions and workflows must use an immutable 40-character commit SHA'
+          shopt -s nullglob
+          workflow_files=(.github/workflows/*.yml .github/workflows/*.yaml)
+          if [ "${#workflow_files[@]}" -eq 0 ]; then
+            echo '::error::no workflow files found to scan'
             exit 1
           fi
+          status=0
+          perl -ne '
+            if (/$ENV{ACTION_REF_PATTERN}/) {
+              print "$ARGV:$.:$_";
+              $found = 1;
+            }
+            close ARGV if eof;
+            END { exit 1 if $found }
+          ' "${workflow_files[@]}" || status=$?
+          if [ "$status" -eq 0 ]; then
+            :
+          elif [ "$status" -eq 1 ]; then
+            echo '::error::external actions and workflows must use an immutable 40-character commit SHA'
+            exit 1
+          else
+            echo "::error::immutable action-reference scan failed with status $status"
+            exit 1
+          fi
+        env:
+          ACTION_REF_PATTERN: '^\s*(?:-\s*)?uses:\s+(?!\./)(?![^@[:space:]]+@[0-9a-f]{40}(?:[[:space:]]|$))'
+      - name: Install shellcheck
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y shellcheck
       # Download a fixed actionlint release and authenticate the archive before
       # extracting it. Avoid executing a mutable raw.githubusercontent.com script.
       - name: Run actionlint
@@ -72,4 +99,8 @@ jobs:
             8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8 \
             "$archive" | sha256sum --check --strict
           tar -xzf "$archive" actionlint
+          command -v shellcheck >/dev/null || {
+            echo '::error::shellcheck is required for actionlint run-block validation'
+            exit 1
+          }
           ./actionlint -color

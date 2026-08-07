@@ -164,7 +164,18 @@ case "$(uname -m)" in
   aarch64|arm64) UPDATE_TARGET="aarch64-unknown-linux-gnu" ;;
   *) UPDATE_TARGET="unsupported" ;;
 esac
-KETTLE_VERSION=$("${BIN_SRC}" --version 2>/dev/null | awk 'NR == 1 { print $2 }')
+version_output=''
+if version_output=$("${BIN_SRC}" --version 2>&1); then
+  :
+else
+  probe_status=$?
+  echo "error: ${BIN_SRC} exists but cannot run; refusing to install an unusable binary:" >&2
+  if [[ -n "${version_output}" ]]; then
+    printf '%s\n' "${version_output}" >&2
+  fi
+  exit "${probe_status}"
+fi
+KETTLE_VERSION=$(printf '%s\n' "${version_output}" | awk 'NR == 1 { print $2 }')
 KETTLE_VERSION=${KETTLE_VERSION:-unknown}
 if [[ "${TARBALL_MODE}" -eq 1 ]]; then
   INSTALL_CHANNEL="stable"

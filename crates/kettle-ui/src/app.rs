@@ -460,6 +460,23 @@ fn optional_u64_param(
     }
 }
 
+fn ctl_capture_bounds(
+    history_size: usize,
+    start_line: usize,
+    cursor_abs: usize,
+    returned_lines: usize,
+) -> (usize, usize, bool) {
+    let take = history_size
+        .saturating_sub(start_line)
+        .min(MAX_CTL_SCROLLBACK_LINES);
+    // The first returned line is absolute `history_size - min(take, history_size)`.
+    let first_abs = history_size - take.min(history_size);
+    let start_idx = start_line.saturating_sub(first_abs);
+    // Inclusive of the cursor line; clamp to what screen_text actually returned.
+    let end_idx = (cursor_abs.saturating_sub(first_abs) + 1).min(returned_lines);
+    (start_idx, end_idx, start_line < first_abs)
+}
+
 /// The production half of this file: everything above the FIRST test module.
 ///
 /// A source guard that searches the whole file also searches its own
@@ -5067,6 +5084,34 @@ pub(crate) fn fire_notify(title: &str, body: &str) {
     if let Err(e) = n.show() {
         log::warn!("kettle.notify: notification send failed: {e}");
     }
+}
+
+fn persist_keybind_rebind(
+    path: Option<&std::path::Path>,
+    stale: &[String],
+    label: &str,
+    action_name: &str,
+) -> bool {
+    let Some(path) = path else {
+        log::warn!(
+            "apply_keybind_rebind: no config path resolved \
+             (set $XDG_CONFIG_HOME or pass --config)"
+        );
+        return false;
+    };
+
+    let mut saved = true;
+    for old in stale {
+        if let Err(e) = kettle_config::append_keybind(path, old, "unbind") {
+            log::warn!("append_keybind({old}=unbind) failed: {e}");
+            saved = false;
+        }
+    }
+    if let Err(e) = kettle_config::append_keybind(path, label, action_name) {
+        log::warn!("append_keybind({label}={action_name}) failed: {e}");
+        saved = false;
+    }
+    saved
 }
 
 impl App {
@@ -11314,7 +11359,7 @@ impl App {
         // C9: the Advanced… escape hatch for everything
         // not exposed as a toggle.
         inner.push(ContextMenuItem::Item {
-            label: "Advanced… (open config in $EDITOR)",
+            label: "Advanced… (open config with default app)",
             action: kettle_config::Action::EditConfig,
             enabled: true,
         });
@@ -13007,10 +13052,9 @@ impl App {
             }
             // Terminator parity (`key_preferences` /
             // `key_preferences_keybindings`). Terminator's GUI
-            // Preferences dialog is config-file-driven for
-            // kettle, so the preferences keybind opens the user's
-            // config file in $EDITOR (or any registered handler
-            // via `open::that_detached`). If no config file is
+            // Preferences dialog is config-file-driven for kettle, so the
+            // preferences keybind opens the user's config file with the OS's
+            // registered handler. If no config file is
             // loaded — kettle started with `--config` pointing
             // at a missing path, or no profile resolved — falls
             // back to `Config::default_path()`. Closes the
@@ -13025,11 +13069,19 @@ impl App {
                 if let Some(path) = path {
                     if let Err(e) = open::that_detached(&path) {
                         log::warn!("Action::EditConfig: failed to open {}: {e}", path.display());
+                        fire_notify(
+                            "kettle: config not opened",
+                            "The operating system could not open the config file.",
+                        );
                     }
                 } else {
                     log::warn!(
                         "Action::EditConfig: no config path resolved \
                          (set $XDG_CONFIG_HOME or pass --config)"
+                    );
+                    fire_notify(
+                        "kettle: config not opened",
+                        "No config file path could be resolved.",
                     );
                 }
             }
@@ -17220,10 +17272,9 @@ impl App {
         let Some(run) = self.pending_runs.remove(&pane) else {
             return;
         };
-        let (output, output_truncated) = cap_utf8_bytes(
-            self.ctl_capture_output_since(ws, pane, run.start_line),
-            MAX_CTL_COMMAND_OUTPUT_BYTES,
-        );
+        let (captured, line_truncated) = self.ctl_capture_output_since(ws, pane, run.start_line);
+        let (output, byte_truncated) = cap_utf8_bytes(captured, MAX_CTL_COMMAND_OUTPUT_BYTES);
+        let output_truncated = line_truncated || byte_truncated;
         let resp = kettle_ctl::protocol::Response::ok(
             run.req_id,
             serde_json::json!({
@@ -17275,10 +17326,10 @@ impl App {
             let Some(run) = self.pending_runs.remove(&pane) else {
                 continue;
             };
-            let (output, output_truncated) = cap_utf8_bytes(
-                self.ctl_capture_output_since(ws, pane, run.start_line),
-                MAX_CTL_COMMAND_OUTPUT_BYTES,
-            );
+            let (captured, line_truncated) =
+                self.ctl_capture_output_since(ws, pane, run.start_line);
+            let (output, byte_truncated) = cap_utf8_bytes(captured, MAX_CTL_COMMAND_OUTPUT_BYTES);
+            let output_truncated = line_truncated || byte_truncated;
             let resp = kettle_ctl::protocol::Response::ok(
                 run.req_id,
                 serde_json::json!({
@@ -17305,33 +17356,36 @@ impl App {
     /// those trailing blanks; addressing by absolute line lands on the real
     /// content wherever it is. The cursor's absolute line is the end of the
     /// content the command produced.
-    fn ctl_capture_output_since(&self, ws: &WindowState, pane: u64, start_line: usize) -> String {
-        const CAP_LINES: usize = 10_000;
+    fn ctl_capture_output_since(
+        &self,
+        ws: &WindowState,
+        pane: u64,
+        start_line: usize,
+    ) -> (String, bool) {
         // C8: the pane may have moved to another window mid-run.
         let Some(p) = Self::ctl_pane_ref(ws, &self.windows, pane) else {
-            return String::new();
+            return (String::new(), false);
         };
         let Some(probe) = p.term.screen_text(0) else {
-            return String::new();
+            return (String::new(), false);
         };
         let hist = probe.history_size;
         let cursor_abs = hist + probe.cursor.0; // absolute line of the cursor now
         // History lines we must pull to reach `start_line` (0 when it's already
         // on the active screen, the common case), capped.
-        let take = hist.saturating_sub(start_line).min(CAP_LINES);
+        let take = hist
+            .saturating_sub(start_line)
+            .min(MAX_CTL_SCROLLBACK_LINES);
         let Some(s) = p.term.screen_text(take) else {
-            return String::new();
+            return (String::new(), false);
         };
         let lines: Vec<&str> = s.text.lines().collect();
-        // The first returned line is absolute `hist - min(take, hist)`.
-        let first_abs = hist - take.min(hist);
-        let start_idx = start_line.saturating_sub(first_abs);
-        // Inclusive of the cursor line; clamp to what we actually have.
-        let end_idx = (cursor_abs.saturating_sub(first_abs) + 1).min(lines.len());
+        let (start_idx, end_idx, head_dropped) =
+            ctl_capture_bounds(hist, start_line, cursor_abs, lines.len());
         if start_idx >= end_idx {
-            return String::new();
+            return (String::new(), head_dropped);
         }
-        lines[start_idx..end_idx].join("\n")
+        (lines[start_idx..end_idx].join("\n"), head_dropped)
     }
 
     /// Claim one bounded remote-command batch and stage it for ordered
@@ -18429,7 +18483,7 @@ impl App {
     /// bound to a DIFFERENT action routes through a confirm dialog first
     /// instead of stealing it silently, but applies via this exact same
     /// method once the user confirms) so the two paths can never diverge.
-    fn apply_keybind_rebind(&mut self, trig: Trigger, act: Action, action_name: &str) {
+    fn apply_keybind_rebind(&mut self, trig: Trigger, act: Action, action_name: &str) -> bool {
         let label = trig.label();
         let stale: Vec<String> = self
             .cfg
@@ -18445,20 +18499,18 @@ impl App {
         // appending `trig=action_name` after any earlier `trig=<other>`
         // line means the last-one-wins reload resolves `trig` to the new
         // action, matching the live HashMap `insert` above.
-        if let Some(path) = self
+        let path = self
             .config_path
             .clone()
-            .or_else(kettle_config::Config::default_path)
-        {
-            for old in &stale {
-                if let Err(e) = kettle_config::append_keybind(&path, old, "unbind") {
-                    log::warn!("append_keybind({old}=unbind) failed: {e}");
-                }
-            }
-            if let Err(e) = kettle_config::append_keybind(&path, &label, action_name) {
-                log::warn!("append_keybind({label}={action_name}) failed: {e}");
-            }
+            .or_else(kettle_config::Config::default_path);
+        let saved = persist_keybind_rebind(path.as_deref(), &stale, &label, action_name);
+        if !saved {
+            fire_notify(
+                "kettle: keybind not saved",
+                "Applied for this session — couldn't write it to your config file.",
+            );
         }
+        saved
     }
 
     /// Keyboard routing while the settings overlay is open.
@@ -30098,6 +30150,29 @@ mod tests {
     }
 
     #[test]
+    fn keybind_rebind_persistence_reports_missing_path_and_writes_valid_path() {
+        use super::persist_keybind_rebind;
+
+        let stale = vec!["Ctrl+Shift+X".to_string()];
+        assert!(
+            !persist_keybind_rebind(None, &stale, "Ctrl+Shift+Y", "copy"),
+            "a missing config path must be reported as not saved"
+        );
+
+        let dir = crate::test_tempdir();
+        let path = dir.path().join("config");
+        assert!(persist_keybind_rebind(
+            Some(&path),
+            &stale,
+            "Ctrl+Shift+Y",
+            "copy"
+        ));
+        let saved = std::fs::read_to_string(path).expect("saved keybind config");
+        assert!(saved.contains("Ctrl+Shift+X=unbind"));
+        assert!(saved.contains("Ctrl+Shift+Y=copy"));
+    }
+
+    #[test]
     fn cwd_is_local_rejects_unc_and_traversal() {
         use super::cwd_is_local;
         // Drift guard. Ordinary absolute cwds (the OSC 7 path form,
@@ -32386,6 +32461,25 @@ mod tests {
             !check.contains("!ws.mux.panes.contains_key(pane)"),
             "current-window-only orphan checks kill pending runs in other windows"
         );
+    }
+
+    #[test]
+    fn run_command_line_cap_reports_a_dropped_head() {
+        use super::{MAX_CTL_SCROLLBACK_LINES, ctl_capture_bounds};
+
+        let history_size = MAX_CTL_SCROLLBACK_LINES + 5_000;
+        let (start, end, head_dropped) =
+            ctl_capture_bounds(history_size, 0, history_size, MAX_CTL_SCROLLBACK_LINES + 24);
+        assert_eq!(start, 0);
+        assert!(end > start);
+        assert!(
+            head_dropped,
+            "a command that outruns the retained-line capture must mark its output incomplete"
+        );
+
+        let (start, end, head_dropped) = ctl_capture_bounds(100, 50, 100, MAX_CTL_SCROLLBACK_LINES);
+        assert!(end > start);
+        assert!(!head_dropped, "a fully retained capture is complete");
     }
 
     /// Drift guard. `pick_light_dark_target` is the

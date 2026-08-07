@@ -88,8 +88,12 @@ jobs:
           # auto-bumps it; a forgotten bump should fail the release, not ship a
           # Nix derivation with wrong metadata).
           if [ -f flake.nix ]; then
-            FLAKE_VER=$(awk -F\" '/^          version = / { print $2; exit }' flake.nix)
-            if [ -n "$FLAKE_VER" ] && [ "$TAG_VER" != "$FLAKE_VER" ]; then
+            FLAKE_VER=$(awk -F\" '/^[[:space:]]*version = "/ { print $2; exit }' flake.nix)
+            if [ -z "$FLAKE_VER" ]; then
+              echo "::error::could not extract a version from flake.nix"
+              exit 1
+            fi
+            if [ "$TAG_VER" != "$FLAKE_VER" ]; then
               echo "::error::tag $GITHUB_REF_NAME but flake.nix says $FLAKE_VER"
               echo "::error::scripts/release.sh auto-bumps this — re-run it or edit flake.nix"
               exit 1

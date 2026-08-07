@@ -431,11 +431,15 @@ pub fn read(cfg: &Config, field: &Field) -> String {
         }
         FieldKind::Number { suffix, .. } => {
             let value = read_number(cfg, field.key);
-            // `scrollback = 0` is the grammar's "infinite", not "keep nothing".
-            // Rendering a bare `0` invited a user to step off it without
-            // realising what they were leaving.
+            // Both scrollback rows have a zero sentinel. Rendering it as a
+            // quantity invited users to impose a finite cap without realising
+            // what they were leaving.
             if field.key == "scrollback" && value == 0 {
                 "infinite".to_string()
+            } else if field.key == "scrollback-bytes" && cfg.scrollback_bytes == 0 {
+                "no cap".to_string()
+            } else if field.key == "scrollback-bytes" && cfg.scrollback_bytes < 1_000_000 {
+                "<1MB".to_string()
             } else {
                 format!("{value}{suffix}")
             }
@@ -504,9 +508,19 @@ pub fn next_value(cfg: &Config, field: &Field, dir: i32) -> String {
             let delta = if dir == 0 {
                 *step
             } else {
-                (dir as i64) * *step
+                (dir as i64).saturating_mul(*step)
             };
-            let next = (cur + delta).clamp(*min, *max);
+            let stepped = cur.saturating_add(delta);
+            // The Settings catalogue intentionally exposes a convenient range,
+            // while the config grammar accepts wider values. Preserve those
+            // values and step in the requested direction; clamping an already
+            // out-of-range value snapped it to the catalogue boundary and could
+            // destructively shrink live scrollback on the first keypress.
+            let next = if (*min..=*max).contains(&cur) {
+                stepped.clamp(*min, *max)
+            } else {
+                stepped
+            };
             write_number(field.key, next, suffix)
         }
         // Keybinds don't change via ←/→: activating one enters capture mode in
@@ -791,6 +805,15 @@ mod tests {
         assert_eq!(read_number(&cfg, "scrollback"), 5_000);
         assert_eq!(read(&cfg, &field), "5000");
         assert_eq!(next_value(&cfg, &field, 1), "6000");
+
+        let bytes = number("Scrollback MB", "scrollback-bytes", 0, 1024, 10, "MB");
+        cfg.scrollback_bytes = 0;
+        assert_eq!(read(&cfg, &bytes), "no cap");
+        assert_eq!(next_value(&cfg, &bytes, -1), "0MB");
+        assert_eq!(next_value(&cfg, &bytes, 1), "10MB");
+
+        cfg.scrollback_bytes = 500_000;
+        assert_eq!(read(&cfg, &bytes), "<1MB");
     }
 
     #[test]
@@ -1079,6 +1102,35 @@ mod tests {
         // clamp at floor
         cfg.font_size = 6.0;
         assert_eq!(next_value(&cfg, &f, -1), "6");
+
+        // Config-valid values outside the catalogue's convenient range step
+        // normally; neither arrow may snap them to the nearest boundary.
+        cfg.background_opacity = 0.10;
+        let opacity = number("Background opacity", "background-opacity", 20, 100, 5, "%");
+        assert_eq!(next_value(&cfg, &opacity, -1), "0.05");
+        assert_eq!(next_value(&cfg, &opacity, 1), "0.15");
+
+        cfg.scrollback = 500_000;
+        let scrollback = number("Scrollback lines", "scrollback", 0, 100_000, 1_000, "");
+        assert_eq!(next_value(&cfg, &scrollback, -1), "499000");
+        assert_eq!(next_value(&cfg, &scrollback, 1), "501000");
+
+        cfg.scrollback_bytes = 4_000_000_000;
+        let bytes = number("Scrollback MB", "scrollback-bytes", 0, 1024, 10, "MB");
+        assert_eq!(next_value(&cfg, &bytes, -1), "3990MB");
+        assert_eq!(next_value(&cfg, &bytes, 1), "4010MB");
+
+        cfg.update_check_interval_hours = 8_760;
+        let updates = number(
+            "Update check (hours)",
+            "update-check-interval-hours",
+            1,
+            720,
+            1,
+            "h",
+        );
+        assert_eq!(next_value(&cfg, &updates, -1), "8759");
+        assert_eq!(next_value(&cfg, &updates, 1), "8761");
     }
 
     #[test]
