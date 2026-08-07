@@ -162,8 +162,16 @@ jobs:
         if: runner.os == 'Linux'
         run: python3 scripts/test-verify-release-assets.py
       - name: Inner package manifest generator and verifier
-        if: runner.os == 'Linux'
-        run: python3 scripts/test-package-manifest.py
+        # Extraction is a native filesystem security boundary. Run its portable
+        # fixtures on every runner so macOS aliases and Windows path semantics
+        # cannot regress behind a Linux-only green check.
+        shell: bash
+        run: |
+          if [[ "$RUNNER_OS" == "Windows" ]]; then
+            python scripts/test-package-manifest.py
+          else
+            python3 scripts/test-package-manifest.py
+          fi
       - name: Hardened online installer fixtures
         if: runner.os == 'Linux'
         run: python3 scripts/test-install-online.py

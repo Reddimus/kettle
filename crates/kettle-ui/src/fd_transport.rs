@@ -16,7 +16,6 @@
 //! lifecycle is phases 6+7+8 of docs/TERMINATOR-DETACHABLE-TABS-DESIGN.md;
 //! this module is the pure fd-passing primitive those phases compose.
 
-#![cfg(unix)]
 #![allow(dead_code)]
 
 use std::io;
@@ -26,7 +25,7 @@ use std::os::unix::net::UnixStream;
 // Use `libc::SCM_RIGHTS` directly rather than a hand-rolled
 // `0x01`. The literal was only `#[cfg]`'d for linux/macos/freebsd, so on
 // NetBSD/OpenBSD/DragonFly/illumos/Android the const was undefined and the
-// `#![cfg(unix)]` module failed to compile. `libc::SCM_RIGHTS` is correct for
+// Unix-only module failed to compile. `libc::SCM_RIGHTS` is correct for
 // every Unix target (matching the `libc::SOL_SOCKET` already used beside it).
 use libc::SCM_RIGHTS;
 

@@ -348,7 +348,7 @@ fn live_canonical_eof_rules(fd: RawFd) -> Result<(CanonicalEofRules, u8, u8)> {
     }
     let disabled = disabled as u8;
     let enabled_cc = |index: usize| {
-        let byte = attrs.c_cc[index] as u8;
+        let byte = attrs.c_cc[index];
         (byte != disabled).then_some(byte)
     };
     #[cfg(any(target_os = "linux", target_os = "android"))]
@@ -407,7 +407,7 @@ fn live_canonical_eof_rules(fd: RawFd) -> Result<(CanonicalEofRules, u8, u8)> {
         target_os = "dragonfly"
     )))]
     let word_erase = WordEraseMode::BsdSimple;
-    let configured_veof = attrs.c_cc[libc::VEOF] as u8;
+    let configured_veof = attrs.c_cc[libc::VEOF];
     Ok((
         CanonicalEofRules {
             canonical: attrs.c_lflag & libc::ICANON != 0,

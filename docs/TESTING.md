@@ -934,12 +934,20 @@ python3 scripts/test-install-online.py
 ```
 
 The current suites cover seven signed-update-manifest cases, six exact
-draft-release cases, fifteen package-manifest cases (one platform-specific
-skip), and nine POSIX online-installer cases. They pin the checked-in Ed25519
+draft-release cases, seventeen package-manifest cases (with platform-dependent
+skips), and nine POSIX online-installer cases. They pin the checked-in Ed25519
 trust root, canonical manifest bytes and sidecars, no-follow same-handle
 artifact hashing, exact local-to-GitHub name/size/SHA-256 binding, bounded
 archive structure and extraction, modern no-downgrade behavior, compatible
 legacy sidecars, and hostile archive/network/parser fixtures.
+Extraction canonicalizes its already-existing output parent before the
+no-link walk. This intentionally accepts an alias anywhere in that existing
+parent chain—including macOS `/var` to `/private/var`—then pins the canonical
+directory identity once so later writes never traverse the alias. The absent
+output root itself is still created as a new real directory and cannot be a
+pre-planted link or junction. A separate case-alias regression drives the
+portable path registry directly, independent
+of whether the host filesystem permits case-distinct directory entries.
 
 Release CI keeps the two capabilities separate: the protected signer has the
 Ed25519 secret and read-only repository permission, while the publisher has
