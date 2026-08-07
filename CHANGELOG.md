@@ -6,6 +6,8 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+## [2.53.0] — 2026-08-07
+
 ### Added
 
 - **Native macOS keyboard defaults and configurable Option behavior.** Cmd
@@ -31,6 +33,14 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   Ctrl+Cmd+B.
 
 ### Fixed
+
+- **Package extraction accepts macOS temporary paths.** `/var/folders/...` is
+  the per-user `$TMPDIR` on macOS and was rejected by the extraction-root
+  check, and a pre-planted extraction root is now refused outright. Shipped in
+  `a4aab83` with no changelog entry of its own.
+- `event-listener` moved past RUSTSEC-2026-0221 (the advisory affects 5.4.1;
+  the lock is on 5.4.2). The only path into the graph was Linux-only, through
+  `accesskit_unix` and `notify-rust` → `zbus`.
 
 - **Control discovery validates its completed Unix-socket fallback.** A long
   `TMPDIR` could turn the supposedly short fallback into another path beyond
