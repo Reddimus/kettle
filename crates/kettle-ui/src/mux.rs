@@ -1071,7 +1071,7 @@ pub fn seam_at(seams: &[SplitSeam], px: f32, py: f32, tol: f32) -> Option<usize>
 /// with no target must draw no hint, not guess one.
 pub fn pane_drop_zone(rect: Rect, px: f32, py: f32) -> Option<(Dir, bool)> {
     let (x, y, w, h) = rect;
-    if !(w > 0.0 && h > 0.0) || !px.is_finite() || !py.is_finite() {
+    if !(w > 0.0 && h > 0.0 && px.is_finite() && py.is_finite()) {
         return None;
     }
     if px < x || px >= x + w || py < y || py >= y + h {

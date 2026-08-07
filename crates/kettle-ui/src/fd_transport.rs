@@ -16,7 +16,6 @@
 //! lifecycle is phases 6+7+8 of docs/TERMINATOR-DETACHABLE-TABS-DESIGN.md;
 //! this module is the pure fd-passing primitive those phases compose.
 
-#![cfg(unix)]
 #![allow(dead_code)]
 
 use std::io;
