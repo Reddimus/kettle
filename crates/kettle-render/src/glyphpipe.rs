@@ -119,6 +119,12 @@ struct CachedSlot {
     last_used: u64,
 }
 
+enum CacheOutcome {
+    Slot(GlyphSlot),
+    Empty,
+    AtlasFull,
+}
+
 /// Pick the `n` keys with the smallest `last_used` value out of `ages` — the
 /// least-recently-touched entries. Generic over the key type so the eviction
 /// *policy* is unit-testable with plain keys, without needing a real
@@ -145,9 +151,100 @@ fn lru_victims<K: Copy>(ages: impl Iterator<Item = (K, u64)>, n: usize) -> Vec<K
     by_age.into_iter().map(|(_, k)| k).collect()
 }
 
-/// A single-format atlas texture with a trivial shelf packer. Append-only +
-/// grow-by-doubling-height with a content-preserving copy, so a glyph's pixel
-/// coords never move once placed (instances stay valid across a grow).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct FreeRect {
+    x: u32,
+    y: u32,
+    width: u32,
+    height: u32,
+}
+
+struct AtlasAllocator {
+    width: u32,
+    height: u32,
+    cursor_x: u32,
+    shelf_y: u32,
+    shelf_h: u32,
+    free: Vec<FreeRect>,
+}
+
+impl AtlasAllocator {
+    fn new(width: u32, height: u32) -> Self {
+        Self {
+            width,
+            height,
+            cursor_x: 0,
+            shelf_y: 0,
+            shelf_h: 0,
+            free: Vec::new(),
+        }
+    }
+
+    fn alloc(&mut self, w: u32, h: u32) -> Option<(u32, u32)> {
+        let (gw, gh) = (w.checked_add(GUTTER)?, h.checked_add(GUTTER)?);
+        if let Some((index, _)) = self
+            .free
+            .iter()
+            .enumerate()
+            .filter(|(_, rect)| rect.width >= gw && rect.height >= gh)
+            .min_by_key(|(_, rect)| u64::from(rect.width) * u64::from(rect.height))
+        {
+            let rect = self.free.swap_remove(index);
+            if rect.width > gw {
+                self.free.push(FreeRect {
+                    x: rect.x + gw,
+                    y: rect.y,
+                    width: rect.width - gw,
+                    height: gh,
+                });
+            }
+            if rect.height > gh {
+                self.free.push(FreeRect {
+                    x: rect.x,
+                    y: rect.y + gh,
+                    width: rect.width,
+                    height: rect.height - gh,
+                });
+            }
+            return Some((rect.x, rect.y));
+        }
+        if self.cursor_x.checked_add(gw)? > self.width {
+            self.cursor_x = 0;
+            self.shelf_y = self.shelf_y.checked_add(self.shelf_h)?;
+            self.shelf_h = 0;
+        }
+        if self.shelf_y.checked_add(gh)? > self.height {
+            return None;
+        }
+        let (x, y) = (self.cursor_x, self.shelf_y);
+        self.cursor_x = self.cursor_x.checked_add(gw)?;
+        self.shelf_h = self.shelf_h.max(gh);
+        Some((x, y))
+    }
+
+    fn free(&mut self, x: u32, y: u32, w: u32, h: u32) {
+        let Some(width) = w.checked_add(GUTTER) else {
+            return;
+        };
+        let Some(height) = h.checked_add(GUTTER) else {
+            return;
+        };
+        self.free.push(FreeRect {
+            x,
+            y,
+            width,
+            height,
+        });
+    }
+
+    fn grow_height(&mut self, height: u32) {
+        self.height = height;
+    }
+}
+
+/// A single-format atlas texture with a shelf packer plus reclaimed rectangles.
+/// Texture growth preserves pixel coordinates, and evicted slots return their
+/// rectangles to the allocator so capacity exhaustion can recover in place.
 struct Atlas {
     tex: wgpu::Texture,
     view: wgpu::TextureView,
@@ -155,10 +252,7 @@ struct Atlas {
     bpp: u32,
     width: u32,
     height: u32,
-    // Shelf cursor.
-    cursor_x: u32,
-    shelf_y: u32,
-    shelf_h: u32,
+    allocator: AtlasAllocator,
     budget: GraphicsBudget,
     _gpu: GraphicsReservation,
 }
@@ -191,9 +285,7 @@ impl Atlas {
             bpp,
             width,
             height,
-            cursor_x: 0,
-            shelf_y: 0,
-            shelf_h: 0,
+            allocator: AtlasAllocator::new(width, height),
             budget,
             _gpu: gpu,
         })
@@ -227,20 +319,16 @@ impl Atlas {
     /// Reserve a `w×h` rectangle (with gutter). `None` ⇒ the current texture is
     /// out of vertical room and the caller must `grow`.
     fn alloc(&mut self, w: u32, h: u32) -> Option<(u32, u32)> {
-        let (gw, gh) = (w.checked_add(GUTTER)?, h.checked_add(GUTTER)?);
-        if self.cursor_x.checked_add(gw)? > self.width {
-            // Next shelf.
-            self.cursor_x = 0;
-            self.shelf_y = self.shelf_y.checked_add(self.shelf_h)?;
-            self.shelf_h = 0;
-        }
-        if self.shelf_y.checked_add(gh)? > self.height {
-            return None;
-        }
-        let (x, y) = (self.cursor_x, self.shelf_y);
-        self.cursor_x = self.cursor_x.checked_add(gw)?;
-        self.shelf_h = self.shelf_h.max(gh);
-        Some((x, y))
+        self.allocator.alloc(w, h)
+    }
+
+    fn free(&mut self, slot: GlyphSlot) {
+        self.allocator.free(
+            slot.atlas_x as u32,
+            slot.atlas_y as u32,
+            slot.w as u32,
+            slot.h as u32,
+        );
     }
 
     /// Double the height (clamped to `max_dim`), preserving existing pixels.
@@ -289,6 +377,7 @@ impl Atlas {
         self.view = new_tex.create_view(&wgpu::TextureViewDescriptor::default());
         self.tex = new_tex;
         self.height = new_h;
+        self.allocator.grow_height(new_h);
         self._gpu = gpu;
         true
     }
@@ -660,14 +749,13 @@ impl GlyphPipeline {
             cached.last_used = self.epoch;
             return cached.slot;
         }
-        // Once the append-only atlases are saturated, caching an unbounded
+        // Bound an unbounded stream of cached glyph and whitespace entries at
         // stream of misses would still grow this map forever. Bound it at a
         // deterministic ceiling, but instead of refusing every new glyph from
         // then on, evict the coldest (least-recently-touched) slots first to
-        // make room. A glyph that's still being drawn gets `last_used`
-        // refreshed by the hit branch above every single frame it appears, so
-        // eviction only ever reclaims combinations that stopped being drawn a
-        // while ago — a long session that floods through many distinct glyphs
+        // make room. Every instance-buffer rebuild re-emits all visible panes,
+        // so a glyph still being drawn gets `last_used` refreshed before cold
+        // slots are reclaimed — a long session that floods through many distinct glyphs
         // (unicode/emoji streaming, repeated zoom-driven subpixel bins)
         // self-heals instead of permanently losing glyph rendering once the
         // cap is first hit.
@@ -682,33 +770,74 @@ impl GlyphPipeline {
             let target = MAX_GLYPH_SLOTS - MAX_GLYPH_SLOTS / 8;
             self.evict_lru(self.slots.len().saturating_sub(target));
         }
-        let slot = self.rasterize_into_atlas(device, queue, rasterize);
-        self.slots.insert(
-            key,
-            CachedSlot {
-                slot,
-                last_used: self.epoch,
-            },
-        );
-        slot
+        match self.rasterize_into_atlas(device, queue, rasterize) {
+            CacheOutcome::Slot(slot) => {
+                self.slots.insert(
+                    key,
+                    CachedSlot {
+                        slot: Some(slot),
+                        last_used: self.epoch,
+                    },
+                );
+                Some(slot)
+            }
+            CacheOutcome::Empty => {
+                self.slots.insert(
+                    key,
+                    CachedSlot {
+                        slot: None,
+                        last_used: self.epoch,
+                    },
+                );
+                None
+            }
+            CacheOutcome::AtlasFull => None,
+        }
     }
 
-    /// Evict the `n` coldest slots (smallest `last_used` epoch). This doesn't
-    /// (and can't cheaply) reclaim their atlas pixels — the shelf packer is
-    /// append-only, so freed map entries don't free atlas space — but that's
-    /// still a strict improvement over refusing the glyph outright: the
-    /// common case (a glyph combination that's gone cold) frees a map slot at
-    /// no rendering cost, and the rare case (an evicted glyph reappears) just
-    /// pays what an ordinary cache miss already pays — a re-rasterize and a
-    /// fresh atlas allocation — rather than rendering as permanent blank
-    /// space for the rest of the session.
+    /// Evict the `n` coldest slots (smallest `last_used` epoch), returning
+    /// their atlas rectangles to the appropriate free list.
     fn evict_lru(&mut self, n: usize) {
         let victims: Vec<CacheKey> = lru_victims(
-            self.slots.iter().map(|(&k, cached)| (k, cached.last_used)),
+            self.slots
+                .iter()
+                .filter(|(_, cached)| cached.last_used < self.epoch)
+                .map(|(&k, cached)| (k, cached.last_used)),
             n,
         );
         for key in victims {
-            self.slots.remove(&key);
+            if let Some(cached) = self.slots.remove(&key) {
+                self.free_cached_slot(cached);
+            }
+        }
+    }
+
+    fn evict_cold_kind(&mut self, kind: u32, n: usize) -> usize {
+        let victims = lru_victims(
+            self.slots.iter().filter_map(|(&key, cached)| {
+                cached
+                    .slot
+                    .filter(|slot| slot.kind == kind && cached.last_used < self.epoch)
+                    .map(|_| (key, cached.last_used))
+            }),
+            n,
+        );
+        let count = victims.len();
+        for key in victims {
+            if let Some(cached) = self.slots.remove(&key) {
+                self.free_cached_slot(cached);
+            }
+        }
+        count
+    }
+
+    fn free_cached_slot(&mut self, cached: CachedSlot) {
+        if let Some(slot) = cached.slot {
+            if slot.kind == 0 {
+                self.color.free(slot);
+            } else {
+                self.mask.free(slot);
+            }
         }
     }
 
@@ -717,52 +846,83 @@ impl GlyphPipeline {
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         rasterize: impl FnOnce() -> Option<RasterGlyph<'r>>,
-    ) -> Option<GlyphSlot> {
-        let g = rasterize()?;
+    ) -> CacheOutcome {
+        let Some(g) = rasterize() else {
+            return CacheOutcome::Empty;
+        };
         // Empty glyph (space, zero-width): nothing to draw, but cache the miss.
         if g.width == 0 || g.height == 0 || g.data.is_empty() {
-            return None;
+            return CacheOutcome::Empty;
         }
-        let (atlas, kind, label) = if g.color {
-            (&mut self.color, 0u32, "kettle-glyph-color-atlas")
+        let (kind, label, bpp, atlas_width) = if g.color {
+            (
+                0u32,
+                "kettle-glyph-color-atlas",
+                self.color.bpp,
+                self.color.width,
+            )
         } else {
-            (&mut self.mask, 1u32, "kettle-glyph-mask-atlas")
+            (
+                1u32,
+                "kettle-glyph-mask-atlas",
+                self.mask.bpp,
+                self.mask.width,
+            )
         };
-        if texture_bytes(g.width, g.height, atlas.bpp) != Some(g.data.len()) {
+        if texture_bytes(g.width, g.height, bpp) != Some(g.data.len()) {
             log::warn!("skipping malformed glyph bitmap: byte length mismatch");
-            return None;
+            return CacheOutcome::Empty;
         }
         // The atlas only grows in HEIGHT; a glyph wider than the (fixed) atlas
         // width can never be packed, and writing it would copy past the texture's
         // right edge (a wgpu validation error → with panic=abort, a process
         // abort). Skip it instead. Unreachable in practice (needs a single glyph
         // > ~1024 physical px, i.e. an absurd font size), but a GPU-input guard.
-        if g.width.checked_add(GUTTER).is_none_or(|w| w > atlas.width) {
+        if g.width.checked_add(GUTTER).is_none_or(|w| w > atlas_width) {
             log::warn!(
                 "kettle glyph {}px wider than the {}px atlas — skipping",
                 g.width,
-                atlas.width
+                atlas_width
             );
-            return None;
+            return CacheOutcome::Empty;
         }
         let (x, y) = loop {
-            if let Some(p) = atlas.alloc(g.width, g.height) {
+            let allocation = if kind == 0 {
+                self.color.alloc(g.width, g.height)
+            } else {
+                self.mask.alloc(g.width, g.height)
+            };
+            if let Some(p) = allocation {
                 break p;
             }
-            if !atlas.grow(device, queue, label, self.max_dim) {
-                // Atlas is at the device's texture limit (tens of thousands of
-                // glyphs — far past any real session). Skip this one glyph
-                // rather than abort the frame.
+            let grew = if kind == 0 {
+                self.color.grow(device, queue, label, self.max_dim)
+            } else {
+                self.mask.grow(device, queue, label, self.max_dim)
+            };
+            if grew {
+                self.bg_dirty = true;
+                continue;
+            }
+            let batch = (self.slots.len() / 8).max(1);
+            if self.evict_cold_kind(kind, batch) == 0 {
                 log::warn!(
                     "kettle glyph atlas full ({}px) — skipping a glyph",
-                    atlas.height
+                    if kind == 0 {
+                        self.color.height
+                    } else {
+                        self.mask.height
+                    }
                 );
-                return None;
+                return CacheOutcome::AtlasFull;
             }
-            self.bg_dirty = true;
         };
-        atlas.write(queue, x, y, g.width, g.height, g.data);
-        Some(GlyphSlot {
+        if kind == 0 {
+            self.color.write(queue, x, y, g.width, g.height, g.data);
+        } else {
+            self.mask.write(queue, x, y, g.width, g.height, g.data);
+        }
+        CacheOutcome::Slot(GlyphSlot {
             kind,
             atlas_x: x as f32,
             atlas_y: y as f32,
@@ -890,12 +1050,8 @@ impl GlyphPipeline {
         // intervening `upload`) would otherwise render stale instances whose UVs
         // point at atlas pixels the packer is about to overwrite from (0,0).
         self.count = 0;
-        self.color.cursor_x = 0;
-        self.color.shelf_y = 0;
-        self.color.shelf_h = 0;
-        self.mask.cursor_x = 0;
-        self.mask.shelf_y = 0;
-        self.mask.shelf_h = 0;
+        self.color.allocator = AtlasAllocator::new(self.color.width, self.color.height);
+        self.mask.allocator = AtlasAllocator::new(self.mask.width, self.mask.height);
     }
 }
 
@@ -1015,6 +1171,35 @@ mod tests {
         }
     }
 
+    #[test]
+    fn tiny_atlas_reuses_evicted_pixels_after_exhaustion() {
+        let mut atlas = AtlasAllocator::new(8, 4);
+        let first = atlas.alloc(3, 3).expect("first glyph");
+        let second = atlas.alloc(3, 3).expect("second glyph");
+        assert_eq!(first, (0, 0));
+        assert_eq!(second, (4, 0));
+        assert_eq!(atlas.alloc(3, 3), None, "tiny atlas must be full");
+
+        atlas.free(first.0, first.1, 3, 3);
+        let newcomer = atlas.alloc(3, 3).expect("cold slot must be reusable");
+        assert_eq!(newcomer, first);
+
+        atlas.free(second.0, second.1, 3, 3);
+        let revisited = atlas
+            .alloc(3, 3)
+            .expect("an evicted glyph must render again without clearing the atlas");
+        assert_eq!(revisited, second);
+    }
+
+    #[test]
+    fn atlas_capacity_failures_are_not_cached_as_whitespace() {
+        let src = include_str!("glyphpipe.rs");
+        assert!(
+            src.contains("CacheOutcome::AtlasFull => None"),
+            "capacity failure must return without inserting a permanent None slot"
+        );
+    }
+
     /// Drift guard (eviction-not-refusal fix). `ensure_glyph` must evict cold
     /// slots to make room once `MAX_GLYPH_SLOTS` is hit, not silently return
     /// `None` for every new glyph from then on — the latter turns a long
@@ -1030,6 +1215,10 @@ mod tests {
         assert!(
             src.contains("self.evict_lru("),
             "ensure_glyph must evict cold slots when MAX_GLYPH_SLOTS is reached"
+        );
+        assert!(
+            src.contains("self.evict_cold_kind(kind, batch)"),
+            "atlas exhaustion must reclaim cold pixels, not only map entries"
         );
         assert!(
             src.contains("cached.last_used = self.epoch"),

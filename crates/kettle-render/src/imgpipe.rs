@@ -17,6 +17,8 @@ pub(crate) struct ImageItem {
     /// Optional destination clip in physical surface pixels. Inline terminal
     /// images use the owning pane's grid viewport; wallpapers stay unclipped.
     clip_rect: Option<[f32; 4]>,
+    uv_override: Option<([f32; 2], [f32; 2])>,
+    repeat: bool,
 }
 
 impl ImageItem {
@@ -27,6 +29,21 @@ impl ImageItem {
             source_rect: None,
             source_crop: None,
             clip_rect: None,
+            uv_override: None,
+            repeat: false,
+        }
+    }
+
+    pub(crate) fn tiled(width: f32, height: f32, image: ImageData) -> Self {
+        let uv_size = [width / image.width as f32, height / image.height as f32];
+        Self {
+            rect: [0.0, 0.0, width, height],
+            image,
+            source_rect: None,
+            source_crop: None,
+            clip_rect: None,
+            uv_override: Some(([0.0, 0.0], uv_size)),
+            repeat: true,
         }
     }
 
@@ -43,6 +60,8 @@ impl ImageItem {
             source_rect,
             source_crop,
             clip_rect: Some(clip_rect),
+            uv_override: None,
+            repeat: false,
         }
     }
 }
@@ -118,7 +137,8 @@ struct CachedTexture {
     _image: ImageData,
     /// Accounts the retained GPU allocation until cache eviction.
     _gpu: GraphicsReservation,
-    bind_group: wgpu::BindGroup,
+    clamp_bind_group: wgpu::BindGroup,
+    repeat_bind_group: wgpu::BindGroup,
     last_used: u64,
 }
 
@@ -275,15 +295,48 @@ fn dropped_warn_transition(dropped: usize, last_warned: Option<usize>) -> (bool,
     }
 }
 
-fn record_draw(draws: &mut Vec<(usize, u32, u32)>, key: usize, index: u32) {
-    if let Some((last_key, start, count)) = draws.last_mut()
+fn record_draw(draws: &mut Vec<(usize, bool, u32, u32)>, key: usize, repeat: bool, index: u32) {
+    if let Some((last_key, last_repeat, start, count)) = draws.last_mut()
         && *last_key == key
+        && *last_repeat == repeat
         && start.saturating_add(*count) == index
     {
         *count += 1;
     } else {
-        draws.push((key, index, 1));
+        draws.push((key, repeat, index, 1));
     }
+}
+
+fn retained_upload_key(screen: [f32; 2], items: &[ImageItem]) -> u64 {
+    use std::hash::{Hash, Hasher};
+
+    let mut hash = std::hash::DefaultHasher::new();
+    for value in screen {
+        value.to_bits().hash(&mut hash);
+    }
+    items.len().hash(&mut hash);
+    for item in items {
+        item.image.allocation_key().hash(&mut hash);
+        item.image.width.hash(&mut hash);
+        item.image.height.hash(&mut hash);
+        for value in item.rect {
+            value.to_bits().hash(&mut hash);
+        }
+        item.source_rect
+            .map(|r| (r.x, r.y, r.width, r.height))
+            .hash(&mut hash);
+        item.source_crop
+            .map(|c| (c.top.to_bits(), c.bottom.to_bits()))
+            .hash(&mut hash);
+        item.clip_rect
+            .map(|rect| rect.map(f32::to_bits))
+            .hash(&mut hash);
+        item.uv_override
+            .map(|(origin, size)| (origin.map(f32::to_bits), size.map(f32::to_bits)))
+            .hash(&mut hash);
+        item.repeat.hash(&mut hash);
+    }
+    hash.finish()
 }
 
 pub struct ImagePipeline {
@@ -291,13 +344,14 @@ pub struct ImagePipeline {
     tex_bgl: wgpu::BindGroupLayout,
     screen_buf: wgpu::Buffer,
     screen_bg: wgpu::BindGroup,
-    sampler: wgpu::Sampler,
+    clamp_sampler: wgpu::Sampler,
+    repeat_sampler: wgpu::Sampler,
     _screen_gpu: GraphicsReservation,
     instances: wgpu::Buffer,
     instance_gpu: GraphicsReservation,
     cap: usize,
     cache: HashMap<usize, CachedTexture>,
-    draws: Vec<(usize, u32, u32)>, // (cache key, first instance, count)
+    draws: Vec<(usize, bool, u32, u32)>, // (cache key, repeat, first instance, count)
     budget: GraphicsBudget,
     max_instances: usize,
     epoch: u64,
@@ -306,6 +360,7 @@ pub struct ImagePipeline {
     /// instead of every frame of a steady-state overflow. `None` once the
     /// backlog clears (or on startup).
     last_dropped_warn: Option<usize>,
+    retained_key: Option<u64>,
 }
 
 impl ImagePipeline {
@@ -435,8 +490,16 @@ impl ImagePipeline {
                 resource: screen_buf.as_entire_binding(),
             }],
         });
-        let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+        let clamp_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("img-sampler"),
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            ..Default::default()
+        });
+        let repeat_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("img-repeat-sampler"),
+            address_mode_u: wgpu::AddressMode::Repeat,
+            address_mode_v: wgpu::AddressMode::Repeat,
             mag_filter: wgpu::FilterMode::Linear,
             min_filter: wgpu::FilterMode::Linear,
             ..Default::default()
@@ -455,7 +518,8 @@ impl ImagePipeline {
             tex_bgl,
             screen_buf,
             screen_bg,
-            sampler,
+            clamp_sampler,
+            repeat_sampler,
             _screen_gpu: screen_gpu,
             instances,
             instance_gpu,
@@ -466,6 +530,7 @@ impl ImagePipeline {
             max_instances,
             epoch: 0,
             last_dropped_warn: None,
+            retained_key: None,
         })
     }
 
@@ -551,20 +616,24 @@ impl ImagePipeline {
             },
         );
         let view = tex.create_view(&wgpu::TextureViewDescriptor::default());
-        let bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("img-tex-bg"),
-            layout: &self.tex_bgl,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: wgpu::BindingResource::TextureView(&view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::Sampler(&self.sampler),
-                },
-            ],
-        });
+        let make_bind_group = |label, sampler: &wgpu::Sampler| {
+            device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some(label),
+                layout: &self.tex_bgl,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::TextureView(&view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::Sampler(sampler),
+                    },
+                ],
+            })
+        };
+        let clamp_bind_group = make_bind_group("img-tex-bg", &self.clamp_sampler);
+        let repeat_bind_group = make_bind_group("img-repeat-tex-bg", &self.repeat_sampler);
         // Store an `Arc` clone alongside the bind group so the keyed buffer
         // address stays pinned while cached (ABA guard — see
         // `CachedTexture`).
@@ -573,7 +642,8 @@ impl ImagePipeline {
             CachedTexture {
                 _image: img.clone(),
                 _gpu: gpu_reservation,
-                bind_group: bg,
+                clamp_bind_group,
+                repeat_bind_group,
                 last_used: self.epoch,
             },
         );
@@ -589,6 +659,33 @@ impl ImagePipeline {
         screen: [f32; 2],
         items: &[ImageItem],
     ) {
+        self.retained_key = None;
+        let _ = self.upload_inner(device, queue, screen, items);
+    }
+
+    pub(crate) fn upload_retained(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        screen: [f32; 2],
+        items: &[ImageItem],
+    ) {
+        let key = retained_upload_key(screen, items);
+        if self.retained_key == Some(key) {
+            return;
+        }
+        self.retained_key = self
+            .upload_inner(device, queue, screen, items)
+            .then_some(key);
+    }
+
+    fn upload_inner(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        screen: [f32; 2],
+        items: &[ImageItem],
+    ) -> bool {
         queue.write_buffer(
             &self.screen_buf,
             0,
@@ -604,7 +701,7 @@ impl ImagePipeline {
             // transition memory so a later overflow (even at the same count)
             // is reported as a fresh event rather than staying suppressed.
             self.last_dropped_warn = None;
-            return;
+            return true;
         }
         let item_count = capped_instance_count(items.len(), self.max_instances);
         let dropped = items.len() - item_count;
@@ -621,16 +718,16 @@ impl ImagePipeline {
         if item_count > self.cap {
             let Some(next_cap) = item_count.checked_next_power_of_two() else {
                 log::warn!("image instance count overflow; skipping frame images");
-                return;
+                return false;
             };
             let next_cap = next_cap.min(self.max_instances);
             let Some(bytes) = next_cap.checked_mul(std::mem::size_of::<Inst>()) else {
                 log::warn!("image instance buffer size overflow; skipping frame images");
-                return;
+                return false;
             };
             let Some(instance_gpu) = self.budget.reserve_gpu(bytes) else {
                 log::warn!("image instance buffer growth exceeds GPU graphics budget");
-                return;
+                return false;
             };
             let instances = device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("img-instances"),
@@ -643,11 +740,14 @@ impl ImagePipeline {
             self.cap = next_cap;
         }
         let mut insts = Vec::with_capacity(item_count);
+        let mut complete = true;
         for (i, item) in items.iter().take(item_count).enumerate() {
             // Push the instance for every item so buffer slot `i` stays aligned
             // with the enumerate index stored in `draws`. Invalid or wholly
             // clipped items receive a zero-sized slot and no draw.
-            let uv = source_uv(&item.image, item.source_rect, item.source_crop);
+            let uv = item
+                .uv_override
+                .or_else(|| source_uv(&item.image, item.source_rect, item.source_crop));
             let Some((uv_origin, uv_size)) = uv else {
                 insts.push(Inst::zeroed());
                 log::warn!("skipping image placement with an invalid source rectangle");
@@ -660,10 +760,13 @@ impl ImagePipeline {
             };
             insts.push(instance);
             if let Some(key) = self.ensure_texture(device, queue, &item.image) {
-                record_draw(&mut self.draws, key, i as u32);
+                record_draw(&mut self.draws, key, item.repeat, i as u32);
+            } else {
+                complete = false;
             }
         }
         queue.write_buffer(&self.instances, 0, bytemuck::cast_slice(&insts));
+        complete
     }
 
     pub fn draw(&self, pass: &mut wgpu::RenderPass<'_>) {
@@ -673,9 +776,14 @@ impl ImagePipeline {
         pass.set_pipeline(&self.pipeline);
         pass.set_bind_group(0, &self.screen_bg, &[]);
         pass.set_vertex_buffer(0, self.instances.slice(..));
-        for (key, first, count) in &self.draws {
+        for (key, repeat, first, count) in &self.draws {
             if let Some(cached) = self.cache.get(key) {
-                pass.set_bind_group(1, &cached.bind_group, &[]);
+                let bind_group = if *repeat {
+                    &cached.repeat_bind_group
+                } else {
+                    &cached.clamp_bind_group
+                };
+                pass.set_bind_group(1, bind_group, &[]);
                 pass.draw(0..4, *first..first.saturating_add(*count));
             }
         }
@@ -883,10 +991,45 @@ mod aba_guard_tests {
     }
 
     #[test]
-    fn wallpaper_and_inline_instance_limits_are_independent() {
+    fn tiled_wallpaper_is_one_fullscreen_repeating_instance() {
+        let image = ImageData::new(43, 48, vec![255; 43 * 48 * 4]).expect("wallpaper");
+        let item = super::ImageItem::tiled(3840.0, 2160.0, image);
+        let (uv_origin, uv_size) = item.uv_override.expect("repeat UVs");
+        let inst = super::clipped_instance(item.rect, uv_origin, uv_size, item.clip_rect)
+            .expect("fullscreen tile instance");
+
+        assert!(item.repeat);
+        assert_eq!(inst.pos, [0.0, 0.0]);
+        assert_eq!(inst.size, [3840.0, 2160.0]);
+        assert_eq!(inst.uv_origin, [0.0, 0.0]);
+        assert!((inst.uv_size[0] - 3840.0 / 43.0).abs() < f32::EPSILON);
+        assert!((inst.uv_size[1] - 45.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn retained_wallpaper_key_tracks_geometry_and_surface() {
+        let image = ImageData::new(2, 2, vec![255; 16]).expect("wallpaper");
+        let centered = super::ImageItem::full(-1.0, -1.0, 2.0, 2.0, image.clone());
+        let same = super::ImageItem::full(-1.0, -1.0, 2.0, 2.0, image.clone());
+        let moved = super::ImageItem::full(0.0, -1.0, 2.0, 2.0, image.clone());
+
+        let key = super::retained_upload_key([1.0, 1.0], &[centered]);
+        assert_eq!(key, super::retained_upload_key([1.0, 1.0], &[same]));
+        assert_ne!(key, super::retained_upload_key([1.0, 1.0], &[moved]));
+        assert_ne!(
+            key,
+            super::retained_upload_key(
+                [2.0, 1.0],
+                &[super::ImageItem::full(-1.0, -1.0, 2.0, 2.0, image)]
+            )
+        );
+    }
+
+    #[test]
+    fn wallpaper_pipeline_needs_one_instance_while_inline_keeps_its_budget() {
         let inline = kettle_core::GraphicsLimits::default().placements;
         assert_eq!(super::capped_instance_count(4096, inline), inline);
-        assert_eq!(super::capped_instance_count(4096, 4096), 4096);
+        assert_eq!(super::capped_instance_count(4096, 1), 1);
     }
 
     #[test]
@@ -907,10 +1050,10 @@ mod aba_guard_tests {
     #[test]
     fn consecutive_instances_of_one_texture_are_batched() {
         let mut draws = Vec::new();
-        super::record_draw(&mut draws, 10, 0);
-        super::record_draw(&mut draws, 10, 1);
-        super::record_draw(&mut draws, 20, 2);
-        super::record_draw(&mut draws, 10, 3);
-        assert_eq!(draws, vec![(10, 0, 2), (20, 2, 1), (10, 3, 1)]);
+        super::record_draw(&mut draws, 10, false, 0);
+        super::record_draw(&mut draws, 10, false, 1);
+        super::record_draw(&mut draws, 10, true, 2);
+        super::record_draw(&mut draws, 10, true, 3);
+        assert_eq!(draws, vec![(10, false, 0, 2), (10, true, 2, 2)]);
     }
 }
