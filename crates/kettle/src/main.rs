@@ -116,6 +116,31 @@ mod mcp;
 mod mcp_tools;
 mod update_cli;
 
+#[cfg(test)]
+fn private_test_tempdir(prefix: &str) -> tempfile::TempDir {
+    let mut builder = tempfile::Builder::new();
+    builder.prefix(prefix);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        builder.permissions(std::fs::Permissions::from_mode(0o700));
+    }
+    #[cfg(windows)]
+    {
+        let base = std::env::var_os("LOCALAPPDATA")
+            .or_else(|| std::env::var_os("USERPROFILE"))
+            .expect("Windows tests require LOCALAPPDATA or USERPROFILE");
+        builder
+            .tempdir_in(base)
+            .expect("create private test directory in the user profile")
+    }
+    #[cfg(not(windows))]
+    {
+        builder.tempdir().expect("create private test directory")
+    }
+}
+
 /// Version string shown by `kettle --version`. Concatenates the
 /// `Cargo.toml` version with the git SHA captured by `build.rs` (or
 /// the empty string when we're not in a git checkout — source
@@ -2669,29 +2694,9 @@ mod tests {
         }
     }
 
-    fn remote_test_tempdir() -> tempfile::TempDir {
-        #[cfg(windows)]
-        {
-            let base = std::env::var_os("LOCALAPPDATA")
-                .or_else(|| std::env::var_os("USERPROFILE"))
-                .expect("Windows tests require LOCALAPPDATA or USERPROFILE");
-            tempfile::Builder::new()
-                .prefix("kettle-remote-lock-test-")
-                .tempdir_in(base)
-                .expect("create private remote-lock test directory")
-        }
-        #[cfg(not(windows))]
-        {
-            tempfile::Builder::new()
-                .prefix("kettle-remote-lock-test-")
-                .tempdir()
-                .expect("create private remote-lock test directory")
-        }
-    }
-
     #[test]
     fn remote_command_append_uses_the_shared_bounded_lock() {
-        let dir = remote_test_tempdir();
+        let dir = super::private_test_tempdir("kettle-remote-lock-test-");
         let path = dir.path().join("remote.cmd");
         let lock_path = kettle_state::remote_command_lock_path(&path);
         let holder = kettle_state::ExclusiveFileLock::acquire(&lock_path).unwrap();
@@ -2758,7 +2763,7 @@ mod tests {
 
     #[test]
     fn remote_command_append_accepts_the_exact_spool_limit() {
-        let dir = remote_test_tempdir();
+        let dir = super::private_test_tempdir("kettle-remote-lock-test-");
         let path = dir.path().join("remote.cmd");
         let prefix = b"send-text ";
         append_remote_command(&path, prefix).unwrap();
@@ -2775,7 +2780,7 @@ mod tests {
 
     #[test]
     fn remote_command_append_rejects_over_limit_without_mutation() {
-        let dir = remote_test_tempdir();
+        let dir = super::private_test_tempdir("kettle-remote-lock-test-");
         let path = dir.path().join("remote.cmd");
         let cap = usize::try_from(kettle_state::MAX_REMOTE_COMMAND_BYTES).unwrap();
         let exact = vec![b'q'; cap];

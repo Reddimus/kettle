@@ -3255,7 +3255,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn requested_recording_failure_prevents_the_child_from_starting() {
-        let temp = tempfile::tempdir().unwrap();
+        let temp = crate::private_test_tempdir("kettle-exec-recording-failure-");
         let record = temp.path().join("active.cast");
         let marker = temp.path().join("child-started");
         let active = kettle_core::record::Recorder::start(&record, 80, 24, false).unwrap();
@@ -3455,17 +3455,8 @@ mod tests {
 
     #[test]
     fn cancellable_capture_kills_child_and_finishes_recorder_promptly() {
-        #[cfg(windows)]
-        let scratch = std::env::var_os("LOCALAPPDATA")
-            .or_else(|| std::env::var_os("USERPROFILE"))
-            .map(std::path::PathBuf::from)
-            .expect("Windows tests require LOCALAPPDATA or USERPROFILE");
-        #[cfg(not(windows))]
-        let scratch = std::env::temp_dir();
-        let dir = scratch.join(format!("kettle-exec-cancel-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        let record = dir.join("cancel.cast");
+        let dir = crate::private_test_tempdir("kettle-exec-cancel-");
+        let record = dir.path().join("cancel.cast");
         #[cfg(unix)]
         let argv = vec![
             "sh".into(),
@@ -3502,7 +3493,6 @@ mod tests {
                 .next()
                 .is_some_and(|line| line.contains("\"version\":2"))
         );
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
