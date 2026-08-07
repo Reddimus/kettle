@@ -285,6 +285,21 @@ if [ -f docs/VERSION-HISTORY.md ]; then
     # that; claiming a tag that does not exist argued with it.
     TAG_COUNT=$(git tag -l 'v[0-9]*' | wc -l | tr -d '[:space:]')
     HEADING_COUNT=$((TAG_COUNT + 1))
+    # Restore the tag range's upper bound to the newest tag that actually
+    # EXISTS. The install-docs lockstep loop above rewrites every `vPREV` in
+    # this file, which is right for the "latest version in this tree" line and
+    # wrong here: this sentence describes the Git tags inspected, and the tag
+    # for $VERSION is not created until tag-release.sh runs. Left alone it
+    # claimed "156 Git tags ... through v2.53.0" while counting 156 tags whose
+    # newest is v2.52.0 -- contradicting the paragraph directly above, which
+    # exists to explain that very off-by-one.
+    NEWEST_TAG=$(git tag -l 'v[0-9]*' | sort -V | tail -1)
+    if [ -n "${NEWEST_TAG}" ]; then
+        sed -i.bak -E \
+            "s/(through \`)v[0-9]+\.[0-9]+\.[0-9]+(\`)/\1${NEWEST_TAG}\2/" \
+            docs/VERSION-HISTORY.md
+        rm -f docs/VERSION-HISTORY.md.bak
+    fi
     echo "refreshing docs/VERSION-HISTORY.md release count/date"
     sed -i.bak -E \
         "s/Release records inspected: [0-9]+ Git tags and [0-9]+ changelog headings/Release records inspected: ${TAG_COUNT} Git tags and ${HEADING_COUNT} changelog headings/" \
