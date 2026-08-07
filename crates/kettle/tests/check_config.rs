@@ -1,4 +1,7 @@
-use std::process::{Command, Output, Stdio};
+// `Output` is only named by the Unix-only `wait_bounded` below; importing it at
+// module scope makes it an unused import on Windows, which `-D warnings` turns
+// into a build failure.
+use std::process::{Command, Stdio};
 
 fn check_config_command(config_home: &std::path::Path) -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_kettle"));
@@ -12,8 +15,9 @@ fn check_config_command(config_home: &std::path::Path) -> Command {
 }
 
 #[cfg(unix)]
-fn wait_bounded(mut child: std::process::Child) -> Output {
+fn wait_bounded(mut child: std::process::Child) -> std::process::Output {
     use std::io::Read as _;
+    use std::process::Output;
     use std::time::{Duration, Instant};
 
     let deadline = Instant::now() + Duration::from_secs(5);
