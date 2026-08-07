@@ -235,18 +235,15 @@ pub enum Action {
     /// Terminator parity (`key_preferences` /
     /// `key_preferences_keybindings`). Terminator's GUI
     /// Preferences dialog is config-file-driven for kettle, so
-    /// the preferences keybind opens the user's config file in
-    /// $EDITOR (fallback: `open::that_detached` lets the OS pick
-    /// the default text editor). Closes the "preferences GUI is
+    /// the preferences keybind opens the user's config file with
+    /// the OS-registered application. Closes the "preferences GUI is
     /// a paradigm choice" Bucket E rationale by making the
-    /// equivalent UX one keystroke away. Writes the path of the
-    /// active config file to that pane's PTY too in case the
-    /// user wants to switch editors mid-session.
+    /// equivalent UX one keystroke away.
     EditConfig,
     /// Open the in-app **Settings overlay** — a keyboard-navigable
     /// panel of the most-used config keys (font size, theme, scrollbar, bell,
     /// cursor, opacity, …) that persists changes live. Distinct from
-    /// `EditConfig` (which opens the raw config file in `$EDITOR` for the long
+    /// `EditConfig` (which opens the raw config file with its default app for the long
     /// tail). This is the "settings menu for non-technical users" surface.
     OpenSettings,
     /// Preferences submenu (C8): runtime-mutable

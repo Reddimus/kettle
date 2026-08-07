@@ -3397,6 +3397,91 @@ mod tests {
         );
     }
 
+    /// Reverse half of the keybind documentation guard: every global chord the
+    /// Linux man page advertises must exist in Linux's default keymap. Modal vi
+    /// keys are intentionally ignored; they are mode-local commands rather than
+    /// entries in `keybinds::defaults()`.
+    #[cfg(all(unix, not(target_os = "macos")))]
+    #[test]
+    fn man_page_does_not_advertise_unbound_global_chords() {
+        use std::collections::HashSet;
+
+        const MAN_PAGE: &str = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../packaging/linux/kettle.1"
+        ));
+
+        fn expand_chord_row(row: &str) -> Vec<String> {
+            let row = row.replace("PgUp", "PageUp").replace("PgDn", "PageDown");
+            if row.eq_ignore_ascii_case("Alt+arrow") {
+                return ["Up", "Down", "Left", "Right"]
+                    .into_iter()
+                    .map(|key| format!("Alt+{key}"))
+                    .collect();
+            }
+            if row.eq_ignore_ascii_case("Shift+arrow") {
+                return ["Up", "Down", "Left", "Right"]
+                    .into_iter()
+                    .map(|key| format!("Shift+{key}"))
+                    .collect();
+            }
+            if let Some((first, last)) = row.split_once(" ... ")
+                && let (Some(first_digit), Some(last_digit)) =
+                    (first.chars().last(), last.chars().last())
+                && first_digit.is_ascii_digit()
+                && last_digit.is_ascii_digit()
+            {
+                let prefix = &first[..first.len() - first_digit.len_utf8()];
+                return (first_digit..=last_digit)
+                    .map(|digit| format!("{prefix}{digit}"))
+                    .collect();
+            }
+            if let Some((first, second_key)) = row.split_once('/') {
+                let prefix = first
+                    .rsplit_once('+')
+                    .map(|(mods, _)| format!("{mods}+"))
+                    .unwrap_or_default();
+                return vec![first.to_string(), format!("{prefix}{second_key}")];
+            }
+            vec![row]
+        }
+
+        let defaults: HashSet<String> = kettle_config::keybinds::defaults()
+            .keys()
+            .map(kettle_config::Trigger::label)
+            .collect();
+        let key_section = MAN_PAGE
+            .split(".SH KEY BINDINGS")
+            .nth(1)
+            .expect("KEY BINDINGS section")
+            .split("\n.SH ")
+            .next()
+            .expect("end of KEY BINDINGS section");
+        let mut unbound = Vec::new();
+        for row in key_section
+            .lines()
+            .filter_map(|line| line.strip_prefix(".B "))
+        {
+            let is_global_chord = row.contains('+')
+                || row.contains('/')
+                || row
+                    .strip_prefix('F')
+                    .is_some_and(|number| number.chars().all(|c| c.is_ascii_digit()));
+            if !is_global_chord || row.contains("\\-") {
+                continue;
+            }
+            for chord in expand_chord_row(row) {
+                if !defaults.contains(&chord) {
+                    unbound.push(chord);
+                }
+            }
+        }
+        assert!(
+            unbound.is_empty(),
+            "Linux man page advertises chords absent from keybinds::defaults(): {unbound:?}"
+        );
+    }
+
     #[test]
     fn extra_check_config_lines_empty_for_default_config() {
         // Drift guard. The default config produces no

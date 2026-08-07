@@ -130,7 +130,7 @@ The panel covers the most-used options; kettle has many more config keys
 (themes, colors, keybinds, shell command, SSH hosts, triggers, plugins, …).
 For those, edit the config file directly — the full reference is in
 [CONFIG.md](CONFIG.md). You can jump straight to it from kettle with
-**right-click → Preferences ▸ Advanced… (open config in $EDITOR)**.
+**right-click → Preferences ▸ Advanced… (open config with default app)**.
 The pre-negotiation Enter fallback `modify-other-keys = enter|off` is one of
 these config-only options; edits still reload immediately for every open pane.
 

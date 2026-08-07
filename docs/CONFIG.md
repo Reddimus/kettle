@@ -105,7 +105,7 @@ configs were written against them: `green` is `#008000` and `gray`/`grey` is
 | `smart-copy` | bool | `true` | `true` (default + Terminator default): `Action::Copy` preserves the existing clipboard when there's no selection. `false`: clobber the clipboard with empty text on every Ctrl+Shift+C — for users who prefer "Copy means the clipboard now reflects the current selection, even when empty" over the smart heuristic. Distinct from `copy-on-select` (which controls auto-copy when text selection completes) |
 | `menu-item` (repeatable, `menu-item = LABEL = CMD`) | string | none | Add a row to the right-click context menu that writes `CMD\n` to the focused pane's PTY when clicked. Repeatable — each `menu-item = …` line appends one row. Use `menu-item = Clear screen = clear`, `menu-item = Open editor = $EDITOR ~/.bashrc`, etc. For richer behavior (Lua callbacks, conditional rows) use `kettle.add_menu_item(label, callback)` from `init.lua` — see [`docs/examples/init.lua`](examples/init.lua) |
 | `handle-size` | int -1–50 px | `-1` | Split-divider stroke width. `-1` = use the theme default (1 px). Higher values give a chunkier divider — useful on high-DPI displays where 1 px is hard to see |
-| `geometry-hinting` | bool | `false` | When `true`, request that the window manager resize the kettle window in steps that match the font cell grid (so a resize always lands on integral rows/columns instead of mid-cell pixel offsets). Best-effort: respected by X11 + Windows window managers via winit; ignored on Wayland (compositor manages sizing) |
+| `geometry-hinting` | bool | `false` | When `true`, request an approximate 8×16 logical-pixel resize increment. This is not recomputed from the active font metrics, so it does not guarantee integral terminal rows/columns and does not track font zoom. X11 honors the hint; Wayland support varies by compositor; macOS ignores it, and Kettle does not currently apply a native Windows increment |
 | `focus` | `click`\|`sloppy`\|`system` | `click` | Focus-follows-mouse policy. `click` (default) — focus on click. `sloppy` — focus on cursor movement; pane under the cursor becomes focused without clicking. `system` — kettle treats this as `click` (winit doesn't expose the OS-level focus policy, so the OS-managed mode falls back to explicit-click behavior) |
 | `minimum-contrast` | float 0–21 | `0.0` | WCAG 2.0 minimum contrast ratio of cell text against its background; `0` = off. `4.5` ≈ WCAG AA, `7.0` ≈ AAA. Foreground is lifted toward white/black as needed |
 | `window-title-format` (`title-format`) | string | `{title} — kettle` | OS window title template — placeholders `{title}` (active pane title), `{cwd}` (active pane cwd), `{tab}` (1-based tab index); `{{`/`}}` escape literal braces. Native OS titlebars strip Private Use / Nerd Font glyphs that desktop UI fonts commonly render as tofu boxes; Kettle-rendered tabs and pane titlebars keep them |
@@ -300,9 +300,9 @@ per-key audit against Terminator's source.
 | `title-at-bottom` | bool | `false` | Per-pane titlebar position |
 | `title-hide-sizetext` | bool | `false` | Hide the `WxH` size annotation in the titlebar |
 | `icon-bell` | bool | `true` | Render a bell glyph in the titlebar when the pane ringed BEL |
-| `title-transmit-bg-color` / `-fg-color` | color | `#c80003` / `#ffffff` | Focused-pane (broadcast-source) titlebar colors |
-| `title-receive-bg-color` / `-fg-color` | color | `#0076c9` / `#ffffff` | Broadcast-group-member titlebar colors |
-| `title-inactive-bg-color` / `-fg-color` | color | `#c0bebf` / `#000000` | Idle-pane titlebar colors |
+| `title-transmit-bg-color` / `-fg-color` | color | `focused-split-color` → window accent / theme `cursor-text` | Focused-pane (broadcast-source) titlebar colors; unset values follow the active theme cascade |
+| `title-receive-bg-color` / `-fg-color` | color | window accent / theme `cursor-text` | Broadcast-group-member titlebar colors; unset values follow the active theme cascade |
+| `title-inactive-bg-color` / `-fg-color` | color | theme `palette[8]` / theme foreground | Idle-pane titlebar colors; unset values follow the active theme cascade |
 | `background-type` | enum | `solid` | `solid` \| `transparent` \| `image` \| `starfield` (v2.24.0 — a zero-config procedural GPU starfield; needs no `background-image`. A FIXED built-in example: its look is baked in, not tunable). Surfaced in Settings → Background. See **[BACKGROUNDS.md](BACKGROUNDS.md)** |
 | `background-image` | path | — | Wallpaper image (for `background-type = image`). Supports PNG/JPEG/WebP/BMP/GIF, **animated GIF / APNG / animated WebP** (plays as a moving background — see `background-animation`). Tilde expansion supported. Editable inline in Settings → Background. Curated sources in **[BACKGROUNDS.md](BACKGROUNDS.md)** |
 | `chrome-background` | enum | `theme` | When a wallpaper (`image` or `starfield`) is set, the opaque fill of the window chrome strips (tab bar, status bar) so the background never bleeds through them: `theme` (the theme's chrome color — default) \| `auto` (the background's average color, kept readable under the tab text; black over the starfield) \| `black` \| `white`. No effect without a wallpaper |
@@ -383,7 +383,7 @@ The remaining keys parse cleanly but are not yet wired. A future cycle wiring an
 
 Most of the keys above can be toggled at runtime via right-click → **Preferences ▸**.
 The submenu surfaces five common toggles + an `Advanced…` row that opens the
-config file in `$EDITOR` for everything else:
+config file with the operating system's default app for everything else:
 
 | Submenu row | Config key written |
 |---|---|
@@ -393,7 +393,7 @@ config file in `$EDITOR` for everything else:
 | Bell (radio: off/visual/attention/both) | `bell` |
 | Mouse-hide while typing (✓) | `mouse-hide-while-typing` |
 | Font size + / − | (live-only; `font-size` not auto-persisted yet) |
-| Advanced… | opens `~/.config/kettle/config` in `$EDITOR` |
+| Advanced… | opens `~/.config/kettle/config` with the default app |
 
 Each click both mutates the running `Config` (the change takes effect
 immediately) and atomically rewrites the matching line in the config file via

@@ -33,7 +33,7 @@ pub fn commands() -> Vec<(&'static str, Action)> {
         ("Open layout picker", OpenLayoutPicker),
         ("Open settings", OpenSettings),
         ("About kettle", About),
-        ("Edit config file in $EDITOR", EditConfig),
+        ("Open config file with default app", EditConfig),
         ("Preferences: scrollbar always-on", SetScrollbarAlways),
         ("Preferences: scrollbar auto-hide", SetScrollbarAuto),
         ("Preferences: scrollbar hidden", SetScrollbarNever),

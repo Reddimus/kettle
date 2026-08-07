@@ -94,6 +94,8 @@ jobs:
       - name: Guard scoped ttf-parser exception
         if: matrix.workspace.name == 'product'
         run: ./scripts/check-ttf-parser-scope.sh
+      - name: Install cargo-audit enforcement CLI
+        run: cargo install cargo-audit --version 0.22.1 --locked
       # Official RustSec action. Vendors `cargo-audit`, runs against the
       # advisory DB, posts a Checks-API annotation per finding, and on
       # `push` to `main` syncs a per-advisory tracking issue. The token
@@ -122,3 +124,12 @@ jobs:
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
           working-directory: ${{ matrix.workspace.path }}
+      # On scheduled runs audit-check files or updates an issue but deliberately
+      # does not fail the job. Keep that reporting and independently enforce the
+      # result so the daily advisory window can turn this workflow red.
+      - name: Enforce product audit result
+        if: matrix.workspace.name == 'product'
+        run: cargo audit --deny warnings --ignore RUSTSEC-2026-0192
+      - name: Enforce vendor validation audit result
+        if: matrix.workspace.name == 'vendor-validation'
+        run: cargo audit --deny warnings --file vendor/Cargo.lock

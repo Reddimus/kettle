@@ -310,13 +310,13 @@ release:
 # `gauntlet-full` below for those.
 gauntlet: live-ui-helper-selftest
     cargo fmt --all --check
-    cargo clippy --workspace --all-targets -- -D warnings
+    cargo clippy --locked --workspace --all-targets -- -D warnings
     # Feature unification hides a crate that leans on an optional dependency,
     # so the workspace lint above structurally cannot catch it.
-    cargo clippy -p kettle-core --all-targets -- -D warnings
-    cargo build --workspace --all-targets
-    cargo test --workspace
-    cargo doc --workspace --no-deps
+    cargo clippy --locked -p kettle-core --all-targets -- -D warnings
+    cargo build --locked --workspace --all-targets
+    cargo test --locked --workspace
+    cargo doc --locked --workspace --no-deps
     @echo ""
     @echo "GAUNTLET PASSED — core Rust gate green. Run 'just gauntlet-full' for required current-OS native gates."
 

@@ -52,9 +52,9 @@ jobs:
             libxcb1-dev mesa-vulkan-drivers libvulkan1 xvfb
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
       - run: cargo fmt --all --check
-      - run: cargo build --workspace --all-targets
-      - run: cargo clippy --workspace --all-targets -- -D warnings
-      - run: cargo test --workspace
+      - run: cargo build --locked --workspace --all-targets
+      - run: cargo clippy --locked --workspace --all-targets -- -D warnings
+      - run: cargo test --locked --workspace
       - name: Vendored parser patches — unit, doctest, clippy
         # vte and alacritty_terminal are excluded from the product workspace,
         # so the root commands above compile their public dependency surfaces
@@ -66,14 +66,15 @@ jobs:
           cargo clippy --locked --manifest-path vendor/Cargo.toml --target-dir target/vendor-check -p vte --all-targets --features ansi -- -D warnings
           cargo test --locked --manifest-path vendor/Cargo.toml --target-dir target/vendor-check -p alacritty_terminal
           cargo clippy --locked --manifest-path vendor/Cargo.toml --target-dir target/vendor-check -p alacritty_terminal --all-targets -- -D warnings
-      - name: Vendored portable-pty patch — native unit, doctest, clippy
+      - name: Vendored portable-pty patch — native unit and doctest
         # Linux covers the retained Unix package surface. Windows is required:
         # it alone compiles and executes the PIPE_NOWAIT ConPTY regression.
         # macOS would duplicate the Unix package check without adding a cfg.
         if: runner.os == 'Linux' || runner.os == 'Windows'
-        run: |
-          cargo test --locked --manifest-path vendor/Cargo.toml --target-dir target/vendor-check -p portable-pty
-          cargo clippy --locked --manifest-path vendor/Cargo.toml --target-dir target/vendor-check -p portable-pty --all-targets -- -D warnings
+        run: cargo test --locked --manifest-path vendor/Cargo.toml --target-dir target/vendor-check -p portable-pty
+      - name: Vendored portable-pty patch — native clippy
+        if: runner.os == 'Linux' || runner.os == 'Windows'
+        run: cargo clippy --locked --manifest-path vendor/Cargo.toml --target-dir target/vendor-check -p portable-pty --all-targets -- -D warnings
       - name: Live UI helper self-test (Windows)
         if: runner.os == 'Windows'
         run: python scripts/check-live-ui-smoke.py self-test
@@ -102,10 +103,10 @@ jobs:
         uses: taiki-e/install-action@1beb33eee6d086258184383af9a538940be190ed # v2.85.6
         with:
           tool: just
-      - name: Justfile validation
-        run: |
-          just --summary
-          just --list
+      - name: Justfile parse validation
+        run: just --summary
+      - name: Justfile platform recipe validation
+        run: just --list
       - name: Packaging smoke — macOS .icns
         # The release.yml's iconutil step only fires on a
         # `v*` tag push, so a regression like "remove a PNG from
@@ -710,8 +711,8 @@ jobs:
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
         with:
           key: msrv-1.89
-      - run: cargo build --workspace --all-targets
-      - run: cargo test --workspace
+      - run: cargo build --locked --workspace --all-targets
+      - run: cargo test --locked --workspace
 
   # Nightly early-warning job. Catches
   # upcoming rustc breaking changes weeks before they hit stable so
@@ -743,8 +744,8 @@ jobs:
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
         with:
           key: nightly
-      - run: cargo build --workspace --all-targets
-      - run: cargo test --workspace
+      - run: cargo build --locked --workspace --all-targets
+      - run: cargo test --locked --workspace
 
   # aarch64-linux cross-compile early-warning. Verifies kettle still
   # builds for ARM64 Linux (Raspberry Pi 4/5, ARM VPS/servers, ARM laptops

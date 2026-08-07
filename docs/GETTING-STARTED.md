@@ -46,7 +46,7 @@ panel. Use the keyboard:
 
 Changes apply **instantly** and are saved automatically — no restart, no file
 to edit. For the handful of advanced options not in the panel, the
-**Advanced** path opens the config file in your editor. Full reference:
+**Advanced** path opens the config file with your operating system's default app. Full reference:
 [SETTINGS.md](SETTINGS.md) and [CONFIG.md](CONFIG.md).
 
 ## 4. Splits, tabs, and getting around
@@ -61,7 +61,7 @@ kettle uses **Terminator-style** keys:
 | Close pane | `Ctrl+Shift+W` |
 | Move focus between panes | `Alt + Arrow` |
 | Resize the split | `Shift + Arrow` |
-| Next / previous tab | `Ctrl+PageUp` / `Ctrl+PageDown` |
+| Next / previous tab | `Ctrl+PageDown` / `Ctrl+PageUp` |
 | Search screen + scrollback | `Ctrl+Shift+F` |
 | Settings | `Ctrl+,` |
 | Command palette (search every action) | `Ctrl+Shift+K` |

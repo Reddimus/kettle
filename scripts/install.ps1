@@ -157,6 +157,32 @@ namespace KettleInstaller
             0x00000040;
         private const uint PROCESS_QUERY_LIMITED_INFORMATION = 0x00001000;
         private const uint DRIVE_FIXED = 3;
+        private static readonly IntPtr HWND_BROADCAST = new IntPtr(0xffff);
+        private const uint WM_SETTINGCHANGE = 0x001a;
+        private const uint SMTO_ABORTIFHUNG = 0x0002;
+
+        [DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        private static extern IntPtr SendMessageTimeoutW(
+            IntPtr window,
+            uint message,
+            UIntPtr wParam,
+            string lParam,
+            uint flags,
+            uint timeout,
+            out UIntPtr result);
+
+        public static bool BroadcastEnvironmentChange()
+        {
+            UIntPtr result;
+            return SendMessageTimeoutW(
+                HWND_BROADCAST,
+                WM_SETTINGCHANGE,
+                UIntPtr.Zero,
+                "Environment",
+                SMTO_ABORTIFHUNG,
+                5000,
+                out result) != IntPtr.Zero;
+        }
 
         [StructLayout(LayoutKind.Sequential)]
         internal struct ByHandleFileInformation
@@ -5131,20 +5157,53 @@ $shortcutPath = Join-Path $startMenuDir "kettle.lnk"
 
 function Invoke-KettleUserPathEdit {
     param([string] $Dir, [switch] $Remove)
-    $current = [Environment]::GetEnvironmentVariable("Path", "User")
-    if ($null -eq $current) { $current = '' }
-    # Split + filter exact-match (case-insensitive) so we don't strip a
-    # superstring entry by accident.
-    $parts = $current -split ';' | Where-Object { $_ -ne '' }
-    $without = $parts | Where-Object { $_ -ne $Dir }
-    if ($Remove) {
-        if ($without.Count -eq $parts.Count) { return $false }  # nothing to remove
-        $new = ($without -join ';')
-    } else {
-        if ($without.Count -ne $parts.Count) { return $false }  # already present
-        $new = (@($without) + $Dir) -join ';'
+    $environmentKey = [Microsoft.Win32.Registry]::CurrentUser.CreateSubKey(
+        'Environment',
+        $true
+    )
+    if ($null -eq $environmentKey) {
+        throw 'Could not open HKCU\Environment for the user PATH update.'
     }
-    [Environment]::SetEnvironmentVariable("Path", $new, "User")
+    try {
+        # Preserve both `%VAR%` tokens and the registry value kind. The
+        # Environment API expands REG_EXPAND_SZ on read and writes REG_SZ,
+        # freezing every unrelated variable-based PATH entry as a side effect.
+        $current = $environmentKey.GetValue(
+            'Path',
+            $null,
+            [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames
+        )
+        $kind = [Microsoft.Win32.RegistryValueKind]::ExpandString
+        if ($null -ne $current) {
+            $kind = $environmentKey.GetValueKind('Path')
+            if (
+                $kind -ne [Microsoft.Win32.RegistryValueKind]::String -and
+                $kind -ne [Microsoft.Win32.RegistryValueKind]::ExpandString
+            ) {
+                throw "HKCU\Environment\Path has unsupported registry kind $kind."
+            }
+        } else {
+            $current = ''
+        }
+        $current = [string]$current
+        # Split + filter exact-match (case-insensitive) so we don't strip a
+        # superstring entry by accident.
+        $parts = @($current -split ';' | Where-Object { $_ -ne '' })
+        $without = @($parts | Where-Object { $_ -ne $Dir })
+        if ($Remove) {
+            if ($without.Count -eq $parts.Count) { return $false }
+            $new = ($without -join ';')
+        } else {
+            if ($without.Count -ne $parts.Count) { return $false }
+            $new = (@($without) + $Dir) -join ';'
+        }
+        $environmentKey.SetValue('Path', $new, $kind)
+    } finally {
+        $environmentKey.Dispose()
+    }
+    if (-not [KettleInstaller.NativeFileSystemV1]::BroadcastEnvironmentChange()) {
+        Write-Warning 'The user PATH was updated, but WM_SETTINGCHANGE could not be broadcast.'
+    }
     return $true
 }
 
