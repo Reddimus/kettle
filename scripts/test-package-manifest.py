@@ -301,6 +301,22 @@ class ArchiveExtractionTests(unittest.TestCase):
             self.assertFalse(output.is_symlink())
             output.rmdir()
 
+    def test_rejects_preexisting_output_root_symlink(self):
+        with tempfile.TemporaryDirectory() as raw:
+            temporary = Path(raw)
+            target = temporary / "target"
+            target.mkdir()
+            output = temporary / "output"
+            try:
+                output.symlink_to(target, target_is_directory=True)
+            except OSError as error:
+                if os.name == "nt" and getattr(error, "winerror", None) == 1314:
+                    self.skipTest("creating a directory symlink requires Windows privilege")
+                raise
+
+            with self.assertRaisesRegex(ValueError, "must not already exist"):
+                MODULE._prepare_output_root(output)
+
     def test_extracts_flat_windows_zip(self):
         with tempfile.TemporaryDirectory() as raw:
             temporary = Path(raw)

@@ -934,8 +934,8 @@ python3 scripts/test-install-online.py
 ```
 
 The current suites cover seven signed-update-manifest cases, six exact
-draft-release cases, sixteen package-manifest cases (one platform-specific
-skip), and nine POSIX online-installer cases. They pin the checked-in Ed25519
+draft-release cases, seventeen package-manifest cases (with platform-dependent
+skips), and nine POSIX online-installer cases. They pin the checked-in Ed25519
 trust root, canonical manifest bytes and sidecars, no-follow same-handle
 artifact hashing, exact local-to-GitHub name/size/SHA-256 binding, bounded
 archive structure and extraction, modern no-downgrade behavior, compatible
