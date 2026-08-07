@@ -320,11 +320,26 @@ commands, environment values, or user paths. `RUST_LOG` controls both `log` and
 | New tab: Nth dropdown shell | `Ctrl+Shift+1..9` | Settings panel | `Ctrl+,` |
 
 On macOS, native Cmd chords are additive; every portable `Ctrl+Shift` default
-above remains bound too. Cmd+C/V copy and paste, Cmd+T opens a tab, Cmd+N opens
-a window, Cmd+W closes the focused pane/surface, Cmd+F searches, Cmd+K opens the
-command palette, Cmd+, opens Settings, Cmd+=/Cmd++/Cmd+-/Cmd+0 change font size,
-Cmd+1..9 selects a tab, and Cmd+Up/Down jumps between shell prompts. Bare
-Option+arrows are left to the PTY for word motion. Set
+above remains bound too. Where Apple Terminal's meaning differs from kettle's
+portable one, macOS follows Apple:
+
+| Chord | Action | | Chord | Action |
+| --- | --- | --- | --- | --- |
+| `Cmd+C` / `Cmd+V` | Copy / Paste | | `Cmd+T` | New tab |
+| `Cmd+N` | New window | | `Cmd+W` | Close **tab** |
+| `Shift+Cmd+D` | Close **split pane** | | `Cmd+F` | Search |
+| `Cmd+K` | Clear scrollback | | `Shift+Cmd+P` | Command palette |
+| `Cmd+,` | Settings | | `Cmd+1..9` | Goto tab |
+| `Cmd+=` / `+` / `-` / `0` | Font size | | `Cmd+Up` / `Down` | Jump prev/next prompt |
+| `Ctrl+Cmd+Arrows` | Directional focus | | `Ctrl+Cmd+B` | Broadcast on |
+
+`Cmd+W` closes the tab and `Shift+Cmd+D` the split, as in Apple Terminal —
+binding `Cmd+W` to close a pane would silently close one split of a split tab.
+`Cmd+K` clears the scrollback there and in iTerm2, so the command palette takes
+`Shift+Cmd+P` alongside its portable `Ctrl+Shift+K`. `Cmd+G` and `Cmd+Shift+G`
+are deliberately left unbound for the system's Find Next/Previous.
+
+Bare Option+arrows are left to the PTY for word motion. Set
 `macos-option-as-alt = left|right|both` when one or both Option keys should act
 as terminal Alt instead of composing macOS text; the default is `none`.
 

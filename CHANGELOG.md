@@ -38,11 +38,14 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   UTF-8 conversion the endpoint goes through, since each invalid byte expands
   to a three-byte replacement character.
 - **Control sockets refuse a directory this user does not own.** The endpoint
-  directory is predictable from the uid, so another local user could
-  pre-create it and then remove or replace the socket inside. Creation now
-  verifies a real directory (not a symlink) owned by the effective uid with no
-  group or world access, and fails closed otherwise. The activation endpoint
-  already did this; both now share one helper.
+  directory is predictable from the uid, so another local user could pre-create
+  it and then remove or replace the socket inside. Creation now verifies a real
+  directory — not a symlink — that is either owned by the effective uid or is a
+  root-owned sticky shared root such as `/tmp`, where the sticky bit already
+  prevents one user unlinking another's entries. Anything else fails closed.
+  The mode is tightened to `0700` best-effort rather than required, because a
+  legitimate shared temp root cannot always be chmod'd: macOS's per-user
+  `$TMPDIR` returns `EPERM`.
 - **Large high-DPI windows keep their real dimensions.** The renderer requests
   the adapter's full 2D texture limit instead of wgpu's default 8192, so a
   window spanning several 4K displays no longer has its right or bottom edge
