@@ -24,6 +24,53 @@ pub use client::{Client, CtlError};
 pub use discovery::{RegistryEntry, registry_dir};
 pub use protocol::{Event, Request, Response, RpcError, error_codes};
 
+#[cfg(unix)]
+pub(crate) const MAX_UNIX_SOCKET_PATH_BYTES: usize = 100;
+
+/// Validate both the native pathname bytes and the UTF-8 string handed to the
+/// transport. Invalid UTF-8 expands during `to_string_lossy`, so checking only
+/// the native length can still overflow `sockaddr_un.sun_path` after conversion.
+#[cfg(unix)]
+pub(crate) fn unix_socket_path_fits(path: &std::path::Path) -> bool {
+    use std::os::unix::ffi::OsStrExt as _;
+
+    path.as_os_str().as_bytes().len() <= MAX_UNIX_SOCKET_PATH_BYTES
+        && path.to_string_lossy().len() <= MAX_UNIX_SOCKET_PATH_BYTES
+}
+
+#[cfg(unix)]
+pub(crate) fn private_temp_socket_dir() -> std::path::PathBuf {
+    std::env::temp_dir().join(format!("kettle-{}", unsafe { libc::geteuid() }))
+}
+
+#[cfg(unix)]
+pub(crate) fn length_safe_unix_socket_path(
+    file: &str,
+    private_temp_dir: &std::path::Path,
+) -> std::path::PathBuf {
+    let candidate = private_temp_dir.join(file);
+    if unix_socket_path_fits(&candidate) {
+        return candidate;
+    }
+
+    // TMPDIR is user-controlled and can itself be too long. Both activation
+    // and discovery use this fixed, uid-private second fallback.
+    let short = std::path::PathBuf::from("/tmp")
+        .join(format!("kettle-{}", unsafe { libc::geteuid() }))
+        .join(file);
+    assert!(
+        unix_socket_path_fits(&short),
+        "built-in Unix socket fallback exceeds sun_path"
+    );
+    short
+}
+
+pub(crate) fn stable_hash(bytes: impl IntoIterator<Item = u8>) -> u64 {
+    bytes.into_iter().fold(0xcbf29ce484222325, |hash, byte| {
+        (hash ^ u64::from(byte)).wrapping_mul(0x100000001b3)
+    })
+}
+
 /// Create `dir` (and its parents) as a directory only this user can enter, and
 /// verify that is what it actually is.
 ///
