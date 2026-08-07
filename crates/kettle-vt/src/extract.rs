@@ -180,6 +180,10 @@ pub struct Extractor {
     seq_reservation: Option<GraphicsReservation>,
     discarding_seq: bool,
     discard_remaining: usize,
+    /// Continuation bytes owed by a UTF-8 lead swallowed at the bounded
+    /// recovery boundary. They belong to the swallowed lead even though the
+    /// control-string state has already returned to pass-through.
+    discard_utf8_continuations: u8,
     /// Rolling tail (≤3 bytes) of the active control string's payload, kept
     /// even while discarding, so a raw `0x9c` can be classified as either a
     /// standalone C1 ST or a UTF-8 continuation byte of an in-progress
@@ -223,6 +227,7 @@ impl Extractor {
             seq_reservation: None,
             discarding_seq: false,
             discard_remaining: 0,
+            discard_utf8_continuations: 0,
             seq_tail: [0; 3],
             seq_tail_len: 0,
         }
@@ -341,33 +346,23 @@ impl Extractor {
         let mut out: Vec<Chunk> = Vec::with_capacity(1);
         let mut i = 0usize;
         while i < input.len() {
+            if self.discard_utf8_continuations > 0 {
+                if matches!(input[i], 0x80..=0xbf) {
+                    self.discard_utf8_continuations -= 1;
+                    i += 1;
+                    continue;
+                }
+                // The swallowed lead was malformed or truncated. The current
+                // byte does not belong to it, so dispatch that byte normally.
+                self.discard_utf8_continuations = 0;
+            }
             match self.mode {
                 Mode::Pass => {
                     if self.esc_pending {
                         let b = input[i];
                         i += 1;
                         self.esc_pending = false;
-                        match b {
-                            b'P' => {
-                                self.flush_pass(&mut out);
-                                self.mode = Mode::Dcs;
-                                self.begin_seq();
-                            }
-                            b'_' => {
-                                self.flush_pass(&mut out);
-                                self.mode = Mode::Apc;
-                                self.begin_seq();
-                            }
-                            b']' => {
-                                self.flush_pass(&mut out);
-                                self.mode = Mode::Osc;
-                                self.begin_seq();
-                            }
-                            _ => {
-                                self.pass.push(0x1b);
-                                self.pass.push(b);
-                            }
-                        }
+                        self.dispatch_escape_follower(b, &mut out);
                     } else {
                         // Bulk path: everything up to the next ESC is plain.
                         match memchr::memchr(0x1b, &input[i..]) {
@@ -405,27 +400,16 @@ impl Extractor {
                             self.cancel_seq();
                             continue;
                         }
-                        if self.discarding_seq {
-                            // Account for the ESC consumed on the preceding
-                            // iteration first. If it is the final quarantined
-                            // byte, leave `b` untouched for Pass mode.
-                            let consumed = self.consume_discard_bytes(1);
-                            debug_assert_eq!(consumed, 1);
-                            if self.mode == Mode::Pass {
-                                continue;
-                            }
-                            i += 1;
-                            let consumed = self.consume_discard_bytes(1);
-                            debug_assert_eq!(consumed, 1);
-                            continue;
-                        }
+                        // OSC, DCS passthrough, and APC strings all leave their
+                        // string state on every ESC, not only ESC \. Drop the
+                        // withheld string and interpret this follower through
+                        // the same dispatch as a fresh ESC in Pass. This is
+                        // immediate while over-limit discard is active too.
                         i += 1;
-                        // The ESC was consumed by the preceding feed/loop
-                        // iteration. The recovery window is always at least
-                        // two bytes, so a failed append consumes this complete
-                        // pair and never has to replay only half an escape.
-                        let consumed = self.consume_seq_bytes(&[0x1b, b]);
-                        debug_assert_eq!(consumed, 2);
+                        self.cancel_seq();
+                        self.dispatch_escape_follower(b, &mut out);
+                        self.handle_pending_chunks(&mut out, &mut handle);
+                        continue;
                     } else {
                         // Bulk path: sequence bytes run to the next ESC, raw
                         // ST (0x9c), or — OSC only — BEL terminator. A BEL
@@ -517,11 +501,36 @@ impl Extractor {
         }
     }
 
+    fn dispatch_escape_follower(&mut self, b: u8, out: &mut Vec<Chunk>) {
+        match b {
+            b'P' => {
+                self.flush_pass(out);
+                self.mode = Mode::Dcs;
+                self.begin_seq();
+            }
+            b'_' => {
+                self.flush_pass(out);
+                self.mode = Mode::Apc;
+                self.begin_seq();
+            }
+            b']' => {
+                self.flush_pass(out);
+                self.mode = Mode::Osc;
+                self.begin_seq();
+            }
+            _ => {
+                self.pass.push(0x1b);
+                self.pass.push(b);
+            }
+        }
+    }
+
     fn begin_seq(&mut self) {
         self.seq.clear();
         self.seq_reservation = None;
         self.discarding_seq = false;
         self.discard_remaining = 0;
+        self.discard_utf8_continuations = 0;
         self.seq_tail_len = 0;
     }
 
@@ -565,26 +574,23 @@ impl Extractor {
         if bytes.is_empty() {
             return 0;
         }
-        let consumed = 'consumed: {
-            if !self.discarding_seq {
-                let room = self
-                    .budget
-                    .limits()
-                    .sequence_bytes
-                    .saturating_sub(self.seq.len());
-                if bytes.len() > room {
-                    // `append_seq` is intentionally all-or-nothing. Account for
-                    // the prefix that still fit so recovery starts at the actual
-                    // configured limit, not at the start of this bulk slice.
-                    self.bail(room);
-                } else if self.append_seq(bytes) {
-                    break 'consumed bytes.len();
-                }
+        if !self.discarding_seq {
+            let room = self
+                .budget
+                .limits()
+                .sequence_bytes
+                .saturating_sub(self.seq.len());
+            if bytes.len() > room {
+                // `append_seq` is intentionally all-or-nothing. Account for
+                // the prefix that still fit so recovery starts at the actual
+                // configured limit, not at the start of this bulk slice.
+                self.bail(room);
+            } else if self.append_seq(bytes) {
+                self.note_seq_tail(bytes);
+                return bytes.len();
             }
-            self.consume_discard_bytes(bytes.len())
-        };
-        self.note_seq_tail(&bytes[..consumed]);
-        consumed
+        }
+        self.consume_discard_bytes(bytes)
     }
 
     /// Remember the last ≤3 payload bytes actually consumed (stored or
@@ -613,6 +619,10 @@ impl Extractor {
     /// raw `0x9c` in that position is character data (✳ = `E2 9C B3`,
     /// 💜 = `F0 9F 92 9C`, 末 = `E6 9C AB`, …), not a C1 ST.
     fn seq_expects_utf8_continuation(&self) -> bool {
+        self.seq_utf8_continuations_owed() > 0
+    }
+
+    fn seq_utf8_continuations_owed(&self) -> u8 {
         let tail = &self.seq_tail[..self.seq_tail_len as usize];
         let mut cont = 0usize;
         for &b in tail.iter().rev() {
@@ -626,22 +636,25 @@ impl Extractor {
             // Every known byte is a continuation: any lead byte is outside
             // the 3-byte window, so the character is already complete (or
             // the payload is malformed) — treat the 0x9c as a real ST.
-            return false;
+            return 0;
         }
-        let needed = match tail[tail.len() - 1 - cont] {
+        let needed: usize = match tail[tail.len() - 1 - cont] {
             0xC2..=0xDF => 1,
             0xE0..=0xEF => 2,
             0xF0..=0xF4 => 3,
-            _ => return false,
+            _ => return 0,
         };
-        cont < needed
+        needed.saturating_sub(cont) as u8
     }
 
-    fn consume_discard_bytes(&mut self, available: usize) -> usize {
-        let consumed = available.min(self.discard_remaining);
+    fn consume_discard_bytes(&mut self, bytes: &[u8]) -> usize {
+        let consumed = bytes.len().min(self.discard_remaining);
+        self.note_seq_tail(&bytes[..consumed]);
         self.discard_remaining -= consumed;
         if self.discard_remaining == 0 {
+            let continuations = self.seq_utf8_continuations_owed();
             self.reset_discard();
+            self.discard_utf8_continuations = continuations;
         }
         consumed
     }
@@ -668,6 +681,7 @@ impl Extractor {
         self.seq_reservation = None;
         self.discarding_seq = false;
         self.discard_remaining = 0;
+        self.discard_utf8_continuations = 0;
         self.st_pending = false;
         self.term_bel = false;
         self.mode = Mode::Pass;
@@ -2043,13 +2057,39 @@ mod tests {
     }
 
     #[test]
-    fn esc_inside_osc_body_is_kept_when_not_st() {
-        // ESC followed by anything but `\` inside a sequence body is payload
-        // (st_pending unwound), byte-for-byte. The BEL-terminated OSC is
-        // re-emitted BEL-terminated (`term_bel` preserved).
-        let mut ex = Extractor::new();
-        let out = ex.feed(b"\x1b]2;a\x1bzb\x07after");
-        assert_eq!(passed(&out), b"\x1b]2;a\x1bzb\x07after");
+    fn non_st_escape_aborts_osc_and_dispatches_the_fresh_escape() {
+        let input = b"\x1b]2;a\x1bzb\x07after";
+        for split in 0..=input.len() {
+            let mut ex = Extractor::new();
+            let mut out = ex.feed(&input[..split]);
+            out.extend(ex.feed(&input[split..]));
+            assert_eq!(passed(&out), b"\x1bzb\x07after", "split {split}");
+        }
+    }
+
+    #[test]
+    fn non_st_escape_aborts_dcs_and_apc_immediately() {
+        for intro in [&b"\x1bP"[..], &b"\x1b_"[..]] {
+            let mut input = intro.to_vec();
+            input.extend_from_slice(b"payload\x1bcVISIBLE");
+            for split in 0..=input.len() {
+                let mut ex = Extractor::new();
+                let mut out = ex.feed(&input[..split]);
+                out.extend(ex.feed(&input[split..]));
+                assert_eq!(
+                    passed(&out),
+                    b"\x1bcVISIBLE",
+                    "{intro:?}, split {split}: the fresh escape must reach the terminal"
+                );
+            }
+
+            // The follower is dispatched as a fresh escape introducer, not as
+            // payload in the abandoned string.
+            let mut starts_osc = intro.to_vec();
+            starts_osc.extend_from_slice(b"payload\x1b]2;title\x07VISIBLE");
+            let mut ex = Extractor::new();
+            assert_eq!(passed(&ex.feed(&starts_osc)), b"\x1b]2;title\x07VISIBLE");
+        }
     }
 
     /// FIX 1: ConEmu/Windows-Terminal OSC 9 subcommands (`9;1`, `9;2`, `9;3`,
@@ -2187,9 +2227,75 @@ mod tests {
         assert!(ex.feed(&input).is_empty());
         assert_eq!(
             passed(&ex.feed(b"Zok")),
-            b"Zok",
-            "the byte after the boundary ESC must be reprocessed in Pass mode"
+            b"\x1bZok",
+            "the boundary ESC and its follower must be dispatched as a fresh escape"
         );
+    }
+
+    #[test]
+    fn bounded_recovery_does_not_emit_orphaned_utf8_continuations() {
+        let limits = crate::GraphicsLimits {
+            sequence_bytes: 64,
+            ..crate::GraphicsLimits::default()
+        };
+        for scalar in [
+            &b"\xc3\xa9"[..],
+            &b"\xe2\x82\xac"[..],
+            &b"\xf0\x9f\x99\x82"[..],
+        ] {
+            let mut input = b"\x1b]".to_vec();
+            input.extend(std::iter::repeat_n(b'X', limits.sequence_bytes * 2 - 1));
+            let scalar_start = input.len();
+            input.extend_from_slice(scalar);
+            input.extend_from_slice(b"VISIBLE");
+
+            // Sweep every feed boundary through each two-, three-, and
+            // four-byte scalar. Its lead is the final quarantined byte, so
+            // every valid continuation belongs to that swallowed lead too.
+            for scalar_split in 0..=scalar.len() {
+                let budget = crate::GraphicsBudget::isolated(limits).unwrap();
+                let mut ex = Extractor::with_budget(budget);
+                let split = scalar_start + scalar_split;
+                let mut out = ex.feed(&input[..split]);
+                out.extend(ex.feed(&input[split..]));
+                let plain = passed(&out);
+                assert_eq!(
+                    std::str::from_utf8(&plain),
+                    Ok("VISIBLE"),
+                    "scalar {scalar:?}, split {scalar_split}: {plain:?}"
+                );
+            }
+        }
+
+        // A non-continuation does not belong to the swallowed lead and must be
+        // reprocessed immediately instead of being hidden by a fixed counter.
+        let budget = crate::GraphicsBudget::isolated(limits).unwrap();
+        let mut ex = Extractor::with_budget(budget);
+        let mut input = b"\x1b]".to_vec();
+        input.extend(std::iter::repeat_n(b'X', limits.sequence_bytes * 2 - 1));
+        input.push(0xe2);
+        input.extend_from_slice(b"VISIBLE");
+        assert_eq!(passed(&ex.feed(&input)), b"VISIBLE");
+    }
+
+    #[test]
+    fn non_st_escape_aborts_an_over_budget_dcs_or_apc_discard() {
+        let limits = crate::GraphicsLimits {
+            sequence_bytes: 64,
+            ..crate::GraphicsLimits::default()
+        };
+        for intro in [&b"\x1b]"[..], &b"\x1bP"[..], &b"\x1b_"[..]] {
+            let budget = crate::GraphicsBudget::isolated(limits).unwrap();
+            let mut ex = Extractor::with_budget(budget);
+            let mut input = intro.to_vec();
+            input.extend(std::iter::repeat_n(b'X', limits.sequence_bytes + 1));
+            assert!(ex.feed(&input).is_empty());
+            assert_eq!(
+                passed(&ex.feed(b"\x1bcVISIBLE")),
+                b"\x1bcVISIBLE",
+                "{intro:?}: an ESC must recover immediately without waiting for the discard window"
+            );
+        }
     }
 
     /// FIX 3: the OSC 7 percent-decoder must require BOTH escape bytes to be

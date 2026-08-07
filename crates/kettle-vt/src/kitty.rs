@@ -771,6 +771,9 @@ impl KittyState {
             // `a=p,U=1` registers a virtual placement (shown later via
             // placeholder text); plain `a=p` puts the image at the cursor.
             if virt {
+                if id == 0 || !self.store.contains_key(&id) {
+                    return KittyOut::None;
+                }
                 let placement = dim("p").unwrap_or(0);
                 let key = (id, placement);
                 // Saturation gate. Updates to an already-tracked
@@ -796,6 +799,9 @@ impl KittyState {
             // `P=` (parent image id) ⇒ a relative placement: recorded and
             // positioned from the parent at render time, not at the cursor.
             if let Some(parent_img) = dim("P") {
+                if id == 0 || !self.store.contains_key(&id) {
+                    return KittyOut::None;
+                }
                 let geti = |k: &str| kv.get(k).and_then(|v| v.parse::<i32>().ok());
                 let placement = dim("p").unwrap_or(0);
                 let key = (id, placement);
@@ -1991,15 +1997,49 @@ mod tests {
     fn virtual_and_relative_placements_share_one_count_budget() {
         let mut k = KittyState::default();
         let cap = k.budget.limits().placements;
-        for id in 1..=cap as u32 {
-            k.feed(&format!("a=p,U=1,i={id},c=1,r=1"));
+        k.feed(&format!("a=t,i=1,f=32,s=1,v=1;{PX}"));
+        for placement in 1..=cap as u32 {
+            k.feed(&format!("a=p,U=1,i=1,p={placement},c=1,r=1"));
         }
-        let overflow = cap as u32 + 1;
-        k.feed(&format!("a=p,i={overflow},p=1,P=1,Q=0"));
-        assert!(k.relative_placement(overflow, 1).is_none());
+        k.feed("a=p,i=1,p=0,P=1,Q=0");
+        assert!(k.relative_placement(1, 0).is_none());
         // Updating an admitted placement does not consume another slot.
-        k.feed("a=p,U=1,i=1,c=2,r=2");
-        assert_eq!(k.virtual_placement(1, 0).map(|p| p.cols), Some(2));
+        k.feed("a=p,U=1,i=1,p=1,c=2,r=2");
+        assert_eq!(k.virtual_placement(1, 1).map(|p| p.cols), Some(2));
+    }
+
+    #[test]
+    fn unknown_placements_do_not_consume_the_valid_placement_budget() {
+        let mut k = KittyState::default();
+        let cap = k.budget.limits().placements;
+        for id in 1..=cap as u32 + 32 {
+            assert!(matches!(
+                k.feed(&format!("a=p,U=1,i={id},c=1,r=1")),
+                KittyOut::None
+            ));
+            assert!(matches!(
+                k.feed(&format!("a=p,i={id},p=1,P=1000,Q=0")),
+                KittyOut::None
+            ));
+        }
+
+        k.feed(&format!("a=t,i=1000,f=32,s=1,v=1;{PX}"));
+        assert!(matches!(
+            k.feed("a=p,U=1,i=1000,p=1,c=1,r=1"),
+            KittyOut::Virtual {
+                id: 1000,
+                placement: 1
+            }
+        ));
+        assert!(matches!(
+            k.feed("a=p,i=1000,p=2,P=1000,Q=1"),
+            KittyOut::Relative {
+                id: 1000,
+                placement: 2
+            }
+        ));
+        assert!(k.virtual_placement(1000, 1).is_some());
+        assert!(k.relative_placement(1000, 2).is_some());
     }
 
     /// Drift guard: chaining more than `MAX_FRAMES_PER_IMAGE`

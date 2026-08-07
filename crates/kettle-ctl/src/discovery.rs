@@ -27,12 +27,15 @@ use serde::{Deserialize, Serialize};
 #[cfg(windows)]
 use windows_sys::Win32::Security::{PSECURITY_DESCRIPTOR, PSID};
 
+#[cfg(unix)]
+use crate::{
+    length_safe_unix_socket_path, private_temp_socket_dir, stable_hash, unix_socket_path_fits,
+};
+
 /// Registry records are tiny (normally a few hundred bytes). Bound reads so a
 /// corrupt same-user file cannot turn discovery into an unbounded allocation.
 const MAX_REGISTRY_ENTRY_BYTES: usize = 16 * 1024;
 const MAX_VERSION_BYTES: usize = 256;
-#[cfg(unix)]
-const MAX_UNIX_SOCKET_PATH_BYTES: usize = 100;
 /// A normal desktop has only a handful of live control servers. Bound the
 /// directory walk so a corrupt or hostile same-user registry cannot make
 /// every discovery attempt enumerate an arbitrarily large directory.
@@ -155,27 +158,10 @@ pub fn default_endpoint(dir: &std::path::Path, pid: u32) -> String {
         if unix_socket_path_fits(&direct) {
             return direct.to_string_lossy().into_owned();
         }
-        fallback_ctl_endpoint(dir, pid, &private_temp_ctl_dir())
+        fallback_ctl_endpoint(dir, pid, &private_temp_socket_dir())
             .to_string_lossy()
             .into_owned()
     }
-}
-
-/// Whether `path` still fits `sun_path` AFTER the lossy conversion this module
-/// performs on the way out.
-///
-/// Measuring only the raw `OsStr` bytes is not sufficient: the endpoint is
-/// returned as a `String` via `to_string_lossy`, and every invalid UTF-8 byte
-/// expands to the three-byte replacement character. A `TMPDIR` carrying enough
-/// non-UTF-8 bytes could therefore pass a raw-length check and still yield an
-/// overlong -- and different -- path to `bind(2)`. Check both so the returned
-/// endpoint is the thing that was actually validated.
-#[cfg(unix)]
-fn unix_socket_path_fits(path: &std::path::Path) -> bool {
-    use std::os::unix::ffi::OsStrExt as _;
-
-    path.as_os_str().as_bytes().len() <= MAX_UNIX_SOCKET_PATH_BYTES
-        && path.to_string_lossy().len() <= MAX_UNIX_SOCKET_PATH_BYTES
 }
 
 #[cfg(unix)]
@@ -194,43 +180,7 @@ fn fallback_ctl_endpoint(
             .chain(pid.to_le_bytes()),
     );
     let file = format!("ctl-{hash:016x}.sock");
-    let candidate = private_temp_dir.join(&file);
-    if unix_socket_path_fits(&candidate) {
-        return candidate;
-    }
-
-    // TMPDIR is user-controlled and can itself be too long for sun_path. The
-    // fixed Unix temp root gives the same uid-private directory semantics while
-    // keeping the completed endpoint short; validate it too so neither branch
-    // can silently hand an overlong path to bind(2).
-    let short = PathBuf::from("/tmp")
-        .join(format!("kettle-{}", unsafe { libc::geteuid() }))
-        .join(file);
-    assert!(
-        unix_socket_path_fits(&short),
-        "built-in control socket fallback exceeds sun_path"
-    );
-    short
-}
-
-/// The private, uid-namespaced temp dir used for the length-fallback socket
-/// path above. Sibling of `private_temp_state_dir` (which fronts a missing
-/// `XDG_RUNTIME_DIR`/`XDG_STATE_HOME`/`HOME`), but this one is used
-/// unconditionally once the direct path is too long, regardless of which
-/// registry dir triggered the overflow.
-#[cfg(unix)]
-fn private_temp_ctl_dir() -> PathBuf {
-    std::env::temp_dir().join(format!("kettle-{}", unsafe { libc::geteuid() }))
-}
-
-/// FNV-1a, matching `activation.rs`'s `stable_hash` exactly so both endpoint
-/// fallbacks in this crate use the same construction. Kept as a separate copy
-/// (rather than a shared helper) to respect this file's ownership boundary.
-#[cfg(unix)]
-fn stable_hash(bytes: impl IntoIterator<Item = u8>) -> u64 {
-    bytes.into_iter().fold(0xcbf29ce484222325, |hash, byte| {
-        (hash ^ u64::from(byte)).wrapping_mul(0x100000001b3)
-    })
+    length_safe_unix_socket_path(&file, private_temp_dir)
 }
 
 /// Path of the `<pid>.json` entry file.
@@ -690,11 +640,11 @@ mod tests {
 
         use std::os::unix::ffi::OsStrExt as _;
         assert!(
-            path.as_os_str().as_bytes().len() <= MAX_UNIX_SOCKET_PATH_BYTES,
+            path.as_os_str().as_bytes().len() <= crate::MAX_UNIX_SOCKET_PATH_BYTES,
             "fixture must fit the raw byte budget"
         );
         assert!(
-            path.to_string_lossy().len() > MAX_UNIX_SOCKET_PATH_BYTES,
+            path.to_string_lossy().len() > crate::MAX_UNIX_SOCKET_PATH_BYTES,
             "fixture must overflow once converted"
         );
         assert!(
@@ -969,7 +919,7 @@ mod tests {
             "fallback must not reuse the overlong dir: {endpoint:?}"
         );
         assert!(
-            endpoint.starts_with(private_temp_ctl_dir().to_string_lossy().as_ref()),
+            endpoint.starts_with(private_temp_socket_dir().to_string_lossy().as_ref()),
             "fallback must live under the private uid-namespaced temp dir: {endpoint:?}"
         );
 

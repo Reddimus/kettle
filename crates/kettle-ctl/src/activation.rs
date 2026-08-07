@@ -14,6 +14,9 @@ use std::time::{Duration, Instant};
 use serde::{Deserialize, Serialize};
 
 use crate::transport::{self, CtlListener, CtlStream};
+use crate::{ensure_private_dir, stable_hash};
+#[cfg(unix)]
+use crate::{length_safe_unix_socket_path, private_temp_socket_dir, unix_socket_path_fits};
 
 const PROTOCOL_VERSION: u32 = 1;
 const MAX_FRAME_BYTES: usize = 8 * 1024;
@@ -669,51 +672,39 @@ fn read_json_frame<T: for<'de> Deserialize<'de>>(
 
 fn activation_paths(base: &Path) -> ActivationPaths {
     #[cfg(unix)]
-    let direct_endpoint = base.join("activation.sock");
-    #[cfg(unix)]
-    let (endpoint, endpoint_dir) = {
-        use std::os::unix::ffi::OsStrExt as _;
-        if direct_endpoint.as_os_str().as_bytes().len() <= 100 {
-            (
-                direct_endpoint.to_string_lossy().into_owned(),
-                Some(base.to_path_buf()),
-            )
-        } else {
-            let dir = private_temp_activation_dir();
-            let hash = stable_hash(base.as_os_str().as_bytes().iter().copied());
-            (
-                dir.join(format!("activation-{hash:016x}.sock"))
-                    .to_string_lossy()
-                    .into_owned(),
-                Some(dir),
-            )
-        }
-    };
+    {
+        activation_paths_with_temp(base, &private_temp_socket_dir())
+    }
     #[cfg(windows)]
-    let (endpoint, endpoint_dir) = {
+    {
         use std::os::windows::ffi::OsStrExt as _;
         let hash = stable_hash(base.as_os_str().encode_wide().flat_map(u16::to_le_bytes));
-        (format!(r"\\.\pipe\kettle-activation-{hash:016x}"), None)
-    };
-    ActivationPaths {
-        lock: base.join("activation.lock"),
-        endpoint,
-        endpoint_dir,
+        ActivationPaths {
+            lock: base.join("activation.lock"),
+            endpoint: format!(r"\\.\pipe\kettle-activation-{hash:016x}"),
+            endpoint_dir: None,
+        }
     }
 }
 
 #[cfg(unix)]
-fn private_temp_activation_dir() -> PathBuf {
-    std::env::temp_dir().join(format!("kettle-{}", unsafe { libc::geteuid() }))
-}
+fn activation_paths_with_temp(base: &Path, private_temp_dir: &Path) -> ActivationPaths {
+    use std::os::unix::ffi::OsStrExt as _;
 
-fn stable_hash(bytes: impl IntoIterator<Item = u8>) -> u64 {
-    bytes.into_iter().fold(0xcbf29ce484222325, |hash, byte| {
-        (hash ^ u64::from(byte)).wrapping_mul(0x100000001b3)
-    })
+    let direct = base.join("activation.sock");
+    let endpoint = if unix_socket_path_fits(&direct) {
+        direct
+    } else {
+        let hash = stable_hash(base.as_os_str().as_bytes().iter().copied());
+        length_safe_unix_socket_path(&format!("activation-{hash:016x}.sock"), private_temp_dir)
+    };
+    let endpoint_dir = endpoint.parent().map(Path::to_path_buf);
+    ActivationPaths {
+        lock: base.join("activation.lock"),
+        endpoint: endpoint.to_string_lossy().into_owned(),
+        endpoint_dir,
+    }
 }
-
-use crate::ensure_private_dir;
 
 #[cfg(test)]
 mod tests {
@@ -1093,6 +1084,62 @@ mod tests {
             0o600
         );
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn activation_fallback_stays_short_when_registry_and_tmpdir_are_long() {
+        let base = PathBuf::from("/tmp").join("registry-component".repeat(8));
+        let private_temp = PathBuf::from("/tmp")
+            .join("an-unusually-long-tmpdir-component".repeat(5))
+            .join("kettle-1234");
+        assert!(!unix_socket_path_fits(&base.join("activation.sock")));
+        assert!(!unix_socket_path_fits(
+            &private_temp.join("activation-0123456789abcdef.sock")
+        ));
+
+        let paths = activation_paths_with_temp(&base, &private_temp);
+        let endpoint = PathBuf::from(&paths.endpoint);
+        assert!(
+            unix_socket_path_fits(&endpoint),
+            "completed activation endpoint must fit sun_path: {endpoint:?}"
+        );
+        let fixed = Path::new("/tmp").join(format!("kettle-{}", unsafe { libc::geteuid() }));
+        assert!(endpoint.starts_with(&fixed));
+        assert_eq!(paths.endpoint_dir.as_deref(), endpoint.parent());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn activation_measures_non_utf8_paths_after_lossy_conversion() {
+        use std::ffi::OsString;
+        use std::os::unix::ffi::{OsStrExt as _, OsStringExt as _};
+
+        let mut raw_base = b"/tmp/".to_vec();
+        raw_base.extend(std::iter::repeat_n(0xff, 30));
+        let base = PathBuf::from(OsString::from_vec(raw_base));
+        let direct = base.join("activation.sock");
+        assert!(direct.as_os_str().as_bytes().len() <= crate::MAX_UNIX_SOCKET_PATH_BYTES);
+        assert!(direct.to_string_lossy().len() > crate::MAX_UNIX_SOCKET_PATH_BYTES);
+        let paths = activation_paths_with_temp(&base, Path::new("/tmp/kettle-test"));
+        assert!(unix_socket_path_fits(Path::new(&paths.endpoint)));
+        assert_ne!(paths.endpoint, direct.to_string_lossy());
+
+        let long_base = PathBuf::from("/tmp").join("registry-component".repeat(8));
+        let mut raw_temp = b"/tmp/".to_vec();
+        raw_temp.extend(std::iter::repeat_n(0xff, 25));
+        let non_utf8_temp = PathBuf::from(OsString::from_vec(raw_temp));
+        let unchecked = non_utf8_temp.join("activation-0123456789abcdef.sock");
+        assert!(unchecked.as_os_str().as_bytes().len() <= crate::MAX_UNIX_SOCKET_PATH_BYTES);
+        assert!(unchecked.to_string_lossy().len() > crate::MAX_UNIX_SOCKET_PATH_BYTES);
+        let paths = activation_paths_with_temp(&long_base, &non_utf8_temp);
+        let endpoint = PathBuf::from(&paths.endpoint);
+        assert!(unix_socket_path_fits(&endpoint));
+        assert!(
+            endpoint.starts_with(
+                Path::new("/tmp").join(format!("kettle-{}", unsafe { libc::geteuid() }))
+            )
+        );
     }
 
     #[test]
