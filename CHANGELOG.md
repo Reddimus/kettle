@@ -6,6 +6,8 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+## [2.54.0] — 2026-08-08
+
 ### Fixed
 
 Fifty-eight findings from a full-repo audit. Five adversarial audits covered

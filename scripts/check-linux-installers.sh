@@ -4,6 +4,19 @@
 set -euo pipefail
 export PATH="$HOME/.cargo/bin:$PATH"
 
+# Create every directory below with mode 0755 regardless of the caller's umask.
+#
+# `install-unix.py` refuses to install into a path whose components are group-
+# or other-writable, because a group member could then replace the installed
+# binary. That check is correct and must not be relaxed. But Ubuntu's DEFAULT
+# umask is 002, so a plain `mkdir` here yields 0775 and the installer rightly
+# rejects the smoke's own scratch prefix — meaning `just linux-installer-smoke`
+# could not pass on a stock Ubuntu desktop, only on a umask-022 machine such as
+# a CI runner. Pinning the umask makes the scratch prefix look like the
+# correctly-permissioned target the installer expects, so the smoke tests the
+# installer rather than the caller's shell configuration.
+umask 022
+
 ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
 cd "$ROOT"
 
