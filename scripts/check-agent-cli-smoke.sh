@@ -3,13 +3,13 @@ set -euo pipefail
 
 # Local agent/TUI smoke for the real CLIs users run inside kettle.
 #
-# This is intentionally not a CI gate: Codex CLI, Claude Code, and a user's
-# Neovim/AstroNvim setup are machine-local tools. The always-available checks
-# prove kettle's own non-interactive agent surfaces work; optional CLI checks
-# prove the real tools launch through kettle when installed. Missing tools are
-# reported as skips, not failures. This script does not drive either client's
-# interactive composer, populate a clipboard, inject paste keys, or assert an
-# image attachment.
+# macOS CI runs the always-available checks to prove kettle's own
+# non-interactive agent surfaces work. Codex CLI, Claude Code, and a user's
+# Neovim/AstroNvim setup remain machine-local optional probes: when installed
+# they prove the real tools launch through kettle, and otherwise they report
+# explicit skips. This script does not drive either client's interactive
+# composer, populate a clipboard, inject paste keys, or assert an image
+# attachment.
 
 KETTLE="${KETTLE_BIN:-kettle}"
 TIMEOUT="${KETTLE_AGENT_SMOKE_TIMEOUT:-8}"

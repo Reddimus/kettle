@@ -215,8 +215,11 @@ tracked here so they are not lost.
   Consequence to state plainly: **the live interactive leg — tmux, Codex CLI,
   Claude Code CLI, and Neovim/AstroNvim inside a real Kettle window — is not
   verified on macOS.** The non-interactive `scripts/check-agent-cli-smoke.sh`
-  passes all 12 checks there, including the configured-AstroNvim path, and that
-  is the full extent of what macOS coverage currently proves.
+  passed all 12 checks in the direct host measurement above, including the
+  configured-AstroNvim path. Its mandatory Kettle-owned probes now also run in
+  macOS CI through `just agent-cli-smoke`; optional machine-local clients remain
+  explicit skips there. That non-interactive evidence is the full extent of
+  what macOS coverage currently proves.
 
 - **One shared streaming control-state kernel for the three ANSI parsers.** The
   `kettle exec` stripper, the session-log scrubber, and the VT extractor have now

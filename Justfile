@@ -151,13 +151,16 @@ vendor-check: vendor-parser-check vendor-pty-check
 
 # Audit every Git-tracked path: index/worktree object identity, path/case
 # uniqueness, UTF-8/LF hygiene, manifests, Markdown links, and binary font/image
-# bounds. The JSON ledger is written under ignored target/diagnostics.
+# bounds. The focused self-test pins that a missing Markdown target is fatal.
+# The JSON ledger is written under ignored target/diagnostics.
 [unix]
 tracked-audit:
+    python3 scripts/test-audit-tracked-files.py
     python3 scripts/audit-tracked-files.py --output target/diagnostics/tracked-files-audit.json
 
 [windows]
 tracked-audit:
+    python scripts/test-audit-tracked-files.py
     python scripts/audit-tracked-files.py --output target/diagnostics/tracked-files-audit.json
 
 # Guard the temporary RUSTSEC-2026-0192 ignore. This must pass while #36 is
@@ -314,6 +317,17 @@ shell-integration-check:
 shell-integration-check:
     python scripts/check-shell-integration.py
 
+# Pin the eligibility rule in macos-compare.sh's embedded scorer: Kettle-only
+# measurements cannot count as competitive evidence. The fixture is GUI-free
+# and portable even though the comparator it guards is macOS-specific.
+[unix]
+macos-compare-score-self-test:
+    python3 scripts/perf/macos-compare-score-self-test.py
+
+[windows]
+macos-compare-score-self-test:
+    python scripts/perf/macos-compare-score-self-test.py
+
 # The CI matrix job's core Rust gate (fmt/clippy/build/test/doc) plus
 # the live-UI-helper and native shell-integration fixtures. This is the fast
 # pre-commit loop; run
@@ -371,7 +385,7 @@ full-native-gates: package-templates update-manifest-test release-assets-test pa
     @echo "NOT APPLICABLE on Linux: Windows installer/ICO/performance-matrix and macOS iconutil gates."
 
 [macos]
-full-native-gates: package-templates update-manifest-test release-assets-test package-manifest-test online-installer-test icns-smoke gpu-render-smoke cli-smoke touchpad-scroll-smoke
+full-native-gates: package-templates update-manifest-test release-assets-test package-manifest-test online-installer-test icns-smoke gpu-render-smoke cli-smoke touchpad-scroll-smoke macos-compare-score-self-test agent-cli-smoke
     @echo "NOT APPLICABLE on macOS: Windows installer/ICO/performance-matrix and Linux installer/Xvfb gates."
 
 # === End-to-end smoke ==============================================
@@ -818,6 +832,19 @@ agent-tui-smoke:
 [windows]
 agent-tui-smoke:
     python scripts/check-live-ui-smoke.py --cargo-release --shell-mode native agent-tui
+
+# Exercise Kettle's non-interactive PTY, JSON-event, and MCP agent surfaces,
+# plus bounded probes for installed Codex, Claude, Neovim, and tmux clients.
+# The Kettle-owned probes are mandatory; unavailable third-party tools are
+# reported as explicit skips. macOS CI runs this recipe against the release
+# binary. KETTLE_BIN may override the binary for diagnostics or fixtures.
+[unix]
+agent-cli-smoke: release
+    KETTLE_BIN="${KETTLE_BIN:-./target/release/kettle}" ./scripts/check-agent-cli-smoke.sh
+
+[windows]
+agent-cli-smoke: release
+    if ($env:KETTLE_BIN) { bash scripts/check-agent-cli-smoke.sh } else { $env:KETTLE_BIN = 'target/release/kettle.exe'; bash scripts/check-agent-cli-smoke.sh }
 
 # Exercise the Windows Kettle executable + ConPTY boundary while all shell,
 # tmux, Neovim/AstroNvim, Codex, and Claude commands run inside WSL. Set

@@ -49,7 +49,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y pkg-config libfontconfig1-dev libfreetype6-dev \
             libx11-dev libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev \
-            libxcb1-dev mesa-vulkan-drivers libvulkan1 xvfb
+            libxcb1-dev mesa-vulkan-drivers libvulkan1 xvfb fish
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
       - run: cargo fmt --all --check
       - run: cargo build --locked --workspace --all-targets
@@ -110,10 +110,21 @@ jobs:
         run: just --summary
       - name: Justfile platform recipe validation
         run: just --list
+      - name: Tracked-file integrity audit
+        # One Linux leg is sufficient for the platform-independent Git object,
+        # encoding, Markdown-link, PNG, and SFNT checks.
+        if: runner.os == 'Linux'
+        run: just tracked-audit
+      - name: macOS comparator score self-test
+        # This fixture is GUI-free, but the guarded scorer is shipped only by
+        # the macOS comparator. Keep its required leg with that platform.
+        if: runner.os == 'macOS'
+        run: just macos-compare-score-self-test
       - name: Shell integration snippets — native interpreters
         # The source/CLI string checks below cannot see interpreter behavior.
         # macOS supplies stock zsh with PROMPT_SUBST off and /bin/bash 3.2;
-        # Windows supplies Windows PowerShell 5.1 and PowerShell 7.
+        # Linux installs Fish above; Windows supplies Windows PowerShell 5.1
+        # and PowerShell 7.
         run: just shell-integration-check
       - name: Packaging smoke — macOS .icns
         # The release.yml's iconutil step only fires on a
@@ -206,6 +217,12 @@ jobs:
         # binary to run. Windows stays out (its smokes are bash-only).
         if: runner.os != 'Windows'
         run: cargo build --release -p kettle
+      - name: Agent CLI non-interactive smoke (macOS)
+        # The mandatory Kettle-owned PTY/JSON/MCP probes run on every attempt.
+        # Third-party CLIs are machine-local and report explicit skips when the
+        # hosted runner does not provide them.
+        if: runner.os == 'macOS'
+        run: just agent-cli-smoke
       - name: Linux installer smoke
         # Exercise the no-sudo Linux install/uninstall paths in an isolated
         # prefix. If the matching release tag already exists, also run the
