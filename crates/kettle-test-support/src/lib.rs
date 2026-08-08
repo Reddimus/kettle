@@ -23,11 +23,16 @@ use std::path::Path;
 ///
 /// # Panics
 ///
-/// Panics if `src` cannot be lexed. This **must** fail closed rather than
-/// return the input unchanged: several callers read another file's source
-/// directly and do not re-assert the slice postconditions, so a silent
-/// pass-through would hand them the complete file — test module included — and
-/// every guard built on it would quietly go back to satisfying itself. A
+/// Panics when the source cannot be lexed, **or** when a test-only attribute is
+/// attached to something this helper cannot delimit — a `#[cfg(test)]` struct
+/// field or match arm, say, rather than a whole item. The second case lexes
+/// perfectly well; it is the item-extent step that has no answer, and the
+/// contract covers both.
+///
+/// Failing closed is deliberate. Several callers read another file's source
+/// directly and do not re-assert the slice postconditions, so returning the
+/// input unchanged would hand them the complete file — test module included —
+/// and every guard built on it would quietly go back to satisfying itself. A
 /// panicking test helper is the loud failure; a permissive one is the bug this
 /// whole helper exists to prevent.
 pub fn production_source(src: &str) -> String {

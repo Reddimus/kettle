@@ -95,6 +95,26 @@ tracked here so they are not lost.
 
 ## Deferred from the 2026-08-07 full-repo audit
 
+- **Two `production_source` forms that leave test-only text in the slice.**
+  Neither occurs in this workspace; both are recorded so the contract's limits
+  are written down rather than discovered later.
+
+  1. `#[cfg_attr(not(test), cfg(test))]` — an item that exists only in test
+     builds, expressed through `cfg_attr`. All `cfg_attr` attributes are ignored,
+     so the item survives. This predates the shared helper and is not a
+     regression.
+  2. `/** needle */ #[cfg(test)] fn f() {}` written on a single line. Doc
+     backtracking requires the attribute to start its line, so the doc text
+     survives the item's removal. `rustfmt` normalises this form, which is why
+     the workspace does not contain it.
+
+  Both leave *test* text behind, which can only make a positive guard pass
+  spuriously. Neither deletes production text, which is the failure that makes a
+  negative guard pass while protecting nothing — that direction is what the
+  helper's tests are weighted toward, and it is why these two are deferred rather
+  than fixed under release pressure.
+
+
 - **`exec_streams_stdout_and_exits_zero` is flaky on macOS at roughly 2–5 %.**
   The test's own comment already records that it "has failed intermittently on
   macOS CI with empty stdout"; this entry adds the missing part, which is a
