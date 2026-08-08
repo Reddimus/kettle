@@ -95,6 +95,31 @@ tracked here so they are not lost.
 
 ## Deferred from the 2026-08-07 full-repo audit
 
+- **The Linux installer smoke's online leg can fail on a transient network
+  blip, and it gates every pull request.** Observed on PR #162, run
+  31255512657:
+
+      kettle install-online.sh: v2.53.0 must ship a bounded Ed25519-signed
+      manifest, but .../v2.53.0/kettle-update-manifest.json[.sig] could not be
+      fetched. ... Refusing to downgrade to the weaker same-origin checksum.
+
+  The release was **not** broken: all 14 assets are published, and both
+  `kettle-update-manifest.json` and its `.sig` return HTTP 200 on direct fetch.
+  The manifest simply could not be retrieved during that run.
+
+  Refusing to continue is the correct response — a missing manifest is
+  indistinguishable from suppression, and falling back to the same-origin
+  checksum would be exactly the downgrade an attacker wants. So the fix is not
+  to soften the check. It is to make the *fetch* resilient: a bounded retry with
+  backoff, distinguishing a transport failure from a manifest that is genuinely
+  absent or oversized, and failing closed only after the retries are exhausted.
+
+  Not attempted here because `install-online.sh` is a shipped, security-relevant
+  script and a release cut is the wrong moment to change how it fetches
+  signatures. Until then, a red `build (ubuntu-latest)` on this step should be
+  re-run once and investigated only if it repeats.
+
+
 - **Two `production_source` forms that leave test-only text in the slice.**
   Neither occurs in this workspace; both are recorded so the contract's limits
   are written down rather than discovered later.
