@@ -26,6 +26,8 @@ All PNGs are 8-bit/color RGBA — GNOME Shell's loader silently fails on
 Usage (from anywhere): python scripts/gen-icons.py
 """
 
+from __future__ import annotations
+
 import argparse
 import struct
 import sys
@@ -91,7 +93,12 @@ LINUX_SIZES = [16, 24, 32, 48, 64, 128, 256]
 ICONSET_BASES = [16, 32, 128, 256, 512]
 
 
-def emit(linux_dir: Path, iconset_dir: Path, ico_path: Path, quiet: bool = False) -> list[tuple[Path, str]]:
+def emit(
+    linux_dir: Path,
+    iconset_dir: Path,
+    ico_path: Path,
+    quiet: bool = False,
+) -> list[tuple[Path, str]]:
     """Write every icon artifact under the given roots.
 
     Returns the (path, label) pairs written, so `--check` can compare the same
@@ -110,57 +117,111 @@ def emit(linux_dir: Path, iconset_dir: Path, ico_path: Path, quiet: bool = False
 
     iconset_dir.mkdir(parents=True, exist_ok=True)
     for base in ICONSET_BASES:
-        for name, px in ((f"icon_{base}x{base}.png", base), (f"icon_{base}x{base}@2x.png", base * 2)):
+        names_and_sizes = (
+            (f"icon_{base}x{base}.png", base),
+            (f"icon_{base}x{base}@2x.png", base * 2),
+        )
+        for name, px in names_and_sizes:
             scaled(master, px).save(iconset_dir / name)
-            written.append((iconset_dir / name, f"packaging/macos/kettle.iconset/{name}"))
+            written.append(
+                (iconset_dir / name, f"packaging/macos/kettle.iconset/{name}")
+            )
         if not quiet:
             print(f"wrote icon_{base}x{base}.png (+@2x)")
 
     ico_path.parent.mkdir(parents=True, exist_ok=True)
-    scaled(master, 256).save(ico_path, format="ICO", sizes=[(px, px) for px in LINUX_SIZES])
+    ico_sizes = [(px, px) for px in LINUX_SIZES]
+    scaled(master, 256).save(ico_path, format="ICO", sizes=ico_sizes)
     written.append((ico_path, "packaging/windows/kettle.ico"))
     if not quiet:
         print(f"wrote {ico_path}")
+
+    # Pillow silently drops requested sizes larger than the source image. Keep
+    # this verification beside the request so both generation and --check fail
+    # if the encoder emits an incomplete container.
+    with ico_path.open("rb") as stream:
+        header = stream.read(6)
+    count = struct.unpack("<H", header[4:6])[0]
+    if count != len(ico_sizes):
+        raise RuntimeError(
+            f"{ico_path} has {count} images, expected {len(ico_sizes)}"
+        )
+    if not quiet:
+        print(f"kettle.ico OK ({count} resolutions)")
     return written
 
 
+def png_encoding(path: Path) -> tuple[int, int]:
+    """Return the PNG IHDR bit depth and color type."""
+    with path.open("rb") as stream:
+        header = stream.read(26)
+    if (
+        len(header) != 26
+        or header[:8] != b"\x89PNG\r\n\x1a\n"
+        or header[12:16] != b"IHDR"
+    ):
+        raise ValueError(f"{path} has no valid PNG IHDR")
+    return header[24], header[25]
+
+
 def same_pixels(a: Path, b: Path) -> bool:
-    """Compare decoded IMAGE CONTENT, not encoded bytes.
+    """Compare image format, required metadata, and decoded pixel content.
 
     Pillow's PNG/ICO encoders are not byte-identical across versions or
     platforms -- zlib settings and chunk ordering differ -- so a byte comparison
     fails on CI while passing locally, for images that are pixel-for-pixel
     identical. That is a gate that cries wolf, which trains people to ignore it.
-    Decoding both sides compares the thing that actually matters.
+    Decoding both sides compares the image content while retaining the PNG mode
+    and bit depth constraints that prevent the GNOME blank-icon regression.
 
-    A multi-resolution .ico is compared frame by frame.
+    Pillow exposes ICO resolutions through `ico.sizes()` and `ico.getimage()`;
+    `n_frames` only reports the default (largest) image.
     """
     with Image.open(a) as left, Image.open(b) as right:
-        if left.size != right.size:
+        if left.format != right.format:
             return False
-        frames = getattr(left, "n_frames", 1)
-        if frames != getattr(right, "n_frames", 1):
-            return False
-        for index in range(frames):
-            left.seek(index)
-            right.seek(index)
-            if left.convert("RGBA").tobytes() != right.convert("RGBA").tobytes():
+
+        if left.format == "ICO":
+            left_sizes = left.ico.sizes()
+            right_sizes = right.ico.sizes()
+            if left_sizes != right_sizes:
                 return False
-    return True
+            for size in sorted(left_sizes):
+                left_image = left.ico.getimage(size)
+                right_image = right.ico.getimage(size)
+                if (
+                    left_image.size != right_image.size
+                    or left_image.mode != right_image.mode
+                    or left_image.tobytes() != right_image.tobytes()
+                ):
+                    return False
+            return True
+
+        if left.size != right.size or left.mode != right.mode:
+            return False
+        if left.format == "PNG" and png_encoding(a) != png_encoding(b):
+            return False
+        return left.tobytes() == right.tobytes()
 
 
 def check() -> int:
-    """Fail if any tracked raster has drifted from what the SVG geometry yields.
+    """Fail if any tracked raster has drifted from the Pillow generator.
 
     The 18 tracked rasters had no gate of any kind: `gen-icons.py` was run by
     hand and dispatched by no recipe or CI job, so an edit to the geometry — or
     a hand-touched PNG — could ship silently. The generator is deterministic
     (pure Pillow, fixed supersampling), so regenerating into a scratch tree and
-    comparing bytes is an exact check rather than a perceptual one.
+    comparing decoded content and required image metadata is an exact check
+    rather than a perceptual one.
     """
     with tempfile.TemporaryDirectory(prefix="kettle-icons-") as tmp:
         root = Path(tmp)
-        produced = emit(root / "linux", root / "iconset", root / "windows" / "kettle.ico", quiet=True)
+        produced = emit(
+            root / "linux",
+            root / "iconset",
+            root / "windows" / "kettle.ico",
+            quiet=True,
+        )
         drifted: list[str] = []
         missing: list[str] = []
         for path, rel in produced:
@@ -179,7 +240,7 @@ def check() -> int:
             "run `python3 scripts/gen-icons.py` and commit the result"
         )
         return 1
-    print(f"icons OK ({len(produced)} rasters match the SVG geometry)")
+    print(f"icons OK ({len(produced)} tracked rasters match the Pillow generator)")
     return 0
 
 
@@ -212,20 +273,13 @@ def main() -> int:
         print(f"SKIPPED: {message}")
         return 0
 
-    if args.check:
-        return check()
-
-    emit(LINUX, ICONSET, ICO)
-
-    # Self-verify: the .ico header's image count must equal the request —
-    # Pillow silently drops sizes larger than the source image.
-    with open(ICO, "rb") as f:
-        header = f.read(6)
-    count = struct.unpack("<H", header[4:6])[0]
-    if count != len(ico_sizes):
-        print(f"ERROR: kettle.ico has {count} images, expected {len(ico_sizes)}")
+    try:
+        if args.check:
+            return check()
+        emit(LINUX, ICONSET, ICO)
+    except RuntimeError as error:
+        print(f"ERROR: {error}")
         return 1
-    print(f"kettle.ico OK ({count} resolutions)")
     return 0
 
 

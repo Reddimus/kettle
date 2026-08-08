@@ -162,13 +162,13 @@ jobs:
           file packaging/windows/kettle.ico | grep -q "MS Windows icon" \
             || { echo "kettle.ico is not a Windows icon"; file packaging/windows/kettle.ico; exit 1; }
           # Multi-resolution check: the `file` output includes the
-          # number of icons. The release recipe asks for 6 sizes; floor
+          # number of icons. The release recipe asks for 7 sizes; floor
           # at 4 to keep headroom for future tweaks.
           count=$(file packaging/windows/kettle.ico | grep -oE '[0-9]+ icons' | grep -oE '^[0-9]+')
           test "${count:-0}" -ge 4 \
             || { echo ".ico has only ${count:-0} resolutions (expected ≥4)"; exit 1; }
           echo "kettle.ico OK (${count} resolutions)"
-      - name: Icon rasters match the SVG geometry
+      - name: Icon rasters match the Pillow generator
         # The 18 tracked PNG/ICO rasters had no gate: gen-icons.py was run by
         # hand and dispatched by nothing, so a geometry edit or a hand-touched
         # PNG shipped silently. --require-tooling makes an absent Pillow fatal
@@ -177,6 +177,7 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           python3 -m pip install --quiet --disable-pip-version-check Pillow
+          python3 scripts/test-gen-icons.py
           python3 scripts/gen-icons.py --check --require-tooling
       - name: Package template lockstep
         # Release CI renders Homebrew and AUR metadata only after it has the

@@ -140,7 +140,7 @@ tracked here so they are not lost.
   than fixed under release pressure.
 
 
-- **`exec_streams_stdout_and_exits_zero` is flaky on macOS at roughly 2–5 %.**
+- **The `kettle/tests/exec.rs` PTY suite is flaky on macOS — the whole suite, not one test.**
   The test's own comment already records that it "has failed intermittently on
   macOS CI with empty stdout"; this entry adds the missing part, which is a
   measured rate and a decisive answer to whether the v2.54.0 change set caused
@@ -175,6 +175,27 @@ tracked here so they are not lost.
   final flush rather than at the stripper. Not chased further here because it is
   pre-existing and unrelated to this release's scope; it wants its own change
   with its own measurement, and the rate above is the baseline to beat.
+
+  **Corrected 2026-08-08.** The entry above named a single test. That was too
+  narrow. Three different tests in this file have now been observed failing on
+  `main`, at 2/30 per full-binary run:
+
+  | test | where seen |
+  |---|---|
+  | `exec_streams_stdout_and_exits_zero` | the measurement above, and a Codex gauntlet run |
+  | `exec_record_writes_replayable_asciicast` | CI on PR #164, and `main` locally |
+  | `exec_raw_mode_eof_is_explicit_and_does_not_destroy_terminal_replies` | `main` locally |
+
+  So the flake is a property of the PTY harness these tests share, not of any one
+  assertion — which also means "re-run once and investigate if it repeats" was
+  the wrong stopping rule: a repeat shows up as a *different* test name and reads
+  like an unrelated failure. Any pull request can go red at random on the macOS
+  leg, and the correct response is to check whether the failing test is in this
+  file before assuming a regression.
+
+  The shared suspect remains recording finalization racing the child's final
+  flush; all three tests drive a PTY child to completion and read what it wrote.
+  Still deferred, but it should be fixed at the harness rather than per test.
 
 - **`kettle ctl screenshot` times out on macOS, so the live-UI smoke cannot
   finish there.** This is the blocker for `just agent-tui-smoke` on macOS, which
