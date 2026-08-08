@@ -576,6 +576,18 @@ pub(crate) struct WindowState {
     /// When `Some`, the user is editing a window/tab/pane title via
     /// an inline overlay.
     pub(crate) editing_title: Option<TitleEditState>,
+    /// Set when a modal transition changed the chrome that consumes content
+    /// area, so the PTYs need re-sizing before the next frame.
+    ///
+    /// Deferred rather than resized on the spot because `close_all_modals`
+    /// runs immediately BEFORE most modal openers. Resizing there and again in
+    /// the opener sent the child two `SIGWINCH`s — grow then shrink — for a net
+    /// change of zero on a title-edit -> title-edit replacement. Kettle paints
+    /// no intermediate frame, but vim, tmux and htop observe both and redraw.
+    /// Coalescing to one flush per frame makes the intermediate state
+    /// unobservable no matter what a caller does next, without threading a
+    /// "will install another modal" flag through seventeen call sites.
+    pub(crate) chrome_geometry_dirty: bool,
     /// When `Some`, a confirm modal is open. Keyboard input routes
     /// to modal dispatch and the renderer paints the centered modal panel.
     pub(crate) confirm_dialog: Option<ConfirmDialogState>,
@@ -814,6 +826,7 @@ impl WindowState {
             context_menu: None,
             theme_preview: None,
             editing_title: None,
+            chrome_geometry_dirty: false,
             confirm_dialog: None,
             window_focused: true,
             window_occluded: false,

@@ -10236,6 +10236,17 @@ impl App {
     }
 
     fn redraw(&mut self, ws: &mut WindowState) {
+        // Flush any pending chrome-geometry change before painting. A title
+        // edit materialises a chrome strip (see `tab_bar_h`), so opening or
+        // closing one changes the content rectangle and the PTYs must follow.
+        // Doing it here rather than at each transition coalesces the
+        // close-then-open pair that every modal opener performs: the child sees
+        // one resize to the final geometry, or none at all when the geometry is
+        // unchanged end to end, because `try_resize_geometry` already skips a
+        // no-op.
+        if std::mem::take(&mut ws.chrome_geometry_dirty) {
+            self.resize_all(ws);
+        }
         // v2.34.0: keep the OS titlebar in step with the active palette.
         // Compare-only when nothing changed; independent of GPU health, so it
         // runs before the device-lost early-return below.
@@ -10845,6 +10856,11 @@ impl App {
     /// would render both, with palette capturing keys; visually
     /// confusing).
     fn close_all_modals(&mut self, ws: &mut WindowState) {
+        // A live title edit materialises a chrome strip (see `tab_bar_h`), so
+        // dropping it here changes the content rectangle. Resize only when it
+        // was actually open -- this runs before every other modal opens, and an
+        // unconditional resize would fire on all 17 call sites for nothing.
+        let title_edit_was_open = ws.editing_title.is_some();
         let search_was_open = ws.search.open;
         self.close_search(ws);
         if !search_was_open {
@@ -10870,6 +10886,9 @@ impl App {
         // first (then sets its own modal), so clearing the confirm dialog here
         // is safe: the confirm-open path clears-then-sets in that order.
         ws.confirm_dialog = None;
+        if title_edit_was_open {
+            ws.chrome_geometry_dirty = true;
+        }
     }
 
     fn open_search(&mut self, ws: &mut WindowState) {
@@ -11018,6 +11037,7 @@ impl App {
     /// overlay. The scope decides which setter is invoked.
     fn apply_title_edit(&mut self, ws: &mut WindowState) {
         if let Some(state) = ws.editing_title.take() {
+            ws.chrome_geometry_dirty = true;
             let value = state.input;
             match state.scope {
                 TitleEditScope::Window => {
@@ -13668,6 +13688,7 @@ impl App {
                     input: current,
                     bulk: GroupBulkScope::Single,
                 });
+                ws.chrome_geometry_dirty = true;
                 if let Some(w) = &ws.window {
                     w.request_redraw();
                 }
@@ -13685,6 +13706,7 @@ impl App {
                     input: current,
                     bulk: GroupBulkScope::Single,
                 });
+                ws.chrome_geometry_dirty = true;
                 if let Some(w) = &ws.window {
                     w.request_redraw();
                 }
@@ -13701,6 +13723,7 @@ impl App {
                     input: current,
                     bulk: GroupBulkScope::Single,
                 });
+                ws.chrome_geometry_dirty = true;
                 if let Some(w) = &ws.window {
                     w.request_redraw();
                 }
@@ -13722,6 +13745,7 @@ impl App {
                     input: current,
                     bulk: GroupBulkScope::Single,
                 });
+                ws.chrome_geometry_dirty = true;
                 if let Some(w) = &ws.window {
                     w.request_redraw();
                 }
@@ -13742,6 +13766,7 @@ impl App {
                     input: String::new(),
                     bulk,
                 });
+                ws.chrome_geometry_dirty = true;
                 if let Some(w) = &ws.window {
                     w.request_redraw();
                 }
@@ -24408,7 +24433,11 @@ impl App {
                 if ws.editing_title.is_some() {
                     match &event.logical_key {
                         Key::Named(NamedKey::Escape) => {
+                            // The chrome strip `tab_bar_h` materialised for
+                            // this modal disappears now, so the content
+                            // rectangle changes and the PTYs must follow it.
                             ws.editing_title = None;
+                            ws.chrome_geometry_dirty = true;
                         }
                         Key::Named(NamedKey::Enter) => {
                             self.apply_title_edit(ws);
