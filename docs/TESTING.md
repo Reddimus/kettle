@@ -38,9 +38,10 @@ matrix.
 Shell-integration changes also run `just shell-integration-check`. Unlike the
 CLI smoke's source-text checks, this executes the shipped snippets: macOS uses
 interactive `zsh -f` with `PROMPT_SUBST` off and its system Bash 3.2, while
-Windows runs the PowerShell prompt-status and PSReadLine binding fixture under
-each installed PowerShell host. Other hosts run the interpreters they have and
-print explicit skips for native legs that belong to the CI matrix.
+Linux CI installs Fish and executes its OSC 133 event hooks and OSC 7 cwd report,
+and Windows runs the PowerShell prompt-status and PSReadLine binding fixture
+under each installed PowerShell host. Other hosts run the interpreters they have
+and print explicit skips for native legs that belong to the CI matrix.
 
 The three patched crates under `vendor/` are explicitly excluded from the
 product workspace, so the root gates exercise their public Kettle integration
@@ -1012,11 +1013,14 @@ These need a real display and are run by hand (or on real hardware):
     clipboard, inject paste keys, or assert an image attachment. The tmux probe
     verifies `tmux-256color`, progressive extended keys, and Kettle's additive
     terminal feature declaration. Missing
-    optional tools are reported as skips, so this is a real-machine smoke rather
-    than a portable CI gate. On Windows Git Bash, npm-style extensionless POSIX
-    shims are resolved to their adjacent `.cmd` launchers and executed through
-    `cmd.exe /d /s /c`; `scripts/check-agent-cli-smoke.sh --self-test` pins the
-    resolver and quoting with hostile shadow fixtures.
+    optional tools are reported as skips. `just agent-cli-smoke` runs the
+    mandatory Kettle-owned probes plus every available optional probe; macOS CI
+    requires the mandatory portion while a fully populated real-machine run is
+    still needed to claim the optional clients. On Windows Git Bash, npm-style
+    extensionless POSIX shims are resolved to their adjacent `.cmd` launchers
+    and executed through `cmd.exe /d /s /c`;
+    `scripts/check-agent-cli-smoke.sh --self-test` pins the resolver and quoting
+    with hostile shadow fixtures.
   - **Live agent/TUI window**: `just agent-tui-smoke` opens a real
     grid-renderer Kettle window in explicit native-shell mode: PowerShell on
     Windows and deterministic non-rc Bash on Unix/macOS. The recipe consumes
@@ -1306,7 +1310,13 @@ name the shape of bug each pass caught.
   **`--screenshot-menu` visual regression** smokes on Linux
   (both run the release binary under `LIBGL_ALWAYS_SOFTWARE=1`).
 - Native shell-integration fixtures: stock interactive `zsh -f` and system
-  Bash 3.2 on macOS, plus PowerShell prompt/Enter behavior on Windows.
+  Bash 3.2 on macOS, Fish OSC 133/OSC 7 behavior on Linux, plus PowerShell
+  prompt/Enter behavior on Windows.
+- The tracked-file integrity audit on Linux, including UTF-8/LF hygiene,
+  Markdown targets, and PNG/SFNT structural checks.
+- The macOS comparator score self-test and the mandatory Kettle-owned portion of
+  `just agent-cli-smoke` on macOS; unavailable third-party clients are recorded
+  as skips rather than claimed as covered.
 - A CLI smoke on every OS: `--version` SHA-regex,
   `--check-config` lead line, `--config-path`, `--list-themes`
   > 400, `--list-actions` > 50, `--list-keybinds` > 40,

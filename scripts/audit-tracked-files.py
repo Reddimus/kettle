@@ -268,7 +268,7 @@ def audit(root: Path) -> dict[str, Any]:
                 if suffix == ".md":
                     for link, exists in local_markdown_links(root, relative, text):
                         if not exists:
-                            warnings.append(f"{relative}: unresolved local link {link}")
+                            errors.append(f"{relative}: unresolved local link {link}")
 
         worktree_id = git_blob_id(data, object_format)
         files.append(

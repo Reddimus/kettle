@@ -16,10 +16,13 @@ from urllib.parse import quote
 ROOT = Path(__file__).resolve().parent.parent
 FIXTURES = ROOT / "scripts" / "fixtures" / "shell-integration"
 INTEGRATION = ROOT / "shell-integration"
+OSC_A = b"\x1b]133;A\x07"
 OSC_B = b"\x1b]133;B\x07"
+OSC_C = b"\x1b]133;C\x07"
+OSC_D_1 = b"\x1b]133;D;1\x07"
 
 
-def run(command: list[str], label: str) -> bytes:
+def run(command: list[str], label: str, announce: bool = True) -> bytes:
     result = subprocess.run(
         command,
         cwd=ROOT,
@@ -30,7 +33,12 @@ def run(command: list[str], label: str) -> bytes:
     if result.returncode != 0:
         output = result.stdout.decode("utf-8", errors="replace")
         raise RuntimeError(f"{label} failed with exit {result.returncode}:\n{output}")
-    print(f"{label}: PASS")
+    # `announce=False` for a check whose assertions run in THIS file after the
+    # subprocess returns. The other fixtures assert internally and exit nonzero,
+    # so a clean exit really is a pass for them; printing PASS here for a check
+    # that has not been verified yet would announce success before doing any.
+    if announce:
+        print(f"{label}: PASS")
     return result.stdout
 
 
@@ -114,6 +122,52 @@ def check_bash(executable: str, require_32: bool) -> None:
         raise RuntimeError(f"Bash OSC 7 report contains a malformed escape: {encoded_path!r}")
 
 
+def check_fish(executable: str) -> None:
+    with tempfile.TemporaryDirectory(prefix="kettle fish ") as temporary:
+        cwd = Path(temporary) / "kt test" / "\u00fcn\u00efcode"
+        cwd.mkdir(parents=True)
+        output = run(
+            [
+                executable,
+                "--no-config",
+                str(FIXTURES / "fish-osc.fish"),
+                str(INTEGRATION / "kettle.fish"),
+                str(cwd),
+            ],
+            "Fish OSC 133 and OSC 7 fixture",
+            announce=False,
+        )
+
+    marks = (OSC_A, OSC_C, OSC_D_1)
+    positions = [output.find(mark) for mark in marks]
+    if not (0 <= positions[0] < positions[1] < positions[2]):
+        raise RuntimeError(
+            "Fish fixture did not emit ordered OSC 133 A, C, D;1 marks: "
+            f"{output!r}"
+        )
+    for mark in marks:
+        if output.count(mark) != 1:
+            raise RuntimeError(f"Fish fixture did not emit exactly one {mark!r}: {output!r}")
+
+    prefix = b"\x1b]7;file://"
+    start = output.find(prefix, positions[0] + len(OSC_A), positions[1])
+    if start < 0:
+        raise RuntimeError(f"Fish fixture emitted no OSC 7 cwd report: {output!r}")
+    payload = output[start + len(prefix) :].split(b"\x07", 1)[0]
+    slash = payload.find(b"/")
+    if slash < 0:
+        raise RuntimeError(f"Fish OSC 7 report omitted its absolute path: {payload!r}")
+    encoded_path = payload[slash:].decode("ascii")
+    expected_path = quote(str(cwd), safe="/:_.~-")
+    if encoded_path != expected_path:
+        raise RuntimeError(
+            "Fish OSC 7 cwd did not preserve separators and URL-encode segments: "
+            f"expected {expected_path!r}, got {encoded_path!r}"
+        )
+
+    print("Fish OSC 133 and OSC 7 fixture: PASS")
+
+
 def check_powershell(executable: str) -> None:
     common = [
         executable,
@@ -173,6 +227,12 @@ def main() -> int:
         if bash is None:
             raise RuntimeError("Bash fixture requires bash")
         check_bash(bash, require_32=False)
+
+    fish = shutil.which("fish")
+    if fish is None:
+        print("fish fixture: SKIP (fish unavailable; Linux CI is the required native leg)")
+    else:
+        check_fish(fish)
 
     powershells: list[str] = []
     if os.name == "nt":

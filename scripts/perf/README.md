@@ -469,6 +469,15 @@ pwsh.exe -NoLogo -NoProfile -File scripts/perf/self-test.ps1
 powershell.exe -NoLogo -NoProfile -File scripts/perf/self-test.ps1
 ```
 
+The macOS comparator's embedded scorer has a separate portable regression gate:
+
+```sh
+just macos-compare-score-self-test
+```
+
+It rejects Kettle-only measurements as ineligible evidence and runs on the
+required macOS CI leg without launching terminal applications.
+
 The Windows PowerShell 5.1 entry point reconstructs `PSModulePath` from that
 engine's native machine roots and imports its engine-owned Utility manifest.
 This keeps the documented command deterministic even when it is launched from
