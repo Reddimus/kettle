@@ -60,12 +60,25 @@ in `docs/AUDIT-2026-08-07-FULL.md`.
   name was corrected too: it asserted the tab title lane while calling itself
   `..._full_segment_rect_budget`.
 
-  The sweep took two passes because the first scan only recognised
-  `src.contains("literal")` and missed guards that put their needles in an array
-  and pass them as a variable. Negative guards (`!src.contains(...)`) get
-  particular care: they fail *open* if the slice loses production code, so the
-  stripper was verified against every column-0 production function rather than
-  assumed correct.
+  The sweep took three passes, and the reasons are worth recording because each
+  one hid behind the previous fix. The first scan only recognised
+  `src.contains("literal")`, missing guards that put their needles in an array
+  and pass them as a variable. The second left three hand-rolled strippers in
+  place, two of which were unsound — one halted at a `}` inside a multiline
+  string and copied the test module back into its own "production" slice; another
+  missed an indented `#[cfg(test)]`. Both passed their self-check, because that
+  check only looked for the helper's own name.
+
+  There is now **one** lexer-based implementation in `kettle-test-support`. It
+  brace-matches while tracking line comments, nested block comments, escaped and
+  raw strings, byte strings and char literals, and it declines to strip a `cfg`
+  whose "test" is part of a longer word. Sixteen unit tests cover the hazards
+  individually, and every wrapper now asserts its slice contains no `#[test]` and
+  no `#[cfg(test)]`, not merely that it lost the helper.
+
+  Negative guards (`!src.contains(...)`) get particular care: they fail *open*
+  when the slice loses production code, so the result was checked by probing real
+  production lines rather than by trusting the stripper.
 
 - **Pastes could be corrupted by terminal replies.** Priority replies were
   selected at every 8 KiB chunk boundary, so a mouse report could land between
