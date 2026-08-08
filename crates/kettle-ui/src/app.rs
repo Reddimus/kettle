@@ -10236,6 +10236,17 @@ impl App {
     }
 
     fn redraw(&mut self, ws: &mut WindowState) {
+        // Flush any pending chrome-geometry change before painting. A title
+        // edit materialises a chrome strip (see `tab_bar_h`), so opening or
+        // closing one changes the content rectangle and the PTYs must follow.
+        // Doing it here rather than at each transition coalesces the
+        // close-then-open pair that every modal opener performs: the child sees
+        // one resize to the final geometry, or none at all when the geometry is
+        // unchanged end to end, because `try_resize_geometry` already skips a
+        // no-op.
+        if std::mem::take(&mut ws.chrome_geometry_dirty) {
+            self.resize_all(ws);
+        }
         // v2.34.0: keep the OS titlebar in step with the active palette.
         // Compare-only when nothing changed; independent of GPU health, so it
         // runs before the device-lost early-return below.
@@ -10876,7 +10887,7 @@ impl App {
         // is safe: the confirm-open path clears-then-sets in that order.
         ws.confirm_dialog = None;
         if title_edit_was_open {
-            self.resize_all(ws);
+            ws.chrome_geometry_dirty = true;
         }
     }
 
@@ -11026,7 +11037,7 @@ impl App {
     /// overlay. The scope decides which setter is invoked.
     fn apply_title_edit(&mut self, ws: &mut WindowState) {
         if let Some(state) = ws.editing_title.take() {
-            self.resize_all(ws);
+            ws.chrome_geometry_dirty = true;
             let value = state.input;
             match state.scope {
                 TitleEditScope::Window => {
@@ -13677,7 +13688,7 @@ impl App {
                     input: current,
                     bulk: GroupBulkScope::Single,
                 });
-                self.resize_all(ws);
+                ws.chrome_geometry_dirty = true;
                 if let Some(w) = &ws.window {
                     w.request_redraw();
                 }
@@ -13695,7 +13706,7 @@ impl App {
                     input: current,
                     bulk: GroupBulkScope::Single,
                 });
-                self.resize_all(ws);
+                ws.chrome_geometry_dirty = true;
                 if let Some(w) = &ws.window {
                     w.request_redraw();
                 }
@@ -13712,7 +13723,7 @@ impl App {
                     input: current,
                     bulk: GroupBulkScope::Single,
                 });
-                self.resize_all(ws);
+                ws.chrome_geometry_dirty = true;
                 if let Some(w) = &ws.window {
                     w.request_redraw();
                 }
@@ -13734,7 +13745,7 @@ impl App {
                     input: current,
                     bulk: GroupBulkScope::Single,
                 });
-                self.resize_all(ws);
+                ws.chrome_geometry_dirty = true;
                 if let Some(w) = &ws.window {
                     w.request_redraw();
                 }
@@ -13755,7 +13766,7 @@ impl App {
                     input: String::new(),
                     bulk,
                 });
-                self.resize_all(ws);
+                ws.chrome_geometry_dirty = true;
                 if let Some(w) = &ws.window {
                     w.request_redraw();
                 }
@@ -24426,7 +24437,7 @@ impl App {
                             // this modal disappears now, so the content
                             // rectangle changes and the PTYs must follow it.
                             ws.editing_title = None;
-                            self.resize_all(ws);
+                            ws.chrome_geometry_dirty = true;
                         }
                         Key::Named(NamedKey::Enter) => {
                             self.apply_title_edit(ws);
