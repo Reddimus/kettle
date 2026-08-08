@@ -11,15 +11,36 @@ Apple silicon, macOS 15, 7 runs with 2 warmups per timing workload. Kettle built
 `--release`. Every peer launched by an empirically verified command form; peers
 that could not be driven are recorded as skips with reasons rather than dropped.
 
+Measured against the **binary actually being released**, not an earlier commit.
+The updater carried a production change after the first measurement, so rather
+than argue it could not touch these paths, the comparator was simply re-run.
+
 | metric | kettle | rank | field |
 |---|---|---|---|
-| startup | 0.334 s | **3 / 5** | wezterm 0.230, alacritty 0.231, **kettle**, kitty 0.655, terminal 1.086 |
-| ascii flood | 0.333 s | **3 / 5** | wezterm 0.228, alacritty 0.231, **kettle**, kitty 0.654, terminal 1.186 |
-| ansi/underline flood | 0.543 s | **2 / 5** | wezterm 0.435, **kettle**, alacritty 0.548, kitty 0.970, terminal 1.391 |
-| max RSS | **103.9 MiB** | **1 / 4** | **kettle**, wezterm 109.5, alacritty 128.8, kitty 129.0 |
-| idle CPU | **0.00 %** | **1 / 5** | **kettle**, alacritty, terminal, wezterm all 0.00 %; kitty 0.10 % |
+| startup | 0.336 s | **3 / 5** | wezterm 0.228, alacritty 0.233, **kettle**, kitty 0.551, terminal 1.017 |
+| ascii flood | 0.339 s | **3 / 5** | alacritty 0.228, wezterm 0.233, **kettle**, kitty 0.662, terminal 1.102 |
+| ansi/underline flood | 0.559 s | **3 / 5** | alacritty 0.450, wezterm 0.450, **kettle**, kitty 0.871, terminal 1.264 |
+| max RSS | **105.9 MiB** | **1 / 4** | **kettle**, wezterm 111.9, kitty 122.3, alacritty 127.4 |
+| idle CPU | **0.00 %** | **1 / 5** | **kettle**, alacritty, kitty, terminal, wezterm — all 0.00 % |
 
-**Top-half on 5 of 5 measured metrics**, and outright first on two of them.
+**Top-half on 5 of 5 eligible metrics**, and outright first on two of them.
+
+Every number above comes from one run of `just macos-perf`, so the table is
+reproducible as a whole rather than assembled from several.
+
+### One rank moved when the peer binary changed, and it is worth saying why
+
+An earlier run recorded the ansi/underline flood at **2 / 5**, with Kettle at
+0.543 s ahead of Alacritty's 0.548 s. That run could not use Alacritty's
+Homebrew cask — it would not open a window — so it measured a build made from
+source. The cask now launches (0.17.0) and posts **0.450 s** on the same
+workload, which puts Kettle third rather than second.
+
+The honest reading is that the earlier second place was an artifact of the peer
+build, not a Kettle regression: Kettle's own figure moved only 0.543 → 0.559 s
+across the two runs, well inside the spread of a machine that is not idle. The
+table above uses the cask, because that is what a user comparing terminals on
+macOS would actually install.
 
 ### The memory result overturns what the Windows numbers implied
 
@@ -80,10 +101,13 @@ traded for the idle number. The table above is the re-run after this fix.
   (AppleEvent −1712) through `create window`, `write text`, and `open -a` alike.
 - **Terminal.app has no RSS figure**, because `/usr/bin/time -l` would measure
   `osascript` rather than the detached process it spawns.
-- **Alacritty was built from source.** The Homebrew cask is ad-hoc-signed, fails
-  Gatekeeper, and hangs in `_dyld_start`; Homebrew has deprecated it for exactly
-  that reason and disables it on 2026-09-01. A source build is not necessarily
-  what a user runs.
+- **Alacritty is the Homebrew cask, 0.17.0, and it is ad-hoc-signed.**
+  `codesign -dv` reports `flags=0x2(adhoc)`, and Homebrew has deprecated the cask
+  for exactly that Gatekeeper failure mode, disabling it on 2026-09-01. During
+  harness development it would not open a window at all and had to be built from
+  source; it launches now. That instability is the reason the ansi-flood rank
+  differs between runs, and it is worth noting that the failure mode Alacritty is
+  living with here is precisely the one PR #156 exists to prevent for Kettle.
 - The machine was not idle. Apple's `MediaAnalysis` and `replayd` daemons were
   active throughout. Kettle's own run-to-run variance was small (startup stddev
   ~0.003 s), and all peers shared the same conditions, but these are not
