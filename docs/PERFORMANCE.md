@@ -7,9 +7,20 @@ legs existed; macOS did not, so no claim about Kettle's standing among macOS
 terminals could be checked. `scripts/perf/macos-compare.sh` (`just macos-perf`)
 closes that gap.
 
-Apple silicon, macOS 15, 7 runs with 2 warmups per timing workload. Kettle built
-`--release`. Every peer launched by an empirically verified command form; peers
-that could not be driven are recorded as skips with reasons rather than dropped.
+Host: **Apple M5 Max, 18 cores, 48 GB, macOS 26.6.1 (build 25G76, Darwin
+25.6.0)**. 7 runs with 2 warmups per timing workload; Kettle built `--release`.
+Every peer launched by an empirically verified command form; peers that could
+not be driven are recorded as skips with reasons rather than dropped.
+
+Peer builds measured, since a benchmark without them is not reproducible:
+
+| terminal | version |
+|---|---|
+| Alacritty | 0.17.0 (94e7c88), Homebrew cask |
+| kitty | 0.48.2 |
+| WezTerm | 20240203-110809-5046fc22 |
+| Terminal.app | macOS 26.6.1 system build |
+| Ghostty, iTerm2 | not measured — see the skips below |
 
 Measured against the **binary actually being released**, not an earlier commit.
 The updater carried a production change after the first measurement, so rather
