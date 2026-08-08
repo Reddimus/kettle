@@ -4633,23 +4633,12 @@ impl Renderer {
             }
             let prompt = format!("  ⚠ {}", dlg.prompt);
             let help = "  Tab/←→ · Enter · Esc";
-            let max_cols = if cw > 0.0 { (sw / cw) as usize } else { 0 };
-            let buttons_cols = buttons_label.chars().count();
-            let min_gap = 2usize;
-            let mut left = format!("{prompt}{help}");
-            let max_left = max_cols.saturating_sub(buttons_cols + min_gap);
-            if max_left > 0 && left.chars().count() > max_left {
-                left = prompt;
-            }
-            if max_left > 3 && left.chars().count() > max_left {
-                left = left.chars().take(max_left - 3).collect::<String>();
-                left.push_str("...");
-            }
-            let gap = max_cols
-                .saturating_sub(left.chars().count() + buttons_cols)
-                .max(1);
-            let label = format!("{left}{}{buttons_label}", " ".repeat(gap));
-            let label = fit_single_line_label(&label, overlay_label_cols(sw, cw));
+            let label = compose_confirm_bar_label(
+                &prompt,
+                help,
+                &buttons_label,
+                overlay_label_cols(sw, cw),
+            );
             self.search_buffer.set_metrics(metrics);
             self.search_buffer.set_size(Some(sw), Some(bar_h));
             // v2.38.2 P1b: same equality gate as the other chrome buffers —
@@ -8669,6 +8658,42 @@ fn search_query_column(query: &str, byte: usize) -> usize {
 
 /// Maximum monospace columns available to a single-line overlay buffer.
 /// Reserve one column for glyph overhang and fractional cell metrics.
+/// Lay out the confirm bar: prompt (plus help text when it fits) on the left,
+/// the button row flush right, within exactly `max_cols` columns.
+///
+/// The width this composes to and the width the caller then fits to MUST be the
+/// same number. They were not: composition targeted `floor(sw/cw)` while
+/// `fit_single_line_label` was handed `overlay_label_cols(sw, cw)`, which is one
+/// column less. The bar therefore overflowed its budget by exactly one column at
+/// every window size, and `fit_single_line_label` clipped two columns and
+/// appended `…` — so the rightmost button rendered as `[  Clos…` rather than
+/// `[  Close]` in every close-confirm, quit-confirm and reassign prompt ever
+/// shown. Taking one budget as a parameter is what makes that class of mismatch
+/// impossible to reintroduce silently.
+fn compose_confirm_bar_label(
+    prompt: &str,
+    help: &str,
+    buttons_label: &str,
+    max_cols: usize,
+) -> String {
+    let buttons_cols = buttons_label.chars().count();
+    let min_gap = 2usize;
+    let mut left = format!("{prompt}{help}");
+    let max_left = max_cols.saturating_sub(buttons_cols + min_gap);
+    if max_left > 0 && left.chars().count() > max_left {
+        left = prompt.to_string();
+    }
+    if max_left > 3 && left.chars().count() > max_left {
+        left = left.chars().take(max_left - 3).collect::<String>();
+        left.push_str("...");
+    }
+    let gap = max_cols
+        .saturating_sub(left.chars().count() + buttons_cols)
+        .max(1);
+    let label = format!("{left}{}{buttons_label}", " ".repeat(gap));
+    fit_single_line_label(&label, max_cols)
+}
+
 fn overlay_label_cols(width: f32, cell_width: f32) -> usize {
     if !width.is_finite() || !cell_width.is_finite() || width <= 0.0 || cell_width <= 0.0 {
         return 0;
@@ -14073,9 +14098,66 @@ mod search_bar_tests {
 #[cfg(test)]
 mod title_fit_tests {
     use super::{
-        display_width, fit_pane_titlebar_title, fit_single_line_label, fit_tab_path,
-        fit_tab_segment_title, fit_tab_title, middle_ellipsis, overlay_label_cols,
+        compose_confirm_bar_label, display_width, fit_pane_titlebar_title, fit_single_line_label,
+        fit_tab_path, fit_tab_segment_title, fit_tab_title, middle_ellipsis, overlay_label_cols,
     };
+
+    /// The confirm bar must never clip its own button row.
+    ///
+    /// It composed to `floor(sw/cw)` and was then fitted to
+    /// `overlay_label_cols(sw, cw)` = `floor(sw/cw) - 1`, so it overflowed by
+    /// exactly one column at EVERY window size and `fit_single_line_label`
+    /// dropped two columns for an ellipsis. The rightmost button therefore
+    /// rendered as `[  Clos…` in every confirm dialog on every machine, and the
+    /// click target from `confirm_dialog_button_hit` extended past the last
+    /// painted glyph. Nothing caught it because the composition had no test at
+    /// all -- it was inline in `redraw`, unreachable without a GPU device.
+    #[test]
+    fn confirm_bar_never_clips_its_button_row() {
+        let buttons = "[▶ Cancel]  [  Close]";
+        // Real geometries: 800/8.0, 1512/7.8 (this laptop), 1920/9.0, 640/8.0.
+        for (sw, cw) in [
+            (800.0f32, 8.0f32),
+            (1512.0, 7.8),
+            (1920.0, 9.0),
+            (640.0, 8.0),
+        ] {
+            let cols = overlay_label_cols(sw, cw);
+            let label = compose_confirm_bar_label(
+                "  ⚠ Close this pane?",
+                "  Tab/←→ · Enter · Esc",
+                buttons,
+                cols,
+            );
+            assert!(
+                label.ends_with(buttons),
+                "confirm bar clipped its buttons at {sw}x{cw} (cols={cols}): {label:?}"
+            );
+            assert!(
+                !label.contains('…'),
+                "confirm bar was ellipsised at {sw}x{cw}: {label:?}"
+            );
+            assert!(
+                display_width(&label) <= cols,
+                "confirm bar overflowed its budget at {sw}x{cw}: {} > {cols}",
+                display_width(&label)
+            );
+        }
+    }
+
+    /// A genuinely narrow window still has to degrade, not overflow.
+    #[test]
+    fn confirm_bar_still_fits_when_the_window_cannot_hold_the_buttons() {
+        let buttons = "[▶ Cancel]  [  Close]";
+        for cols in [0usize, 1, 5, 12, 20] {
+            let label = compose_confirm_bar_label("  ⚠ Close this pane?", "  Tab", buttons, cols);
+            assert!(
+                display_width(&label) <= cols,
+                "overflowed at cols={cols}: {} > {cols}",
+                display_width(&label)
+            );
+        }
+    }
 
     #[test]
     fn single_line_overlay_labels_fit_without_wrapping() {

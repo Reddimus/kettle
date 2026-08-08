@@ -1911,7 +1911,13 @@ fn confirm_dialog_button_hit(
         .map(confirm_dialog_button_cells)
         .sum::<usize>()
         + gap_cells.saturating_mul(buttons.len().saturating_sub(1));
-    let cols = (window_w / cell_w).floor().max(0.0) as usize;
+    // One column narrower than the window, because that is the width the bar is
+    // actually PAINTED at: the renderer fits every bottom-bar overlay to
+    // `overlay_label_cols` = `floor(width / cell) - 1`. Using the full window
+    // width here right-aligned the hit boxes one column past the last painted
+    // glyph, so the rightmost column of the last button was dead and the column
+    // beyond it was live.
+    let cols = ((window_w / cell_w).floor().max(0.0) as usize).saturating_sub(1);
     if buttons_cells == 0 || buttons_cells > cols {
         return None;
     }
@@ -31940,22 +31946,32 @@ mod tests {
         let ch = 16.0;
         let y = sh - (ch + 10.0) + 4.0;
 
-        // `[  Cancel]  [  Close]` consumes 10 + 2 + 9 = 21 cells,
-        // right-aligned inside a 100-cell window.
+        // `[  Cancel]  [  Close]` consumes 10 + 2 + 9 = 21 cells, right-aligned
+        // inside the PAINTED width. An 800px window at cw=8 is 100 cells, but
+        // the renderer fits bottom-bar overlays to `overlay_label_cols` =
+        // floor(w/cw) - 1 = 99, so the row occupies columns 78..99:
+        // Cancel 78..88, gap 88..90, Close 90..99. These expectations were one
+        // column to the right while the hit test used the full window width,
+        // which put the live region past the last painted glyph.
         assert_eq!(
-            confirm_dialog_button_hit(&buttons, 79.0 * cw + 1.0, y, sw, sh, cw, ch),
+            confirm_dialog_button_hit(&buttons, 78.0 * cw + 1.0, y, sw, sh, cw, ch),
             Some(0),
             "clicking the visible Cancel button should cancel"
         );
         assert_eq!(
-            confirm_dialog_button_hit(&buttons, 91.0 * cw + 1.0, y, sw, sh, cw, ch),
+            confirm_dialog_button_hit(&buttons, 90.0 * cw + 1.0, y, sw, sh, cw, ch),
             Some(1),
             "clicking the visible Close button should confirm"
         );
         assert_eq!(
-            confirm_dialog_button_hit(&buttons, 90.0 * cw + 1.0, y, sw, sh, cw, ch),
+            confirm_dialog_button_hit(&buttons, 88.0 * cw + 1.0, y, sw, sh, cw, ch),
             None,
             "the gap between buttons is not a button"
+        );
+        assert_eq!(
+            confirm_dialog_button_hit(&buttons, 99.0 * cw + 1.0, y, sw, sh, cw, ch),
+            None,
+            "the column past the painted bar is not a button"
         );
         assert_eq!(
             confirm_dialog_button_hit(&buttons, 91.0 * cw + 1.0, sh - ch - 20.0, sw, sh, cw, ch),
