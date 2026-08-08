@@ -181,3 +181,60 @@ fn a_plain_block_comment_before_a_test_item_is_not_swallowed() {
         &["fn hidden()"],
     );
 }
+
+/// Adversarial predicates for the three-valued `cfg` evaluator.
+///
+/// The FALSE direction is the dangerous one: a predicate wrongly judged
+/// test-only deletes production code from the slice, and a negative guard then
+/// passes vacuously. So every case here that must be KEPT is a potential silent
+/// hole, and every case that must be STRIPPED is only a missed opportunity.
+#[test]
+fn cfg_evaluator_handles_adversarial_predicates() {
+    let keep = [
+        // Vacuously true: `all()` with no arguments holds in every build.
+        "all()",
+        // Nested, but reachable without test.
+        "all(unix, any(test, feature = \"x\"))",
+        "not(all(test, unix))",
+        "any(all(test, unix), windows)",
+        // A value containing punctuation that could desynchronise a scanner.
+        "feature = \"a,b)c\"",
+        "any(feature = \"a)b\", test)",
+        // Whitespace and a trailing comma.
+        "any( unix , test , )",
+    ];
+    for predicate in keep {
+        let src = format!("#[cfg({predicate})]\nfn stays() {{}}\nfn anchor() {{}}\n");
+        let out = production_source(&src);
+        assert!(
+            out.contains("fn stays()"),
+            "cfg({predicate}) can hold without test; deleting it makes negative guards \
+             pass vacuously\n--- slice ---\n{out}"
+        );
+        assert!(
+            out.contains("fn anchor()"),
+            "cfg({predicate}): cursor desynchronised"
+        );
+    }
+
+    let strip = [
+        "test",
+        "all(test)",
+        "all(unix, test)",
+        "all(test, any(unix, windows))",
+        "any(all(test, unix), all(test, windows))",
+        "all(test, feature = \"x\")",
+    ];
+    for predicate in strip {
+        let src = format!("#[cfg({predicate})]\nfn gone() {{}}\nfn anchor() {{}}\n");
+        let out = production_source(&src);
+        assert!(
+            !out.contains("fn gone()"),
+            "cfg({predicate}) cannot hold without test and should be stripped\n--- slice ---\n{out}"
+        );
+        assert!(
+            out.contains("fn anchor()"),
+            "cfg({predicate}): cursor desynchronised"
+        );
+    }
+}
