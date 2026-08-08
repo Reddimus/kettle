@@ -427,6 +427,12 @@ mod tests {
         let diagnostics = diagnostic_dir(Some(dir.0.path()));
         let bootstrap_path = diagnostics.join("bootstrap");
         let bootstrap = kettle_state::create_private_file_new(&bootstrap_path).unwrap();
+        // Windows creation handles deliberately withhold FILE_SHARE_DELETE while
+        // the new object is validated. Close that handle before reopening via
+        // the removal API's required path, or ReOpenFile conflicts with the
+        // creation handle itself and returns ERROR_SHARING_VIOLATION.
+        drop(bootstrap);
+        let bootstrap = kettle_state::open_existing_private_file(&bootstrap_path).unwrap();
         kettle_state::remove_open_private_file(bootstrap, &bootstrap_path).unwrap();
         for index in 0..12 {
             std::fs::write(diagnostics.join(format!("gpu-{index:04}-1.jsonl")), b"{}\n").unwrap();
