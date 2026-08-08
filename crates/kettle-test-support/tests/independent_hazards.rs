@@ -134,3 +134,50 @@ fn a_semicolon_terminated_cfg_item_is_stripped_without_eating_the_next_item() {
         &["use std::collections::HashMap;"],
     );
 }
+
+#[test]
+fn cfg_not_test_marks_production_only_code_and_must_survive() {
+    // `#[cfg(not(test))]` is PRODUCTION-ONLY code. Stripping it is backwards.
+    assert_kept(
+        "cfg(not(test))",
+        "fn keep() {}\n#[cfg(not(test))]\nfn production_only() {}\nfn also_keep() {}\n",
+        &["fn keep()", "fn production_only()", "fn also_keep()"],
+        &[],
+    );
+}
+
+#[test]
+fn cfg_any_unix_test_still_compiles_in_production_and_must_survive() {
+    assert_kept(
+        "cfg(any(unix, test))",
+        "fn keep() {}\n#[cfg(any(unix, test))]\nfn unix_production() {}\nfn also_keep() {}\n",
+        &["fn keep()", "fn unix_production()", "fn also_keep()"],
+        &[],
+    );
+}
+
+#[test]
+fn a_block_doc_comment_on_a_test_item_is_removed_with_it() {
+    // The prose is searchable text: a needle quoted in a test item's docs
+    // would survive the item's removal and satisfy a guard by itself.
+    assert_kept(
+        "block doc comment",
+        "fn keep() {}\n/** requires required_call() to remain */\n#[cfg(test)]\nmod t {\n    fn hidden() {}\n}\nfn also_keep() {}\n",
+        &["fn keep()", "fn also_keep()"],
+        &["required_call()", "fn hidden()"],
+    );
+}
+
+#[test]
+fn a_plain_block_comment_before_a_test_item_is_not_swallowed() {
+    // An ordinary `/* … */` may document the PRECEDING production item.
+    // Removing it would delete production text and make negative guards pass
+    // vacuously, so it must survive.
+    let src = "fn keep() {}\n/* belongs to keep(): calls required_call() */\n#[cfg(test)]\nmod t {\n    fn hidden() {}\n}\n";
+    assert_kept(
+        "plain block comment",
+        src,
+        &["fn keep()", "belongs to keep()", "required_call()"],
+        &["fn hidden()"],
+    );
+}

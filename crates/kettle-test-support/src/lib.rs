@@ -2,15 +2,43 @@
 
 use std::path::Path;
 
-/// Returns `src` with every `#[cfg(test)]` / `#[cfg(all(test, ...))]` item
-/// removed, so a guard searching it cannot match its own assertions.
+/// Returns `src` with every test-only item removed, so a guard searching it
+/// cannot match its own assertions.
 ///
-/// More generally, an item is removed when its `cfg` predicate contains
-/// `test` as an identifier. If the source is malformed, the original input is
-/// returned unchanged so callers' source-slice postconditions fail loudly.
+/// An item is removed when its `cfg` predicate cannot hold in a non-test
+/// build — `test`, `all(test, ...)` and so on. An item that merely *mentions*
+/// `test` is kept: `any(unix, test)` compiles on every Unix build and
+/// `not(test)` is production-only.
+///
+/// # Known limitation
+///
+/// An item's body is taken to start at its first top-level `{`. A braced macro
+/// invocation in return-type position — `fn f() -> ty! { () } { .. }` — would
+/// therefore end the item early and leave its real body in the slice. That form
+/// is legal Rust but appears nowhere in this workspace (checked), and handling
+/// it properly needs macro-aware parsing. Recorded rather than implemented; if
+/// such an item is ever added under `cfg(test)`, the wrapper postcondition
+/// asserting the slice contains no `#[test]` is the thing most likely to catch
+/// it.
+///
+/// # Panics
+///
+/// Panics if `src` cannot be lexed. This **must** fail closed rather than
+/// return the input unchanged: several callers read another file's source
+/// directly and do not re-assert the slice postconditions, so a silent
+/// pass-through would hand them the complete file — test module included — and
+/// every guard built on it would quietly go back to satisfying itself. A
+/// panicking test helper is the loud failure; a permissive one is the bug this
+/// whole helper exists to prevent.
 pub fn production_source(src: &str) -> String {
     let normalized = src.replace("\r\n", "\n");
-    strip_test_items(&normalized).unwrap_or_else(|()| src.to_owned())
+    strip_test_items(&normalized).unwrap_or_else(|()| {
+        panic!(
+            "production_source could not lex this source, so it cannot prove the \
+             slice excludes test items. Returning the input unchanged would let \
+             every guard built on it satisfy itself again, so this fails closed."
+        )
+    })
 }
 
 fn strip_test_items(src: &str) -> Result<String, ()> {
@@ -72,15 +100,51 @@ fn strip_test_items(src: &str) -> Result<String, ()> {
     Ok(production)
 }
 
+/// Walk back over the doc comment attached to a test item, so its prose is
+/// removed along with it.
+///
+/// This matters because the prose is searchable text like any other: a guard
+/// needle quoted inside a test item's documentation would survive the item's
+/// removal and satisfy the guard on its own.
+///
+/// Only `///` lines and `/** … */` blocks are consumed — never a plain `//` or
+/// `/* … */` comment, which may well belong to the *preceding* production item.
+/// Erring that way is deliberate: over-stripping removes production text and
+/// makes negative guards pass vacuously, which is the worse failure.
 fn preceding_doc_comments_start(src: &str, mut start: usize) -> usize {
     while start > 0 {
         let line_end = start - 1;
         let line_start = src[..line_end].rfind('\n').map_or(0, |newline| newline + 1);
         let line = src[line_start..line_end].trim_start();
-        if !line.starts_with("///") || line.starts_with("////") {
+
+        if line.starts_with("///") && !line.starts_with("////") {
+            start = line_start;
+            continue;
+        }
+
+        // A `/** … */` block doc comment, which may span several lines. Scan
+        // back to its opener, and only accept it if that opener really is a doc
+        // block rather than an ordinary `/* … */`.
+        if line.ends_with("*/") {
+            let Some(open_rel) = src[..line_end].rfind("/*") else {
+                break;
+            };
+            let opener_line_start = src[..open_rel].rfind('\n').map_or(0, |n| n + 1);
+            let opener = src[opener_line_start..].trim_start();
+            let is_doc_block = opener.starts_with("/**") && !opener.starts_with("/***");
+            // Refuse if anything other than whitespace precedes the opener on
+            // its line — that would be trailing content of another item.
+            let opener_alone = src[opener_line_start..open_rel]
+                .chars()
+                .all(char::is_whitespace);
+            if is_doc_block && opener_alone {
+                start = opener_line_start;
+                continue;
+            }
             break;
         }
-        start = line_start;
+
+        break;
     }
     start
 }
@@ -122,7 +186,7 @@ fn parse_attribute(bytes: &[u8], start: usize) -> Result<Option<Attribute>, ()> 
                 if depth == 0 {
                     return Ok(Some(Attribute {
                         end: cursor + 1,
-                        has_test_cfg: cfg_contains_test(&bytes[contents_start..cursor])?,
+                        has_test_cfg: cfg_is_test_only(&bytes[contents_start..cursor])?,
                     }));
                 }
             }
@@ -133,7 +197,37 @@ fn parse_attribute(bytes: &[u8], start: usize) -> Result<Option<Attribute>, ()> 
     Err(())
 }
 
-fn cfg_contains_test(contents: &[u8]) -> Result<bool, ()> {
+/// A `cfg` predicate evaluated with `test = false` and every other atom
+/// unknown, because we only know one of the configuration's values.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Tri {
+    False,
+    True,
+    Unknown,
+}
+
+impl Tri {
+    fn not(self) -> Self {
+        match self {
+            Tri::False => Tri::True,
+            Tri::True => Tri::False,
+            Tri::Unknown => Tri::Unknown,
+        }
+    }
+}
+
+/// True when the item is compiled **only** under `cfg(test)`.
+///
+/// Presence of the `test` identifier is not the question, and treating it as
+/// one silently deletes production code. `#[cfg(any(unix, test))]` compiles on
+/// every Unix build and `#[cfg(not(test))]` is production-*only*, yet both
+/// mention `test`. Stripping either removes real code from the slice, which
+/// makes a negative guard (`!src.contains(...)`) pass while protecting nothing.
+///
+/// So evaluate the predicate three-valued with `test = false`: strip only when
+/// the result is definitely `False`, i.e. the item cannot exist in a non-test
+/// build no matter what the other atoms are.
+fn cfg_is_test_only(contents: &[u8]) -> Result<bool, ()> {
     let mut cursor = skip_trivia(contents, 0)?;
     let Some((name, end)) = identifier(contents, cursor) else {
         return Ok(false);
@@ -141,40 +235,96 @@ fn cfg_contains_test(contents: &[u8]) -> Result<bool, ()> {
     if name != b"cfg" {
         return Ok(false);
     }
-
     cursor = skip_trivia(contents, end)?;
     if contents.get(cursor) != Some(&b'(') {
         return Ok(false);
     }
-    let mut depth = 1usize;
-    let mut found_test = false;
-    cursor += 1;
+    let (value, _) = eval_predicate(contents, cursor + 1)?;
+    Ok(value == Tri::False)
+}
 
-    while cursor < contents.len() {
-        if let Some(end) = skip_lexeme(contents, cursor)? {
-            cursor = end;
-            continue;
+/// Evaluate one predicate starting at `cursor`, returning its value and the
+/// offset just past it. `cursor` sits immediately after the opening `(` of the
+/// enclosing list, or at the start of a bare predicate.
+fn eval_predicate(contents: &[u8], cursor: usize) -> Result<(Tri, usize), ()> {
+    let mut cursor = skip_trivia(contents, cursor)?;
+    let Some((name, end)) = identifier(contents, cursor) else {
+        return Err(());
+    };
+    cursor = skip_trivia(contents, end)?;
+
+    // `key = "value"` and bare identifiers other than `test` are unknown to us.
+    if contents.get(cursor) != Some(&b'(') {
+        if contents.get(cursor) == Some(&b'=') {
+            cursor = skip_trivia(contents, cursor + 1)?;
+            cursor = match skip_lexeme(contents, cursor)? {
+                Some(end) => end,
+                None => return Err(()),
+            };
+            return Ok((Tri::Unknown, cursor));
         }
-        if let Some((name, end)) = identifier(contents, cursor) {
-            if name == b"test" {
-                found_test = true;
-            }
-            cursor = end;
-            continue;
-        }
-        match contents[cursor] {
-            b'(' => depth += 1,
-            b')' => {
-                depth -= 1;
-                if depth == 0 {
-                    return Ok(found_test);
-                }
-            }
-            _ => {}
-        }
-        cursor += 1;
+        let value = if name == b"test" {
+            Tri::False
+        } else {
+            Tri::Unknown
+        };
+        return Ok((value, cursor));
     }
-    Err(())
+
+    // A list form: not(..), all(..), any(..).
+    cursor += 1;
+    let mut values = Vec::new();
+    loop {
+        cursor = skip_trivia(contents, cursor)?;
+        match contents.get(cursor) {
+            Some(b')') => {
+                cursor += 1;
+                break;
+            }
+            Some(b',') => {
+                cursor += 1;
+                continue;
+            }
+            Some(_) => {
+                let (value, next) = eval_predicate(contents, cursor)?;
+                values.push(value);
+                cursor = next;
+            }
+            None => return Err(()),
+        }
+    }
+
+    let combined = match name {
+        b"not" => {
+            if values.len() != 1 {
+                return Err(());
+            }
+            values[0].not()
+        }
+        b"all" => {
+            if values.contains(&Tri::False) {
+                Tri::False
+            } else if values.iter().all(|v| *v == Tri::True) {
+                Tri::True
+            } else {
+                Tri::Unknown
+            }
+        }
+        b"any" => {
+            if values.contains(&Tri::True) {
+                Tri::True
+            } else if values.iter().all(|v| *v == Tri::False) {
+                // An empty `any()` is false in Rust, which matches this arm.
+                Tri::False
+            } else {
+                Tri::Unknown
+            }
+        }
+        // An unrecognised list form (a proc-macro cfg extension, say) tells us
+        // nothing; assume it can appear in production rather than delete it.
+        _ => Tri::Unknown,
+    };
+    Ok((combined, cursor))
 }
 
 fn identifier(bytes: &[u8], start: usize) -> Option<(&[u8], usize)> {
@@ -625,9 +775,46 @@ mod tests {
     }
 
     #[test]
-    fn removes_any_cfg_predicate_with_bare_test_term() {
-        let src = "#[cfg(not(any(feature = \"fastest\", test)))]\nconst TEST_ONLY: bool = true;\nconst KEEP: bool = true;\n";
-        assert_eq!(production_source(src), "\nconst KEEP: bool = true;\n");
+    fn keeps_an_item_whose_cfg_excludes_test_rather_than_requiring_it() {
+        // `not(any(feature = "fastest", test))` compiles when the feature is
+        // OFF and test is OFF — production-only code, the exact opposite of a
+        // test item, despite the predicate mentioning `test`. This test
+        // previously asserted the item was removed, which encoded the bug: any
+        // appearance of the `test` identifier was treated as "test-only".
+        let src = "#[cfg(not(any(feature = \"fastest\", test)))]\nconst PRODUCTION_ONLY: bool = true;\nconst KEEP: bool = true;\n";
+        assert_eq!(production_source(src), src);
+    }
+
+    #[test]
+    fn removes_only_items_that_cannot_exist_in_a_non_test_build() {
+        // Strip: the predicate is false whenever `test` is off.
+        for predicate in [
+            "test",
+            "all(test, unix)",
+            "all(unix, test)",
+            "any(all(test, unix), all(test, windows))",
+        ] {
+            let src = format!("#[cfg({predicate})]\nfn gone() {{}}\nfn keep() {{}}\n");
+            assert!(
+                !production_source(&src).contains("fn gone()"),
+                "{predicate} is test-only and must be stripped"
+            );
+        }
+        // Keep: the predicate can still hold with `test` off.
+        for predicate in [
+            "not(test)",
+            "any(unix, test)",
+            "any(windows, test)",
+            "any(feature = \"asciicast\", test)",
+            "any(target_os = \"linux\", test)",
+            "feature = \"fastest\"",
+        ] {
+            let src = format!("#[cfg({predicate})]\nfn stays() {{}}\nfn keep() {{}}\n");
+            assert!(
+                production_source(&src).contains("fn stays()"),
+                "{predicate} can hold without test and must survive"
+            );
+        }
     }
 
     #[test]
@@ -649,13 +836,23 @@ mod tests {
     }
 
     #[test]
-    fn malformed_input_is_returned_unchanged() {
-        let unclosed_item = "#[cfg(test)]\nmod tests {\n";
-        let unclosed_string = "#[cfg(test)]\nfn test_only() { let _ = \"unterminated; }\n";
-        let unclosed_comment = "#[cfg(test)]\nfn test_only() { /* unterminated\n";
-        assert_eq!(production_source(unclosed_item), unclosed_item);
-        assert_eq!(production_source(unclosed_string), unclosed_string);
-        assert_eq!(production_source(unclosed_comment), unclosed_comment);
+    fn malformed_input_panics_rather_than_passing_the_file_through() {
+        // This previously returned the input UNCHANGED, on the theory that
+        // callers' postconditions would catch it. Several callers read another
+        // file's source directly and assert nothing, so a pass-through handed
+        // them the whole file — test module included — and every guard built on
+        // it silently went back to satisfying itself. Fail closed instead.
+        for malformed in [
+            "#[cfg(test)]\nmod tests {\n",
+            "#[cfg(test)]\nfn test_only() { let _ = \"unterminated; }\n",
+            "#[cfg(test)]\nfn test_only() { /* unterminated\n",
+        ] {
+            let outcome = std::panic::catch_unwind(|| production_source(malformed));
+            assert!(
+                outcome.is_err(),
+                "malformed input {malformed:?} must panic, not pass the file through"
+            );
+        }
     }
 
     #[cfg(unix)]
