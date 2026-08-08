@@ -1369,29 +1369,14 @@ fn main() -> anyhow::Result<()> {
         // spot; this extracts the helper because the same gap existed at
         // every other site.
         let path = resolve_config_path(&cli);
-        // Surface read errors explicitly. Pre-fix,
-        // `load_from_with_diagnostics` silently returned defaults on
-        // any read error (permission denied, ENOENT-after-stat-race,
-        // I/O error) — the warn went to stderr but `--check-config`'s
-        // stdout said "status: OK" and exited 0, making the user
-        // think their config loaded. Now: probe `read_to_string`
-        // directly and turn a read failure into a malformed entry
-        // so it lands in the issues list with a non-zero exit code.
-        // A follow-up to that read-error fix: drive parse_collect /
-        // detect_malformed_values directly from the text we already
-        // read, rather than calling `load_from_with_diagnostics`
-        // which reads the file a SECOND time internally. The
-        // first take did the read twice (once for the error probe,
-        // once inside load_from_with_diagnostics). Harmless but
-        // wasteful; now the read happens once.
+        // Surface read errors explicitly while sharing the hardened single-read
+        // path used by startup and reload. This must not regress to a raw
+        // `read_to_string`: the resolved default path has not gone through the
+        // explicit `--config` regular-file precheck, and configs may be UTF-16.
         let mut read_error: Option<String> = None;
         let (cfg, unknown, malformed) = match &path {
-            Some(p) if p.exists() => match std::fs::read_to_string(p) {
-                Ok(text) => {
-                    let (cfg, unknown) = kettle_config::Config::parse_collect(&text);
-                    let malformed = kettle_config::Config::detect_malformed_values(&text);
-                    (cfg, unknown, malformed)
-                }
+            Some(p) if p.exists() => match kettle_config::Config::read_from_with_diagnostics(p) {
+                Ok(loaded) => (loaded.config, loaded.unknown_keys, loaded.malformed_values),
                 Err(e) => {
                     read_error = Some(format!("could not read {}: {e}", p.display()));
                     (kettle_config::Config::default(), Vec::new(), Vec::new())
@@ -2163,7 +2148,7 @@ fn extra_check_config_lines(cfg: &kettle_config::Config) -> Vec<String> {
     if !cfg.inert_keys.is_empty() {
         lines.push(format!(
             "inert:   {} (accepted and validated, but kettle does not act on \
-             {} yet)",
+             {})",
             cfg.inert_keys.join(", "),
             if cfg.inert_keys.len() == 1 {
                 "it"
@@ -2246,6 +2231,25 @@ fn window_state_from_flags(
     } else {
         None
     }
+}
+
+/// The production source of this file, excluding test-only items.
+#[cfg(test)]
+fn production_source() -> String {
+    let production = kettle_test_support::production_source(include_str!("main.rs"));
+    assert!(
+        !production.contains("fn production_source()"),
+        "the production slice retained its own helper"
+    );
+    assert!(
+        !production.contains("#[test]"),
+        "the production slice retained a test function"
+    );
+    assert!(
+        !production.contains("#[cfg(test)]"),
+        "the production slice retained a test-only item"
+    );
+    production
 }
 
 #[cfg(test)]
@@ -2684,29 +2688,9 @@ mod tests {
         }
     }
 
-    fn remote_test_tempdir() -> tempfile::TempDir {
-        #[cfg(windows)]
-        {
-            let base = std::env::var_os("LOCALAPPDATA")
-                .or_else(|| std::env::var_os("USERPROFILE"))
-                .expect("Windows tests require LOCALAPPDATA or USERPROFILE");
-            tempfile::Builder::new()
-                .prefix("kettle-remote-lock-test-")
-                .tempdir_in(base)
-                .expect("create private remote-lock test directory")
-        }
-        #[cfg(not(windows))]
-        {
-            tempfile::Builder::new()
-                .prefix("kettle-remote-lock-test-")
-                .tempdir()
-                .expect("create private remote-lock test directory")
-        }
-    }
-
     #[test]
     fn remote_command_append_uses_the_shared_bounded_lock() {
-        let dir = remote_test_tempdir();
+        let dir = kettle_test_support::private_tempdir("kettle-remote-lock-test-");
         let path = dir.path().join("remote.cmd");
         let lock_path = kettle_state::remote_command_lock_path(&path);
         let holder = kettle_state::ExclusiveFileLock::acquire(&lock_path).unwrap();
@@ -2773,7 +2757,7 @@ mod tests {
 
     #[test]
     fn remote_command_append_accepts_the_exact_spool_limit() {
-        let dir = remote_test_tempdir();
+        let dir = kettle_test_support::private_tempdir("kettle-remote-lock-test-");
         let path = dir.path().join("remote.cmd");
         let prefix = b"send-text ";
         append_remote_command(&path, prefix).unwrap();
@@ -2790,7 +2774,7 @@ mod tests {
 
     #[test]
     fn remote_command_append_rejects_over_limit_without_mutation() {
-        let dir = remote_test_tempdir();
+        let dir = kettle_test_support::private_tempdir("kettle-remote-lock-test-");
         let path = dir.path().join("remote.cmd");
         let cap = usize::try_from(kettle_state::MAX_REMOTE_COMMAND_BYTES).unwrap();
         let exact = vec![b'q'; cap];
@@ -2835,7 +2819,7 @@ mod tests {
     /// both directions (attribute removed, or guard removed) at gauntlet time.
     #[test]
     fn windows_gui_subsystem_with_conditional_attach_survives() {
-        let src = include_str!("main.rs");
+        let src = super::production_source();
         // GUI-subsystem attribute present (column-0 inner attr); matched
         // leniently so the exact cfg predicate can still evolve.
         let attr_present = src.lines().any(|l| {
@@ -2851,9 +2835,8 @@ mod tests {
         );
         // The conditional parent-console attach is present.
         for needle in [
-            "attach_parent_console_if_needed",
-            "AttachConsole",
-            "ATTACH_PARENT_PROCESS",
+            "fn attach_parent_console_if_needed()",
+            "AttachConsole(ATTACH_PARENT_PROCESS)",
         ] {
             assert!(
                 src.contains(needle),
@@ -2865,7 +2848,11 @@ mod tests {
         // GetFileType + GetStdHandle there is no way to tell a piped stdout
         // from an allocated console, so an unconditional reopen would re-break
         // `kettle --flag | grep` on Windows CI.
-        for needle in ["GetFileType", "GetStdHandle", "out_ok && err_ok"] {
+        for needle in [
+            "GetFileType(h)",
+            "GetStdHandle(STD_OUTPUT_HANDLE)",
+            "if out_ok && err_ok {",
+        ] {
             assert!(
                 src.contains(needle),
                 "missing inherited-handle guard token: {needle}"
@@ -2878,7 +2865,7 @@ mod tests {
         // CONIN$ reopen, any terminal launch that needs an out/err reopen
         // (i.e. most terminal launches) unconditionally clobbers a piped
         // stdin with the parent console's keyboard input.
-        for needle in ["in_ok", "if !in_ok"] {
+        for needle in ["let in_ok = is_inherited(stdin_handle);", "if !in_ok {"] {
             assert!(
                 src.contains(needle),
                 "missing stdin inherited-handle guard token: {needle} \
@@ -3045,6 +3032,90 @@ mod tests {
                  include_str!",
                 embedded.lines().count()
             );
+        }
+    }
+
+    /// The test above CLAIMED, in its own comment, that its contract keeps
+    /// `docs/SHELL-INTEGRATION.md` from diverging from the shipped files. It
+    /// never read that document — it only checked each `include_str!` against
+    /// itself. The doc's zsh block duly drifted: it lost `__kettle_osc7`
+    /// entirely (so cwd inheritance and "Open folder" silently stopped working
+    /// for anyone who followed the docs instead of running
+    /// `kettle --shell-integration zsh`) and prepended the OSC 133;B marker
+    /// unconditionally, so re-sourcing `.zshrc` stacked duplicates.
+    ///
+    /// A guard that names a contract it does not enforce is worse than no
+    /// guard, because it stops anyone else from writing the real one. This is
+    /// the real one: every load-bearing line of each shipped snippet must
+    /// appear in the document's fenced block for that shell.
+    ///
+    /// Exact byte equality is deliberately NOT required — the document
+    /// legitimately omits the shipped files' long provenance comments. What is
+    /// required is that no functional line goes missing.
+    #[test]
+    fn documented_shell_snippets_do_not_drift_from_the_shipped_files() {
+        let doc = include_str!("../../../docs/SHELL-INTEGRATION.md");
+
+        // bash is DELIBERATELY reduced in the document: its section says the
+        // snippet is "the OSC 133 half only" and tells the reader to source the
+        // shipped file for OSC 7. That is a legitimate editorial choice, so it
+        // is exempt from the line-for-line check below — but only while the
+        // caveat is actually there. Delete the caveat and this fires, because
+        // then the document IS presenting a reduced snippet as the whole thing.
+        assert!(
+            doc.contains("the OSC 133 half only"),
+            "the bash section no longer declares that its snippet is reduced, so \
+             it must either carry the full shipped snippet or say that it does \
+             not — silently shipping a partial snippet is how the zsh and fish \
+             blocks lost their OSC 7 support"
+        );
+
+        for (fence, shipped) in [
+            (
+                "```zsh",
+                include_str!("../../../shell-integration/kettle.zsh"),
+            ),
+            (
+                "```fish",
+                include_str!("../../../shell-integration/kettle.fish"),
+            ),
+        ] {
+            // A shell can own MORE THAN ONE fenced block — bash has both the
+            // `source …` one-liner and the paste-into-.bashrc snippet — so
+            // check the union. Taking only the first block compares the
+            // snippet against a one-line `source` instruction and fails for
+            // the wrong reason.
+            let mut block = String::new();
+            let mut rest = doc;
+            while let Some((_, after)) = rest.split_once(fence) {
+                match after.split_once("```") {
+                    Some((body, tail)) => {
+                        block.push_str(body);
+                        block.push('\n');
+                        rest = tail;
+                    }
+                    None => break,
+                }
+            }
+            assert!(
+                !block.is_empty(),
+                "{fence}: no fenced block in SHELL-INTEGRATION.md"
+            );
+
+            for line in shipped.lines() {
+                let trimmed = line.trim();
+                // Comments and blank lines are prose, not behavior.
+                if trimmed.is_empty() || trimmed.starts_with('#') {
+                    continue;
+                }
+                assert!(
+                    block.contains(trimmed),
+                    "{fence}: docs/SHELL-INTEGRATION.md is missing a line that \
+                     shell-integration/ actually ships, so a reader who follows \
+                     the docs gets a different integration than \
+                     `kettle --shell-integration` installs:\n  {trimmed}"
+                );
+            }
         }
     }
 
@@ -3412,6 +3483,91 @@ mod tests {
         );
     }
 
+    /// Reverse half of the keybind documentation guard: every global chord the
+    /// Linux man page advertises must exist in Linux's default keymap. Modal vi
+    /// keys are intentionally ignored; they are mode-local commands rather than
+    /// entries in `keybinds::defaults()`.
+    #[cfg(all(unix, not(target_os = "macos")))]
+    #[test]
+    fn man_page_does_not_advertise_unbound_global_chords() {
+        use std::collections::HashSet;
+
+        const MAN_PAGE: &str = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../packaging/linux/kettle.1"
+        ));
+
+        fn expand_chord_row(row: &str) -> Vec<String> {
+            let row = row.replace("PgUp", "PageUp").replace("PgDn", "PageDown");
+            if row.eq_ignore_ascii_case("Alt+arrow") {
+                return ["Up", "Down", "Left", "Right"]
+                    .into_iter()
+                    .map(|key| format!("Alt+{key}"))
+                    .collect();
+            }
+            if row.eq_ignore_ascii_case("Shift+arrow") {
+                return ["Up", "Down", "Left", "Right"]
+                    .into_iter()
+                    .map(|key| format!("Shift+{key}"))
+                    .collect();
+            }
+            if let Some((first, last)) = row.split_once(" ... ")
+                && let (Some(first_digit), Some(last_digit)) =
+                    (first.chars().last(), last.chars().last())
+                && first_digit.is_ascii_digit()
+                && last_digit.is_ascii_digit()
+            {
+                let prefix = &first[..first.len() - first_digit.len_utf8()];
+                return (first_digit..=last_digit)
+                    .map(|digit| format!("{prefix}{digit}"))
+                    .collect();
+            }
+            if let Some((first, second_key)) = row.split_once('/') {
+                let prefix = first
+                    .rsplit_once('+')
+                    .map(|(mods, _)| format!("{mods}+"))
+                    .unwrap_or_default();
+                return vec![first.to_string(), format!("{prefix}{second_key}")];
+            }
+            vec![row]
+        }
+
+        let defaults: HashSet<String> = kettle_config::keybinds::defaults()
+            .keys()
+            .map(kettle_config::Trigger::label)
+            .collect();
+        let key_section = MAN_PAGE
+            .split(".SH KEY BINDINGS")
+            .nth(1)
+            .expect("KEY BINDINGS section")
+            .split("\n.SH ")
+            .next()
+            .expect("end of KEY BINDINGS section");
+        let mut unbound = Vec::new();
+        for row in key_section
+            .lines()
+            .filter_map(|line| line.strip_prefix(".B "))
+        {
+            let is_global_chord = row.contains('+')
+                || row.contains('/')
+                || row
+                    .strip_prefix('F')
+                    .is_some_and(|number| number.chars().all(|c| c.is_ascii_digit()));
+            if !is_global_chord || row.contains("\\-") {
+                continue;
+            }
+            for chord in expand_chord_row(row) {
+                if !defaults.contains(&chord) {
+                    unbound.push(chord);
+                }
+            }
+        }
+        assert!(
+            unbound.is_empty(),
+            "Linux man page advertises chords absent from keybinds::defaults(): {unbound:?}"
+        );
+    }
+
     #[test]
     fn extra_check_config_lines_empty_for_default_config() {
         // Drift guard. The default config produces no
@@ -3500,6 +3656,22 @@ mod tests {
             extra_check_config_lines(&cfg)
                 .iter()
                 .any(|l| l == "status-bar: Bottom")
+        );
+    }
+
+    #[test]
+    fn check_config_inert_line_covers_permanent_noops() {
+        let cfg = kettle_config::Config::parse_text(
+            "cursor-color-default = true\nhttp-proxy = http://proxy.invalid\n\
+             enabled-plugins = example\naudible-bell = true\n",
+        );
+        assert_eq!(
+            extra_check_config_lines(&cfg),
+            vec![
+                "inert:   cursor-color-default, http-proxy, enabled-plugins, audible-bell \
+                 (accepted and validated, but kettle does not act on them)"
+                    .to_string()
+            ]
         );
     }
 

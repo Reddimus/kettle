@@ -260,7 +260,7 @@ so press Enter with `send_keys`, not a trailing `\n`.
 | `ui_geometry` | read-only | live window geometry: surface/content rects, renderer cell metrics, resize-overlay grid, tab-bar segment/new-tab rects, tab segment `path`/`fitted_title` diagnostics, pane titlebar rect/title/path/`fitted_title` diagnostics, open context-menu rect/rows, cursor, tab drag armed/visible state, and additive Search geometry/status/control metadata. The Search object deliberately omits its query and matched terminal text |
 | `screenshot` | full | save a live PNG (`pane`, `full_window`, `path`); filesystem writes are never allowed through read-only mode |
 | `subscribe` | read-only | switches the connection to the event stream |
-| `wait_for` | read-only | v2.20: block until the screen matches (`text` substring / `regex` / `quiet_ms` settle — AND when combined; `timeout_ms` default 30 000). Returns `{matched, elapsed_ms, polls}`; a timeout is `matched: false`, not an error. Runs on the connection thread, polling ≥50 ms — the UI is never blocked. The screen-text regex runs against per-line right-trimmed, newline-joined text — use `(?m)` end-of-line anchors rather than end-of-string |
+| `wait_for` | read-only | v2.20: block until the screen matches (`text` substring / `regex` / `quiet_ms` settle — AND when combined; `timeout_ms` default 30 000; `poll_ms` default 100, clamped to 50–5000). Returns `{matched, elapsed_ms, polls}`; a timeout is `matched: false`, not an error. Runs on the connection thread — the UI is never blocked. The screen-text regex runs against per-line right-trimmed, newline-joined text — use `(?m)` end-of-line anchors rather than end-of-string |
 | `send_text` | full | type text into a pane (`pane`, `text`) |
 | `send_keys` | full | v2.20: press 1–1,024 named keys / chords (`pane`, `keys: ["escape","ctrl+c","down","G",…]`), with 64-byte tokens and a 64 KiB encoded-byte budget. Tokens: key names (`escape`, `enter`, `tab`, `backspace`, `delete`, `insert`, `space`, arrows, `home`/`end`, `pageup`/`pagedown`, `f1`–`f12`), chords with `ctrl`/`alt`/`shift`/`super` (+ aliases), or single characters (case preserved). Encoded through the same path as GUI keystrokes against the pane's live modes (DECCKM- and negotiated Kitty CSI-u-aware); all tokens parse before any byte is sent |
 | `dispatch_keybind` | full | diagnostic app-keybind dispatch (`logical`, `physical`, `mods`) using the same resolver as real window keyboard input. It does not write PTY bytes; it returns the candidate triggers, matched action, and whether a modal blocked dispatch |
@@ -268,7 +268,7 @@ so press Enter with `send_keys`, not a trailing `\n`.
 | `send_mouse` | full | deterministic mouse input for diagnostics (`event`: `move`/`press`/`release`/`click`/`wheel`, window-relative `x`/`y`, `button`, `wheel_lines` **or** `wheel_delta`, optional event-local `mods`). A wheel event takes exactly one of `wheel_lines` (signed whole scroll lines, entering downstream of quantization) or `wheel_delta` (signed raw wheel detents, fractions allowed — runs the real sub-detent accumulator, so it can emulate a precision touchpad) |
 | `resize_window` | full | request a live window client-area resize (`window`, `width`, `height`) and let the normal renderer/PTY resize path process it |
 | `perform_action` | full | dispatch a named Kettle app action (`action`, for example `start_search`, `command_palette`, `open_ssh`, `hint_mode`, `edit_tab_title`). Use this for app chrome that is not pane input; `send_keys` intentionally writes terminal keystrokes to the focused pane |
-| `run_command` | full | run `command` in a pane, reply with `{exit_code, duration_ms, output, output_truncated}`; output is capped at 512 KiB |
+| `run_command` | full | run `command` in a pane, reply with `{exit_code, duration_ms, output, output_truncated}`; capture is capped at the newest 10,000 retained lines and then 512 KiB, and `output_truncated` is true if either cap drops output |
 
 **Multi-window (v2.18)**: a kettle process can host several OS windows.
 `list_tabs` / `list_panes` enumerate them all, ordered by window seq;
@@ -281,8 +281,10 @@ that identifies a live target. A malformed or stale explicit target is an
 error; Kettle never falls back to the focused pane/window for that request.
 
 `list_tabs`, `list_panes`, `read_screen`, and `read_cells` are paged. Pass
-`limit` (1–4096); when `truncated` is true, repeat the call with both the returned
-`next_cursor` and `snapshot`. A `stale_snapshot` error means live terminal state
+`limit` (1–4096); when `truncated` is true, repeat the same fully parameterized
+call with both the returned `next_cursor` and `snapshot`. The snapshot token
+binds to parameters such as `pane` and `scrollback_lines`; dropping them changes
+the result being paged. A `stale_snapshot` error means live terminal state
 changed between pages and the read must restart. Small results remain one page.
 `read_screen` additionally reports `text_truncated` if one pathological terminal
 line alone exceeds its 256 KiB text budget. Its complete stable-pagination
@@ -451,7 +453,9 @@ broad region instead of a cursor-sized box. The script also draws a high-contras
 prompt-shaped `➜  ~ KETTLE_LIVE_RENDER_SMOKE` marker and rejects blank or
 mostly-empty screenshot frames, so the rendered PNGs must prove that normal
 prompt glyphs remain visible across blink phases. This needs a visible
-X11/Wayland desktop session.
+X11/Wayland desktop session or an unlocked macOS Aqua session. The shared
+preflight fails nonzero when no usable GUI session exists; on macOS it also
+wakes an unlocked display before Kettle starts.
 
 ```sh
 just agent-tui-smoke
@@ -461,6 +465,9 @@ Starts a real grid-renderer Kettle window in explicit `native` shell mode,
 using PowerShell on Windows and deterministic non-rc Bash on Unix/macOS. The
 recipe asks Cargo to build and report the current checkout's exact release
 executable (including a custom `CARGO_TARGET_DIR` or configured target triple),
+and fails nonzero instead of reporting success when the graphical session is
+missing or locked. On macOS the preflight wakes an unlocked display before the
+window starts. It
 then drives a shell marker, optional Codex
 CLI and Claude Code CLI `--version` probes plus `codex exec --help` /
 `claude --print --help` output captures, a prompt-shaped `➜  ~` marker, a
@@ -515,9 +522,11 @@ that distro (not a hard-coded `/bin/bash`), and checked cleanup registered
 before the session starts. Before configured Neovim or AstroNvim runs, the
 helper creates an unpredictable, owner-private directory inside the target
 distro. It copies only regular files from the config plus existing
-`lazy`/`site` plugin runtime while dereferencing symlinks; cycles, special
-files, more than 100,000 entries or 64 levels, a file over 256 MiB, and an
-aggregate over 2 GiB are rejected. It then redirects `HOME`,
+`lazy`/`site` plugin runtime while dereferencing symlinks. Plugin Git refs are
+retained so lazy.nvim recognizes the pinned checkout, but Git object databases
+are excluded because they are not Neovim runtime; cycles, special files, more
+than 100,000 entries or 64 levels, a runtime file over 256 MiB, and an aggregate
+over 2 GiB are rejected. It then redirects `HOME`,
 `XDG_CONFIG_HOME`, `XDG_DATA_HOME`, `XDG_STATE_HOME`, and `XDG_CACHE_HOME` to
 that snapshot; `XDG_RUNTIME_DIR` is isolated there as well. Clean Neovim uses
 the same isolation; the directory is removed at the end.

@@ -32,12 +32,12 @@ pub fn run_ctl(args: CtlArgs) -> i32 {
         }
     };
 
-    match client.call(&args.method, params) {
+    match client.call(&args.method, params.clone()) {
         Ok(result) => {
             if args.raw {
                 println!("{result}");
             } else {
-                print!("{}", pretty(&args.method, &result));
+                print!("{}", pretty(&args.method, &params, &result));
             }
             0
         }
@@ -129,7 +129,7 @@ fn build_params(args: &CtlArgs) -> Result<Value, String> {
 }
 
 /// A compact human-readable rendering of common method results.
-fn pretty(method: &str, result: &Value) -> String {
+fn pretty(method: &str, request_params: &Value, result: &Value) -> String {
     match method {
         "list_panes" => {
             let mut out = String::new();
@@ -151,7 +151,7 @@ fn pretty(method: &str, result: &Value) -> String {
                     ));
                 }
             }
-            out.push_str(&page_notice(result));
+            out.push_str(&page_notice(request_params, result));
             out
         }
         "list_tabs" => {
@@ -170,7 +170,7 @@ fn pretty(method: &str, result: &Value) -> String {
                     ));
                 }
             }
-            out.push_str(&page_notice(result));
+            out.push_str(&page_notice(request_params, result));
             out
         }
         "read_screen" => {
@@ -179,7 +179,7 @@ fn pretty(method: &str, result: &Value) -> String {
                 .and_then(|t| t.as_str())
                 .map(str::to_string)
                 .unwrap_or_else(|| format!("{result}\n"));
-            out.push_str(&page_notice(result));
+            out.push_str(&page_notice(request_params, result));
             out
         }
         "screenshot" => {
@@ -195,10 +195,19 @@ fn pretty(method: &str, result: &Value) -> String {
             let code = result.get("exit_code");
             let timed = result.get("timed_out").and_then(|t| t.as_bool()) == Some(true);
             let out = result.get("output").and_then(|o| o.as_str()).unwrap_or("");
-            if timed {
-                format!("{out}\n[timed out — no exit code]\n")
+            let truncated = if result.get("output_truncated").and_then(Value::as_bool) == Some(true)
+            {
+                "\n[output truncated]"
             } else {
-                format!("{out}\n[exit {}]\n", code.unwrap_or(&Value::Null))
+                ""
+            };
+            if timed {
+                format!("{out}{truncated}\n[timed out — no exit code]\n")
+            } else {
+                format!(
+                    "{out}{truncated}\n[exit {}]\n",
+                    code.unwrap_or(&Value::Null)
+                )
             }
         }
         // v2.20.0 (agent plane).
@@ -251,7 +260,7 @@ fn pretty(method: &str, result: &Value) -> String {
     }
 }
 
-fn page_notice(result: &Value) -> String {
+fn page_notice(request_params: &Value, result: &Value) -> String {
     if result.get("truncated").and_then(Value::as_bool) != Some(true) {
         return String::new();
     }
@@ -260,9 +269,11 @@ fn page_notice(result: &Value) -> String {
         .and_then(Value::as_str)
         .unwrap_or("");
     let snapshot = result.get("snapshot").and_then(Value::as_str).unwrap_or("");
-    format!(
-        "\n[more: repeat with --json '{{\"cursor\":\"{cursor}\",\"snapshot\":\"{snapshot}\"}}']\n"
-    )
+    let mut continuation = request_params.as_object().cloned().unwrap_or_default();
+    continuation.insert("cursor".into(), Value::String(cursor.to_string()));
+    continuation.insert("snapshot".into(), Value::String(snapshot.to_string()));
+    let json = Value::Object(continuation);
+    format!("\n[more: repeat with --json '{json}']\n")
 }
 
 #[cfg(test)]
@@ -277,8 +288,38 @@ mod tests {
             "next_cursor": "10",
             "snapshot": "abc",
         });
-        let output = pretty("list_panes", &result);
+        let output = pretty("list_panes", &serde_json::json!({}), &result);
         assert!(output.contains(r#""cursor":"10""#));
         assert!(output.contains(r#""snapshot":"abc""#));
+    }
+
+    #[test]
+    fn read_screen_continuation_keeps_original_parameters() {
+        let result = serde_json::json!({
+            "text": "page one",
+            "truncated": true,
+            "next_cursor": "1024",
+            "snapshot": "stable",
+        });
+        let params = serde_json::json!({"pane": 7, "scrollback_lines": 4000, "limit": 1024});
+        let output = pretty("read_screen", &params, &result);
+        assert!(output.contains(r#""pane":7"#));
+        assert!(output.contains(r#""scrollback_lines":4000"#));
+        assert!(output.contains(r#""limit":1024"#));
+        assert!(output.contains(r#""cursor":"1024""#));
+        assert!(output.contains(r#""snapshot":"stable""#));
+    }
+
+    #[test]
+    fn run_command_pretty_output_discloses_truncation() {
+        let result = serde_json::json!({
+            "output": "surviving tail",
+            "output_truncated": true,
+            "exit_code": 1,
+            "timed_out": false,
+        });
+        let output = pretty("run_command", &serde_json::json!({}), &result);
+        assert!(output.contains("[output truncated]"));
+        assert!(output.contains("[exit 1]"));
     }
 }

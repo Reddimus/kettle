@@ -13,11 +13,9 @@ KETTLE="${KETTLE_BIN:-kettle}"
 FRAMES="${KETTLE_LIVE_RENDER_FRAMES:-6}"
 SLEEP_SECS="${KETTLE_LIVE_RENDER_SLEEP:-0.20}"
 TIMEOUT="${KETTLE_LIVE_RENDER_TIMEOUT:-20}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-if [ -z "${DISPLAY:-}" ] && [ -z "${WAYLAND_DISPLAY:-}" ]; then
-  echo "live-render smoke: skipped (no DISPLAY or WAYLAND_DISPLAY)" >&2
-  exit 0
-fi
+python3 "$SCRIPT_DIR/check-live-ui-smoke.py" session-check
 
 tmp="$(mktemp -d "${TMPDIR:-/tmp}/kettle-live-render.XXXXXX")"
 pid=""

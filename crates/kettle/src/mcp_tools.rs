@@ -149,7 +149,8 @@ pub fn tool_specs() -> Vec<Value> {
         json!({
             "name": "kettle_run_command",
             "description": "Run a command in a kettle pane and wait for it to finish, returning the \
-                exit code (if the shell has OSC 133 integration), duration, and output. \
+                exit code (if the shell has OSC 133 integration), duration, and output. Output is \
+                capped at 10,000 retained lines and 512 KiB; output_truncated reports either cap. \
                 Requires the agent server in `full` mode.",
             "inputSchema": {
                 "type": "object",
@@ -263,7 +264,8 @@ pub fn tool_specs() -> Vec<Value> {
                     "text": {"type": "string", "description": "substring that must appear on screen"},
                     "regex": {"type": "string", "description": "regex the screen text must match"},
                     "quiet_ms": {"type": "integer", "description": "require the screen unchanged for N ms"},
-                    "timeout_ms": {"type": "integer", "description": "overall deadline (default 30000, max 300000)"}
+                    "timeout_ms": {"type": "integer", "description": "overall deadline (default 30000, max 300000)"},
+                    "poll_ms": {"type": "integer", "minimum": 50, "maximum": 5000, "description": "screen poll interval (default 100)"}
                 },
                 "additionalProperties": false
             }
@@ -334,72 +336,52 @@ fn call_tool_inner(params: &Value, cancelled: Option<&std::sync::atomic::AtomicB
     }
     match call.name.as_str() {
         "kettle_run" => tool_kettle_run(&args, cancelled),
-        "kettle_list_panes" => ctl_call("list_panes", paging_params(&args, &[]), cancelled),
-        "kettle_read_screen" => {
-            let mut p = serde_json::Map::new();
-            for key in [
-                "pane",
-                "scrollback_lines",
-                "include_selection",
-                "cursor",
-                "limit",
-                "snapshot",
-            ] {
-                if let Some(value) = args.get(key) {
-                    p.insert(key.into(), value.clone());
-                }
-            }
-            ctl_call("read_screen", Value::Object(p), cancelled)
-        }
-        "kettle_read_cells" => {
-            let mut p = serde_json::Map::new();
-            for key in ["pane", "cursor", "limit", "snapshot"] {
-                if let Some(value) = args.get(key) {
-                    p.insert(key.into(), value.clone());
-                }
-            }
-            ctl_call("read_cells", Value::Object(p), cancelled)
-        }
-        "kettle_ui_geometry" => {
-            let mut p = serde_json::Map::new();
-            if let Some(window) = args.get("window") {
-                p.insert("window".into(), window.clone());
-            }
-            ctl_call("ui_geometry", Value::Object(p), cancelled)
-        }
-        "kettle_screenshot" => {
-            let mut p = serde_json::Map::new();
-            for k in ["pane", "full_window", "path"] {
-                if let Some(v) = args.get(k) {
-                    p.insert(k.into(), v.clone());
-                }
-            }
-            ctl_call("screenshot", Value::Object(p), cancelled)
-        }
+        "kettle_list_panes" => ctl_call(
+            "list_panes",
+            forwarded_ctl_arguments(&call.name, &args),
+            cancelled,
+        ),
+        "kettle_read_screen" => ctl_call(
+            "read_screen",
+            forwarded_ctl_arguments(&call.name, &args),
+            cancelled,
+        ),
+        "kettle_read_cells" => ctl_call(
+            "read_cells",
+            forwarded_ctl_arguments(&call.name, &args),
+            cancelled,
+        ),
+        "kettle_ui_geometry" => ctl_call(
+            "ui_geometry",
+            forwarded_ctl_arguments(&call.name, &args),
+            cancelled,
+        ),
+        "kettle_screenshot" => ctl_call(
+            "screenshot",
+            forwarded_ctl_arguments(&call.name, &args),
+            cancelled,
+        ),
         "kettle_send_text" => {
             let Some(text) = args.get("text").and_then(|t| t.as_str()) else {
                 return error_result("kettle_send_text requires a 'text' string");
             };
-            let mut p = serde_json::Map::new();
-            p.insert("text".into(), json!(text));
-            if let Some(pane) = args.get("pane") {
-                p.insert("pane".into(), pane.clone());
-            }
-            ctl_call("send_text", Value::Object(p), cancelled)
+            let _ = text;
+            ctl_call(
+                "send_text",
+                forwarded_ctl_arguments(&call.name, &args),
+                cancelled,
+            )
         }
         "kettle_run_command" => {
             let Some(cmd) = args.get("command").and_then(|c| c.as_str()) else {
                 return error_result("kettle_run_command requires a 'command' string");
             };
-            let mut p = serde_json::Map::new();
-            p.insert("command".into(), json!(cmd));
-            if let Some(pane) = args.get("pane") {
-                p.insert("pane".into(), pane.clone());
-            }
-            if let Some(t) = args.get("timeout_s") {
-                p.insert("timeout_s".into(), t.clone());
-            }
-            ctl_call("run_command", Value::Object(p), cancelled)
+            let _ = cmd;
+            ctl_call(
+                "run_command",
+                forwarded_ctl_arguments(&call.name, &args),
+                cancelled,
+            )
         }
         // v2.20.0 (agent plane).
         "kettle_send_keys" => {
@@ -409,12 +391,11 @@ fn call_tool_inner(params: &Value, cancelled: Option<&std::sync::atomic::AtomicB
             if keys.is_empty() {
                 return error_result("kettle_send_keys 'keys' must be non-empty");
             }
-            let mut p = serde_json::Map::new();
-            p.insert("keys".into(), Value::Array(keys.clone()));
-            if let Some(pane) = args.get("pane") {
-                p.insert("pane".into(), pane.clone());
-            }
-            ctl_call("send_keys", Value::Object(p), cancelled)
+            ctl_call(
+                "send_keys",
+                forwarded_ctl_arguments(&call.name, &args),
+                cancelled,
+            )
         }
         "kettle_dispatch_ui_key" => {
             let Some(keys) = args.get("keys").and_then(|k| k.as_array()) else {
@@ -423,20 +404,22 @@ fn call_tool_inner(params: &Value, cancelled: Option<&std::sync::atomic::AtomicB
             if keys.is_empty() {
                 return error_result("kettle_dispatch_ui_key 'keys' must be non-empty");
             }
-            ctl_call("dispatch_ui_key", json!({"keys": keys}), cancelled)
+            ctl_call(
+                "dispatch_ui_key",
+                forwarded_ctl_arguments(&call.name, &args),
+                cancelled,
+            )
         }
         "kettle_send_mouse" => {
             let Some(event) = args.get("event").and_then(|e| e.as_str()) else {
                 return error_result("kettle_send_mouse requires an 'event' string");
             };
-            let mut p = serde_json::Map::new();
-            p.insert("event".into(), json!(event));
-            for k in ["window", "x", "y", "button", "wheel_lines", "wheel_delta"] {
-                if let Some(v) = args.get(k) {
-                    p.insert(k.into(), v.clone());
-                }
-            }
-            ctl_call("send_mouse", Value::Object(p), cancelled)
+            let _ = event;
+            ctl_call(
+                "send_mouse",
+                forwarded_ctl_arguments(&call.name, &args),
+                cancelled,
+            )
         }
         "kettle_resize_window" => {
             let Some(width) = args.get("width") else {
@@ -445,35 +428,38 @@ fn call_tool_inner(params: &Value, cancelled: Option<&std::sync::atomic::AtomicB
             let Some(height) = args.get("height") else {
                 return error_result("kettle_resize_window requires a 'height' integer");
             };
-            let mut p = serde_json::Map::new();
-            p.insert("width".into(), width.clone());
-            p.insert("height".into(), height.clone());
-            if let Some(window) = args.get("window") {
-                p.insert("window".into(), window.clone());
-            }
-            ctl_call("resize_window", Value::Object(p), cancelled)
+            let _ = (width, height);
+            ctl_call(
+                "resize_window",
+                forwarded_ctl_arguments(&call.name, &args),
+                cancelled,
+            )
         }
         "kettle_perform_action" => {
             let Some(action) = args.get("action").and_then(|a| a.as_str()) else {
                 return error_result("kettle_perform_action requires an 'action' string");
             };
-            let mut p = serde_json::Map::new();
-            p.insert("action".into(), json!(action));
-            ctl_call("perform_action", Value::Object(p), cancelled)
+            let _ = action;
+            ctl_call(
+                "perform_action",
+                forwarded_ctl_arguments(&call.name, &args),
+                cancelled,
+            )
         }
         "kettle_wait_for" => {
-            let mut p = serde_json::Map::new();
-            for k in ["pane", "text", "regex", "quiet_ms", "timeout_ms"] {
-                if let Some(v) = args.get(k) {
-                    p.insert(k.into(), v.clone());
-                }
-            }
-            if !p.contains_key("text") && !p.contains_key("regex") && !p.contains_key("quiet_ms") {
+            if args.get("text").is_none()
+                && args.get("regex").is_none()
+                && args.get("quiet_ms").is_none()
+            {
                 return error_result(
                     "kettle_wait_for needs at least one of 'text', 'regex', 'quiet_ms'",
                 );
             }
-            ctl_call("wait_for", Value::Object(p), cancelled)
+            ctl_call(
+                "wait_for",
+                forwarded_ctl_arguments(&call.name, &args),
+                cancelled,
+            )
         }
         other => error_result(&format!("unknown tool '{other}'")),
     }
@@ -597,21 +583,18 @@ fn error_result(message: &str) -> Value {
     })
 }
 
-fn paging_params(args: &Value, extra: &[&str]) -> Value {
+fn forwarded_ctl_arguments(name: &str, args: &Value) -> Value {
     let mut params = serde_json::Map::new();
-    for key in ["cursor", "limit", "snapshot"]
-        .into_iter()
-        .chain(extra.iter().copied())
-    {
+    for (key, _) in tool_argument_fields(name).unwrap_or_default() {
         if let Some(value) = args.get(key) {
-            params.insert(key.into(), value.clone());
+            params.insert((*key).into(), value.clone());
         }
     }
     Value::Object(params)
 }
 
-fn validate_tool_arguments(name: &str, args: &Value) -> Result<(), String> {
-    let fields: &[(&str, ArgKind)] = match name {
+fn tool_argument_fields(name: &str) -> Option<&'static [(&'static str, ArgKind)]> {
+    Some(match name {
         "kettle_run" => &[
             ("command", ArgKind::Strings),
             ("cols", ArgKind::Unsigned),
@@ -674,8 +657,15 @@ fn validate_tool_arguments(name: &str, args: &Value) -> Result<(), String> {
             ("regex", ArgKind::String),
             ("quiet_ms", ArgKind::Unsigned),
             ("timeout_ms", ArgKind::Unsigned),
+            ("poll_ms", ArgKind::Unsigned),
         ],
-        _ => return Ok(()),
+        _ => return None,
+    })
+}
+
+fn validate_tool_arguments(name: &str, args: &Value) -> Result<(), String> {
+    let Some(fields) = tool_argument_fields(name) else {
+        return Ok(());
     };
     let Some(object) = args.as_object() else {
         return Ok(()); // null means an empty object and is handled by required fields.
@@ -727,6 +717,8 @@ mod tests {
 
     #[test]
     fn tool_specs_have_required_shape() {
+        use std::collections::BTreeSet;
+
         let specs = tool_specs();
         assert!(specs.len() >= 8, "screenshot is part of the agent plane");
         for s in &specs {
@@ -734,6 +726,23 @@ mod tests {
             assert!(s["description"].is_string(), "tool missing description");
             assert_eq!(s["inputSchema"]["type"], "object", "schema not an object");
             assert_eq!(s["inputSchema"]["additionalProperties"], false);
+
+            let name = s["name"].as_str().expect("tool name");
+            let schema_keys: BTreeSet<&str> = s["inputSchema"]["properties"]
+                .as_object()
+                .expect("schema properties")
+                .keys()
+                .map(String::as_str)
+                .collect();
+            let validator_keys: BTreeSet<&str> = tool_argument_fields(name)
+                .expect("every listed tool has one argument declaration")
+                .iter()
+                .map(|(key, _)| *key)
+                .collect();
+            assert_eq!(
+                schema_keys, validator_keys,
+                "{name} schema and validator/ctl-forwarding keys drifted"
+            );
         }
         // kettle_run requires `command`.
         let run = specs
@@ -844,6 +853,21 @@ mod tests {
                 .unwrap()
                 .contains("at least one of"),
             "wait_for must demand a condition"
+        );
+
+        assert!(
+            validate_tool_arguments("kettle_wait_for", &json!({"quiet_ms": 300, "poll_ms": 50}))
+                .is_ok(),
+            "the MCP wait_for surface must accept the ctl server's poll_ms parameter"
+        );
+        let wait = tool_specs()
+            .into_iter()
+            .find(|spec| spec["name"] == "kettle_wait_for")
+            .expect("kettle_wait_for spec");
+        assert_eq!(wait["inputSchema"]["properties"]["poll_ms"]["minimum"], 50);
+        assert_eq!(
+            wait["inputSchema"]["properties"]["poll_ms"]["maximum"],
+            5000
         );
     }
 

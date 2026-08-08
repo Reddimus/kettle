@@ -6,6 +6,150 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+### Fixed
+
+Fifty-eight findings from a full-repo audit. Five adversarial audits covered
+every crate; a separate six-surface pass covered the scripts, CI, packaging,
+shell-integration, documentation, and UI/UX-design surfaces those crate audits do
+not reach; and three successive reviews of the integrated change set found
+further defects — including three in the fixes themselves, which is why the
+review loop ran until a pass came back clean rather than stopping at the first
+one. Each finding was adversarially re-verified before it earned a fix, and each
+fix carries a regression test that was confirmed to fail without it. Full ledger
+in `docs/AUDIT-2026-08-07-FULL.md`.
+
+- **A killed Linux update could not be recovered by its own recovery code.**
+  Provenance was verified before any path could recover a transaction, so a crash
+  between publishing a file and writing the record left the journal and backups
+  intact but unreachable — the installation was stranded until manual repair.
+  Structural discovery is now separated from provenance verification. Backups
+  also became visible before their journal entries, which recovery correctly
+  refused to act on; a durable intent record now precedes the backup.
+
+- **Shell-integration snippets corrupted the prompts they hook.** The zsh snippet
+  built `PS1` with `$(...)`, which requires `PROMPT_SUBST` — off by default — so
+  on stock zsh the prompt rendered 25 literal characters and never emitted OSC
+  133;B, with ZLE column arithmetic wrong for the whole line. It also defined
+  `precmd`/`preexec` outright, destroying hand-rolled hooks. The PowerShell
+  snippet read `$LASTEXITCODE` and wrote to the console before invoking the
+  user's prompt, destroying `$?` — under starship every failed command rendered a
+  success prompt — and replaced any existing Enter binding. The bash OSC 7
+  encoder emitted 16-hex-digit escapes on bash 3.2, which is what macOS ships.
+
+- **PowerShell reported a successful exit code for failed commands.** Fixing the
+  `$?` defect above moved the `$LASTEXITCODE` read *after* the user's prompt
+  rendered — and starship, oh-my-posh and posh-git all shell out while rendering,
+  with every native call overwriting it. A command that failed with 37 followed
+  by a prompt that ran anything successfully emitted `OSC 133;D;0`, so command
+  notifications, `command_finished`, and ctl/MCP `run_command` reported success
+  for a failed command. Both indicators are now captured in one statement, before
+  anything else runs, and `$LASTEXITCODE` is restored afterwards so the prompt's
+  own native calls do not leak into the next command's view of it.
+
+- **Drift guards across ten files could not fail.** Tests asserting on
+  `include_str!` of their own file also searched their own assertions, so the
+  needle was always present and the guard passed whether or not the production
+  code it named still existed. Reintroducing the exact defects two of them
+  describe left both passing. Every such guard now slices the test module off
+  first, reusing the `production_source()` helper already written for `mux.rs`
+  and `app.rs`; no file in the workspace reads its own source unsliced any more.
+
+  Doing so exposed seven stale expectations in five render guards that had been
+  masking real refactors — none needed a production change, and each was
+  re-checked against current source rather than relaxed to match. One guard's
+  name was corrected too: it asserted the tab title lane while calling itself
+  `..._full_segment_rect_budget`.
+
+  The sweep took three passes, and the reasons are worth recording because each
+  one hid behind the previous fix. The first scan only recognised
+  `src.contains("literal")`, missing guards that put their needles in an array
+  and pass them as a variable. The second left three hand-rolled strippers in
+  place, two of which were unsound — one halted at a `}` inside a multiline
+  string and copied the test module back into its own "production" slice; another
+  missed an indented `#[cfg(test)]`. Both passed their self-check, because that
+  check only looked for the helper's own name.
+
+  There is now **one** lexer-based implementation in `kettle-test-support`. It
+  brace-matches while tracking line comments, nested block comments, escaped and
+  raw strings, byte strings and char literals, and it declines to strip a `cfg`
+  whose "test" is part of a longer word. Sixteen unit tests cover the hazards
+  individually, and every wrapper now asserts its slice contains no `#[test]` and
+  no `#[cfg(test)]`, not merely that it lost the helper.
+
+  Negative guards (`!src.contains(...)`) get particular care: they fail *open*
+  when the slice loses production code, so the result was checked by probing real
+  production lines rather than by trusting the stripper.
+
+- **Pastes could be corrupted by terminal replies.** Priority replies were
+  selected at every 8 KiB chunk boundary, so a mouse report could land between
+  the bracketed-paste markers and be read as pasted content. PTY writes are now
+  message-atomic.
+
+- **Broadcast mangled keys and lost panes.** Keys were encoded once for the
+  focused pane's mode and the bytes fanned out, so a legacy pane sharing a group
+  with a Kitty pane received `ESC [ 97 u` instead of `a`; releases never crossed
+  windows, leaving remote TUIs holding a stuck key; dropped files reached only
+  the source window; and paths were formatted for the source pane's shell, so a
+  WSL pane received a Windows path.
+
+- **macOS translucency composited twice.** Metal's `PostMultiplied` surface
+  received a premultiplied scene, so the compositor multiplied it again and
+  darkened every translucent edge. Alpha-mode selection also ignored
+  `background-darkness` and never recomputed on reload. `background-darkness` had
+  no effect over a wallpaper, per-pane OSC 11 backdrops compounded window
+  opacity, and `minimum-contrast` measured against the wrong background — white
+  text on a white selection satisfied a 4.5 requirement at an actual 1:1.
+
+- **Glyphs could go permanently blank.** Atlas-full misses were cached as
+  whitespace and eviction never reclaimed pixels, so once the atlas filled the
+  affected glyphs stayed blank until a font change or restart.
+
+- **Three parsers disagreed about where a control sequence ends.** The exec
+  stripper ignored CAN/SUB outside one state, so `\033[31\030hello` printed
+  `ello`, and MCP capture reads that same path. The session-log scrubber lacked
+  escape-intermediate and ESC-from-CSI transitions, writing OSC payloads — which
+  can carry a window title — into a supposedly plain-text log, and leaked parser
+  state across logging sessions. Bounded VT recovery could split a UTF-8 scalar
+  and emit orphaned continuation bytes.
+
+- **Kettle reversed OpenSSH's option precedence.** Real `ssh` keeps the first
+  value, so `ssh -l bob alice@h` connects as `bob`; Kettle's title and Reconnect
+  used `alice`, authenticating as a different user. Verified against `ssh -G`.
+
+- **Three CI gates could not turn red.** The mutable-action-reference
+  supply-chain check grepped with a tool absent from the runner image and had
+  never executed; the daily audit cron filed an issue instead of failing; and a
+  failing `cargo test -p portable-pty` was masked by a trailing command in the
+  same step. Each is now demonstrated to fail on a real violation.
+
+- **Settings could silently discard a configured value.** Number rows snapped an
+  out-of-range value into the row's own range on the first arrow press. A rebind
+  that could not be written reported nothing.
+
+- **`run_command` reported complete output that was not.** A 10,000-line cap
+  dropped the head of the capture while `output_truncated` stayed `false`, so
+  agents read partial output believing it whole.
+
+- Tests across the workspace created "private" scratch directories without making
+  them private, so the suite failed on any host with a permissive umask
+  (`umask 002`, a common Ubuntu default) — 23 failures in one crate alone.
+  Verified under both `umask 002` and `umask 022`.
+
+### Added
+
+- **macOS performance comparator** (`scripts/perf/macos-compare.sh`,
+  `just macos-perf`), the leg Windows and Linux already had. Ranks Kettle against
+  installed macOS terminals on startup, ASCII flood, ANSI/underline flood, max
+  RSS, and idle CPU. A metric counts only when Kettle and at least one real
+  competitor were both measured, so the harness cannot certify a standing it did
+  not measure; undriveable peers and unmeasured metrics are explicit skips.
+
+- **Shell-integration fixtures that run the real interpreters**
+  (`just shell-integration-check`), because the defects above all survived tests
+  that only inspected snippet text. zsh runs under `zsh -f` with no options set,
+  and the bash encoder is exercised under macOS `/bin/bash` 3.2 specifically — a
+  bash 5 test passes while the shipped path is broken.
+
 ## [2.53.0] — 2026-08-07
 
 ### Added

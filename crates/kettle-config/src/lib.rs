@@ -355,6 +355,14 @@ impl PasteImages {
     }
 }
 
+fn parse_paste_policy(value: &str) -> Option<bool> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "off" | "none" | "disabled" | "false" | "0" => Some(false),
+        "on" | "enabled" | "true" | "1" => Some(true),
+        _ => None,
+    }
+}
+
 /// Whether the GUI session recorder is armed at launch (`record = on`). `Off`
 /// (the default) records nothing; `On` starts an asciicast recording for the
 /// window session, written into the configured `record-dir`. Recording captures
@@ -1787,6 +1795,16 @@ pub struct Config {
     pub menu_items: Vec<MenuItem>,
 }
 
+/// One bounded, decoded config-file read and all diagnostics derived from it.
+/// Startup, reload, and CLI inspection share this result so none of them needs
+/// a second read or a weaker filesystem path.
+pub struct LoadedConfig {
+    pub text: String,
+    pub config: Config,
+    pub unknown_keys: Vec<String>,
+    pub malformed_values: Vec<String>,
+}
+
 /// A user-defined right-click menu entry from
 /// `menu-item = LABEL = CMD`. The label is shown in the menu;
 /// the command is sent as PTY input + `\n` when the row is
@@ -3027,6 +3045,19 @@ impl Config {
         cfg
     }
 
+    pub fn read_from_with_diagnostics(path: &Path) -> std::io::Result<LoadedConfig> {
+        let read_path = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+        let text = decode_config_text(&read_config_bytes(&read_path)?);
+        let (config, unknown_keys) = Self::parse_collect(&text);
+        let malformed_values = Self::detect_malformed_values(&text);
+        Ok(LoadedConfig {
+            text,
+            config,
+            unknown_keys,
+            malformed_values,
+        })
+    }
+
     /// Parse the config at `path` and also return the unknown-keys and
     /// malformed-values diagnostics. `load_from` wraps this with a
     /// `log::warn!` for each; callers that want to render the diagnostics
@@ -3072,14 +3103,8 @@ impl Config {
         // Fall back to the raw path when canonicalization fails (a missing
         // config, the common case, then yields the NotFound handled below as
         // defaults; a non-regular target is rejected by the reader itself).
-        let read_path = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
-        match read_config_bytes(&read_path) {
-            Ok(bytes) => {
-                let text = decode_config_text(&bytes);
-                let (cfg, unknown) = Self::parse_collect(&text);
-                let malformed = Self::detect_malformed_values(&text);
-                (cfg, unknown, malformed)
-            }
+        match Self::read_from_with_diagnostics(path) {
+            Ok(loaded) => (loaded.config, loaded.unknown_keys, loaded.malformed_values),
             // `read_config_bytes` folds the size + cap into the error
             // message itself (`InvalidData`), so surface it as-is rather
             // than re-deriving the byte count from a second `metadata()`
@@ -3642,10 +3667,9 @@ impl Config {
                     v.to_ascii_lowercase().as_str(),
                     "enter" | "off"
                 ),
-                "paste-files" => matches!(
-                    v.to_ascii_lowercase().as_str(),
-                    "off" | "none" | "disabled" | "false" | "0" | "on" | "enabled" | "true" | "1"
-                ),
+                "paste-files" | "paste-images" | "paste-image" => {
+                    parse_paste_policy(v).is_some()
+                }
                 "record" => matches!(
                     v.trim().to_ascii_lowercase().as_str(),
                     "off" | "none" | "disabled" | "false" | "0" | "on" | "enabled" | "true" | "1"
@@ -3860,9 +3884,13 @@ impl Config {
     /// Removing a key from this list means either implementing it or deciding
     /// it should be rejected; it must not simply be dropped.
     pub const INERT_KEYS: &'static [&'static str] = &[
+        "audible-bell",
+        "cursor-color-default",
+        "enabled-plugins",
         #[cfg(not(target_os = "macos"))]
         "macos-option-as-alt",
         "extra-styling",
+        "http-proxy",
         "title-font",
         "title-use-system-font",
         "use-system-font",
@@ -4273,15 +4301,17 @@ impl Config {
                     }
                 }
                 "paste-files" => {
-                    cfg.paste_files = match e.value.to_ascii_lowercase().as_str() {
-                        "off" | "none" | "disabled" | "false" | "0" => PasteFiles::Off,
-                        _ => PasteFiles::On,
+                    cfg.paste_files = if parse_paste_policy(&e.value) == Some(false) {
+                        PasteFiles::Off
+                    } else {
+                        PasteFiles::On
                     }
                 }
                 "paste-images" | "paste-image" => {
-                    cfg.paste_images = match e.value.to_ascii_lowercase().as_str() {
-                        "off" | "none" | "disabled" | "false" | "0" => PasteImages::Off,
-                        _ => PasteImages::On,
+                    cfg.paste_images = if parse_paste_policy(&e.value) == Some(false) {
+                        PasteImages::Off
+                    } else {
+                        PasteImages::On
                     }
                 }
                 "record" => {
@@ -5397,6 +5427,25 @@ impl Config {
         unknown.dedup();
         (cfg, unknown)
     }
+}
+
+/// The production source of this file, excluding test-only items.
+#[cfg(test)]
+fn production_source() -> String {
+    let production = kettle_test_support::production_source(include_str!("lib.rs"));
+    assert!(
+        !production.contains("fn production_source()"),
+        "the production slice retained its own helper"
+    );
+    assert!(
+        !production.contains("#[test]"),
+        "the production slice retained a test function"
+    );
+    assert!(
+        !production.contains("#[cfg(test)]"),
+        "the production slice retained a test-only item"
+    );
+    production
 }
 
 #[cfg(test)]
@@ -6985,6 +7034,41 @@ cell-height = 1.2\n";
     }
 
     #[test]
+    fn paste_policies_share_accepted_tokens_and_report_image_typos() {
+        for key in ["paste-files", "paste-images", "paste-image"] {
+            for value in ["off", "none", "disabled", "false", "0"] {
+                assert!(
+                    Config::detect_malformed_values(&format!("{key} = {value}\n")).is_empty(),
+                    "{key} must accept the shared off token {value}"
+                );
+            }
+            for value in ["on", "enabled", "true", "1"] {
+                assert!(
+                    Config::detect_malformed_values(&format!("{key} = {value}\n")).is_empty(),
+                    "{key} must accept the shared on token {value}"
+                );
+            }
+        }
+
+        for line in [
+            "paste-images = of",
+            "paste-image = flase",
+            "paste-images = bogus",
+        ] {
+            assert_eq!(
+                Config::detect_malformed_values(&format!("{line}\n")),
+                vec![line.replace(" = ", " = \"") + "\""],
+                "a bitmap-paste typo must be visible to --check-config"
+            );
+            assert_eq!(
+                Config::parse_text(line).paste_images,
+                PasteImages::On,
+                "the compatibility fallback remains on while the typo is diagnosed"
+            );
+        }
+    }
+
+    #[test]
     fn record_policy_parsing_and_default() {
         // Off by default: a fresh install never records unless asked.
         let d = Config::default();
@@ -7304,7 +7388,7 @@ cell-height = 1.2\n";
     /// disclosure and leave the field looking like a live, wired setting.
     #[test]
     fn dead_terminator_stub_fields_document_their_own_inertness() {
-        let src = include_str!("lib.rs");
+        let src = super::production_source();
         for (field_decl, marker) in [
             (
                 "pub cursor_color_default: bool",
@@ -7352,7 +7436,7 @@ cell-height = 1.2\n";
     /// `kettle-ui`, which is where the readers live.
     #[test]
     fn the_split_and_group_keys_name_the_code_that_reads_them() {
-        let src = include_str!("lib.rs");
+        let src = super::production_source();
         for (field_decl, reader) in [
             ("pub split_to_group: bool", "Mux::inherit_split_group"),
             ("pub autoclean_groups: bool", "Mux::hoover_groups"),
@@ -8676,6 +8760,11 @@ split_horiz = <Control><Shift>j
         assert_eq!(cfg.font_size, default_cfg.font_size);
         assert!(unknown.is_empty(), "no diagnostics past the cap");
         assert!(malformed.is_empty(), "no diagnostics past the cap");
+        let error = Config::read_from_with_diagnostics(&path)
+            .err()
+            .expect("the single-read API must retain the typed read failure");
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+        assert!(error.to_string().contains("cap"));
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_dir(&dir);
     }
@@ -8711,6 +8800,10 @@ split_horiz = <Control><Shift>j
         assert_eq!(cfg.font_size, default_cfg.font_size);
         assert!(unknown.is_empty(), "no diagnostics for a refused path");
         assert!(malformed.is_empty(), "no diagnostics for a refused path");
+        let error = Config::read_from_with_diagnostics(&dir)
+            .err()
+            .expect("the single-read API must reject a non-regular path");
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
         let _ = std::fs::remove_dir(&dir);
     }
 
@@ -10567,25 +10660,8 @@ split_horiz = <Control><Shift>j
 
     // Drift guards for `persist_config_toggle`.
 
-    fn tempdir_for(test_name: &str) -> std::path::PathBuf {
-        #[cfg(windows)]
-        let scratch = std::env::var_os("LOCALAPPDATA")
-            .or_else(|| std::env::var_os("USERPROFILE"))
-            .map(std::path::PathBuf::from)
-            .expect("Windows tests require LOCALAPPDATA or USERPROFILE");
-        #[cfg(not(windows))]
-        let scratch = std::env::temp_dir();
-        let p = scratch.join(format!(
-            "kettle-cfg-{}-{}-{}",
-            test_name,
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_nanos())
-                .unwrap_or(0)
-        ));
-        std::fs::create_dir_all(&p).expect("mkdir tmp");
-        p
+    fn tempdir_for(test_name: &str) -> kettle_test_support::PrivateTempDir {
+        kettle_test_support::private_tempdir(&format!("kettle-cfg-{test_name}-"))
     }
 
     /// `append_keybind` appends a repeatable `keybind` line, the
@@ -11423,6 +11499,18 @@ font-size = 15
     /// claiming to be inert.
     #[test]
     fn keys_that_do_nothing_are_reported_as_doing_nothing() {
+        for key in [
+            "audible-bell",
+            "cursor-color-default",
+            "enabled-plugins",
+            "http-proxy",
+        ] {
+            assert!(
+                Config::INERT_KEYS.contains(&key),
+                "the accepted no-op {key} must be in the inert registry"
+            );
+        }
+
         // Every listed key is reported when set, under either spelling.
         for key in Config::INERT_KEYS {
             let hyphen = Config::parse_text(&format!("{key} = 1\n"));

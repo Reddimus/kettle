@@ -1,5 +1,135 @@
 # Performance
 
+## Unreleased — macOS comparator, first measured standing
+
+The first macOS comparison Kettle has ever had. Windows and Linux comparator
+legs existed; macOS did not, so no claim about Kettle's standing among macOS
+terminals could be checked. `scripts/perf/macos-compare.sh` (`just macos-perf`)
+closes that gap.
+
+Host: **Apple M5 Max, 18 cores, 48 GB, macOS 26.6.1 (build 25G76, Darwin
+25.6.0)**. 7 runs with 2 warmups per timing workload; Kettle built `--release`.
+Every peer launched by an empirically verified command form; peers that could
+not be driven are recorded as skips with reasons rather than dropped.
+
+Peer builds measured, since a benchmark without them is not reproducible:
+
+| terminal | version |
+|---|---|
+| Alacritty | 0.17.0 (94e7c88), Homebrew cask |
+| kitty | 0.48.2 |
+| WezTerm | 20240203-110809-5046fc22 |
+| Terminal.app | macOS 26.6.1 system build |
+| Ghostty, iTerm2 | not measured — see the skips below |
+
+Measured against the **binary actually being released**, not an earlier commit.
+The updater carried a production change after the first measurement, so rather
+than argue it could not touch these paths, the comparator was simply re-run.
+
+| metric | kettle | rank | field |
+|---|---|---|---|
+| startup | 0.336 s | **3 / 5** | wezterm 0.228, alacritty 0.233, **kettle**, kitty 0.551, terminal 1.017 |
+| ascii flood | 0.339 s | **3 / 5** | alacritty 0.228, wezterm 0.233, **kettle**, kitty 0.662, terminal 1.102 |
+| ansi/underline flood | 0.559 s | **3 / 5** | alacritty 0.450, wezterm 0.450, **kettle**, kitty 0.871, terminal 1.264 |
+| max RSS | **105.9 MiB** | **1 / 4** | **kettle**, wezterm 111.9, kitty 122.3, alacritty 127.4 |
+| idle CPU | **0.00 %** | **1 / 5** | **kettle**, alacritty, kitty, terminal, wezterm — all 0.00 % |
+
+**Top-half on 5 of 5 eligible metrics**, and outright first on two of them.
+
+Every number above comes from one run of `just macos-perf`, so the table is
+reproducible as a whole rather than assembled from several.
+
+### One rank moved when the peer binary changed, and it is worth saying why
+
+An earlier run recorded the ansi/underline flood at **2 / 5**, with Kettle at
+0.543 s ahead of Alacritty's 0.548 s. That run could not use Alacritty's
+Homebrew cask — it would not open a window — so it measured a build made from
+source. The cask now launches (0.17.0) and posts **0.450 s** on the same
+workload, which puts Kettle third rather than second.
+
+The honest reading is that the earlier second place was an artifact of the peer
+build, not a Kettle regression: Kettle's own figure moved only 0.543 → 0.559 s
+across the two runs, well inside the spread of a machine that is not idle. The
+table above uses the cask, because that is what a user comparing terminals on
+macOS would actually install.
+
+### The memory result overturns what the Windows numbers implied
+
+`docs/PERFORMANCE.md`'s Windows section records Kettle at ~335 MB against
+Alacritty's ~148 MB, and attributes ~182 MB of it to the DX12 shader compiler
+being loaded and run for the first time — "not an allocation Kettle makes."
+
+That attribution predicted the gap would not transfer to Metal. It did not.
+On macOS Kettle is the **lightest** terminal measured, at 105.9 MiB against
+WezTerm's 111.9, kitty's 122.3 and Alacritty's 127.4. The same binary, the same
+workload, the opposite ranking — because the cost was never Kettle's.
+
+Three separate comparator runs agree on both the value and the ordering: 103.7,
+103.9 and 105.9 MiB, Kettle first every time. The spread across runs is smaller
+than the gap to second place, so this is not a single lucky sample.
+
+### Idle CPU was the one loss, and finding out why was the point
+
+The first run measured Kettle at **2.60 %** while every competitor measured
+**0.00 %** — the only metric it lost, and a regression against its own 0.0000 %
+on Windows. The comparator existed to surface exactly that.
+
+The cause was a feedback loop Kettle created against itself, not a busy timer.
+Cursor blink — the obvious suspect — was ruled out by measurement: disabling it
+still read 2.6 %, while disabling only the remote-command watcher read 0.0 %. A
+symbolized sample gave the chain:
+
+    user_event -> poll_pending_remote_commands -> claim_remote_command_batch
+      -> open_private_file -> fchmod
+
+The private-file helper called `fchmod(0600)` unconditionally, **including when
+the file was already 0600**. macOS FSEvents reports that no-op chmod as both
+`INODE_META_MOD` and `ITEM_MODIFIED`, so the watcher woke for the event it had
+just caused — hundreds of self-events per second on an idle window.
+
+Hardening now runs only when the mode is not already exactly `0600`; every
+ownership, regular-file, hard-link and special-permission check is unchanged.
+
+    before: 2.8, 2.7, 2.6, 2.6, 2.4 %   median 2.6 %
+    after:  0.1, 0.0, 0.0, 0.0, 0.0 %   median 0.0 %
+
+A live `--remote-send` is still consumed in 20.3 ms, so responsiveness was not
+traded for the idle number. The table above is the re-run after this fix.
+
+### What this measurement does NOT say
+
+- **Input latency was not measured.** Driving keystroke-to-paint across
+  AppleScript-only terminals is its own problem and is deliberately out of scope.
+  Its absence is not a pass. This matters, because input latency is Kettle's
+  strongest published result on Windows and it is unverified here.
+- **Ghostty is missing from every metric.** It measured fine during harness
+  development, then stopped launching a window on this machine entirely — it
+  answers `--version` but `open -a Ghostty` will not start it. That is a peer
+  environment fault, not a Kettle or harness fault, but it removes Kettle's
+  closest architectural peer from the field and the numbers above are weaker for
+  it. Re-run on a machine with a healthy Ghostty before treating the ranking as
+  settled.
+- **iTerm2 is missing.** Its AppleScript interface times out on this machine
+  (AppleEvent −1712) through `create window`, `write text`, and `open -a` alike.
+- **Terminal.app has no RSS figure**, because `/usr/bin/time -l` would measure
+  `osascript` rather than the detached process it spawns.
+- **Alacritty is the Homebrew cask, 0.17.0, and it is ad-hoc-signed.**
+  `codesign -dv` reports `flags=0x2(adhoc)`, and Homebrew has deprecated the cask
+  for exactly that Gatekeeper failure mode, disabling it on 2026-09-01. During
+  harness development it would not open a window at all and had to be built from
+  source; it launches now. That instability is the reason the ansi-flood rank
+  differs between runs, and it is worth noting that the failure mode Alacritty is
+  living with here is precisely the one PR #156 exists to prevent for Kettle.
+- The machine was not idle. Apple's `MediaAnalysis` and `replayd` daemons were
+  active throughout. Kettle's own run-to-run variance was small (startup stddev
+  ~0.003 s), and all peers shared the same conditions, but these are not
+  quiet-machine numbers.
+
+A metric counts only when Kettle **and at least one real competitor** were both
+measured, so the harness cannot certify a standing it did not actually measure.
+Five of five metrics were eligible here; none were excluded for lack of a
+competitor.
+
 ## Unreleased — context-menu interaction latency
 
 Context-menu row hover used to take the full frame path: every pointer crossing

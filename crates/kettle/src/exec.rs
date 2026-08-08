@@ -180,7 +180,7 @@ pub struct AnsiStripper {
     utf8_emitted: bool,
 }
 
-#[derive(Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 enum StripState {
     #[default]
     Ground,
@@ -272,18 +272,11 @@ impl AnsiStripper {
                         StripState::Ground
                     }
                 },
-                StripState::Escape => match b {
-                    b'[' => Self::csi(),
-                    b']' => Self::string(true),
-                    b'P' | b'X' | b'^' | b'_' => Self::string(false),
-                    0x20..=0x2f => StripState::EscapeIntermediate {
-                        remaining: MAX_CONTROL_SEQUENCE_BYTES,
-                    },
-                    0x1b => StripState::Escape,
-                    _ => StripState::Ground,
-                },
+                StripState::Escape => Self::after_escape(b),
                 StripState::EscapeIntermediate { remaining } => {
-                    if b == 0x1b {
+                    if matches!(b, 0x18 | 0x1a) {
+                        StripState::Ground
+                    } else if b == 0x1b {
                         StripState::Escape
                     } else if (0x30..=0x7e).contains(&b) || remaining <= 1 {
                         StripState::Ground
@@ -294,7 +287,9 @@ impl AnsiStripper {
                     }
                 }
                 StripState::Csi { remaining } => {
-                    if b == 0x1b {
+                    if matches!(b, 0x18 | 0x1a) {
+                        StripState::Ground
+                    } else if b == 0x1b {
                         StripState::Escape
                     } else if (0x40..=0x7e).contains(&b) || remaining <= 1 {
                         StripState::Ground
@@ -309,8 +304,20 @@ impl AnsiStripper {
                     escaped,
                     remaining,
                 } => {
-                    if b == 0x9c || (bel_terminated && b == 0x07) || (escaped && b == b'\\') {
+                    if matches!(b, 0x18 | 0x1a)
+                        || b == 0x9c
+                        || (bel_terminated && b == 0x07)
+                        || (escaped && b == b'\\')
+                    {
                         StripState::Ground
+                    } else if escaped {
+                        // ESC starts a fresh escape sequence from every control
+                        // string. OSC used to be the lone exception because
+                        // its BEL terminator was folded into this condition:
+                        // `ESC ] title ESC c` therefore swallowed all later
+                        // text while DCS/APC/PM/SOS correctly dispatched `c`.
+                        // The terminators above still win for ESC \\ and BEL.
+                        Self::after_escape(b)
                     } else if remaining <= 1 {
                         // Forced resynchronization: an unterminated control
                         // string cannot hold the stream hostage, so it ends
@@ -334,6 +341,19 @@ impl AnsiStripper {
     fn csi() -> StripState {
         StripState::Csi {
             remaining: MAX_CONTROL_SEQUENCE_BYTES,
+        }
+    }
+
+    fn after_escape(b: u8) -> StripState {
+        match b {
+            b'[' => Self::csi(),
+            b']' => Self::string(true),
+            b'P' | b'X' | b'^' | b'_' => Self::string(false),
+            0x20..=0x2f => StripState::EscapeIntermediate {
+                remaining: MAX_CONTROL_SEQUENCE_BYTES,
+            },
+            0x1b => StripState::Escape,
+            _ => StripState::Ground,
         }
     }
 
@@ -482,6 +502,25 @@ fn run_exec_capture_inner(opts: ExecOpts, cancelled: Option<&AtomicBool>) -> (i3
 /// Default console-size probe (real terminal dimensions when stdout is a TTY).
 pub fn default_size_probe() -> Option<(u16, u16)> {
     terminal_size_cols_rows()
+}
+
+/// The production source of this file, excluding test-only items.
+#[cfg(test)]
+fn production_source() -> String {
+    let production = kettle_test_support::production_source(include_str!("exec.rs"));
+    assert!(
+        !production.contains("fn production_source()"),
+        "the production slice retained its own helper"
+    );
+    assert!(
+        !production.contains("#[test]"),
+        "the production slice retained a test function"
+    );
+    assert!(
+        !production.contains("#[cfg(test)]"),
+        "the production slice retained a test-only item"
+    );
+    production
 }
 
 /// Core run loop, with the stdout sink and size probe injected for testing.
@@ -2093,6 +2132,13 @@ impl PendingWrite {
     }
 }
 
+fn priority_reply_may_start(
+    reply_current: &Option<PendingWrite>,
+    stdin_current: &Option<PendingWrite>,
+) -> bool {
+    reply_current.is_none() && stdin_current.is_none()
+}
+
 fn process_stdin_event(
     event: StdinPumpEvent,
     current: &mut Option<PendingWrite>,
@@ -2162,7 +2208,7 @@ fn spawn_pty_writer_arbiter(
             let never_stdin = crossbeam_channel::never::<StdinPumpEvent>();
 
             loop {
-                if reply_current.is_none() && replies_open {
+                if priority_reply_may_start(&reply_current, &stdin_current) && replies_open {
                     match replies.try_recv() {
                         Ok(bytes) => reply_current = PendingWrite::new(bytes),
                         Err(crossbeam_channel::TryRecvError::Empty) => {}
@@ -2226,7 +2272,6 @@ fn spawn_pty_writer_arbiter(
                     }
                 }
 
-                let writing_reply = reply_current.is_some();
                 let write_result = if let Some(reply) = reply_current.as_ref() {
                     Some(pty_stdin.try_write(reply.remaining()))
                 } else {
@@ -2238,23 +2283,9 @@ fn spawn_pty_writer_arbiter(
                     match result {
                         Ok(0) => {
                             // Unix PTY capacity is temporarily exhausted.
-                            // Wait briefly for a newly generated high-priority
-                            // reply before retrying the pending frame.
-                            if replies_open && !writing_reply {
-                                match replies.recv_timeout(Duration::from_millis(1)) {
-                                    Ok(bytes) => {
-                                        reply_current = PendingWrite::new(bytes);
-                                    }
-                                    Err(crossbeam_channel::RecvTimeoutError::Disconnected) => {
-                                        replies_open = false;
-                                    }
-                                    Err(crossbeam_channel::RecvTimeoutError::Timeout) => {}
-                                }
-                            } else {
-                                std::thread::sleep(Duration::from_millis(1));
-                            }
+                            std::thread::sleep(Duration::from_millis(1));
                         }
-                        Ok(written) if writing_reply => {
+                        Ok(written) if reply_current.is_some() => {
                             if reply_current
                                 .as_mut()
                                 .is_some_and(|reply| reply.advance(written))
@@ -2873,6 +2904,249 @@ mod tests {
     }
 
     #[test]
+    fn ansi_stripper_cancellation_and_nested_escape_recover_control_sequences() {
+        for (label, input, expected) in [
+            ("CAN cancels CSI", &b"\x1b[31\x18hello"[..], &b"hello"[..]),
+            ("SUB cancels CSI", &b"\x1b[31\x1ahello"[..], &b"hello"[..]),
+            (
+                "CAN cancels escape intermediate",
+                &b"\x1b(\x18hello"[..],
+                &b"hello"[..],
+            ),
+            (
+                "SUB cancels escape intermediate",
+                &b"\x1b(\x1ahello"[..],
+                &b"hello"[..],
+            ),
+            (
+                "CAN cancels DCS",
+                &b"\x1bPpayload\x18hello"[..],
+                &b"hello"[..],
+            ),
+            (
+                "SUB cancels SOS",
+                &b"\x1bXpayload\x1ahello"[..],
+                &b"hello"[..],
+            ),
+            (
+                "CAN cancels PM",
+                &b"\x1b^payload\x18hello"[..],
+                &b"hello"[..],
+            ),
+            (
+                "SUB cancels APC",
+                &b"\x1b_payload\x1ahello"[..],
+                &b"hello"[..],
+            ),
+            (
+                "CAN cancels after a pending string ESC",
+                &b"\x1b^payload\x1b\x18hello"[..],
+                &b"hello"[..],
+            ),
+            (
+                "single-character ESC aborts a control string",
+                &b"\x1b^payload\x1bchello"[..],
+                &b"hello"[..],
+            ),
+            (
+                "single-character ESC aborts OSC too",
+                &b"\x1b]0;title\x1bchello"[..],
+                &b"hello"[..],
+            ),
+            (
+                "nested CSI replaces a control string",
+                &b"\x1b^payload\x1b[31mhello"[..],
+                &b"hello"[..],
+            ),
+            (
+                "nested OSC replaces a control string",
+                &b"\x1b^payload\x1b]title\x07hello"[..],
+                &b"hello"[..],
+            ),
+        ] {
+            for split in 0..=input.len() {
+                let mut stripper = AnsiStripper::default();
+                let mut out = Vec::new();
+                stripper.push(&input[..split], &mut out);
+                stripper.push(&input[split..], &mut out);
+                assert_eq!(
+                    out, expected,
+                    "{label} split at byte {split} must preserve the visible suffix"
+                );
+            }
+        }
+    }
+
+    /// Every parser-state sibling crossed with every cancellation/termination
+    /// event. Some pairs deliberately do not terminate: BEL is data in a
+    /// DCS/APC-style string, while BEL and raw ST are parameter/intermediate
+    /// bytes in CSI and ESC-intermediate states. The expected-state matrix
+    /// pins those distinctions instead of making the test name promise more
+    /// than it proves.
+    #[test]
+    fn ansi_stripper_control_events_cover_every_state_cross_product() {
+        #[derive(Clone, Copy)]
+        enum StateCase {
+            Ground,
+            Escape,
+            EscapeIntermediate,
+            Csi,
+            OscString,
+            DcsApcString,
+        }
+
+        impl StateCase {
+            fn name(self) -> &'static str {
+                match self {
+                    Self::Ground => "Ground",
+                    Self::Escape => "Escape",
+                    Self::EscapeIntermediate => "EscapeIntermediate",
+                    Self::Csi => "Csi",
+                    Self::OscString => "OSC-string",
+                    Self::DcsApcString => "DCS/APC-string",
+                }
+            }
+
+            fn state(self) -> StripState {
+                match self {
+                    Self::Ground => StripState::Ground,
+                    Self::Escape => StripState::Escape,
+                    Self::EscapeIntermediate => StripState::EscapeIntermediate {
+                        remaining: MAX_CONTROL_SEQUENCE_BYTES,
+                    },
+                    Self::Csi => StripState::Csi {
+                        remaining: MAX_CONTROL_SEQUENCE_BYTES,
+                    },
+                    Self::OscString => StripState::String {
+                        bel_terminated: true,
+                        escaped: false,
+                        remaining: MAX_CONTROL_SEQUENCE_BYTES,
+                    },
+                    Self::DcsApcString => StripState::String {
+                        bel_terminated: false,
+                        escaped: false,
+                        remaining: MAX_CONTROL_SEQUENCE_BYTES,
+                    },
+                }
+            }
+        }
+
+        #[derive(Clone, Copy)]
+        enum Event {
+            Can,
+            Sub,
+            FreshEscapeDispatch,
+            EscBackslash,
+            Bel,
+            RawSt,
+        }
+
+        impl Event {
+            fn name(self) -> &'static str {
+                match self {
+                    Self::Can => "CAN",
+                    Self::Sub => "SUB",
+                    Self::FreshEscapeDispatch => "fresh ESC + dispatch",
+                    Self::EscBackslash => "ESC \\",
+                    Self::Bel => "BEL",
+                    Self::RawSt => "raw ST 0x9c",
+                }
+            }
+
+            fn bytes(self) -> &'static [u8] {
+                match self {
+                    Self::Can => b"\x18",
+                    Self::Sub => b"\x1a",
+                    Self::FreshEscapeDispatch => b"\x1bc",
+                    Self::EscBackslash => b"\x1b\\",
+                    Self::Bel => b"\x07",
+                    Self::RawSt => b"\x9c",
+                }
+            }
+        }
+
+        fn remains_open(state: StateCase, event: Event) -> bool {
+            matches!(
+                (state, event),
+                (
+                    StateCase::EscapeIntermediate | StateCase::Csi,
+                    Event::Bel | Event::RawSt
+                ) | (StateCase::DcsApcString, Event::Bel)
+            )
+        }
+
+        fn is_open(state: &StripState) -> bool {
+            !matches!(state, StripState::Ground)
+        }
+
+        let states = [
+            StateCase::Ground,
+            StateCase::Escape,
+            StateCase::EscapeIntermediate,
+            StateCase::Csi,
+            StateCase::OscString,
+            StateCase::DcsApcString,
+        ];
+        let events = [
+            Event::Can,
+            Event::Sub,
+            Event::FreshEscapeDispatch,
+            Event::EscBackslash,
+            Event::Bel,
+            Event::RawSt,
+        ];
+        let mut covered = 0;
+        for state in states {
+            for event in events {
+                let bytes = event.bytes();
+                for split in 0..=bytes.len() {
+                    let mut stripper = AnsiStripper {
+                        state: state.state(),
+                        ..AnsiStripper::default()
+                    };
+                    let mut out = Vec::new();
+                    stripper.push(&bytes[..split], &mut out);
+                    stripper.push(&bytes[split..], &mut out);
+
+                    assert_eq!(
+                        is_open(&stripper.state),
+                        remains_open(state, event),
+                        "{} x {} split at {split} reached {:?}",
+                        state.name(),
+                        event.name(),
+                        stripper.state
+                    );
+
+                    // Finish the deliberately-open combinations, then prove
+                    // the parser returns to visible output rather than merely
+                    // reaching a superficially plausible enum variant.
+                    if is_open(&stripper.state) {
+                        stripper.push(b"\x18", &mut out);
+                    }
+                    stripper.push(b"VISIBLE", &mut out);
+                    let control_prefix: &[u8] = match (state, event) {
+                        (StateCase::Ground, Event::Can) => b"\x18",
+                        (StateCase::Ground, Event::Sub) => b"\x1a",
+                        (StateCase::Ground, Event::Bel) => b"\x07",
+                        _ => b"",
+                    };
+                    let mut expected = control_prefix.to_vec();
+                    expected.extend_from_slice(b"VISIBLE");
+                    assert_eq!(
+                        out,
+                        expected,
+                        "{} x {} split at {split} must preserve the visible suffix",
+                        state.name(),
+                        event.name()
+                    );
+                }
+                covered += 1;
+            }
+        }
+        assert_eq!(covered, 6 * 6, "the full state/event cross product changed");
+    }
+
+    #[test]
     fn ansi_stripper_has_constant_memory_and_bounded_resynchronization() {
         assert!(std::mem::size_of::<AnsiStripper>() <= 32);
         let mut stripper = AnsiStripper::default();
@@ -3107,6 +3381,19 @@ mod tests {
     }
 
     #[test]
+    fn priority_reply_waits_for_a_started_stdin_message() {
+        let none = None;
+        let pending_stdin = PendingWrite::new(vec![b'u'; 8192]);
+        assert!(priority_reply_may_start(&none, &none));
+        assert!(
+            !priority_reply_may_start(&none, &pending_stdin),
+            "a reply arriving after a partial stdin write must wait for that message"
+        );
+        let pending_reply = PendingWrite::new(b"reply".to_vec());
+        assert!(!priority_reply_may_start(&pending_reply, &none));
+    }
+
+    #[test]
     fn admitted_reply_preempts_a_pending_eof_retry() {
         let (reply_tx, reply_rx) = crossbeam_channel::bounded(1);
         let reply_gate = Mutex::new(());
@@ -3167,7 +3454,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn requested_recording_failure_prevents_the_child_from_starting() {
-        let temp = tempfile::tempdir().unwrap();
+        let temp = kettle_test_support::private_tempdir("kettle-exec-recording-failure-");
         let record = temp.path().join("active.cast");
         let marker = temp.path().join("child-started");
         let active = kettle_core::record::Recorder::start(&record, 80, 24, false).unwrap();
@@ -3367,17 +3654,8 @@ mod tests {
 
     #[test]
     fn cancellable_capture_kills_child_and_finishes_recorder_promptly() {
-        #[cfg(windows)]
-        let scratch = std::env::var_os("LOCALAPPDATA")
-            .or_else(|| std::env::var_os("USERPROFILE"))
-            .map(std::path::PathBuf::from)
-            .expect("Windows tests require LOCALAPPDATA or USERPROFILE");
-        #[cfg(not(windows))]
-        let scratch = std::env::temp_dir();
-        let dir = scratch.join(format!("kettle-exec-cancel-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        let record = dir.join("cancel.cast");
+        let dir = kettle_test_support::private_tempdir("kettle-exec-cancel-");
+        let record = dir.path().join("cancel.cast");
         #[cfg(unix)]
         let argv = vec![
             "sh".into(),
@@ -3414,7 +3692,6 @@ mod tests {
                 .next()
                 .is_some_and(|line| line.contains("\"version\":2"))
         );
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -3423,12 +3700,9 @@ mod tests {
         // future edit reaches for a `kettle_ui::` / `winit::` path, this fails —
         // "headless means headless". Scans for the `::` *usage* forms so the
         // module's own doc comment (which names the crates in prose) doesn't
-        // trip it; strips this test's body so its assert strings don't either.
-        let src = include_str!("exec.rs");
-        let scan = src
-            .split("fn exec_module_is_headless_no_ui_no_winit")
-            .next()
-            .unwrap();
+        // trip it; `production_source` strips every test item so the assertions
+        // cannot satisfy their own checks.
+        let scan = super::production_source();
         assert!(
             !scan.contains("kettle_ui::"),
             "exec.rs must not use kettle_ui (headless)"

@@ -63,20 +63,9 @@ const DIRECTORY_RECORD_PREFIX: &str = "kettle-session-";
 const DIRECTORY_RECORD_SUFFIX: &str = ".cast";
 static RECORD_SEQUENCE: AtomicU32 = AtomicU32::new(0);
 
-#[cfg(all(test, windows))]
-pub(crate) fn test_tempdir() -> tempfile::TempDir {
-    let base = std::env::var_os("LOCALAPPDATA")
-        .or_else(|| std::env::var_os("USERPROFILE"))
-        .expect("Windows tests require LOCALAPPDATA or USERPROFILE");
-    tempfile::Builder::new()
-        .prefix("kettle-core-test-")
-        .tempdir_in(base)
-        .expect("create test directory in the user-private profile")
-}
-
-#[cfg(all(test, not(windows)))]
-pub(crate) fn test_tempdir() -> tempfile::TempDir {
-    tempfile::tempdir().expect("create test directory")
+#[cfg(test)]
+pub(crate) fn test_tempdir() -> kettle_test_support::PrivateTempDir {
+    kettle_test_support::private_tempdir("kettle-core-test-")
 }
 
 /// Where a GUI development recording should be written.

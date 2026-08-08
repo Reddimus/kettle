@@ -62,5 +62,5 @@ windows-sys = { version = "0.61", features = [
 # `record.rs` is compiled under `cfg(test)` (feature off) so its unit
 # tests + the replay test run in the plain suite.
 fs4 = "1.1"
+kettle-test-support.workspace = true
 serde_json = "1"
-tempfile = "3"

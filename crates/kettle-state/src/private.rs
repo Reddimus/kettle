@@ -58,7 +58,13 @@ pub fn remove_open_private_file(file: File, path: &Path) -> io::Result<()> {
     remove_open_private_file_impl(file, path)
 }
 
-pub(crate) fn discard_created_private_file(file: File, path: &Path) {
+/// Best-effort removal of a file still held by its creation handle.
+///
+/// `file` must have been returned by [`create_private_file_new`]. This is the
+/// failure-path counterpart to [`remove_open_private_file`]: Windows creation
+/// handles intentionally omit delete sharing, so they must be marked for
+/// deletion directly instead of being passed through that reopen-based API.
+pub fn discard_created_private_file(file: File, path: &Path) {
     discard_created_private_file_impl(file, path);
 }
 
@@ -535,6 +541,16 @@ mod unix {
         unsafe { libc::geteuid() }
     }
 
+    const PRIVATE_FILE_MODE: u32 = 0o600;
+
+    /// A same-mode `fchmod` is not free: macOS FSEvents reports it as both a
+    /// metadata and data change, which can feed a watched private file back to
+    /// its reader indefinitely. Special permission bits still require the
+    /// real hardening call; file-type bits do not.
+    pub(super) fn private_mode_needs_hardening(mode: u32) -> bool {
+        mode & 0o7777 != PRIVATE_FILE_MODE
+    }
+
     fn c_name(name: &OsStr, description: &str) -> io::Result<CString> {
         CString::new(name.as_bytes()).map_err(|_| {
             io::Error::new(
@@ -761,11 +777,32 @@ mod unix {
         {
             return Ok(());
         }
+        let parent_path = path.parent().unwrap_or(Path::new("/"));
+        let detail = if !trusted_identity(parent.uid()) {
+            format!(
+                "parent {} is owned by uid {}; expected uid {} or 0",
+                parent_path.display(),
+                parent.uid(),
+                current_user()
+            )
+        } else if !sticky {
+            format!(
+                "parent {} has mode {:04o}; group/other write bits are unsafe (set an explicit directory mode instead of relying on the process umask)",
+                parent_path.display(),
+                parent.mode() & 0o7777
+            )
+        } else {
+            format!(
+                "sticky parent {} contains a child owned by untrusted uid {}",
+                parent_path.display(),
+                child.uid()
+            )
+        };
         Err(io::Error::new(
             io::ErrorKind::PermissionDenied,
             format!(
-                "private path crosses an untrusted writable directory edge: {}",
-                path.display()
+                "private path crosses an untrusted directory edge at {}: {detail}",
+                path.display(),
             ),
         ))
     }
@@ -1308,8 +1345,11 @@ mod unix {
                 "refusing to harden a private file with multiple hard links",
             ));
         }
-        file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
-        if file.metadata()?.mode() & 0o777 == 0o600 {
+        if !private_mode_needs_hardening(metadata.mode()) {
+            return Ok(());
+        }
+        file.set_permissions(std::fs::Permissions::from_mode(PRIVATE_FILE_MODE))?;
+        if !private_mode_needs_hardening(file.metadata()?.mode()) {
             Ok(())
         } else {
             Err(io::Error::new(
@@ -3258,6 +3298,27 @@ mod tests {
     use super::*;
     use std::io::Write as _;
 
+    #[cfg(unix)]
+    #[test]
+    fn writable_parent_diagnostic_identifies_the_parent_mode_and_umask_risk() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let dir = crate::test_tempdir();
+        let writable = dir.path().join("install");
+        let child = writable.join("share");
+        std::fs::create_dir_all(&child).unwrap();
+        std::fs::set_permissions(&writable, std::fs::Permissions::from_mode(0o775)).unwrap();
+        std::fs::set_permissions(&child, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let error = guard_private_parent(&child.join("state.json"))
+            .err()
+            .expect("a group-writable parent must be rejected");
+        let message = error.to_string();
+        assert!(message.contains(&format!("parent {}", writable.display())));
+        assert!(message.contains("mode 0775"));
+        assert!(message.contains("process umask"));
+    }
+
     #[test]
     fn private_create_and_reopen_are_owner_only() {
         let dir = crate::test_tempdir();
@@ -3290,6 +3351,36 @@ mod tests {
         }
         #[cfg(windows)]
         assert!(has_current_user_only_dacl(&reopened).unwrap());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn private_mode_hardening_skips_only_the_exact_owner_mode() {
+        assert!(!unix::private_mode_needs_hardening(0o600));
+        assert!(!unix::private_mode_needs_hardening(0o100600));
+        for mode in [0o000, 0o400, 0o640, 0o660, 0o700, 0o4600] {
+            assert!(
+                unix::private_mode_needs_hardening(mode),
+                "mode {mode:04o} must be hardened"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn existing_owner_file_with_broad_mode_is_still_hardened() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let dir = crate::test_tempdir();
+        let path = dir.path().join("legacy");
+        std::fs::write(&path, b"legacy").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+        let file = open_existing_private_file(&path).unwrap();
+        assert_eq!(
+            file.metadata().unwrap().permissions().mode() & 0o7777,
+            0o600
+        );
     }
 
     #[test]

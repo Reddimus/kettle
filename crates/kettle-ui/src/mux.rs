@@ -74,6 +74,26 @@ impl PaneInputResult {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct PaneInputDelivery {
+    pub result: PaneInputResult,
+    pub accepted: bool,
+}
+
+impl PaneInputDelivery {
+    fn new() -> Self {
+        Self {
+            result: PaneInputResult::Queued,
+            accepted: false,
+        }
+    }
+
+    fn record(&mut self, result: PaneInputResult) {
+        self.accepted |= result.is_queued();
+        self.result = self.result.merge(result);
+    }
+}
+
 fn pane_input_policy(failed: bool, read_only: bool) -> Option<PaneInputResult> {
     if failed {
         Some(PaneInputResult::Failed)
@@ -120,6 +140,104 @@ impl PendingPtyInput {
     }
 }
 
+fn run_pty_input_worker<F>(
+    reply_rx: Receiver<QueuedPtyInput>,
+    user_rx: Receiver<QueuedPtyInput>,
+    failed: &AtomicBool,
+    stop: &AtomicBool,
+    waker: &Waker,
+    mut try_write: F,
+) where
+    F: FnMut(&[u8]) -> Result<usize>,
+{
+    let mut current: Option<(bool, PendingPtyInput)> = None;
+    let mut prefer_reply = true;
+    let mut replies_open = true;
+    let mut user_open = true;
+    let never_reply = crossbeam_channel::never::<QueuedPtyInput>();
+    let never_user = crossbeam_channel::never::<QueuedPtyInput>();
+
+    while !stop.load(Ordering::Acquire) {
+        if current.is_none() && !prefer_reply && user_open {
+            match user_rx.try_recv() {
+                Ok(message) => current = Some((false, PendingPtyInput::new(message))),
+                Err(crossbeam_channel::TryRecvError::Empty) => {}
+                Err(crossbeam_channel::TryRecvError::Disconnected) => user_open = false,
+            }
+        }
+        if current.is_none() && replies_open {
+            match reply_rx.try_recv() {
+                Ok(message) => current = Some((true, PendingPtyInput::new(message))),
+                Err(crossbeam_channel::TryRecvError::Empty) => {}
+                Err(crossbeam_channel::TryRecvError::Disconnected) => replies_open = false,
+            }
+        }
+        if current.is_none() && user_open {
+            match user_rx.try_recv() {
+                Ok(message) => current = Some((false, PendingPtyInput::new(message))),
+                Err(crossbeam_channel::TryRecvError::Empty) => {}
+                Err(crossbeam_channel::TryRecvError::Disconnected) => user_open = false,
+            }
+        }
+
+        if let Some((_, pending)) = current.as_ref() {
+            match try_write(pending.next_chunk()) {
+                Ok(0) => std::thread::sleep(Duration::from_millis(1)),
+                Ok(written) => {
+                    if current
+                        .as_mut()
+                        .is_some_and(|(_, pending)| pending.advance(written))
+                    {
+                        prefer_reply = !current.as_ref().is_some_and(|(reply, _)| *reply);
+                        current = None;
+                    }
+                }
+                Err(error) => {
+                    log::error!("PTY input worker failed: {error:#}");
+                    if !failed.swap(true, Ordering::AcqRel) {
+                        (waker)();
+                    }
+                    break;
+                }
+            }
+            continue;
+        }
+
+        if !replies_open && !user_open {
+            break;
+        }
+        let reply_receiver = if replies_open {
+            &reply_rx
+        } else {
+            &never_reply
+        };
+        let user_receiver = if user_open { &user_rx } else { &never_user };
+        if prefer_reply {
+            crossbeam_channel::select_biased! {
+                recv(reply_receiver) -> message => match message {
+                    Ok(message) => current = Some((true, PendingPtyInput::new(message))),
+                    Err(_) => replies_open = false,
+                },
+                recv(user_receiver) -> message => match message {
+                    Ok(message) => current = Some((false, PendingPtyInput::new(message))),
+                    Err(_) => user_open = false,
+                },
+            }
+        } else {
+            crossbeam_channel::select_biased! {
+                recv(user_receiver) -> message => match message {
+                    Ok(message) => current = Some((false, PendingPtyInput::new(message))),
+                    Err(_) => user_open = false,
+                },
+                recv(reply_receiver) -> message => match message {
+                    Ok(message) => current = Some((true, PendingPtyInput::new(message))),
+                    Err(_) => replies_open = false,
+                },
+            }
+        }
+    }
+}
+
 struct PtyInputQueue {
     user_tx: Sender<QueuedPtyInput>,
     reply_tx: Sender<QueuedPtyInput>,
@@ -145,106 +263,14 @@ impl PtyInputQueue {
         std::thread::Builder::new()
             .name("kettle-pty-input".into())
             .spawn(move || {
-                let mut reply_current: Option<PendingPtyInput> = None;
-                let mut user_current: Option<PendingPtyInput> = None;
-                let mut replies_open = true;
-                let mut user_open = true;
-                let never_reply = crossbeam_channel::never::<QueuedPtyInput>();
-                let never_user = crossbeam_channel::never::<QueuedPtyInput>();
-
-                while !worker_stop.load(Ordering::Acquire) {
-                    if reply_current.is_none() && replies_open {
-                        match reply_rx.try_recv() {
-                            Ok(message) => reply_current = Some(PendingPtyInput::new(message)),
-                            Err(crossbeam_channel::TryRecvError::Empty) => {}
-                            Err(crossbeam_channel::TryRecvError::Disconnected) => {
-                                replies_open = false;
-                            }
-                        }
-                    }
-                    if user_current.is_none() && user_open {
-                        match user_rx.try_recv() {
-                            Ok(message) => user_current = Some(PendingPtyInput::new(message)),
-                            Err(crossbeam_channel::TryRecvError::Empty) => {}
-                            Err(crossbeam_channel::TryRecvError::Disconnected) => {
-                                user_open = false;
-                            }
-                        }
-                    }
-
-                    let writing_reply = reply_current.is_some();
-                    let write_result = if let Some(reply) = reply_current.as_ref() {
-                        Some(pty_stdin.try_write(reply.next_chunk()))
-                    } else {
-                        user_current
-                            .as_ref()
-                            .map(|user| pty_stdin.try_write(user.next_chunk()))
-                    };
-                    if let Some(result) = write_result {
-                        match result {
-                            Ok(0) if !writing_reply && replies_open => {
-                                match reply_rx.recv_timeout(Duration::from_millis(1)) {
-                                    Ok(message) => {
-                                        reply_current = Some(PendingPtyInput::new(message));
-                                    }
-                                    Err(crossbeam_channel::RecvTimeoutError::Disconnected) => {
-                                        replies_open = false;
-                                    }
-                                    Err(crossbeam_channel::RecvTimeoutError::Timeout) => {}
-                                }
-                            }
-                            Ok(0) => std::thread::sleep(Duration::from_millis(1)),
-                            Ok(written) if writing_reply => {
-                                if reply_current
-                                    .as_mut()
-                                    .is_some_and(|reply| reply.advance(written))
-                                {
-                                    reply_current = None;
-                                }
-                            }
-                            Ok(written) => {
-                                if user_current
-                                    .as_mut()
-                                    .is_some_and(|user| user.advance(written))
-                                {
-                                    user_current = None;
-                                }
-                            }
-                            Err(error) => {
-                                log::error!("PTY input worker failed: {error:#}");
-                                if !worker_failed.swap(true, Ordering::AcqRel) {
-                                    (worker_waker)();
-                                }
-                                break;
-                            }
-                        }
-                        continue;
-                    }
-
-                    if !replies_open && !user_open {
-                        break;
-                    }
-                    let reply_receiver = if replies_open {
-                        &reply_rx
-                    } else {
-                        &never_reply
-                    };
-                    let user_receiver = if user_open { &user_rx } else { &never_user };
-                    crossbeam_channel::select_biased! {
-                        recv(reply_receiver) -> message => match message {
-                            Ok(message) => {
-                                reply_current = Some(PendingPtyInput::new(message));
-                            }
-                            Err(_) => replies_open = false,
-                        },
-                        recv(user_receiver) -> message => match message {
-                            Ok(message) => {
-                                user_current = Some(PendingPtyInput::new(message));
-                            }
-                            Err(_) => user_open = false,
-                        },
-                    }
-                }
+                run_pty_input_worker(
+                    reply_rx,
+                    user_rx,
+                    &worker_failed,
+                    &worker_stop,
+                    &worker_waker,
+                    |bytes| pty_stdin.try_write(bytes),
+                );
             })
             .context("cannot spawn PTY input worker")?;
         Ok(Self {
@@ -615,15 +641,6 @@ impl Pane {
 /// event-loop turn, defeating the feature entirely.
 pub(crate) fn is_reapable(closed: bool, held: bool, child_exited: bool) -> bool {
     closed || (!held && child_exited)
-}
-
-/// Whether a `Group` broadcast scope should be dropped after a pane removal:
-/// only when `autoclean-groups` is on and the group has no members left. Pure
-/// so the truth table can be driven directly — a `Pane` needs a real PTY, so a
-/// test that built one to check the keep-case would be an integration test
-/// pretending to be a unit test.
-pub(crate) fn group_scope_is_stale(autoclean: bool, group_populated: bool) -> bool {
-    autoclean && !group_populated
 }
 
 /// Whether splitting a pane launched as `argv` should start the configured
@@ -1347,8 +1364,8 @@ pub struct Mux {
     /// so the only thing that can outlive its members is a broadcast *scope*
     /// still aimed at the dead group — which would keep the titlebar claiming a
     /// group that no longer exists and re-capture any pane later given the same
-    /// name. Mirrored from the config at window construction, alongside the
-    /// other process-wide flags above.
+    /// name. `App` owns the process-wide membership sweep because a group can
+    /// span several muxes. Mirrored from the config at window construction.
     pub autoclean_groups: bool,
 }
 
@@ -1364,26 +1381,6 @@ impl Mux {
             osc52_copy_allowed: true,
             closed_tabs: std::collections::VecDeque::with_capacity(CLOSED_TAB_RING_CAP),
             autoclean_groups: true,
-        }
-    }
-
-    /// Terminator's `group_hoover`: drop a broadcast scope whose group has no
-    /// members left. Called after every pane removal.
-    ///
-    /// Without it, closing the last pane of a group leaves the window still
-    /// claiming to broadcast to it — the titlebar keeps showing the group, and
-    /// the moment any pane is later given that name it silently joins a
-    /// broadcast the user set up for panes that are gone.
-    fn hoover_groups(&mut self) {
-        let BroadcastScope::Group(name) = &self.broadcast else {
-            return;
-        };
-        let populated = self
-            .panes
-            .values()
-            .any(|pane| pane.group_name.as_deref() == Some(name.as_str()));
-        if group_scope_is_stale(self.autoclean_groups, populated) {
-            self.broadcast = BroadcastScope::Off;
         }
     }
 
@@ -2675,7 +2672,6 @@ impl Mux {
                 }
             }
         }
-        self.hoover_groups();
         self.tabs.is_empty()
     }
 
@@ -2817,10 +2813,6 @@ impl Mux {
         // The user lands on whichever tab slid into focus; mark it seen so
         // its activity dot clears (same as every other tab-switch path).
         self.touch_active_tab_seen();
-        // The panes left this window entirely, so a group they were the last
-        // members of is gone from *here* even though it lives on in the window
-        // they land in.
-        self.hoover_groups();
         Some(DetachedTab { tab, panes })
     }
 
@@ -2902,7 +2894,6 @@ impl Mux {
             if (self.active >= self.tabs.len() || self.active > idx) && self.active > 0 {
                 self.active -= 1;
             }
-            self.hoover_groups();
         }
         self.tabs.is_empty()
     }
@@ -3071,9 +3062,6 @@ impl Mux {
             self.panes.remove(id);
         }
         Self::reap_tabs(&mut self.tabs, &mut self.active, &dead);
-        if !dead.is_empty() {
-            self.hoover_groups();
-        }
         self.tabs.is_empty()
     }
 
@@ -3151,30 +3139,23 @@ impl Mux {
         }
     }
 
-    /// Send `bytes` to every pane in the **active tab** (not every tab in
-    /// the mux). The old implementation broadcast across
-    /// every pane in every tab — typing one character with broadcast on
-    /// echoed into the user's other tabs too (often unrelated work, often
-    /// where the user *didn't* want their fan-out keystroke). Terminator's
-    /// `broadcast_all` is per-window-per-tab; iTerm2's "Send Input to All
-    /// Sessions" defaults per-window; kitty's `send_text` targets all
-    /// windows in the current tab. We follow that convention.
-    pub fn broadcast_write(&mut self, bytes: &[u8]) -> PaneInputResult {
-        self.broadcast_write_inner(bytes, false)
+    /// Deliver identical bytes to the panes selected by this mux's broadcast
+    /// scope and report both the worst rejection and whether any pane accepted.
+    pub(crate) fn broadcast_write_delivery(
+        &mut self,
+        bytes: &[u8],
+        scroll_to_bottom: bool,
+    ) -> PaneInputDelivery {
+        self.broadcast_write_inner(bytes, scroll_to_bottom)
     }
 
-    /// Broadcast a keystroke and scroll only panes which actually accepted it.
-    pub fn broadcast_write_with_scroll(&mut self, bytes: &[u8]) -> PaneInputResult {
-        self.broadcast_write_inner(bytes, true)
-    }
-
-    fn broadcast_write_inner(&mut self, bytes: &[u8], scroll_to_bottom: bool) -> PaneInputResult {
+    fn broadcast_write_inner(&mut self, bytes: &[u8], scroll_to_bottom: bool) -> PaneInputDelivery {
         // Respect the `BroadcastScope` enum (phase 3 of the named-groups
         // design). Off short-circuits; Tab keeps the
         // active-tab behavior; All targets every pane
         // window-wide; Group(name) targets cross-tab matches.
         let ids = self.broadcast_target_ids();
-        let mut result = PaneInputResult::Queued;
+        let mut delivery = PaneInputDelivery::new();
         for id in ids {
             if let Some(p) = self.panes.get_mut(&id) {
                 // A read-only pane drops user input (keystroke /
@@ -3186,10 +3167,10 @@ impl Mux {
                 {
                     term.scroll_display(kettle_core::Scroll::Bottom);
                 }
-                result = result.merge(pane_result);
+                delivery.record(pane_result);
             }
         }
-        result
+        delivery
     }
 
     /// Deliver a broadcast that ANOTHER window is originating, to the panes in
@@ -3206,13 +3187,13 @@ impl Mux {
     /// Only `Group` crosses. `Tab` is defined by a focused tab, which exists in
     /// exactly one window; `All` is kettle's own window-wide scope and stays
     /// that way; `Off` sends nothing anywhere.
-    pub fn broadcast_write_foreign(
+    pub(crate) fn broadcast_write_foreign_delivery(
         &mut self,
         scope: &BroadcastScope,
         bytes: &[u8],
         scroll_to_bottom: bool,
-    ) -> PaneInputResult {
-        let mut result = PaneInputResult::Queued;
+    ) -> PaneInputDelivery {
+        let mut delivery = PaneInputDelivery::new();
         for id in self.foreign_target_ids(scope) {
             if let Some(pane) = self.panes.get_mut(&id) {
                 let pane_result = pane.feed_input(bytes);
@@ -3222,10 +3203,73 @@ impl Mux {
                 {
                     term.scroll_display(kettle_core::Scroll::Bottom);
                 }
-                result = result.merge(pane_result);
+                delivery.record(pane_result);
             }
         }
-        result
+        delivery
+    }
+
+    pub(crate) fn broadcast_encoded<F>(
+        &mut self,
+        scroll_to_bottom: bool,
+        encode: F,
+    ) -> PaneInputDelivery
+    where
+        F: FnMut(kettle_core::TermMode) -> Option<Vec<u8>>,
+    {
+        let ids = self.broadcast_target_ids();
+        self.write_encoded_into(ids, scroll_to_bottom, encode)
+    }
+
+    pub(crate) fn broadcast_encoded_foreign<F>(
+        &mut self,
+        scope: &BroadcastScope,
+        scroll_to_bottom: bool,
+        encode: F,
+    ) -> PaneInputDelivery
+    where
+        F: FnMut(kettle_core::TermMode) -> Option<Vec<u8>>,
+    {
+        let ids = self.foreign_target_ids(scope);
+        self.write_encoded_into(ids, scroll_to_bottom, encode)
+    }
+
+    fn write_encoded_into<F>(
+        &mut self,
+        ids: Vec<u64>,
+        scroll_to_bottom: bool,
+        encode: F,
+    ) -> PaneInputDelivery
+    where
+        F: FnMut(kettle_core::TermMode) -> Option<Vec<u8>>,
+    {
+        let target_modes = ids.into_iter().filter_map(|id| {
+            let pane = self.panes.get(&id)?;
+            let mode = pane
+                .term
+                .term
+                .lock()
+                .ok()
+                .map(|term| *term.mode())
+                .unwrap_or_else(kettle_core::TermMode::empty);
+            Some((id, mode))
+        });
+        let encoded = encode_target_modes(target_modes, encode);
+        let mut delivery = PaneInputDelivery::new();
+        for (id, bytes) in encoded {
+            let Some(pane) = self.panes.get_mut(&id) else {
+                continue;
+            };
+            let pane_result = pane.feed_input(&bytes);
+            if pane_result.is_queued()
+                && scroll_to_bottom
+                && let Ok(mut term) = pane.term.term.lock()
+            {
+                term.scroll_display(kettle_core::Scroll::Bottom);
+            }
+            delivery.record(pane_result);
+        }
+        delivery
     }
 
     /// Whether a scope reaches panes outside the window that owns it, so the
@@ -3334,8 +3378,9 @@ impl Mux {
     }
 
     /// Deliver a paste that ANOTHER window is originating, to the panes in this
-    /// one that its scope selects. The companion to `broadcast_write_foreign`;
-    /// see it for why only a named group crosses.
+    /// one that its scope selects. The companion to
+    /// `broadcast_write_foreign_delivery`; see it for why only a named group
+    /// crosses.
     pub fn broadcast_paste_foreign(
         &mut self,
         scope: &BroadcastScope,
@@ -3343,6 +3388,56 @@ impl Mux {
     ) -> PaneInputResult {
         let ids = self.foreign_target_ids(scope);
         self.paste_into(ids, text)
+    }
+
+    pub fn broadcast_paste_paths(
+        &mut self,
+        paths: &[std::path::PathBuf],
+        trailing_space: bool,
+        max_text_bytes: usize,
+    ) -> PaneInputResult {
+        let ids = self.broadcast_target_ids();
+        self.paste_paths_into(ids, paths, trailing_space, max_text_bytes)
+    }
+
+    pub fn broadcast_paste_paths_within_limit(
+        &self,
+        paths: &[std::path::PathBuf],
+        trailing_space: bool,
+        max_text_bytes: usize,
+    ) -> bool {
+        self.paste_paths_within_limit(
+            self.broadcast_target_ids(),
+            paths,
+            trailing_space,
+            max_text_bytes,
+        )
+    }
+
+    pub fn broadcast_paste_paths_foreign(
+        &mut self,
+        scope: &BroadcastScope,
+        paths: &[std::path::PathBuf],
+        trailing_space: bool,
+        max_text_bytes: usize,
+    ) -> PaneInputResult {
+        let ids = self.foreign_target_ids(scope);
+        self.paste_paths_into(ids, paths, trailing_space, max_text_bytes)
+    }
+
+    pub fn broadcast_paste_paths_foreign_within_limit(
+        &self,
+        scope: &BroadcastScope,
+        paths: &[std::path::PathBuf],
+        trailing_space: bool,
+        max_text_bytes: usize,
+    ) -> bool {
+        self.paste_paths_within_limit(
+            self.foreign_target_ids(scope),
+            paths,
+            trailing_space,
+            max_text_bytes,
+        )
     }
 
     /// Would a paste under ANOTHER window's scope land raw and executable in
@@ -3427,6 +3522,70 @@ impl Mux {
             }
         }
         result
+    }
+
+    fn paste_paths_into(
+        &mut self,
+        ids: Vec<u64>,
+        paths: &[std::path::PathBuf],
+        trailing_space: bool,
+        max_text_bytes: usize,
+    ) -> PaneInputResult {
+        let targets = ids
+            .iter()
+            .filter_map(|id| self.panes.get(id).map(|pane| (*id, pane.argv.as_slice())));
+        let formatted = format_paths_for_targets(targets, paths, trailing_space);
+        if formatted.iter().any(|(id, text)| {
+            self.panes.get(id).is_some_and(|pane| {
+                !pane.read_only && !pane.pty_input_failed() && text.len() > max_text_bytes
+            })
+        }) {
+            return PaneInputResult::Oversize;
+        }
+
+        let mut result = PaneInputResult::Queued;
+        for (id, text) in formatted {
+            let Some(pane) = self.panes.get_mut(&id) else {
+                continue;
+            };
+            if pane.pty_input_failed() {
+                result = result.merge(PaneInputResult::Failed);
+                continue;
+            }
+            if pane.read_only {
+                result = result.merge(PaneInputResult::ReadOnly);
+                continue;
+            }
+            let bracketed = pane
+                .term
+                .term
+                .lock()
+                .ok()
+                .map(|term| term.mode().contains(kettle_core::TermMode::BRACKETED_PASTE))
+                .unwrap_or(false);
+            let bytes = crate::input::paste_payload(&text, bracketed);
+            result = result.merge(pane.feed_input(&bytes));
+        }
+        result
+    }
+
+    fn paste_paths_within_limit(
+        &self,
+        ids: Vec<u64>,
+        paths: &[std::path::PathBuf],
+        trailing_space: bool,
+        max_text_bytes: usize,
+    ) -> bool {
+        let targets = ids
+            .iter()
+            .filter_map(|id| self.panes.get(id).map(|pane| (*id, pane.argv.as_slice())));
+        format_paths_for_targets(targets, paths, trailing_space)
+            .iter()
+            .all(|(id, text)| {
+                self.panes.get(id).is_none_or(|pane| {
+                    pane.read_only || pane.pty_input_failed() || text.len() <= max_text_bytes
+                })
+            })
     }
 
     pub fn tab_titles(&self) -> Vec<String> {
@@ -3907,6 +4066,33 @@ pub(crate) fn format_paths_for_paste(argv: &[String], paths: &[std::path::PathBu
         .join(" ")
 }
 
+pub(crate) fn format_paths_for_targets<'a>(
+    targets: impl IntoIterator<Item = (u64, &'a [String])>,
+    paths: &[std::path::PathBuf],
+    trailing_space: bool,
+) -> Vec<(u64, String)> {
+    targets
+        .into_iter()
+        .map(|(id, argv)| {
+            let mut text = format_paths_for_paste(argv, paths);
+            if trailing_space {
+                text.push(' ');
+            }
+            (id, text)
+        })
+        .collect()
+}
+
+pub(crate) fn encode_target_modes(
+    targets: impl IntoIterator<Item = (u64, kettle_core::TermMode)>,
+    mut encode: impl FnMut(kettle_core::TermMode) -> Option<Vec<u8>>,
+) -> Vec<(u64, Vec<u8>)> {
+    targets
+        .into_iter()
+        .filter_map(|(id, mode)| encode(mode).map(|bytes| (id, bytes)))
+        .collect()
+}
+
 fn collect_ids(n: &Node, out: &mut Vec<u64>) {
     match n {
         Node::Leaf(id) => out.push(*id),
@@ -3929,22 +4115,20 @@ mod node_tests {
 
     /// The production half of this file: everything above the test module.
     ///
-    /// A source guard that searches the WHOLE file also searches its own
-    /// assertions, so a plain `src.contains("…")` matches the needle written
-    /// one line above it and passes whether or not the production code is
-    /// there — and a `matches(…).count()` is inflated by one for the same
-    /// reason. Slicing the test module off first removes the class.
+    /// The production source of this file, excluding test-only items.
     fn production_source() -> String {
-        let src = include_str!("mux.rs").replace("\r\n", "\n");
-        let marker = "\n#[cfg(test)]\nmod node_tests {";
-        let cut = src
-            .find(marker)
-            .expect("mux.rs must have a test module to slice off");
-        let production = src[..cut].to_string();
+        let production = kettle_test_support::production_source(include_str!("mux.rs"));
         assert!(
             !production.contains("fn production_source()"),
-            "the slice must exclude the test module, or every guard built on \
-             it still self-matches"
+            "the production slice retained its own helper"
+        );
+        assert!(
+            !production.contains("#[test]"),
+            "the production slice retained a test function"
+        );
+        assert!(
+            !production.contains("#[cfg(test)]"),
+            "the production slice retained a test-only item"
         );
         production
     }
@@ -3967,6 +4151,29 @@ mod node_tests {
             Some(Failed),
             "sticky transport failure must dominate read-only policy"
         );
+    }
+
+    #[test]
+    fn broadcast_key_encoding_runs_for_each_target_mode() {
+        let kitty = kettle_core::TermMode::REPORT_ALL_KEYS_AS_ESC
+            | kettle_core::TermMode::REPORT_EVENT_TYPES;
+        let targets = [(10, kettle_core::TermMode::empty()), (20, kitty)];
+        let press = encode_target_modes(targets, |mode| {
+            Some(
+                if mode.contains(kettle_core::TermMode::REPORT_ALL_KEYS_AS_ESC) {
+                    b"\x1b[97;1u".to_vec()
+                } else {
+                    b"a".to_vec()
+                },
+            )
+        });
+        assert_eq!(press, [(10, b"a".to_vec()), (20, b"\x1b[97;1u".to_vec())]);
+
+        let release = encode_target_modes(targets, |mode| {
+            mode.contains(kettle_core::TermMode::REPORT_EVENT_TYPES)
+                .then(|| b"\x1b[97;1:3u".to_vec())
+        });
+        assert_eq!(release, [(20, b"\x1b[97;1:3u".to_vec())]);
     }
 
     #[test]
@@ -4090,6 +4297,91 @@ mod node_tests {
 
         drop(user_rx);
         drop(reply_rx);
+    }
+
+    #[test]
+    fn pty_input_worker_finishes_started_message_before_priority_reply() {
+        let (user_tx, user_rx) = crossbeam_channel::bounded(1);
+        let (reply_tx, reply_rx) = crossbeam_channel::bounded(1);
+        let user_bytes: Arc<[u8]> = Arc::from(vec![b'u'; PTY_INPUT_WRITE_CHUNK_BYTES + 37]);
+        let reply_bytes: Arc<[u8]> = Arc::from(&b"reply"[..]);
+        let queued_user_bytes = Arc::new(AtomicUsize::new(user_bytes.len()));
+        let queued_reply_bytes = Arc::new(AtomicUsize::new(0));
+        user_tx
+            .send(QueuedPtyInput {
+                bytes: user_bytes.clone(),
+                queued_bytes: queued_user_bytes.clone(),
+            })
+            .unwrap();
+        drop(user_tx);
+
+        let failed = AtomicBool::new(false);
+        let stop = AtomicBool::new(false);
+        let waker: Waker = Arc::new(|| {});
+        let mut reply_tx = Some(reply_tx);
+        let mut written = Vec::new();
+        let mut writes = 0usize;
+        run_pty_input_worker(reply_rx, user_rx, &failed, &stop, &waker, |bytes| {
+            let count = bytes.len().min(97);
+            written.extend_from_slice(&bytes[..count]);
+            writes += 1;
+            if writes == 1 {
+                queued_reply_bytes.store(reply_bytes.len(), Ordering::Release);
+                reply_tx
+                    .take()
+                    .unwrap()
+                    .send(QueuedPtyInput {
+                        bytes: reply_bytes.clone(),
+                        queued_bytes: queued_reply_bytes.clone(),
+                    })
+                    .unwrap();
+            }
+            Ok(count)
+        });
+
+        let mut expected = user_bytes.to_vec();
+        expected.extend_from_slice(&reply_bytes);
+        assert_eq!(written, expected);
+        assert_eq!(queued_user_bytes.load(Ordering::Acquire), 0);
+        assert_eq!(queued_reply_bytes.load(Ordering::Acquire), 0);
+        assert!(!failed.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn pty_input_worker_bounds_reply_priority_between_messages() {
+        let (user_tx, user_rx) = crossbeam_channel::bounded(1);
+        let (reply_tx, reply_rx) = crossbeam_channel::bounded(2);
+        let queued_user_bytes = Arc::new(AtomicUsize::new(1));
+        let queued_reply_bytes = Arc::new(AtomicUsize::new(2));
+        user_tx
+            .send(QueuedPtyInput {
+                bytes: Arc::from(&b"u"[..]),
+                queued_bytes: queued_user_bytes.clone(),
+            })
+            .unwrap();
+        drop(user_tx);
+        for byte in *b"12" {
+            reply_tx
+                .send(QueuedPtyInput {
+                    bytes: Arc::from(&[byte][..]),
+                    queued_bytes: queued_reply_bytes.clone(),
+                })
+                .unwrap();
+        }
+        drop(reply_tx);
+
+        let failed = AtomicBool::new(false);
+        let stop = AtomicBool::new(false);
+        let waker: Waker = Arc::new(|| {});
+        let mut written = Vec::new();
+        run_pty_input_worker(reply_rx, user_rx, &failed, &stop, &waker, |bytes| {
+            written.extend_from_slice(bytes);
+            Ok(bytes.len())
+        });
+
+        assert_eq!(written, b"1u2");
+        assert_eq!(queued_user_bytes.load(Ordering::Acquire), 0);
+        assert_eq!(queued_reply_bytes.load(Ordering::Acquire), 0);
     }
 
     #[test]
@@ -4593,63 +4885,6 @@ mod node_tests {
             after < before,
             "shrink moved {before}px to {after}px — the wrong direction"
         );
-    }
-
-    /// Drift guard. `compute_broadcast_targets` is the
-    /// pure helper that maps a `BroadcastScope` + focused pane +
-    /// Terminator's `autoclean_groups`. kettle has no group registry to prune —
-    /// a group is just the name its panes carry — so the thing that can outlive
-    /// its members is the broadcast *scope*. Left behind, the titlebar goes on
-    /// claiming a group nobody is in, and the next pane given that name is
-    /// silently swept into a broadcast set up for panes that are gone.
-    #[test]
-    fn a_group_with_no_panes_left_stops_being_the_broadcast_scope() {
-        // The whole decision, both axes:
-        assert!(
-            group_scope_is_stale(true, false),
-            "empty group, cleaning on"
-        );
-        assert!(
-            !group_scope_is_stale(true, true),
-            "a group that still has members must survive the removal of one"
-        );
-        assert!(
-            !group_scope_is_stale(false, false),
-            "`autoclean-groups = false` keeps the scope, as Terminator does"
-        );
-        assert!(!group_scope_is_stale(false, true));
-
-        // And the Mux applies it: no panes at all means no members.
-        let mut m = Mux::new();
-        m.broadcast = BroadcastScope::Group("fleet".into());
-        m.hoover_groups();
-        assert_eq!(m.broadcast, BroadcastScope::Off);
-
-        let mut kept = Mux::new();
-        kept.autoclean_groups = false;
-        kept.broadcast = BroadcastScope::Group("fleet".into());
-        kept.hoover_groups();
-        assert_eq!(kept.broadcast, BroadcastScope::Group("fleet".into()));
-
-        // Off and Tab scopes are not group scopes and are never touched.
-        for scope in [
-            BroadcastScope::Off,
-            BroadcastScope::Tab,
-            BroadcastScope::All,
-        ] {
-            let mut m = Mux::new();
-            m.broadcast = scope.clone();
-            m.hoover_groups();
-            assert_eq!(m.broadcast, scope);
-        }
-
-        // And the whole thing is opt-out: `autoclean-groups = false` keeps the
-        // scope pointed at the empty group, which is what Terminator does.
-        let mut kept = Mux::new();
-        kept.autoclean_groups = false;
-        kept.broadcast = BroadcastScope::Group("fleet".into());
-        kept.hoover_groups();
-        assert_eq!(kept.broadcast, BroadcastScope::Group("fleet".into()));
     }
 
     /// Terminator's `always_split_with_profile`. Off (the default), splitting
@@ -5746,6 +5981,26 @@ mod node_tests {
                 &[PathBuf::from("/a/one.txt"), PathBuf::from("/a/two.txt")]
             ),
             "'/a/one.txt' '/a/two.txt'"
+        );
+    }
+
+    #[test]
+    fn path_paste_fanout_formats_every_target_shell_independently() {
+        use std::path::PathBuf;
+
+        let powershell = vec!["pwsh.exe".to_string()];
+        let wsl = vec!["wsl.exe".to_string()];
+        let formatted = format_paths_for_targets(
+            [(10, powershell.as_slice()), (20, wsl.as_slice())],
+            &[PathBuf::from(r"C:\Users\me\a b.txt")],
+            true,
+        );
+        assert_eq!(
+            formatted,
+            [
+                (10, "'C:\\Users\\me\\a b.txt' ".to_string()),
+                (20, "'/mnt/c/Users/me/a b.txt' ".to_string()),
+            ]
         );
     }
 

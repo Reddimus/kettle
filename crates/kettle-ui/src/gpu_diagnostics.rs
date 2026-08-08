@@ -340,27 +340,14 @@ fn sanitize(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::{AtomicU64, Ordering};
 
-    static NEXT_DIR: AtomicU64 = AtomicU64::new(0);
-
-    struct TestDir(PathBuf);
+    struct TestDir(kettle_test_support::PrivateTempDir);
 
     impl TestDir {
         fn new(label: &str) -> Self {
-            let id = NEXT_DIR.fetch_add(1, Ordering::Relaxed);
-            let path = crate::test_scratch_root().join(format!(
-                "kettle-gpu-diagnostics-{label}-{}-{id}",
-                std::process::id()
-            ));
-            std::fs::create_dir_all(&path).unwrap();
-            Self(path)
-        }
-    }
-
-    impl Drop for TestDir {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(&self.0);
+            Self(kettle_test_support::private_tempdir(&format!(
+                "kettle-gpu-diagnostics-{label}-"
+            )))
         }
     }
 
@@ -408,9 +395,15 @@ mod tests {
             kind: "device_lost".to_string(),
             message: "driver\nreset\u{7}".to_string(),
         };
-        let mut log =
-            IncidentLog::start_at(Some(&dir.0), 1234, 42, "2.34.3 abc", adapter(), Some(fault))
-                .unwrap();
+        let mut log = IncidentLog::start_at(
+            Some(dir.0.path()),
+            1234,
+            42,
+            "2.34.3 abc",
+            adapter(),
+            Some(fault),
+        )
+        .unwrap();
         log.record_attempt(1, "preferred").unwrap();
         log.record_failure(1, "preferred", "adapter\nmissing")
             .unwrap();
@@ -431,13 +424,22 @@ mod tests {
     #[test]
     fn diagnostic_rotation_retains_ten_incidents() {
         let dir = TestDir::new("rotation");
-        let diagnostics = diagnostic_dir(Some(&dir.0));
-        std::fs::create_dir_all(&diagnostics).unwrap();
+        let diagnostics = diagnostic_dir(Some(dir.0.path()));
+        let bootstrap_path = diagnostics.join("bootstrap");
+        let bootstrap = kettle_state::create_private_file_new(&bootstrap_path).unwrap();
+        // Windows creation handles deliberately withhold FILE_SHARE_DELETE while
+        // the new object is validated. Close that handle before reopening via
+        // the removal API's required path, or ReOpenFile conflicts with the
+        // creation handle itself and returns ERROR_SHARING_VIOLATION.
+        drop(bootstrap);
+        let bootstrap = kettle_state::open_existing_private_file(&bootstrap_path).unwrap();
+        kettle_state::remove_open_private_file(bootstrap, &bootstrap_path).unwrap();
         for index in 0..12 {
             std::fs::write(diagnostics.join(format!("gpu-{index:04}-1.jsonl")), b"{}\n").unwrap();
         }
 
-        let log = IncidentLog::start_at(Some(&dir.0), 9999, 1, "test", adapter(), None).unwrap();
+        let log =
+            IncidentLog::start_at(Some(dir.0.path()), 9999, 1, "test", adapter(), None).unwrap();
         let count = std::fs::read_dir(&diagnostics).unwrap().count();
         assert_eq!(count, RETAINED_INCIDENTS);
         assert!(log.path().exists());
@@ -447,7 +449,7 @@ mod tests {
     fn diagnostic_stops_before_incident_size_cap() {
         let dir = TestDir::new("cap");
         let mut log =
-            IncidentLog::start_at(Some(&dir.0), 4321, 7, "test", adapter(), None).unwrap();
+            IncidentLog::start_at(Some(dir.0.path()), 4321, 7, "test", adapter(), None).unwrap();
         let message = "x".repeat(MAX_MESSAGE_CHARS);
         for attempt in 1..=1000 {
             log.record_failure(attempt, "force_software", &message)

@@ -303,20 +303,32 @@ release:
 
 # === Verification gauntlet =========================================
 
+# Execute the shipped snippets rather than merely checking that their source
+# text is non-empty. macOS supplies the stock zsh configuration and Bash 3.2
+# needed for those regressions; Windows runs each installed PowerShell host.
+[unix]
+shell-integration-check:
+    python3 scripts/check-shell-integration.py
+
+[windows]
+shell-integration-check:
+    python scripts/check-shell-integration.py
+
 # The CI matrix job's core Rust gate (fmt/clippy/build/test/doc) plus
-# the live-UI-helper self-test. This is the fast pre-commit loop; run
+# the live-UI-helper and native shell-integration fixtures. This is the fast
+# pre-commit loop; run
 # it before every commit. It does NOT cover the packaging/installer/
 # update-manifest/GPU-render checks ci.yml also runs — see
 # `gauntlet-full` below for those.
-gauntlet: live-ui-helper-selftest
+gauntlet: live-ui-helper-selftest shell-integration-check
     cargo fmt --all --check
-    cargo clippy --workspace --all-targets -- -D warnings
+    cargo clippy --locked --workspace --all-targets -- -D warnings
     # Feature unification hides a crate that leans on an optional dependency,
     # so the workspace lint above structurally cannot catch it.
-    cargo clippy -p kettle-core --all-targets -- -D warnings
-    cargo build --workspace --all-targets
-    cargo test --workspace
-    cargo doc --workspace --no-deps
+    cargo clippy --locked -p kettle-core --all-targets -- -D warnings
+    cargo build --locked --workspace --all-targets
+    cargo test --locked --workspace
+    cargo doc --locked --workspace --no-deps
     @echo ""
     @echo "GAUNTLET PASSED — core Rust gate green. Run 'just gauntlet-full' for required current-OS native gates."
 
@@ -636,6 +648,21 @@ linux-perf:
     @echo "On Windows use: pwsh -File scripts/perf/perf-all.ps1 -Label after"
     @echo "then:          pwsh -File scripts/perf/score.ps1 -ResultsDir target/perf-results/after"
 
+# Compare Kettle against installed macOS peer terminals using Hyperfine, native
+# max-RSS accounting, quiet-window CPU samples, and a top-half rank gate. This
+# is desktop-local by design and writes target/perf-results/macos-local/.
+[macos]
+macos-perf:
+    ./scripts/perf/macos-compare.sh
+
+[linux]
+macos-perf:
+    @echo "macos-perf is a macOS desktop benchmark."
+
+[windows]
+macos-perf:
+    @echo "macos-perf is a macOS desktop benchmark."
+
 # === Install / uninstall ===========================================
 
 # Drop a build under ~/.local/ (scripts/install.sh — Linux
@@ -765,10 +792,10 @@ menu-shot *ARGS:
 
 # Start a real kettle window with `text-renderer = grid`, capture live
 # screenshots through `kettle ctl screenshot`, and assert cursor blink changes
-# only a cursor-sized region. This is Linux desktop-local by design: it needs a
-# visible X11/Wayland session and complements the CI offscreen renderer tests.
+# only a cursor-sized region. This needs a visible Linux X11/Wayland or unlocked
+# macOS Aqua session and complements the CI offscreen renderer tests.
 [unix]
-live-render-smoke:
+live-render-smoke: release
     KETTLE_BIN=./target/release/kettle ./scripts/check-live-render-smoke.sh
 
 [windows]
@@ -899,8 +926,8 @@ zoom-keybind-smoke:
 # Reproduce underline scrolling with git diff | delta under repeated j/k input.
 # Captures PNG frames and read_cells JSON under target/diagnostics/underline-scroll-*.
 [unix]
-underline-scroll-smoke: release
-    KETTLE_BIN=./target/release/kettle ./scripts/check-underline-scroll-smoke.sh
+underline-scroll-smoke:
+    python3 scripts/check-live-ui-smoke.py --cargo-release underline
 
 [windows]
 underline-scroll-smoke:

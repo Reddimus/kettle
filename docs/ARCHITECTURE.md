@@ -120,12 +120,15 @@ held PE version resource, and accepts only a strict upgrade.
 Both platforms parse the digest-verified archive directly and materialize its
 manifest-verified members into immutable byte buffers; transaction publication
 never returns to an extracted pathname. The release grammar is capped at 128
-entries and 512 MiB. Each schema-2 backup has an id-bound marker and must exactly
-match the journal's `existed=true` paths, sizes, and hashes before rollback or
-cleanup. Rollback also compares each live destination with the recorded
-replacement fingerprint and preserves later writes on conflict. A committed
-journal retains the last-known-good bytes until a process at the target version
-reaches the managed startup checkpoint.
+entries and 512 MiB. Before a backup pathname can appear, the schema-2 journal
+durably records a transaction-bound `backing_up` intent with the destination's
+prior size and hash. Recovery accepts an absent or partial backup only for that
+one intent and only while the live destination still matches the recorded prior
+bytes; established backups must exactly match the journal's paths, sizes, and
+hashes before rollback or cleanup. Rollback also compares each live destination
+with the recorded replacement fingerprint and preserves later writes on
+conflict. A committed journal retains the last-known-good bytes until a process
+at the target version reaches the managed startup checkpoint.
 
 Linux retains the open descriptor-relative parent until each destination
 snapshot leaf is opened; a `/proc/self/fd/...` capability can therefore never
@@ -137,7 +140,11 @@ only directories that Kettle created. Install, authenticated update, and
 uninstall walk components without following links, validate owner/write modes,
 and verify the complete prior record before mutation. Uninstall consequently
 unlinks only recorded leaves and removes only recorded empty directories; it
-does not recursively delete a shared XDG prefix or adopt a legacy tree.
+does not recursively delete a shared XDG prefix or adopt a legacy tree. Startup
+and explicit update first authenticate the marker, layout, prefix ownership, and
+update journal under the update lock; they recover an incomplete transaction
+before checking file-content provenance, so the old record cannot strand the
+recovery data after a crash between publication and provenance replacement.
 The Windows lock order is update then running; the helper releases running then
 update after durable commit and pending-record removal, before asking a fully
 qualified system PowerShell to execute the exact archive-verified `install.ps1`

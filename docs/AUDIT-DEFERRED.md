@@ -93,6 +93,145 @@ tracked here so they are not lost.
 - Per-window `FontSystem` sharing; lazy system-font load on first frame. Both are
   speculative — profile on the maintainer's machine before implementing.
 
+## Deferred from the 2026-08-07 full-repo audit
+
+- **Two `production_source` forms that leave test-only text in the slice.**
+  Neither occurs in this workspace; both are recorded so the contract's limits
+  are written down rather than discovered later.
+
+  1. `#[cfg_attr(not(test), cfg(test))]` — an item that exists only in test
+     builds, expressed through `cfg_attr`. All `cfg_attr` attributes are ignored,
+     so the item survives. This predates the shared helper and is not a
+     regression.
+  2. `/** needle */ #[cfg(test)] fn f() {}` written on a single line. Doc
+     backtracking requires the attribute to start its line, so the doc text
+     survives the item's removal. `rustfmt` normalises this form, which is why
+     the workspace does not contain it.
+
+  Both leave *test* text behind, which can only make a positive guard pass
+  spuriously. Neither deletes production text, which is the failure that makes a
+  negative guard pass while protecting nothing — that direction is what the
+  helper's tests are weighted toward, and it is why these two are deferred rather
+  than fixed under release pressure.
+
+
+- **`exec_streams_stdout_and_exits_zero` is flaky on macOS at roughly 2–5 %.**
+  The test's own comment already records that it "has failed intermittently on
+  macOS CI with empty stdout"; this entry adds the missing part, which is a
+  measured rate and a decisive answer to whether the v2.54.0 change set caused
+  it. `crates/kettle/tests/exec.rs:346` — the `out.contains("agent-marker-7f3")`
+  assertion — fails with empty stdout.
+
+  Measured on an Apple-silicon macOS 15 host, `main` at `f67cce6` versus this
+  release branch, same machine, back to back:
+
+  | | full 26-test binary | test alone |
+  |---|---|---|
+  | `main` (f67cce6) | 1 / 25 | 0 / 30 |
+  | `integration/v2.54.0` | 2 / 25 | 1 / 30 |
+
+  Three conclusions, all of which needed the numbers rather than a guess:
+
+  1. **It is pre-existing.** 1/55 on `main` against 3/55 on the branch is not a
+     significant difference at these sample sizes. The branch did not introduce
+     it — and `git log main..HEAD -- crates/kettle/tests/exec.rs` is empty, so
+     the test itself is untouched.
+  2. **It is not caused by this release's ANSI-stripper change**, which was the
+     obvious suspicion because the test runs `--strip-ansi` and
+     `crates/kettle/src/exec.rs` was edited here. `main` predates that change and
+     still flakes.
+  3. **It is not purely a concurrency artifact.** It reproduces with the test run
+     alone, so contention between the binary's 26 PTY tests is not required —
+     which rules out the cheapest possible fix.
+
+  The one captured diagnostic instance carried "asciicast capture stopped
+  (recording I/O failed or finalization exceeded its bound)" immediately before
+  the empty read, which points at recording finalization racing the child's
+  final flush rather than at the stripper. Not chased further here because it is
+  pre-existing and unrelated to this release's scope; it wants its own change
+  with its own measurement, and the rate above is the baseline to beat.
+
+- **`kettle ctl screenshot` times out on macOS, so the live-UI smoke cannot
+  finish there.** This is the blocker for `just agent-tui-smoke` on macOS, which
+  until this release could never run at all — it gated on
+  `DISPLAY`/`WAYLAND_DISPLAY` and skipped with exit 0, reading exactly like a
+  pass. The gate is fixed; this is what the smoke hits next.
+
+  What is established, by direct measurement on an Apple-silicon macOS 15 host
+  running the bare `target/release/kettle` binary:
+
+  - `kettle ctl list_panes` and `kettle ctl ui_geometry` **work** — the control
+    server is healthy and Kettle believes it has a window with sane geometry.
+  - `kettle --screenshot out.png` and `--screenshot-menu` **work** (a 61 KB
+    96x28 PNG). The offscreen render-and-read-back path is fine.
+  - `kettle ctl screenshot` **times out at exactly 10 s**
+    (`crates/kettle-ui/src/app.rs:16922`). That path calls `request_redraw()` and
+    waits for the presented frame, unlike the offscreen path.
+  - macOS System Events reports the process has **0 windows**, and AppleScript
+    cannot bring it frontmost.
+  - `/Applications/kettle.app` exists and is what real users launch; the smoke
+    drives the bare binary.
+
+  So the leading hypothesis is that a non-bundled Mach-O does not register a
+  presenting window with the macOS window server, meaning `request_redraw()`
+  never delivers a frame and the ctl screenshot legitimately cannot complete —
+  a HARNESS problem, with real users unaffected because they launch the bundle.
+  **That hypothesis is NOT confirmed.** An investigation that was constructing a
+  minimal `.app` bundle to test it died on a network failure before reaching a
+  verdict, so the alternative — that the screenshot path itself is broken on
+  Metal — has not been excluded.
+
+  Settle it before assuming either. Useful evidence: `CGWindowListCopyWindowInfo`
+  at the CoreGraphics level rather than the accessibility level, and whether the
+  same ctl screenshot succeeds when driven against `/Applications/kettle.app`.
+  If it is the harness, the smoke must drive a bundle; either way it must fail
+  loudly rather than skip, because a silent skip is what hid this for so long.
+
+  Consequence to state plainly: **the live interactive leg — tmux, Codex CLI,
+  Claude Code CLI, and Neovim/AstroNvim inside a real Kettle window — is not
+  verified on macOS.** The non-interactive `scripts/check-agent-cli-smoke.sh`
+  passes all 12 checks there, including the configured-AstroNvim path, and that
+  is the full extent of what macOS coverage currently proves.
+
+- **One shared streaming control-state kernel for the three ANSI parsers.** The
+  `kettle exec` stripper, the session-log scrubber, and the VT extractor have now
+  drifted from each other **three separate times**, and the 2026-08-07 audit found
+  holes in all three simultaneously — each in a *different* state, each already
+  fixed in one parser and not the others. The 2026-08-07 pass fixed the holes but
+  deliberately did not unify them: two of the parsers were being repaired
+  concurrently and a unifying refactor would have collided with that work.
+
+  A shared kernel must cover ground/pass, ESC, escape intermediates, CSI,
+  OSC, DCS/SOS/PM/APC, 7-bit and C1 introducers and terminators, OSC BEL, raw ST,
+  CAN/SUB, ESC-from-anywhere redispatch, split ESC/ST/UTF-8 input across feed
+  boundaries, bounded recovery, and explicit UTF-8 lead ownership. Policy hooks
+  decide forwarding versus suppression, protocol extraction, size budgets, and
+  session resets, so the three consumers share state semantics without sharing
+  output behavior.
+
+  Until this lands, treat any fix to one of the three as incomplete until the
+  same input has been checked against the other two. The
+  `ansi_stripper_control_events_cover_every_state_cross_product` test added in
+  this pass is the shape the shared kernel's conformance matrix should take.
+
+- **`scroll_page_up` does not enter scrollback on macOS — reproduced three times.**
+  `scripts/perf/kettle-live-probes.py` seeds 1600 lines and then asserts
+  `display_offset > 0` after `perform_action scroll_page_up`. That assertion
+  failed during macOS comparator development and again in the full comparator
+  run, under different machine loads:
+
+      kettle-live-probes: scroll_page_up did not enter scrollback
+
+  Two independent reproductions make contention flakiness the less likely
+  explanation, so this is now a **probable real defect** rather than an
+  unconfirmed observation. It was recorded rather than fixed because it was found
+  during a benchmark run and diagnosing it properly needs a live UI session, not
+  a hurried patch. Start from `Action::ScrollPageUp` in
+  `crates/kettle-ui/src/app.rs:13204` and the `display_offset` the control plane
+  reports through `read_screen`; establish first whether the viewport actually
+  fails to move or whether only the reported offset is wrong, because those are
+  different bugs.
+
 ## Search follow-up and platform evidence
 
 The two-track search audit is recorded in

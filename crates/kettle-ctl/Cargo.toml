@@ -46,3 +46,6 @@ windows-sys = { version = "0.61", features = [
     # GetExitCodeProcess for stale-entry cleanup.
     "Win32_System_Threading",
 ] }
+
+[dev-dependencies]
+kettle-test-support.workspace = true

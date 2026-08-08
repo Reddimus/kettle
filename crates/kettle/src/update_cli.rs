@@ -3,11 +3,15 @@ use std::io::{BufRead as _, IsTerminal as _, Write as _};
 use kettle_update::{CheckOutcome, FeedClient, UpdateError};
 
 pub fn run(assume_yes: bool, current: &str) -> i32 {
-    if let Err(error) = kettle_update::detect_managed_install() {
-        eprintln!("kettle update: {error}");
-        eprintln!(
-            "Use the package manager or installer that owns this executable. Self-update is available for installs created by kettle's official Windows or Linux installer."
-        );
+    if let Err(error) = kettle_update::prepare_managed_install_for_update() {
+        if matches!(&error, UpdateError::UpdateLocked) {
+            eprintln!("kettle update: another update is already running");
+        } else {
+            eprintln!("kettle update: {error}");
+            eprintln!(
+                "Use the package manager or installer that owns this executable. Self-update is available for installs created by kettle's official Windows or Linux installer."
+            );
+        }
         return 2;
     }
 

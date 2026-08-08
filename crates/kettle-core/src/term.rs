@@ -460,6 +460,25 @@ fn pty_eof_sequence(
     Ok(Some(([configured_veof; 2], count)))
 }
 
+/// The production source of this file, excluding test-only items.
+#[cfg(test)]
+fn production_source() -> String {
+    let production = kettle_test_support::production_source(include_str!("term.rs"));
+    assert!(
+        !production.contains("fn production_source()"),
+        "the production slice retained its own helper"
+    );
+    assert!(
+        !production.contains("#[test]"),
+        "the production slice retained a test function"
+    );
+    assert!(
+        !production.contains("#[cfg(test)]"),
+        "the production slice retained a test-only item"
+    );
+    production
+}
+
 #[cfg(test)]
 mod pty_eof_tests {
     use super::{
@@ -2225,6 +2244,9 @@ pub struct Terminal {
     /// [`Terminal::set_log_file`],
     /// which keeps the pair in sync.
     log_active: Arc<std::sync::atomic::AtomicBool>,
+    /// Changes whenever the installed writer's logging session changes. The
+    /// reader uses it to keep parser state from crossing session boundaries.
+    log_generation: Arc<std::sync::atomic::AtomicU64>,
     /// Keeps worker-side failure reporting edge-triggered while preserving the
     /// failed writer long enough for the UI to observe its exact reason.
     log_failure_reported: AtomicBool,
@@ -4047,6 +4069,9 @@ impl Terminal {
         let log_active: Arc<std::sync::atomic::AtomicBool> =
             Arc::new(std::sync::atomic::AtomicBool::new(false));
         let log_active_for_struct = log_active.clone();
+        let log_generation: Arc<std::sync::atomic::AtomicU64> =
+            Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let log_generation_for_struct = log_generation.clone();
         // Terminator parity: when true, strip ANSI
         // escape sequences from the bytes before writing to the
         // log file. Default false preserves the raw-stream
@@ -4084,6 +4109,7 @@ impl Terminal {
             let session_log = session_log.clone();
             let log_strip_ansi = log_strip_ansi.clone();
             let log_active = log_active.clone();
+            let log_generation = log_generation.clone();
             let stop = stop.clone();
             let drain_output = drain_output.clone();
             std::thread::Builder::new()
@@ -4093,12 +4119,7 @@ impl Terminal {
                     let mut extractor = Extractor::new();
                     let mut active_alternate = false;
                     let mut observed_reflow_generation = 0;
-                    // Persistent across every PTY-read chunk for this pane's
-                    // lifetime (see `AnsiStripper` docs): a CSI/OSC sequence
-                    // whose terminator lands in the next 64 KiB read is still
-                    // recognized, instead of leaking its continuation bytes
-                    // into the log as literal text.
-                    let mut ansi_stripper = AnsiStripper::new();
+                    let mut session_log_filter = SessionLogFilter::default();
                     // A blocking PTY read must remain on a pump thread so the
                     // parser's DEC 2026 timeout can wake independently. Bound
                     // the handoff and recycle buffers: under output flood this
@@ -4265,12 +4286,11 @@ impl Terminal {
                                     && let Some(writer) = guard.as_mut()
                                 {
                                     let strip = log_strip_ansi.lock().map(|g| *g).unwrap_or(false);
-                                    let bytes = if strip {
-                                        ansi_stripper.strip(&buffer)
-                                    } else {
-                                        buffer.clone()
-                                    };
+                                    let generation = log_generation.load(Ordering::Acquire);
+                                    let bytes =
+                                        session_log_filter.filter(&buffer, generation, strip);
                                     if writer.try_write(bytes).is_err() {
+                                        log_generation.fetch_add(1, Ordering::AcqRel);
                                         log_active.store(false, Ordering::Release);
                                     }
                                 }
@@ -4946,6 +4966,7 @@ impl Terminal {
             session_log: session_log_for_struct,
             log_strip_ansi: log_strip_ansi_for_struct,
             log_active: log_active_for_struct,
+            log_generation: log_generation_for_struct,
             log_failure_reported: AtomicBool::new(false),
             log_waker: waker,
             output_start_seen: output_start_seen_for_struct,
@@ -5054,17 +5075,21 @@ impl Terminal {
                 }
                 let mut writer = AsyncFileWriter::spawn("kettle-session-log-writer", writer)?;
                 let active = Arc::clone(&self.log_active);
+                let generation = Arc::clone(&self.log_generation);
                 let wake = Arc::clone(&self.log_waker);
                 writer.set_failure_waker(Arc::new(move || {
+                    generation.fetch_add(1, Ordering::AcqRel);
                     active.store(false, Ordering::Release);
                     wake();
                 }));
                 self.log_failure_reported.store(false, Ordering::Release);
                 *guard = Some(writer);
+                self.log_generation.fetch_add(1, Ordering::AcqRel);
                 self.log_active.store(true, Ordering::Release);
             }
             None => {
                 self.log_active.store(false, Ordering::Release);
+                self.log_generation.fetch_add(1, Ordering::AcqRel);
                 self.log_failure_reported.store(false, Ordering::Release);
                 if let Some(writer) = guard.as_mut() {
                     writer.request_finish();
@@ -6721,14 +6746,14 @@ enum StripState {
     /// Just saw a bare ESC; the next byte decides CSI (`[`), OSC (`]`), or a
     /// single-char escape (anything else).
     EscSeen,
+    /// Inside an ESC sequence whose intermediates are `0x20..=0x2f`, waiting
+    /// for its `0x30..=0x7e` final byte.
+    EscapeIntermediate,
     /// Inside `ESC [ params...`, scanning for the CSI final byte
     /// (`0x40..=0x7e`).
     Csi,
-    /// Inside `ESC ] ...`, scanning for BEL (`0x07`) or ST (`ESC \\`).
-    /// `esc_seen` is true right after an ESC byte was seen inside the OSC
-    /// body, so the very next byte can complete (`\\`) or invalidate it (any
-    /// other byte, including another ESC, which restarts the same check).
-    Osc { esc_seen: bool },
+    /// Inside `ESC ] ...`, scanning for BEL (`0x07`) or ST.
+    Osc,
     /// Inside a DCS/APC/PM/SOS control string (`ESC P`, `ESC _`, `ESC ^`,
     /// `ESC X`), scanning for ST.
     ///
@@ -6737,7 +6762,7 @@ enum StripState {
     /// the session log as text — Sixel pixel data and Kitty graphics payloads,
     /// which carry encoded file paths and shared-memory names. A log the user
     /// enabled to keep a transcript was instead accumulating binary payloads.
-    String { esc_seen: bool },
+    String,
 }
 
 /// Terminator parity (`plugins/logger.py` extension): a persistent-state
@@ -6765,6 +6790,9 @@ pub struct AnsiStripper {
     /// that character and leaked the remainder into the log. The VT extractor
     /// already draws this distinction; the log stripper has to as well.
     utf8_continuation: u8,
+    /// Whether the lead byte of the current UTF-8 scalar reached the log.
+    /// Continuations follow their lead across parser-state transitions.
+    utf8_emitted: bool,
 }
 
 impl AnsiStripper {
@@ -6786,23 +6814,23 @@ impl AnsiStripper {
             if self.utf8_continuation > 0 {
                 if matches!(b, 0x80..=0xbf) {
                     self.utf8_continuation -= 1;
-                    if matches!(self.state, StripState::Plain) {
+                    if self.utf8_emitted {
                         out.push(b);
                     }
                     continue;
                 }
                 self.utf8_continuation = 0;
             }
-            // A character can only begin where text is being read: plain
-            // output, or a control-string payload. CSI parameters are ASCII.
-            if matches!(self.state, StripState::Plain | StripState::String { .. }) {
-                self.utf8_continuation = match b {
-                    0xc2..=0xdf => 1,
-                    0xe0..=0xef => 2,
-                    0xf0..=0xf4 => 3,
-                    _ => 0,
-                };
-            }
+            // Track leads in every state. A malformed escape can contain one,
+            // and consuming its lead while emitting continuations after the
+            // state returns to Plain would manufacture invalid UTF-8.
+            self.utf8_continuation = match b {
+                0xc2..=0xdf => 1,
+                0xe0..=0xef => 2,
+                0xf0..=0xf4 => 3,
+                _ => 0,
+            };
+            self.utf8_emitted = matches!(self.state, StripState::Plain);
             match self.state {
                 StripState::Plain => {
                     if b == 0x1b {
@@ -6812,19 +6840,19 @@ impl AnsiStripper {
                     }
                 }
                 StripState::EscSeen => {
-                    self.state = match b {
-                        b'[' => StripState::Csi,
-                        b']' => StripState::Osc { esc_seen: false },
-                        // DCS / SOS / PM / APC all run to ST and carry a
-                        // payload that must not reach the log.
-                        b'P' | b'X' | b'^' | b'_' => StripState::String { esc_seen: false },
-                        // Single-char ESC (like ESC c reset): this one byte
-                        // completes it, back to plain.
-                        _ => StripState::Plain,
-                    };
+                    self.state = Self::escape_follower(b);
+                }
+                StripState::EscapeIntermediate => {
+                    if b == 0x1b {
+                        self.state = StripState::EscSeen;
+                    } else if b == 0x18 || b == 0x1a || (0x30..=0x7e).contains(&b) {
+                        self.state = StripState::Plain;
+                    }
                 }
                 StripState::Csi => {
-                    if b == 0x18 || b == 0x1a {
+                    if b == 0x1b {
+                        self.state = StripState::EscSeen;
+                    } else if b == 0x18 || b == 0x1a {
                         // CAN/SUB cancel the sequence. Without this the next
                         // ordinary character was consumed as the CSI final
                         // byte: `ESC [ 31 CAN hello` logged `ello` while the
@@ -6835,61 +6863,65 @@ impl AnsiStripper {
                     }
                     // Else still inside CSI params — keep scanning.
                 }
-                StripState::Osc { esc_seen } => {
-                    if esc_seen {
-                        // A prior byte in this OSC body was ESC. `\` now
-                        // completes the ST terminator; anything else means
-                        // that ESC wasn't a terminator after all — resume
-                        // scanning, re-arming `esc_seen` if THIS byte is
-                        // itself another ESC.
-                        self.state = if b == b'\\' {
-                            StripState::Plain
-                        } else {
-                            StripState::Osc {
-                                esc_seen: b == 0x1b,
-                            }
-                        };
-                    } else if b == 0x07 {
+                StripState::Osc => {
+                    if b == 0x07 || b == 0x9c {
                         self.state = StripState::Plain; // BEL terminator
                     } else if b == 0x18 || b == 0x1a {
                         // CAN/SUB cancel the string (DEC). Without this an
                         // unterminated OSC swallowed the remainder of the log.
                         self.state = StripState::Plain;
                     } else if b == 0x1b {
-                        self.state = StripState::Osc { esc_seen: true };
+                        // ESC terminates OSC and begins a fresh escape. This is
+                        // also how ESC \ represents ST.
+                        self.state = StripState::EscSeen;
                     }
                     // Else still inside the OSC payload — keep scanning.
                 }
-                StripState::String { esc_seen } => {
-                    if esc_seen {
-                        // `ESC \` is ST and ends the string. Any OTHER byte
-                        // means that ESC began a new sequence, which aborts the
-                        // string the way the terminal parser does — previously
-                        // `ESC ^ payload ESC c visible` left the stripper inside
-                        // `String` and swallowed `visible` and everything after.
-                        self.state = match b {
-                            b'\\' => StripState::Plain,
-                            0x1b => StripState::String { esc_seen: true },
-                            b'[' => StripState::Csi,
-                            b']' => StripState::Osc { esc_seen: false },
-                            b'P' | b'X' | b'^' | b'_' => StripState::String { esc_seen: false },
-                            // A single-character escape (`ESC c`) completes
-                            // here, and CAN/SUB cancel — either way the string
-                            // is over.
-                            _ => StripState::Plain,
-                        };
-                    } else if b == 0x9c && self.utf8_continuation == 0 {
+                StripState::String => {
+                    if b == 0x9c {
                         self.state = StripState::Plain; // 8-bit ST
                     } else if b == 0x18 || b == 0x1a {
                         self.state = StripState::Plain; // cancelled
                     } else if b == 0x1b {
-                        self.state = StripState::String { esc_seen: true };
+                        self.state = StripState::EscSeen;
                     }
                     // Else still inside the payload — dropped, not logged.
                 }
             }
         }
         out
+    }
+
+    fn escape_follower(b: u8) -> StripState {
+        match b {
+            b'[' => StripState::Csi,
+            b']' => StripState::Osc,
+            b'P' | b'X' | b'^' | b'_' => StripState::String,
+            0x20..=0x2f => StripState::EscapeIntermediate,
+            0x1b => StripState::EscSeen,
+            _ => StripState::Plain,
+        }
+    }
+}
+
+#[derive(Default)]
+struct SessionLogFilter {
+    stripper: AnsiStripper,
+    observed: Option<(u64, bool)>,
+}
+
+impl SessionLogFilter {
+    fn filter(&mut self, input: &[u8], generation: u64, strip: bool) -> Vec<u8> {
+        let current = (generation, strip);
+        if self.observed != Some(current) {
+            self.stripper = AnsiStripper::new();
+            self.observed = Some(current);
+        }
+        if strip {
+            self.stripper.strip(input)
+        } else {
+            input.to_vec()
+        }
     }
 }
 
@@ -7460,7 +7492,7 @@ mod placeholder_lock_order_tests {
         // Normalized, like every other source guard in this file: the split
         // patterns below embed `\n`, so a CRLF checkout would silently find
         // nothing and fail on an unrelated-looking `expect`.
-        let src = include_str!("term.rs").replace("\r\n", "\n");
+        let src = super::production_source();
         let body = src
             .split("pub fn placeholder_tiles(&self) -> Vec<Placement> {")
             .nth(1)
@@ -7489,7 +7521,7 @@ mod placeholder_lock_order_tests {
         // Normalized, like every other source guard in this file: the split
         // patterns below embed `\n`, so a CRLF checkout would silently find
         // nothing and fail on an unrelated-looking `expect`.
-        let src = include_str!("term.rs").replace("\r\n", "\n");
+        let src = super::production_source();
         let body = src
             .split("pub fn relative_tiles(&self) -> Vec<Placement> {")
             .nth(1)
@@ -7559,7 +7591,7 @@ mod detect_shells_tests {
     /// (a behavioral test would need to hang a real `wsl.exe`).
     #[test]
     fn list_wsl_distros_is_time_bounded() {
-        let src = include_str!("term.rs").replace("\r\n", "\n");
+        let src = super::production_source();
         let start = src
             .find("fn list_wsl_distros()")
             .expect("list_wsl_distros present");
@@ -7921,7 +7953,7 @@ mod home_dir_tests {
 
     #[test]
     fn session_log_parser_tap_only_uses_bounded_worker_admission() {
-        let source = include_str!("term.rs");
+        let source = super::production_source();
         let tap = source
             .split("// Terminator parity (logger.py): per-pane log")
             .nth(1)
@@ -7939,18 +7971,7 @@ mod home_dir_tests {
 
     #[test]
     fn session_log_target_open_is_deferred_to_the_persistence_worker() {
-        #[cfg(windows)]
-        let temp = {
-            let base = std::env::var_os("LOCALAPPDATA")
-                .or_else(|| std::env::var_os("USERPROFILE"))
-                .expect("Windows tests require LOCALAPPDATA or USERPROFILE");
-            tempfile::Builder::new()
-                .prefix("kettle-session-log-test-")
-                .tempdir_in(base)
-                .unwrap()
-        };
-        #[cfg(not(windows))]
-        let temp = tempfile::tempdir().unwrap();
+        let temp = kettle_test_support::private_tempdir("kettle-session-log-test-");
         let path = temp.path().join("deferred-session.log");
         let sink = LazySessionLogWriter::new(path.clone());
         assert!(
@@ -8006,6 +8027,26 @@ mod home_dir_tests {
             ("CAN cancels a CSI", &b"\x1b[31\x18hello"[..], "hello"),
             ("SUB cancels a CSI", &b"\x1b[31\x1ahello"[..], "hello"),
             (
+                "an escape intermediate consumes its final",
+                &b"before\x1b(Bafter"[..],
+                "beforeafter",
+            ),
+            (
+                "ESC from CSI starts a fresh OSC",
+                &b"\x1b[31\x1b]0;secret\x07visible"[..],
+                "visible",
+            ),
+            (
+                "raw ST terminates OSC",
+                &b"\x1b]0;title\x9cvisible"[..],
+                "visible",
+            ),
+            (
+                "a non-ST ESC aborts OSC",
+                &b"\x1b]0;title\x1bcvisible"[..],
+                "visible",
+            ),
+            (
                 "a non-ST ESC aborts a control string",
                 &b"\x1b^payload\x1bcvisible"[..],
                 "visible",
@@ -8034,6 +8075,47 @@ mod home_dir_tests {
                 "{label}: the stripper must end the sequence where the terminal does"
             );
         }
+    }
+
+    #[test]
+    fn escaped_utf8_leads_do_not_emit_orphaned_continuations() {
+        for scalar in [
+            &b"\xc3\xa9"[..],
+            &b"\xe2\x82\xac"[..],
+            &b"\xf0\x9f\x99\x82"[..],
+        ] {
+            for split in 0..=scalar.len() {
+                let mut input = b"head\x1b".to_vec();
+                let scalar_start = input.len();
+                input.extend_from_slice(scalar);
+                input.extend_from_slice(b"tail");
+                let mut stripper = super::AnsiStripper::new();
+                let boundary = scalar_start + split;
+                let mut out = stripper.strip(&input[..boundary]);
+                out.extend(stripper.strip(&input[boundary..]));
+                assert_eq!(
+                    std::str::from_utf8(&out),
+                    Ok("headtail"),
+                    "scalar {scalar:?}, split {split}: {out:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn session_log_filter_resets_between_sessions_and_strip_modes() {
+        let mut filter = super::SessionLogFilter::default();
+        assert_eq!(filter.filter(b"before\x1b]0;partial", 1, true), b"before");
+
+        // Logging is inactive while the terminal consumes the BEL. A new log
+        // must not inherit the old log's OSC state.
+        assert_eq!(filter.filter(b"visible", 2, true), b"visible");
+
+        // Changing raw/stripped mode is another parser-session boundary even
+        // when the writer generation itself has not changed.
+        assert_eq!(filter.filter(b"\x1b]0;partial", 2, true), b"");
+        assert_eq!(filter.filter(b"raw", 2, false), b"raw");
+        assert_eq!(filter.filter(b"visible", 2, true), b"visible");
     }
 
     /// Ordinary UTF-8 text must survive the stripper untouched — the log is
@@ -10165,7 +10247,7 @@ mod teardown_tests {
         // And the setter is wired to that helper rather than to the monotonic
         // resize rule — a guard, because the two are one line apart and reusing
         // the resize wrapper here would silently make the rows inert again.
-        let src = include_str!("term.rs").replace("\r\n", "\n");
+        let src = super::production_source();
         let body = src
             .split("pub fn set_scrollback_limits(")
             .nth(1)
@@ -10628,7 +10710,7 @@ mod teardown_tests {
     fn drop_detaches_reader_never_joins() {
         // Normalize CRLF→LF first: the repo checks out with Windows line
         // endings, so byte patterns must not assume bare `\n`.
-        let src = include_str!("term.rs").replace("\r\n", "\n");
+        let src = super::production_source();
         // Anchor on the impl, not on the first `fn drop` in the file. There is
         // more than one `Drop` in this module, and which one comes first is an
         // accident of ordering — this test silently retargeted itself the
@@ -10735,7 +10817,7 @@ mod teardown_tests {
     /// be provoked from a test, but their ORDER can be checked directly.
     #[test]
     fn the_spawn_guard_covers_every_fallible_step_after_spawn() {
-        let src = include_str!("term.rs").replace("\r\n", "\n");
+        let src = super::production_source();
         let spawn = src
             .find("let child = pair.slave.spawn_command(cmd)?;")
             .expect("child spawn present");
@@ -11421,7 +11503,7 @@ mod atomic_geometry_tests {
 mod output_publish_guard {
     #[test]
     fn reader_sidechannels_share_the_generation_ordered_output_gate() {
-        let source = include_str!("term.rs").replace("\r\n", "\n");
+        let source = super::production_source();
         let reader_start = source
             .find(".name(\"kettle-pty-reader\"")
             .expect("PTY reader thread present");
@@ -11465,7 +11547,7 @@ mod output_publish_guard {
 
     #[test]
     fn pty_pump_spawn_failure_is_observable_and_closes_the_pane() {
-        let source = include_str!("term.rs").replace("\r\n", "\n");
+        let source = super::production_source();
         let name = source
             .find(".name(\"kettle-pty-pump\"")
             .expect("PTY pump thread present");

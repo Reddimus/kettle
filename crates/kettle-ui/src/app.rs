@@ -1,7 +1,7 @@
 //! winit application: window lifecycle, input routing, the tiled multiplexer,
 //! the search overlay, clipboard, and live config reload.
 
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
 use std::sync::Arc;
 
 use accesskit::{
@@ -31,7 +31,9 @@ use winit::window::{
 
 use crate::gpu_diagnostics::{IncidentLog, RecoveryAction, RecoveryState};
 use crate::input;
-use crate::mux::{Dir, Mux, PaneInputResult, PaneTitleOrigin, Rect};
+use crate::mux::{
+    BroadcastScope, Dir, Mux, PaneInputDelivery, PaneInputResult, PaneTitleOrigin, Rect,
+};
 use crate::window_state::{
     DpiResizeAction, DpiResizeEvent, FrameRecoveryAction, FrameRecoveryPoll, WindowState,
     track_consumed_key_release,
@@ -458,62 +460,38 @@ fn optional_u64_param(
     }
 }
 
-/// The production half of this file: everything above the FIRST test module.
-///
-/// A source guard that searches the whole file also searches its own
-/// assertions, so a plain `src.contains("…")` matches the needle written one
-/// line above it and passes whether or not the production code is there at
-/// all — and a `matches(…).count()` comes out one too high for the same
-/// reason. That is not hypothetical: `split_divider_drag_is_wired` went on
-/// passing after the multi-window refactor threaded `ws` through
-/// `split_drag_at` and `split_seam_hover_icon`, leaving both needles with
-/// zero production matches, and it still passed with the entire
-/// press-to-start-drag block deleted while rustc reported both functions as
-/// dead code.
-///
-/// Removing every `#[cfg(test)]` item removes the class for every guard in the
-/// file at once. It has to REMOVE them rather than truncate at the first one:
-/// this file interleaves seven test items with production code across 30,000
-/// lines, so cutting at the first would throw most of the production away and
-/// fail every guard for the opposite reason.
-///
-/// Top-level items close on a column-0 brace — rustfmt guarantees it, and
-/// nothing nested can produce one — so a line scan is enough, and the
-/// postconditions below fail loudly if that ever stops holding.
+fn ctl_capture_bounds(
+    history_size: usize,
+    start_line: usize,
+    cursor_abs: usize,
+    returned_lines: usize,
+) -> (usize, usize, bool) {
+    let take = history_size
+        .saturating_sub(start_line)
+        .min(MAX_CTL_SCROLLBACK_LINES);
+    // The first returned line is absolute `history_size - min(take, history_size)`.
+    let first_abs = history_size - take.min(history_size);
+    let start_idx = start_line.saturating_sub(first_abs);
+    // Inclusive of the cursor line; clamp to what screen_text actually returned.
+    let end_idx = (cursor_abs.saturating_sub(first_abs) + 1).min(returned_lines);
+    (start_idx, end_idx, start_line < first_abs)
+}
+
+/// The production source of this file, excluding test-only items.
 #[cfg(test)]
 fn production_source() -> String {
-    let src = include_str!("app.rs").replace("\r\n", "\n");
-    let mut production = String::with_capacity(src.len());
-    let mut inside_test_item = false;
-    for line in src.lines() {
-        if inside_test_item {
-            if line == "}" {
-                inside_test_item = false;
-            }
-            continue;
-        }
-        if line == "#[cfg(test)]" {
-            inside_test_item = true;
-            continue;
-        }
-        production.push_str(line);
-        production.push('\n');
-    }
+    let production = kettle_test_support::production_source(include_str!("app.rs"));
     assert!(
         !production.contains("fn production_source()"),
-        "the slice must exclude every test item, or the guards built on it \
-         still self-match"
+        "the production slice retained its own helper"
     );
     assert!(
-        production.contains("fn apply_bs_del_binding("),
-        "the slice must KEEP production code — a needle-free slice would fail \
-         every guard for the opposite reason"
+        !production.contains("#[test]"),
+        "the production slice retained a test function"
     );
     assert!(
-        production.len() > src.len() / 2,
-        "production is {} bytes of {}, which is too little to be right",
-        production.len(),
-        src.len()
+        !production.contains("#[cfg(test)]"),
+        "the production slice retained a test-only item"
     );
     production
 }
@@ -1786,6 +1764,24 @@ const LOCAL_PASTE_MAX: usize = 4 << 20;
 
 fn local_paste_within_limit(text: &str) -> bool {
     text.len() <= LOCAL_PASTE_MAX
+}
+
+fn group_scope_is_globally_stale(
+    autoclean: bool,
+    scope: &BroadcastScope,
+    populated_groups: &HashSet<String>,
+) -> bool {
+    autoclean && matches!(scope, BroadcastScope::Group(name) if !populated_groups.contains(name))
+}
+
+fn stamp_accepted_input(
+    last_typed: &mut Option<std::time::Instant>,
+    delivery: PaneInputDelivery,
+    input_time: std::time::Instant,
+) {
+    if delivery.accepted {
+        *last_typed = Some(input_time);
+    }
 }
 
 fn text_contains_line_break(text: &str) -> bool {
@@ -3087,16 +3083,22 @@ fn should_notify_malformed(new: &[String], last: &[String]) -> bool {
 
 /// Filesystem watchers observe the containing directory so atomic replacement
 /// works across platforms. Only content/name changes to the exact file are
-/// actionable: accepting `Access(Open)` creates a read -> reload -> read
-/// feedback loop on Linux inotify.
+/// actionable. Accepting `Access(Open)` creates a read -> reload -> read
+/// feedback loop on Linux inotify; accepting `Modify(Metadata)` creates the
+/// same loop on macOS because opening a private state file re-applies its mode.
 fn watcher_event_matches(event: &notify::Event, watched: &std::path::Path) -> bool {
     use notify::EventKind;
+    use notify::event::ModifyKind;
 
-    event.paths.iter().any(|path| path == watched)
-        && matches!(
-            event.kind,
-            EventKind::Any | EventKind::Create(_) | EventKind::Modify(_) | EventKind::Remove(_)
-        )
+    if !event.paths.iter().any(|path| path == watched) {
+        return false;
+    }
+    match event.kind {
+        EventKind::Any | EventKind::Create(_) | EventKind::Remove(_) => true,
+        EventKind::Modify(ModifyKind::Metadata(_)) => false,
+        EventKind::Modify(_) => true,
+        EventKind::Access(_) | EventKind::Other => false,
+    }
 }
 
 /// Queue at most one event until the main thread re-arms the latch. Re-open it
@@ -3485,6 +3487,12 @@ pub enum ConfirmAction {
     /// Send a clipboard/PRIMARY paste after the user accepted the multi-line
     /// paste protection prompt.
     PasteText(Box<str>),
+    /// Format and send original file paths per target pane after paste
+    /// protection confirmation.
+    PastePaths {
+        paths: Box<[std::path::PathBuf]>,
+        trailing_space: bool,
+    },
     /// Finish a Settings keybind rebind that would otherwise silently steal
     /// a chord already bound to a different action (audit v2.38.2). Applies
     /// via `App::apply_keybind_rebind` — identical to the direct
@@ -5043,6 +5051,34 @@ pub(crate) fn fire_notify(title: &str, body: &str) {
     }
 }
 
+fn persist_keybind_rebind(
+    path: Option<&std::path::Path>,
+    stale: &[String],
+    label: &str,
+    action_name: &str,
+) -> bool {
+    let Some(path) = path else {
+        log::warn!(
+            "apply_keybind_rebind: no config path resolved \
+             (set $XDG_CONFIG_HOME or pass --config)"
+        );
+        return false;
+    };
+
+    let mut saved = true;
+    for old in stale {
+        if let Err(e) = kettle_config::append_keybind(path, old, "unbind") {
+            log::warn!("append_keybind({old}=unbind) failed: {e}");
+            saved = false;
+        }
+    }
+    if let Err(e) = kettle_config::append_keybind(path, label, action_name) {
+        log::warn!("append_keybind({label}={action_name}) failed: {e}");
+        saved = false;
+    }
+    saved
+}
+
 impl App {
     /// The map key of the WindowState whose OS window is `wid`, if any.
     /// Returns `WindowState::seq`, which is the map key by invariant.
@@ -5081,6 +5117,7 @@ impl App {
                 self.abandon_torn_drag(None);
             }
             drop(ws);
+            self.hoover_mapped_groups();
             if self.windows.is_empty() {
                 event_loop.exit();
             } else if self.focused_seq == seq
@@ -6253,11 +6290,14 @@ impl App {
         self.clear_selection_on_input(ws);
         self.reset_blink_phase(ws);
         self.hide_mouse_cursor(ws);
-        ws.last_typed = Some(std::time::Instant::now());
+        let input_time = std::time::Instant::now();
         let result = if ws.mux.is_broadcast_on() {
-            self.broadcast_input(ws, bytes, self.cfg.scroll_on_keystroke)
+            self.broadcast_input(ws, bytes, self.cfg.scroll_on_keystroke, input_time)
         } else if let Some(pane) = ws.mux.focused() {
             let result = pane.feed_input(bytes);
+            if result.is_queued() {
+                ws.last_typed = Some(input_time);
+            }
             if result.is_queued()
                 && self.cfg.scroll_on_keystroke
                 && let Ok(mut term) = pane.term.term.lock()
@@ -6269,6 +6309,64 @@ impl App {
             PaneInputResult::Queued
         };
         self.report_input_result(result);
+    }
+
+    fn write_terminal_key_event(
+        &mut self,
+        ws: &mut WindowState,
+        event: &winit::event::KeyEvent,
+        prepare_input: bool,
+    ) {
+        if !ws.mux.is_broadcast_on() {
+            let mode = ws
+                .mux
+                .focused()
+                .and_then(|pane| pane.term.term.lock().ok().map(|term| *term.mode()))
+                .unwrap_or_else(kettle_core::TermMode::empty);
+            let Some(bytes) = encode_key_event_for_mode(&self.cfg, event, ws.mods, mode) else {
+                return;
+            };
+            if prepare_input {
+                self.write_terminal_input(ws, &bytes);
+            } else if let Some(pane) = ws.mux.focused() {
+                let result = pane.feed_input(&bytes);
+                self.report_input_result(result);
+            }
+            return;
+        }
+
+        if prepare_input {
+            self.clear_selection_on_input(ws);
+            self.reset_blink_phase(ws);
+            self.hide_mouse_cursor(ws);
+        }
+        let input_time = prepare_input.then(std::time::Instant::now);
+        let scroll_to_bottom = prepare_input && self.cfg.scroll_on_keystroke;
+        let scope = ws.mux.broadcast.clone();
+        let cfg = &self.cfg;
+        let mods = ws.mods;
+        let mut delivery = ws.mux.broadcast_encoded(scroll_to_bottom, |mode| {
+            encode_key_event_for_mode(cfg, event, mods, mode)
+        });
+        if let Some(input_time) = input_time {
+            stamp_accepted_input(&mut ws.last_typed, delivery, input_time);
+        }
+        if Mux::scope_crosses_windows(&scope) {
+            for other in self.windows.values_mut() {
+                let foreign =
+                    other
+                        .mux
+                        .broadcast_encoded_foreign(&scope, scroll_to_bottom, |mode| {
+                            encode_key_event_for_mode(cfg, event, mods, mode)
+                        });
+                if let Some(input_time) = input_time {
+                    stamp_accepted_input(&mut other.last_typed, foreign, input_time);
+                }
+                delivery.result = delivery.result.merge(foreign.result);
+                delivery.accepted |= foreign.accepted;
+            }
+        }
+        self.report_input_result(delivery.result);
     }
 
     fn commit_ime_text(&mut self, ws: &mut WindowState, text: &str, event_loop: &ActiveEventLoop) {
@@ -7281,9 +7379,9 @@ impl App {
         // `paste-files` (on by default); a plain-text clipboard falls through to
         // the normal text paste below.
         if self.cfg.paste_files.enabled()
-            && let Some(text) = self.clipboard_file_paste_text(ws)
+            && let Some(paths) = self.clipboard_file_paste_paths()
         {
-            self.paste_text(ws, text);
+            self.paste_paths(ws, paths, false);
             return;
         }
         // Bitmap paste: a screenshot puts raw pixels on the clipboard with no
@@ -7292,9 +7390,9 @@ impl App {
         // path, reusing the same shell-quoting / WSL-translation pipeline.
         // Ordered after the file branch so a genuine copied file always wins.
         if self.cfg.paste_images.enabled()
-            && let Some(text) = self.clipboard_image_paste_text(ws)
+            && let Some(path) = self.clipboard_image_paste_path()
         {
-            self.paste_text(ws, text);
+            self.paste_paths(ws, vec![path], false);
             return;
         }
         let text = self
@@ -7305,13 +7403,13 @@ impl App {
         self.paste_text(ws, text);
     }
 
-    /// Write a clipboard bitmap to a temporary PNG and format its path for the
-    /// focused pane, or `None` when the clipboard holds no image.
+    /// Write a clipboard bitmap to a temporary PNG, or `None` when the
+    /// clipboard holds no image.
     ///
     /// A failure to encode or write is logged and degrades to `None` so the
     /// paste falls through to text rather than silently doing nothing — the
     /// failure mode this whole path exists to remove.
-    fn clipboard_image_paste_text(&mut self, ws: &WindowState) -> Option<String> {
+    fn clipboard_image_paste_path(&mut self) -> Option<std::path::PathBuf> {
         let image = self.clipboard.as_mut()?.get_image().ok()?;
         let path = match self
             .pasted_images
@@ -7323,26 +7421,18 @@ impl App {
                 return None;
             }
         };
-        let argv = ws.mux.focused_argv();
-        Some(crate::mux::format_paths_for_paste(
-            &argv,
-            std::slice::from_ref(&path),
-        ))
+        Some(path)
     }
 
-    /// Read a file list from the clipboard (CF_HDROP on Windows, `text/uri-list`
-    /// elsewhere) and format it for the focused pane, or `None` if the clipboard
-    /// holds no files. See [`crate::mux::format_paths_for_paste`].
-    fn clipboard_file_paste_text(&mut self, ws: &WindowState) -> Option<String> {
-        let paths = self
-            .clipboard
+    /// Read a file list from the clipboard (CF_HDROP on Windows,
+    /// `text/uri-list` elsewhere), or `None` if the clipboard holds no files.
+    fn clipboard_file_paste_paths(&mut self) -> Option<Vec<std::path::PathBuf>> {
+        self.clipboard
             .as_mut()?
             .get()
             .file_list()
             .ok()
-            .filter(|v| !v.is_empty())?;
-        let argv = ws.mux.focused_argv();
-        Some(crate::mux::format_paths_for_paste(&argv, &paths))
+            .filter(|paths| !paths.is_empty())
     }
 
     /// Paste the **X11 PRIMARY selection** (middle-click). On X11 the
@@ -7472,6 +7562,115 @@ impl App {
         if let Some(p) = ws.mux.focused() {
             // Paste is user input — a read-only pane drops it.
             let result = p.feed_input(&bytes);
+            self.report_input_result(result);
+        }
+    }
+
+    fn paste_paths(
+        &mut self,
+        ws: &mut WindowState,
+        paths: Vec<std::path::PathBuf>,
+        trailing_space: bool,
+    ) {
+        if paths.is_empty() {
+            return;
+        }
+        let mut preview = crate::mux::format_paths_for_paste(&ws.mux.focused_argv(), &paths);
+        if trailing_space {
+            preview.push(' ');
+        }
+        let within_limit = if ws.mux.is_broadcast_on() {
+            ws.mux
+                .broadcast_paste_paths_within_limit(&paths, trailing_space, LOCAL_PASTE_MAX)
+                && (!Mux::scope_crosses_windows(&ws.mux.broadcast)
+                    || self.windows.values().all(|other| {
+                        other.mux.broadcast_paste_paths_foreign_within_limit(
+                            &ws.mux.broadcast,
+                            &paths,
+                            trailing_space,
+                            LOCAL_PASTE_MAX,
+                        )
+                    }))
+        } else {
+            local_paste_within_limit(&preview)
+        };
+        if !within_limit {
+            self.report_input_result(PaneInputResult::Oversize);
+            return;
+        }
+
+        let raw_target = if ws.mux.is_broadcast_on() {
+            ws.mux.broadcast_paste_has_raw_writable_target()
+                || (Mux::scope_crosses_windows(&ws.mux.broadcast)
+                    && self.windows.values().any(|other| {
+                        other
+                            .mux
+                            .broadcast_paste_foreign_has_raw_writable_target(&ws.mux.broadcast)
+                    }))
+        } else {
+            !self
+                .focused_mode(ws)
+                .contains(kettle_core::TermMode::BRACKETED_PASTE)
+        };
+        if paste_needs_confirmation(&preview, self.cfg.clipboard_paste_protection, raw_target) {
+            ws.confirm_dialog = Some(ConfirmDialogState {
+                prompt: paste_confirm_prompt(&preview),
+                buttons: vec![
+                    ConfirmButton::Cancel,
+                    ConfirmButton::Confirm {
+                        label: "Paste".into(),
+                        destructive: false,
+                    },
+                ],
+                focus_idx: 0,
+                on_confirm: ConfirmAction::PastePaths {
+                    paths: paths.into_boxed_slice(),
+                    trailing_space,
+                },
+            });
+            return;
+        }
+        self.paste_paths_confirmed(ws, &paths, trailing_space);
+    }
+
+    fn paste_paths_confirmed(
+        &mut self,
+        ws: &mut WindowState,
+        paths: &[std::path::PathBuf],
+        trailing_space: bool,
+    ) {
+        if let Some(recorder) = self.recorder.as_mut() {
+            recorder.record_marker(&format!("kettle:paste paths={}", paths.len()));
+        }
+        if ws.mux.is_broadcast_on() {
+            let scope = ws.mux.broadcast.clone();
+            let mut result = ws
+                .mux
+                .broadcast_paste_paths(paths, trailing_space, LOCAL_PASTE_MAX);
+            if Mux::scope_crosses_windows(&scope) {
+                for other in self.windows.values_mut() {
+                    result = result.merge(other.mux.broadcast_paste_paths_foreign(
+                        &scope,
+                        paths,
+                        trailing_space,
+                        LOCAL_PASTE_MAX,
+                    ));
+                }
+            }
+            self.report_input_result(result);
+            return;
+        }
+
+        let mut text = crate::mux::format_paths_for_paste(&ws.mux.focused_argv(), paths);
+        if trailing_space {
+            text.push(' ');
+        }
+        let bracketed = self
+            .focused_mode(ws)
+            .contains(kettle_core::TermMode::BRACKETED_PASTE);
+        let bytes = input::paste_payload(&text, bracketed);
+        if let Some(pane) = ws.mux.focused() {
+            let result = pane.feed_input(&bytes);
             self.report_input_result(result);
         }
     }
@@ -9544,11 +9743,11 @@ impl App {
             return true;
         }
         let seq = input::mouse_encode(sgr, btn, pressed, motion, col, row, ws.mods);
-        if let Some(p) = ws.mux.focused()
-            && !p.queue_protocol_reply(&seq).is_queued()
-        {
-            log::error!("closing pane: mouse protocol reply transport failed");
-            p.closed = true;
+        if let Some(pane) = ws.mux.focused() {
+            let result = pane.feed_input(&seq);
+            if !result.is_queued() {
+                self.report_input_result(result);
+            }
         }
         ws.last_mouse_cell = Some((row, col));
         true
@@ -10080,7 +10279,9 @@ impl App {
             // Capture a just-exited pane's final output before reap drops
             // its sidechannel — otherwise the shell's last line is lost from the trace.
             self.flush_recorder_output(ws);
-            if ws.mux.reap() {
+            let mux_empty = ws.mux.reap();
+            self.hoover_groups(ws);
+            if mux_empty {
                 return;
             }
             ws.search_queries
@@ -10825,6 +11026,7 @@ impl App {
                 }
             }
         }
+        self.hoover_groups(ws);
     }
 
     /// `true` while any modal overlay (search bar, command palette, hint
@@ -11122,7 +11324,7 @@ impl App {
         // C9: the Advanced… escape hatch for everything
         // not exposed as a toggle.
         inner.push(ContextMenuItem::Item {
-            label: "Advanced… (open config in $EDITOR)",
+            label: "Advanced… (open config with default app)",
             action: kettle_config::Action::EditConfig,
             enabled: true,
         });
@@ -12266,23 +12468,63 @@ impl App {
         ws: &mut WindowState,
         bytes: &[u8],
         scroll_to_bottom: bool,
+        input_time: std::time::Instant,
     ) -> PaneInputResult {
-        let mut result = if scroll_to_bottom {
-            ws.mux.broadcast_write_with_scroll(bytes)
-        } else {
-            ws.mux.broadcast_write(bytes)
-        };
+        let local = ws.mux.broadcast_write_delivery(bytes, scroll_to_bottom);
+        stamp_accepted_input(&mut ws.last_typed, local, input_time);
+        let mut result = local.result;
         if crate::mux::Mux::scope_crosses_windows(&ws.mux.broadcast) {
             let scope = ws.mux.broadcast.clone();
             for other in self.windows.values_mut() {
-                result = result.merge(other.mux.broadcast_write_foreign(
-                    &scope,
-                    bytes,
-                    scroll_to_bottom,
-                ));
+                let delivery =
+                    other
+                        .mux
+                        .broadcast_write_foreign_delivery(&scope, bytes, scroll_to_bottom);
+                stamp_accepted_input(&mut other.last_typed, delivery, input_time);
+                result = result.merge(delivery.result);
             }
         }
         result
+    }
+
+    fn populated_groups(&self, ws: Option<&WindowState>) -> HashSet<String> {
+        ws.into_iter()
+            .chain(self.windows.values())
+            .flat_map(|window| window.mux.panes.values())
+            .filter_map(|pane| pane.group_name.clone())
+            .collect()
+    }
+
+    fn hoover_groups(&mut self, ws: &mut WindowState) {
+        let populated = self.populated_groups(Some(ws));
+        for target in std::iter::once(ws).chain(self.windows.values_mut()) {
+            if group_scope_is_globally_stale(
+                target.mux.autoclean_groups,
+                &target.mux.broadcast,
+                &populated,
+            ) {
+                target.mux.broadcast = BroadcastScope::Off;
+                if let Some(window) = &target.window {
+                    window.request_redraw();
+                }
+            }
+        }
+    }
+
+    fn hoover_mapped_groups(&mut self) {
+        let populated = self.populated_groups(None);
+        for target in self.windows.values_mut() {
+            if group_scope_is_globally_stale(
+                target.mux.autoclean_groups,
+                &target.mux.broadcast,
+                &populated,
+            ) {
+                target.mux.broadcast = BroadcastScope::Off;
+                if let Some(window) = &target.window {
+                    window.request_redraw();
+                }
+            }
+        }
     }
 
     /// Preferences submenu, C8: write a `key = value`
@@ -12775,10 +13017,9 @@ impl App {
             }
             // Terminator parity (`key_preferences` /
             // `key_preferences_keybindings`). Terminator's GUI
-            // Preferences dialog is config-file-driven for
-            // kettle, so the preferences keybind opens the user's
-            // config file in $EDITOR (or any registered handler
-            // via `open::that_detached`). If no config file is
+            // Preferences dialog is config-file-driven for kettle, so the
+            // preferences keybind opens the user's config file with the OS's
+            // registered handler. If no config file is
             // loaded — kettle started with `--config` pointing
             // at a missing path, or no profile resolved — falls
             // back to `Config::default_path()`. Closes the
@@ -12793,11 +13034,19 @@ impl App {
                 if let Some(path) = path {
                     if let Err(e) = open::that_detached(&path) {
                         log::warn!("Action::EditConfig: failed to open {}: {e}", path.display());
+                        fire_notify(
+                            "kettle: config not opened",
+                            "The operating system could not open the config file.",
+                        );
                     }
                 } else {
                     log::warn!(
                         "Action::EditConfig: no config path resolved \
                          (set $XDG_CONFIG_HOME or pass --config)"
+                    );
+                    fire_notify(
+                        "kettle: config not opened",
+                        "No config file path could be resolved.",
                     );
                 }
             }
@@ -12924,7 +13173,8 @@ impl App {
                 // broadcast branch inherited the gate from broadcast_write;
                 // the focused branch used to bypass it, a split-brain).
                 if ws.mux.is_broadcast_on() {
-                    let result = ws.mux.broadcast_write(b"\x1b[3J");
+                    let result =
+                        self.broadcast_input(ws, b"\x1b[3J", false, std::time::Instant::now());
                     self.report_input_result(result);
                 } else if let Some(p) = ws.mux.focused() {
                     let result = p.feed_input(b"\x1b[3J");
@@ -13826,6 +14076,7 @@ impl App {
         }
         // If focus moved as a result of the action,
         // land the cursor visible on the new pane right away.
+        self.hoover_groups(ws);
         self.note_focus_change(ws, pre_focus);
         self.resize_all(ws);
         self.save_session(ws);
@@ -14304,6 +14555,7 @@ impl App {
         _event_loop: &winit::event_loop::ActiveEventLoop,
     ) {
         self.dispatch_confirm_action_arms(ws, action);
+        self.hoover_groups(ws);
         // The same tail `handle_action` gives every keybind and menu action.
         //
         // Answering a confirmation is a second, separate entry point into the
@@ -14399,6 +14651,12 @@ impl App {
             }
             ConfirmAction::PasteText(text) => {
                 self.paste_text_confirmed(ws, &text);
+            }
+            ConfirmAction::PastePaths {
+                paths,
+                trailing_space,
+            } => {
+                self.paste_paths_confirmed(ws, &paths, trailing_space);
             }
             ConfirmAction::RebindKeybind {
                 trig,
@@ -14590,6 +14848,7 @@ impl App {
                 runtime_font_size,
             ));
             r.set_cell_scale(self.cfg.cell_width, self.cfg.cell_height);
+            r.set_background_compositing(&self.cfg);
         }
         // A configured size change invalidates the pre-scaled-zoom baseline;
         // a no-op reload must preserve both it and the live runtime zoom.
@@ -16978,10 +17237,9 @@ impl App {
         let Some(run) = self.pending_runs.remove(&pane) else {
             return;
         };
-        let (output, output_truncated) = cap_utf8_bytes(
-            self.ctl_capture_output_since(ws, pane, run.start_line),
-            MAX_CTL_COMMAND_OUTPUT_BYTES,
-        );
+        let (captured, line_truncated) = self.ctl_capture_output_since(ws, pane, run.start_line);
+        let (output, byte_truncated) = cap_utf8_bytes(captured, MAX_CTL_COMMAND_OUTPUT_BYTES);
+        let output_truncated = line_truncated || byte_truncated;
         let resp = kettle_ctl::protocol::Response::ok(
             run.req_id,
             serde_json::json!({
@@ -17033,10 +17291,10 @@ impl App {
             let Some(run) = self.pending_runs.remove(&pane) else {
                 continue;
             };
-            let (output, output_truncated) = cap_utf8_bytes(
-                self.ctl_capture_output_since(ws, pane, run.start_line),
-                MAX_CTL_COMMAND_OUTPUT_BYTES,
-            );
+            let (captured, line_truncated) =
+                self.ctl_capture_output_since(ws, pane, run.start_line);
+            let (output, byte_truncated) = cap_utf8_bytes(captured, MAX_CTL_COMMAND_OUTPUT_BYTES);
+            let output_truncated = line_truncated || byte_truncated;
             let resp = kettle_ctl::protocol::Response::ok(
                 run.req_id,
                 serde_json::json!({
@@ -17063,33 +17321,36 @@ impl App {
     /// those trailing blanks; addressing by absolute line lands on the real
     /// content wherever it is. The cursor's absolute line is the end of the
     /// content the command produced.
-    fn ctl_capture_output_since(&self, ws: &WindowState, pane: u64, start_line: usize) -> String {
-        const CAP_LINES: usize = 10_000;
+    fn ctl_capture_output_since(
+        &self,
+        ws: &WindowState,
+        pane: u64,
+        start_line: usize,
+    ) -> (String, bool) {
         // C8: the pane may have moved to another window mid-run.
         let Some(p) = Self::ctl_pane_ref(ws, &self.windows, pane) else {
-            return String::new();
+            return (String::new(), false);
         };
         let Some(probe) = p.term.screen_text(0) else {
-            return String::new();
+            return (String::new(), false);
         };
         let hist = probe.history_size;
         let cursor_abs = hist + probe.cursor.0; // absolute line of the cursor now
         // History lines we must pull to reach `start_line` (0 when it's already
         // on the active screen, the common case), capped.
-        let take = hist.saturating_sub(start_line).min(CAP_LINES);
+        let take = hist
+            .saturating_sub(start_line)
+            .min(MAX_CTL_SCROLLBACK_LINES);
         let Some(s) = p.term.screen_text(take) else {
-            return String::new();
+            return (String::new(), false);
         };
         let lines: Vec<&str> = s.text.lines().collect();
-        // The first returned line is absolute `hist - min(take, hist)`.
-        let first_abs = hist - take.min(hist);
-        let start_idx = start_line.saturating_sub(first_abs);
-        // Inclusive of the cursor line; clamp to what we actually have.
-        let end_idx = (cursor_abs.saturating_sub(first_abs) + 1).min(lines.len());
+        let (start_idx, end_idx, head_dropped) =
+            ctl_capture_bounds(hist, start_line, cursor_abs, lines.len());
         if start_idx >= end_idx {
-            return String::new();
+            return (String::new(), head_dropped);
         }
-        lines[start_idx..end_idx].join("\n")
+        (lines[start_idx..end_idx].join("\n"), head_dropped)
     }
 
     /// Claim one bounded remote-command batch and stage it for ordered
@@ -18187,7 +18448,7 @@ impl App {
     /// bound to a DIFFERENT action routes through a confirm dialog first
     /// instead of stealing it silently, but applies via this exact same
     /// method once the user confirms) so the two paths can never diverge.
-    fn apply_keybind_rebind(&mut self, trig: Trigger, act: Action, action_name: &str) {
+    fn apply_keybind_rebind(&mut self, trig: Trigger, act: Action, action_name: &str) -> bool {
         let label = trig.label();
         let stale: Vec<String> = self
             .cfg
@@ -18203,20 +18464,18 @@ impl App {
         // appending `trig=action_name` after any earlier `trig=<other>`
         // line means the last-one-wins reload resolves `trig` to the new
         // action, matching the live HashMap `insert` above.
-        if let Some(path) = self
+        let path = self
             .config_path
             .clone()
-            .or_else(kettle_config::Config::default_path)
-        {
-            for old in &stale {
-                if let Err(e) = kettle_config::append_keybind(&path, old, "unbind") {
-                    log::warn!("append_keybind({old}=unbind) failed: {e}");
-                }
-            }
-            if let Err(e) = kettle_config::append_keybind(&path, &label, action_name) {
-                log::warn!("append_keybind({label}={action_name}) failed: {e}");
-            }
+            .or_else(kettle_config::Config::default_path);
+        let saved = persist_keybind_rebind(path.as_deref(), &stale, &label, action_name);
+        if !saved {
+            fire_notify(
+                "kettle: keybind not saved",
+                "Applied for this session — couldn't write it to your config file.",
+            );
         }
+        saved
     }
 
     /// Keyboard routing while the settings overlay is open.
@@ -19029,6 +19288,19 @@ fn apply_bs_del_binding(cfg: &Config, key: &Key, bytes: Vec<u8>) -> Vec<u8> {
     }
 }
 
+fn encode_key_event_for_mode(
+    cfg: &Config,
+    event: &winit::event::KeyEvent,
+    mods: ModifiersState,
+    mode: kettle_core::TermMode,
+) -> Option<Vec<u8>> {
+    let mut bytes = input::encode_key_event(event, mods, mode)?;
+    if !input::uses_kitty_sequence(event, mods, mode) {
+        bytes = apply_bs_del_binding(cfg, &event.logical_key, bytes);
+    }
+    Some(bytes)
+}
+
 fn parse_ctl_send_key_batch(
     keys: &[serde_json::Value],
 ) -> std::result::Result<Vec<(ModifiersState, Key)>, String> {
@@ -19465,6 +19737,19 @@ fn settings_edit_display(buf: &str) -> String {
 /// Only `window_state = hidden` remains hidden.
 fn should_reveal_after_renderer_init(state: kettle_config::WindowState) -> bool {
     !matches!(state, kettle_config::WindowState::Hidden)
+}
+
+/// Some surface backends cannot acquire a first frame while their native
+/// window is hidden. macOS Metal is one: `CAMetalLayer::nextDrawable` does not
+/// make progress until the `NSWindow` can be ordered on screen. In that case a
+/// hide-until-first-presentation policy is circular, so reveal after renderer
+/// initialization and immediately before the first surface frame instead.
+fn should_reveal_before_first_surface_frame(
+    state: kettle_config::WindowState,
+    window_shown: bool,
+    surface_requires_visible_window: bool,
+) -> bool {
+    surface_requires_visible_window && !window_shown && should_reveal_after_renderer_init(state)
 }
 
 /// Is the default last-session (`session.json`) active
@@ -20825,9 +21110,21 @@ impl App {
         self.resize_all(&mut ws);
         self.sync_output_wake_gate(&ws);
         self.focused_seq = seq;
+        if should_reveal_before_first_surface_frame(
+            state,
+            ws.window_shown,
+            cfg!(target_os = "macos"),
+        ) {
+            if let Some(w) = &ws.window {
+                w.set_visible(true);
+            }
+            ws.window_shown = true;
+        }
         // First frame painted directly. A successful presentation reveals the
         // native window from `redraw`, so neither an empty renderer nor an
-        // un-restored default-size surface can flash on screen.
+        // un-restored default-size surface can flash on screen. macOS is
+        // revealed immediately above because Metal cannot acquire that first
+        // surface frame from a hidden NSWindow.
         self.redraw(&mut ws);
         if let Some(w) = &ws.window {
             w.request_redraw();
@@ -22149,6 +22446,20 @@ impl App {
                     self.sync_recording_state(ws, &body);
                 }
             }
+        }
+        if should_reveal_before_first_surface_frame(
+            self.cfg.window_state,
+            ws.window_shown,
+            cfg!(target_os = "macos"),
+        ) {
+            if let Some(w) = &ws.window {
+                w.set_visible(true);
+            }
+            ws.window_shown = true;
+            log::info!(
+                "startup: window revealed before first macOS surface frame, working set {:.1} MiB",
+                process_working_set_mb()
+            );
         }
         self.redraw(ws);
         if let Some(w) = &ws.window {
@@ -23579,34 +23890,10 @@ impl App {
                 // vim caused each char of the path to act as a normal-
                 // mode command — chaotic. Clipboard paste already
                 // routes through the same helper; this brings drag-
-                // drop into line. Honors broadcast:
-                // when group input is on, the path goes to every pane
-                // in the active tab — and each pane gets the *per-
-                // pane* BRACKETED_PASTE wrap (applied individually per pane),
-                // so a broadcast set containing one shell + one vim
-                // doesn't break either of them.
-                let argv = ws.mux.focused_argv();
-                let text = format!(
-                    "{} ",
-                    crate::mux::format_paths_for_paste(&argv, std::slice::from_ref(&path))
-                );
-                if ws.mux.is_broadcast_on() {
-                    let result = ws.mux.broadcast_paste(&text);
-                    self.report_input_result(result);
-                } else {
-                    // Read the focused pane's BRACKETED_PASTE state first
-                    // — `focused_mode` and `mux.focused` both want &mut
-                    // self, so they have to run sequentially (not nested).
-                    let bracketed = self
-                        .focused_mode(ws)
-                        .contains(kettle_core::TermMode::BRACKETED_PASTE);
-                    let bytes = input::paste_payload(&text, bracketed);
-                    if let Some(p) = ws.mux.focused() {
-                        // Drag-drop is user input — read-only drops it.
-                        let result = p.feed_input(&bytes);
-                        self.report_input_result(result);
-                    }
-                }
+                // drop into line. Honors broadcast: the path goes to every
+                // selected pane across the same windows as typing, and each
+                // pane gets its own shell formatting and BRACKETED_PASTE wrap.
+                self.paste_paths(ws, vec![path], true);
                 if let Some(w) = &ws.window {
                     w.request_redraw();
                 }
@@ -23698,13 +23985,12 @@ impl App {
                 if self
                     .focused_mode(ws)
                     .contains(kettle_core::TermMode::FOCUS_IN_OUT)
-                    && let Some(p) = ws.mux.focused()
-                    && !p
-                        .queue_protocol_reply(if f { b"\x1b[I" } else { b"\x1b[O" })
-                        .is_queued()
+                    && let Some(pane) = ws.mux.focused()
                 {
-                    log::error!("closing pane: focus protocol reply transport failed");
-                    p.closed = true;
+                    let result = pane.feed_input(if f { b"\x1b[I" } else { b"\x1b[O" });
+                    if !result.is_queued() {
+                        self.report_input_result(result);
+                    }
                 }
                 // winit's `request_user_attention(None)` alone does
                 // not reliably stop the Win11 taskbar flash once started, so
@@ -23814,21 +24100,7 @@ impl App {
                     return;
                 }
                 if event.state == ElementState::Released {
-                    let mode = ws
-                        .mux
-                        .focused()
-                        .and_then(|p| p.term.term.lock().ok().map(|t| *t.mode()))
-                        .unwrap_or(kettle_core::TermMode::empty());
-                    if let Some(bytes) = input::encode_key_event(&event, ws.mods, mode) {
-                        let result = if ws.mux.is_broadcast_on() {
-                            ws.mux.broadcast_write(&bytes)
-                        } else if let Some(p) = ws.mux.focused() {
-                            p.feed_input(&bytes)
-                        } else {
-                            PaneInputResult::Queued
-                        };
-                        self.report_input_result(result);
-                    }
+                    self.write_terminal_key_event(ws, &event, false);
                     return;
                 }
                 if ws.ime_preedit.is_some() {
@@ -24123,29 +24395,7 @@ impl App {
                     return;
                 }
 
-                let mode = ws
-                    .mux
-                    .focused()
-                    .and_then(|p| p.term.term.lock().ok().map(|t| *t.mode()))
-                    .unwrap_or(kettle_core::TermMode::empty());
-                // Application-keypad mode (DECKPAM) — an
-                // unmodified numpad key emits its SS3 sequence when the focused
-                // app set it. Tried before the normal encoder, which is
-                // location-agnostic. `event.location` distinguishes the numpad
-                // from the main keyboard row.
-                let encoded = input::encode_key_event(&event, ws.mods, mode);
-                if let Some(mut bytes) = encoded {
-                    // Mirrors Terminator's `backspace_binding` + `delete_binding`
-                    // (terminatorlib/config.py:107-108): remap the
-                    // encoded bytes when the user picked a non-default
-                    // binding. Same as VTE's per-profile override.
-                    // v2.20.0: shared with `send_keys` (review fix) so the
-                    // agent plane honors the same remap as GUI keystrokes.
-                    if !input::uses_kitty_sequence(&event, ws.mods, mode) {
-                        bytes = apply_bs_del_binding(&self.cfg, &event.logical_key, bytes);
-                    }
-                    self.write_terminal_input(ws, &bytes);
-                }
+                self.write_terminal_key_event(ws, &event, true);
             }
             WindowEvent::RedrawRequested => self.redraw(ws),
             _ => {}
@@ -24168,7 +24418,9 @@ impl App {
         // just-exited pane (covers the shell-exit → process-exit close path,
         // e.g. a fast `-e cmd` session).
         self.flush_recorder_output(ws);
-        if ws.mux.reap() && ws.window.is_some() {
+        let mux_empty = ws.mux.reap();
+        self.hoover_groups(ws);
+        if mux_empty && ws.window.is_some() {
             self.save_session(ws);
             self.pending_window_close = true;
             return None;
@@ -24984,23 +25236,106 @@ mod tests {
         context_menu_item_columns, context_menu_max_scroll_offset,
         context_menu_scroll_for_highlight, context_menu_snapshot_reuse_safe,
         context_menu_surface_can_fit_row, count_rows_fitting, ctl_input_error, filter_disabled,
-        find_menu_row_y, fit_context_menu_row, input_rejection_message, local_paste_within_limit,
-        macos_effective_modifiers, modal_swallows_pointer, osc52_clipboard_channel,
-        output_generation_advanced, output_wakeup_needs_paint, pane_cursor_blinking_with,
-        pane_snapshot_keys_match, parse_remote_command_batch, production_source, rank_layouts,
-        sanitize_native_window_title, sanitize_title, selection_kind, session_sweep_due,
-        should_notify_input_rejection, should_poll_remote_window, should_restore_session,
-        should_reveal_after_renderer_init, stage_applied_remote_probe,
-        stage_output_generations_for_frame, stage_remote_targets, startup_inner_size_px,
-        typeahead_match,
+        find_menu_row_y, fit_context_menu_row, group_scope_is_globally_stale,
+        input_rejection_message, local_paste_within_limit, macos_effective_modifiers,
+        modal_swallows_pointer, osc52_clipboard_channel, output_generation_advanced,
+        output_wakeup_needs_paint, pane_cursor_blinking_with, pane_snapshot_keys_match,
+        parse_remote_command_batch, production_source, rank_layouts, sanitize_native_window_title,
+        sanitize_title, selection_kind, session_sweep_due, should_notify_input_rejection,
+        should_poll_remote_window, should_restore_session, should_reveal_after_renderer_init,
+        should_reveal_before_first_surface_frame, stage_applied_remote_probe,
+        stage_output_generations_for_frame, stage_remote_targets, stamp_accepted_input,
+        startup_inner_size_px, typeahead_match,
     };
-    use crate::mux::{Dir, Mux, PaneInputResult, PaneTitleOrigin};
+    use crate::mux::{
+        BroadcastScope, Dir, Mux, PaneInputDelivery, PaneInputResult, PaneTitleOrigin,
+    };
     use crate::window_state::WindowState;
     use kettle_config::Action;
     use kettle_core::{ClipboardType, SelectionType, event::OutputWakeGate};
     use kettle_render::{ContextMenuRow, FrameOutcome, PaneSnapshot};
+    use std::collections::HashSet;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+
+    #[test]
+    fn global_group_autoclean_keeps_foreign_members_and_clears_empty_scopes() {
+        let scope = BroadcastScope::Group("fleet".into());
+        let populated = HashSet::from(["fleet".to_string()]);
+        assert!(
+            !group_scope_is_globally_stale(true, &scope, &populated),
+            "a member in another window keeps the process-wide group alive"
+        );
+        assert!(group_scope_is_globally_stale(true, &scope, &HashSet::new()));
+        assert!(!group_scope_is_globally_stale(
+            false,
+            &scope,
+            &HashSet::new()
+        ));
+        assert!(!group_scope_is_globally_stale(
+            true,
+            &BroadcastScope::All,
+            &HashSet::new()
+        ));
+
+        let source = production_source();
+        for owner in [
+            "fn apply_title_edit(",
+            "fn handle_action(",
+            "fn redraw(",
+            "fn about_to_wait_inner(",
+        ] {
+            let body = source
+                .split(owner)
+                .nth(1)
+                .unwrap_or_else(|| panic!("{owner} must exist"));
+            let end = body.find("\n    fn ").unwrap_or(body.len());
+            assert!(
+                body[..end].contains("self.hoover_groups(ws);"),
+                "{owner} must globally clean group-name edits and completed pane/tab mutations"
+            );
+        }
+        assert!(
+            source.contains("drop(ws);\n            self.hoover_mapped_groups();"),
+            "closing a whole window must clean scopes in the surviving windows"
+        );
+    }
+
+    #[test]
+    fn echo_bypass_timestamp_only_marks_windows_that_accepted_input() {
+        let before = std::time::Instant::now();
+        let input_time = before + std::time::Duration::from_millis(1);
+        let mut accepted = Some(before);
+        let mut rejected = Some(before);
+        stamp_accepted_input(
+            &mut accepted,
+            PaneInputDelivery {
+                result: PaneInputResult::ReadOnly,
+                accepted: true,
+            },
+            input_time,
+        );
+        stamp_accepted_input(
+            &mut rejected,
+            PaneInputDelivery {
+                result: PaneInputResult::ReadOnly,
+                accepted: false,
+            },
+            input_time,
+        );
+        assert_eq!(accepted, Some(input_time));
+        assert_eq!(rejected, Some(before));
+
+        let source = production_source();
+        for owner in ["fn broadcast_input(", "fn write_terminal_key_event("] {
+            let body = source.split(owner).nth(1).expect("delivery helper exists");
+            let end = body.find("\n    fn ").unwrap_or(body.len());
+            assert!(
+                body[..end].contains("stamp_accepted_input(&mut other.last_typed"),
+                "{owner} must stamp every foreign window that accepted input"
+            );
+        }
+    }
 
     #[test]
     fn macos_option_modifier_is_masked_per_side_and_mode() {
@@ -25113,7 +25448,8 @@ mod tests {
         // (so it clears the base overlay quads), and the settings panel's dim
         // backdrop — pushed to the same list afterwards, therefore drawn over
         // it — stops above the bar rather than greying it out.
-        let render = include_str!("../../kettle-render/src/lib.rs").replace("\r\n", "\n");
+        let render =
+            kettle_test_support::production_source(include_str!("../../kettle-render/src/lib.rs"));
         assert!(
             render
                 .contains("menu_q.push(rect(0.0, sh - bar_h, sw, bar_h, theme.palette[1], 0.96));"),
@@ -25160,28 +25496,18 @@ mod tests {
     #[test]
     fn the_paste_prompt_asks_every_window_the_paste_can_reach() {
         let src = production_source();
-        let gate = src
-            .split("let raw_target = if ws.mux.is_broadcast_on() {")
-            .nth(1)
-            .expect("the paste-confirmation raw-target gate is present");
-        let end = gate.find("\n        };").unwrap_or(gate.len());
-        let gate = &gate[..end];
-        assert!(
-            gate.contains("scope_crosses_windows(&ws.mux.broadcast)")
-                && gate.contains("broadcast_paste_foreign_has_raw_writable_target"),
-            "the raw-target question must be asked of every window the \
-             broadcast reaches, or a group member at a shell prompt in another \
-             window receives an unbracketed multi-line paste with no prompt"
-        );
-        // The delivery and the check must agree on WHICH windows are in scope.
-        // If one of them ever stops using the shared predicate, they can
-        // disagree about who is about to receive the paste.
         assert_eq!(
-            src.matches("scope_crosses_windows(&ws.mux.broadcast)")
+            src.split("let raw_target = if ws.mux.is_broadcast_on() {")
+                .skip(1)
+                .take(2)
+                .filter(|gate| {
+                    let end = gate.find("\n        };").unwrap_or(gate.len());
+                    gate[..end].contains("scope_crosses_windows(&ws.mux.broadcast)")
+                        && gate[..end].contains("broadcast_paste_foreign_has_raw_writable_target")
+                })
                 .count(),
-            3,
-            "the keystroke path, the paste path, and the paste PROMPT must all \
-             ask the same question about which windows are in scope"
+            2,
+            "text and path paste prompts must both inspect foreign raw targets"
         );
     }
 
@@ -25191,11 +25517,13 @@ mod tests {
     /// fixing only the typing path would have left a broadcast that types to
     /// the whole group but pastes to half of it.
     #[test]
-    fn typing_and_pasting_both_cross_the_window_boundary() {
+    fn every_broadcast_input_ingress_crosses_the_window_boundary() {
         let src = production_source();
         for (path, entry) in [
             ("keystroke", "fn broadcast_input("),
-            ("paste", "fn paste_text_confirmed("),
+            ("key event", "fn write_terminal_key_event("),
+            ("text paste", "fn paste_text_confirmed("),
+            ("path paste", "fn paste_paths_confirmed("),
         ] {
             let body = src
                 .split(entry)
@@ -25204,12 +25532,30 @@ mod tests {
             let end = body.find("\n    fn ").unwrap_or(body.len());
             let body = &body[..end];
             assert!(
-                body.contains("scope_crosses_windows(&ws.mux.broadcast)")
-                    && body.contains("for other in self.windows.values_mut()"),
+                body.contains("scope_crosses_windows")
+                    && body.contains("self.windows.values_mut()"),
                 "the {path} path must walk the other windows when the scope \
                  reaches across them"
             );
         }
+        let dropped = src
+            .split("WindowEvent::DroppedFile(path) => {")
+            .nth(1)
+            .and_then(|body| body.split("WindowEvent::Focused").next())
+            .expect("dropped-file arm");
+        assert!(
+            dropped.contains("self.paste_paths(ws, vec![path], true);"),
+            "dropped files must use the same cross-window path fanout as clipboard files"
+        );
+        let clear_history = src
+            .split("Action::ClearHistory => {")
+            .nth(1)
+            .and_then(|body| body.split("Action::Reset =>").next())
+            .expect("ClearHistory arm");
+        assert!(
+            clear_history.contains("self.broadcast_input("),
+            "broadcast-aware terminal actions must not stop at the source mux"
+        );
     }
 
     /// `broadcast-default` parsed for three releases without anything reading
@@ -26334,10 +26680,11 @@ mod tests {
     }
 
     #[test]
-    fn watcher_accepts_changes_to_exact_path_only() {
+    fn watcher_accepts_content_and_name_changes_to_exact_path_only() {
         use notify::EventKind;
         use notify::event::{
-            AccessKind, AccessMode, CreateKind, DataChange, ModifyKind, RemoveKind,
+            AccessKind, AccessMode, CreateKind, DataChange, MetadataKind, ModifyKind, RemoveKind,
+            RenameMode,
         };
 
         let watched = std::path::Path::new("/tmp/kettle-config.toml");
@@ -26346,6 +26693,7 @@ mod tests {
             EventKind::Any,
             EventKind::Create(CreateKind::File),
             EventKind::Modify(ModifyKind::Data(DataChange::Content)),
+            EventKind::Modify(ModifyKind::Name(RenameMode::Any)),
             EventKind::Remove(RemoveKind::File),
         ] {
             assert!(super::watcher_event_matches(&event(kind), watched));
@@ -26355,6 +26703,7 @@ mod tests {
             EventKind::Access(AccessKind::Read),
             EventKind::Access(AccessKind::Open(AccessMode::Read)),
             EventKind::Access(AccessKind::Close(AccessMode::Read)),
+            EventKind::Modify(ModifyKind::Metadata(MetadataKind::Permissions)),
             EventKind::Other,
         ] {
             assert!(!super::watcher_event_matches(&event(kind), watched));
@@ -27143,6 +27492,34 @@ mod tests {
         assert!(!should_reveal_after_renderer_init(WindowState::Hidden));
     }
 
+    /// Surface backends such as macOS Metal need the native window ordered on
+    /// screen before their first drawable can exist. Pin the portable policy
+    /// independently of the host running this unit test.
+    #[test]
+    fn visible_surface_requirement_breaks_the_hidden_first_frame_cycle() {
+        use kettle_config::WindowState;
+        assert!(should_reveal_before_first_surface_frame(
+            WindowState::Normal,
+            false,
+            true
+        ));
+        assert!(!should_reveal_before_first_surface_frame(
+            WindowState::Hidden,
+            false,
+            true
+        ));
+        assert!(!should_reveal_before_first_surface_frame(
+            WindowState::Normal,
+            true,
+            true
+        ));
+        assert!(!should_reveal_before_first_surface_frame(
+            WindowState::Normal,
+            false,
+            false
+        ));
+    }
+
     /// The default-session restore is opt-in. The same
     /// predicate gates BOTH the startup `load()` and the `save()` so they can't
     /// drift apart (an earlier version gated load but left save unconditional,
@@ -27647,6 +28024,33 @@ mod tests {
         assert!(App::motion_should_report(true, Some((4, 4)), (4, 5)));
         assert!(App::motion_should_report(true, None, (4, 4)));
         assert!(!App::motion_should_report(true, Some((4, 4)), (4, 4)));
+    }
+
+    #[test]
+    fn mouse_and_focus_reports_use_chronological_user_input() {
+        let source = production_source();
+        let mouse = source
+            .split("fn send_mouse(")
+            .nth(1)
+            .and_then(|body| body.split("\n    fn ").next())
+            .expect("mouse sender");
+        assert!(mouse.contains("let result = pane.feed_input(&seq);"));
+        assert!(!mouse.contains("queue_protocol_reply"));
+
+        let focus = source
+            .split("WindowEvent::Focused(f) => {")
+            .nth(1)
+            .and_then(|body| body.split("WindowEvent::").next())
+            .expect("focus event arm");
+        assert!(focus.contains("let result = pane.feed_input(if f"));
+        assert!(!focus.contains("queue_protocol_reply"));
+
+        let terminal_replies = source
+            .split("TermEvent::PtyWrite(s) => {")
+            .nth(1)
+            .and_then(|body| body.split("TermEvent::").next())
+            .expect("terminal reply arm");
+        assert!(terminal_replies.contains("pane.queue_protocol_reply"));
     }
 
     /// Drift guard. `ScaledZoom` must baseline off the live
@@ -29783,6 +30187,29 @@ mod tests {
     }
 
     #[test]
+    fn keybind_rebind_persistence_reports_missing_path_and_writes_valid_path() {
+        use super::persist_keybind_rebind;
+
+        let stale = vec!["Ctrl+Shift+X".to_string()];
+        assert!(
+            !persist_keybind_rebind(None, &stale, "Ctrl+Shift+Y", "copy"),
+            "a missing config path must be reported as not saved"
+        );
+
+        let dir = crate::test_tempdir();
+        let path = dir.path().join("config");
+        assert!(persist_keybind_rebind(
+            Some(&path),
+            &stale,
+            "Ctrl+Shift+Y",
+            "copy"
+        ));
+        let saved = std::fs::read_to_string(path).expect("saved keybind config");
+        assert!(saved.contains("Ctrl+Shift+X=unbind"));
+        assert!(saved.contains("Ctrl+Shift+Y=copy"));
+    }
+
+    #[test]
     fn cwd_is_local_rejects_unc_and_traversal() {
         use super::cwd_is_local;
         // Drift guard. Ordinary absolute cwds (the OSC 7 path form,
@@ -31895,7 +32322,7 @@ mod tests {
     #[test]
     fn focused_link_scans_are_not_output_debounced() {
         let app_src = production_source();
-        let window_src = include_str!("window_state.rs");
+        let window_src = kettle_test_support::production_source(include_str!("window_state.rs"));
         let removed_const = format!("LINKS_SCAN_{}", "DEBOUNCE");
         let removed_field = format!("last_{}_scan", "links");
         assert!(
@@ -32071,6 +32498,25 @@ mod tests {
             !check.contains("!ws.mux.panes.contains_key(pane)"),
             "current-window-only orphan checks kill pending runs in other windows"
         );
+    }
+
+    #[test]
+    fn run_command_line_cap_reports_a_dropped_head() {
+        use super::{MAX_CTL_SCROLLBACK_LINES, ctl_capture_bounds};
+
+        let history_size = MAX_CTL_SCROLLBACK_LINES + 5_000;
+        let (start, end, head_dropped) =
+            ctl_capture_bounds(history_size, 0, history_size, MAX_CTL_SCROLLBACK_LINES + 24);
+        assert_eq!(start, 0);
+        assert!(end > start);
+        assert!(
+            head_dropped,
+            "a command that outruns the retained-line capture must mark its output incomplete"
+        );
+
+        let (start, end, head_dropped) = ctl_capture_bounds(100, 50, 100, MAX_CTL_SCROLLBACK_LINES);
+        assert!(end > start);
+        assert!(!head_dropped, "a fully retained capture is complete");
     }
 
     /// Drift guard. `pick_light_dark_target` is the

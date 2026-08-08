@@ -35,6 +35,13 @@ stubs. It prints other-OS legs as explicitly not applicable and claims only a
 current-OS pass; cross-platform release evidence still requires the native CI
 matrix.
 
+Shell-integration changes also run `just shell-integration-check`. Unlike the
+CLI smoke's source-text checks, this executes the shipped snippets: macOS uses
+interactive `zsh -f` with `PROMPT_SUBST` off and its system Bash 3.2, while
+Windows runs the PowerShell prompt-status and PSReadLine binding fixture under
+each installed PowerShell host. Other hosts run the interpreters they have and
+print explicit skips for native legs that belong to the CI matrix.
+
 The three patched crates under `vendor/` are explicitly excluded from the
 product workspace, so the root gates exercise their public Kettle integration
 but do not run package-owned unit targets. A separate validation workspace and
@@ -329,6 +336,8 @@ discipline here.
   first-write backups, and symlinked dotfile targets while refusing
   non-regular/oversized files, newly malformed edits, and external changes
   observed by the final pre-stage comparison;
+  CLI `--check-config` exercises the same bounded reader against a resolved
+  default-path FIFO and oversized file, and verifies UTF-16LE/BE BOM decoding;
   session load/save atomic + corruption-backup contracts;
   empty-value resets for every string-config key;
   `clamp_font_size` bounds.
@@ -398,9 +407,13 @@ discipline here.
   expired/future signed metadata and strict RFC 3339 parsing. Post-update
   integration tests require the installed script to match the verified archive
   bytes and retain it against replacement through execution. Transaction tests
-  prove rollback preserves a post-update conflicting write and its recovery
-  evidence, while committed last-known-good bytes remain until the target
-  version reaches managed startup.
+  interrupt backup streaming, backup sync, prepared-entry persistence, and
+  replacement publication after an earlier destination was installed. They
+  prove every boundary rolls back, foreign unjournaled evidence still fails
+  closed, Linux startup and explicit update recover before provenance checking,
+  rollback preserves a post-update conflicting write and its recovery evidence,
+  and committed last-known-good bytes remain until the target version reaches
+  managed startup.
 
 - **kettle-core VT conformance** (150+ tests): drives the *real*
   vte + alacritty_terminal path used by the PTY reader and asserts
@@ -1009,7 +1022,10 @@ These need a real display and are run by hand (or on real hardware):
     Windows and deterministic non-rc Bash on Unix/macOS. The recipe consumes
     Cargo's JSON build artifact to select the current checkout's exact release
     executable, including custom target directories and configured target
-    triples, then drives a shell marker,
+    triples. Its graphical-session preflight fails nonzero rather than turning
+    an unavailable display into a successful skip; on macOS it requires an
+    unlocked Aqua console and wakes the display before launch. It then drives a
+    shell marker,
     a prompt-shaped `➜  ~`
     marker, deterministic Windows Codex active-placeholder and queued-input
     cursor fixtures with cell-level pixel assertions, optional
@@ -1071,8 +1087,9 @@ These need a real display and are run by hand (or on real hardware):
     `KETTLE_SMOKE_NVIM_DATA` can select its installed plugin data. The helper
     creates an unpredictable owner-private directory inside the target distro,
     copies only regular files from the config and existing `lazy`/`site`
-    runtime while dereferencing symlinks, and redirects `HOME` plus every
-    Neovim XDG
+    runtime while dereferencing symlinks. Plugin Git refs are retained for
+    lazy.nvim checkout recognition, but non-runtime Git object databases are
+    excluded. It redirects `HOME` plus every Neovim XDG
     config/data/state/cache/runtime path to that snapshot before removing it.
     The streaming copy rejects cycles and special files and caps the snapshot at
     100,000 entries, 64 directory levels, 256 MiB per file, and 2 GiB total.
@@ -1207,7 +1224,8 @@ These need a real display and are run by hand (or on real hardware):
     connection usable and serving the next call.
   - **Live MCP**: `claude --mcp-config .mcp.json --strict-mcp-config -p "use
     kettle_run to echo a marker"` — Claude Code drives the MCP tools end-to-end.
-  - **Live renderer/UI diagnostics**: on a Linux desktop run
+  - **Live renderer/UI diagnostics**: on a Linux desktop or unlocked macOS Aqua
+    session run
     `just live-render-smoke`, `just interaction-smoke`, `just tabbar-click-smoke`,
     `just pane-drag-smoke`, `just tearoff-smoke`, `just tab-title-smoke`,
     `just split-titlebar-smoke`,
@@ -1215,7 +1233,7 @@ These need a real display and are run by hand (or on real hardware):
     for frame-by-frame review. The tearoff recipe is two-tier: a portable
     ctl tier proves the mouseless `move_tab_to_new_window` tear +
     `tab_moved` broadcast (plus the `tear_lift`/`dock_highlighted`/`band`
-    diagnostics in `ui_geometry`), and an X11-desktop tier
+    diagnostics in `ui_geometry`), and an X11-desktop-only tier
     (`scripts/check-tearoff-live-smoke.sh`) drives xdotool REAL pointer
     input through the full gesture — tear, freeze-guarded follow, re-dock
     merge, Esc cancel — once per carry path (native `_NET_WM_MOVERESIZE`,
@@ -1258,11 +1276,12 @@ These need a real display and are run by hand (or on real hardware):
     interaction code.
 
 Search release evidence is platform-scoped. Run the live interaction/search
-probe on an Ubuntu Wayland or X11 desktop and on native Windows 11; exercise the
-same pane under tmux, clean Neovim, configured AstroNvim, Codex CLI, and Claude
-Code CLI where installed. macOS and Windows/WSL results remain separate checks:
-never infer them from a Linux unit test or an offscreen renderer pass. Record
-missing tools and unrun platforms as explicit skips in the release audit.
+probe on an Ubuntu Wayland or X11 desktop, an unlocked macOS Aqua session, and
+native Windows 11; exercise the same pane under tmux, clean Neovim, configured
+AstroNvim, Codex CLI, and Claude Code CLI where installed. macOS and Windows/WSL
+results remain separate checks: never infer them from a Linux unit test or an
+offscreen renderer pass. Record missing tools and unrun platforms as explicit
+skips in the release audit.
 
 ## Pattern: audit-driven hardening
 
@@ -1286,12 +1305,14 @@ name the shape of bug each pass caught.
 - The **`--screenshot` end-to-end** +
   **`--screenshot-menu` visual regression** smokes on Linux
   (both run the release binary under `LIBGL_ALWAYS_SOFTWARE=1`).
+- Native shell-integration fixtures: stock interactive `zsh -f` and system
+  Bash 3.2 on macOS, plus PowerShell prompt/Enter behavior on Windows.
 - A CLI smoke on every OS: `--version` SHA-regex,
   `--check-config` lead line, `--config-path`, `--list-themes`
   > 400, `--list-actions` > 50, `--list-keybinds` > 40,
   `--list-ssh-hosts` empty fallback, `--print-default-config`
-  round-trip, `--shell-integration <bash|zsh|fish>` snippets,
-  `--print-completions <bash|zsh|fish>` scripts,
+  round-trip, `--shell-integration <bash|zsh|fish|powershell>` snippets,
+  `--print-completions <bash|zsh|fish|powershell>` scripts,
   `--config /<typo>` + `--working-directory /<typo>` hard-fail
   exit codes, happy-path basename round-trip
   (Windows path-translation parity).

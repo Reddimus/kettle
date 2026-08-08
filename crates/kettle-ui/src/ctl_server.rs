@@ -846,6 +846,24 @@ fn wait_for_poll(
 mod tests {
     use super::*;
 
+    /// The production source of this file, excluding test-only items.
+    fn production_source() -> String {
+        let production = kettle_test_support::production_source(include_str!("ctl_server.rs"));
+        assert!(
+            !production.contains("fn production_source()"),
+            "the production slice retained its own helper"
+        );
+        assert!(
+            !production.contains("#[test]"),
+            "the production slice retained a test function"
+        );
+        assert!(
+            !production.contains("#[cfg(test)]"),
+            "the production slice retained a test-only item"
+        );
+        production
+    }
+
     fn test_endpoint(tag: &str) -> String {
         static NEXT: AtomicU64 = AtomicU64::new(1);
         let unique = NEXT.fetch_add(1, Ordering::Relaxed);
@@ -971,7 +989,7 @@ mod tests {
                     "connection-thread methods cannot bypass the UI mutation gate"
                 );
                 let name = method.as_str();
-                let src = include_str!("ctl_server.rs");
+                let src = production_source();
                 assert!(
                     src.contains("method.execution() == Execution::Connection"),
                     "connection-thread method {name} has no connection_loop dispatch"
@@ -1366,7 +1384,7 @@ mod tests {
     /// capability gate occurs before that match.
     #[test]
     fn every_typed_method_is_dispatched_behind_capability_gate() {
-        let src = include_str!("app.rs");
+        let src = kettle_test_support::production_source(include_str!("app.rs"));
         let start = src
             .find("if method.capability() == Capability::Mutate")
             .expect("typed capability gate present");

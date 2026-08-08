@@ -518,7 +518,12 @@ mod tests {
 
     #[test]
     fn pre_exec_descriptor_sweep_has_no_allocating_source_shapes() {
-        let source = include_str!("unix.rs");
+        // This vendored crate cannot depend on Kettle's test-support crate;
+        // its one trailing test module makes this local split sufficient.
+        let source = include_str!("unix.rs")
+            .split_once("\n#[cfg(test)]\nmod tests {")
+            .expect("trailing tests module")
+            .0;
         let hook = source
             .split_once(".pre_exec(move || {")
             .expect("pre_exec hook")

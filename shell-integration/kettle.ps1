@@ -37,13 +37,71 @@ if (-not $global:__kettle_prompt_installed) {
     $global:__kettle_original_prompt = (Get-Item function:prompt -ErrorAction SilentlyContinue).ScriptBlock
 
     function global:prompt {
-        $code = $LASTEXITCODE
-        if ($null -eq $code) { $code = 0 }
+        # Capture BOTH failure indicators before any other statement runs.
+        #
+        # `$?` reflects only the immediately preceding statement, so it must be
+        # read first. `$LASTEXITCODE` must be read first too: the user's prompt
+        # (starship, oh-my-posh, posh-git) routinely runs native commands, and
+        # each one overwrites it. Reading it *after* rendering therefore
+        # reported the prompt's own exit code — a command that failed with 37
+        # followed by a prompt that shelled out successfully emitted `D;0`, so
+        # command notifications and ctl/MCP `run_command` reported success for
+        # a failed command.
+        #
+        # An array literal evaluates `$?` before the assignment resets it, so a
+        # single statement captures both without either clobbering the other.
+        # Every local here is `__kettle_`-prefixed on purpose. PowerShell
+        # resolves variables dynamically through the call stack, so a plainly
+        # named local (`$code`) declared before the user's prompt is invoked
+        # would shadow a variable of that name inside their prompt.
+        $__kettle_state = @($?, $global:LASTEXITCODE)
+        $__kettle_ok = $__kettle_state[0]
+
+        # `$LASTEXITCODE` is written only by NATIVE commands. A failed *cmdlet*
+        # leaves it untouched, so reporting it verbatim mislabels both
+        # directions: a failed `Get-Item` after a clean native command would
+        # report success, and a successful cmdlet after `sh -c 'exit 37'` would
+        # report 37. `$?` is the only indicator that tracks cmdlets, so it
+        # decides success or failure; the numeric code is consulted only when
+        # `$?` already says the command failed, and a failure with no native
+        # code of its own reports 1.
+        $__kettle_code = if ($__kettle_ok) {
+            0
+        } elseif ($__kettle_state[1]) {
+            $__kettle_state[1]
+        } else {
+            1
+        }
+
+        # Hand the user's prompt the same `$?` an unwrapped prompt would see.
+        # `$?` is read-only; failing a statement is the only way to set it
+        # False, so this must be the LAST statement before the prompt runs.
+        #
+        # `-ErrorAction Ignore`, not `SilentlyContinue`: both set `$?`, but
+        # `SilentlyContinue` also pushes a record onto `$Error`, so a prompt
+        # that inspects `$Error[0]` — posh-git does — would read kettle's
+        # synthetic error instead of the user's real one, and a long session
+        # would push real errors out of the capped list. `Ignore` records
+        # nothing, so there is nothing to clean up afterwards. Either form
+        # overrides a profile-wide `$ErrorActionPreference = 'Stop'`, so this
+        # cannot become a terminating error and break the prompt.
+        if (-not $__kettle_ok) {
+            Write-Error 'kettle: propagating command failure' -ErrorAction Ignore
+        }
+        try {
+            $rendered = & $global:__kettle_original_prompt
+        } catch {
+            $rendered = $null
+        }
+        if ($null -eq $rendered) {
+            $rendered = "PS $($ExecutionContext.SessionState.Path.CurrentLocation)$('>' * ($NestedPromptLevel + 1)) "
+        }
+
         $esc = [char]27
         $bel = [char]7
         # D = last command's exit code, A = this prompt's start.
         # Emitted together at the top of the prompt function.
-        [Console]::Write("$esc]133;D;$code$bel$esc]133;A$bel")
+        [Console]::Write("$esc]133;D;$__kettle_code$bel$esc]133;A$bel")
         # OSC 7 cwd report (v2.20): powers new-tab/split cwd inheritance and
         # "Open folder" in kettle. Windows paths travel in URL form
         # (`file://HOST/C:/Users/...`, forward slashes, each segment
@@ -61,32 +119,37 @@ if (-not $global:__kettle_prompt_installed) {
             if (-not $enc.StartsWith('/')) { $enc = "/$enc" }
             [Console]::Write("$esc]7;file://$env:COMPUTERNAME$enc$bel")
         }
-        # Render the user's original prompt (or PowerShell's built-in default
-        # if none was set). Guarded: a prompt that THROWS would otherwise make
-        # PowerShell re-invoke it endlessly (no prompt, no input), so on any
-        # failure fall back to the built-in default rather than loop.
-        $default = "PS $($ExecutionContext.SessionState.Path.CurrentLocation)$('>' * ($NestedPromptLevel + 1)) "
-        $rendered = if ($null -ne $global:__kettle_original_prompt) {
-            try { & $global:__kettle_original_prompt } catch { $default }
-        } else {
-            $default
-        }
+        # Restore the exit code the user's own last command left, undoing any
+        # native call the rendered prompt made. Without this, `$LASTEXITCODE`
+        # typed at the next prompt reports the prompt's internals rather than
+        # the command the user actually ran.
+        $global:LASTEXITCODE = $__kettle_state[1]
         # B = end of prompt / input start. Emitted after the rendered
         # prompt text so the marker lands right where the user starts
-        # typing.
-        [Console]::Write("$esc]133;B$bel")
-        return $rendered
+        # typing. Returning it with the prompt is necessary: Console.Write
+        # runs before PowerShell displays the function's returned text.
+        return "$rendered$esc]133;B$bel"
     }
 
     # C = command started executing. PSReadLine (the default in
     # PowerShell 5.1+ since Windows 10 1809; bundled with PS 7) fires
-    # AcceptLine when the user hits Enter — hook it to emit OSC 133;C
-    # right before the command runs. Silently skipped if PSReadLine
-    # isn't loaded (rare; the user would have disabled it on purpose).
+    # AcceptLine when the user hits Enter — hook the stock binding to emit
+    # OSC 133;C right before the command runs. PSReadLine reports a custom
+    # binding's name but cannot return its ScriptBlock, so replacing one
+    # would be irreversible; leave every non-stock Enter binding untouched.
+    # Silently skipped if PSReadLine isn't loaded (rare; the user would have
+    # disabled it on purpose).
     if (Get-Module -ListAvailable PSReadLine) {
-        Set-PSReadLineKeyHandler -Key Enter -ScriptBlock {
-            [Console]::Write([char]27 + ']133;C' + [char]7)
-            [Microsoft.PowerShell.PSConsoleReadLine]::AcceptLine()
+        & {
+            $enterHandler = Get-PSReadLineKeyHandler -Bound |
+                Where-Object { $_.Key -eq 'Enter' } |
+                Select-Object -First 1
+            if ($null -ne $enterHandler -and $enterHandler.Function -eq 'AcceptLine') {
+                Set-PSReadLineKeyHandler -Key Enter -ScriptBlock {
+                    [Console]::Write([char]27 + ']133;C' + [char]7)
+                    [Microsoft.PowerShell.PSConsoleReadLine]::AcceptLine()
+                }
+            }
         }
     }
 

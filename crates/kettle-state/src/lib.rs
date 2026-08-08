@@ -13,25 +13,14 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
-#[cfg(all(test, windows))]
-pub(crate) fn test_tempdir() -> tempfile::TempDir {
-    let base = std::env::var_os("LOCALAPPDATA")
-        .or_else(|| std::env::var_os("USERPROFILE"))
-        .expect("Windows tests require LOCALAPPDATA or USERPROFILE");
-    tempfile::Builder::new()
-        .prefix("kettle-state-test-")
-        .tempdir_in(base)
-        .expect("create test directory in the user-private profile")
-}
-
-#[cfg(all(test, not(windows)))]
-pub(crate) fn test_tempdir() -> tempfile::TempDir {
-    tempfile::tempdir().expect("create test directory")
+#[cfg(test)]
+pub(crate) fn test_tempdir() -> kettle_test_support::PrivateTempDir {
+    kettle_test_support::private_tempdir("kettle-state-test-")
 }
 
 pub use private::{
-    create_private_file_new, open_existing_private_file, open_private_file,
-    open_private_file_append, remove_open_private_file, restrict_private_file,
+    create_private_file_new, discard_created_private_file, open_existing_private_file,
+    open_private_file, open_private_file_append, remove_open_private_file, restrict_private_file,
 };
 
 /// Maximum on-disk size of the shared remote-command spool.
@@ -911,8 +900,8 @@ mod tests {
     fn guarded_reaper_never_follows_a_replaced_parent_path() {
         let root = crate::test_tempdir();
         let live_path = root.path().join("state");
-        fs::create_dir(&live_path).unwrap();
         let destination = live_path.join("state.json");
+        private::create_private_parent_dirs(&destination).unwrap();
         let guard = private::guard_private_parent(&destination).unwrap();
         let dead_pid = exited_child_pid();
         let name = format!(".state.json.tmp.{dead_pid}.1.0");
@@ -921,7 +910,7 @@ mod tests {
 
         let displaced = root.path().join("displaced");
         fs::rename(&live_path, &displaced).unwrap();
-        fs::create_dir(&live_path).unwrap();
+        private::create_private_parent_dirs(&destination).unwrap();
         let replacement_candidate = live_path.join(&name);
         drop(create_private_file_new(&replacement_candidate).unwrap());
         let replacement_sentinel = live_path.join("sentinel");
@@ -981,6 +970,17 @@ mod tests {
         let file = open_existing_private_file(&path).unwrap();
         fs4::FileExt::try_lock(&file).unwrap();
         remove_open_private_file(file, &path).unwrap();
+
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn discards_a_private_file_through_its_creation_handle() {
+        let dir = crate::test_tempdir();
+        let path = dir.path().join("partial");
+        let file = create_private_file_new(&path).unwrap();
+
+        discard_created_private_file(file, &path);
 
         assert!(!path.exists());
     }

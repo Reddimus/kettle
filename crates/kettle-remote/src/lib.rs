@@ -149,7 +149,7 @@ pub enum ContainerRuntime {
 /// Implementations:
 /// - [`sysinfo::System`](https://docs.rs/sysinfo) — built-in via
 ///   the impl below; used by [`detect_remote_with`].
-/// - `tests::MockProcessTree` — `#[cfg(test)]`-only fixture in the
+/// - `tests::MockProcessTree` — test-configuration-only fixture in the
 ///   test module; powers the 8 BFS tests below.
 ///
 /// The trait is intentionally minimal: four read-only methods +
@@ -590,25 +590,42 @@ fn parse_proc_children(bytes: &[u8]) -> impl Iterator<Item = u32> + '_ {
 }
 
 #[cfg(any(target_os = "linux", test))]
-fn parse_proc_argv(bytes: &[u8]) -> Vec<String> {
+struct ParsedProcArgv {
+    argv: Vec<String>,
+    complete: bool,
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn parse_proc_argv(bytes: &[u8]) -> ParsedProcArgv {
     let mut argv = Vec::new();
     let mut decoded_bytes = 0_usize;
-    for arg in bytes
-        .split(|byte| *byte == 0)
-        .filter(|arg| !arg.is_empty())
-        .take(MAX_PROC_ARGS_PER_PROCESS)
-    {
+    for arg in bytes.split(|byte| *byte == 0).filter(|arg| !arg.is_empty()) {
+        if argv.len() >= MAX_PROC_ARGS_PER_PROCESS {
+            return ParsedProcArgv {
+                argv,
+                complete: false,
+            };
+        }
         let arg = String::from_utf8_lossy(arg);
         let Some(next_decoded_bytes) = decoded_bytes.checked_add(arg.len()) else {
-            break;
+            return ParsedProcArgv {
+                argv,
+                complete: false,
+            };
         };
         if next_decoded_bytes > MAX_PROC_ARG_DECODED_BYTES {
-            break;
+            return ParsedProcArgv {
+                argv,
+                complete: false,
+            };
         }
         decoded_bytes = next_decoded_bytes;
         argv.push(arg.into_owned());
     }
-    argv
+    ParsedProcArgv {
+        argv,
+        complete: true,
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -670,7 +687,11 @@ impl LinuxProcessTree {
             let process_dir = proc_root.join(pid.to_string());
             let argv = match read_proc_file_charged(&process_dir.join("cmdline"), &mut total_bytes)
             {
-                ProcFileRead::Complete(bytes) => Some(parse_proc_argv(&bytes)),
+                ProcFileRead::Complete(bytes) => {
+                    let parsed = parse_proc_argv(&bytes);
+                    complete &= parsed.complete;
+                    Some(parsed.argv)
+                }
                 ProcFileRead::Unavailable => None,
                 ProcFileRead::Incomplete => {
                     complete = false;
@@ -1226,6 +1247,25 @@ fn deepest_descendant_in_index(
     }
 }
 
+/// The production source of this file, excluding test-only items.
+#[cfg(test)]
+fn production_source() -> String {
+    let production = kettle_test_support::production_source(include_str!("lib.rs"));
+    assert!(
+        !production.contains("fn production_source()"),
+        "the production slice retained its own helper"
+    );
+    assert!(
+        !production.contains("#[test]"),
+        "the production slice retained a test function"
+    );
+    assert!(
+        !production.contains("#[cfg(test)]"),
+        "the production slice retained a test-only item"
+    );
+    production
+}
+
 /// One-shot [`find_foreground_shell_in_index`] over a fresh snapshot
 /// (mirrors [`detect_in_tree`]). Test-only — the app uses
 /// [`RemoteScanner::foreground_shell`] for the amortized shared-index path.
@@ -1339,6 +1379,20 @@ fn capture_option(slot: &mut Option<String>, unreproducible: &mut bool, value: &
     } else {
         *unreproducible = true;
     }
+}
+
+fn capture_first_option(
+    slot: &mut Option<String>,
+    seen: &mut bool,
+    unreproducible: &mut bool,
+    value: &str,
+    safe: bool,
+) {
+    if *seen {
+        return;
+    }
+    *seen = true;
+    capture_option(slot, unreproducible, value, safe);
 }
 
 /// One short-option occurrence pulled out of a `-abc`-style argv token.
@@ -1499,13 +1553,16 @@ pub fn detect_ssh(argv: &[String]) -> Option<RemoteContext> {
     let mut i = inner_start;
     let mut target: Option<&str> = None;
     // H2 (audit v2.32.0): capture `-l user` so Reconnect / the remote title keep
-    // the login user. An explicit `user@host` (parsed from `target` below) wins
-    // per OpenSSH precedence, so `-l` only fills `user` when `user@host` didn't.
+    // the login user. OpenSSH keeps the first command-line value obtained, so
+    // an earlier `-l` also wins over a later target's `user@` component.
     let mut flag_user: Option<&str> = None;
     // The remaining endpoint-selecting options travel with the host: `box` on
     // its own is not a service, and a Reconnect that dropped `-p`/`-J`/`-i`
     // would open a session on a different one.
     let mut options = SshOptions::default();
+    let mut port_seen = false;
+    let mut jump_seen = false;
+    let mut config_seen = false;
     while i < argv.len() {
         let a = &argv[i];
         if a.starts_with("--") {
@@ -1523,15 +1580,21 @@ pub fn detect_ssh(argv: &[String]) -> Option<RemoteContext> {
         });
         if let (Some(flag), Some(value)) = (short.flag, short.value) {
             match flag {
-                'l' => flag_user = Some(value),
-                'p' => capture_option(
+                'l' => {
+                    if flag_user.is_none() {
+                        flag_user = Some(value);
+                    }
+                }
+                'p' => capture_first_option(
                     &mut options.port,
+                    &mut port_seen,
                     &mut options.unreproducible,
                     value,
                     ssh_port_is_safe(value),
                 ),
-                'J' => capture_option(
+                'J' => capture_first_option(
                     &mut options.jump,
+                    &mut jump_seen,
                     &mut options.unreproducible,
                     value,
                     field_is_safe(value, SSH_JUMP_EXTRA),
@@ -1557,8 +1620,9 @@ pub fn detect_ssh(argv: &[String]) -> Option<RemoteContext> {
                         field_is_safe(value, FILE_PATH_EXTRA),
                     );
                 }
-                'F' => capture_option(
+                'F' => capture_first_option(
                     &mut options.config,
+                    &mut config_seen,
                     &mut options.unreproducible,
                     value,
                     field_is_safe(value, FILE_PATH_EXTRA),
@@ -1576,12 +1640,11 @@ pub fn detect_ssh(argv: &[String]) -> Option<RemoteContext> {
         i += if short.consumed_next { 2 } else { 1 };
     }
     let raw = target?;
-    let (user, host) = match raw.split_once('@') {
-        Some((u, h)) if !u.is_empty() && !h.is_empty() => (Some(u.to_string()), h.to_string()),
-        // No `user@` in the target — fall back to any `-l user` we captured
-        // (OpenSSH precedence: an explicit `user@host` would have won above).
-        _ => (flag_user.map(str::to_string), raw.to_string()),
+    let (target_user, host) = match raw.split_once('@') {
+        Some((u, h)) if !u.is_empty() && !h.is_empty() => (Some(u), h.to_string()),
+        _ => (None, raw.to_string()),
     };
+    let user = flag_user.or(target_user).map(str::to_string);
     if host.is_empty() {
         return None;
     }
@@ -2404,19 +2467,50 @@ mod tests {
             parse_proc_children(b"12 34\ninvalid 4294967296 56").collect::<Vec<_>>(),
             [12, 34, 56]
         );
-        assert_eq!(
-            parse_proc_argv(b"ssh\0alice@host\0bad-\xff\0\0"),
-            ["ssh", "alice@host", "bad-\u{fffd}"]
-        );
+        let parsed = parse_proc_argv(b"ssh\0alice@host\0bad-\xff\0\0");
+        assert_eq!(parsed.argv, ["ssh", "alice@host", "bad-\u{fffd}"]);
+        assert!(parsed.complete);
 
-        let nul_dense = [b'x', 0]
+        let exact_arg_count = [b'x', 0]
             .into_iter()
             .cycle()
-            .take((MAX_PROC_ARGS_PER_PROCESS + 100) * 2)
+            .take(MAX_PROC_ARGS_PER_PROCESS * 2)
             .collect::<Vec<_>>();
-        assert_eq!(parse_proc_argv(&nul_dense).len(), MAX_PROC_ARGS_PER_PROCESS);
+        let parsed = parse_proc_argv(&exact_arg_count);
+        assert_eq!(parsed.argv.len(), MAX_PROC_ARGS_PER_PROCESS);
+        assert!(parsed.complete, "an exact count-boundary EOF is complete");
+
+        let one_extra_arg = [b'x', 0]
+            .into_iter()
+            .cycle()
+            .take((MAX_PROC_ARGS_PER_PROCESS + 1) * 2)
+            .collect::<Vec<_>>();
+        let parsed = parse_proc_argv(&one_extra_arg);
+        assert_eq!(parsed.argv.len(), MAX_PROC_ARGS_PER_PROCESS);
+        assert!(!parsed.complete, "a dropped argument must mark truncation");
+
+        let exact_decoded = vec![b'x'; MAX_PROC_ARG_DECODED_BYTES];
+        let parsed = parse_proc_argv(&exact_decoded);
+        assert_eq!(parsed.argv.len(), 1);
+        assert!(parsed.complete, "an exact byte-boundary EOF is complete");
         let oversized_decoded = vec![b'x'; MAX_PROC_ARG_DECODED_BYTES + 1];
-        assert!(parse_proc_argv(&oversized_decoded).is_empty());
+        let parsed = parse_proc_argv(&oversized_decoded);
+        assert!(parsed.argv.is_empty());
+        assert!(!parsed.complete);
+    }
+
+    #[test]
+    fn proc_argv_limit_reports_a_destination_in_argument_257_as_truncated() {
+        let mut cmdline = b"ssh\0".to_vec();
+        for _ in 0..255 {
+            cmdline.extend_from_slice(b"-n\0");
+        }
+        cmdline.extend_from_slice(b"host.example\0");
+
+        let parsed = parse_proc_argv(&cmdline);
+        assert_eq!(parsed.argv.len(), MAX_PROC_ARGS_PER_PROCESS);
+        assert!(!parsed.complete);
+        assert!(!parsed.argv.iter().any(|arg| arg == "host.example"));
     }
 
     #[cfg(target_os = "linux")]
@@ -2465,6 +2559,37 @@ mod tests {
             detect_root_in_index(10, &tree, &index),
             Some(ssh_ctx("box.example", Some("alice")))
         );
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_proc_scanner_rejects_an_argv_truncated_before_the_ssh_destination() {
+        let root = std::env::temp_dir().join(format!(
+            "kettle-proc-tree-argv-truncation-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let process_dir = root.join("10");
+        std::fs::create_dir_all(process_dir.join("task/10")).unwrap();
+        let mut cmdline = b"ssh\0".to_vec();
+        for _ in 0..255 {
+            cmdline.extend_from_slice(b"-n\0");
+        }
+        cmdline.extend_from_slice(b"host.example\0");
+        std::fs::write(process_dir.join("cmdline"), cmdline).unwrap();
+        std::fs::write(process_dir.join("task/10/children"), b"").unwrap();
+
+        let mut tree = LinuxProcessTree::default();
+        assert!(
+            !tree.refresh_from(&root, &[10]),
+            "argv parser truncation must prevent publishing the scan"
+        );
+        assert!(detect_in_tree(10, &mut tree).is_none());
 
         std::fs::remove_dir_all(root).unwrap();
     }
@@ -2932,8 +3057,8 @@ mod tests {
     }
 
     /// H2 (audit v2.32.0): `ssh -l bob h` must reproduce the login user end to
-    /// end — both the remote title and the Reconnect command render `bob@h`. An
-    /// explicit `user@host` still wins over `-l` (OpenSSH precedence).
+    /// end — both the remote title and the Reconnect command render `bob@h`.
+    /// OpenSSH keeps that first user even if the later target spells another.
     #[test]
     fn ssh_dash_l_user_reaches_title_and_reconnect() {
         let argv = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
@@ -2946,10 +3071,10 @@ mod tests {
         );
         assert_eq!(clone_session_label(&ctx), "Reconnect ssh bob@h");
 
-        // user@host wins over -l.
+        // The earlier -l wins over the later target's user@ component.
         let ctx = detect_ssh(&argv(&["ssh", "-l", "bob", "alice@h"])).unwrap();
-        assert_eq!(ctx, ssh_ctx("h", Some("alice")));
-        assert_eq!(format_remote_title(&ctx), "ssh alice@h");
+        assert_eq!(ctx, ssh_ctx("h", Some("bob")));
+        assert_eq!(format_remote_title(&ctx), "ssh bob@h");
     }
 
     /// Drift guard: `clone_session_label` is the menu
@@ -3085,11 +3210,10 @@ mod tests {
             detect_ssh(&argv(&["ssh", "-l", "bob", "h"])),
             Some(ssh_ctx("h", Some("bob")))
         );
-        // ssh -l bob alice@h — an explicit user@host wins over -l (OpenSSH
-        // precedence); the login user stays `alice`.
+        // ssh -l bob alice@h — OpenSSH keeps the first obtained user, `bob`.
         assert_eq!(
             detect_ssh(&argv(&["ssh", "-l", "bob", "alice@h"])),
-            Some(ssh_ctx("h", Some("alice")))
+            Some(ssh_ctx("h", Some("bob")))
         );
         // sshpass -p secret ssh user@host
         assert_eq!(
@@ -3225,6 +3349,58 @@ mod tests {
                     ..ContainerOptions::default()
                 },
             })
+        );
+    }
+
+    #[test]
+    fn ssh_scalar_options_keep_the_first_obtained_value() {
+        let argv = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(
+            detect_ssh(&argv(&[
+                "ssh",
+                "-l",
+                "bob",
+                "-l",
+                "carol",
+                "-p",
+                "2222",
+                "-p22",
+                "-J",
+                "first-jump",
+                "-Jsecond-jump",
+                "-F",
+                "/first/config",
+                "-F/second/config",
+                "alice@host"
+            ])),
+            Some(RemoteContext::Ssh {
+                host: "host".into(),
+                user: Some("bob".into()),
+                options: SshOptions {
+                    port: Some("2222".into()),
+                    jump: Some("first-jump".into()),
+                    config: Some("/first/config".into()),
+                    ..SshOptions::default()
+                },
+            })
+        );
+
+        let unsafe_first = detect_ssh(&argv(&[
+            "ssh",
+            "-F",
+            "/bad/$config",
+            "-F",
+            "/safe/config",
+            "host",
+        ]))
+        .unwrap();
+        let RemoteContext::Ssh { options, .. } = unsafe_first else {
+            unreachable!();
+        };
+        assert!(options.unreproducible);
+        assert_eq!(
+            options.config, None,
+            "a later value cannot replace the first"
         );
     }
 
@@ -4160,7 +4336,7 @@ mod tests {
         // Every option name the two tables actually match on, read out of
         // their source. `NAMES` must equal this exactly, or the sweep below is
         // silently skipping a table entry.
-        let source = include_str!("lib.rs");
+        let source = super::production_source();
         let start = source
             .find("fn container_global_option(")
             .expect("the global option table");

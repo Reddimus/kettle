@@ -43,6 +43,7 @@ mod color;
 mod cursor_policy;
 mod glyphpipe;
 mod imgpipe;
+mod present;
 mod quad;
 mod snapshot;
 mod starfield;
@@ -272,6 +273,25 @@ pub fn menu_row_chars(row: &ContextMenuRow) -> usize {
         }
 }
 
+/// The production source of this file, excluding test-only items.
+#[cfg(test)]
+fn production_source() -> String {
+    let production = kettle_test_support::production_source(include_str!("lib.rs"));
+    assert!(
+        !production.contains("fn production_source()"),
+        "the production slice retained its own helper"
+    );
+    assert!(
+        !production.contains("#[test]"),
+        "the production slice retained a test function"
+    );
+    assert!(
+        !production.contains("#[cfg(test)]"),
+        "the production slice retained a test-only item"
+    );
+    production
+}
+
 #[cfg(test)]
 mod context_menu_row_width_tests {
     use super::{
@@ -427,6 +447,26 @@ fn context_menu_text_damage_key(
             row.enabled.hash(&mut hash);
             row.hint.hash(&mut hash);
         }
+    }
+    hash.finish()
+}
+
+fn prepared_text_areas_damage_key(areas: &[TextArea<'_>]) -> u64 {
+    use std::hash::{Hash, Hasher};
+
+    let mut hash = std::hash::DefaultHasher::new();
+    areas.len().hash(&mut hash);
+    for area in areas {
+        (area.buffer as *const TextBuffer as usize).hash(&mut hash);
+        area.left.to_bits().hash(&mut hash);
+        area.top.to_bits().hash(&mut hash);
+        area.scale.to_bits().hash(&mut hash);
+        area.bounds.left.hash(&mut hash);
+        area.bounds.top.hash(&mut hash);
+        area.bounds.right.hash(&mut hash);
+        area.bounds.bottom.hash(&mut hash);
+        area.default_color.hash(&mut hash);
+        area.custom_glyphs.len().hash(&mut hash);
     }
     hash.finish()
 }
@@ -1313,6 +1353,10 @@ struct BgImageAnim {
     /// texture cache (keyed by `Arc::as_ptr`) reuses one GPU texture per frame
     /// and only re-uploads when the displayed frame index actually changes.
     frames: Vec<kettle_core::ImageData>,
+    /// Whether every source texel in each parallel frame has alpha 255.
+    /// Computed once when the decoded result enters the cache, not by scanning
+    /// a 4K wallpaper again on every redraw.
+    opaque_frames: Vec<bool>,
     /// Per-frame dwell time (ms), parallel to `frames`.
     gaps: Vec<u32>,
     /// Wall-clock origin for the playback loop (`bg_current_frame`).
@@ -1325,6 +1369,7 @@ pub struct Renderer {
     /// Shared CPU/GPU retained-resource scope for this renderer window.
     graphics_budget: kettle_core::GraphicsBudget,
     config: wgpu::SurfaceConfiguration,
+    supported_alpha_modes: Vec<wgpu::CompositeAlphaMode>,
 
     font_system: FontSystem,
     swash: SwashCache,
@@ -1540,6 +1585,7 @@ pub struct Renderer {
     /// for tab labels. Stays at length 0 when the status bar is off.
     status_bar_buffer: TextBuffer,
 
+    pane_bases: QuadPipeline,
     quads: QuadPipeline,
     /// Second quad pass drawn *after* text (pane dimming, scrollbar).
     overlay_quads: QuadPipeline,
@@ -1575,6 +1621,7 @@ pub struct Renderer {
     /// drawn in the same back-most slot as `bg_imgs`. Stateless on the GPU side
     /// (just a per-frame uniform); the only state is `starfield_started`.
     starfield: starfield::StarfieldPipeline,
+    presentation: present::PresentationPipeline,
     /// Playback clock for the starfield drift — `elapsed()` feeds the shader's
     /// continuous `time` so motion is smooth-valued even though we repaint at a
     /// low fps cap.
@@ -1704,11 +1751,10 @@ struct PreparedScreenshot {
     unpadded_bytes_per_row: u32,
     padded_bytes_per_row: u32,
     format: wgpu::TextureFormat,
-    /// Whether the surface this was captured from holds premultiplied colour.
-    /// True exactly when the surface composites as `PreMultiplied`, because
-    /// that is when [`surface_clear_color`] premultiplies the clear and the
-    /// whole pass is then premultiplied. PNG stores straight alpha, so the
-    /// readback has to be converted back before it is saved.
+    /// Whether the captured surface holds kettle's premultiplied scene.
+    /// `PostMultiplied` is the sole exception because its final presentation
+    /// pass has already converted the completed scene to straight alpha. PNG
+    /// stores straight alpha, so every direct-scene readback is converted.
     premultiplied: bool,
     request: ScreenshotRequest,
 }
@@ -2063,20 +2109,8 @@ fn crop_screenshot(
 mod live_screenshot_tests {
     use super::{create_private_screenshot_file, crop_screenshot};
 
-    #[cfg(windows)]
-    fn test_tempdir() -> tempfile::TempDir {
-        let base = std::env::var_os("LOCALAPPDATA")
-            .or_else(|| std::env::var_os("USERPROFILE"))
-            .expect("Windows tests require LOCALAPPDATA or USERPROFILE");
-        tempfile::Builder::new()
-            .prefix("kettle-render-test-")
-            .tempdir_in(base)
-            .expect("create test directory in the user-private profile")
-    }
-
-    #[cfg(not(windows))]
-    fn test_tempdir() -> tempfile::TempDir {
-        tempfile::tempdir().expect("tempdir")
+    fn test_tempdir() -> kettle_test_support::PrivateTempDir {
+        kettle_test_support::private_tempdir("kettle-render-test-")
     }
 
     fn pixels(width: u32, height: u32) -> Vec<u8> {
@@ -2518,30 +2552,7 @@ impl Renderer {
             .copied()
             .find(|f| f.is_srgb())
             .unwrap_or(caps.formats[0]);
-        // Pick a real alpha-aware mode when the user wants
-        // transparency. The previous `caps.alpha_modes[0]` just took
-        // whatever the backend listed first — usually `Opaque`, which
-        // ignores the alpha channel from `Color { a: ... }` on the
-        // clear ops. So `background-opacity = 0.5` rendered as fully
-        // opaque on most surfaces. Prefer `PreMultiplied` (the
-        // standard for compositing) when opacity < 1.0, falling back
-        // through `PostMultiplied` → `Inherit` → `Auto` → whatever's
-        // first if nothing fancier is available. Opaque configs
-        // stay opaque (matching the surface's default behavior).
-        let want_transparency = cfg.background_opacity < 1.0;
-        let alpha_mode = if want_transparency {
-            [
-                wgpu::CompositeAlphaMode::PreMultiplied,
-                wgpu::CompositeAlphaMode::PostMultiplied,
-                wgpu::CompositeAlphaMode::Inherit,
-                wgpu::CompositeAlphaMode::Auto,
-            ]
-            .into_iter()
-            .find(|m| caps.alpha_modes.contains(m))
-            .unwrap_or(caps.alpha_modes[0])
-        } else {
-            caps.alpha_modes[0]
-        };
+        let alpha_mode = desired_alpha_mode(cfg, &caps.alpha_modes);
         // Phase 4 of TERMINATOR-TERMINALSHOT-DESIGN.md: add COPY_SRC
         // so the `pending_screenshot` path can read
         // back the live surface. Gate it on the surface's advertised caps:
@@ -2572,6 +2583,7 @@ impl Renderer {
             desired_maximum_frame_latency: 2,
         };
         surface.configure(&device, &config);
+        let supported_alpha_modes = caps.alpha_modes;
 
         let t_font_system = std::time::Instant::now();
         let mut font_system = FontSystem::new();
@@ -2627,6 +2639,7 @@ impl Renderer {
         let cell_w = cell_w * cell_scale_w;
         let cell_h = cell_h * cell_scale_h;
 
+        let pane_bases = QuadPipeline::new_replace(&device, format);
         let quads = QuadPipeline::new(&device, format);
         let overlay_quads = QuadPipeline::new(&device, format);
         let menu_quads = QuadPipeline::new(&device, format);
@@ -2636,6 +2649,8 @@ impl Renderer {
             TextRenderer::new(&mut atlas, &device, wgpu::MultisampleState::default(), None);
         let cursor_glyph_buffer = TextBuffer::new(&mut font_system, metrics);
         let graphics_budget = kettle_core::GraphicsBudget::default();
+        let presentation =
+            present::PresentationPipeline::new(&device, format, graphics_budget.clone());
         let imgs =
             imgpipe::ImagePipeline::new_with_budget(&device, format, graphics_budget.clone())
                 .ok_or_else(|| {
@@ -2647,7 +2662,7 @@ impl Renderer {
             &device,
             format,
             graphics_budget.clone(),
-            MAX_BG_TILES,
+            1,
         )
         .ok_or_else(|| {
             anyhow!("GPU graphics budget exhausted while creating background image pipeline")
@@ -2666,6 +2681,7 @@ impl Renderer {
             gpu,
             graphics_budget,
             config,
+            supported_alpha_modes,
             font_system,
             swash,
             atlas,
@@ -2727,6 +2743,7 @@ impl Renderer {
             search_buffer,
             search_buffer_text: String::new(),
             status_bar_buffer,
+            pane_bases,
             quads,
             overlay_quads,
             menu_quads,
@@ -2734,6 +2751,7 @@ impl Renderer {
             imgs,
             bg_imgs,
             starfield,
+            presentation,
             starfield_started: std::time::Instant::now(),
             bg_image_cache: None,
             bg_image_retry_at: None,
@@ -2839,6 +2857,15 @@ impl Renderer {
         );
         self.config.width = width;
         self.config.height = height;
+        self.surface.configure(&self.gpu.device, &self.config);
+    }
+
+    pub fn set_background_compositing(&mut self, cfg: &Config) {
+        let alpha_mode = desired_alpha_mode(cfg, &self.supported_alpha_modes);
+        if self.config.alpha_mode == alpha_mode {
+            return;
+        }
+        self.config.alpha_mode = alpha_mode;
         self.surface.configure(&self.gpu.device, &self.config);
     }
 
@@ -3171,19 +3198,26 @@ impl Renderer {
                 continue;
             }
             self.bg_image_pending = None;
-            let (frames, gaps): (Vec<kettle_core::ImageData>, Vec<u32>) = result
-                .frames
-                .into_iter()
-                .filter_map(|f| {
-                    kettle_core::ImageData::new_with_budget(
-                        f.image.width,
-                        f.image.height,
-                        f.image.rgba,
-                        &self.graphics_budget,
-                    )
-                    .map(|img| (img, f.gap_ms))
-                })
-                .unzip();
+            let mut frames = Vec::with_capacity(result.frames.len());
+            let mut opaque_frames = Vec::with_capacity(result.frames.len());
+            let mut gaps = Vec::with_capacity(result.frames.len());
+            for frame in result.frames {
+                let opaque = frame
+                    .image
+                    .rgba
+                    .chunks_exact(4)
+                    .all(|pixel| pixel[3] == 255);
+                if let Some(image) = kettle_core::ImageData::new_with_budget(
+                    frame.image.width,
+                    frame.image.height,
+                    frame.image.rgba,
+                    &self.graphics_budget,
+                ) {
+                    frames.push(image);
+                    opaque_frames.push(opaque);
+                    gaps.push(frame.gap_ms);
+                }
+            }
             // On failure, throttle the next retry; on success, clear it so
             // the loaded wallpaper never re-decodes.
             self.bg_image_retry_at = if frames.is_empty() {
@@ -3195,6 +3229,7 @@ impl Renderer {
                 path: result.path,
                 blur: result.blur_radius,
                 frames,
+                opaque_frames,
                 gaps,
                 started: std::time::Instant::now(),
             });
@@ -3217,6 +3252,7 @@ impl Renderer {
     where
         F: FnOnce(),
     {
+        self.set_background_compositing(cfg);
         let theme = &cfg.theme;
         // OSC 11 (set default background) override from the focused pane.
         // The engine stores it in `Colors[257]`; the renderer needs it for
@@ -3417,6 +3453,17 @@ impl Renderer {
         let mut quads: Vec<QuadInstance> = std::mem::take(&mut self.quad_scratch);
         quads.clear();
         quads.reserve(panes.len() * 16 + 256);
+        let mut pane_bases: Vec<QuadInstance> = Vec::with_capacity(panes.len() + 1);
+        if !background_has_wallpaper(cfg) {
+            pane_bases.push(rect(
+                0.0,
+                0.0,
+                sw,
+                sh,
+                default_bg,
+                composed_bg_alpha(cfg) as f32,
+            ));
+        }
         // Third quad pass — drawn after `over` so the right-click
         // context menu's bg/shadow/border/highlight sit on top of
         // every other UI element. The menu's text is rendered by
@@ -3430,19 +3477,24 @@ impl Renderer {
         // so the allocation is trivial; high-water pooling is reserved for the
         // large per-cell `quads` / `spans` buffers where it actually pays off.
         // The asymmetry is deliberate, not an oversight.
+        use kettle_config::BackgroundType;
         let mut menu_q: Vec<QuadInstance> = Vec::with_capacity(64);
         // Drawn *after* text: unfocused-pane dimming + scrollbar thumbs.
         let mut over: Vec<QuadInstance> = Vec::with_capacity(panes.len() * 4 + 8);
         let mut img_items: Vec<imgpipe::ImageItem> = Vec::with_capacity(16);
-        // v2.23.0: the wallpaper item(s) draw in their own pass (`bg_imgs`)
-        // BEFORE the cell/chrome quads, so the wallpaper sits at the very back
-        // and everything else composites opaquely on top. `tile` mode can push
-        // many; the rest push one.
-        let mut bg_img_items: Vec<imgpipe::ImageItem> = Vec::new();
+        // The wallpaper is always one retained item in its own back-most pass;
+        // tile mode repeats UVs in the sampler instead of rebuilding a quad per
+        // tile on every frame.
+        let mut bg_img_items: Vec<imgpipe::ImageItem> = Vec::with_capacity(1);
         // v2.23.0: when `chrome-background = auto`, the average color of the
         // currently-displayed wallpaper frame, used to tint the chrome strips.
         // Computed once from the displayed frame below (only when auto is set).
         let mut bg_frame_avg: Option<Rgb> = None;
+        // Starfield's fragment shader writes alpha 1 over the whole surface.
+        // Image backgrounds prove this separately from the selected frame's
+        // cached alpha scan and its destination geometry below.
+        let mut opaque_wallpaper_covers_surface =
+            matches!(cfg.background_type, BackgroundType::Starfield);
         let mut bg_live: std::collections::HashSet<usize> = std::collections::HashSet::new();
         let mut inline_live: std::collections::HashSet<usize> = std::collections::HashSet::new();
 
@@ -3452,7 +3504,6 @@ impl Renderer {
         // renders at the back. The `decode_bg_image_frames_with_blur`
         // helper handles the file-not-found / decode-error paths
         // gracefully.
-        use kettle_config::BackgroundType;
         if matches!(cfg.background_type, BackgroundType::Image) && !cfg.background_image.is_empty()
         {
             let want = cfg.background_image.clone();
@@ -3508,7 +3559,7 @@ impl Renderer {
             // still shows the time-correct frame, no jump) — focus only gates
             // whether the render loop PROACTIVELY wakes to animate, via
             // `background_is_animating` feeding the anim tick.
-            let bg_frame: Option<&kettle_core::ImageData> = self
+            let bg_frame: Option<(&kettle_core::ImageData, bool)> = self
                 .bg_image_cache
                 .as_ref()
                 .filter(|c| !c.frames.is_empty())
@@ -3520,9 +3571,13 @@ impl Renderer {
                     } else {
                         0
                     };
-                    &c.frames[idx.min(c.frames.len() - 1)]
+                    let idx = idx.min(c.frames.len() - 1);
+                    (
+                        &c.frames[idx],
+                        c.opaque_frames.get(idx).copied().unwrap_or(false),
+                    )
                 });
-            if let Some(data) = bg_frame {
+            if let Some((data, frame_is_opaque)) = bg_frame {
                 // v2.23.0: sample the displayed frame's average color for
                 // `chrome-background = auto`. Sampled + alpha-aware, so it's a
                 // few microseconds even on a 4K frame; only when auto is set.
@@ -3548,78 +3603,20 @@ impl Renderer {
                 let img_w = data.width as f32;
                 let img_h = data.height as f32;
                 bg_live.insert(data.allocation_key());
-                match cfg.background_image_mode.as_str() {
-                    "tile" if bg_tiles_within_cap(sw, sh, img_w, img_h) => {
-                        // Tile starts from (0, 0); rows go top-to-bottom.
-                        let mut y = 0.0;
-                        while y < sh {
-                            let mut x = 0.0;
-                            while x < sw {
-                                let tw = img_w.min(sw - x);
-                                let th = img_h.min(sh - y);
-                                bg_img_items.push(imgpipe::ImageItem::full(
-                                    x,
-                                    y,
-                                    tw,
-                                    th,
-                                    data.clone(),
-                                ));
-                                x += img_w;
-                            }
-                            y += img_h;
-                        }
-                    }
-                    "tile" => {
-                        // A tiny source image (e.g. a 1×1
-                        // pixel) tiles into a huge number of CPU quads + Arc
-                        // clones EVERY frame — ~8.3M on a 4K surface — hanging
-                        // the render thread. Past `MAX_BG_TILES`, fall back to a
-                        // single stretched quad instead of melting the renderer.
-                        bg_img_items.push(imgpipe::ImageItem::full(0.0, 0.0, sw, sh, data.clone()));
-                    }
-                    "center" => {
-                        // align_horiz/vert nudge the
-                        // centered position. left/top → 0, right/
-                        // bottom → max-edge, center/middle (default)
-                        // → centered.
-                        let w = img_w.min(sw);
-                        let h = img_h.min(sh);
-                        let x = match cfg.background_image_align_horiz.as_str() {
-                            "left" => 0.0,
-                            "right" => (sw - w).max(0.0),
-                            _ => ((sw - w) * 0.5).max(0.0),
-                        };
-                        let y = match cfg.background_image_align_vert.as_str() {
-                            "top" => 0.0,
-                            "bottom" => (sh - h).max(0.0),
-                            _ => ((sh - h) * 0.5).max(0.0),
-                        };
-                        bg_img_items.push(imgpipe::ImageItem::full(x, y, w, h, data.clone()));
-                    }
-                    "scale" => {
-                        // Aspect-preserving fit within
-                        // the surface; align_horiz/vert position
-                        // the scaled image.
-                        let scale = (sw / img_w).min(sh / img_h);
-                        let w = img_w * scale;
-                        let h = img_h * scale;
-                        let x = match cfg.background_image_align_horiz.as_str() {
-                            "left" => 0.0,
-                            "right" => (sw - w).max(0.0),
-                            _ => ((sw - w) * 0.5).max(0.0),
-                        };
-                        let y = match cfg.background_image_align_vert.as_str() {
-                            "top" => 0.0,
-                            "bottom" => (sh - h).max(0.0),
-                            _ => ((sh - h) * 0.5).max(0.0),
-                        };
-                        bg_img_items.push(imgpipe::ImageItem::full(x, y, w, h, data.clone()));
-                    }
-                    _ => {
-                        // "stretch_and_fill" + any unknown value:
-                        // single quad covering the whole surface.
-                        bg_img_items.push(imgpipe::ImageItem::full(0.0, 0.0, sw, sh, data.clone()));
-                    }
+                if cfg.background_image_mode == "tile" {
+                    bg_img_items.push(imgpipe::ImageItem::tiled(sw, sh, data.clone()));
+                    opaque_wallpaper_covers_surface = frame_is_opaque;
+                } else {
+                    let rect @ [x, y, w, h] = background_image_rect(
+                        cfg.background_image_mode.as_str(),
+                        cfg.background_image_align_horiz.as_str(),
+                        cfg.background_image_align_vert.as_str(),
+                        [sw, sh],
+                        [img_w, img_h],
+                    );
+                    bg_img_items.push(imgpipe::ImageItem::full(x, y, w, h, data.clone()));
+                    opaque_wallpaper_covers_surface =
+                        frame_is_opaque && rect_covers_surface(rect, [sw, sh]);
                 }
             }
         } else if self.bg_image_cache.is_some() {
@@ -4072,10 +4069,8 @@ impl Renderer {
                     &[]
                 },
                 &mut quads,
+                &mut pane_bases,
                 pane_titlebar_h,
-                // The whole-surface clear color so build_pane can
-                // detect when an unfocused pane needs its own bg backdrop.
-                default_bg,
             );
 
             // Image placements, anchored history-aware so they scroll.
@@ -5684,6 +5679,7 @@ impl Renderer {
             self.new_tab_arrow_text.hash(&mut h);
             self.resize_overlay_text.hash(&mut h);
             self.ime_text.hash(&mut h);
+            prepared_text_areas_damage_key(&areas).hash(&mut h);
             context_menu_text_damage_key(
                 overlay.context_menu.as_ref(),
                 theme.foreground,
@@ -5835,6 +5831,8 @@ impl Renderer {
         if preparing_text {
             self.text_prepare_dirty = false;
         }
+        self.pane_bases
+            .upload(&self.gpu.device, &self.gpu.queue, [sw, sh], &pane_bases);
         self.quads
             .upload(&self.gpu.device, &self.gpu.queue, [sw, sh], &quads);
         // Return the scratch to the pool (keeps its capacity for next
@@ -5848,8 +5846,13 @@ impl Renderer {
         // the per-window/process GPU budgets; visible entries remain pinned.
         self.bg_imgs.gc(&bg_live);
         self.imgs.gc(&inline_live);
-        self.bg_imgs
-            .upload(&self.gpu.device, &self.gpu.queue, [sw, sh], &bg_img_items);
+        let wallpaper_upload_complete = self.bg_imgs.upload_retained(
+            &self.gpu.device,
+            &self.gpu.queue,
+            [sw, sh],
+            &bg_img_items,
+        );
+        opaque_wallpaper_covers_surface &= wallpaper_upload_complete;
         // v2.24.0: refresh the procedural starfield's per-frame uniform (just
         // resolution + the continuous `time` clock; the look is baked into the
         // shader as of v2.24.1) when it's the active wallpaper.
@@ -5907,9 +5910,34 @@ impl Renderer {
         };
         let target_extent = frame.texture.size();
         let target_size = [target_extent.width.max(1), target_extent.height.max(1)];
-        let view = frame
+        let surface_view = frame
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
+        let scene_is_opaque = final_scene_is_uniformly_opaque(cfg, opaque_wallpaper_covers_surface);
+        let needs_presentation =
+            needs_postmultiplied_presentation(self.config.alpha_mode, scene_is_opaque);
+        if !needs_presentation {
+            // A target retained from a previous translucent configuration or
+            // animation frame should not keep a full-surface texture charged
+            // while the completed scene is provably alpha 1 everywhere.
+            self.presentation.discard_target();
+        }
+        if needs_presentation
+            && !self
+                .presentation
+                .ensure_target(&self.gpu.device, target_size[0], target_size[1])
+        {
+            return Err(anyhow!(
+                "GPU graphics budget exhausted while creating the presentation target"
+            ));
+        }
+        let scene_view = if needs_presentation {
+            self.presentation
+                .scene_view()
+                .expect("presentation target ensured above")
+        } else {
+            &surface_view
+        };
         let mut encoder = self
             .gpu
             .device
@@ -5917,29 +5945,13 @@ impl Renderer {
                 label: Some("kettle-encoder"),
             });
         {
-            let bg = default_bg;
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("kettle-pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &view,
+                    view: scene_view,
                     resolve_target: None,
                     ops: wgpu::Operations {
-                        // Terminator parity, terminatorlib/config.py:106 +
-                        // 117 `background_darkness` + `background_type`:
-                        // when bg-type=transparent, compose the configured
-                        // darkness with the background-opacity.
-                        // `composed_bg_alpha` owns that composition.
-                        //
-                        // `surface_clear_color` owns the premultiply: the
-                        // pipelines drawing over this clear all treat the
-                        // attachment as premultiplied, so a straight clear
-                        // made every translucent background composite too
-                        // bright.
-                        load: wgpu::LoadOp::Clear(surface_clear_color(
-                            bg,
-                            composed_bg_alpha(cfg),
-                            self.config.alpha_mode,
-                        )),
+                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
                         store: wgpu::StoreOp::Store,
                     },
                     depth_slice: None,
@@ -5961,6 +5973,7 @@ impl Renderer {
             } else {
                 self.bg_imgs.draw(&mut pass);
             }
+            self.pane_bases.draw(&mut pass);
             self.quads.draw(&mut pass);
             self.imgs.draw(&mut pass);
             // v2.25.0: cell-locked pane text sits above cell backgrounds + inline
@@ -5989,6 +6002,25 @@ impl Renderer {
                 self.cursor_glyph_renderer
                     .render(&self.atlas, &self.viewport, &mut pass)?;
             }
+        }
+        if needs_presentation {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("kettle-presentation-pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &surface_view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                        store: wgpu::StoreOp::Store,
+                    },
+                    depth_slice: None,
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            self.presentation.draw(&mut pass);
         }
         // Encode a pending surface readback into this frame's submission. The
         // finite GPU wait, mapping, conversion, PNG encode, and write happen on
@@ -6108,9 +6140,9 @@ impl Renderer {
             unpadded_bytes_per_row,
             padded_bytes_per_row,
             format: texture.format(),
-            premultiplied: matches!(
+            premultiplied: !matches!(
                 self.config.alpha_mode,
-                wgpu::CompositeAlphaMode::PreMultiplied
+                wgpu::CompositeAlphaMode::PostMultiplied
             ),
             request,
         })
@@ -6176,18 +6208,12 @@ impl Renderer {
         cursor_visible: bool,
         search_highlights: &[HighlightRect],
         quads: &mut Vec<QuadInstance>,
+        pane_bases: &mut Vec<QuadInstance>,
         // Terminator parity, per-pane-titlebar Bucket-D,
         // phase 2 of TERMINATOR-PANE-TITLEBAR-DESIGN.md: extra top offset for cell content
         // so it doesn't overlap the per-pane titlebar bar. When
         // titlebar is off this is 0.0 (zero overhead).
         pane_titlebar_h: f32,
-        // The whole-surface clear color (the FOCUSED
-        // pane's OSC 11 bg, or the theme bg). When this pane's own
-        // default bg differs from it we must paint a backdrop — the
-        // per-cell loop skips quads for default-bg cells on the
-        // assumption the clear already painted them, which is false for
-        // an unfocused pane carrying its own OSC 11 background.
-        surface_bg: Rgb,
     ) -> bool {
         // v2.21.0 (idle perf): becomes true iff this pane mutated its text
         // buffer this frame (a row reshaped, or the line count changed). When
@@ -6228,43 +6254,30 @@ impl Renderer {
         // not scrolled (display_offset == 0).
         let display_off = snap.display_offset as i32;
         let screen_rows = snap.screen_lines as i32;
-        // Match the surface clear-color so a cell whose bg resolves to the
-        // active default (OSC 11 override or theme bg) doesn't paint a
-        // redundant quad over the already-correct backdrop.
         let default_bg = term_colors[257]
             .map(|c| Rgb::new(c.r, c.g, c.b))
             .unwrap_or(theme.background);
 
-        // When this pane's default bg differs from the
-        // surface clear color (e.g. an UNFOCUSED pane running a program that
-        // set its own OSC 11 background, while the focused pane defines the
-        // clear color), paint a backdrop over the pane interior. Without it
-        // the per-cell loop below skips a quad for every default-bg cell —
-        // correct for the focused pane (the clear already painted them) but
-        // wrong here, so those cells leaked the *other* pane's background.
-        //
-        // Cover the interior only: inside the border (`bw`) and below/above
-        // the titlebar strip, so we don't paint over the focus border or the
-        // per-pane titlebar quad (both drawn by the caller before this call).
-        // Alpha mirrors the surface clear so window transparency / darkness
-        // applies to this pane's bg exactly as it does to the focused one.
-        if default_bg != surface_bg {
-            let bw = if cfg.handle_size < 0 {
-                1.0
+        let bw = if cfg.handle_size < 0 {
+            1.0
+        } else {
+            cfg.handle_size as f32
+        };
+        if let Some((bx, by, bwid, bhgt)) =
+            pane_backdrop_rect(pv.rect, bw, pane_titlebar_h, cfg.title_at_bottom)
+        {
+            let backdrop = rect(
+                bx,
+                by,
+                bwid,
+                bhgt,
+                default_bg,
+                composed_bg_alpha(cfg) as f32,
+            );
+            if background_has_wallpaper(cfg) {
+                quads.push(backdrop);
             } else {
-                cfg.handle_size as f32
-            };
-            if let Some((bx, by, bwid, bhgt)) =
-                pane_backdrop_rect(pv.rect, bw, pane_titlebar_h, cfg.title_at_bottom)
-            {
-                quads.push(rect(
-                    bx,
-                    by,
-                    bwid,
-                    bhgt,
-                    default_bg,
-                    composed_bg_alpha(cfg) as f32,
-                ));
+                pane_bases.push(backdrop);
             }
         }
 
@@ -6367,13 +6380,7 @@ impl Renderer {
             if flags.contains(Flags::INVERSE) {
                 std::mem::swap(&mut fg, &mut bg);
             }
-            // Selection foreground override — applied *after* INVERSE so the
-            // selection always wins for readability (alacritty / iTerm2
-            // behavior). Without this, a cell with INVERSE under a selection
-            // would render as inverse-fg on selection-bg, often invisible.
-            if selection_range.is_some_and(|r| r.contains(sc.point())) {
-                fg = theme.selection_foreground;
-            }
+            let selected = selection_range.is_some_and(|r| r.contains(sc.point()));
             // Terminator parity, terminatorlib/config.py:111
             // `allow_bold`: when false, suppress bold attr entirely.
             // Useful on fonts without a bold companion.
@@ -6381,21 +6388,27 @@ impl Renderer {
             let italic = flags.contains(Flags::ITALIC);
             saw_styled_text |= bold || italic;
             let hidden = flags.contains(Flags::HIDDEN);
-            fg = attributed_foreground(fg, bg, flags.contains(Flags::DIM), bold, cfg, theme);
             // The same search pair drives the match background quads and the
             // terminal glyphs above them. Active matches use the configured
             // search fg/bg; inactive matches reuse the theme selection pair.
             // `search_highlight_at` advances once through sorted visible spans,
             // so this adds no match-count multiplier to the hot cell walk.
-            if let Some(active) =
-                search_highlight_at(search_highlights, &mut search_highlight_cursor, vrow, col)
-            {
-                fg = if active {
-                    cfg.search_foreground.unwrap_or(theme.background)
-                } else {
-                    theme.selection_foreground
-                };
-            }
+            let search =
+                search_highlight_at(search_highlights, &mut search_highlight_cursor, vrow, col);
+            let highlight = match search {
+                Some(active) => CellHighlight::Search(active),
+                None if selected => CellHighlight::Selection,
+                None => CellHighlight::None,
+            };
+            fg = resolved_cell_foreground(
+                fg,
+                bg,
+                highlight,
+                flags.contains(Flags::DIM),
+                bold,
+                cfg,
+                theme,
+            );
             // Recolor the glyph sitting under a focused solid block cursor.
             // The second arm catches a cursor parked on the spacer half of a
             // wide glyph: the glyph lives one cell LEFT (the WIDE_CHAR lead),
@@ -6864,8 +6877,6 @@ impl Renderer {
 /// back to a single stretched quad. ~60-px tiles on a 4K surface (3840×2160 →
 /// 64×34 ≈ 2176) stay under it; only pathologically small source images
 /// (≤ ~30 px) trip the cap.
-const MAX_BG_TILES: usize = 4096;
-
 /// Divide a bounded frame resource across independent panes in deterministic
 /// round-robin order. Saturated or empty panes donate their unused share, so
 /// the result consumes `min(sum(counts), limit)` slots without allowing the
@@ -6960,14 +6971,48 @@ fn inline_image_clip(
     (x1 > x0 && y1 > y0).then_some([x0, y0, x1 - x0, y1 - y0])
 }
 
-/// Whether a `tile` background's source image yields a sane number of tiles for
-/// the surface, or so many (a tiny source image) that the per-frame quad +
-/// Arc-clone storm would hang the renderer and it should stretch instead. Zero
-/// dims are treated as 1 px so we never divide by zero.
-fn bg_tiles_within_cap(surface_w: f32, surface_h: f32, img_w: f32, img_h: f32) -> bool {
-    let tiles_x = (surface_w / img_w.max(1.0)).ceil().max(1.0);
-    let tiles_y = (surface_h / img_h.max(1.0)).ceil().max(1.0);
-    tiles_x * tiles_y <= MAX_BG_TILES as f32
+fn background_image_rect(
+    mode: &str,
+    align_horiz: &str,
+    align_vert: &str,
+    surface: [f32; 2],
+    image: [f32; 2],
+) -> [f32; 4] {
+    let [sw, sh] = surface;
+    let [img_w, img_h] = image;
+    let (w, h) = match mode {
+        "center" => (img_w, img_h),
+        "scale" => {
+            let scale = (sw / img_w).min(sh / img_h);
+            (img_w * scale, img_h * scale)
+        }
+        _ => return [0.0, 0.0, sw, sh],
+    };
+    let x = match align_horiz {
+        "left" => 0.0,
+        "right" => sw - w,
+        _ => (sw - w) * 0.5,
+    };
+    let y = match align_vert {
+        "top" => 0.0,
+        "bottom" => sh - h,
+        _ => (sh - h) * 0.5,
+    };
+    [x, y, w, h]
+}
+
+fn rect_covers_surface(rect: [f32; 4], surface: [f32; 2]) -> bool {
+    let [x, y, width, height] = rect;
+    let [surface_width, surface_height] = surface;
+    rect.into_iter().chain(surface).all(f32::is_finite)
+        && surface_width > 0.0
+        && surface_height > 0.0
+        && width > 0.0
+        && height > 0.0
+        && x <= 0.0
+        && y <= 0.0
+        && x + width >= surface_width
+        && y + height >= surface_height
 }
 
 fn font_features(cfg: &Config) -> FontFeatures {
@@ -9315,11 +9360,10 @@ fn srgb_encode(linear: f64) -> u8 {
 /// pass is linear. [`srgb`] already returns linear, so scaling its output is
 /// the correct place.
 ///
-/// Only `PreMultiplied` gets scaled. `Opaque` discards alpha at composite time,
-/// so scaling would darken the surface toward black for no gain; under
-/// `PostMultiplied` the compositor divides alpha back out, so the straight
-/// value is the one it is asking for. `Inherit` and `Auto` are
-/// platform-defined and get the conservative straight value too.
+/// Only `PreMultiplied` gets scaled. The live `PostMultiplied` path never draws
+/// the scene directly into the surface: it renders this premultiplied
+/// representation offscreen and explicitly unpremultiplies in the final
+/// presentation pass. The other modes receive a straight clear here.
 fn surface_clear_color(bg: Rgb, alpha: f64, mode: wgpu::CompositeAlphaMode) -> wgpu::Color {
     let alpha = alpha.clamp(0.0, 1.0);
     let scale = if matches!(mode, wgpu::CompositeAlphaMode::PreMultiplied) {
@@ -9486,6 +9530,43 @@ fn attributed_foreground(
     fg
 }
 
+#[derive(Clone, Copy)]
+enum CellHighlight {
+    None,
+    Selection,
+    Search(bool),
+}
+
+fn resolved_cell_foreground(
+    fg: Rgb,
+    bg: Rgb,
+    highlight: CellHighlight,
+    dim: bool,
+    bold: bool,
+    cfg: &kettle_config::Config,
+    theme: &kettle_config::Theme,
+) -> Rgb {
+    match highlight {
+        CellHighlight::Search(true) => attributed_foreground(
+            cfg.search_foreground.unwrap_or(theme.background),
+            cfg.search_background.unwrap_or(theme.palette[3]),
+            false,
+            false,
+            cfg,
+            theme,
+        ),
+        CellHighlight::Search(false) | CellHighlight::Selection => attributed_foreground(
+            theme.selection_foreground,
+            theme.selection_background,
+            false,
+            false,
+            cfg,
+            theme,
+        ),
+        CellHighlight::None => attributed_foreground(fg, bg, dim, bold, cfg, theme),
+    }
+}
+
 fn composed_bg_alpha(cfg: &kettle_config::Config) -> f64 {
     use kettle_config::BackgroundType;
     match cfg.background_type {
@@ -9497,6 +9578,72 @@ fn composed_bg_alpha(cfg: &kettle_config::Config) -> f64 {
             (cfg.background_opacity as f64) * (cfg.background_darkness as f64)
         }
     }
+}
+
+fn background_has_wallpaper(cfg: &kettle_config::Config) -> bool {
+    matches!(
+        cfg.background_type,
+        kettle_config::BackgroundType::Image | kettle_config::BackgroundType::Starfield
+    )
+}
+
+/// Whether the back-most content proves alpha 1 at every surface pixel.
+/// Once an opaque base covers the surface, source-over compositing cannot make
+/// any later pixel translucent, regardless of the alpha of panes, glyphs,
+/// inline images, or overlays.
+fn final_scene_is_uniformly_opaque(
+    cfg: &kettle_config::Config,
+    opaque_wallpaper_covers_surface: bool,
+) -> bool {
+    if background_has_wallpaper(cfg) {
+        opaque_wallpaper_covers_surface
+    } else {
+        composed_bg_alpha(cfg) >= 1.0
+    }
+}
+
+/// A premultiplied scene needs the fullscreen unpremultiply pass only for a
+/// PostMultiplied surface and only while alpha can differ from one. At alpha 1,
+/// straight and premultiplied RGB are identical.
+fn needs_postmultiplied_presentation(
+    alpha_mode: wgpu::CompositeAlphaMode,
+    scene_is_uniformly_opaque: bool,
+) -> bool {
+    matches!(alpha_mode, wgpu::CompositeAlphaMode::PostMultiplied) && !scene_is_uniformly_opaque
+}
+
+fn desired_alpha_mode(
+    cfg: &kettle_config::Config,
+    supported: &[wgpu::CompositeAlphaMode],
+) -> wgpu::CompositeAlphaMode {
+    let preferred = if composed_bg_alpha(cfg) < 1.0
+        || matches!(cfg.background_type, kettle_config::BackgroundType::Image)
+    {
+        [
+            wgpu::CompositeAlphaMode::PreMultiplied,
+            wgpu::CompositeAlphaMode::PostMultiplied,
+            wgpu::CompositeAlphaMode::Auto,
+            wgpu::CompositeAlphaMode::Inherit,
+            wgpu::CompositeAlphaMode::Opaque,
+        ]
+    } else {
+        [
+            wgpu::CompositeAlphaMode::Opaque,
+            wgpu::CompositeAlphaMode::PreMultiplied,
+            wgpu::CompositeAlphaMode::PostMultiplied,
+            wgpu::CompositeAlphaMode::Auto,
+            wgpu::CompositeAlphaMode::Inherit,
+        ]
+    };
+    preferred
+        .into_iter()
+        .find(|mode| supported.contains(mode))
+        .unwrap_or_else(|| {
+            supported
+                .first()
+                .copied()
+                .unwrap_or(wgpu::CompositeAlphaMode::Opaque)
+        })
 }
 
 /// Grid column of the cluster a laid-out glyph belongs to (v2.25.0 cell-locked
@@ -11266,7 +11413,7 @@ mod gpu_tests {
     #[test]
     fn a_translucent_background_composites_against_a_premultiplied_clear() {
         let _serialized = gpu_test_guard();
-        let Some((premultiplied, straight)) =
+        let Some((premultiplied, straight, _postmultiplied)) =
             pollster::block_on(render_black_quad_over_translucent_clear())
         else {
             eprintln!("no GPU adapter on this host; skipped");
@@ -11297,11 +11444,29 @@ mod gpu_tests {
         );
     }
 
+    #[test]
+    fn postmultiplied_presentation_unpremultiplies_the_completed_scene() {
+        let _serialized = gpu_test_guard();
+        let Some((premultiplied, _wrong_clear, postmultiplied)) =
+            pollster::block_on(render_black_quad_over_translucent_clear())
+        else {
+            eprintln!("no GPU adapter on this host; skipped");
+            return;
+        };
+
+        for channel in 0..4 {
+            assert!(
+                postmultiplied[channel].abs_diff(premultiplied[channel]) <= 2,
+                "PostMultiplied output {postmultiplied:?} must be the straight-alpha form of the premultiplied scene {premultiplied:?}"
+            );
+        }
+    }
+
     /// Render one 50%-alpha black quad over a 50%-alpha white clear, once with
     /// the premultiplied clear and once with the straight one, and return both
     /// centre pixels already converted back to straight alpha. `None` when the
     /// host has no usable adapter.
-    async fn render_black_quad_over_translucent_clear() -> Option<([u8; 4], [u8; 4])> {
+    async fn render_black_quad_over_translucent_clear() -> Option<([u8; 4], [u8; 4], [u8; 4])> {
         let cfg = Config::default();
         let (_instance, adapter) = resolve_headless_adapter(&cfg, "premultiplied_clear_test")
             .await
@@ -11323,7 +11488,7 @@ mod gpu_tests {
         };
         let alpha = 0.5;
 
-        let render = |clear: wgpu::Color| -> Option<[u8; 4]> {
+        let render = |clear: wgpu::Color, postmultiplied: bool| -> Option<[u8; 4]> {
             let mut quads = QuadPipeline::new(&device, format);
             quads.upload(
                 &device,
@@ -11350,6 +11515,22 @@ mod gpu_tests {
                 view_formats: &[],
             });
             let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+            let mut presentation = postmultiplied.then(|| {
+                present::PresentationPipeline::new(
+                    &device,
+                    format,
+                    kettle_core::GraphicsBudget::default(),
+                )
+            });
+            if let Some(presentation) = presentation.as_mut()
+                && !presentation.ensure_target(&device, size, size)
+            {
+                return None;
+            }
+            let scene_view = presentation
+                .as_ref()
+                .and_then(present::PresentationPipeline::scene_view)
+                .unwrap_or(&view);
             let bytes_per_row = 256_u32;
             let readback = device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("kettle-premultiplied-clear-readback"),
@@ -11363,7 +11544,7 @@ mod gpu_tests {
                 let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                     label: Some("kettle-premultiplied-clear-pass"),
                     color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                        view: &view,
+                        view: scene_view,
                         resolve_target: None,
                         ops: wgpu::Operations {
                             load: wgpu::LoadOp::Clear(clear),
@@ -11377,6 +11558,25 @@ mod gpu_tests {
                     multiview_mask: None,
                 });
                 quads.draw(&mut pass);
+            }
+            if let Some(presentation) = presentation.as_ref() {
+                let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("kettle-postmultiplied-presentation-test-pass"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: &view,
+                        resolve_target: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                            store: wgpu::StoreOp::Store,
+                        },
+                        depth_slice: None,
+                    })],
+                    depth_stencil_attachment: None,
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                    multiview_mask: None,
+                });
+                presentation.draw(&mut pass);
             }
             encoder.copy_texture_to_buffer(
                 wgpu::TexelCopyTextureInfo {
@@ -11410,7 +11610,7 @@ mod gpu_tests {
             rx.recv().ok()?.ok()?;
             let data = slice.get_mapped_range().ok()?;
             let offset = (size as usize / 2) * bytes_per_row as usize + (size as usize / 2) * 4;
-            let mut texel = [
+            let texel = [
                 data[offset],
                 data[offset + 1],
                 data[offset + 2],
@@ -11418,26 +11618,200 @@ mod gpu_tests {
             ];
             drop(data);
             readback.unmap();
-            // Convert exactly as the capture paths do, so this measures the
-            // pair of changes together rather than the clear alone.
-            unpremultiply_rgba8(&mut texel, true);
             Some(texel)
         };
 
-        let premultiplied = render(surface_clear_color(
-            bg,
-            alpha,
-            wgpu::CompositeAlphaMode::PreMultiplied,
-        ))?;
-        // The convention kettle shipped: straight colour, translucent alpha,
-        // saved without conversion.
-        let straight = render(wgpu::Color {
-            r: srgb(bg.r),
-            g: srgb(bg.g),
-            b: srgb(bg.b),
-            a: alpha,
-        })?;
-        Some((premultiplied, straight))
+        let mut premultiplied = render(
+            surface_clear_color(bg, alpha, wgpu::CompositeAlphaMode::PreMultiplied),
+            false,
+        )?;
+        unpremultiply_rgba8(&mut premultiplied, true);
+        let postmultiplied = render(
+            surface_clear_color(bg, alpha, wgpu::CompositeAlphaMode::PreMultiplied),
+            true,
+        )?;
+        let mut straight = render(
+            wgpu::Color {
+                r: srgb(bg.r),
+                g: srgb(bg.g),
+                b: srgb(bg.b),
+                a: alpha,
+            },
+            false,
+        )?;
+        unpremultiply_rgba8(&mut straight, true);
+        Some((premultiplied, straight, postmultiplied))
+    }
+
+    #[test]
+    fn pane_osc11_bases_replace_without_opacity_or_color_compounding() {
+        let _serialized = gpu_test_guard();
+        let replace = [
+            QuadInstance {
+                pos: [0.0, 0.0],
+                size: [8.0, 4.0],
+                color: [1.0, 0.0, 0.0, 0.5],
+            },
+            QuadInstance {
+                pos: [4.0, 0.0],
+                size: [4.0, 4.0],
+                color: [0.0, 0.0, 1.0, 0.5],
+            },
+        ];
+        let Some((left, right)) = pollster::block_on(render_quad_layers(&replace, &[])) else {
+            eprintln!("no GPU adapter on this host; skipped");
+            return;
+        };
+
+        assert!(left[0] >= 250 && left[1] <= 2 && left[2] <= 2);
+        assert!(right[0] <= 2 && right[1] <= 2 && right[2] >= 250);
+        assert!(left[3].abs_diff(128) <= 1, "left alpha was {}", left[3]);
+        assert!(
+            right[3].abs_diff(128) <= 1,
+            "right alpha compounded instead of staying 0.5: {}",
+            right[3]
+        );
+    }
+
+    #[test]
+    fn wallpaper_darkness_endpoints_are_painted_after_the_wallpaper() {
+        let _serialized = gpu_test_guard();
+        let wallpaper = [QuadInstance {
+            pos: [0.0, 0.0],
+            size: [8.0, 4.0],
+            color: [1.0, 1.0, 1.0, 1.0],
+        }];
+        let pane_layers = [
+            QuadInstance {
+                pos: [0.0, 0.0],
+                size: [4.0, 4.0],
+                color: [0.0, 0.0, 0.0, 0.0],
+            },
+            QuadInstance {
+                pos: [4.0, 0.0],
+                size: [4.0, 4.0],
+                color: [0.0, 0.0, 0.0, 1.0],
+            },
+        ];
+        let Some((visible, covered)) =
+            pollster::block_on(render_quad_layers(&wallpaper, &pane_layers))
+        else {
+            eprintln!("no GPU adapter on this host; skipped");
+            return;
+        };
+
+        assert!(visible[..3].iter().all(|&channel| channel >= 250));
+        assert!(covered[..3].iter().all(|&channel| channel <= 2));
+        assert_eq!(visible[3], 255);
+        assert_eq!(covered[3], 255);
+    }
+
+    async fn render_quad_layers(
+        replace: &[QuadInstance],
+        blend: &[QuadInstance],
+    ) -> Option<([u8; 4], [u8; 4])> {
+        let cfg = Config::default();
+        let (_instance, adapter) = resolve_headless_adapter(&cfg, "pane_base_layers_test")
+            .await
+            .ok()?;
+        let (device, queue) = adapter
+            .request_device(&wgpu::DeviceDescriptor::default())
+            .await
+            .ok()?;
+        let format = wgpu::TextureFormat::Rgba8UnormSrgb;
+        let mut replace_pipeline = QuadPipeline::new_replace(&device, format);
+        let mut blend_pipeline = QuadPipeline::new(&device, format);
+        replace_pipeline.upload(&device, &queue, [8.0, 4.0], replace);
+        blend_pipeline.upload(&device, &queue, [8.0, 4.0], blend);
+
+        let texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("kettle-pane-base-test-target"),
+            size: wgpu::Extent3d {
+                width: 8,
+                height: 4,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let readback = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("kettle-pane-base-test-readback"),
+            size: 256 * 4,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("kettle-pane-base-test-pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                        store: wgpu::StoreOp::Store,
+                    },
+                    depth_slice: None,
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            replace_pipeline.draw(&mut pass);
+            blend_pipeline.draw(&mut pass);
+        }
+        encoder.copy_texture_to_buffer(
+            wgpu::TexelCopyTextureInfo {
+                texture: &texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::TexelCopyBufferInfo {
+                buffer: &readback,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(256),
+                    rows_per_image: Some(4),
+                },
+            },
+            wgpu::Extent3d {
+                width: 8,
+                height: 4,
+                depth_or_array_layers: 1,
+            },
+        );
+        queue.submit(std::iter::once(encoder.finish()));
+        let slice = readback.slice(..);
+        let (tx, rx) = std::sync::mpsc::channel();
+        slice.map_async(wgpu::MapMode::Read, move |result| {
+            let _ = tx.send(result);
+        });
+        let _ = device.poll(wgpu::PollType::wait_indefinitely());
+        rx.recv().ok()?.ok()?;
+        let data = slice.get_mapped_range().ok()?;
+        let sample = |x: usize| {
+            let offset = 2 * 256 + x * 4;
+            [
+                data[offset],
+                data[offset + 1],
+                data[offset + 2],
+                data[offset + 3],
+            ]
+        };
+        let mut left = sample(2);
+        let mut right = sample(6);
+        drop(data);
+        readback.unmap();
+        unpremultiply_rgba8(&mut left, true);
+        unpremultiply_rgba8(&mut right, true);
+        Some((left, right))
     }
 
     #[cfg(target_os = "windows")]
@@ -12589,17 +12963,17 @@ mod titlebar_glyph_fallback_tests {
     /// reappear in production code. The only permitted uses are the two
     /// comparison calls in this module's tests above, so pin the exact
     /// count; the needle is assembled at runtime so this test's own
-    /// source cannot satisfy the match.
+    /// source cannot satisfy the match. `production_source` excludes this
+    /// module's two comparison calls, so production must contain zero uses.
     #[test]
     fn no_call_site_uses_basic_shaping() {
-        let src = include_str!("lib.rs");
+        let src = super::production_source();
         let needle = format!("Shaping::{}", "Basic");
         let count = src.matches(&needle).count();
         assert_eq!(
-            count, 2,
-            "expected exactly 2 uses of {needle} (both inside \
-             titlebar_glyph_fallback_tests) but found {count} — it skips \
-             cosmic-text's font-fallback cascade (no CJK/emoji/symbol \
+            count, 0,
+            "expected no production uses of {needle} but found {count} — it \
+             skips cosmic-text's font-fallback cascade (no CJK/emoji/symbol \
              fallback): the split-titlebar tofu-box bug"
         );
     }
@@ -12607,6 +12981,61 @@ mod titlebar_glyph_fallback_tests {
 
 #[cfg(test)]
 mod pane_buffer_lifecycle_tests {
+    #[test]
+    fn prepared_chrome_colors_and_geometry_invalidate_retained_vertices() {
+        let mut font_system = super::FontSystem::new();
+        let buffer = super::TextBuffer::new(&mut font_system, super::Metrics::new(14.0, 18.0));
+        let area = |color, left| super::TextArea {
+            buffer: &buffer,
+            left,
+            top: 4.0,
+            scale: 1.0,
+            bounds: super::TextBounds {
+                left: 0,
+                top: 0,
+                right: 100,
+                bottom: 30,
+            },
+            default_color: color,
+            custom_glyphs: &[],
+        };
+        let idle =
+            super::prepared_text_areas_damage_key(&[area(super::GColor::rgb(80, 80, 80), 10.0)]);
+
+        for (name, changed) in [
+            (
+                "close hover",
+                super::prepared_text_areas_damage_key(&[area(
+                    super::GColor::rgb(20, 20, 20),
+                    10.0,
+                )]),
+            ),
+            (
+                "pane focus",
+                super::prepared_text_areas_damage_key(&[area(
+                    super::GColor::rgb(230, 230, 230),
+                    10.0,
+                )]),
+            ),
+            (
+                "broadcast",
+                super::prepared_text_areas_damage_key(&[area(
+                    super::GColor::rgb(240, 210, 80),
+                    10.0,
+                )]),
+            ),
+            (
+                "area position",
+                super::prepared_text_areas_damage_key(&[area(
+                    super::GColor::rgb(80, 80, 80),
+                    11.0,
+                )]),
+            ),
+        ] {
+            assert_ne!(idle, changed, "{name} must force main-text preparation");
+        }
+    }
+
     #[test]
     fn context_menu_hover_preserves_text_damage_key() {
         let mut menu = super::ContextMenu {
@@ -12721,7 +13150,7 @@ mod pane_buffer_lifecycle_tests {
 
     #[test]
     fn failed_text_prepare_keeps_the_retry_latch_armed() {
-        let src = include_str!("lib.rs");
+        let src = super::production_source();
         let start = src
             .find("let need_prepare = self.text_prepare_dirty")
             .expect("prepare retry latch participates in damage");
@@ -12758,7 +13187,7 @@ mod pane_buffer_lifecycle_tests {
     /// detach-never-joins guard): both truncate calls must stay present.
     #[test]
     fn render_frame_truncates_pane_buffers_on_shrink() {
-        let src = include_str!("lib.rs");
+        let src = super::production_source();
         assert!(
             src.contains("self.pane_buffers.truncate(panes.len())"),
             "pane_buffers must be truncated to panes.len() so closed panes \
@@ -12781,7 +13210,7 @@ mod pane_buffer_lifecycle_tests {
     /// change. Source-level guard: the behavioral path needs a live `Renderer`.
     #[test]
     fn pane_buffers_are_keyed_by_stable_pane_id() {
-        let src = include_str!("lib.rs");
+        let src = super::production_source();
         assert!(
             src.contains("pub id: u64,"),
             "PaneView must carry the process-global pane id into the renderer"
@@ -12804,7 +13233,7 @@ mod pane_buffer_lifecycle_tests {
     /// that may have shaped before the complete family was available.
     #[test]
     fn bundled_style_faces_load_lazily_and_invalidate_text_caches() {
-        let src = include_str!("lib.rs");
+        let src = super::production_source();
         assert!(
             src.contains("bundled_style_faces_loaded: bool"),
             "Renderer must track whether optional bundled style faces loaded"
@@ -12839,9 +13268,9 @@ mod pane_buffer_lifecycle_tests {
     /// paired `atlas.trim`) on that + a chrome-text hash + any open overlay.
     #[test]
     fn idle_repaint_skips_glyphon_prepare_when_nothing_changed() {
-        let src = include_str!("lib.rs");
+        let src = super::production_source();
         assert!(
-            src.contains("let need_prepare = any_pane_text_changed")
+            src.contains("let need_prepare = self.text_prepare_dirty")
                 && src.contains("if need_prepare {"),
             "render_frame must gate the text prepare on a need_prepare flag"
         );
@@ -12867,7 +13296,7 @@ mod pane_buffer_lifecycle_tests {
     /// and ORs the open↔closed transition into `need_prepare`.
     #[test]
     fn overlay_close_forces_a_clearing_prepare() {
-        let src = include_str!("lib.rs");
+        let src = super::production_source();
         assert!(
             src.contains("let overlay_changed = overlay_open != self.last_overlay_open;")
                 && src.contains("self.last_overlay_open = overlay_open;"),
@@ -12886,7 +13315,7 @@ mod pane_buffer_lifecycle_tests {
     /// dedicated pass keeps the pane buffer byte-identical across a blink.
     #[test]
     fn block_cursor_glyph_is_decoupled_from_the_pane_buffer() {
-        let src = include_str!("lib.rs");
+        let src = super::production_source();
         assert!(
             src.contains("cursor_glyph_renderer: TextRenderer")
                 && src.contains("pending_cursor_glyph: Option<PendingCursorGlyph>"),
@@ -12959,7 +13388,7 @@ mod pane_buffer_lifecycle_tests {
     /// source level — exercising it needs a full GPU `Renderer`.
     #[test]
     fn bg_image_cache_keys_on_blur_and_frees_on_disable() {
-        let src = include_str!("lib.rs");
+        let src = super::production_source();
         assert!(
             src.contains("bg_image_cache: Option<BgImageAnim>")
                 && src.contains("struct BgImageAnim"),
@@ -13014,7 +13443,7 @@ mod pane_buffer_lifecycle_tests {
     /// level since exercising the pass needs a full GPU `Renderer`.
     #[test]
     fn wallpaper_draws_behind_quads_in_its_own_pass() {
-        let src = include_str!("lib.rs");
+        let src = super::production_source();
         // A dedicated pipeline exists and is constructed.
         assert!(
             src.contains("bg_imgs: imgpipe::ImagePipeline,")
@@ -13027,15 +13456,19 @@ mod pane_buffer_lifecycle_tests {
                 && src.contains("img_items.push(imgpipe::ImageItem::placement("),
             "wallpaper pushes to bg_img_items; inline images to img_items"
         );
-        // Draw order: bg_imgs (back) → quads → imgs (inline) → text.
+        // Draw order: wallpaper (back) -> replacement pane bases -> ordinary
+        // quads -> inline images -> text.
         let bg = src
             .find("self.bg_imgs.draw(&mut pass);")
             .expect("bg_imgs draw");
+        let pane_bases = src
+            .find("self.pane_bases.draw(&mut pass);")
+            .expect("pane bases draw");
         let quads = src.find("self.quads.draw(&mut pass);").expect("quads draw");
         let inline = src.find("self.imgs.draw(&mut pass);").expect("imgs draw");
         assert!(
-            bg < quads && quads < inline,
-            "draw order must be wallpaper → quads → inline images"
+            bg < pane_bases && pane_bases < quads && quads < inline,
+            "draw order must be wallpaper -> pane bases -> quads -> inline images"
         );
     }
 
@@ -13283,16 +13716,18 @@ mod pane_buffer_lifecycle_tests {
         );
     }
 
-    /// The unfocused-pane backdrop is gated on the pane's
-    /// own default bg differing from the surface clear color, and pinned to
-    /// the build_pane path. Source-level guard (behavioral check needs GPU).
+    /// Every pane owns a default-background layer. Wallpaper configurations
+    /// source-over it after the wallpaper; solid/transparent configurations
+    /// route it through the replacement pipeline so OSC 11 panes cannot
+    /// compound each other's alpha.
     #[test]
-    fn unfocused_pane_backdrop_is_wired_into_build_pane() {
-        let src = include_str!("lib.rs");
+    fn pane_default_backdrop_is_wired_into_both_compositing_paths() {
+        let src = super::production_source();
+        let wallpaper_branch = ["if background_has_", "wallpaper(cfg) {"].concat();
+        let replacement_branch = ["pane_", "bases.push(backdrop)"].concat();
         assert!(
-            src.contains("if default_bg != surface_bg {"),
-            "build_pane must paint a backdrop when this pane's default bg \
-             differs from the surface clear color"
+            src.contains(&wallpaper_branch) && src.contains(&replacement_branch),
+            "build_pane must route every pane backdrop through wallpaper-over or replacement semantics"
         );
         assert!(
             src.contains("pane_backdrop_rect(pv.rect, bw, pane_titlebar_h, cfg.title_at_bottom)"),
@@ -13308,7 +13743,7 @@ mod pane_buffer_lifecycle_tests {
     /// test would need a full GPU `Renderer`).
     #[test]
     fn render_frame_truncates_overlay_buffer_pools_on_shrink() {
-        let src = include_str!("lib.rs");
+        let src = super::production_source();
         for (call, what) in [
             (
                 "self.tab_buffers.truncate(tabbar.segments.len())",
@@ -13343,7 +13778,7 @@ mod pane_buffer_lifecycle_tests {
     /// `Renderer`; pin the pattern at the source level.
     #[test]
     fn build_pane_pools_the_span_scratch() {
-        let src = include_str!("lib.rs");
+        let src = super::production_source();
         assert!(
             src.contains("std::mem::take(&mut self.span_scratch)"),
             "span scratch must be taken from the self-pool, not allocated fresh"
@@ -13367,20 +13802,20 @@ mod pane_buffer_lifecycle_tests {
         );
     }
 
-    /// Drift guard. Tab text must use the full rendered segment rect
-    /// as its budget, including the active tab. Otherwise a wide equal-width
-    /// tab can still middle-ellipsize a path to the compact active affordance
-    /// even though the full segment has room.
+    /// Drift guard. Tab text must use the UI-computed title lane as its shaping
+    /// budget and drawing bounds. The lane derives from the full rendered
+    /// segment and excludes only fixed controls such as the close button; it
+    /// must not regress to compact visual/pressed affordance rects.
     #[test]
-    fn tab_text_uses_full_segment_rect_budget() {
-        let src = include_str!("lib.rs");
+    fn tab_text_uses_full_title_lane_budget() {
+        let src = super::production_source();
         assert!(
-            src.contains("let (_, _, w, _) = s.rect;"),
-            "tab label shaping must budget from the full tab segment"
+            src.contains("let (_, _, title_w, title_h) = s.title_rect;"),
+            "tab label shaping must budget from the full title lane"
         );
         assert!(
-            src.contains("let (x, _, w, _) = s.rect;"),
-            "tab label drawing bounds must use the full tab segment"
+            src.contains("let (tx, ty_px, tw, th) = s.title_rect;"),
+            "tab label drawing bounds must use the full title lane"
         );
         let visual_token = ["visual", "_rect"].concat();
         let pressed_token = ["pressed", "_rect"].concat();
@@ -13390,21 +13825,22 @@ mod pane_buffer_lifecycle_tests {
         );
     }
 
-    /// Drift guard (audit C1). Image-placement draw must keep the
-    /// `len > 1` fast-path so the common 0–1-image pane doesn't pay a per-frame
-    /// `Vec` alloc + sort, AND must still z-sort the 2+ case so higher-z images
-    /// land on top. A behavioral test needs a full GPU `Renderer`; pin both at
-    /// the source level (same shape as the buffer-truncate guards above).
+    /// Drift guard (audit C1). Image-placement draw must keep the `quota > 1`
+    /// fast-path so a pane admitted zero or one visible image doesn't pay a
+    /// per-frame `Vec` alloc + sort, AND must still z-sort the 2+ case so
+    /// higher-z images land on top. A behavioral test needs a full GPU
+    /// `Renderer`; pin both at the source level (same shape as the
+    /// buffer-truncate guards above).
     #[test]
     fn image_placement_draw_keeps_len_fastpath_and_z_sort() {
-        let src = include_str!("lib.rs");
+        let src = super::production_source();
         assert!(
-            src.contains("if pv.images.len() > 1"),
+            src.contains("if quota > 1"),
             "image placement draw must fast-path the 0–1 case to skip the \
              per-frame Vec alloc + sort"
         );
         assert!(
-            src.contains("ordered.sort_by_key(|p| p.z)"),
+            src.contains("ordered.sort_by_key(|placement| placement.z)"),
             "2+ image placements must still be z-sorted so higher z lands on top"
         );
     }
@@ -13423,7 +13859,7 @@ mod pane_buffer_lifecycle_tests {
     /// pin the borrowed field types at the source.
     #[test]
     fn paneview_borrows_per_frame_data() {
-        let src = include_str!("lib.rs");
+        let src = super::production_source();
         assert!(
             src.contains("pub images: &'a [kettle_core::Placement],"),
             "PaneView.images must borrow the frame's image Vec, not clone it"
@@ -13440,7 +13876,7 @@ mod pane_buffer_lifecycle_tests {
 
     #[test]
     fn font_family_is_arc_str_not_string() {
-        let src = include_str!("lib.rs");
+        let src = super::production_source();
         assert!(
             src.contains("font_family: Arc<str>,"),
             "Renderer.font_family must be Arc<str> so the per-frame clone is a \
@@ -14032,23 +14468,37 @@ mod update_banner_top_tests {
 }
 
 #[cfg(test)]
-mod bg_tile_cap_tests {
-    use super::bg_tiles_within_cap;
+mod background_image_geometry_tests {
+    use super::{background_image_rect, rect_covers_surface};
 
-    /// Drift guard: a small source image must NOT tile into a
-    /// per-frame quad storm — past the cap it falls back to a stretched quad.
     #[test]
-    fn tiny_source_image_falls_back_to_stretch() {
-        // A reasonable 64×64 tile on 4K (≈2176 tiles) still tiles.
-        assert!(bg_tiles_within_cap(3840.0, 2160.0, 64.0, 64.0));
-        // A 1×1 tile on 4K (~8.3M tiles) trips the cap.
-        assert!(!bg_tiles_within_cap(3840.0, 2160.0, 1.0, 1.0));
-        // A 16×16 tile on 4K (~32k tiles) also trips it.
-        assert!(!bg_tiles_within_cap(3840.0, 2160.0, 16.0, 16.0));
-        // Degenerate zero dims are treated as 1 px (no divide-by-zero) → cap.
-        assert!(!bg_tiles_within_cap(3840.0, 2160.0, 0.0, 0.0));
-        // A source as large as the surface is a single tile.
-        assert!(bg_tiles_within_cap(1920.0, 1080.0, 1920.0, 1080.0));
+    fn oversized_center_wallpaper_keeps_natural_size_and_crops() {
+        assert_eq!(
+            background_image_rect("center", "center", "middle", [100.0, 80.0], [140.0, 120.0]),
+            [-20.0, -20.0, 140.0, 120.0]
+        );
+        assert_eq!(
+            background_image_rect("center", "right", "bottom", [100.0, 80.0], [140.0, 120.0]),
+            [-40.0, -40.0, 140.0, 120.0]
+        );
+    }
+
+    #[test]
+    fn wallpaper_coverage_requires_all_four_surface_edges() {
+        let surface = [100.0, 80.0];
+        assert!(rect_covers_surface([0.0, 0.0, 100.0, 80.0], surface));
+        assert!(rect_covers_surface([-20.0, -10.0, 140.0, 100.0], surface));
+        for rect in [
+            [1.0, 0.0, 100.0, 80.0],
+            [0.0, 1.0, 100.0, 80.0],
+            [0.0, 0.0, 99.0, 80.0],
+            [0.0, 0.0, 100.0, 79.0],
+        ] {
+            assert!(
+                !rect_covers_surface(rect, surface),
+                "a wallpaper missing any surface edge is not an opaque base: {rect:?}"
+            );
+        }
     }
 }
 
@@ -14214,7 +14664,7 @@ mod inline_placement_budget_tests {
 
 #[cfg(test)]
 mod attributed_foreground_tests {
-    use super::{Rgb, attributed_foreground, color};
+    use super::{CellHighlight, Rgb, attributed_foreground, color, resolved_cell_foreground};
     use kettle_config::{Config, Theme};
 
     /// `minimum-contrast` must survive `bold-is-bright`.
@@ -14306,11 +14756,131 @@ mod attributed_foreground_tests {
             "a dimmed foreground must still be lifted to the configured ratio"
         );
     }
+
+    #[test]
+    fn minimum_contrast_uses_the_background_painted_under_highlights() {
+        let mut theme = Theme {
+            background: Rgb::new(0, 0, 0),
+            foreground: Rgb::new(255, 255, 255),
+            selection_background: Rgb::new(255, 255, 255),
+            selection_foreground: Rgb::new(255, 255, 255),
+            ..Theme::default()
+        };
+        theme.palette[3] = Rgb::new(255, 255, 255);
+        let cfg = Config {
+            minimum_contrast: 4.5,
+            search_background: Some(Rgb::new(255, 255, 255)),
+            search_foreground: Some(Rgb::new(255, 255, 255)),
+            ..Config::default()
+        };
+        let base_fg = Rgb::new(255, 255, 255);
+        let base_bg = Rgb::new(0, 0, 0);
+
+        let ordinary = resolved_cell_foreground(
+            base_fg,
+            base_bg,
+            CellHighlight::None,
+            false,
+            false,
+            &cfg,
+            &theme,
+        );
+        assert_eq!(ordinary, base_fg);
+
+        for (name, highlight, painted_bg) in [
+            (
+                "selection",
+                CellHighlight::Selection,
+                theme.selection_background,
+            ),
+            (
+                "inactive search",
+                CellHighlight::Search(false),
+                theme.selection_background,
+            ),
+            (
+                "active search",
+                CellHighlight::Search(true),
+                cfg.search_background.expect("search background"),
+            ),
+        ] {
+            let drawn =
+                resolved_cell_foreground(base_fg, base_bg, highlight, false, false, &cfg, &theme);
+            assert!(
+                color::contrast_ratio(drawn, painted_bg) >= 4.5 - 1e-6,
+                "{name} must meet contrast against its final painted background; got {drawn:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn search_and_selection_foregrounds_ignore_underlying_dim_and_bold_attributes() {
+        let mut theme = Theme {
+            selection_background: Rgb::new(10, 20, 30),
+            selection_foreground: Rgb::new(90, 100, 110),
+            ..Theme::default()
+        };
+        // If BOLD reaches the highlight foreground, bold-is-bright remaps this
+        // exact search colour to the deliberately distinct bright slot.
+        theme.palette[2] = Rgb::new(20, 80, 20);
+        theme.palette[10] = Rgb::new(180, 250, 180);
+        let cfg = Config {
+            bold_is_bright: true,
+            search_background: Some(Rgb::new(40, 50, 60)),
+            search_foreground: Some(theme.palette[2]),
+            ..Config::default()
+        };
+        let base_fg = Rgb::new(200, 210, 220);
+        let base_bg = Rgb::new(1, 2, 3);
+
+        for (name, highlight, expected) in [
+            (
+                "active search",
+                CellHighlight::Search(true),
+                cfg.search_foreground.expect("search foreground"),
+            ),
+            (
+                "inactive search",
+                CellHighlight::Search(false),
+                theme.selection_foreground,
+            ),
+            (
+                "selection",
+                CellHighlight::Selection,
+                theme.selection_foreground,
+            ),
+        ] {
+            for (dim, bold) in [(false, false), (true, false), (false, true), (true, true)] {
+                assert_eq!(
+                    resolved_cell_foreground(base_fg, base_bg, highlight, dim, bold, &cfg, &theme,),
+                    expected,
+                    "{name} must override the cell's DIM={dim} BOLD={bold} attributes"
+                );
+            }
+        }
+
+        assert_ne!(
+            color::dim(
+                cfg.search_foreground.unwrap(),
+                cfg.search_background.unwrap()
+            ),
+            cfg.search_foreground.unwrap(),
+            "the DIM fixture must visibly change the configured search foreground"
+        );
+        assert_ne!(
+            color::bright_for_bold(cfg.search_foreground.unwrap(), &theme),
+            cfg.search_foreground.unwrap(),
+            "the bold-is-bright fixture must visibly remap the configured search foreground"
+        );
+    }
 }
 
 #[cfg(test)]
 mod background_darkness_tests {
-    use super::composed_bg_alpha;
+    use super::{
+        composed_bg_alpha, desired_alpha_mode, final_scene_is_uniformly_opaque,
+        needs_postmultiplied_presentation,
+    };
     use kettle_config::{BackgroundType, Config};
 
     /// `background-darkness` runs see-through → covered, and the docs must say
@@ -14366,6 +14936,102 @@ mod background_darkness_tests {
                 "a solid background must not consult darkness"
             );
         }
+    }
+
+    #[test]
+    fn effective_alpha_mode_tracks_darkness_and_live_reload() {
+        let macos_modes = [
+            wgpu::CompositeAlphaMode::Opaque,
+            wgpu::CompositeAlphaMode::PostMultiplied,
+        ];
+        let opaque = Config {
+            background_type: BackgroundType::Transparent,
+            background_opacity: 1.0,
+            background_darkness: 1.0,
+            ..Config::default()
+        };
+        assert_eq!(
+            desired_alpha_mode(&opaque, &macos_modes),
+            wgpu::CompositeAlphaMode::Opaque
+        );
+
+        let transparent = Config {
+            background_darkness: 0.5,
+            ..opaque.clone()
+        };
+        assert_eq!(
+            desired_alpha_mode(&transparent, &macos_modes),
+            wgpu::CompositeAlphaMode::PostMultiplied,
+            "effective opacity, not background-opacity alone, must select the surface mode"
+        );
+
+        let reloaded = Config {
+            background_type: BackgroundType::Solid,
+            background_opacity: 0.5,
+            ..opaque
+        };
+        assert_eq!(
+            desired_alpha_mode(&reloaded, &macos_modes),
+            wgpu::CompositeAlphaMode::PostMultiplied,
+            "an opaque-to-transparent reload must change the configured surface mode"
+        );
+
+        let src = super::production_source();
+        let refresh = ["self.set_background_", "compositing(cfg);"].concat();
+        assert!(
+            src.contains(&refresh),
+            "frame ingress must apply a changed effective-alpha mode before acquisition"
+        );
+    }
+
+    #[test]
+    fn postmultiplied_presentation_skips_only_provably_opaque_scenes() {
+        let image = Config {
+            background_type: BackgroundType::Image,
+            background_opacity: 1.0,
+            background_darkness: 1.0,
+            ..Config::default()
+        };
+        let post = wgpu::CompositeAlphaMode::PostMultiplied;
+
+        let opaque_image = final_scene_is_uniformly_opaque(&image, true);
+        assert!(
+            opaque_image,
+            "an opaque fullscreen wallpaper proves alpha 1"
+        );
+        assert!(
+            !needs_postmultiplied_presentation(post, opaque_image),
+            "opaque wallpaper must skip the fullscreen allocation and conversion pass"
+        );
+
+        for reason in [
+            "transparent source texel",
+            "wallpaper does not cover the surface",
+        ] {
+            let possibly_translucent = final_scene_is_uniformly_opaque(&image, false);
+            assert!(
+                !possibly_translucent,
+                "fixture must be non-opaque: {reason}"
+            );
+            assert!(
+                needs_postmultiplied_presentation(post, possibly_translucent),
+                "{reason}: a premultiplied scene must still be converted before a PostMultiplied surface"
+            );
+        }
+
+        let translucent_solid = Config {
+            background_type: BackgroundType::Solid,
+            background_opacity: 0.5,
+            ..Config::default()
+        };
+        assert!(needs_postmultiplied_presentation(
+            post,
+            final_scene_is_uniformly_opaque(&translucent_solid, false)
+        ));
+        assert!(
+            !needs_postmultiplied_presentation(wgpu::CompositeAlphaMode::PreMultiplied, false),
+            "a PreMultiplied surface consumes the scene directly even when translucent"
+        );
     }
 }
 
@@ -14756,7 +15422,7 @@ mod glyph_cell_lock_tests {
     /// render pass, and the emit must be gated on grid mode.
     #[test]
     fn grid_path_wiring_is_present() {
-        let src = include_str!("lib.rs");
+        let src = super::production_source();
         assert!(
             src.contains("if cfg.text_renderer == TextRendererMode::Legacy {"),
             "pane TextArea must be pushed to glyphon ONLY in legacy mode"
@@ -14785,7 +15451,7 @@ mod glyph_cell_lock_tests {
     /// content damage or layout/style damage.
     #[test]
     fn grid_upload_damage_excludes_cursor_blink() {
-        let src = include_str!("lib.rs");
+        let src = super::production_source();
         assert!(
             src.contains("last_text_layout_key: Option<u64>"),
             "renderer must keep a layout damage key for cached text/grid vertices"
@@ -14818,24 +15484,25 @@ mod glyph_cell_lock_tests {
     }
 
     /// v2.32.0 fix #1 (durability): the cell-locked emit loop must live in ONE
-    /// free function, `emit_cell_locked_glyphs`, called from all THREE sites
-    /// (live panes, the screenshot path, the blink test fixture). Three hand-
-    /// copied loops could silently drift so the README imagery no longer matches
-    /// the live renderer; pin the single source of truth here.
+    /// free function, `emit_cell_locked_glyphs`, called from both production
+    /// sites (live panes and the screenshot path). Hand-copied loops could
+    /// silently drift so the README imagery no longer matches the live
+    /// renderer; pin the single source of truth here.
     #[test]
     fn cell_lock_emit_is_a_single_shared_fn() {
-        let src = include_str!("lib.rs");
+        let src = super::production_source();
         assert!(
             src.contains("fn emit_cell_locked_glyphs("),
             "the shared cell-locked emit function must exist"
         );
-        // Exactly one definition; the rest must be CALLS, not re-implementations.
+        // Exactly one definition plus the two production calls. The GPU blink
+        // fixtures are deliberately absent from `production_source`.
         let calls = src.matches("emit_cell_locked_glyphs(").count();
-        assert!(
-            calls >= 4,
-            "emit_cell_locked_glyphs must be the single emit, called from \
-             emit_pane_glyphs, the screenshot path, and the blink fixture \
-             (def + 3 calls = 4); found {calls} occurrences"
+        assert_eq!(
+            calls, 3,
+            "emit_cell_locked_glyphs must be the single emit shared by \
+             emit_pane_glyphs and the screenshot path (definition + 2 calls); \
+             found {calls} occurrences"
         );
     }
 
@@ -14847,7 +15514,7 @@ mod glyph_cell_lock_tests {
     /// imagery rendered through legacy glyphon regardless of the shipped default.
     #[test]
     fn screenshot_routes_pane_text_by_renderer_mode() {
-        let src = include_str!("lib.rs");
+        let src = super::production_source();
         // The capture path reads the renderer mode.
         assert!(
             src.contains("let grid = cfg.text_renderer == TextRendererMode::Grid;"),

@@ -332,7 +332,7 @@ mod fold_tests {
     /// future underscore-only key fails here instead of silently going dead.
     #[test]
     fn every_underscore_key_has_a_hyphen_sibling() {
-        let src = include_str!("lib.rs").replace("\r\n", "\n");
+        let src = kettle_test_support::production_source(include_str!("lib.rs"));
         let start = src.find("fn parse_collect").expect("parse_collect present");
         let region = &src[start..];
 

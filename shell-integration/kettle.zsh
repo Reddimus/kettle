@@ -33,6 +33,11 @@ __kettle_osc7() {
   done
   printf '\e]7;file://%s%s\a' "${HOST:-localhost}" "$out"
 }
-precmd()  { print -Pn '\e]133;D;%?\a\e]133;A\a'; __kettle_osc7; }
-preexec() { print -Pn '\e]133;C\a'; }
-PS1='%{$(print -Pn "\e]133;B\a")%}'"$PS1"
+autoload -Uz add-zsh-hook
+__kettle_precmd()  { print -Pn '\e]133;D;%?\a\e]133;A\a'; __kettle_osc7; }
+__kettle_preexec() { print -Pn '\e]133;C\a'; }
+add-zsh-hook precmd __kettle_precmd
+add-zsh-hook preexec __kettle_preexec
+if [[ "$PS1" != $'%{\e]133;B\a%}'* ]]; then
+  PS1=$'%{\e]133;B\a%}'"$PS1"
+fi

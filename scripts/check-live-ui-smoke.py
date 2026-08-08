@@ -14,6 +14,7 @@ import json
 import math
 import os
 import platform
+import plistlib
 import queue
 import re
 import secrets
@@ -399,7 +400,7 @@ def resolve_release_kettle() -> str:
 
 def require_cmd(cmd: str) -> None:
     if shutil.which(cmd) is None:
-        raise SystemExit(f"live-ui smoke: skipped ({cmd} not found)")
+        raise SystemExit(f"live-ui smoke: cannot run ({cmd} not found)")
 
 
 def missing_commands(*commands: str) -> List[str]:
@@ -1280,6 +1281,15 @@ class AgentShellTarget:
             with os.scandir(source) as entries:
                 for entry in entries:
                     source_entry = Path(entry.path)
+                    # Preserve the repository marker and refs lazy.nvim uses
+                    # to recognize an installed, pinned plugin, but omit the
+                    # object database: it is not Neovim runtime and a single
+                    # pack can dwarf the complete checked-out plugin.
+                    if (
+                        entry.name == "objects"
+                        and source_entry.parent.name == ".git"
+                    ):
+                        continue
                     target_entry = target / entry.name
                     budget.add_entry(source_entry)
                     try:
@@ -1375,7 +1385,7 @@ class AgentShellTarget:
             'mkfifo -m 600 -- "$KETTLE_COPY_FIFO" || { '
             'rm -f -- "$KETTLE_COPY_MANIFEST"; return 1; }; '
             'find -L "$KETTLE_COPY_SOURCE" -mindepth 1 '
-            "-printf '%y\\0%s\\0%p\\0' "
+            "-path '*/.git/objects' -prune -o -printf '%y\\0%s\\0%p\\0' "
             '>"$KETTLE_COPY_FIFO" & KETTLE_COPY_FIND_PID=$!; '
             "KETTLE_COPY_STATUS=0; "
             "while IFS= read -r -d '' KETTLE_COPY_TYPE && "
@@ -1705,13 +1715,19 @@ class AgentShellTarget:
         if not root.exists():
             return
 
-        def clear_readonly_and_retry(
-            operation: Callable[[str], None],
-            name: str,
-            _error: Tuple[type, BaseException, object],
-        ) -> None:
-            os.chmod(name, stat.S_IWRITE | stat.S_IREAD)
-            operation(name)
+        def make_tree_removable(directory: Path) -> None:
+            """Restore owner access without following runtime-created links."""
+            directory.chmod(stat.S_IRWXU)
+            with os.scandir(directory) as entries:
+                for entry in entries:
+                    if entry.is_symlink():
+                        continue
+                    entry_mode = entry.stat(follow_symlinks=False).st_mode
+                    entry_path = Path(entry.path)
+                    if stat.S_ISDIR(entry_mode):
+                        make_tree_removable(entry_path)
+                    else:
+                        entry_path.chmod(stat.S_IWRITE | stat.S_IREAD)
 
         last_error: Optional[OSError] = None
         for _attempt in range(5):
@@ -1719,7 +1735,8 @@ class AgentShellTarget:
             if not root.exists():
                 return
             try:
-                shutil.rmtree(root, onerror=clear_readonly_and_retry)
+                make_tree_removable(root)
+                shutil.rmtree(root)
                 return
             except OSError as error:
                 last_error = error
@@ -3040,6 +3057,27 @@ def agent_output_contains_marker(
 
 
 def live_helper_selftest() -> None:
+    assert macos_session_locked(
+        plistlib.dumps([{"IOConsoleLocked": True}])
+    ) is True
+    assert macos_session_locked(
+        plistlib.dumps([{"IOConsoleLocked": False}])
+    ) is False
+    assert macos_session_locked(plistlib.dumps({"IOConsoleLocked": False})) is False
+    assert macos_session_locked(
+        plistlib.dumps(
+            [
+                {
+                    "IOConsoleUsers": [
+                        {"CGSSessionScreenIsLocked": False},
+                        {"CGSSessionScreenIsLocked": True},
+                    ]
+                }
+            ]
+        )
+    ) is True
+    assert macos_session_locked(b"not a plist") is None
+
     artifact_root = Path("artifacts")
     state_shot = live_state_screenshot_path(artifact_root, "search-open")
     transition_shot = live_transition_screenshot_path(artifact_root, "search-open")
@@ -3649,8 +3687,15 @@ def live_helper_selftest() -> None:
             assert "Copy-Item" not in native_setup
             readonly_cleanup_fixture = native_root / "read-only-cleanup-fixture"
             readonly_cleanup_fixture.write_text("fixture\n", encoding="utf-8")
+            readonly_cleanup_dir = native_root / "read-only-cleanup-directory"
+            readonly_cleanup_dir.mkdir()
+            (readonly_cleanup_dir / "fixture").write_text(
+                "fixture\n", encoding="utf-8"
+            )
             if platform.system() == "Windows":
                 readonly_cleanup_fixture.chmod(stat.S_IREAD)
+            else:
+                readonly_cleanup_dir.chmod(stat.S_IREAD | stat.S_IWRITE)
         finally:
             snapshot_target.cleanup_nvim_sandbox_host(native_sandbox_path)
         assert not Path(native_sandbox_path).exists()
@@ -3733,6 +3778,27 @@ def live_helper_selftest() -> None:
             assert "aggregate byte limit" in str(error)
         else:
             raise AssertionError("snapshot aggregate byte limit must be enforced")
+
+        metadata_source = fixture_root / "metadata-source"
+        (metadata_source / ".git" / "objects" / "pack").mkdir(parents=True)
+        (metadata_source / ".git" / "objects" / "pack" / "large.pack").write_bytes(
+            b"ignored"
+        )
+        (metadata_source / ".git" / "HEAD").write_bytes(b"x\n")
+        (metadata_source / "runtime.lua").write_bytes(b"ok")
+        metadata_copy = fixture_root / "copy-without-git-objects"
+        AgentShellTarget.copy_bounded_regular_tree(
+            metadata_source,
+            metadata_copy,
+            SnapshotCopyBudget(max_file_bytes=2),
+        )
+        assert (metadata_copy / "runtime.lua").read_bytes() == b"ok"
+        assert (metadata_copy / ".git" / "HEAD").read_bytes() == b"x\n"
+        assert not (metadata_copy / ".git" / "objects").exists()
+        assert (
+            "-path '*/.git/objects' -prune"
+            in AgentShellTarget.wsl_bounded_copy_function()
+        )
 
         if hasattr(os, "mkfifo"):
             special_source = fixture_root / "special-source"
@@ -6617,6 +6683,104 @@ def run_touchpad_scroll(kettle: str, root: Path) -> Path:
     return out
 
 
+def macos_session_locked(ioreg_plist: bytes) -> Optional[bool]:
+    """Extract the macOS console-lock state from `ioreg -a` output."""
+    try:
+        roots = plistlib.loads(ioreg_plist)
+    except (plistlib.InvalidFileException, ValueError):
+        return None
+    if isinstance(roots, dict):
+        roots = [roots]
+    if not isinstance(roots, list):
+        return None
+    observed_unlocked = False
+    for root in roots:
+        if not isinstance(root, dict):
+            continue
+        root_locked = root.get("IOConsoleLocked")
+        if isinstance(root_locked, bool):
+            return root_locked
+        users = root.get("IOConsoleUsers")
+        if not isinstance(users, list):
+            continue
+        for user in users:
+            if not isinstance(user, dict):
+                continue
+            locked = user.get("CGSSessionScreenIsLocked")
+            if locked is True:
+                return True
+            if locked is False:
+                observed_unlocked = True
+    return False if observed_unlocked else None
+
+
+def live_session_failure_reason() -> Optional[str]:
+    """Return why the live-UI smoke cannot run here, or None if it can.
+
+    macOS has no DISPLAY/WAYLAND_DISPLAY -- it draws through the Quartz window
+    server -- so the original X11/Wayland-only check skipped unconditionally on
+    Darwin. `just agent-tui-smoke` therefore exited 0 having tested nothing,
+    which reads identically to a pass. A live smoke now fails closed when it
+    cannot prove that a usable graphical session exists.
+
+    On Darwin the question is whether this process can reach the window server
+    at all. `launchctl managername` answers it: a logged-in GUI session reports
+    `Aqua`, while an SSH session reports `Background` or `StandardIO`. An Aqua
+    bootstrap can still be locked, in which case Metal cannot present a live
+    drawable, so the console lock state is a second required precondition.
+    """
+    system = platform.system()
+    if system == "Windows":
+        return None
+    if system == "Darwin":
+        try:
+            manager = subprocess.run(
+                ["launchctl", "managername"],
+                capture_output=True,
+                text=True,
+                timeout=5,
+                check=False,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return "launchctl managername is unavailable, cannot prove a GUI session"
+        managername = manager.stdout.strip()
+        if manager.returncode != 0:
+            return "launchctl managername failed, cannot prove a GUI session"
+        if managername != "Aqua":
+            return f"no macOS GUI session (launchctl managername = {managername or 'unknown'!s})"
+        try:
+            console = subprocess.run(
+                ["ioreg", "-n", "Root", "-d", "1", "-a"],
+                capture_output=True,
+                timeout=5,
+                check=False,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return "ioreg is unavailable, cannot prove the macOS session is unlocked"
+        if console.returncode != 0:
+            return "ioreg failed, cannot prove the macOS session is unlocked"
+        locked = macos_session_locked(console.stdout)
+        if locked is None:
+            return "macOS console lock state is unavailable"
+        if locked:
+            return "macOS console session is locked"
+        try:
+            wake = subprocess.run(
+                ["caffeinate", "-u", "-t", "1"],
+                capture_output=True,
+                timeout=5,
+                check=False,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return "caffeinate is unavailable, cannot wake the macOS display"
+        if wake.returncode != 0:
+            return "caffeinate could not wake the macOS display"
+        return None
+    if os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"):
+        return None
+    return "no DISPLAY or WAYLAND_DISPLAY"
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument(
@@ -6632,6 +6796,7 @@ def main() -> int:
             "search-history",
             "interaction",
             "touchpad-scroll",
+            "session-check",
             "self-test",
             "all",
         ],
@@ -6694,6 +6859,14 @@ def main() -> int:
         print("live-ui helper self-test: OK")
         return 0
 
+    failure_reason = live_session_failure_reason()
+    if failure_reason is not None:
+        print(f"live-ui smoke: cannot run ({failure_reason})", file=sys.stderr)
+        return 1
+    if args.case == "session-check":
+        print("live-ui smoke: graphical session ready")
+        return 0
+
     if args.shell_mode != "native" and args.case != "agent-tui":
         parser.error("--shell-mode applies only to the agent-tui case")
     if args.wsl_distro and args.shell_mode != "wsl":
@@ -6709,10 +6882,6 @@ def main() -> int:
         astro_config=args.astro_config,
         nvim_data=args.nvim_data,
     )
-
-    if platform.system() != "Windows" and not (os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")):
-        print("live-ui smoke: skipped (no DISPLAY or WAYLAND_DISPLAY)", file=sys.stderr)
-        return 0
 
     if args.cargo_release:
         args.kettle = resolve_release_kettle()
@@ -6740,9 +6909,9 @@ def main() -> int:
     if args.case in ("underline", "all"):
         missing = missing_commands("git", "delta", "less")
         if missing:
-            print(
-                f"underline-scroll smoke: skipped ({', '.join(missing)} not found)",
-                file=sys.stderr,
+            raise SystemExit(
+                "underline-scroll smoke: cannot run "
+                f"({', '.join(missing)} not found)"
             )
         else:
             out = run_underline(args.kettle, root)
