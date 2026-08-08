@@ -27,7 +27,6 @@ Usage (from anywhere): python scripts/gen-icons.py
 """
 
 import argparse
-import filecmp
 import struct
 import sys
 import tempfile
@@ -125,6 +124,31 @@ def emit(linux_dir: Path, iconset_dir: Path, ico_path: Path, quiet: bool = False
     return written
 
 
+def same_pixels(a: Path, b: Path) -> bool:
+    """Compare decoded IMAGE CONTENT, not encoded bytes.
+
+    Pillow's PNG/ICO encoders are not byte-identical across versions or
+    platforms -- zlib settings and chunk ordering differ -- so a byte comparison
+    fails on CI while passing locally, for images that are pixel-for-pixel
+    identical. That is a gate that cries wolf, which trains people to ignore it.
+    Decoding both sides compares the thing that actually matters.
+
+    A multi-resolution .ico is compared frame by frame.
+    """
+    with Image.open(a) as left, Image.open(b) as right:
+        if left.size != right.size:
+            return False
+        frames = getattr(left, "n_frames", 1)
+        if frames != getattr(right, "n_frames", 1):
+            return False
+        for index in range(frames):
+            left.seek(index)
+            right.seek(index)
+            if left.convert("RGBA").tobytes() != right.convert("RGBA").tobytes():
+                return False
+    return True
+
+
 def check() -> int:
     """Fail if any tracked raster has drifted from what the SVG geometry yields.
 
@@ -143,7 +167,7 @@ def check() -> int:
             tracked = ROOT / rel
             if not tracked.exists():
                 missing.append(rel)
-            elif not filecmp.cmp(path, tracked, shallow=False):
+            elif not same_pixels(path, tracked):
                 drifted.append(rel)
     for rel in missing:
         print(f"ERROR: tracked icon missing: {rel}")
