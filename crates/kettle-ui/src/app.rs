@@ -477,62 +477,21 @@ fn ctl_capture_bounds(
     (start_idx, end_idx, start_line < first_abs)
 }
 
-/// The production half of this file: everything above the FIRST test module.
-///
-/// A source guard that searches the whole file also searches its own
-/// assertions, so a plain `src.contains("…")` matches the needle written one
-/// line above it and passes whether or not the production code is there at
-/// all — and a `matches(…).count()` comes out one too high for the same
-/// reason. That is not hypothetical: `split_divider_drag_is_wired` went on
-/// passing after the multi-window refactor threaded `ws` through
-/// `split_drag_at` and `split_seam_hover_icon`, leaving both needles with
-/// zero production matches, and it still passed with the entire
-/// press-to-start-drag block deleted while rustc reported both functions as
-/// dead code.
-///
-/// Removing every `#[cfg(test)]` item removes the class for every guard in the
-/// file at once. It has to REMOVE them rather than truncate at the first one:
-/// this file interleaves seven test items with production code across 30,000
-/// lines, so cutting at the first would throw most of the production away and
-/// fail every guard for the opposite reason.
-///
-/// Top-level items close on a column-0 brace — rustfmt guarantees it, and
-/// nothing nested can produce one — so a line scan is enough, and the
-/// postconditions below fail loudly if that ever stops holding.
+/// The production source of this file, excluding test-only items.
 #[cfg(test)]
 fn production_source() -> String {
-    let src = include_str!("app.rs").replace("\r\n", "\n");
-    let mut production = String::with_capacity(src.len());
-    let mut inside_test_item = false;
-    for line in src.lines() {
-        if inside_test_item {
-            if line == "}" {
-                inside_test_item = false;
-            }
-            continue;
-        }
-        if line == "#[cfg(test)]" {
-            inside_test_item = true;
-            continue;
-        }
-        production.push_str(line);
-        production.push('\n');
-    }
+    let production = kettle_test_support::production_source(include_str!("app.rs"));
     assert!(
         !production.contains("fn production_source()"),
-        "the slice must exclude every test item, or the guards built on it \
-         still self-match"
+        "the production slice retained its own helper"
     );
     assert!(
-        production.contains("fn apply_bs_del_binding("),
-        "the slice must KEEP production code — a needle-free slice would fail \
-         every guard for the opposite reason"
+        !production.contains("#[test]"),
+        "the production slice retained a test function"
     );
     assert!(
-        production.len() > src.len() / 2,
-        "production is {} bytes of {}, which is too little to be right",
-        production.len(),
-        src.len()
+        !production.contains("#[cfg(test)]"),
+        "the production slice retained a test-only item"
     );
     production
 }
@@ -25489,7 +25448,8 @@ mod tests {
         // (so it clears the base overlay quads), and the settings panel's dim
         // backdrop — pushed to the same list afterwards, therefore drawn over
         // it — stops above the bar rather than greying it out.
-        let render = include_str!("../../kettle-render/src/lib.rs").replace("\r\n", "\n");
+        let render =
+            kettle_test_support::production_source(include_str!("../../kettle-render/src/lib.rs"));
         assert!(
             render
                 .contains("menu_q.push(rect(0.0, sh - bar_h, sw, bar_h, theme.palette[1], 0.96));"),
@@ -32362,7 +32322,7 @@ mod tests {
     #[test]
     fn focused_link_scans_are_not_output_debounced() {
         let app_src = production_source();
-        let window_src = include_str!("window_state.rs");
+        let window_src = kettle_test_support::production_source(include_str!("window_state.rs"));
         let removed_const = format!("LINKS_SCAN_{}", "DEBOUNCE");
         let removed_field = format!("last_{}_scan", "links");
         assert!(

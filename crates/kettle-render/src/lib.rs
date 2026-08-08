@@ -273,47 +273,21 @@ pub fn menu_row_chars(row: &ContextMenuRow) -> usize {
         }
 }
 
-/// The production half of this file, with every top-level test item removed.
-///
-/// A source guard that searches the whole file also searches its own
-/// assertions, so a plain `src.contains("...")` matches the needle written in
-/// the test and passes even when production no longer contains it. This file
-/// interleaves test modules with production, so truncate-at-first-test is not
-/// sufficient; remove every test item using rustfmt's column-zero item braces.
+/// The production source of this file, excluding test-only items.
 #[cfg(test)]
 fn production_source() -> String {
-    let src = include_str!("lib.rs").replace("\r\n", "\n");
-    let mut production = String::with_capacity(src.len());
-    let mut inside_test_item = false;
-    for line in src.lines() {
-        if inside_test_item {
-            if line == "}" {
-                inside_test_item = false;
-            }
-            continue;
-        }
-        if line == "#[cfg(test)]" {
-            inside_test_item = true;
-            continue;
-        }
-        production.push_str(line);
-        production.push('\n');
-    }
+    let production = kettle_test_support::production_source(include_str!("lib.rs"));
     assert!(
         !production.contains("fn production_source()"),
-        "the slice must exclude every test item, or the guards built on it \
-         still self-match"
+        "the production slice retained its own helper"
     );
     assert!(
-        production.contains("pub struct ContextMenuRow {"),
-        "the slice must keep production code, or every guard would fail for \
-         the opposite reason"
+        !production.contains("#[test]"),
+        "the production slice retained a test function"
     );
     assert!(
-        production.len() > src.len() / 2,
-        "production is {} bytes of {}, which is too little to be right",
-        production.len(),
-        src.len()
+        !production.contains("#[cfg(test)]"),
+        "the production slice retained a test-only item"
     );
     production
 }

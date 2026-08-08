@@ -4115,22 +4115,20 @@ mod node_tests {
 
     /// The production half of this file: everything above the test module.
     ///
-    /// A source guard that searches the WHOLE file also searches its own
-    /// assertions, so a plain `src.contains("…")` matches the needle written
-    /// one line above it and passes whether or not the production code is
-    /// there — and a `matches(…).count()` is inflated by one for the same
-    /// reason. Slicing the test module off first removes the class.
+    /// The production source of this file, excluding test-only items.
     fn production_source() -> String {
-        let src = include_str!("mux.rs").replace("\r\n", "\n");
-        let marker = "\n#[cfg(test)]\nmod node_tests {";
-        let cut = src
-            .find(marker)
-            .expect("mux.rs must have a test module to slice off");
-        let production = src[..cut].to_string();
+        let production = kettle_test_support::production_source(include_str!("mux.rs"));
         assert!(
             !production.contains("fn production_source()"),
-            "the slice must exclude the test module, or every guard built on \
-             it still self-matches"
+            "the production slice retained its own helper"
+        );
+        assert!(
+            !production.contains("#[test]"),
+            "the production slice retained a test function"
+        );
+        assert!(
+            !production.contains("#[cfg(test)]"),
+            "the production slice retained a test-only item"
         );
         production
     }

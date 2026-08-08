@@ -2233,34 +2233,21 @@ fn window_state_from_flags(
     }
 }
 
-/// The production source of this file, with every top-level test item removed.
+/// The production source of this file, excluding test-only items.
 #[cfg(test)]
 fn production_source() -> String {
-    let src = include_str!("main.rs").replace("\r\n", "\n");
-    let mut production = String::with_capacity(src.len());
-    let mut inside_test_item = false;
-    for line in src.lines() {
-        if inside_test_item {
-            if line == "}" {
-                inside_test_item = false;
-            }
-            continue;
-        }
-        if line == "#[cfg(test)]" {
-            inside_test_item = true;
-            continue;
-        }
-        production.push_str(line);
-        production.push('\n');
-    }
+    let production = kettle_test_support::production_source(include_str!("main.rs"));
     assert!(
         !production.contains("fn production_source()"),
-        "the slice must exclude every test item, or the guards built on it \
-         still self-match"
+        "the production slice retained its own helper"
     );
     assert!(
-        production.contains("fn main() -> anyhow::Result<()>"),
-        "the slice must keep the binary entry point"
+        !production.contains("#[test]"),
+        "the production slice retained a test function"
+    );
+    assert!(
+        !production.contains("#[cfg(test)]"),
+        "the production slice retained a test-only item"
     );
     production
 }
@@ -2848,9 +2835,8 @@ mod tests {
         );
         // The conditional parent-console attach is present.
         for needle in [
-            "attach_parent_console_if_needed",
-            "AttachConsole",
-            "ATTACH_PARENT_PROCESS",
+            "fn attach_parent_console_if_needed()",
+            "AttachConsole(ATTACH_PARENT_PROCESS)",
         ] {
             assert!(
                 src.contains(needle),
@@ -2862,7 +2848,11 @@ mod tests {
         // GetFileType + GetStdHandle there is no way to tell a piped stdout
         // from an allocated console, so an unconditional reopen would re-break
         // `kettle --flag | grep` on Windows CI.
-        for needle in ["GetFileType", "GetStdHandle", "out_ok && err_ok"] {
+        for needle in [
+            "GetFileType(h)",
+            "GetStdHandle(STD_OUTPUT_HANDLE)",
+            "if out_ok && err_ok {",
+        ] {
             assert!(
                 src.contains(needle),
                 "missing inherited-handle guard token: {needle}"
@@ -2875,7 +2865,7 @@ mod tests {
         // CONIN$ reopen, any terminal launch that needs an out/err reopen
         // (i.e. most terminal launches) unconditionally clobbers a piped
         // stdin with the parent console's keyboard input.
-        for needle in ["in_ok", "if !in_ok"] {
+        for needle in ["let in_ok = is_inherited(stdin_handle);", "if !in_ok {"] {
             assert!(
                 src.contains(needle),
                 "missing stdin inherited-handle guard token: {needle} \

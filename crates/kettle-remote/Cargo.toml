@@ -39,3 +39,6 @@ workspace = true
 # components). We only need process enumeration; opt-out + opt-in
 # the bare minimum.
 sysinfo = { version = "0.32", default-features = false, features = ["system"] }
+
+[dev-dependencies]
+kettle-test-support.workspace = true

@@ -807,18 +807,20 @@ impl ImagePipeline {
 mod aba_guard_tests {
     use kettle_core::{ImageData, ImageSourceCrop, ImageSourceRect};
 
-    /// The production half of this file: everything above the test module.
+    /// The production source of this file, excluding test-only items.
     fn production_source() -> String {
-        let src = include_str!("imgpipe.rs").replace("\r\n", "\n");
-        let marker = "\n#[cfg(test)]\nmod aba_guard_tests {";
-        let cut = src
-            .find(marker)
-            .expect("imgpipe.rs must have a test module to slice off");
-        let production = src[..cut].to_string();
+        let production = kettle_test_support::production_source(include_str!("imgpipe.rs"));
         assert!(
             !production.contains("fn production_source()"),
-            "the slice must exclude the test module, or every guard built on \
-             it still self-matches"
+            "the production slice retained its own helper"
+        );
+        assert!(
+            !production.contains("#[test]"),
+            "the production slice retained a test function"
+        );
+        assert!(
+            !production.contains("#[cfg(test)]"),
+            "the production slice retained a test-only item"
         );
         production
     }

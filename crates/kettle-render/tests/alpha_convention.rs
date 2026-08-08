@@ -110,11 +110,20 @@ fn blend_state(src: &str) -> &'static str {
 #[test]
 fn each_pipeline_blends_the_way_its_shader_writes() {
     for (name, src) in [
-        ("quad", include_str!("../src/quad.rs")),
-        ("imgpipe", include_str!("../src/imgpipe.rs")),
-        ("glyphpipe", include_str!("../src/glyphpipe.rs")),
+        (
+            "quad",
+            kettle_test_support::production_source(include_str!("../src/quad.rs")),
+        ),
+        (
+            "imgpipe",
+            kettle_test_support::production_source(include_str!("../src/imgpipe.rs")),
+        ),
+        (
+            "glyphpipe",
+            kettle_test_support::production_source(include_str!("../src/glyphpipe.rs")),
+        ),
     ] {
-        let multiplies = alpha_multiplications(src);
+        let multiplies = alpha_multiplications(&src);
         assert!(
             multiplies <= 1,
             "{name}: the shader multiplies by alpha {multiplies} times — more \
@@ -126,7 +135,7 @@ fn each_pipeline_blends_the_way_its_shader_writes() {
             "straight"
         };
         assert_eq!(
-            blend_state(src),
+            blend_state(&src),
             want,
             "{name}: the shader returns {want} color, so the blend state must \
              match — mismatching them applies alpha twice, or not at all"

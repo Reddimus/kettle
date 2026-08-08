@@ -846,18 +846,20 @@ fn wait_for_poll(
 mod tests {
     use super::*;
 
-    /// The production half of this file: everything above the test module.
+    /// The production source of this file, excluding test-only items.
     fn production_source() -> String {
-        let src = include_str!("ctl_server.rs").replace("\r\n", "\n");
-        let marker = "\n#[cfg(test)]\nmod tests {";
-        let cut = src
-            .find(marker)
-            .expect("ctl_server.rs must have a test module to slice off");
-        let production = src[..cut].to_string();
+        let production = kettle_test_support::production_source(include_str!("ctl_server.rs"));
         assert!(
             !production.contains("fn production_source()"),
-            "the slice must exclude the test module, or every guard built on \
-             it still self-matches"
+            "the production slice retained its own helper"
+        );
+        assert!(
+            !production.contains("#[test]"),
+            "the production slice retained a test function"
+        );
+        assert!(
+            !production.contains("#[cfg(test)]"),
+            "the production slice retained a test-only item"
         );
         production
     }
@@ -1382,7 +1384,7 @@ mod tests {
     /// capability gate occurs before that match.
     #[test]
     fn every_typed_method_is_dispatched_behind_capability_gate() {
-        let src = include_str!("app.rs");
+        let src = kettle_test_support::production_source(include_str!("app.rs"));
         let start = src
             .find("if method.capability() == Capability::Mutate")
             .expect("typed capability gate present");
