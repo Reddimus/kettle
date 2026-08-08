@@ -1390,25 +1390,32 @@ fn content_rect_for(
 ) -> Rect {
     content_rect_for_with_strip(
         surface,
-        tab_bar_h,
-        status_bar_h,
-        0.0,
+        ContentBands {
+            tab_bar_h,
+            status_bar_h,
+            ..ContentBands::default()
+        },
         tab_bar_pos,
         status_bar_mode,
         VERTICAL_TAB_STRIP_W,
     )
 }
 
-/// Phase 7 of the vertical-tabs design: explicit
-/// strip-width variant so callers with `cfg.tab_bar_width` in
-/// scope can pass it through. The non-`_with_strip` wrapper
-/// above keeps the same signature for code paths that
-/// don't have a Config available.
-fn content_rect_for_with_strip(
-    surface: (u32, u32),
+/// Horizontal chrome bands that reduce the pane-content area.
+#[derive(Clone, Copy, Default)]
+struct ContentBands {
     tab_bar_h: f32,
     status_bar_h: f32,
     update_banner_h: f32,
+    vertical_title_edit_h: f32,
+}
+
+/// Phase 7 of the vertical-tabs design: explicit strip-width variant so callers
+/// with `cfg.tab_bar_width` in scope can pass it through. The non-`_with_strip`
+/// wrapper above keeps the same signature for code paths without a Config.
+fn content_rect_for_with_strip(
+    surface: (u32, u32),
+    bands: ContentBands,
     tab_bar_pos: kettle_config::TabBarPos,
     status_bar_mode: kettle_config::StatusBarMode,
     strip_w: f32,
@@ -1421,13 +1428,22 @@ fn content_rect_for_with_strip(
     let sb_on_top = matches!(status_bar_mode, kettle_config::StatusBarMode::Top);
     let sb_on_bottom = matches!(status_bar_mode, kettle_config::StatusBarMode::Bottom);
 
-    // Vertical: status bar still claims y-band (status is
-    // always horizontal in v1); the strip claims an x-band.
-    let top_offset =
-        (if tb_on_top { tab_bar_h } else { 0.0 }) + (if sb_on_top { status_bar_h } else { 0.0 });
-    let bot_offset = (if tb_on_bottom { tab_bar_h } else { 0.0 })
-        + (if sb_on_bottom { status_bar_h } else { 0.0 })
-        + update_banner_h.max(0.0);
+    // Vertical: status bar and title editing claim y-bands (status is always
+    // horizontal in v1); the persistent tab strip claims only an x-band.
+    let top_offset = (if tb_on_top { bands.tab_bar_h } else { 0.0 })
+        + (if sb_on_top { bands.status_bar_h } else { 0.0 })
+        + (if tb_on_left || tb_on_right {
+            bands.vertical_title_edit_h.max(0.0)
+        } else {
+            0.0
+        });
+    let bot_offset = (if tb_on_bottom { bands.tab_bar_h } else { 0.0 })
+        + (if sb_on_bottom {
+            bands.status_bar_h
+        } else {
+            0.0
+        })
+        + bands.update_banner_h.max(0.0);
     let left_offset = if tb_on_left { strip_w } else { 0.0 };
     let right_offset = if tb_on_right { strip_w } else { 0.0 };
     let content_h = (sh - top_offset - bot_offset).max(1.0);
@@ -1876,6 +1892,42 @@ fn confirm_button_label(button: &ConfirmButton) -> &str {
     match button {
         ConfirmButton::Cancel => "Cancel",
         ConfirmButton::Confirm { label, .. } => label.as_str(),
+    }
+}
+
+/// Where the title-edit overlay is painted.
+///
+/// Pure so the geometry can be tested; it was inline and untestable, which is
+/// how the vertical-tab-bar case shipped broken.
+///
+/// Under a VERTICAL tab bar this must span the full window width, not the tab
+/// strip. The renderer composes
+/// `"  ✎ {label} {input}_   (Enter apply · Esc cancel)"` into
+/// `overlay_label_cols(rect.2, cw)`; a strip is `tab-bar-width` wide (default
+/// 180px, ~22 columns) and the trailing hint alone is 30 columns, so the budget
+/// could not hold even the prefix. The input rendered zero columns — no text,
+/// no caret, no horizontal scroll — while Enter still committed the invisible
+/// buffer. For `EditPaneGroup` that buffer names the broadcast group, so it
+/// decides which panes receive subsequent keystrokes.
+fn title_edit_rect_for(
+    vertical: bool,
+    bar_y: f32,
+    bar_height: f32,
+    content_y: f32,
+    sw: f32,
+    sh: f32,
+    row_h: f32,
+) -> kettle_render::Rect4 {
+    if bar_height > 0.0 {
+        if vertical {
+            let height = row_h.max(0.0).min(sh);
+            let y = (content_y - height).clamp(0.0, (sh - height).max(0.0));
+            (0.0, y, sw, height)
+        } else {
+            (0.0, bar_y, sw, bar_height)
+        }
+    } else {
+        (0.0, 0.0, sw, row_h)
     }
 }
 
@@ -6461,6 +6513,14 @@ impl App {
         }
     }
 
+    fn vertical_title_edit_h(&self, ws: &WindowState) -> f32 {
+        if self.cfg.tab_bar_pos.is_vertical() && ws.editing_title.is_some() {
+            self.tab_bar_h(ws)
+        } else {
+            0.0
+        }
+    }
+
     /// Height reserved by the responsive search lane. The renderer owns the
     /// layout formula; the app reuses it for PTY sizing and hit-testing so no
     /// terminal row can be painted underneath the controls.
@@ -6538,9 +6598,12 @@ impl App {
         // is honored.
         let mut area = content_rect_for_with_strip(
             surface,
-            self.tab_bar_h(ws),
-            self.status_bar_h(ws),
-            self.update_banner_h(ws),
+            ContentBands {
+                tab_bar_h: self.tab_bar_h(ws),
+                status_bar_h: self.status_bar_h(ws),
+                update_banner_h: self.update_banner_h(ws),
+                vertical_title_edit_h: self.vertical_title_edit_h(ws),
+            },
             self.cfg.tab_bar_pos,
             self.cfg.status_bar,
             self.cfg.tab_bar_width,
@@ -6777,17 +6840,17 @@ impl App {
             .unwrap_or((800, 600));
         let (sw, sh) = (w as f32, h as f32);
         let bar = self.tab_bar(ws);
-        if bar.height > 0.0 {
-            if self.cfg.tab_bar_pos.is_vertical() {
-                let (x, _, bw, _) = bar.segments.first().map(|s| s.rect).unwrap_or(bar.new_tab);
-                (x, 0.0, bw, bar.height.min(sh))
-            } else {
-                (0.0, bar.y, sw, bar.height)
-            }
-        } else {
-            let fallback_h = ws.renderer.as_ref().map(|r| r.cell_h + 8.0).unwrap_or(24.0);
-            (0.0, 0.0, sw, fallback_h)
-        }
+        let row_h = ws.renderer.as_ref().map(|r| r.cell_h + 8.0).unwrap_or(24.0);
+        let content_y = self.area(ws).1;
+        title_edit_rect_for(
+            self.cfg.tab_bar_pos.is_vertical(),
+            bar.y,
+            bar.height,
+            content_y,
+            sw,
+            sh,
+            row_h,
+        )
     }
 
     /// Tab-bar layout for
@@ -31925,6 +31988,88 @@ mod tests {
         );
     }
 
+    /// The title-edit overlay must be wide enough to show what you are typing.
+    ///
+    /// Under a vertical tab bar it was handed the first tab SEGMENT's rect —
+    /// `tab-bar-width`, default 180px. The renderer fits
+    /// `"  ✎ {label} {input}_   (Enter apply · Esc cancel)"` into
+    /// `overlay_label_cols(width, cw)`; at 180px and an 8px cell that is 21
+    /// columns, and the trailing hint alone is 30. Zero input columns rendered,
+    /// no caret, no horizontal scroll — yet Enter committed the invisible
+    /// buffer. For `EditPaneGroup` that buffer is the broadcast-group name,
+    /// which decides which panes receive later keystrokes.
+    #[test]
+    fn title_edit_overlay_is_wide_enough_to_show_the_input() {
+        use super::{ContentBands, content_rect_for_with_strip, title_edit_rect_for};
+        use kettle_config::{StatusBarMode, TabBarPos};
+
+        let sw = 1512.0f32;
+        let sh = 945.0f32;
+        let row_h = 24.0f32;
+        let strip_w = 180.0f32;
+        let content = content_rect_for_with_strip(
+            (sw as u32, sh as u32),
+            ContentBands {
+                tab_bar_h: row_h,
+                vertical_title_edit_h: row_h,
+                ..ContentBands::default()
+            },
+            TabBarPos::Left,
+            StatusBarMode::Off,
+            strip_w,
+        );
+        // A vertical strip: tall bar, tab-bar-width wide. The overlay occupies
+        // the horizontal band immediately above terminal content.
+        let vertical = title_edit_rect_for(true, 0.0, sh, content.1, sw, sh, row_h);
+        assert_eq!(
+            vertical.2, sw,
+            "vertical tab bar: overlay must span the window, not the 180px strip"
+        );
+        assert_eq!(
+            vertical.3, row_h,
+            "vertical tab bar: overlay is one row, not the full strip height"
+        );
+
+        let intersects = vertical.0 < content.0 + content.2
+            && content.0 < vertical.0 + vertical.2
+            && vertical.1 < content.1 + content.3
+            && content.1 < vertical.1 + vertical.3;
+        assert!(
+            !intersects,
+            "the full-width title input must occupy reserved chrome, not cover terminal content: \
+             overlay={vertical:?}, content={content:?}"
+        );
+
+        // A top status bar keeps its own band. The title input starts after it,
+        // and terminal content starts after both pieces of chrome.
+        let status_h = 22.0;
+        let content_below_status = content_rect_for_with_strip(
+            (sw as u32, sh as u32),
+            ContentBands {
+                tab_bar_h: row_h,
+                status_bar_h: status_h,
+                vertical_title_edit_h: row_h,
+                ..ContentBands::default()
+            },
+            TabBarPos::Right,
+            StatusBarMode::Top,
+            strip_w,
+        );
+        let below_status =
+            title_edit_rect_for(true, 0.0, sh, content_below_status.1, sw, sh, row_h);
+        assert_eq!(below_status.1, status_h);
+        assert_eq!(content_below_status.1, status_h + row_h);
+        assert!(below_status.1 + below_status.3 <= content_below_status.1);
+
+        // Horizontal is unchanged: the overlay sits on the bar itself.
+        let horizontal = title_edit_rect_for(false, 12.0, 28.0, 0.0, sw, sh, row_h);
+        assert_eq!(horizontal, (0.0, 12.0, sw, 28.0));
+
+        // No tab bar at all: a single row at the top.
+        let none = title_edit_rect_for(false, 0.0, 0.0, 0.0, sw, sh, row_h);
+        assert_eq!(none, (0.0, 0.0, sw, row_h));
+    }
+
     #[test]
     fn confirm_dialog_button_hit_tracks_right_aligned_button_row() {
         use super::{ConfirmButton, confirm_dialog_button_hit};
@@ -32085,7 +32230,7 @@ mod tests {
 
     #[test]
     fn content_rect_for_carves_out_update_banner_band() {
-        use super::content_rect_for_with_strip;
+        use super::{ContentBands, content_rect_for_with_strip};
         use kettle_config::{StatusBarMode, TabBarPos};
 
         // Top tab bar plus update banner: normal top chrome remains at the top;
@@ -32093,9 +32238,12 @@ mod tests {
         // does not render underneath it.
         let r = content_rect_for_with_strip(
             (800, 600),
-            24.0,
-            16.0,
-            26.0,
+            ContentBands {
+                tab_bar_h: 24.0,
+                status_bar_h: 16.0,
+                update_banner_h: 26.0,
+                ..ContentBands::default()
+            },
             TabBarPos::Top,
             StatusBarMode::Off,
             180.0,
@@ -32106,9 +32254,12 @@ mod tests {
         // bottom; the content height loses all three bands.
         let r = content_rect_for_with_strip(
             (800, 600),
-            24.0,
-            16.0,
-            26.0,
+            ContentBands {
+                tab_bar_h: 24.0,
+                status_bar_h: 16.0,
+                update_banner_h: 26.0,
+                ..ContentBands::default()
+            },
             TabBarPos::Bottom,
             StatusBarMode::Bottom,
             180.0,
@@ -32119,9 +32270,11 @@ mod tests {
         // only a y-axis band.
         let r = content_rect_for_with_strip(
             (800, 600),
-            24.0,
-            0.0,
-            26.0,
+            ContentBands {
+                tab_bar_h: 24.0,
+                update_banner_h: 26.0,
+                ..ContentBands::default()
+            },
             TabBarPos::Left,
             StatusBarMode::Off,
             180.0,
