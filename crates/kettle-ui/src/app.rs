@@ -3124,16 +3124,22 @@ fn should_notify_malformed(new: &[String], last: &[String]) -> bool {
 
 /// Filesystem watchers observe the containing directory so atomic replacement
 /// works across platforms. Only content/name changes to the exact file are
-/// actionable: accepting `Access(Open)` creates a read -> reload -> read
-/// feedback loop on Linux inotify.
+/// actionable. Accepting `Access(Open)` creates a read -> reload -> read
+/// feedback loop on Linux inotify; accepting `Modify(Metadata)` creates the
+/// same loop on macOS because opening a private state file re-applies its mode.
 fn watcher_event_matches(event: &notify::Event, watched: &std::path::Path) -> bool {
     use notify::EventKind;
+    use notify::event::ModifyKind;
 
-    event.paths.iter().any(|path| path == watched)
-        && matches!(
-            event.kind,
-            EventKind::Any | EventKind::Create(_) | EventKind::Modify(_) | EventKind::Remove(_)
-        )
+    if !event.paths.iter().any(|path| path == watched) {
+        return false;
+    }
+    match event.kind {
+        EventKind::Any | EventKind::Create(_) | EventKind::Remove(_) => true,
+        EventKind::Modify(ModifyKind::Metadata(_)) => false,
+        EventKind::Modify(_) => true,
+        EventKind::Access(_) | EventKind::Other => false,
+    }
 }
 
 /// Queue at most one event until the main thread re-arms the latch. Re-open it
@@ -26674,10 +26680,11 @@ mod tests {
     }
 
     #[test]
-    fn watcher_accepts_changes_to_exact_path_only() {
+    fn watcher_accepts_content_and_name_changes_to_exact_path_only() {
         use notify::EventKind;
         use notify::event::{
-            AccessKind, AccessMode, CreateKind, DataChange, ModifyKind, RemoveKind,
+            AccessKind, AccessMode, CreateKind, DataChange, MetadataKind, ModifyKind, RemoveKind,
+            RenameMode,
         };
 
         let watched = std::path::Path::new("/tmp/kettle-config.toml");
@@ -26686,6 +26693,7 @@ mod tests {
             EventKind::Any,
             EventKind::Create(CreateKind::File),
             EventKind::Modify(ModifyKind::Data(DataChange::Content)),
+            EventKind::Modify(ModifyKind::Name(RenameMode::Any)),
             EventKind::Remove(RemoveKind::File),
         ] {
             assert!(super::watcher_event_matches(&event(kind), watched));
@@ -26695,6 +26703,7 @@ mod tests {
             EventKind::Access(AccessKind::Read),
             EventKind::Access(AccessKind::Open(AccessMode::Read)),
             EventKind::Access(AccessKind::Close(AccessMode::Read)),
+            EventKind::Modify(ModifyKind::Metadata(MetadataKind::Permissions)),
             EventKind::Other,
         ] {
             assert!(!super::watcher_event_matches(&event(kind), watched));

@@ -6617,6 +6617,42 @@ def run_touchpad_scroll(kettle: str, root: Path) -> Path:
     return out
 
 
+def live_session_skip_reason() -> Optional[str]:
+    """Return why the live-UI smoke cannot run here, or None if it can.
+
+    macOS has no DISPLAY/WAYLAND_DISPLAY -- it draws through the Quartz window
+    server -- so the original X11/Wayland-only check skipped unconditionally on
+    Darwin. `just agent-tui-smoke` therefore exited 0 having tested nothing,
+    which reads identically to a pass. That is the whole point of this helper:
+    a skip must name a real reason.
+
+    On Darwin the question is whether this process can reach the window server
+    at all. `launchctl managername` answers it: a logged-in GUI session reports
+    `Aqua`, while an SSH session reports `Background` or `StandardIO` -- which is
+    exactly the case that must still skip, because no window can be created.
+    """
+    system = platform.system()
+    if system == "Windows":
+        return None
+    if system == "Darwin":
+        try:
+            managername = subprocess.run(
+                ["launchctl", "managername"],
+                capture_output=True,
+                text=True,
+                timeout=5,
+                check=False,
+            ).stdout.strip()
+        except (OSError, subprocess.SubprocessError):
+            return "launchctl managername is unavailable, cannot prove a GUI session"
+        if managername != "Aqua":
+            return f"no macOS GUI session (launchctl managername = {managername or 'unknown'!s})"
+        return None
+    if os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"):
+        return None
+    return "no DISPLAY or WAYLAND_DISPLAY"
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument(
@@ -6710,8 +6746,9 @@ def main() -> int:
         nvim_data=args.nvim_data,
     )
 
-    if platform.system() != "Windows" and not (os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")):
-        print("live-ui smoke: skipped (no DISPLAY or WAYLAND_DISPLAY)", file=sys.stderr)
+    skip_reason = live_session_skip_reason()
+    if skip_reason is not None:
+        print(f"live-ui smoke: skipped ({skip_reason})", file=sys.stderr)
         return 0
 
     if args.cargo_release:
