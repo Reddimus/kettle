@@ -58,7 +58,13 @@ pub fn remove_open_private_file(file: File, path: &Path) -> io::Result<()> {
     remove_open_private_file_impl(file, path)
 }
 
-pub(crate) fn discard_created_private_file(file: File, path: &Path) {
+/// Best-effort removal of a file still held by its creation handle.
+///
+/// `file` must have been returned by [`create_private_file_new`]. This is the
+/// failure-path counterpart to [`remove_open_private_file`]: Windows creation
+/// handles intentionally omit delete sharing, so they must be marked for
+/// deletion directly instead of being passed through that reopen-based API.
+pub fn discard_created_private_file(file: File, path: &Path) {
     discard_created_private_file_impl(file, path);
 }
 

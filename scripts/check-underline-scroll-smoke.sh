@@ -6,18 +6,16 @@ FRAMES="${KETTLE_UNDERLINE_FRAMES:-8}"
 TIMEOUT="${KETTLE_UNDERLINE_TIMEOUT:-25}"
 SCROLL_DOWN_KEYS="${KETTLE_UNDERLINE_DOWN_KEYS:-j,j,j,j,j,j}"
 SCROLL_UP_KEYS="${KETTLE_UNDERLINE_UP_KEYS:-k,k,k,k,k,k}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-if [ -z "${DISPLAY:-}" ] && [ -z "${WAYLAND_DISPLAY:-}" ]; then
-  echo "underline-scroll smoke: skipped (no DISPLAY or WAYLAND_DISPLAY)" >&2
-  exit 0
-fi
+python3 "$SCRIPT_DIR/check-live-ui-smoke.py" session-check
 if ! command -v git >/dev/null 2>&1; then
-  echo "underline-scroll smoke: skipped (git not found)" >&2
-  exit 0
+  echo "underline-scroll smoke: cannot run (git not found)" >&2
+  exit 1
 fi
 if ! command -v delta >/dev/null 2>&1; then
-  echo "underline-scroll smoke: skipped (delta not found)" >&2
-  exit 0
+  echo "underline-scroll smoke: cannot run (delta not found)" >&2
+  exit 1
 fi
 
 stamp="$(date +%Y%m%d-%H%M%S)"

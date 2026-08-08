@@ -3,11 +3,9 @@ set -euo pipefail
 
 KETTLE="${KETTLE_BIN:-kettle}"
 TIMEOUT="${KETTLE_TABBAR_TIMEOUT:-20}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-if [ -z "${DISPLAY:-}" ] && [ -z "${WAYLAND_DISPLAY:-}" ]; then
-  echo "tabbar-click smoke: skipped (no DISPLAY or WAYLAND_DISPLAY)" >&2
-  exit 0
-fi
+python3 "$SCRIPT_DIR/check-live-ui-smoke.py" session-check
 
 stamp="$(date +%Y%m%d-%H%M%S)"
 out="${KETTLE_DIAG_DIR:-target/diagnostics}/tabbar-click-$stamp"

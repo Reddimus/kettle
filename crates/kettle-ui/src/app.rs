@@ -19780,6 +19780,19 @@ fn should_reveal_after_renderer_init(state: kettle_config::WindowState) -> bool 
     !matches!(state, kettle_config::WindowState::Hidden)
 }
 
+/// Some surface backends cannot acquire a first frame while their native
+/// window is hidden. macOS Metal is one: `CAMetalLayer::nextDrawable` does not
+/// make progress until the `NSWindow` can be ordered on screen. In that case a
+/// hide-until-first-presentation policy is circular, so reveal after renderer
+/// initialization and immediately before the first surface frame instead.
+fn should_reveal_before_first_surface_frame(
+    state: kettle_config::WindowState,
+    window_shown: bool,
+    surface_requires_visible_window: bool,
+) -> bool {
+    surface_requires_visible_window && !window_shown && should_reveal_after_renderer_init(state)
+}
+
 /// Is the default last-session (`session.json`) active
 /// Where a session snapshot should be written, if anywhere.
 #[derive(Debug, PartialEq, Eq)]
@@ -21138,9 +21151,21 @@ impl App {
         self.resize_all(&mut ws);
         self.sync_output_wake_gate(&ws);
         self.focused_seq = seq;
+        if should_reveal_before_first_surface_frame(
+            state,
+            ws.window_shown,
+            cfg!(target_os = "macos"),
+        ) {
+            if let Some(w) = &ws.window {
+                w.set_visible(true);
+            }
+            ws.window_shown = true;
+        }
         // First frame painted directly. A successful presentation reveals the
         // native window from `redraw`, so neither an empty renderer nor an
-        // un-restored default-size surface can flash on screen.
+        // un-restored default-size surface can flash on screen. macOS is
+        // revealed immediately above because Metal cannot acquire that first
+        // surface frame from a hidden NSWindow.
         self.redraw(&mut ws);
         if let Some(w) = &ws.window {
             w.request_redraw();
@@ -22462,6 +22487,20 @@ impl App {
                     self.sync_recording_state(ws, &body);
                 }
             }
+        }
+        if should_reveal_before_first_surface_frame(
+            self.cfg.window_state,
+            ws.window_shown,
+            cfg!(target_os = "macos"),
+        ) {
+            if let Some(w) = &ws.window {
+                w.set_visible(true);
+            }
+            ws.window_shown = true;
+            log::info!(
+                "startup: window revealed before first macOS surface frame, working set {:.1} MiB",
+                process_working_set_mb()
+            );
         }
         self.redraw(ws);
         if let Some(w) = &ws.window {
@@ -25245,8 +25284,9 @@ mod tests {
         parse_remote_command_batch, production_source, rank_layouts, sanitize_native_window_title,
         sanitize_title, selection_kind, session_sweep_due, should_notify_input_rejection,
         should_poll_remote_window, should_restore_session, should_reveal_after_renderer_init,
-        stage_applied_remote_probe, stage_output_generations_for_frame, stage_remote_targets,
-        stamp_accepted_input, startup_inner_size_px, typeahead_match,
+        should_reveal_before_first_surface_frame, stage_applied_remote_probe,
+        stage_output_generations_for_frame, stage_remote_targets, stamp_accepted_input,
+        startup_inner_size_px, typeahead_match,
     };
     use crate::mux::{
         BroadcastScope, Dir, Mux, PaneInputDelivery, PaneInputResult, PaneTitleOrigin,
@@ -27490,6 +27530,34 @@ mod tests {
         assert!(should_reveal_after_renderer_init(WindowState::Maximise));
         assert!(should_reveal_after_renderer_init(WindowState::Fullscreen));
         assert!(!should_reveal_after_renderer_init(WindowState::Hidden));
+    }
+
+    /// Surface backends such as macOS Metal need the native window ordered on
+    /// screen before their first drawable can exist. Pin the portable policy
+    /// independently of the host running this unit test.
+    #[test]
+    fn visible_surface_requirement_breaks_the_hidden_first_frame_cycle() {
+        use kettle_config::WindowState;
+        assert!(should_reveal_before_first_surface_frame(
+            WindowState::Normal,
+            false,
+            true
+        ));
+        assert!(!should_reveal_before_first_surface_frame(
+            WindowState::Hidden,
+            false,
+            true
+        ));
+        assert!(!should_reveal_before_first_surface_frame(
+            WindowState::Normal,
+            true,
+            true
+        ));
+        assert!(!should_reveal_before_first_surface_frame(
+            WindowState::Normal,
+            false,
+            false
+        ));
     }
 
     /// The default-session restore is opt-in. The same

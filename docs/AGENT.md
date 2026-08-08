@@ -453,7 +453,9 @@ broad region instead of a cursor-sized box. The script also draws a high-contras
 prompt-shaped `➜  ~ KETTLE_LIVE_RENDER_SMOKE` marker and rejects blank or
 mostly-empty screenshot frames, so the rendered PNGs must prove that normal
 prompt glyphs remain visible across blink phases. This needs a visible
-X11/Wayland desktop session.
+X11/Wayland desktop session or an unlocked macOS Aqua session. The shared
+preflight fails nonzero when no usable GUI session exists; on macOS it also
+wakes an unlocked display before Kettle starts.
 
 ```sh
 just agent-tui-smoke
@@ -463,6 +465,9 @@ Starts a real grid-renderer Kettle window in explicit `native` shell mode,
 using PowerShell on Windows and deterministic non-rc Bash on Unix/macOS. The
 recipe asks Cargo to build and report the current checkout's exact release
 executable (including a custom `CARGO_TARGET_DIR` or configured target triple),
+and fails nonzero instead of reporting success when the graphical session is
+missing or locked. On macOS the preflight wakes an unlocked display before the
+window starts. It
 then drives a shell marker, optional Codex
 CLI and Claude Code CLI `--version` probes plus `codex exec --help` /
 `claude --print --help` output captures, a prompt-shaped `➜  ~` marker, a
@@ -517,9 +522,11 @@ that distro (not a hard-coded `/bin/bash`), and checked cleanup registered
 before the session starts. Before configured Neovim or AstroNvim runs, the
 helper creates an unpredictable, owner-private directory inside the target
 distro. It copies only regular files from the config plus existing
-`lazy`/`site` plugin runtime while dereferencing symlinks; cycles, special
-files, more than 100,000 entries or 64 levels, a file over 256 MiB, and an
-aggregate over 2 GiB are rejected. It then redirects `HOME`,
+`lazy`/`site` plugin runtime while dereferencing symlinks. Plugin Git refs are
+retained so lazy.nvim recognizes the pinned checkout, but Git object databases
+are excluded because they are not Neovim runtime; cycles, special files, more
+than 100,000 entries or 64 levels, a runtime file over 256 MiB, and an aggregate
+over 2 GiB are rejected. It then redirects `HOME`,
 `XDG_CONFIG_HOME`, `XDG_DATA_HOME`, `XDG_STATE_HOME`, and `XDG_CACHE_HOME` to
 that snapshot; `XDG_RUNTIME_DIR` is isolated there as well. Clean Neovim uses
 the same isolation; the directory is removed at the end.

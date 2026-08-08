@@ -19,8 +19,8 @@ pub(crate) fn test_tempdir() -> kettle_test_support::PrivateTempDir {
 }
 
 pub use private::{
-    create_private_file_new, open_existing_private_file, open_private_file,
-    open_private_file_append, remove_open_private_file, restrict_private_file,
+    create_private_file_new, discard_created_private_file, open_existing_private_file,
+    open_private_file, open_private_file_append, remove_open_private_file, restrict_private_file,
 };
 
 /// Maximum on-disk size of the shared remote-command spool.
@@ -970,6 +970,17 @@ mod tests {
         let file = open_existing_private_file(&path).unwrap();
         fs4::FileExt::try_lock(&file).unwrap();
         remove_open_private_file(file, &path).unwrap();
+
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn discards_a_private_file_through_its_creation_handle() {
+        let dir = crate::test_tempdir();
+        let path = dir.path().join("partial");
+        let file = create_private_file_new(&path).unwrap();
+
+        discard_created_private_file(file, &path);
 
         assert!(!path.exists());
     }

@@ -1022,7 +1022,10 @@ These need a real display and are run by hand (or on real hardware):
     Windows and deterministic non-rc Bash on Unix/macOS. The recipe consumes
     Cargo's JSON build artifact to select the current checkout's exact release
     executable, including custom target directories and configured target
-    triples, then drives a shell marker,
+    triples. Its graphical-session preflight fails nonzero rather than turning
+    an unavailable display into a successful skip; on macOS it requires an
+    unlocked Aqua console and wakes the display before launch. It then drives a
+    shell marker,
     a prompt-shaped `➜  ~`
     marker, deterministic Windows Codex active-placeholder and queued-input
     cursor fixtures with cell-level pixel assertions, optional
@@ -1084,8 +1087,9 @@ These need a real display and are run by hand (or on real hardware):
     `KETTLE_SMOKE_NVIM_DATA` can select its installed plugin data. The helper
     creates an unpredictable owner-private directory inside the target distro,
     copies only regular files from the config and existing `lazy`/`site`
-    runtime while dereferencing symlinks, and redirects `HOME` plus every
-    Neovim XDG
+    runtime while dereferencing symlinks. Plugin Git refs are retained for
+    lazy.nvim checkout recognition, but non-runtime Git object databases are
+    excluded. It redirects `HOME` plus every Neovim XDG
     config/data/state/cache/runtime path to that snapshot before removing it.
     The streaming copy rejects cycles and special files and caps the snapshot at
     100,000 entries, 64 directory levels, 256 MiB per file, and 2 GiB total.
@@ -1220,7 +1224,8 @@ These need a real display and are run by hand (or on real hardware):
     connection usable and serving the next call.
   - **Live MCP**: `claude --mcp-config .mcp.json --strict-mcp-config -p "use
     kettle_run to echo a marker"` — Claude Code drives the MCP tools end-to-end.
-  - **Live renderer/UI diagnostics**: on a Linux desktop run
+  - **Live renderer/UI diagnostics**: on a Linux desktop or unlocked macOS Aqua
+    session run
     `just live-render-smoke`, `just interaction-smoke`, `just tabbar-click-smoke`,
     `just pane-drag-smoke`, `just tearoff-smoke`, `just tab-title-smoke`,
     `just split-titlebar-smoke`,
@@ -1228,7 +1233,7 @@ These need a real display and are run by hand (or on real hardware):
     for frame-by-frame review. The tearoff recipe is two-tier: a portable
     ctl tier proves the mouseless `move_tab_to_new_window` tear +
     `tab_moved` broadcast (plus the `tear_lift`/`dock_highlighted`/`band`
-    diagnostics in `ui_geometry`), and an X11-desktop tier
+    diagnostics in `ui_geometry`), and an X11-desktop-only tier
     (`scripts/check-tearoff-live-smoke.sh`) drives xdotool REAL pointer
     input through the full gesture — tear, freeze-guarded follow, re-dock
     merge, Esc cancel — once per carry path (native `_NET_WM_MOVERESIZE`,
@@ -1271,11 +1276,12 @@ These need a real display and are run by hand (or on real hardware):
     interaction code.
 
 Search release evidence is platform-scoped. Run the live interaction/search
-probe on an Ubuntu Wayland or X11 desktop and on native Windows 11; exercise the
-same pane under tmux, clean Neovim, configured AstroNvim, Codex CLI, and Claude
-Code CLI where installed. macOS and Windows/WSL results remain separate checks:
-never infer them from a Linux unit test or an offscreen renderer pass. Record
-missing tools and unrun platforms as explicit skips in the release audit.
+probe on an Ubuntu Wayland or X11 desktop, an unlocked macOS Aqua session, and
+native Windows 11; exercise the same pane under tmux, clean Neovim, configured
+AstroNvim, Codex CLI, and Claude Code CLI where installed. macOS and Windows/WSL
+results remain separate checks: never infer them from a Linux unit test or an
+offscreen renderer pass. Record missing tools and unrun platforms as explicit
+skips in the release audit.
 
 ## Pattern: audit-driven hardening
 

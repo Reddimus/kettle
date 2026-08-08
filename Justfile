@@ -792,10 +792,10 @@ menu-shot *ARGS:
 
 # Start a real kettle window with `text-renderer = grid`, capture live
 # screenshots through `kettle ctl screenshot`, and assert cursor blink changes
-# only a cursor-sized region. This is Linux desktop-local by design: it needs a
-# visible X11/Wayland session and complements the CI offscreen renderer tests.
+# only a cursor-sized region. This needs a visible Linux X11/Wayland or unlocked
+# macOS Aqua session and complements the CI offscreen renderer tests.
 [unix]
-live-render-smoke:
+live-render-smoke: release
     KETTLE_BIN=./target/release/kettle ./scripts/check-live-render-smoke.sh
 
 [windows]
@@ -926,8 +926,8 @@ zoom-keybind-smoke:
 # Reproduce underline scrolling with git diff | delta under repeated j/k input.
 # Captures PNG frames and read_cells JSON under target/diagnostics/underline-scroll-*.
 [unix]
-underline-scroll-smoke: release
-    KETTLE_BIN=./target/release/kettle ./scripts/check-underline-scroll-smoke.sh
+underline-scroll-smoke:
+    python3 scripts/check-live-ui-smoke.py --cargo-release underline
 
 [windows]
 underline-scroll-smoke:

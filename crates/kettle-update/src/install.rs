@@ -1531,7 +1531,7 @@ fn copy_file_new_durable(source: &Path, destination: &Path) -> Result<(), Update
         Ok(())
     })();
     if result.is_err() {
-        let _ = kettle_state::remove_open_private_file(destination_file, destination);
+        kettle_state::discard_created_private_file(destination_file, destination);
         return result;
     }
     drop(destination_file);
@@ -4478,7 +4478,7 @@ fn stream_transaction_backup(
         Ok((total, hex::encode(hash.finalize())))
     })();
     if result.is_err() {
-        let _ = kettle_state::remove_open_private_file(backup, destination);
+        kettle_state::discard_created_private_file(backup, destination);
         return result;
     }
     drop(backup);
@@ -4880,11 +4880,13 @@ impl Transaction {
     /// protect; `remove_dir` refuses that case for us. Any other failure leaves
     /// the directory exactly as it is, which is the pre-existing behaviour.
     ///
-    fn remove_created_directories(&mut self) {
-        // Do not persist the in-memory take: if recovery is interrupted while
-        // removing the deepest directories, the on-disk journal must retain the
-        // complete idempotent removal set for the next startup.
-        let created = std::mem::take(&mut self.journal.created_directories);
+    fn remove_created_directories(&self) {
+        // Keep the in-memory map as well as the on-disk journal complete. Windows
+        // reopens and compares the journal before deleting it, so clearing only
+        // this copy would make the unchanged persisted journal look replaced.
+        // Retaining both copies also preserves the full idempotent removal set if
+        // recovery is interrupted while removing the deepest directories.
+        let created = &self.journal.created_directories;
         // Deepest first: `share/kettle/shell-integration` has to go before
         // `share/kettle`, and reverse path order gives that for free because a
         // parent is a prefix of its children.
@@ -6940,6 +6942,74 @@ mod tests {
             "rollback must not infer ownership from emptiness"
         );
         assert!(!root.path().join(".kettle-update-journal.json").exists());
+    }
+
+    #[cfg(any(windows, target_os = "linux"))]
+    #[test]
+    fn created_parent_cleanup_preserves_the_persisted_journal_comparison_value() {
+        let root = test_tempdir();
+        fs::create_dir(root.path().join("existing")).unwrap();
+        let mut transaction = Transaction::begin(root.path(), "99.0.0").unwrap();
+        let stopped = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            transaction
+                .install_bytes_with_progress_and_post_publish(
+                    Path::new("existing/new/deep/value"),
+                    b"replacement",
+                    None,
+                    |progress| {
+                        if progress == TransactionProgress::ParentDirectoriesPersisted {
+                            panic!("simulated stop after destination parents were persisted");
+                        }
+                    },
+                    || Ok(()),
+                )
+                .unwrap();
+        }));
+        assert!(stopped.is_err());
+
+        transaction.journal.phase = JournalPhase::RollingBack;
+        transaction.persist_journal().unwrap();
+        transaction.remove_created_directories();
+
+        let persisted: Journal = serde_json::from_slice(
+            &fs::read(root.path().join(".kettle-update-journal.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            transaction.journal, persisted,
+            "directory cleanup must retain the exact value checked before journal deletion"
+        );
+        assert!(!root.path().join("existing/new").exists());
+        transaction.finish_cleanup().unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_checked_journal_deletion_preserves_a_replacement() {
+        let root = test_tempdir();
+        let transaction = Transaction::begin(root.path(), "99.0.0").unwrap();
+        let expected = transaction.journal.clone();
+        let mut replacement = expected.clone();
+        replacement.target_version = "98.0.0".into();
+        atomic_write(
+            &transaction.journal_path,
+            &serde_json::to_vec_pretty(&replacement).unwrap(),
+            None,
+        )
+        .unwrap();
+
+        let error =
+            remove_schema2_journal_checked(root.path(), &transaction.journal_path, &expected)
+                .unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("state file changed before deletion")
+        );
+        let retained: Journal =
+            serde_json::from_slice(&fs::read(&transaction.journal_path).unwrap()).unwrap();
+        assert_eq!(retained, replacement);
     }
 
     #[cfg(any(windows, target_os = "linux"))]
