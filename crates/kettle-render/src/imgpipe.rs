@@ -807,6 +807,22 @@ impl ImagePipeline {
 mod aba_guard_tests {
     use kettle_core::{ImageData, ImageSourceCrop, ImageSourceRect};
 
+    /// The production half of this file: everything above the test module.
+    fn production_source() -> String {
+        let src = include_str!("imgpipe.rs").replace("\r\n", "\n");
+        let marker = "\n#[cfg(test)]\nmod aba_guard_tests {";
+        let cut = src
+            .find(marker)
+            .expect("imgpipe.rs must have a test module to slice off");
+        let production = src[..cut].to_string();
+        assert!(
+            !production.contains("fn production_source()"),
+            "the slice must exclude the test module, or every guard built on \
+             it still self-matches"
+        );
+        production
+    }
+
     /// Drift guard (ABA fix). The image cache keys textures
     /// by the rgba `Arc`'s raw pointer; it MUST hold an `Arc` clone
     /// (`CachedTexture._rgba`) to pin that address while the entry is cached,
@@ -818,7 +834,7 @@ mod aba_guard_tests {
     /// lifecycle guards in `lib.rs`).
     #[test]
     fn cache_pins_arc_to_prevent_address_reuse() {
-        let src = include_str!("imgpipe.rs");
+        let src = production_source();
         assert!(
             src.contains("_image: ImageData"),
             "CachedTexture must keep an ImageData clone to pin pixels + CPU reservation"

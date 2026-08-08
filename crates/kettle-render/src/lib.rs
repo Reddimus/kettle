@@ -273,6 +273,51 @@ pub fn menu_row_chars(row: &ContextMenuRow) -> usize {
         }
 }
 
+/// The production half of this file, with every top-level test item removed.
+///
+/// A source guard that searches the whole file also searches its own
+/// assertions, so a plain `src.contains("...")` matches the needle written in
+/// the test and passes even when production no longer contains it. This file
+/// interleaves test modules with production, so truncate-at-first-test is not
+/// sufficient; remove every test item using rustfmt's column-zero item braces.
+#[cfg(test)]
+fn production_source() -> String {
+    let src = include_str!("lib.rs").replace("\r\n", "\n");
+    let mut production = String::with_capacity(src.len());
+    let mut inside_test_item = false;
+    for line in src.lines() {
+        if inside_test_item {
+            if line == "}" {
+                inside_test_item = false;
+            }
+            continue;
+        }
+        if line == "#[cfg(test)]" {
+            inside_test_item = true;
+            continue;
+        }
+        production.push_str(line);
+        production.push('\n');
+    }
+    assert!(
+        !production.contains("fn production_source()"),
+        "the slice must exclude every test item, or the guards built on it \
+         still self-match"
+    );
+    assert!(
+        production.contains("pub struct ContextMenuRow {"),
+        "the slice must keep production code, or every guard would fail for \
+         the opposite reason"
+    );
+    assert!(
+        production.len() > src.len() / 2,
+        "production is {} bytes of {}, which is too little to be right",
+        production.len(),
+        src.len()
+    );
+    production
+}
+
 #[cfg(test)]
 mod context_menu_row_width_tests {
     use super::{
@@ -12944,17 +12989,17 @@ mod titlebar_glyph_fallback_tests {
     /// reappear in production code. The only permitted uses are the two
     /// comparison calls in this module's tests above, so pin the exact
     /// count; the needle is assembled at runtime so this test's own
-    /// source cannot satisfy the match.
+    /// source cannot satisfy the match. `production_source` excludes this
+    /// module's two comparison calls, so production must contain zero uses.
     #[test]
     fn no_call_site_uses_basic_shaping() {
-        let src = include_str!("lib.rs");
+        let src = super::production_source();
         let needle = format!("Shaping::{}", "Basic");
         let count = src.matches(&needle).count();
         assert_eq!(
-            count, 2,
-            "expected exactly 2 uses of {needle} (both inside \
-             titlebar_glyph_fallback_tests) but found {count} — it skips \
-             cosmic-text's font-fallback cascade (no CJK/emoji/symbol \
+            count, 0,
+            "expected no production uses of {needle} but found {count} — it \
+             skips cosmic-text's font-fallback cascade (no CJK/emoji/symbol \
              fallback): the split-titlebar tofu-box bug"
         );
     }
@@ -13131,7 +13176,7 @@ mod pane_buffer_lifecycle_tests {
 
     #[test]
     fn failed_text_prepare_keeps_the_retry_latch_armed() {
-        let src = include_str!("lib.rs");
+        let src = super::production_source();
         let start = src
             .find("let need_prepare = self.text_prepare_dirty")
             .expect("prepare retry latch participates in damage");
@@ -13168,7 +13213,7 @@ mod pane_buffer_lifecycle_tests {
     /// detach-never-joins guard): both truncate calls must stay present.
     #[test]
     fn render_frame_truncates_pane_buffers_on_shrink() {
-        let src = include_str!("lib.rs");
+        let src = super::production_source();
         assert!(
             src.contains("self.pane_buffers.truncate(panes.len())"),
             "pane_buffers must be truncated to panes.len() so closed panes \
@@ -13191,7 +13236,7 @@ mod pane_buffer_lifecycle_tests {
     /// change. Source-level guard: the behavioral path needs a live `Renderer`.
     #[test]
     fn pane_buffers_are_keyed_by_stable_pane_id() {
-        let src = include_str!("lib.rs");
+        let src = super::production_source();
         assert!(
             src.contains("pub id: u64,"),
             "PaneView must carry the process-global pane id into the renderer"
@@ -13214,7 +13259,7 @@ mod pane_buffer_lifecycle_tests {
     /// that may have shaped before the complete family was available.
     #[test]
     fn bundled_style_faces_load_lazily_and_invalidate_text_caches() {
-        let src = include_str!("lib.rs");
+        let src = super::production_source();
         assert!(
             src.contains("bundled_style_faces_loaded: bool"),
             "Renderer must track whether optional bundled style faces loaded"
@@ -13249,9 +13294,9 @@ mod pane_buffer_lifecycle_tests {
     /// paired `atlas.trim`) on that + a chrome-text hash + any open overlay.
     #[test]
     fn idle_repaint_skips_glyphon_prepare_when_nothing_changed() {
-        let src = include_str!("lib.rs");
+        let src = super::production_source();
         assert!(
-            src.contains("let need_prepare = any_pane_text_changed")
+            src.contains("let need_prepare = self.text_prepare_dirty")
                 && src.contains("if need_prepare {"),
             "render_frame must gate the text prepare on a need_prepare flag"
         );
@@ -13277,7 +13322,7 @@ mod pane_buffer_lifecycle_tests {
     /// and ORs the open↔closed transition into `need_prepare`.
     #[test]
     fn overlay_close_forces_a_clearing_prepare() {
-        let src = include_str!("lib.rs");
+        let src = super::production_source();
         assert!(
             src.contains("let overlay_changed = overlay_open != self.last_overlay_open;")
                 && src.contains("self.last_overlay_open = overlay_open;"),
@@ -13296,7 +13341,7 @@ mod pane_buffer_lifecycle_tests {
     /// dedicated pass keeps the pane buffer byte-identical across a blink.
     #[test]
     fn block_cursor_glyph_is_decoupled_from_the_pane_buffer() {
-        let src = include_str!("lib.rs");
+        let src = super::production_source();
         assert!(
             src.contains("cursor_glyph_renderer: TextRenderer")
                 && src.contains("pending_cursor_glyph: Option<PendingCursorGlyph>"),
@@ -13369,7 +13414,7 @@ mod pane_buffer_lifecycle_tests {
     /// source level — exercising it needs a full GPU `Renderer`.
     #[test]
     fn bg_image_cache_keys_on_blur_and_frees_on_disable() {
-        let src = include_str!("lib.rs");
+        let src = super::production_source();
         assert!(
             src.contains("bg_image_cache: Option<BgImageAnim>")
                 && src.contains("struct BgImageAnim"),
@@ -13424,7 +13469,7 @@ mod pane_buffer_lifecycle_tests {
     /// level since exercising the pass needs a full GPU `Renderer`.
     #[test]
     fn wallpaper_draws_behind_quads_in_its_own_pass() {
-        let src = include_str!("lib.rs");
+        let src = super::production_source();
         // A dedicated pipeline exists and is constructed.
         assert!(
             src.contains("bg_imgs: imgpipe::ImagePipeline,")
@@ -13703,7 +13748,7 @@ mod pane_buffer_lifecycle_tests {
     /// compound each other's alpha.
     #[test]
     fn pane_default_backdrop_is_wired_into_both_compositing_paths() {
-        let src = include_str!("lib.rs");
+        let src = super::production_source();
         let wallpaper_branch = ["if background_has_", "wallpaper(cfg) {"].concat();
         let replacement_branch = ["pane_", "bases.push(backdrop)"].concat();
         assert!(
@@ -13724,7 +13769,7 @@ mod pane_buffer_lifecycle_tests {
     /// test would need a full GPU `Renderer`).
     #[test]
     fn render_frame_truncates_overlay_buffer_pools_on_shrink() {
-        let src = include_str!("lib.rs");
+        let src = super::production_source();
         for (call, what) in [
             (
                 "self.tab_buffers.truncate(tabbar.segments.len())",
@@ -13759,7 +13804,7 @@ mod pane_buffer_lifecycle_tests {
     /// `Renderer`; pin the pattern at the source level.
     #[test]
     fn build_pane_pools_the_span_scratch() {
-        let src = include_str!("lib.rs");
+        let src = super::production_source();
         assert!(
             src.contains("std::mem::take(&mut self.span_scratch)"),
             "span scratch must be taken from the self-pool, not allocated fresh"
@@ -13783,20 +13828,20 @@ mod pane_buffer_lifecycle_tests {
         );
     }
 
-    /// Drift guard. Tab text must use the full rendered segment rect
-    /// as its budget, including the active tab. Otherwise a wide equal-width
-    /// tab can still middle-ellipsize a path to the compact active affordance
-    /// even though the full segment has room.
+    /// Drift guard. Tab text must use the UI-computed title lane as its shaping
+    /// budget and drawing bounds. The lane derives from the full rendered
+    /// segment and excludes only fixed controls such as the close button; it
+    /// must not regress to compact visual/pressed affordance rects.
     #[test]
-    fn tab_text_uses_full_segment_rect_budget() {
-        let src = include_str!("lib.rs");
+    fn tab_text_uses_full_title_lane_budget() {
+        let src = super::production_source();
         assert!(
-            src.contains("let (_, _, w, _) = s.rect;"),
-            "tab label shaping must budget from the full tab segment"
+            src.contains("let (_, _, title_w, title_h) = s.title_rect;"),
+            "tab label shaping must budget from the full title lane"
         );
         assert!(
-            src.contains("let (x, _, w, _) = s.rect;"),
-            "tab label drawing bounds must use the full tab segment"
+            src.contains("let (tx, ty_px, tw, th) = s.title_rect;"),
+            "tab label drawing bounds must use the full title lane"
         );
         let visual_token = ["visual", "_rect"].concat();
         let pressed_token = ["pressed", "_rect"].concat();
@@ -13806,21 +13851,22 @@ mod pane_buffer_lifecycle_tests {
         );
     }
 
-    /// Drift guard (audit C1). Image-placement draw must keep the
-    /// `len > 1` fast-path so the common 0–1-image pane doesn't pay a per-frame
-    /// `Vec` alloc + sort, AND must still z-sort the 2+ case so higher-z images
-    /// land on top. A behavioral test needs a full GPU `Renderer`; pin both at
-    /// the source level (same shape as the buffer-truncate guards above).
+    /// Drift guard (audit C1). Image-placement draw must keep the `quota > 1`
+    /// fast-path so a pane admitted zero or one visible image doesn't pay a
+    /// per-frame `Vec` alloc + sort, AND must still z-sort the 2+ case so
+    /// higher-z images land on top. A behavioral test needs a full GPU
+    /// `Renderer`; pin both at the source level (same shape as the
+    /// buffer-truncate guards above).
     #[test]
     fn image_placement_draw_keeps_len_fastpath_and_z_sort() {
-        let src = include_str!("lib.rs");
+        let src = super::production_source();
         assert!(
-            src.contains("if pv.images.len() > 1"),
+            src.contains("if quota > 1"),
             "image placement draw must fast-path the 0–1 case to skip the \
              per-frame Vec alloc + sort"
         );
         assert!(
-            src.contains("ordered.sort_by_key(|p| p.z)"),
+            src.contains("ordered.sort_by_key(|placement| placement.z)"),
             "2+ image placements must still be z-sorted so higher z lands on top"
         );
     }
@@ -13839,7 +13885,7 @@ mod pane_buffer_lifecycle_tests {
     /// pin the borrowed field types at the source.
     #[test]
     fn paneview_borrows_per_frame_data() {
-        let src = include_str!("lib.rs");
+        let src = super::production_source();
         assert!(
             src.contains("pub images: &'a [kettle_core::Placement],"),
             "PaneView.images must borrow the frame's image Vec, not clone it"
@@ -13856,7 +13902,7 @@ mod pane_buffer_lifecycle_tests {
 
     #[test]
     fn font_family_is_arc_str_not_string() {
-        let src = include_str!("lib.rs");
+        let src = super::production_source();
         assert!(
             src.contains("font_family: Arc<str>,"),
             "Renderer.font_family must be Arc<str> so the per-frame clone is a \
@@ -14956,7 +15002,7 @@ mod background_darkness_tests {
             "an opaque-to-transparent reload must change the configured surface mode"
         );
 
-        let src = include_str!("lib.rs");
+        let src = super::production_source();
         let refresh = ["self.set_background_", "compositing(cfg);"].concat();
         assert!(
             src.contains(&refresh),
@@ -15402,7 +15448,7 @@ mod glyph_cell_lock_tests {
     /// render pass, and the emit must be gated on grid mode.
     #[test]
     fn grid_path_wiring_is_present() {
-        let src = include_str!("lib.rs");
+        let src = super::production_source();
         assert!(
             src.contains("if cfg.text_renderer == TextRendererMode::Legacy {"),
             "pane TextArea must be pushed to glyphon ONLY in legacy mode"
@@ -15431,7 +15477,7 @@ mod glyph_cell_lock_tests {
     /// content damage or layout/style damage.
     #[test]
     fn grid_upload_damage_excludes_cursor_blink() {
-        let src = include_str!("lib.rs");
+        let src = super::production_source();
         assert!(
             src.contains("last_text_layout_key: Option<u64>"),
             "renderer must keep a layout damage key for cached text/grid vertices"
@@ -15464,24 +15510,25 @@ mod glyph_cell_lock_tests {
     }
 
     /// v2.32.0 fix #1 (durability): the cell-locked emit loop must live in ONE
-    /// free function, `emit_cell_locked_glyphs`, called from all THREE sites
-    /// (live panes, the screenshot path, the blink test fixture). Three hand-
-    /// copied loops could silently drift so the README imagery no longer matches
-    /// the live renderer; pin the single source of truth here.
+    /// free function, `emit_cell_locked_glyphs`, called from both production
+    /// sites (live panes and the screenshot path). Hand-copied loops could
+    /// silently drift so the README imagery no longer matches the live
+    /// renderer; pin the single source of truth here.
     #[test]
     fn cell_lock_emit_is_a_single_shared_fn() {
-        let src = include_str!("lib.rs");
+        let src = super::production_source();
         assert!(
             src.contains("fn emit_cell_locked_glyphs("),
             "the shared cell-locked emit function must exist"
         );
-        // Exactly one definition; the rest must be CALLS, not re-implementations.
+        // Exactly one definition plus the two production calls. The GPU blink
+        // fixtures are deliberately absent from `production_source`.
         let calls = src.matches("emit_cell_locked_glyphs(").count();
-        assert!(
-            calls >= 4,
-            "emit_cell_locked_glyphs must be the single emit, called from \
-             emit_pane_glyphs, the screenshot path, and the blink fixture \
-             (def + 3 calls = 4); found {calls} occurrences"
+        assert_eq!(
+            calls, 3,
+            "emit_cell_locked_glyphs must be the single emit shared by \
+             emit_pane_glyphs and the screenshot path (definition + 2 calls); \
+             found {calls} occurrences"
         );
     }
 
@@ -15493,7 +15540,7 @@ mod glyph_cell_lock_tests {
     /// imagery rendered through legacy glyphon regardless of the shipped default.
     #[test]
     fn screenshot_routes_pane_text_by_renderer_mode() {
-        let src = include_str!("lib.rs");
+        let src = super::production_source();
         // The capture path reads the renderer mode.
         assert!(
             src.contains("let grid = cfg.text_renderer == TextRendererMode::Grid;"),

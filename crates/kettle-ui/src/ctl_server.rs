@@ -846,6 +846,22 @@ fn wait_for_poll(
 mod tests {
     use super::*;
 
+    /// The production half of this file: everything above the test module.
+    fn production_source() -> String {
+        let src = include_str!("ctl_server.rs").replace("\r\n", "\n");
+        let marker = "\n#[cfg(test)]\nmod tests {";
+        let cut = src
+            .find(marker)
+            .expect("ctl_server.rs must have a test module to slice off");
+        let production = src[..cut].to_string();
+        assert!(
+            !production.contains("fn production_source()"),
+            "the slice must exclude the test module, or every guard built on \
+             it still self-matches"
+        );
+        production
+    }
+
     fn test_endpoint(tag: &str) -> String {
         static NEXT: AtomicU64 = AtomicU64::new(1);
         let unique = NEXT.fetch_add(1, Ordering::Relaxed);
@@ -971,7 +987,7 @@ mod tests {
                     "connection-thread methods cannot bypass the UI mutation gate"
                 );
                 let name = method.as_str();
-                let src = include_str!("ctl_server.rs");
+                let src = production_source();
                 assert!(
                     src.contains("method.execution() == Execution::Connection"),
                     "connection-thread method {name} has no connection_loop dispatch"

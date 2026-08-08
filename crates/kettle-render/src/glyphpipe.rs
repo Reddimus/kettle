@@ -1117,6 +1117,22 @@ impl GlyphPipeline {
 mod tests {
     use super::*;
 
+    /// The production half of this file: everything above the test module.
+    fn production_source() -> String {
+        let src = include_str!("glyphpipe.rs").replace("\r\n", "\n");
+        let marker = "\n#[cfg(test)]\nmod tests {";
+        let cut = src
+            .find(marker)
+            .expect("glyphpipe.rs must have a test module to slice off");
+        let production = src[..cut].to_string();
+        assert!(
+            !production.contains("fn production_source()"),
+            "the slice must exclude the test module, or every guard built on \
+             it still self-matches"
+        );
+        production
+    }
+
     #[test]
     fn texture_byte_math_is_checked_at_the_per_texture_boundary() {
         let limit = kettle_core::GraphicsLimits::default().image_bytes;
@@ -1309,7 +1325,7 @@ mod tests {
 
     #[test]
     fn atlas_capacity_failures_are_not_cached_as_whitespace() {
-        let src = include_str!("glyphpipe.rs");
+        let src = production_source();
         assert!(
             src.contains("CacheOutcome::AtlasFull => None"),
             "capacity failure must return without inserting a permanent None slot"
@@ -1327,7 +1343,7 @@ mod tests {
     /// ABA guard.
     #[test]
     fn ensure_glyph_evicts_instead_of_refusing_at_the_cap() {
-        let src = include_str!("glyphpipe.rs");
+        let src = production_source();
         assert!(
             src.contains("self.evict_lru("),
             "ensure_glyph must evict cold slots when MAX_GLYPH_SLOTS is reached"

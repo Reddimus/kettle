@@ -8,12 +8,13 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Fixed
 
-Fifty-two findings from a full-repo audit. Five adversarial audits covered every
+Fifty-four findings from a full-repo audit. Five adversarial audits covered every
 crate; a separate six-surface pass covered the scripts, CI, packaging,
 shell-integration, documentation, and UI/UX-design surfaces those crate audits do
-not reach; and a review of the resulting diff found further defects in the fixes
-themselves. Each finding was adversarially re-verified before it earned a fix,
-and each fix carries a regression test. Full ledger in
+not reach; a review of the resulting diff found further defects in the fixes
+themselves; and a final pre-release read of the whole integrated change set found
+two more, both blocking. Each finding was adversarially re-verified before it
+earned a fix, and each fix carries a regression test. Full ledger in
 `docs/AUDIT-2026-08-07-FULL.md`.
 
 - **A killed Linux update could not be recovered by its own recovery code.**
@@ -33,6 +34,26 @@ and each fix carries a regression test. Full ledger in
   user's prompt, destroying `$?` — under starship every failed command rendered a
   success prompt — and replaced any existing Enter binding. The bash OSC 7
   encoder emitted 16-hex-digit escapes on bash 3.2, which is what macOS ships.
+
+- **PowerShell reported a successful exit code for failed commands.** Fixing the
+  `$?` defect above moved the `$LASTEXITCODE` read *after* the user's prompt
+  rendered — and starship, oh-my-posh and posh-git all shell out while rendering,
+  with every native call overwriting it. A command that failed with 37 followed
+  by a prompt that ran anything successfully emitted `OSC 133;D;0`, so command
+  notifications, `command_finished`, and ctl/MCP `run_command` reported success
+  for a failed command. Both indicators are now captured in one statement, before
+  anything else runs, and `$LASTEXITCODE` is restored afterwards so the prompt's
+  own native calls do not leak into the next command's view of it.
+
+- **88 drift guards could not fail.** Tests asserting on `include_str!` of their
+  own file also searched their own assertions, so the needle was always present
+  and the guard passed whether or not the production code it named still existed.
+  Reintroducing the exact defects two of them describe left both passing. All 88
+  now slice the test module off first, reusing the `production_source()` helper
+  already written for `mux.rs` and `app.rs`. Doing so exposed seven stale
+  expectations in five guards that had been masking real refactors — none needed
+  a production change, and each was re-checked against current source rather than
+  relaxed to match.
 
 - **Pastes could be corrupted by terminal replies.** Priority replies were
   selected at every 8 KiB chunk boundary, so a mouse report could land between

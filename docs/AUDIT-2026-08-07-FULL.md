@@ -143,6 +143,73 @@ done as its own change with its own measurement.
 
 ---
 
+## Final pre-release review — two more, both blocking
+
+A last read of the whole integrated diff turned up two defects that every
+earlier pass had missed. Both were reproduced before they earned a fix.
+
+**`shell-integration/kettle.ps1` reported success for failed commands.** The
+wrapper invoked the user's prompt first — correct, and deliberate, because `$?`
+must reach starship/oh-my-posh unperturbed — and only then read
+`$LASTEXITCODE`. But those prompts shell out while rendering, and every native
+call overwrites it. A command failing with 37 followed by a prompt that ran
+anything successfully emitted `D;0`, so command notifications, `command_finished`
+events, and ctl/MCP `run_command` all reported success for a failed command.
+
+`$?` and `$LASTEXITCODE` pull in opposite directions here: `$?` reflects only the
+immediately preceding statement and is read-only, so it cannot be saved and
+restored by assignment. Both are now captured in a single array literal, which
+evaluates `$?` before the assignment resets it, and the failure indicator is
+re-armed — by deliberately failing a statement — as the last thing before the
+user's prompt runs. `$LASTEXITCODE` is restored afterwards so the prompt's own
+native calls do not leak into the next command's view of it.
+
+The fixture asserted `$?` and marker ordering but **never read the `D` payload**,
+which is exactly why this shipped: a wrapper hardcoded to `D;0` passed every
+check it had. The payload case is now covered, and was confirmed to fail against
+the pre-fix snippet before being accepted.
+
+**88 source-level drift guards could not fail.** A guard of the shape
+
+    let src = include_str!("lib.rs");
+    assert!(src.contains("self.evict_lru("), "...");
+
+searches its own test module, so the needle written inside the assertion is
+always present. The assertion is unconditionally true. This was proved rather
+than argued: both defects named by the `glyphpipe.rs` guards were reintroduced
+in production code — capacity failure cached as a permanent blank slot, and
+refusal instead of eviction at the cap — and both tests still passed.
+
+A scan found 88 such assertions across four files (80 in `kettle-render/src/lib.rs`
+alone). The repair reuses the `production_source()` helper this repository had
+already written for `mux.rs` and `app.rs`, which slices the test module off and
+asserts that the slice worked. `lib.rs` needed a line-scanning variant because it
+carries 28 interleaved test modules rather than one trailing block.
+
+Slicing exposed **seven stale expectations in five guards**, every one of which
+had been masking real drift invisibly:
+
+| guard | what the needle still claimed | what production had migrated to |
+|---|---|---|
+| `idle_repaint_skips_glyphon_prepare…` | `let need_prepare = any_pane_text_changed` | `self.text_prepare_dirty` (retry latch); gate intact |
+| `tab_text_uses_full_title_lane_budget` | `s.rect` | `s.title_rect` — the title lane, excluding close-button chrome |
+| `image_placement_draw_keeps_len_fastpath…` | `pv.images.len() > 1` | `quota > 1` — fair per-class placement quotas |
+| `cell_lock_emit_is_a_single_shared_fn` | def + 3 calls = 4 | 3 — the fourth call site was a test fixture |
+| `no_call_site_uses_basic_shaping` | exactly 2 `Shaping::Basic` | 0 — which is the state the guard actually wants |
+
+None required a production change; all five were stale text, and each was checked
+against current source rather than relaxed until it matched. The first guard's
+name was corrected too — it asserted the title lane while calling itself
+`…full_segment_rect_budget`, a quieter instance of the same disease.
+
+This is now the **fifth and sixth** time this repository has been caught with a
+test that names a contract it does not enforce. The first three were found
+earlier in this same audit. The class is worth stating as a standing rule: a
+source-text guard must be proved to fail before it is trusted, and
+`include_str!` on one's own file is a defect until the test module is sliced off.
+
+---
+
 ## Verification
 
 Beyond each finding's regression test and a green `just gauntlet` on the

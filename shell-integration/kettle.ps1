@@ -37,9 +37,30 @@ if (-not $global:__kettle_prompt_installed) {
     $global:__kettle_original_prompt = (Get-Item function:prompt -ErrorAction SilentlyContinue).ScriptBlock
 
     function global:prompt {
-        # Invoke the user's prompt before doing anything that changes `$?`.
-        # Starship, oh-my-posh, and other prompts read it as their first
-        # operation to distinguish a failed command from a successful one.
+        # Capture BOTH failure indicators before any other statement runs.
+        #
+        # `$?` reflects only the immediately preceding statement, so it must be
+        # read first. `$LASTEXITCODE` must be read first too: the user's prompt
+        # (starship, oh-my-posh, posh-git) routinely runs native commands, and
+        # each one overwrites it. Reading it *after* rendering therefore
+        # reported the prompt's own exit code — a command that failed with 37
+        # followed by a prompt that shelled out successfully emitted `D;0`, so
+        # command notifications and ctl/MCP `run_command` reported success for
+        # a failed command.
+        #
+        # An array literal evaluates `$?` before the assignment resets it, so a
+        # single statement captures both without either clobbering the other.
+        $__kettle_state = @($?, $global:LASTEXITCODE)
+        $__kettle_ok = $__kettle_state[0]
+        $code = $__kettle_state[1]
+        if ($null -eq $code) { $code = 0 }
+
+        # Hand the user's prompt the same `$?` an unwrapped prompt would see.
+        # `$?` is read-only; failing a statement is the only way to set it
+        # False, so this must be the LAST statement before the prompt runs.
+        if (-not $__kettle_ok) {
+            Write-Error 'kettle: propagating command failure' -ErrorAction SilentlyContinue
+        }
         try {
             $rendered = & $global:__kettle_original_prompt
         } catch {
@@ -49,8 +70,6 @@ if (-not $global:__kettle_prompt_installed) {
             $rendered = "PS $($ExecutionContext.SessionState.Path.CurrentLocation)$('>' * ($NestedPromptLevel + 1)) "
         }
 
-        $code = $LASTEXITCODE
-        if ($null -eq $code) { $code = 0 }
         $esc = [char]27
         $bel = [char]7
         # D = last command's exit code, A = this prompt's start.
@@ -73,6 +92,11 @@ if (-not $global:__kettle_prompt_installed) {
             if (-not $enc.StartsWith('/')) { $enc = "/$enc" }
             [Console]::Write("$esc]7;file://$env:COMPUTERNAME$enc$bel")
         }
+        # Restore the exit code the user's own last command left, undoing any
+        # native call the rendered prompt made. Without this, `$LASTEXITCODE`
+        # typed at the next prompt reports the prompt's internals rather than
+        # the command the user actually ran.
+        $global:LASTEXITCODE = $__kettle_state[1]
         # B = end of prompt / input start. Emitted after the rendered
         # prompt text so the marker lands right where the user starts
         # typing. Returning it with the prompt is necessary: Console.Write
