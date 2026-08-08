@@ -459,6 +459,7 @@ privacy-sanitized publication flow.
 - [docs/INSTALL.md](docs/INSTALL.md) — install per-OS / from source
 - [docs/ROADMAP.md](docs/ROADMAP.md) — what's done / next
 - [docs/TESTING.md](docs/TESTING.md) — test suite + CI
+- [docs/RELEASING.md](docs/RELEASING.md) — the two-PR release flow, the tag-signing requirement, and how to verify published artifacts
 - [docs/AUDIT-2026-07.md](docs/AUDIT-2026-07.md) — Windows reliability investigation + tracked-tree audit
 - [docs/AUDIT-2026-07-22-SEARCH.md](docs/AUDIT-2026-07-22-SEARCH.md) — frame-by-frame search regression evidence + implementation audit
 - [docs/PERFORMANCE.md](docs/PERFORMANCE.md) — historical measurements and the current release benchmark methodology

@@ -13,6 +13,10 @@
   outputs = { self, nixpkgs, flake-utils, rust-overlay }:
     flake-utils.lib.eachSystem [
       "aarch64-darwin"
+      # Intel Macs. Omitting this made `nix build` simply unavailable on every
+      # x86_64 Mac -- not degraded, absent -- while the release ships a
+      # universal macOS binary that explicitly supports them.
+      "x86_64-darwin"
       "aarch64-linux"
       "x86_64-linux"
     ] (system:

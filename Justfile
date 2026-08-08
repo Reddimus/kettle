@@ -153,6 +153,23 @@ vendor-check: vendor-parser-check vendor-pty-check
 # uniqueness, UTF-8/LF hygiene, manifests, Markdown links, and binary font/image
 # bounds. The focused self-test pins that a missing Markdown target is fatal.
 # The JSON ledger is written under ignored target/diagnostics.
+
+# Verify the 18 tracked icon rasters still match what the SVG geometry yields.
+# Compares decoded PIXELS, not encoded bytes: Pillow's encoders are not
+# byte-identical across versions or platforms, so a byte check fails on CI while
+# passing locally for images that are pixel-for-pixel identical. The rasters had
+# no gate at all -- the generator was run by hand and dispatched by nothing, so a
+# geometry edit or a hand-touched PNG could ship silently. Skips without Pillow
+# so a contributor is not blocked; CI passes --require-tooling so the skip
+# cannot become permanent there.
+[unix]
+icons-check:
+    python3 scripts/gen-icons.py --check
+
+[windows]
+icons-check:
+    python scripts/gen-icons.py --check
+
 [unix]
 tracked-audit:
     python3 scripts/test-audit-tracked-files.py
