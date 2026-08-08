@@ -58,13 +58,32 @@ if (-not $global:__kettle_prompt_installed) {
         # Hand the user's prompt the same `$?` an unwrapped prompt would see.
         # `$?` is read-only; failing a statement is the only way to set it
         # False, so this must be the LAST statement before the prompt runs.
+        # `-ErrorAction SilentlyContinue` overrides a profile-wide
+        # `$ErrorActionPreference = 'Stop'`, so this cannot become a
+        # terminating error and break the prompt.
+        $__kettle_marker = 'kettle: propagating command failure'
         if (-not $__kettle_ok) {
-            Write-Error 'kettle: propagating command failure' -ErrorAction SilentlyContinue
+            Write-Error $__kettle_marker -ErrorAction SilentlyContinue
         }
         try {
             $rendered = & $global:__kettle_original_prompt
         } catch {
             $rendered = $null
+        }
+        # Drop that synthetic record again, so a user inspecting `$Error[0]`
+        # after a failed command sees their own error rather than ours, and a
+        # long session does not push real errors out of the capped `$Error`
+        # list. Matched by message, not position: the user's prompt may have
+        # pushed its own errors on top. This can only run *after* the prompt —
+        # removal succeeds, and succeeding would have reset `$?` before the
+        # prompt ever read it.
+        if (-not $__kettle_ok) {
+            for ($__kettle_i = 0; $__kettle_i -lt $Error.Count; $__kettle_i++) {
+                if ($Error[$__kettle_i].Exception.Message -eq $__kettle_marker) {
+                    $Error.RemoveAt($__kettle_i)
+                    break
+                }
+            }
         }
         if ($null -eq $rendered) {
             $rendered = "PS $($ExecutionContext.SessionState.Path.CurrentLocation)$('>' * ($NestedPromptLevel + 1)) "
