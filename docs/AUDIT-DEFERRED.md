@@ -116,7 +116,7 @@ tracked here so they are not lost.
   `ansi_stripper_control_events_cover_every_state_cross_product` test added in
   this pass is the shape the shared kernel's conformance matrix should take.
 
-- **`scroll_page_up` does not enter scrollback on macOS — reproduced twice.**
+- **`scroll_page_up` does not enter scrollback on macOS — reproduced three times.**
   `scripts/perf/kettle-live-probes.py` seeds 1600 lines and then asserts
   `display_offset > 0` after `perform_action scroll_page_up`. That assertion
   failed during macOS comparator development and again in the full comparator

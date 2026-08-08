@@ -13,13 +13,13 @@ that could not be driven are recorded as skips with reasons rather than dropped.
 
 | metric | kettle | rank | field |
 |---|---|---|---|
-| startup | — | **3 / 5** | alacritty, wezterm, **kettle**, kitty 0.663 s, terminal 1.134 s |
-| ascii flood | 0.343 s | **3 / 5** | alacritty 0.234, wezterm 0.235, **kettle**, kitty 0.662, terminal 1.217 |
-| ansi/underline flood | 0.551 s | **3 / 5** | wezterm 0.445, alacritty 0.449, **kettle**, kitty 0.875, terminal 1.427 |
-| max RSS | **103.7 MiB** | **1 / 4** | **kettle**, wezterm 109.6, kitty 121.6, alacritty 124.9 |
-| idle CPU | 2.60 % | **5 / 5** | alacritty / kitty / terminal / wezterm all 0.00 %, **kettle last** |
+| startup | 0.334 s | **3 / 5** | wezterm 0.230, alacritty 0.231, **kettle**, kitty 0.655, terminal 1.086 |
+| ascii flood | 0.333 s | **3 / 5** | wezterm 0.228, alacritty 0.231, **kettle**, kitty 0.654, terminal 1.186 |
+| ansi/underline flood | 0.543 s | **2 / 5** | wezterm 0.435, **kettle**, alacritty 0.548, kitty 0.970, terminal 1.391 |
+| max RSS | **103.9 MiB** | **1 / 4** | **kettle**, wezterm 109.5, alacritty 128.8, kitty 129.0 |
+| idle CPU | **0.00 %** | **1 / 5** | **kettle**, alacritty, terminal, wezterm all 0.00 %; kitty 0.10 % |
 
-**Top-half on 4 of 5 measured metrics.**
+**Top-half on 5 of 5 measured metrics**, and outright first on two of them.
 
 ### The memory result overturns what the Windows numbers implied
 
@@ -32,16 +32,33 @@ On macOS Kettle is the **lightest** terminal measured, at 103.7 MiB against
 WezTerm's 109.6, kitty's 121.6 and Alacritty's 124.9. The same binary, the same
 workload, the opposite ranking — because the cost was never Kettle's.
 
-### Idle CPU is a real loss, and it is not close
+### Idle CPU was the one loss, and finding out why was the point
 
-Kettle measures **2.60 %** CPU on an idle window with an idle shell while four
-competitors measure exactly **0.00 %**. This is not a measurement artifact: the
-figure is the median of five 1-second-spaced samples after a 3-second settle,
-and every peer went through the identical procedure.
+The first run measured Kettle at **2.60 %** while every competitor measured
+**0.00 %** — the only metric it lost, and a regression against its own 0.0000 %
+on Windows. The comparator existed to surface exactly that.
 
-It is also a regression against Kettle's own Windows result, where it measured
-0.0000 %. Something wakes the event loop on macOS with nothing to draw. This is
-tracked and being fixed; it is recorded here as a loss rather than omitted.
+The cause was a feedback loop Kettle created against itself, not a busy timer.
+Cursor blink — the obvious suspect — was ruled out by measurement: disabling it
+still read 2.6 %, while disabling only the remote-command watcher read 0.0 %. A
+symbolized sample gave the chain:
+
+    user_event -> poll_pending_remote_commands -> claim_remote_command_batch
+      -> open_private_file -> fchmod
+
+The private-file helper called `fchmod(0600)` unconditionally, **including when
+the file was already 0600**. macOS FSEvents reports that no-op chmod as both
+`INODE_META_MOD` and `ITEM_MODIFIED`, so the watcher woke for the event it had
+just caused — hundreds of self-events per second on an idle window.
+
+Hardening now runs only when the mode is not already exactly `0600`; every
+ownership, regular-file, hard-link and special-permission check is unchanged.
+
+    before: 2.8, 2.7, 2.6, 2.6, 2.4 %   median 2.6 %
+    after:  0.1, 0.0, 0.0, 0.0, 0.0 %   median 0.0 %
+
+A live `--remote-send` is still consumed in 20.3 ms, so responsiveness was not
+traded for the idle number. The table above is the re-run after this fix.
 
 ### What this measurement does NOT say
 
