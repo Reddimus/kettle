@@ -13,6 +13,16 @@
   outputs = { self, nixpkgs, flake-utils, rust-overlay }:
     flake-utils.lib.eachSystem [
       "aarch64-darwin"
+      # NOT x86_64-darwin, deliberately. An audit flagged its absence as a gap —
+      # the release does ship a universal macOS binary — but adding it fails
+      # `nix flake check` outright:
+      #
+      #     error: Nixpkgs 26.11 has dropped support for x86_64-darwin.
+      #
+      # Intel Mac users can still build from source or use the released
+      # universal binary; only the Nix path is unavailable, and that is
+      # upstream's decision, not ours. Re-add it only if this flake's nixpkgs
+      # input moves back to a branch that still supports it.
       "aarch64-linux"
       "x86_64-linux"
     ] (system:

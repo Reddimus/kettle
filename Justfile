@@ -153,6 +153,32 @@ vendor-check: vendor-parser-check vendor-pty-check
 # uniqueness, UTF-8/LF hygiene, manifests, Markdown links, and binary font/image
 # bounds. The focused self-test pins that a missing Markdown target is fatal.
 # The JSON ledger is written under ignored target/diagnostics.
+
+# Verify the 18 tracked icon rasters against the Pillow generator. The check
+# compares decoded pixels, all ICO resolutions, and required PNG mode/bit depth;
+# it ignores only encoder-dependent compression and chunk ordering. Skips without
+# Pillow so a contributor is not blocked; CI and `gauntlet-full` pass
+# --require-tooling so the gate cannot quietly stop running.
+[unix]
+icons-check:
+    python3 scripts/test-gen-icons.py
+    python3 scripts/gen-icons.py --check
+
+[windows]
+icons-check:
+    python scripts/test-gen-icons.py
+    python scripts/gen-icons.py --check
+
+[unix]
+icons-check-required:
+    python3 scripts/test-gen-icons.py
+    python3 scripts/gen-icons.py --check --require-tooling
+
+[windows]
+icons-check-required:
+    python scripts/test-gen-icons.py
+    python scripts/gen-icons.py --check --require-tooling
+
 [unix]
 tracked-audit:
     python3 scripts/test-audit-tracked-files.py
@@ -377,15 +403,15 @@ gauntlet-full: gauntlet-strict full-native-gates
     @echo "This is not a PASS for native legs on other operating systems."
 
 [windows]
-full-native-gates: update-manifest-test release-assets-test package-manifest-test ico-smoke windows-installer-smoke gpu-render-smoke cli-smoke touchpad-scroll-smoke perf-self-test
+full-native-gates: icons-check-required update-manifest-test release-assets-test package-manifest-test ico-smoke windows-installer-smoke gpu-render-smoke cli-smoke touchpad-scroll-smoke perf-self-test
     @echo "NOT APPLICABLE on Windows: Linux installer/online/package-template/headless-Xvfb and macOS iconutil gates."
 
 [linux]
-full-native-gates: package-templates update-manifest-test release-assets-test package-manifest-test online-installer-test linux-installer-smoke headless-gpu-smoke gpu-render-smoke cli-smoke touchpad-scroll-smoke
+full-native-gates: icons-check-required package-templates update-manifest-test release-assets-test package-manifest-test online-installer-test linux-installer-smoke headless-gpu-smoke gpu-render-smoke cli-smoke touchpad-scroll-smoke
     @echo "NOT APPLICABLE on Linux: Windows installer/ICO/performance-matrix and macOS iconutil gates."
 
 [macos]
-full-native-gates: package-templates update-manifest-test release-assets-test package-manifest-test online-installer-test icns-smoke gpu-render-smoke cli-smoke touchpad-scroll-smoke macos-compare-score-self-test agent-cli-smoke
+full-native-gates: icons-check-required package-templates update-manifest-test release-assets-test package-manifest-test online-installer-test icns-smoke gpu-render-smoke cli-smoke touchpad-scroll-smoke macos-compare-score-self-test agent-cli-smoke
     @echo "NOT APPLICABLE on macOS: Windows installer/ICO/performance-matrix and Linux installer/Xvfb gates."
 
 # === End-to-end smoke ==============================================

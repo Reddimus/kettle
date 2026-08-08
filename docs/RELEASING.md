@@ -1,0 +1,167 @@
+# Releasing
+
+The maintained release procedure is **two pull requests and one signed,
+annotated tag**, in that order. The two-PR split is project policy;
+`scripts/release.sh` validates repository state but does not query GitHub to
+prove that a separate prep pull request was merged.
+
+## 1. Merge the changelog prep pull request
+
+Create `release/prep-vX.Y.Z` from synchronized `main`. Promote
+`## [Unreleased]` to `## [X.Y.Z] — YYYY-MM-DD` (with an em dash), restore an
+empty `## [Unreleased]` placeholder, and change only `CHANGELOG.md`. Merge that
+pull request before preparing the release commit.
+
+This ordering closes the tag-before-changelog race recorded in
+`scripts/release.sh`: the release workflow once reached its platform jobs before
+one job rejected the missing version heading.
+
+## 2. Merge the signed release-cut pull request
+
+Create `release/vX.Y.Z-cut` from the now-synchronized `main`, then run from the
+repository root:
+
+```bash
+scripts/release.sh X.Y.Z
+```
+
+The script requires a clean topic branch, the dated changelog heading, and no
+local or remote `vX.Y.Z` tag. It updates the workspace and inter-crate versions,
+`Cargo.lock`, the release version in `flake.nix`, and the maintained version
+references in `README.md`, `docs/INSTALL.md`, and `docs/VERSION-HISTORY.md`. It
+runs `cargo build --workspace --quiet`, stages its files, and unconditionally
+creates the release commit with `git commit -S`. A missing or unusable signing
+identity therefore aborts the script; release commits cannot be unsigned when
+created by this path.
+
+The script neither pushes the branch nor creates a tag. Review the signed
+commit, push the topic branch, and merge its pull request only after required CI
+passes.
+
+## 3. Create the signed release tag
+
+After synchronizing local `main`, run:
+
+```bash
+scripts/tag-release.sh X.Y.Z
+```
+
+The script fetches `origin/main` and tags, then requires a clean `main` exactly
+equal to `origin/main`, matching versions in `Cargo.toml` and `CHANGELOG.md`, and
+no remote tag with that name. It creates an annotated tag with `git tag -s`,
+runs `git verify-tag`, and pushes only that tag.
+
+If an earlier attempt created the local tag but failed before pushing, rerun the
+same command after fixing the cause. `tag-release.sh` reuses the tag only after
+checking that it is annotated, points to the current `HEAD`, and passes
+`git verify-tag`. Delete the local tag only when one of those checks shows that
+it is the wrong tag.
+
+### Signing prerequisites
+
+Both the release commit and tag need a Git signing identity. Release CI adds a
+separate requirement for the tag: GitHub's tag-object API must report
+`verification.verified: true`. GitHub can verify registered GPG keys as well as
+SSH keys registered with key type **Signing Key**. The workflow checks the tag's
+GitHub verdict; it does not check the release commit's GitHub verification
+status.
+
+Inspect the configured format, identity, and key before starting:
+
+```bash
+git config --get gpg.format || printf '%s\n' openpgp
+git config --get user.email
+git config --get user.signingkey
+```
+
+For SSH signing, confirm the public key and local verifier configuration:
+
+```bash
+ssh-keygen -lf "$(git config --get user.signingkey)"
+allowed_signers=$(git config --path --get gpg.ssh.allowedSignersFile)
+test -n "$allowed_signers" && test -r "$allowed_signers"
+```
+
+`gpg.ssh.allowedSignersFile` is required by Git's **SSH** signature verifier; it
+is not a GPG-signing requirement. For GPG signing, confirm that the configured
+secret key is available instead:
+
+```bash
+gpg --list-secret-keys "$(git config --get user.signingkey)"
+```
+
+In either format, exercise local tag verification and inspect GitHub's verdict
+for a previous tag signed with the key you intend to reuse:
+
+```bash
+previous=v2.54.0
+git verify-tag "$previous"
+tag_object=$(git rev-parse "$previous")
+gh api "repos/{owner}/{repo}/git/tags/${tag_object}" \
+  --jq '.verification | {verified, reason}'
+```
+
+The expected API result is `verified: true` with `reason: valid`. A successful
+local verification alone does not prove GitHub knows the key. Register the GPG
+key, or add the SSH public key under GitHub Settings -> SSH and GPG keys as a
+signing key, before pushing the new tag.
+
+## What the tag triggers
+
+For a `v*` tag, `.github/workflows/release.yml` first requires a GitHub-verified
+annotated tag pointing at `origin/main` and checks the tag, `Cargo.toml`,
+`flake.nix`, and `CHANGELOG.md` versions. It then tests and builds four packages:
+Linux x86_64, Linux aarch64, macOS universal, and Windows x86_64. Each package
+gets a canonical SHA-256 sidecar.
+
+The `release-signing` environment supplies `KETTLE_UPDATE_SIGNING_KEY_PEM`. The
+finalizer proves that secret matches `packaging/update-public.pem`, signs the
+domain-separated update manifest, and stages the exact release set. The publish
+job reverifies those files, creates or resumes a draft release, uploads and
+checks the exact remote size/SHA-256 set, and only then makes the release public.
+
+## Verify the published artifacts
+
+Run this from a trusted source checkout so the public key comes from the
+repository, not from the release being verified:
+
+```bash
+tag=vX.Y.Z
+repo_root=$(git rev-parse --show-toplevel)
+public_key="$repo_root/packaging/update-public.pem"
+verify_dir=$(mktemp -d "${TMPDIR:-/tmp}/kettle-verify.XXXXXX")
+
+gh release download "$tag" --repo Reddimus/kettle --dir "$verify_dir"
+(
+  cd "$verify_dir"
+  for sidecar in *.sha256; do
+    shasum -a 256 -c "$sidecar"
+  done
+
+  payload=$(mktemp)
+  signature=$(mktemp)
+  trap 'rm -f "$payload" "$signature"' EXIT
+  printf 'kettle-update-manifest-v1\0' > "$payload"
+  cat kettle-update-manifest.json >> "$payload"
+  openssl base64 -d -A \
+    -in kettle-update-manifest.json.sig -out "$signature"
+  test "$(wc -c < "$signature" | tr -d '[:space:]')" -eq 64
+  openssl pkeyutl -verify -rawin -pubin -inkey "$public_key" \
+    -in "$payload" -sigfile "$signature"
+)
+```
+
+`packaging/update-public.pem` is deliberately not a release asset: downloading
+a replacement key from the same channel as the files would not provide an
+independent trust root. The `kettle-update-manifest-v1\0` prefix is the domain
+separator covered by the Ed25519 signature; verifying the bare JSON instead is
+expected to fail.
+
+## Known gaps
+
+- The current release workflow does not code-sign or notarize the macOS app, so
+  Gatekeeper may warn users. The tracked implementation is draft PR #156; the
+  credential dependency is recorded in `docs/ROADMAP.md`.
+- `scripts/verify-release-assets.py` intentionally accepts only draft-release
+  API responses. It protects the publish transition in `release.yml`; after
+  publication, use the sidecars and signed-manifest procedure above.

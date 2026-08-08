@@ -26,11 +26,19 @@ All PNGs are 8-bit/color RGBA — GNOME Shell's loader silently fails on
 Usage (from anywhere): python scripts/gen-icons.py
 """
 
+from __future__ import annotations
+
+import argparse
 import struct
 import sys
+import tempfile
 from pathlib import Path
 
-from PIL import Image, ImageDraw
+try:
+    from PIL import Image, ImageDraw
+except ModuleNotFoundError:  # pragma: no cover - exercised by the CI wiring
+    Image = None  # type: ignore[assignment]
+    ImageDraw = None  # type: ignore[assignment]
 
 ROOT = Path(__file__).resolve().parent.parent
 LINUX = ROOT / "packaging" / "linux"
@@ -81,38 +89,197 @@ def scaled(master: Image.Image, px: int) -> Image.Image:
     return out
 
 
-def main() -> int:
+LINUX_SIZES = [16, 24, 32, 48, 64, 128, 256]
+ICONSET_BASES = [16, 32, 128, 256, 512]
+
+
+def emit(
+    linux_dir: Path,
+    iconset_dir: Path,
+    ico_path: Path,
+    quiet: bool = False,
+) -> list[tuple[Path, str]]:
+    """Write every icon artifact under the given roots.
+
+    Returns the (path, label) pairs written, so `--check` can compare the same
+    set it would have produced.
+    """
     master = render_master()
+    written: list[tuple[Path, str]] = []
 
-    # Linux hicolor PNGs (also the embedded window icon's source).
-    linux_sizes = [16, 24, 32, 48, 64, 128, 256]
-    for px in linux_sizes:
-        path = LINUX / f"kettle-{px}.png"
+    linux_dir.mkdir(parents=True, exist_ok=True)
+    for px in LINUX_SIZES:
+        path = linux_dir / f"kettle-{px}.png"
         scaled(master, px).save(path)
-        print(f"wrote {path}")
+        written.append((path, f"packaging/linux/kettle-{px}.png"))
+        if not quiet:
+            print(f"wrote {path}")
 
-    # macOS iconset (iconutil consumes the @2x naming).
-    ICONSET.mkdir(parents=True, exist_ok=True)
-    for base in [16, 32, 128, 256, 512]:
-        scaled(master, base).save(ICONSET / f"icon_{base}x{base}.png")
-        scaled(master, base * 2).save(ICONSET / f"icon_{base}x{base}@2x.png")
-        print(f"wrote icon_{base}x{base}.png (+@2x)")
+    iconset_dir.mkdir(parents=True, exist_ok=True)
+    for base in ICONSET_BASES:
+        names_and_sizes = (
+            (f"icon_{base}x{base}.png", base),
+            (f"icon_{base}x{base}@2x.png", base * 2),
+        )
+        for name, px in names_and_sizes:
+            scaled(master, px).save(iconset_dir / name)
+            written.append(
+                (iconset_dir / name, f"packaging/macos/kettle.iconset/{name}")
+            )
+        if not quiet:
+            print(f"wrote icon_{base}x{base}.png (+@2x)")
 
-    # Windows .ico — exactly 7 sizes (CI asserts the count ≥4; the release
-    # recipe ships 7 so every shell surface gets a crisp raster).
-    ico_sizes = [(px, px) for px in linux_sizes]
-    scaled(master, 256).save(ICO, format="ICO", sizes=ico_sizes)
-    print(f"wrote {ICO}")
+    ico_path.parent.mkdir(parents=True, exist_ok=True)
+    ico_sizes = [(px, px) for px in LINUX_SIZES]
+    scaled(master, 256).save(ico_path, format="ICO", sizes=ico_sizes)
+    written.append((ico_path, "packaging/windows/kettle.ico"))
+    if not quiet:
+        print(f"wrote {ico_path}")
 
-    # Self-verify: the .ico header's image count must equal the request —
-    # Pillow silently drops sizes larger than the source image.
-    with open(ICO, "rb") as f:
-        header = f.read(6)
+    # Pillow silently drops requested sizes larger than the source image. Keep
+    # this verification beside the request so both generation and --check fail
+    # if the encoder emits an incomplete container.
+    with ico_path.open("rb") as stream:
+        header = stream.read(6)
     count = struct.unpack("<H", header[4:6])[0]
     if count != len(ico_sizes):
-        print(f"ERROR: kettle.ico has {count} images, expected {len(ico_sizes)}")
+        raise RuntimeError(
+            f"{ico_path} has {count} images, expected {len(ico_sizes)}"
+        )
+    if not quiet:
+        print(f"kettle.ico OK ({count} resolutions)")
+    return written
+
+
+def png_encoding(path: Path) -> tuple[int, int]:
+    """Return the PNG IHDR bit depth and color type."""
+    with path.open("rb") as stream:
+        header = stream.read(26)
+    if (
+        len(header) != 26
+        or header[:8] != b"\x89PNG\r\n\x1a\n"
+        or header[12:16] != b"IHDR"
+    ):
+        raise ValueError(f"{path} has no valid PNG IHDR")
+    return header[24], header[25]
+
+
+def same_pixels(a: Path, b: Path) -> bool:
+    """Compare image format, required metadata, and decoded pixel content.
+
+    Pillow's PNG/ICO encoders are not byte-identical across versions or
+    platforms -- zlib settings and chunk ordering differ -- so a byte comparison
+    fails on CI while passing locally, for images that are pixel-for-pixel
+    identical. That is a gate that cries wolf, which trains people to ignore it.
+    Decoding both sides compares the image content while retaining the PNG mode
+    and bit depth constraints that prevent the GNOME blank-icon regression.
+
+    Pillow exposes ICO resolutions through `ico.sizes()` and `ico.getimage()`;
+    `n_frames` only reports the default (largest) image.
+    """
+    with Image.open(a) as left, Image.open(b) as right:
+        if left.format != right.format:
+            return False
+
+        if left.format == "ICO":
+            left_sizes = left.ico.sizes()
+            right_sizes = right.ico.sizes()
+            if left_sizes != right_sizes:
+                return False
+            for size in sorted(left_sizes):
+                left_image = left.ico.getimage(size)
+                right_image = right.ico.getimage(size)
+                if (
+                    left_image.size != right_image.size
+                    or left_image.mode != right_image.mode
+                    or left_image.tobytes() != right_image.tobytes()
+                ):
+                    return False
+            return True
+
+        if left.size != right.size or left.mode != right.mode:
+            return False
+        if left.format == "PNG" and png_encoding(a) != png_encoding(b):
+            return False
+        return left.tobytes() == right.tobytes()
+
+
+def check() -> int:
+    """Fail if any tracked raster has drifted from the Pillow generator.
+
+    The 18 tracked rasters had no gate of any kind: `gen-icons.py` was run by
+    hand and dispatched by no recipe or CI job, so an edit to the geometry — or
+    a hand-touched PNG — could ship silently. The generator is deterministic
+    (pure Pillow, fixed supersampling), so regenerating into a scratch tree and
+    comparing decoded content and required image metadata is an exact check
+    rather than a perceptual one.
+    """
+    with tempfile.TemporaryDirectory(prefix="kettle-icons-") as tmp:
+        root = Path(tmp)
+        produced = emit(
+            root / "linux",
+            root / "iconset",
+            root / "windows" / "kettle.ico",
+            quiet=True,
+        )
+        drifted: list[str] = []
+        missing: list[str] = []
+        for path, rel in produced:
+            tracked = ROOT / rel
+            if not tracked.exists():
+                missing.append(rel)
+            elif not same_pixels(path, tracked):
+                drifted.append(rel)
+    for rel in missing:
+        print(f"ERROR: tracked icon missing: {rel}")
+    for rel in drifted:
+        print(f"ERROR: tracked icon differs from the generated one: {rel}")
+    if missing or drifted:
+        print(
+            f"{len(missing) + len(drifted)} icon(s) out of date — "
+            "run `python3 scripts/gen-icons.py` and commit the result"
+        )
         return 1
-    print(f"kettle.ico OK ({count} resolutions)")
+    print(f"icons OK ({len(produced)} tracked rasters match the Pillow generator)")
+    return 0
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--check",
+        action="store_true",
+        help="verify the tracked rasters match the generator instead of rewriting them",
+    )
+    parser.add_argument(
+        "--require-tooling",
+        action="store_true",
+        help=(
+            "treat a missing Pillow as a failure rather than a skip. CI passes "
+            "this so the gate cannot quietly stop running"
+        ),
+    )
+    args = parser.parse_args()
+
+    if Image is None:
+        # Skipping locally is deliberate -- a contributor without Pillow should
+        # not be blocked -- but a skip that CI accepts is just a gate that never
+        # runs, which is the defect this check was added to close. CI passes
+        # --require-tooling, so the skip cannot become permanent there.
+        message = "Pillow is not installed (pip install Pillow)"
+        if args.require_tooling:
+            print(f"ERROR: {message}; --require-tooling makes this fatal")
+            return 1
+        print(f"SKIPPED: {message}")
+        return 0
+
+    try:
+        if args.check:
+            return check()
+        emit(LINUX, ICONSET, ICO)
+    except RuntimeError as error:
+        print(f"ERROR: {error}")
+        return 1
     return 0
 
 
