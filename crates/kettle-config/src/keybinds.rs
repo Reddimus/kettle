@@ -1509,6 +1509,22 @@ pub(crate) fn is_unbind_token(s: &str) -> bool {
 mod tests {
     use super::*;
 
+    /// The production half of this file: everything above the test module.
+    fn production_source() -> String {
+        let src = include_str!("keybinds.rs").replace("\r\n", "\n");
+        let marker = "\n#[cfg(test)]\nmod tests {";
+        let cut = src
+            .find(marker)
+            .expect("keybinds.rs must have a test module to slice off");
+        let production = src[..cut].to_string();
+        assert!(
+            !production.contains("fn production_source()"),
+            "the slice must exclude the test module, or every guard built on \
+             it still self-matches"
+        );
+        production
+    }
+
     /// Only F1..=F12 are real keys (the winit→Key bridge maps no
     /// others), so `parse_key` must reject F0 and F13+ rather than accept a
     /// binding that can never fire.
@@ -2391,7 +2407,7 @@ mod tests {
     /// that works in one spelling only, in either direction.
     #[test]
     fn every_action_name_resolves_in_both_spellings() {
-        let src = include_str!("keybinds.rs");
+        let src = production_source();
         let start = src.find("pub fn from_name(").expect("from_name");
         let body = &src[start..];
         let end = body.find("\n    pub fn ").unwrap_or(body.len());

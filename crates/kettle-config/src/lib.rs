@@ -5429,6 +5429,38 @@ impl Config {
     }
 }
 
+/// The production source of this file, with every top-level test item removed.
+#[cfg(test)]
+fn production_source() -> String {
+    let src = include_str!("lib.rs").replace("\r\n", "\n");
+    let mut production = String::with_capacity(src.len());
+    let mut inside_test_item = false;
+    for line in src.lines() {
+        if inside_test_item {
+            if line == "}" {
+                inside_test_item = false;
+            }
+            continue;
+        }
+        if line == "#[cfg(test)]" {
+            inside_test_item = true;
+            continue;
+        }
+        production.push_str(line);
+        production.push('\n');
+    }
+    assert!(
+        !production.contains("fn production_source()"),
+        "the slice must exclude every test item, or the guards built on it \
+         still self-match"
+    );
+    assert!(
+        production.contains("pub fn append_keybind("),
+        "the slice must keep production code after interleaved test items"
+    );
+    production
+}
+
 #[cfg(test)]
 mod config_tests {
     use super::*;
@@ -7369,7 +7401,7 @@ cell-height = 1.2\n";
     /// disclosure and leave the field looking like a live, wired setting.
     #[test]
     fn dead_terminator_stub_fields_document_their_own_inertness() {
-        let src = include_str!("lib.rs");
+        let src = super::production_source();
         for (field_decl, marker) in [
             (
                 "pub cursor_color_default: bool",
@@ -7417,7 +7449,7 @@ cell-height = 1.2\n";
     /// `kettle-ui`, which is where the readers live.
     #[test]
     fn the_split_and_group_keys_name_the_code_that_reads_them() {
-        let src = include_str!("lib.rs");
+        let src = super::production_source();
         for (field_decl, reader) in [
             ("pub split_to_group: bool", "Mux::inherit_split_group"),
             ("pub autoclean_groups: bool", "Mux::hoover_groups"),

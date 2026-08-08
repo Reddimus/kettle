@@ -504,6 +504,38 @@ pub fn default_size_probe() -> Option<(u16, u16)> {
     terminal_size_cols_rows()
 }
 
+/// The production source of this file, with every top-level test item removed.
+#[cfg(test)]
+fn production_source() -> String {
+    let src = include_str!("exec.rs").replace("\r\n", "\n");
+    let mut production = String::with_capacity(src.len());
+    let mut inside_test_item = false;
+    for line in src.lines() {
+        if inside_test_item {
+            if line == "}" {
+                inside_test_item = false;
+            }
+            continue;
+        }
+        if line == "#[cfg(test)]" {
+            inside_test_item = true;
+            continue;
+        }
+        production.push_str(line);
+        production.push('\n');
+    }
+    assert!(
+        !production.contains("fn production_source()"),
+        "the slice must exclude every test item, or the guards built on it \
+         still self-match"
+    );
+    assert!(
+        production.contains("fn run_exec_engine("),
+        "the slice must keep production code after interleaved test items"
+    );
+    production
+}
+
 /// Core run loop, with the stdout sink and size probe injected for testing.
 #[cfg(test)]
 pub fn run_exec_with(
@@ -3681,12 +3713,9 @@ mod tests {
         // future edit reaches for a `kettle_ui::` / `winit::` path, this fails —
         // "headless means headless". Scans for the `::` *usage* forms so the
         // module's own doc comment (which names the crates in prose) doesn't
-        // trip it; strips this test's body so its assert strings don't either.
-        let src = include_str!("exec.rs");
-        let scan = src
-            .split("fn exec_module_is_headless_no_ui_no_winit")
-            .next()
-            .unwrap();
+        // trip it; `production_source` strips every test item so the assertions
+        // cannot satisfy their own checks.
+        let scan = super::production_source();
         assert!(
             !scan.contains("kettle_ui::"),
             "exec.rs must not use kettle_ui (headless)"

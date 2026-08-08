@@ -460,6 +460,38 @@ fn pty_eof_sequence(
     Ok(Some(([configured_veof; 2], count)))
 }
 
+/// The production source of this file, with every top-level test item removed.
+#[cfg(test)]
+fn production_source() -> String {
+    let src = include_str!("term.rs").replace("\r\n", "\n");
+    let mut production = String::with_capacity(src.len());
+    let mut inside_test_item = false;
+    for line in src.lines() {
+        if inside_test_item {
+            if line == "}" {
+                inside_test_item = false;
+            }
+            continue;
+        }
+        if line == "#[cfg(test)]" || line.starts_with("#[cfg(all(test,") {
+            inside_test_item = true;
+            continue;
+        }
+        production.push_str(line);
+        production.push('\n');
+    }
+    assert!(
+        !production.contains("fn production_source()"),
+        "the slice must exclude every test item, or the guards built on it \
+         still self-match"
+    );
+    assert!(
+        production.contains("impl Drop for Terminal {"),
+        "the slice must keep production code after interleaved test items"
+    );
+    production
+}
+
 #[cfg(test)]
 mod pty_eof_tests {
     use super::{
@@ -7473,7 +7505,7 @@ mod placeholder_lock_order_tests {
         // Normalized, like every other source guard in this file: the split
         // patterns below embed `\n`, so a CRLF checkout would silently find
         // nothing and fail on an unrelated-looking `expect`.
-        let src = include_str!("term.rs").replace("\r\n", "\n");
+        let src = super::production_source();
         let body = src
             .split("pub fn placeholder_tiles(&self) -> Vec<Placement> {")
             .nth(1)
@@ -7502,7 +7534,7 @@ mod placeholder_lock_order_tests {
         // Normalized, like every other source guard in this file: the split
         // patterns below embed `\n`, so a CRLF checkout would silently find
         // nothing and fail on an unrelated-looking `expect`.
-        let src = include_str!("term.rs").replace("\r\n", "\n");
+        let src = super::production_source();
         let body = src
             .split("pub fn relative_tiles(&self) -> Vec<Placement> {")
             .nth(1)
@@ -7572,7 +7604,7 @@ mod detect_shells_tests {
     /// (a behavioral test would need to hang a real `wsl.exe`).
     #[test]
     fn list_wsl_distros_is_time_bounded() {
-        let src = include_str!("term.rs").replace("\r\n", "\n");
+        let src = super::production_source();
         let start = src
             .find("fn list_wsl_distros()")
             .expect("list_wsl_distros present");
@@ -7934,7 +7966,7 @@ mod home_dir_tests {
 
     #[test]
     fn session_log_parser_tap_only_uses_bounded_worker_admission() {
-        let source = include_str!("term.rs");
+        let source = super::production_source();
         let tap = source
             .split("// Terminator parity (logger.py): per-pane log")
             .nth(1)
@@ -10228,7 +10260,7 @@ mod teardown_tests {
         // And the setter is wired to that helper rather than to the monotonic
         // resize rule — a guard, because the two are one line apart and reusing
         // the resize wrapper here would silently make the rows inert again.
-        let src = include_str!("term.rs").replace("\r\n", "\n");
+        let src = super::production_source();
         let body = src
             .split("pub fn set_scrollback_limits(")
             .nth(1)
@@ -10691,7 +10723,7 @@ mod teardown_tests {
     fn drop_detaches_reader_never_joins() {
         // Normalize CRLF→LF first: the repo checks out with Windows line
         // endings, so byte patterns must not assume bare `\n`.
-        let src = include_str!("term.rs").replace("\r\n", "\n");
+        let src = super::production_source();
         // Anchor on the impl, not on the first `fn drop` in the file. There is
         // more than one `Drop` in this module, and which one comes first is an
         // accident of ordering — this test silently retargeted itself the
@@ -10798,7 +10830,7 @@ mod teardown_tests {
     /// be provoked from a test, but their ORDER can be checked directly.
     #[test]
     fn the_spawn_guard_covers_every_fallible_step_after_spawn() {
-        let src = include_str!("term.rs").replace("\r\n", "\n");
+        let src = super::production_source();
         let spawn = src
             .find("let child = pair.slave.spawn_command(cmd)?;")
             .expect("child spawn present");
@@ -11484,7 +11516,7 @@ mod atomic_geometry_tests {
 mod output_publish_guard {
     #[test]
     fn reader_sidechannels_share_the_generation_ordered_output_gate() {
-        let source = include_str!("term.rs").replace("\r\n", "\n");
+        let source = super::production_source();
         let reader_start = source
             .find(".name(\"kettle-pty-reader\"")
             .expect("PTY reader thread present");
@@ -11528,7 +11560,7 @@ mod output_publish_guard {
 
     #[test]
     fn pty_pump_spawn_failure_is_observable_and_closes_the_pane() {
-        let source = include_str!("term.rs").replace("\r\n", "\n");
+        let source = super::production_source();
         let name = source
             .find(".name(\"kettle-pty-pump\"")
             .expect("PTY pump thread present");

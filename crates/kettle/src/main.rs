@@ -2233,6 +2233,38 @@ fn window_state_from_flags(
     }
 }
 
+/// The production source of this file, with every top-level test item removed.
+#[cfg(test)]
+fn production_source() -> String {
+    let src = include_str!("main.rs").replace("\r\n", "\n");
+    let mut production = String::with_capacity(src.len());
+    let mut inside_test_item = false;
+    for line in src.lines() {
+        if inside_test_item {
+            if line == "}" {
+                inside_test_item = false;
+            }
+            continue;
+        }
+        if line == "#[cfg(test)]" {
+            inside_test_item = true;
+            continue;
+        }
+        production.push_str(line);
+        production.push('\n');
+    }
+    assert!(
+        !production.contains("fn production_source()"),
+        "the slice must exclude every test item, or the guards built on it \
+         still self-match"
+    );
+    assert!(
+        production.contains("fn main() -> anyhow::Result<()>"),
+        "the slice must keep the binary entry point"
+    );
+    production
+}
+
 #[cfg(test)]
 mod window_state_flag_tests {
     use super::window_state_from_flags;
@@ -2800,7 +2832,7 @@ mod tests {
     /// both directions (attribute removed, or guard removed) at gauntlet time.
     #[test]
     fn windows_gui_subsystem_with_conditional_attach_survives() {
-        let src = include_str!("main.rs");
+        let src = super::production_source();
         // GUI-subsystem attribute present (column-0 inner attr); matched
         // leniently so the exact cfg predicate can still evolve.
         let attr_present = src.lines().any(|l| {

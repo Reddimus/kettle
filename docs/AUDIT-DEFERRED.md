@@ -95,6 +95,42 @@ tracked here so they are not lost.
 
 ## Deferred from the 2026-08-07 full-repo audit
 
+- **`exec_streams_stdout_and_exits_zero` is flaky on macOS at roughly 2–5 %.**
+  The test's own comment already records that it "has failed intermittently on
+  macOS CI with empty stdout"; this entry adds the missing part, which is a
+  measured rate and a decisive answer to whether the v2.54.0 change set caused
+  it. `crates/kettle/tests/exec.rs:346` — the `out.contains("agent-marker-7f3")`
+  assertion — fails with empty stdout.
+
+  Measured on an Apple-silicon macOS 15 host, `main` at `f67cce6` versus this
+  release branch, same machine, back to back:
+
+  | | full 26-test binary | test alone |
+  |---|---|---|
+  | `main` (f67cce6) | 1 / 25 | 0 / 30 |
+  | `integration/v2.54.0` | 2 / 25 | 1 / 30 |
+
+  Three conclusions, all of which needed the numbers rather than a guess:
+
+  1. **It is pre-existing.** 1/55 on `main` against 3/55 on the branch is not a
+     significant difference at these sample sizes. The branch did not introduce
+     it — and `git log main..HEAD -- crates/kettle/tests/exec.rs` is empty, so
+     the test itself is untouched.
+  2. **It is not caused by this release's ANSI-stripper change**, which was the
+     obvious suspicion because the test runs `--strip-ansi` and
+     `crates/kettle/src/exec.rs` was edited here. `main` predates that change and
+     still flakes.
+  3. **It is not purely a concurrency artifact.** It reproduces with the test run
+     alone, so contention between the binary's 26 PTY tests is not required —
+     which rules out the cheapest possible fix.
+
+  The one captured diagnostic instance carried "asciicast capture stopped
+  (recording I/O failed or finalization exceeded its bound)" immediately before
+  the empty read, which points at recording finalization racing the child's
+  final flush rather than at the stripper. Not chased further here because it is
+  pre-existing and unrelated to this release's scope; it wants its own change
+  with its own measurement, and the rate above is the baseline to beat.
+
 - **`kettle ctl screenshot` times out on macOS, so the live-UI smoke cannot
   finish there.** This is the blocker for `just agent-tui-smoke` on macOS, which
   until this release could never run at all — it gated on

@@ -1247,6 +1247,38 @@ fn deepest_descendant_in_index(
     }
 }
 
+/// The production source of this file, with every top-level test item removed.
+#[cfg(test)]
+fn production_source() -> String {
+    let src = include_str!("lib.rs").replace("\r\n", "\n");
+    let mut production = String::with_capacity(src.len());
+    let mut inside_test_item = false;
+    for line in src.lines() {
+        if inside_test_item {
+            if line == "}" {
+                inside_test_item = false;
+            }
+            continue;
+        }
+        if line == "#[cfg(test)]" {
+            inside_test_item = true;
+            continue;
+        }
+        production.push_str(line);
+        production.push('\n');
+    }
+    assert!(
+        !production.contains("fn production_source()"),
+        "the slice must exclude every test item, or the guards built on it \
+         still self-match"
+    );
+    assert!(
+        production.contains("pub fn format_remote_title("),
+        "the slice must keep production code after interleaved test items"
+    );
+    production
+}
+
 /// One-shot [`find_foreground_shell_in_index`] over a fresh snapshot
 /// (mirrors [`detect_in_tree`]). Test-only — the app uses
 /// [`RemoteScanner::foreground_shell`] for the amortized shared-index path.
@@ -4317,7 +4349,7 @@ mod tests {
         // Every option name the two tables actually match on, read out of
         // their source. `NAMES` must equal this exactly, or the sweep below is
         // silently skipping a table entry.
-        let source = include_str!("lib.rs");
+        let source = super::production_source();
         let start = source
             .find("fn container_global_option(")
             .expect("the global option table");
