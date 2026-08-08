@@ -95,6 +95,48 @@ tracked here so they are not lost.
 
 ## Deferred from the 2026-08-07 full-repo audit
 
+- **`kettle ctl screenshot` times out on macOS, so the live-UI smoke cannot
+  finish there.** This is the blocker for `just agent-tui-smoke` on macOS, which
+  until this release could never run at all — it gated on
+  `DISPLAY`/`WAYLAND_DISPLAY` and skipped with exit 0, reading exactly like a
+  pass. The gate is fixed; this is what the smoke hits next.
+
+  What is established, by direct measurement on an Apple-silicon macOS 15 host
+  running the bare `target/release/kettle` binary:
+
+  - `kettle ctl list_panes` and `kettle ctl ui_geometry` **work** — the control
+    server is healthy and Kettle believes it has a window with sane geometry.
+  - `kettle --screenshot out.png` and `--screenshot-menu` **work** (a 61 KB
+    96x28 PNG). The offscreen render-and-read-back path is fine.
+  - `kettle ctl screenshot` **times out at exactly 10 s**
+    (`crates/kettle-ui/src/app.rs:16922`). That path calls `request_redraw()` and
+    waits for the presented frame, unlike the offscreen path.
+  - macOS System Events reports the process has **0 windows**, and AppleScript
+    cannot bring it frontmost.
+  - `/Applications/kettle.app` exists and is what real users launch; the smoke
+    drives the bare binary.
+
+  So the leading hypothesis is that a non-bundled Mach-O does not register a
+  presenting window with the macOS window server, meaning `request_redraw()`
+  never delivers a frame and the ctl screenshot legitimately cannot complete —
+  a HARNESS problem, with real users unaffected because they launch the bundle.
+  **That hypothesis is NOT confirmed.** An investigation that was constructing a
+  minimal `.app` bundle to test it died on a network failure before reaching a
+  verdict, so the alternative — that the screenshot path itself is broken on
+  Metal — has not been excluded.
+
+  Settle it before assuming either. Useful evidence: `CGWindowListCopyWindowInfo`
+  at the CoreGraphics level rather than the accessibility level, and whether the
+  same ctl screenshot succeeds when driven against `/Applications/kettle.app`.
+  If it is the harness, the smoke must drive a bundle; either way it must fail
+  loudly rather than skip, because a silent skip is what hid this for so long.
+
+  Consequence to state plainly: **the live interactive leg — tmux, Codex CLI,
+  Claude Code CLI, and Neovim/AstroNvim inside a real Kettle window — is not
+  verified on macOS.** The non-interactive `scripts/check-agent-cli-smoke.sh`
+  passes all 12 checks there, including the configured-AstroNvim path, and that
+  is the full extent of what macOS coverage currently proves.
+
 - **One shared streaming control-state kernel for the three ANSI parsers.** The
   `kettle exec` stripper, the session-log scrubber, and the VT extractor have now
   drifted from each other **three separate times**, and the 2026-08-07 audit found
