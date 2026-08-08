@@ -1,5 +1,79 @@
 # Performance
 
+## Unreleased — macOS comparator, first measured standing
+
+The first macOS comparison Kettle has ever had. Windows and Linux comparator
+legs existed; macOS did not, so no claim about Kettle's standing among macOS
+terminals could be checked. `scripts/perf/macos-compare.sh` (`just macos-perf`)
+closes that gap.
+
+Apple silicon, macOS 15, 7 runs with 2 warmups per timing workload. Kettle built
+`--release`. Every peer launched by an empirically verified command form; peers
+that could not be driven are recorded as skips with reasons rather than dropped.
+
+| metric | kettle | rank | field |
+|---|---|---|---|
+| startup | — | **3 / 5** | alacritty, wezterm, **kettle**, kitty 0.663 s, terminal 1.134 s |
+| ascii flood | 0.343 s | **3 / 5** | alacritty 0.234, wezterm 0.235, **kettle**, kitty 0.662, terminal 1.217 |
+| ansi/underline flood | 0.551 s | **3 / 5** | wezterm 0.445, alacritty 0.449, **kettle**, kitty 0.875, terminal 1.427 |
+| max RSS | **103.7 MiB** | **1 / 4** | **kettle**, wezterm 109.6, kitty 121.6, alacritty 124.9 |
+| idle CPU | 2.60 % | **5 / 5** | alacritty / kitty / terminal / wezterm all 0.00 %, **kettle last** |
+
+**Top-half on 4 of 5 measured metrics.**
+
+### The memory result overturns what the Windows numbers implied
+
+`docs/PERFORMANCE.md`'s Windows section records Kettle at ~335 MB against
+Alacritty's ~148 MB, and attributes ~182 MB of it to the DX12 shader compiler
+being loaded and run for the first time — "not an allocation Kettle makes."
+
+That attribution predicted the gap would not transfer to Metal. It did not.
+On macOS Kettle is the **lightest** terminal measured, at 103.7 MiB against
+WezTerm's 109.6, kitty's 121.6 and Alacritty's 124.9. The same binary, the same
+workload, the opposite ranking — because the cost was never Kettle's.
+
+### Idle CPU is a real loss, and it is not close
+
+Kettle measures **2.60 %** CPU on an idle window with an idle shell while four
+competitors measure exactly **0.00 %**. This is not a measurement artifact: the
+figure is the median of five 1-second-spaced samples after a 3-second settle,
+and every peer went through the identical procedure.
+
+It is also a regression against Kettle's own Windows result, where it measured
+0.0000 %. Something wakes the event loop on macOS with nothing to draw. This is
+tracked and being fixed; it is recorded here as a loss rather than omitted.
+
+### What this measurement does NOT say
+
+- **Input latency was not measured.** Driving keystroke-to-paint across
+  AppleScript-only terminals is its own problem and is deliberately out of scope.
+  Its absence is not a pass. This matters, because input latency is Kettle's
+  strongest published result on Windows and it is unverified here.
+- **Ghostty is missing from every metric.** It measured fine during harness
+  development, then stopped launching a window on this machine entirely — it
+  answers `--version` but `open -a Ghostty` will not start it. That is a peer
+  environment fault, not a Kettle or harness fault, but it removes Kettle's
+  closest architectural peer from the field and the numbers above are weaker for
+  it. Re-run on a machine with a healthy Ghostty before treating the ranking as
+  settled.
+- **iTerm2 is missing.** Its AppleScript interface times out on this machine
+  (AppleEvent −1712) through `create window`, `write text`, and `open -a` alike.
+- **Terminal.app has no RSS figure**, because `/usr/bin/time -l` would measure
+  `osascript` rather than the detached process it spawns.
+- **Alacritty was built from source.** The Homebrew cask is ad-hoc-signed, fails
+  Gatekeeper, and hangs in `_dyld_start`; Homebrew has deprecated it for exactly
+  that reason and disables it on 2026-09-01. A source build is not necessarily
+  what a user runs.
+- The machine was not idle. Apple's `MediaAnalysis` and `replayd` daemons were
+  active throughout. Kettle's own run-to-run variance was small (startup stddev
+  ~0.003 s), and all peers shared the same conditions, but these are not
+  quiet-machine numbers.
+
+A metric counts only when Kettle **and at least one real competitor** were both
+measured, so the harness cannot certify a standing it did not actually measure.
+Five of five metrics were eligible here; none were excluded for lack of a
+competitor.
+
 ## Unreleased — context-menu interaction latency
 
 Context-menu row hover used to take the full frame path: every pointer crossing

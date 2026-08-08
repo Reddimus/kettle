@@ -116,14 +116,23 @@ tracked here so they are not lost.
   `ansi_stripper_control_events_cover_every_state_cross_product` test added in
   this pass is the shape the shared kernel's conformance matrix should take.
 
-- **`scroll_page_up` did not enter scrollback in one macOS live-probe run.**
+- **`scroll_page_up` does not enter scrollback on macOS — reproduced twice.**
   `scripts/perf/kettle-live-probes.py` seeds 1600 lines and then asserts
-  `display_offset > 0` after `perform_action scroll_page_up`; that assertion
-  failed once during macOS comparator development. It was observed on a heavily
-  loaded machine and has not been reproduced deliberately, so it is recorded as
-  **unconfirmed** rather than diagnosed: it is either a real scrollback defect or
-  probe flakiness under contention. Reproduce on a quiet machine before
-  investigating — do not assume which.
+  `display_offset > 0` after `perform_action scroll_page_up`. That assertion
+  failed during macOS comparator development and again in the full comparator
+  run, under different machine loads:
+
+      kettle-live-probes: scroll_page_up did not enter scrollback
+
+  Two independent reproductions make contention flakiness the less likely
+  explanation, so this is now a **probable real defect** rather than an
+  unconfirmed observation. It was recorded rather than fixed because it was found
+  during a benchmark run and diagnosing it properly needs a live UI session, not
+  a hurried patch. Start from `Action::ScrollPageUp` in
+  `crates/kettle-ui/src/app.rs:13204` and the `display_offset` the control plane
+  reports through `read_screen`; establish first whether the viewport actually
+  fails to move or whether only the reported offset is wrong, because those are
+  different bugs.
 
 ## Search follow-up and platform evidence
 
