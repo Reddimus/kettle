@@ -50,40 +50,48 @@ if (-not $global:__kettle_prompt_installed) {
         #
         # An array literal evaluates `$?` before the assignment resets it, so a
         # single statement captures both without either clobbering the other.
+        # Every local here is `__kettle_`-prefixed on purpose. PowerShell
+        # resolves variables dynamically through the call stack, so a plainly
+        # named local (`$code`) declared before the user's prompt is invoked
+        # would shadow a variable of that name inside their prompt.
         $__kettle_state = @($?, $global:LASTEXITCODE)
         $__kettle_ok = $__kettle_state[0]
-        $code = $__kettle_state[1]
-        if ($null -eq $code) { $code = 0 }
+
+        # `$LASTEXITCODE` is written only by NATIVE commands. A failed *cmdlet*
+        # leaves it untouched, so reporting it verbatim mislabels both
+        # directions: a failed `Get-Item` after a clean native command would
+        # report success, and a successful cmdlet after `sh -c 'exit 37'` would
+        # report 37. `$?` is the only indicator that tracks cmdlets, so it
+        # decides success or failure; the numeric code is consulted only when
+        # `$?` already says the command failed, and a failure with no native
+        # code of its own reports 1.
+        $__kettle_code = if ($__kettle_ok) {
+            0
+        } elseif ($__kettle_state[1]) {
+            $__kettle_state[1]
+        } else {
+            1
+        }
 
         # Hand the user's prompt the same `$?` an unwrapped prompt would see.
         # `$?` is read-only; failing a statement is the only way to set it
         # False, so this must be the LAST statement before the prompt runs.
-        # `-ErrorAction SilentlyContinue` overrides a profile-wide
-        # `$ErrorActionPreference = 'Stop'`, so this cannot become a
-        # terminating error and break the prompt.
-        $__kettle_marker = 'kettle: propagating command failure'
+        #
+        # `-ErrorAction Ignore`, not `SilentlyContinue`: both set `$?`, but
+        # `SilentlyContinue` also pushes a record onto `$Error`, so a prompt
+        # that inspects `$Error[0]` — posh-git does — would read kettle's
+        # synthetic error instead of the user's real one, and a long session
+        # would push real errors out of the capped list. `Ignore` records
+        # nothing, so there is nothing to clean up afterwards. Either form
+        # overrides a profile-wide `$ErrorActionPreference = 'Stop'`, so this
+        # cannot become a terminating error and break the prompt.
         if (-not $__kettle_ok) {
-            Write-Error $__kettle_marker -ErrorAction SilentlyContinue
+            Write-Error 'kettle: propagating command failure' -ErrorAction Ignore
         }
         try {
             $rendered = & $global:__kettle_original_prompt
         } catch {
             $rendered = $null
-        }
-        # Drop that synthetic record again, so a user inspecting `$Error[0]`
-        # after a failed command sees their own error rather than ours, and a
-        # long session does not push real errors out of the capped `$Error`
-        # list. Matched by message, not position: the user's prompt may have
-        # pushed its own errors on top. This can only run *after* the prompt —
-        # removal succeeds, and succeeding would have reset `$?` before the
-        # prompt ever read it.
-        if (-not $__kettle_ok) {
-            for ($__kettle_i = 0; $__kettle_i -lt $Error.Count; $__kettle_i++) {
-                if ($Error[$__kettle_i].Exception.Message -eq $__kettle_marker) {
-                    $Error.RemoveAt($__kettle_i)
-                    break
-                }
-            }
         }
         if ($null -eq $rendered) {
             $rendered = "PS $($ExecutionContext.SessionState.Path.CurrentLocation)$('>' * ($NestedPromptLevel + 1)) "
@@ -93,7 +101,7 @@ if (-not $global:__kettle_prompt_installed) {
         $bel = [char]7
         # D = last command's exit code, A = this prompt's start.
         # Emitted together at the top of the prompt function.
-        [Console]::Write("$esc]133;D;$code$bel$esc]133;A$bel")
+        [Console]::Write("$esc]133;D;$__kettle_code$bel$esc]133;A$bel")
         # OSC 7 cwd report (v2.20): powers new-tab/split cwd inheritance and
         # "Open folder" in kettle. Windows paths travel in URL form
         # (`file://HOST/C:/Users/...`, forward slashes, each segment

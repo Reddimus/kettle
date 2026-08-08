@@ -44,26 +44,73 @@ if ($global:__fixture_prompt_status -ne $false) {
 # re-source from capturing the wrapper as its own "original" and recursing.
 function global:prompt {
     $global:__fixture_prompt_status = $?
+    $global:__fixture_prompt_err0 =
+        if ($Error.Count) { $Error[0].Exception.Message } else { '<none>' }
     $global:LASTEXITCODE = 0
     return 'USER-PROMPT'
 }
 Remove-Variable __kettle_prompt_installed -Scope Global -ErrorAction SilentlyContinue
 . $IntegrationPath
 
-$global:LASTEXITCODE = 37
-$capture = [System.IO.StringWriter]::new()
+# Each case runs its trigger IMMEDIATELY before `prompt`, in this scope. `$?`
+# does not survive `& $scriptblock` or a function call, so a helper that wraps
+# the trigger would silently test nothing.
 $stdout = [Console]::Out
-[Console]::SetOut($capture)
-try { $null = prompt } finally { [Console]::SetOut($stdout) }
 
-$emitted = $capture.ToString()
-if ($emitted -notmatch '\]133;D;37') {
+# (a) a failure carrying a native exit code must report that code.
+$Error.Clear()
+Write-Error 'USERS-REAL-ERROR' -ErrorAction SilentlyContinue
+$errorsBefore = $Error.Count
+$capture = [System.IO.StringWriter]::new()
+[Console]::SetOut($capture)
+$global:LASTEXITCODE = 37
+Get-Item -LiteralPath '__kettle_missing_payload__' -ErrorAction SilentlyContinue
+try { $null = prompt } finally { [Console]::SetOut($stdout) }
+if ($capture.ToString() -notmatch '\]133;D;37') {
     throw 'wrapper reported the wrong exit code; expected D;37'
 }
 # The prompt's own native calls must not leak into the next command's view of
 # $LASTEXITCODE either.
 if ($global:LASTEXITCODE -ne 37) {
     throw "wrapper left LASTEXITCODE = $($global:LASTEXITCODE), expected 37"
+}
+# Re-arming `$?` must not cost the user their error history. The trigger above
+# is itself a failing cmdlet, so $Error[0] is legitimately ITS error — what must
+# never appear is kettle's synthetic re-arm record, either to the prompt while
+# it renders or in the list afterwards.
+if ($global:__fixture_prompt_err0 -like '*kettle: propagating*') {
+    throw "the prompt observed kettle's synthetic re-arm error at \$Error[0]"
+}
+foreach ($record in $Error) {
+    if ($record.Exception.Message -like '*kettle: propagating*') {
+        throw 're-arming $? left a synthetic record in $Error'
+    }
+}
+# The user's earlier error must still be reachable, not pushed out.
+if (-not ($Error | Where-Object { $_.Exception.Message -eq 'USERS-REAL-ERROR' })) {
+    throw "re-arming \$? displaced the user's own error from \$Error"
+}
+
+# (b) `$LASTEXITCODE` is written only by NATIVE commands, so a stale nonzero
+# value must not mark a SUCCEEDING cmdlet as failed.
+$capture = [System.IO.StringWriter]::new()
+[Console]::SetOut($capture)
+$global:LASTEXITCODE = 37
+Get-Date | Out-Null
+try { $null = prompt } finally { [Console]::SetOut($stdout) }
+if ($capture.ToString() -notmatch '\]133;D;0') {
+    throw 'a successful command after an earlier native failure must report D;0'
+}
+
+# (c) ...and a failed CMDLET, which never touches $LASTEXITCODE, must report a
+# failure rather than the stale zero.
+$capture = [System.IO.StringWriter]::new()
+[Console]::SetOut($capture)
+$global:LASTEXITCODE = 0
+Get-Item -LiteralPath '__kettle_missing_cmdlet__' -ErrorAction SilentlyContinue
+try { $null = prompt } finally { [Console]::SetOut($stdout) }
+if ($capture.ToString() -notmatch '\]133;D;1') {
+    throw 'a failed cmdlet with no native exit code must report D;1, not D;0'
 }
 
 Write-Output 'KETTLE_POWERSHELL_PROMPT_OK'
