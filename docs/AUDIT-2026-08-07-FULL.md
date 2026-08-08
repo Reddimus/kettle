@@ -208,6 +208,48 @@ earlier in this same audit. The class is worth stating as a standing rule: a
 source-text guard must be proved to fail before it is trusted, and
 `include_str!` on one's own file is a defect until the test module is sliced off.
 
+### Three more in the fixes themselves, and a seventh guard
+
+A review of the two fixes above found three defects **in them**, which is the
+whole argument for not stopping the loop at the first clean-looking pass:
+
+- The exit code was still wrong for cmdlets. `$LASTEXITCODE` is written only by
+  *native* commands, so reporting it verbatim mislabelled both directions: a
+  successful cmdlet after an earlier `exit 37` reported failure, and a failed
+  cmdlet reported success. `$?` now decides, and the numeric code is consulted
+  only once `$?` says the command failed.
+- `$code` was a plainly named local hoisted above the prompt invocation.
+  PowerShell resolves variables dynamically through the call stack, so it
+  shadowed any `$code` the user's own prompt reads.
+- The `$?` re-arm used `-ErrorAction SilentlyContinue` and removed the resulting
+  `$Error` record afterwards. "Afterwards" is too late: while the prompt renders
+  — exactly when posh-git inspects `$Error[0]` — kettle's synthetic error was
+  the visible one. `-ErrorAction Ignore` sets `$?` and records nothing, so there
+  is no window and no cleanup.
+
+The same review found a **seventh** unfailable guard, in
+`main.rs`'s `windows_gui_subsystem_with_conditional_attach_survives`. The first
+scan had missed it because it only recognised `src.contains("literal")`; that
+guard writes its needles into an array and passes them as a variable. The six
+remaining files holding a raw own-file `include_str!` were then converted
+wholesale — 15 reads — rather than patching the one instance.
+
+`exec.rs` deserved the most care: its guard is *negative*
+(`!scan.contains("kettle_ui::")`), and a negative guard fails **open** if the
+slice loses production code. So the stripper was measured rather than trusted:
+all 38 column-0 production functions survive, and a probe inserted at line 400
+and again at line 2000 — real production sandwiched between the test modules at
+672 and 2498 — trips the guard, while one at line 3000 inside a test module
+correctly does not.
+
+**Cross-platform verification.** The PowerShell snippet claims 5.1+ support that
+had never once been executed. All four payload cases now run green on Windows
+PowerShell **5.1.26100.8875 (Desktop)** on the Surface Book 3 as well as pwsh
+7.6.4 on macOS, under `$ErrorActionPreference = 'Stop'`. The fixture
+discriminates all three generations of the snippet: it passes on the shipped
+one, fails the original on `D;37`, and fails the intermediate one on the
+synthetic `$Error` record.
+
 ---
 
 ## Verification

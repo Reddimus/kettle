@@ -8,14 +8,15 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Fixed
 
-Fifty-four findings from a full-repo audit. Five adversarial audits covered every
-crate; a separate six-surface pass covered the scripts, CI, packaging,
+Fifty-eight findings from a full-repo audit. Five adversarial audits covered
+every crate; a separate six-surface pass covered the scripts, CI, packaging,
 shell-integration, documentation, and UI/UX-design surfaces those crate audits do
-not reach; a review of the resulting diff found further defects in the fixes
-themselves; and a final pre-release read of the whole integrated change set found
-two more, both blocking. Each finding was adversarially re-verified before it
-earned a fix, and each fix carries a regression test. Full ledger in
-`docs/AUDIT-2026-08-07-FULL.md`.
+not reach; and three successive reviews of the integrated change set found
+further defects — including three in the fixes themselves, which is why the
+review loop ran until a pass came back clean rather than stopping at the first
+one. Each finding was adversarially re-verified before it earned a fix, and each
+fix carries a regression test that was confirmed to fail without it. Full ledger
+in `docs/AUDIT-2026-08-07-FULL.md`.
 
 - **A killed Linux update could not be recovered by its own recovery code.**
   Provenance was verified before any path could recover a transaction, so a crash
@@ -45,15 +46,26 @@ earned a fix, and each fix carries a regression test. Full ledger in
   anything else runs, and `$LASTEXITCODE` is restored afterwards so the prompt's
   own native calls do not leak into the next command's view of it.
 
-- **88 drift guards could not fail.** Tests asserting on `include_str!` of their
-  own file also searched their own assertions, so the needle was always present
-  and the guard passed whether or not the production code it named still existed.
-  Reintroducing the exact defects two of them describe left both passing. All 88
-  now slice the test module off first, reusing the `production_source()` helper
-  already written for `mux.rs` and `app.rs`. Doing so exposed seven stale
-  expectations in five guards that had been masking real refactors — none needed
-  a production change, and each was re-checked against current source rather than
-  relaxed to match.
+- **Drift guards across ten files could not fail.** Tests asserting on
+  `include_str!` of their own file also searched their own assertions, so the
+  needle was always present and the guard passed whether or not the production
+  code it named still existed. Reintroducing the exact defects two of them
+  describe left both passing. Every such guard now slices the test module off
+  first, reusing the `production_source()` helper already written for `mux.rs`
+  and `app.rs`; no file in the workspace reads its own source unsliced any more.
+
+  Doing so exposed seven stale expectations in five render guards that had been
+  masking real refactors — none needed a production change, and each was
+  re-checked against current source rather than relaxed to match. One guard's
+  name was corrected too: it asserted the tab title lane while calling itself
+  `..._full_segment_rect_budget`.
+
+  The sweep took two passes because the first scan only recognised
+  `src.contains("literal")` and missed guards that put their needles in an array
+  and pass them as a variable. Negative guards (`!src.contains(...)`) get
+  particular care: they fail *open* if the slice loses production code, so the
+  stripper was verified against every column-0 production function rather than
+  assumed correct.
 
 - **Pastes could be corrupted by terminal replies.** Priority replies were
   selected at every 8 KiB chunk boundary, so a mouse report could land between
