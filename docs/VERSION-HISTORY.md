@@ -14,13 +14,13 @@ the version below is present in the changelog but not yet as a Git tag or a
 GitHub release. Git tags and GitHub releases remain authoritative for what has
 actually shipped.
 
-- Latest version in this tree: `v2.53.0` — carried by the changelog and the
+- Latest version in this tree: `v2.54.0` — carried by the changelog and the
   version-bearing source files. It becomes a release when release CI publishes
   the tag; until then the entry above it is the newest thing that actually
   shipped.
-- Current workspace version: `2.53.0`
-- Release records inspected: 156 Git tags and 157 changelog headings, from
-  `v0.1.0` through `v2.52.0`. The counts differ by one on purpose: the
+- Current workspace version: `2.54.0`
+- Release records inspected: 157 Git tags and 158 changelog headings, from
+  `v0.1.0` through `v2.53.0`. The counts differ by one on purpose: the
   newest heading is the release being prepared, and its tag is created
   only once that change lands, per the note above.
 - Version-bearing source files that must stay in lockstep: workspace
@@ -44,7 +44,7 @@ actually shipped.
 - `v2.21.0` to `v2.28.0` (2026-06-13 to 2026-06-19): GPU/background features,
   animated media, tab/theme settings, scrollbar work, and release packaging
   refreshes.
-- `v2.29.0` to `v2.53.0` (2026-06-19 to 2026-08-07): cwd-aware titles and
+- `v2.29.0` to `v2.54.0` (2026-06-19 to 2026-08-08): cwd-aware titles and
   shell integration, GPU device-loss resilience, Ubuntu titlebar fixes,
   keyboard text selection, package-template lockstep, bounded/private recording
   retention, graphics-resource accounting, hardened control/MCP and durable
