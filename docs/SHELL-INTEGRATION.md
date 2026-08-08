@@ -131,12 +131,28 @@ trap 'printf "\033]133;C\007"' DEBUG
 ### zsh — add to `~/.zshrc`
 
 ```zsh
+# Percent-encode $PWD byte-by-byte (LC_ALL=C makes ${p[i]} a BYTE, so
+# multi-byte UTF-8 path characters encode as their UTF-8 byte sequence).
+__kettle_osc7() {
+  emulate -L zsh
+  local LC_ALL=C p="$PWD" out='' i ch
+  for (( i = 1; i <= ${#p}; i++ )); do
+    ch="${p[i]}"
+    case "$ch" in
+      ([A-Za-z0-9/:_.~-]) out+="$ch" ;;
+      (*) out+="$(printf '%%%02X' "'$ch")" ;;
+    esac
+  done
+  printf '\e]7;file://%s%s\a' "${HOST:-localhost}" "$out"
+}
 autoload -Uz add-zsh-hook
-__kettle_precmd()  { print -Pn '\e]133;D;%?\a\e]133;A\a'; }
+__kettle_precmd()  { print -Pn '\e]133;D;%?\a\e]133;A\a'; __kettle_osc7; }
 __kettle_preexec() { print -Pn '\e]133;C\a'; }
 add-zsh-hook precmd __kettle_precmd
 add-zsh-hook preexec __kettle_preexec
-PS1=$'%{\e]133;B\a%}'"$PS1"
+if [[ "$PS1" != $'%{\e]133;B\a%}'* ]]; then
+  PS1=$'%{\e]133;B\a%}'"$PS1"
+fi
 ```
 
 ### fish — add to `~/.config/fish/config.fish`
@@ -144,12 +160,24 @@ PS1=$'%{\e]133;B\a%}'"$PS1"
 ```fish
 function __kettle_prompt --on-event fish_prompt
     printf '\e]133;A\a'
+    __kettle_osc7
 end
 function __kettle_preexec --on-event fish_preexec
     printf '\e]133;C\a'
 end
 function __kettle_postexec --on-event fish_postexec
     printf '\e]133;D;%d\a' $status
+end
+# OSC 7 cwd report: powers new-tab/split cwd inheritance and "Open folder";
+# the hostname is validated terminal-side so an ssh session's remote cwd is
+# never adopted locally. Segments are percent-encoded individually so the `/`
+# separators stay literal.
+function __kettle_osc7
+    set -l enc
+    for s in (string split '/' -- $PWD)
+        set -a enc (string escape --style=url -- $s)
+    end
+    printf '\e]7;file://%s%s\a' (hostname) (string join '/' -- $enc)
 end
 # `B` (end-of-prompt) goes inside the prompt itself — fish doesn't
 # have a dedicated event for it. Append the marker to your prompt's
