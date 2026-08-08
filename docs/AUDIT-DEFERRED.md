@@ -95,6 +95,40 @@ tracked here so they are not lost.
 
 ## Deferred from the 2026-08-07 full-repo audit
 
+- **`handle_action`'s tail resizes unconditionally, so queued actions still
+  double-resize.** PR #168 deferred every `editing_title` transition to a
+  once-per-frame flush in `redraw`, and its commit message claims the child then
+  "sees one resize to the final geometry, or none at all". That is true for the
+  paths #168 changed and **false** for actions dispatched through
+  `handle_action`, whose tail (`crates/kettle-ui/src/app.rs`, after
+  `note_focus_change`) calls `self.resize_all(ws)` after *every* action,
+  unconditionally.
+
+  Trigger: a Lua hook or automation queues two geometry-affecting actions —
+  `EditWindowTitle` then `CommandPalette`, say — and the loop processes both
+  before any redraw. The tail resizes after each, producing a shrink and a grow
+  for a net-zero frame; #168's dirty-flag flush then finds nothing to do. The
+  user sees nothing wrong, but a PTY child gets two `SIGWINCH`s and vim, tmux or
+  htop redraw twice.
+
+  Not fixed here, deliberately. That tail runs after every action in the
+  application, and it predates #168 — it exists for splits, focus moves and tab
+  changes, not for title edits. Two candidate fixes, neither safe to take
+  unverified at the end of an unrelated change:
+
+  1. Defer the tail like the rest: set `chrome_geometry_dirty` instead of
+     resizing. Needs proof that nothing between the tail and the next frame
+     depends on the resize having already happened — `save_session` runs
+     immediately after it and snapshots window geometry.
+  2. Make the tail conditional on a real net change by comparing the computed
+     layout before and after, rather than relying on the per-PTY dedup in
+     `try_resize_geometry`, which cannot see that an intermediate state will be
+     undone.
+
+  Severity medium: narrow trigger, no visual defect, and no data loss. Recorded
+  rather than left implied, because #168's own message overstates what it
+  achieved.
+
 - **The Linux installer smoke's online leg can fail on a transient network
   blip, and it gates every pull request.** Observed on PR #162, run
   31255512657:
