@@ -10244,7 +10244,14 @@ impl App {
         // one resize to the final geometry, or none at all when the geometry is
         // unchanged end to end, because `try_resize_geometry` already skips a
         // no-op.
-        if std::mem::take(&mut ws.chrome_geometry_dirty) {
+        // Consume the flag ONLY when the resize can actually happen.
+        // `resize_all` returns early while the renderer is absent (GPU
+        // recovery), so `mem::take`ing unconditionally dropped the pending
+        // geometry change on the floor: the strip had appeared or gone, and
+        // nothing ever told the PTYs. Leaving the flag set defers it to the
+        // first frame after the renderer is rebuilt.
+        if ws.chrome_geometry_dirty && ws.renderer.is_some() {
+            ws.chrome_geometry_dirty = false;
             self.resize_all(ws);
         }
         // v2.34.0: keep the OS titlebar in step with the active palette.
@@ -14168,7 +14175,26 @@ impl App {
         // land the cursor visible on the new pane right away.
         self.hoover_groups(ws);
         self.note_focus_change(ws, pre_focus);
-        self.resize_all(ws);
+        // Coalesce into the per-frame flush when a frame is actually coming.
+        //
+        // This tail runs after EVERY action. Resizing here eagerly meant a
+        // queued pair of geometry-affecting actions -- a Lua hook dispatching
+        // `EditWindowTitle` then `CommandPalette`, processed before any redraw
+        // -- resized twice: shrink, then grow, for a net-zero frame. The user
+        // sees nothing, but the PTY child gets two `SIGWINCH`s and vim, tmux or
+        // htop redraw for no reason.
+        //
+        // `save_session` runs immediately below and does NOT depend on this:
+        // it records the OS window rect and the split tree, never the PTY grid.
+        //
+        // With no window there is no frame to flush on, so resize now — a
+        // deferred resize that never runs is worse than an eager one that runs
+        // twice.
+        if ws.window.is_some() {
+            ws.chrome_geometry_dirty = true;
+        } else {
+            self.resize_all(ws);
+        }
         self.save_session(ws);
         if let Some(w) = &ws.window {
             w.request_redraw();
