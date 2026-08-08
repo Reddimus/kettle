@@ -238,3 +238,52 @@ fn cfg_evaluator_handles_adversarial_predicates() {
         );
     }
 }
+
+#[test]
+fn a_stale_block_comment_terminator_does_not_delete_production_code() {
+    // A line that merely ENDS in `*/` was paired, by a backward `rfind("/*")`,
+    // with an already-closed doc comment further up — and everything between
+    // them was deleted. On this exact input the whole production half vanished,
+    // which a negative guard reads as a pass.
+    assert_kept(
+        "stale */ terminator",
+        "/** docs for production */\nfn production() {}\n// */\n#[cfg(test)]\nfn test_only() {}\n",
+        &["fn production()", "docs for production"],
+        &["fn test_only()"],
+    );
+}
+
+#[test]
+fn a_raw_identifier_test_is_still_recognised_as_test_only() {
+    // `r#test` is exactly `test`. Parsing only the leading `r` leaves the rest
+    // unconsumed, the predicate reads Unknown, and the item survives.
+    assert_kept(
+        "raw identifier",
+        "fn keep() {}\n#[cfg(r#test)]\nfn gone() {}\nfn also_keep() {}\n",
+        &["fn keep()", "fn also_keep()"],
+        &["fn gone()"],
+    );
+}
+
+#[test]
+fn boolean_cfg_literals_are_evaluated_not_treated_as_unknown_atoms() {
+    // Stable since 1.79; this workspace's MSRV is 1.89.
+    assert_kept(
+        "cfg(false)",
+        "fn keep() {}\n#[cfg(false)]\nfn never_built() {}\nfn also_keep() {}\n",
+        &["fn keep()", "fn also_keep()"],
+        &["fn never_built()"],
+    );
+    assert_kept(
+        "cfg(true)",
+        "fn keep() {}\n#[cfg(true)]\nfn always_built() {}\nfn also_keep() {}\n",
+        &["fn keep()", "fn always_built()", "fn also_keep()"],
+        &[],
+    );
+    assert_kept(
+        "cfg(any(false, test))",
+        "fn keep() {}\n#[cfg(any(false, test))]\nfn gone() {}\nfn also_keep() {}\n",
+        &["fn keep()", "fn also_keep()"],
+        &["fn gone()"],
+    );
+}

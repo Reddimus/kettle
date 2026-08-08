@@ -47,18 +47,45 @@ fn strip_test_items(src: &str) -> Result<String, ()> {
     let mut copied_through = 0;
     let mut cursor = 0;
 
+    // Start of the doc-comment run immediately preceding `cursor`, tracked as
+    // the forward lex proceeds.
+    //
+    // This used to be recovered afterwards by searching BACKWARDS for `/*`,
+    // which is unsound: the search happily paired a `// */` line with an
+    // already-closed doc comment further up and deleted every line between
+    // them. On one three-line input the entire production half disappeared,
+    // which a negative guard reads as a pass. `skip_lexeme` already walks
+    // comments correctly going forward, so record the position there instead of
+    // reconstructing it later.
+    let mut doc_start: Option<usize> = None;
+
     while cursor < bytes.len() {
         if let Some(end) = skip_lexeme(bytes, cursor)? {
+            if is_line_leading_doc_comment(bytes, cursor) {
+                // Record the LINE start, not the `///` token, so an indented
+                // doc comment is removed along with its indentation.
+                let line_start = src[..cursor].rfind('\n').map_or(0, |newline| newline + 1);
+                doc_start.get_or_insert(line_start);
+            } else {
+                // A string literal, or a comment that is not documentation.
+                // Either way the run of docs attached to whatever follows has
+                // been broken.
+                doc_start = None;
+            }
             cursor = end;
             continue;
         }
 
         if bytes[cursor] != b'#' {
+            if !bytes[cursor].is_ascii_whitespace() {
+                doc_start = None;
+            }
             cursor += 1;
             continue;
         }
 
         let Some(first_attribute) = parse_attribute(bytes, cursor)? else {
+            doc_start = None;
             cursor += 1;
             continue;
         };
@@ -75,18 +102,29 @@ fn strip_test_items(src: &str) -> Result<String, ()> {
         }
 
         if !has_test_cfg {
+            doc_start = None;
             cursor = attributes_end;
             continue;
         }
 
+        // Remove the attached doc comments along with the item: prose is
+        // searchable text, so a needle quoted in a test item's documentation
+        // would outlive the item and satisfy a guard on its own. Only a run
+        // recorded by the forward lex counts, and only when nothing but
+        // whitespace separates it from the attribute.
         let line_start = src[..cursor].rfind('\n').map_or(0, |newline| newline + 1);
-        let removal_start = if bytes[line_start..cursor]
+        let attribute_starts_its_line = bytes[line_start..cursor]
             .iter()
-            .all(u8::is_ascii_whitespace)
-        {
-            preceding_doc_comments_start(src, line_start)
-        } else {
-            cursor
+            .all(u8::is_ascii_whitespace);
+        let removal_start = match doc_start {
+            Some(start) if attribute_starts_its_line => start,
+            _ => {
+                if attribute_starts_its_line {
+                    line_start
+                } else {
+                    cursor
+                }
+            }
         };
         let item_start = skip_trivia(bytes, attributes_end)?;
         let item_end = find_item_end(bytes, item_start)?;
@@ -94,59 +132,34 @@ fn strip_test_items(src: &str) -> Result<String, ()> {
         production.push_str(&src[copied_through..removal_start]);
         copied_through = item_end;
         cursor = item_end;
+        doc_start = None;
     }
 
     production.push_str(&src[copied_through..]);
     Ok(production)
 }
 
-/// Walk back over the doc comment attached to a test item, so its prose is
-/// removed along with it.
+/// True when a comment beginning at `start` is documentation that leads its
+/// line — `///` or `/** … */`, with only whitespace before it.
 ///
-/// This matters because the prose is searchable text like any other: a guard
-/// needle quoted inside a test item's documentation would survive the item's
-/// removal and satisfy the guard on its own.
-///
-/// Only `///` lines and `/** … */` blocks are consumed — never a plain `//` or
-/// `/* … */` comment, which may well belong to the *preceding* production item.
-/// Erring that way is deliberate: over-stripping removes production text and
-/// makes negative guards pass vacuously, which is the worse failure.
-fn preceding_doc_comments_start(src: &str, mut start: usize) -> usize {
-    while start > 0 {
-        let line_end = start - 1;
-        let line_start = src[..line_end].rfind('\n').map_or(0, |newline| newline + 1);
-        let line = src[line_start..line_end].trim_start();
-
-        if line.starts_with("///") && !line.starts_with("////") {
-            start = line_start;
-            continue;
-        }
-
-        // A `/** … */` block doc comment, which may span several lines. Scan
-        // back to its opener, and only accept it if that opener really is a doc
-        // block rather than an ordinary `/* … */`.
-        if line.ends_with("*/") {
-            let Some(open_rel) = src[..line_end].rfind("/*") else {
-                break;
-            };
-            let opener_line_start = src[..open_rel].rfind('\n').map_or(0, |n| n + 1);
-            let opener = src[opener_line_start..].trim_start();
-            let is_doc_block = opener.starts_with("/**") && !opener.starts_with("/***");
-            // Refuse if anything other than whitespace precedes the opener on
-            // its line — that would be trailing content of another item.
-            let opener_alone = src[opener_line_start..open_rel]
-                .chars()
-                .all(char::is_whitespace);
-            if is_doc_block && opener_alone {
-                start = opener_line_start;
-                continue;
-            }
-            break;
-        }
-
-        break;
+/// A plain `//` or `/* … */` is deliberately excluded: it may document the
+/// PRECEDING production item, and removing production text is the worse
+/// failure, since a negative guard (`!src.contains(...)`) then passes while
+/// protecting nothing.
+fn is_line_leading_doc_comment(bytes: &[u8], start: usize) -> bool {
+    let is_doc = match bytes.get(start..start + 3) {
+        Some(b"///") => bytes.get(start + 3) != Some(&b'/'),
+        Some(b"/**") => bytes.get(start + 3) != Some(&b'*') && bytes.get(start + 3) != Some(&b'/'),
+        _ => false,
+    };
+    if !is_doc {
+        return false;
     }
-    start
+    bytes[..start]
+        .iter()
+        .rev()
+        .take_while(|byte| **byte != b'\n')
+        .all(u8::is_ascii_whitespace)
 }
 
 #[derive(Clone, Copy)]
@@ -263,10 +276,13 @@ fn eval_predicate(contents: &[u8], cursor: usize) -> Result<(Tri, usize), ()> {
             };
             return Ok((Tri::Unknown, cursor));
         }
-        let value = if name == b"test" {
-            Tri::False
-        } else {
-            Tri::Unknown
+        // `cfg(true)` / `cfg(false)` are boolean literals, stable since 1.79 and
+        // usable at this workspace's 1.89 MSRV. `false` means the item exists in
+        // no build at all, so it is safe to drop from a production slice.
+        let value = match name {
+            b"test" | b"false" => Tri::False,
+            b"true" => Tri::True,
+            _ => Tri::Unknown,
         };
         return Ok((value, cursor));
     }
@@ -327,7 +343,20 @@ fn eval_predicate(contents: &[u8], cursor: usize) -> Result<(Tri, usize), ()> {
     Ok((combined, cursor))
 }
 
+/// Parse one identifier, accepting the raw form.
+///
+/// `r#test` is exactly equivalent to `test` in a `cfg` predicate. Parsing only
+/// the leading `r` leaves the rest of the token unconsumed, the predicate
+/// evaluates to Unknown, and the test-only item survives into the "production"
+/// slice — which is the self-satisfying state this helper exists to prevent.
 fn identifier(bytes: &[u8], start: usize) -> Option<(&[u8], usize)> {
+    // A raw identifier: `r#ident`. Skip the sigil and return the bare name, so
+    // callers compare against `test` without knowing which form was written.
+    let start = if bytes.get(start) == Some(&b'r') && bytes.get(start + 1) == Some(&b'#') {
+        start + 2
+    } else {
+        start
+    };
     let first = *bytes.get(start)?;
     if !(first == b'_' || first.is_ascii_alphabetic() || first >= 0x80) {
         return None;

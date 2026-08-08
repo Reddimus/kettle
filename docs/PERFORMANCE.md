@@ -49,12 +49,13 @@ Alacritty's ~148 MB, and attributes ~182 MB of it to the DX12 shader compiler
 being loaded and run for the first time — "not an allocation Kettle makes."
 
 That attribution predicted the gap would not transfer to Metal. It did not.
-On macOS Kettle is the **lightest** terminal measured, at 103.9 MiB against
-WezTerm's 109.5, Alacritty's 128.8 and kitty's 129.0. The same binary, the same
+On macOS Kettle is the **lightest** terminal measured, at 105.9 MiB against
+WezTerm's 111.9, kitty's 122.3 and Alacritty's 127.4. The same binary, the same
 workload, the opposite ranking — because the cost was never Kettle's.
 
-Both comparator runs agree on this: the pre-fix run measured 103.7 MiB with the
-same ordering, so the result is not a single lucky sample.
+Three separate comparator runs agree on both the value and the ordering: 103.7,
+103.9 and 105.9 MiB, Kettle first every time. The spread across runs is smaller
+than the gap to second place, so this is not a single lucky sample.
 
 ### Idle CPU was the one loss, and finding out why was the point
 
