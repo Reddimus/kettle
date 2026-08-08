@@ -4637,7 +4637,7 @@ impl Renderer {
                 &prompt,
                 help,
                 &buttons_label,
-                overlay_label_cols(sw, cw),
+                confirm_bar_columns(sw, cw),
             );
             self.search_buffer.set_metrics(metrics);
             self.search_buffer.set_size(Some(sw), Some(bar_h));
@@ -8676,22 +8676,33 @@ fn compose_confirm_bar_label(
     buttons_label: &str,
     max_cols: usize,
 ) -> String {
-    let buttons_cols = buttons_label.chars().count();
+    let buttons_cols = display_width(buttons_label);
+    if buttons_cols > max_cols {
+        return String::new();
+    }
+
     let min_gap = 2usize;
-    let mut left = format!("{prompt}{help}");
+    let full_left = format!("{prompt}{help}");
     let max_left = max_cols.saturating_sub(buttons_cols + min_gap);
-    if max_left > 0 && left.chars().count() > max_left {
-        left = prompt.to_string();
-    }
-    if max_left > 3 && left.chars().count() > max_left {
-        left = left.chars().take(max_left - 3).collect::<String>();
-        left.push_str("...");
-    }
-    let gap = max_cols
-        .saturating_sub(left.chars().count() + buttons_cols)
-        .max(1);
-    let label = format!("{left}{}{buttons_label}", " ".repeat(gap));
-    fit_single_line_label(&label, max_cols)
+    let left = if display_width(&full_left) <= max_left {
+        full_left
+    } else if display_width(prompt) <= max_left {
+        prompt.to_string()
+    } else if max_left > 3 {
+        let mut truncated = take_cols_front(prompt, max_left - 3);
+        truncated.push_str("...");
+        truncated
+    } else {
+        String::new()
+    };
+    let gap = max_cols - buttons_cols - display_width(&left);
+    format!("{left}{}{buttons_label}", " ".repeat(gap))
+}
+
+/// Columns in which the confirm bar is painted. The App uses this same budget
+/// for mouse hit-testing so the live row cannot extend past visible glyphs.
+pub fn confirm_bar_columns(width: f32, cell_width: f32) -> usize {
+    overlay_label_cols(width, cell_width)
 }
 
 fn overlay_label_cols(width: f32, cell_width: f32) -> usize {
@@ -14145,18 +14156,47 @@ mod title_fit_tests {
         }
     }
 
-    /// A genuinely narrow window still has to degrade, not overflow.
+    /// A genuinely narrow window must keep the interactive row intact or paint
+    /// none of it. A clipped button row would disagree with the App hit-test.
     #[test]
     fn confirm_bar_still_fits_when_the_window_cannot_hold_the_buttons() {
-        let buttons = "[▶ Cancel]  [  Close]";
-        for cols in [0usize, 1, 5, 12, 20] {
-            let label = compose_confirm_bar_label("  ⚠ Close this pane?", "  Tab", buttons, cols);
-            assert!(
-                display_width(&label) <= cols,
-                "overflowed at cols={cols}: {} > {cols}",
-                display_width(&label)
-            );
+        for buttons in ["[▶ Cancel]  [  Close]", "[▶ OK]"] {
+            let buttons_cols = display_width(buttons);
+            for cols in 0..buttons_cols {
+                assert_eq!(
+                    compose_confirm_bar_label("  ⚠ Close this pane?", "  Tab", buttons, cols),
+                    "",
+                    "a {cols}-column bar must not paint a partial {buttons_cols}-column button row"
+                );
+            }
+            for cols in buttons_cols..=buttons_cols + 2 {
+                let label =
+                    compose_confirm_bar_label("  ⚠ Close this pane?", "  Tab", buttons, cols);
+                assert!(
+                    label.ends_with(buttons),
+                    "the complete button row must win at cols={cols}: {label:?}"
+                );
+                assert_eq!(
+                    display_width(&label),
+                    cols,
+                    "the intact button row must remain right-aligned"
+                );
+            }
         }
+    }
+
+    #[test]
+    fn confirm_bar_uses_display_columns_for_wide_button_labels() {
+        let prompt = "P";
+        let buttons = "[▶ Cancel]  [  界]";
+        let cols = display_width(prompt) + 2 + display_width(buttons);
+        let label = compose_confirm_bar_label(prompt, "", buttons, cols);
+
+        assert_eq!(display_width(&label), cols);
+        assert!(
+            label.ends_with(buttons),
+            "a wide label must not make the fitter clip the button row: {label:?}"
+        );
     }
 
     #[test]

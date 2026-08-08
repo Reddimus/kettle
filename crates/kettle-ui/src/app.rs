@@ -1883,7 +1883,7 @@ fn confirm_dialog_button_cells(button: &ConfirmButton) -> usize {
     // Renderer format is `[<marker> <label>]`, where marker is either `▶` or a
     // single space. The hit-test uses the same cell budget so clicks track the
     // visible right-aligned button row.
-    confirm_button_label(button).chars().count() + 4
+    confirm_button_label(button).width() + 4
 }
 
 fn confirm_dialog_button_hit(
@@ -1911,13 +1911,9 @@ fn confirm_dialog_button_hit(
         .map(confirm_dialog_button_cells)
         .sum::<usize>()
         + gap_cells.saturating_mul(buttons.len().saturating_sub(1));
-    // One column narrower than the window, because that is the width the bar is
-    // actually PAINTED at: the renderer fits every bottom-bar overlay to
-    // `overlay_label_cols` = `floor(width / cell) - 1`. Using the full window
-    // width here right-aligned the hit boxes one column past the last painted
-    // glyph, so the rightmost column of the last button was dead and the column
-    // beyond it was live.
-    let cols = ((window_w / cell_w).floor().max(0.0) as usize).saturating_sub(1);
+    // Use the renderer's exact painted budget: one column narrower than the
+    // window to allow for glyph overhang and fractional cell metrics.
+    let cols = kettle_render::confirm_bar_columns(window_w, cell_w);
     if buttons_cells == 0 || buttons_cells > cols {
         return None;
     }
@@ -31977,6 +31973,43 @@ mod tests {
             confirm_dialog_button_hit(&buttons, 91.0 * cw + 1.0, sh - ch - 20.0, sw, sh, cw, ch),
             None,
             "clicks above the confirm bar are still generic modal clicks"
+        );
+
+        // The painted budget is 21 columns when the window provides 22. The
+        // complete row is visible and live at that exact boundary; one column
+        // narrower paints no buttons and therefore must expose no target.
+        assert_eq!(
+            confirm_dialog_button_hit(&buttons, 1.0, y, 22.0 * cw, sh, cw, ch),
+            Some(0)
+        );
+        assert_eq!(
+            confirm_dialog_button_hit(&buttons, 1.0, y, 21.0 * cw, sh, cw, ch),
+            None
+        );
+    }
+
+    #[test]
+    fn confirm_dialog_button_hit_uses_display_columns() {
+        use super::{ConfirmButton, confirm_dialog_button_cells, confirm_dialog_button_hit};
+
+        let buttons = vec![
+            ConfirmButton::Cancel,
+            ConfirmButton::Confirm {
+                label: "界".into(),
+                destructive: true,
+            },
+        ];
+        let sw = 800.0;
+        let sh = 600.0;
+        let cw = 8.0;
+        let ch = 16.0;
+        let y = sh - (ch + 10.0) + 4.0;
+
+        assert_eq!(confirm_dialog_button_cells(&buttons[1]), 6);
+        assert_eq!(
+            confirm_dialog_button_hit(&buttons, 81.0 * cw + 1.0, y, sw, sh, cw, ch),
+            Some(0),
+            "the hit row must start where the wide-glyph button row is painted"
         );
     }
 
