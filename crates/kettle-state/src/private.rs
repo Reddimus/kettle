@@ -8,6 +8,15 @@ use std::path::Path;
 /// bases and the temp root. Read from the environment because that is where the
 /// call sites read them from.
 ///
+/// What does NOT belong here, and why the distinction matters: this list is for
+/// the roots kettle keeps *private state* under, not everywhere it writes.
+/// `~/.local/share/kettle` is kettle-named and kettle-created, but it holds the
+/// installed program — `install.sh`, the shell-integration snippets — which are
+/// deliberately world-readable. Adding it would make the repair narrow an
+/// install directory to `0700` and break a multi-user install, fixing nothing,
+/// since nothing under it goes through the private-path verifier. The same goes
+/// for a `--screenshot` path, which is wherever the user pointed.
+///
 /// The cache base belongs here for the same reason the others do:
 /// `cache_dir_from_env` resolves `XDG_CACHE_HOME`, then `~/.cache` on Unix and
 /// `%LOCALAPPDATA%` on Windows, and kettle puts recordings, diagnostics and
