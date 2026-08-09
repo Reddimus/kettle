@@ -93,6 +93,53 @@ tracked here so they are not lost.
 - Per-window `FontSystem` sharing; lazy system-font load on first frame. Both are
   speculative — profile on the maintainer's machine before implementing.
 
+## Testing coverage
+
+- **Ten live-UI scenarios run in no automated gate.**
+  `scripts/check-live-ui-smoke.py` launches a real windowed kettle and drives it
+  through ten scenarios (`tabbar`, `tab-title`, `tearoff`, `split-titlebar`,
+  `zoom-keybind`, `underline`, `agent-tui`, `search-history`, `interaction`,
+  `touchpad-scroll`). Its other three `case` values do less: `all` runs those
+  ten, `session-check` only asserts that a graphical session is usable and
+  returns without launching kettle, and `self-test` exercises the helper's own
+  pure functions. **CI runs `self-test` only**, on all three OSes; every real
+  scenario is a `just` recipe a human has to remember.
+
+  Note what is and is not missing. CI does launch a real kettle under Xvfb, and
+  the Nix workflow's runtime smoke waits until an installed kettle creates a
+  visible X11 window. Neither drives the control server, and neither asserts
+  anything about what was rendered. That narrower gap — nothing automated speaks
+  to a running kettle over ctl — is the real one.
+
+  The recorded reason for the gap was a GPU/interactive-desktop requirement, and
+  Linux already has the infrastructure to test it: CI installs `xvfb` and
+  `mesa-vulkan-drivers`, and `search-history` was run under `xvfb-run` with
+  `LIBGL_ALWAYS_SOFTWARE=1` on Ubuntu 24.04 for this audit.
+
+  **That run failed, and the failure was worth having.** It reported
+  `timed out waiting for control server` — the helper's 25-second `ctl
+  list_panes` probe never succeeded, so the scenario body never ran. What it
+  proves on its own is only that kettle stayed alive for those 25 seconds; it is
+  the warning kettle logged alongside it that identified the cause, the
+  `002`-umask directory bug fixed in #178 and #180. Three features were disabled
+  on that machine with nothing but a log line to say so, and no automated test
+  in the repo caught it before #178 added one.
+
+  So the gap is demonstrated but the remedy is not yet measured: no live
+  scenario has been observed passing under Xvfb, because the first attempt hit a
+  real bug before it could. A first gate should rerun `search-history` on Linux
+  now that #178 and #180 are in, and only then pin it — quarantined as
+  non-blocking until its flake rate is known over a week.
+
+  Add cases one at a time rather than enabling `all`; whether each survives Xvfb
+  has to be established, not assumed. Note that the pointer-driven tear/re-dock
+  gesture is **not** in `all` at all — the Python `tearoff` case is deliberately
+  mouseless (`perform_action("move_tab_to_new_window")`), and the real-pointer
+  version lives in `scripts/check-tearoff-live-smoke.sh`, driven by `xdotool` and
+  dispatched only by the Unix `tearoff-smoke` recipe. macOS and Windows have no
+  such gate configured today; whether their runners could host one is untested
+  rather than known to be impossible.
+
 ## Deferred from the 2026-08-07 full-repo audit
 
 - **~~`handle_action`'s tail resizes unconditionally~~ — fixed.** Recorded when
