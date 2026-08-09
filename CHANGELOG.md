@@ -6,6 +6,103 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+### Fixed
+
+- **The confirm bar clipped its own rightmost button.** Every close-confirm,
+  quit-confirm and keybind-reassign prompt rendered `[  Clos…` instead of
+  `[  Close]`, at every window size on every platform. The bar composed itself to
+  one column wider than the budget it was then fitted to, so the overflow was
+  unconditional and the fitter dropped two columns for an ellipsis. The click
+  target had the matching error, leaving the last painted column dead and the
+  column past the bar live. (#164)
+
+- **Title editing showed no input under a vertical tab bar.** With
+  `tab-bar-position = left` or `right`, editing a pane, tab or group title
+  rendered zero input columns — no text, no caret — while Enter still committed
+  the invisible buffer. For a broadcast group that buffer names the group, so it
+  decided which panes received later keystrokes. The overlay had been handed the
+  tab *segment's* rect (`tab-bar-width`, 180px ≈ 21 columns) while the line it
+  composes ends in a 30-column hint. (#165)
+
+- **Opening or closing a title edit left the PTYs at the wrong size.** The chrome
+  strip that appears for the modal changes the content rectangle, and nothing
+  resized the panes across either transition, so the grid the child believed it
+  had stayed wrong until an unrelated event corrected it. Resizes are now
+  coalesced to one per frame, so a queued pair of actions no longer sends two
+  `SIGWINCH`s for a net change of zero. (#168, #170)
+
+- **Icon rasters, release documentation, and Intel-Mac Nix.** The 18 tracked
+  PNG/ICO rasters had no gate at all and could drift from the generator silently;
+  they are now compared by decoded pixels and metadata on every push.
+  `docs/RELEASING.md` documents the two-PR flow and the tag-signature requirement
+  that fails a release closed. (#167)
+
+- **A confirmed paste, and a committed title edit, went wherever focus had
+  drifted to.** Both prompts recorded only *that* they were open, not what they
+  were opened over, so a click, a Lua hook or a remote command that moved focus
+  while the prompt was up sent the paste — or renamed the pane, tab or broadcast
+  group — somewhere the user never pointed at. `ClosePane` had pinned its target
+  since it was written; these two now do the same, and a target that dies while
+  the prompt is open dismisses it instead of applying to whatever inherited the
+  focus. (#172, #175)
+
+- **kettle created the directory its own security check then rejected.** The
+  private-directory paths ran `create_dir_all` on their parent chain, which takes
+  the ambient umask, and named `0700` only on the leaf. On a `002` umask —
+  Debian and Ubuntu's per-user-group default — `$XDG_RUNTIME_DIR/kettle` and
+  `~/.config/kettle` landed at `0775`, and because the private-path verifier
+  walks *ancestors*, every private path beneath them was refused. On Ubuntu 24.04
+  that silently disabled single-instance activation, the remote-command watcher
+  and the update-check throttle, each reporting only a warning in a log. Every
+  kettle-named directory now gets an explicit `0700`, an existing one this user
+  owns is repaired through an `O_NOFOLLOW` descriptor rather than a path, and
+  the refusal message names the `chmod` that restores it. Eight sites in all,
+  and the ones that mattered were not in the obvious list: the config-reload
+  watcher creates the config directory *first*, so it decided the mode every
+  later check was judged against, and the control socket binds before the
+  registry is repaired, so an agent-enabled launch could bind under a
+  group-writable parent. (#180)
+
+- **kettle could narrow a source checkout to `0700`.** A directory counted as
+  kettle's own if its *name* matched, so `~/Repos/kettle` — anybody's checkout —
+  qualified, and `kettle --config ~/Repos/kettle/dev.config` set the whole tree
+  to `0700`. It now also has to sit where kettle actually puts its namespace: an
+  XDG base, `~/.config`, `~/.local/state`, or the temp root. The same mistake
+  made the refusal message advise `chmod 700` on directories kettle does not
+  own, including a user's entire `~/Repos`; that advice is now offered only for
+  kettle's own directories, while the refusal and its diagnostic are unchanged.
+  (#181)
+
+- **`--list-actions` hid 27 aliases the parser accepts, while the documentation
+  promised it could not.** `page_up`, `move_pane_left`, `bell_off` and 24 more
+  worked in a config but were absent from the list users are told is complete,
+  and `switch_to_tab_N` appeared in no output at all. The drift guard behind that
+  promise pinned two names by hand; it now derives the whole set from the
+  parser's own arms. (#177)
+
+### Performance
+
+- **Every visible pane walked its entire grid, every frame, to discover it had
+  no kitty images.** `placeholder_tiles` scanned the grid under the terminal lock
+  before checking whether any virtual placement existed — 127 µs per pane per
+  frame on a 300x80 grid, held against the mutex the PTY reader blocks on. It now
+  checks first and scans only when there is something to draw. (#176)
+
+### Changed
+
+- Four CI gates that existed but were dispatched by nothing now run on every
+  push: the tracked-file audit (the only enforcement of encoding, CRLF, PNG-CRC
+  and Markdown-link integrity across 925 files), the agent-CLI smoke, the macOS
+  comparator scorer self-test, and an executing `kettle.fish` fixture. (#166)
+
+- Removed `scripts/check-underline-scroll-smoke.sh`, superseded by the
+  cross-platform live-UI driver its recipe already dispatched. (#171)
+
+- `docs/AUDIT-DEFERRED.md` records why the eleven live-UI scenarios still run in
+  no automated gate, with the evidence that the recorded reason — a GPU and
+  interactive desktop — is wrong for Linux: one scenario was run headlessly under
+  Xvfb with software Vulkan, and the bug it found is the umask fix above. (#179)
+
 ## [2.54.0] — 2026-08-08
 
 ### Fixed
