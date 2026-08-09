@@ -339,13 +339,30 @@ tracked here so they are not lost.
   flush; all three tests drive a PTY child to completion and read what it wrote.
   Still deferred, but it should be fixed at the harness rather than per test.
 
-  **It does not reproduce locally, 2026-08-09.** Thirty runs of the full
-  26-test binary and forty runs of `exec_streams_stdout_and_exits_zero` alone
-  under saturating CPU load, on an Apple-silicon macOS host at `9f3da01`:
-  **zero failures**. That is a negative result worth recording, because it
-  redirects the next attempt: the difference is the GitHub macOS runner, not
-  the code path on any macOS. Do not spend another session trying to reproduce
-  it on a developer machine.
+  **It reproduces locally — under `cargo test --workspace`, 2026-08-09.**
+  An earlier version of this paragraph said it did not, on the strength of
+  thirty runs of the exec binary and forty of one test under CPU load. That
+  scoping was wrong and the conclusion it invited — "do not try to reproduce
+  this on a developer machine" — would have sent the next investigator away
+  from the one recipe that works.
+
+  Running the **whole workspace** reproduces it at roughly **1 in 14** on an
+  Apple-silicon macOS host: forty-five `cargo test --workspace` runs, one
+  failure. The failing test that time was
+  `exec_raw_mode_eof_is_explicit_and_does_not_destroy_terminal_replies` —
+  the third name in the table above, and the same family of symptom
+  (`missing explicit raw-mode EOF diagnostic: ""`, an empty read where output
+  was expected).
+
+  So the missing condition is not CPU load, it is **whole-workspace
+  concurrency**: many test binaries and their PTY children running at once.
+  That is also what CI does, which is why CI sees it and an exec-only loop
+  does not. Reproduce with:
+
+      for i in $(seq 1 30); do cargo test --workspace --no-fail-fast; done
+
+  and expect roughly two failures. That is a tractable loop for whoever
+  attacks the harness fix, and it is the thing this entry was missing.
 
   So the test now diagnoses itself. On failure it re-runs the same command
   **without** `--strip-ansi` and reports both, which answers the one question
