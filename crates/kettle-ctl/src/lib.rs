@@ -125,11 +125,24 @@ pub(crate) fn unix_dir_is_safe_for_endpoint(is_dir: bool, uid: u32, mode: u32) -
 /// `clippy -D warnings` rejects it.
 #[cfg(unix)]
 pub(crate) fn ensure_owned_dir(dir: &std::path::Path) -> std::io::Result<()> {
-    std::fs::create_dir_all(dir)?;
+    // Make kettle's own ancestors private on the way in. This looked exempt —
+    // the leaf is chmod'd just below, and the parents are either a shared temp
+    // root we must not touch or a directory some earlier path already fixed —
+    // but the ordering refutes it: `CtlServer::start` binds the socket through
+    // here BEFORE `discovery::register` repairs anything, so an agent-enabled
+    // launch on a fresh install would bind under a 0775 `<base>/kettle` and
+    // leave a window in which a group peer can rename the endpoint out of it.
+    kettle_state::create_private_dirs(dir)?;
     {
-        use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+        use std::os::unix::fs::MetadataExt as _;
 
-        let _ = std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700));
+        // No path-based chmod here. `create_private_dirs` above already set the
+        // mode through a descriptor, so this was redundant — and in the
+        // `<tmp>/kettle-<uid>` fallback it was a primitive: creating a NEW name
+        // in a sticky /tmp is allowed, so a peer can plant that path as a
+        // symlink to a directory they want narrowed. The helper correctly skips
+        // it (ELOOP), and then this line followed the link and chmodded the
+        // target before the check below could reject the bind.
         // `symlink_metadata`, so a symlink planted at this path is rejected
         // rather than followed to a directory its owner does control.
         let metadata = std::fs::symlink_metadata(dir)?;
@@ -150,73 +163,12 @@ pub(crate) fn ensure_owned_dir(dir: &std::path::Path) -> std::io::Result<()> {
     Ok(())
 }
 
-/// Whether `path` is a directory kettle named for itself.
-///
-/// Everything kettle puts under an XDG base or a temp root lives inside one
-/// directory it chose the name of: `<base>/kettle`, or `<tmp>/kettle-<uid>` for
-/// the length-safe socket fallback. Those are ours to set the mode on. The
-/// conventional roots above them — `$XDG_RUNTIME_DIR`, `~/.local/state`, `/tmp`
-/// — belong to the system or the user and are never touched.
-#[cfg(unix)]
-pub(crate) fn is_kettle_owned_dir_name(path: &std::path::Path) -> bool {
-    path.file_name()
-        .and_then(|name| name.to_str())
-        .is_some_and(|name| name == "kettle" || name.starts_with("kettle-"))
-}
-
-/// Create `dir` and kettle's own directory above it with an explicit `0700`,
-/// leaving only the conventional roots above that to the ambient umask.
-///
-/// This used to be `create_dir_all(parent)` followed by a mode-carrying builder
-/// for the leaf alone, which made kettle create the very directory its own
-/// checks then reject. On a `002` umask — Debian/Ubuntu's per-user-group
-/// default — `$XDG_RUNTIME_DIR/kettle` landed at `0775`, and because
-/// `kettle-state`'s private-path verifier walks *ancestors*, every private path
-/// beneath it was refused. Observed on Ubuntu 24.04: single-instance
-/// activation, the remote-command watcher and the update-check throttle all
-/// silently disabled themselves, each reporting only a warning in a log.
-///
-/// `DirBuilder::mode` applies to every directory a recursive create makes, not
-/// just the last one, so naming the mode is all that is required. An existing
-/// kettle-owned directory left group-writable by an earlier run is repaired,
-/// since otherwise the fix would only help installations that never ran.
-#[cfg(unix)]
-pub(crate) fn create_private_dir_chain(dir: &std::path::Path) -> std::io::Result<()> {
-    use std::os::unix::fs::{DirBuilderExt as _, MetadataExt as _, PermissionsExt as _};
-
-    let private = |path: &std::path::Path| {
-        std::fs::DirBuilder::new()
-            .recursive(true)
-            .mode(0o700)
-            .create(path)
-    };
-
-    if let Some(parent) = dir.parent() {
-        if is_kettle_owned_dir_name(parent) {
-            if let Some(root) = parent.parent() {
-                std::fs::create_dir_all(root)?;
-            }
-            private(parent)?;
-            let metadata = std::fs::symlink_metadata(parent)?;
-            if metadata.file_type().is_dir()
-                && metadata.uid() == unsafe { libc::geteuid() }
-                && metadata.mode() & 0o077 != 0
-            {
-                std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700))?;
-            }
-        } else {
-            std::fs::create_dir_all(parent)?;
-        }
-    }
-    private(dir)
-}
-
 pub(crate) fn ensure_private_dir(dir: &std::path::Path) -> std::io::Result<()> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
 
-        create_private_dir_chain(dir)?;
+        kettle_state::create_private_dirs(dir)?;
         let metadata = std::fs::symlink_metadata(dir)?;
         if !metadata.file_type().is_dir() || metadata.uid() != unsafe { libc::geteuid() } {
             return Err(std::io::Error::new(
@@ -266,7 +218,8 @@ pub(crate) fn test_scratch_root() -> std::path::PathBuf {
 /// every other test in this binary.
 #[cfg(all(test, unix))]
 mod private_dir_chain_umask_tests {
-    use super::{create_private_dir_chain, ensure_private_dir, test_scratch_root};
+    use super::{ensure_private_dir, test_scratch_root};
+    use kettle_state::create_private_dirs;
     use std::os::unix::fs::PermissionsExt as _;
     use std::path::{Path, PathBuf};
 
@@ -281,8 +234,11 @@ mod private_dir_chain_umask_tests {
     }
 
     fn scratch(tag: &str) -> PathBuf {
+        // Deliberately NOT named `kettle-…`: the scratch root stands in for a
+        // conventional root, and a name the helper claims would make the test
+        // assert against its own fixture.
         let root = test_scratch_root().join(format!(
-            "kettle-ctl-umask-{tag}-{}-{:?}",
+            "ctl-umask-scratch-{tag}-{}-{:?}",
             std::process::id(),
             std::thread::current().id()
         ));
@@ -320,7 +276,7 @@ mod private_dir_chain_umask_tests {
                 let owned = root.join("kettle");
                 let leaf = owned.join("ctl");
 
-                create_private_dir_chain(&leaf).expect("create the private chain");
+                create_private_dirs(&leaf).expect("create the private chain");
 
                 // The regression: this was 0775, and because kettle-state's
                 // verifier walks ancestors, every private path under it failed.
@@ -357,6 +313,179 @@ mod private_dir_chain_umask_tests {
                     0o700,
                     "an installation that already ran must be repaired, not left broken"
                 );
+                let _ = std::fs::remove_dir_all(&root);
+            },
+        );
+    }
+
+    #[test]
+    fn a_pre_existing_nested_chain_is_repaired_at_every_level() {
+        in_child(
+            "private_dir_chain_umask_tests::\
+             a_pre_existing_nested_chain_is_repaired_at_every_level",
+            || {
+                let root = scratch("nested-repair");
+                let outer = root.join("kettle-1000");
+                let middle = outer.join("state");
+                let inner = middle.join("kettle");
+                let leaf = inner.join("ctl");
+                // Exactly what the OLD code left on a no-HOME machine.
+                std::fs::create_dir_all(&leaf).expect("pre-existing chain");
+                for path in [&outer, &middle, &inner, &leaf] {
+                    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o775))
+                        .expect("pre-existing mode");
+                }
+
+                create_private_dirs(&leaf).expect("repair the nested chain");
+
+                for path in [&outer, &middle, &inner, &leaf] {
+                    assert_eq!(
+                        mode_of(path),
+                        0o700,
+                        "{} was left group-writable by the repair",
+                        path.display()
+                    );
+                }
+                let _ = std::fs::remove_dir_all(&root);
+            },
+        );
+    }
+
+    #[test]
+    fn a_kettle_named_target_repairs_itself_not_just_its_ancestors() {
+        in_child(
+            "private_dir_chain_umask_tests::\
+             a_kettle_named_target_repairs_itself_not_just_its_ancestors",
+            || {
+                let root = scratch("self-repair");
+                // `~/.config/kettle` is passed as the TARGET by the config
+                // write-back and the update-check cache, not as a parent.
+                let owned = root.join("kettle");
+                std::fs::create_dir_all(&owned).expect("pre-existing directory");
+                std::fs::set_permissions(&owned, std::fs::Permissions::from_mode(0o775))
+                    .expect("pre-existing mode");
+
+                create_private_dirs(&owned).expect("repair the target itself");
+
+                assert_eq!(
+                    mode_of(&owned),
+                    0o700,
+                    "a kettle-named target must repair itself, not only ancestors"
+                );
+                let _ = std::fs::remove_dir_all(&root);
+            },
+        );
+    }
+
+    /// A dotfile manager can make `~/.config/kettle` a symlink into its own
+    /// repository. `O_NOFOLLOW` protects the FINAL component: a link there is
+    /// skipped and left to the ownership checks at the call site, rather than
+    /// having its target chmodded the way path-based `set_permissions` would.
+    ///
+    /// An ANCESTOR link is different, and the test says so rather than leaving
+    /// the stronger-sounding claim standing: it resolves the way it does for
+    /// every other path, so the real directory behind it is repaired. For a
+    /// dotfile-managed tree that is the wanted outcome — the directory kettle
+    /// actually uses gets secured — but it is not "never through a symlink".
+    #[test]
+    fn symlink_repair_skips_the_final_component_and_resolves_ancestors() {
+        in_child(
+            "private_dir_chain_umask_tests::\
+             symlink_repair_skips_the_final_component_and_resolves_ancestors",
+            || {
+                let root = scratch("symlink");
+                let real = root.join("elsewhere");
+                std::fs::create_dir_all(&real).expect("link target");
+                std::fs::set_permissions(&real, std::fs::Permissions::from_mode(0o775))
+                    .expect("target mode");
+                let link = root.join("kettle");
+                std::os::unix::fs::symlink(&real, &link).expect("symlink");
+
+                // Not `let _`: a test that ignores the result also passes when
+                // the helper simply fails, which proves nothing about symlinks.
+                create_private_dirs(&link).expect("a symlinked target is skipped, not an error");
+
+                assert_eq!(
+                    mode_of(&real),
+                    0o775,
+                    "the repair followed a symlink and chmodded its target"
+                );
+                assert!(
+                    std::fs::symlink_metadata(&link)
+                        .expect("the link survives")
+                        .file_type()
+                        .is_symlink(),
+                    "the repair replaced the symlink instead of leaving it alone"
+                );
+
+                // The same, one level up: `<root>/kettle` a real directory but
+                // its parent a link. The walk repairs from the outermost
+                // kettle-named component down, so an intermediate link is on
+                // that path too.
+                let inner_real = root.join("inner-real");
+                std::fs::create_dir_all(inner_real.join("kettle")).expect("inner tree");
+                std::fs::set_permissions(
+                    inner_real.join("kettle"),
+                    std::fs::Permissions::from_mode(0o775),
+                )
+                .expect("inner mode");
+                let inner_link = root.join("inner-link");
+                std::os::unix::fs::symlink(&inner_real, &inner_link).expect("inner symlink");
+                create_private_dirs(&inner_link.join("kettle").join("ctl"))
+                    .expect("an intermediate link resolves like any path");
+                // O_NOFOLLOW protects the FINAL component only. An ancestor
+                // link resolves the way it does for every other path, so the
+                // real directory behind it IS repaired — which is the right
+                // outcome for a dotfile-managed tree, but not what "never
+                // through a symlink" would suggest, so assert it rather than
+                // leave the weaker claim standing.
+                assert_eq!(
+                    mode_of(&inner_real.join("kettle")),
+                    0o700,
+                    "the real directory behind an ancestor link should be repaired"
+                );
+                assert!(
+                    std::fs::symlink_metadata(&inner_link)
+                        .expect("the inner link survives")
+                        .file_type()
+                        .is_symlink(),
+                    "an intermediate symlink was replaced"
+                );
+                let _ = std::fs::remove_file(&link);
+                let _ = std::fs::remove_dir_all(&root);
+            },
+        );
+    }
+
+    /// The no-`HOME` fallback nests two kettle-named directories:
+    /// `discovery::registry_dir_from` ends at `<tmp>/kettle-<uid>/state/kettle/ctl`
+    /// when `XDG_RUNTIME_DIR`, `XDG_STATE_HOME` and `HOME` are all unset. Fixing
+    /// only the immediate parent leaves the OUTER one at the umask's mercy, and
+    /// the verifier walks every ancestor — so that path would still be refused,
+    /// with a message pointing at a directory the fix had already handled.
+    #[test]
+    fn every_kettle_named_ancestor_is_private_not_just_the_innermost() {
+        in_child(
+            "private_dir_chain_umask_tests::\
+             every_kettle_named_ancestor_is_private_not_just_the_innermost",
+            || {
+                let root = scratch("nested");
+                let outer = root.join("kettle-1000");
+                let middle = outer.join("state");
+                let inner = middle.join("kettle");
+                let leaf = inner.join("ctl");
+
+                create_private_dirs(&leaf).expect("create the nested private chain");
+
+                for path in [&outer, &middle, &inner, &leaf] {
+                    assert_eq!(
+                        mode_of(path),
+                        0o700,
+                        "{} must not be left group-writable",
+                        path.display()
+                    );
+                }
+                assert_eq!(mode_of(&root), 0o755, "the conventional root is untouched");
                 let _ = std::fs::remove_dir_all(&root);
             },
         );

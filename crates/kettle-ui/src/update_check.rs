@@ -40,7 +40,7 @@ fn try_acquire_check_lock() -> std::io::Result<CheckLockAttempt> {
     let Some(parent) = cache.parent() else {
         return Ok(CheckLockAttempt::Acquired(None));
     };
-    std::fs::create_dir_all(parent)?;
+    kettle_state::create_private_dirs(parent)?;
     try_acquire_file_lock(&parent.join("update-check.lock"))
 }
 
@@ -95,7 +95,7 @@ fn load_cache() -> Option<UpdateCache> {
 fn save_cache(cache: &UpdateCache) {
     let Some(path) = cache_path() else { return };
     if let Some(parent) = path.parent()
-        && std::fs::create_dir_all(parent).is_err()
+        && kettle_state::create_private_dirs(parent).is_err()
     {
         return;
     }

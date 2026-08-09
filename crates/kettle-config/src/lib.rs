@@ -2274,7 +2274,7 @@ impl ConfigEdit {
                 requested_path.display()
             ))
         })?;
-        std::fs::create_dir_all(parent)?;
+        kettle_state::create_private_dirs(parent)?;
 
         // Editing a symlink updates its resolved regular-file target instead
         // of replacing the link itself. This preserves dotfile-manager setups.

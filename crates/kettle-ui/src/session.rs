@@ -349,7 +349,7 @@ impl Session {
             return;
         };
         if let Some(parent) = p.parent() {
-            let _ = std::fs::create_dir_all(parent);
+            let _ = kettle_state::create_private_dirs(parent);
         }
         if let Err(e) = save_to_path(self, &p) {
             log::warn!("could not save layout {name:?} to {}: {e}", p.display());
@@ -568,7 +568,7 @@ pub(crate) fn clamp_geometry_to_monitors(
 /// also the cheap one.
 pub(crate) fn save_to_path(s: &Session, p: &std::path::Path) -> std::io::Result<()> {
     if let Some(dir) = p.parent() {
-        std::fs::create_dir_all(dir)?;
+        kettle_state::create_private_dirs(dir)?;
     }
     let text = serde_json::to_string_pretty(s)
         .map_err(|e| std::io::Error::other(format!("serialize session: {e}")))?;

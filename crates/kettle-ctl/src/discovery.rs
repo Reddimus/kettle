@@ -289,7 +289,7 @@ pub fn register(dir: &std::path::Path, entry: &RegistryEntry) -> std::io::Result
         // umask make this whole subtree unusable. Then re-assert 0700 on the
         // leaf in case it already existed with looser perms.
         use std::os::unix::fs::{MetadataExt as _, PermissionsExt};
-        crate::create_private_dir_chain(dir)?;
+        kettle_state::create_private_dirs(dir)?;
         let metadata = std::fs::symlink_metadata(dir)?;
         if !metadata.file_type().is_dir() || metadata.uid() != unsafe { libc::geteuid() } {
             return Err(std::io::Error::new(
