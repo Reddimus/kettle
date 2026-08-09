@@ -175,6 +175,15 @@ tracked here so they are not lost.
 
 ## Deferred from the 2026-08-09 umask work
 
+- ~~**The config-reload watcher keeps a handle it may never have registered.**~~
+  Fixed in the next release. The decision it was waiting on: a config directory
+  that cannot be watched is not fatal — everything else works and reload is a
+  convenience — so it warns and continues, but does not pretend the watcher
+  exists. Both results are now checked, matching the remote-command block below
+  it, and a source guard pins that neither `watch(` call is discarded.
+
+  Original entry:
+
 - **The config-reload watcher keeps a handle it may never have registered.**
   `app.rs` ignores the result of both the directory create and
   `w.watch(&dir, …)`, then stores `Some(w)` regardless. If the watch call fails,

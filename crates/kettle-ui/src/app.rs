@@ -5505,9 +5505,25 @@ impl App {
                 // refusing its own parent on a 002 umask, reporting `mode 775`
                 // even in a run where a later write-back would have repaired
                 // it — the repair simply came after this check.
-                let _ = kettle_state::create_private_dirs(&dir);
-                let _ = w.watch(&dir, notify::RecursiveMode::NonRecursive);
-                watcher = Some(w);
+                // Both results are checked. Storing the handle regardless left
+                // kettle holding a watcher that watches nothing whenever
+                // registration failed — live config reload silently off for the
+                // session, with no way for the user to tell it apart from a
+                // config that simply was not being edited. The remote-command
+                // block below already fails closed and logs; this is the same
+                // shape.
+                //
+                // A config directory that cannot be watched is not fatal:
+                // everything else works, and reload is a convenience. So warn
+                // and continue rather than refusing to start — but do not
+                // pretend the watcher exists.
+                if let Err(error) = kettle_state::create_private_dirs(&dir) {
+                    log::warn!("config live-reload disabled for {}: {error}", dir.display());
+                } else if let Err(error) = w.watch(&dir, notify::RecursiveMode::NonRecursive) {
+                    log::warn!("config live-reload disabled for {}: {error}", dir.display());
+                } else {
+                    watcher = Some(w);
+                }
             }
         }
 
@@ -25183,6 +25199,28 @@ impl Drop for App {
 #[cfg(test)]
 mod modal_discipline_guard {
     use super::{production_source, session_write_target};
+
+    /// A watcher handle is only worth keeping if it is actually watching.
+    ///
+    /// Both watcher setups used to discard the result of `watch()` and store
+    /// the handle anyway, so a failed registration left live reload silently
+    /// off — indistinguishable, from the user's side, from a config nobody was
+    /// editing. Pin that neither `watch(` call is discarded with `let _ =`.
+    #[test]
+    fn a_watcher_is_stored_only_when_its_registration_succeeded() {
+        let src = production_source();
+        assert!(
+            !src.contains("let _ = w.watch("),
+            "a watcher whose registration failed must not be stored; the \
+             handle would watch nothing and report nothing"
+        );
+        // And the failure has to be visible: a silent `if let Ok` would satisfy
+        // the check above while still telling the user nothing.
+        assert!(
+            src.contains("config live-reload disabled for"),
+            "a failed config watcher must say so"
+        );
+    }
     #[test]
     fn confirm_dialog_is_tracked_as_a_modal() {
         let src = production_source();
