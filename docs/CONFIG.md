@@ -540,10 +540,14 @@ the clipboard, `Esc` exits. See `man kettle` for the full keymap.
 **Misc**: `reset` (RIS — full terminal reset including engine state),
 `reload_config`, `detach_tab` (Unix-only cross-window tab tear-off).
 
-> This list covers the common actions. For the **complete, always-current**
-> set of bindable action names (and every accepted alias), run
-> `kettle --list-actions` — it prints straight from the parser, so it can't
-> drift from the build.
+> This list covers the common actions. For the **complete** set of bindable
+> action names, including every alias, run `kettle --list-actions`. It prints a
+> table that lives beside the parser rather than the parser itself, so a test
+> in CI derives every name the parser accepts and fails if the table omits one.
+> Each alias appears once, in its underscore spelling; hyphens and underscores
+> are interchangeable everywhere (`bell_off` and `bell-off` both parse). What
+> cannot be enumerated — the parametric `goto_tab:N`, `switch_to_tab_N` and
+> `new_tab_shell_N`, and the `unbind` sentinel — is printed as trailing notes.
 
 The action `unbind` (also `none`, `null`, `false`, or an empty string) removes
 the default binding for that trigger — useful when a default like

@@ -766,13 +766,45 @@ pub fn action_names() -> Vec<&'static str> {
         "show-about",
         // These two bindable actions had `from_name` aliases + tests
         // but were omitted from the discovery list, so `kettle --list-actions`
-        // silently hid them. The reverse-coverage drift guard below now catches
-        // any future omission.
+        // silently hid them.
         "insert_name",
         "insert_pane_name",
         "insert_term_name",
         "open_cwd",
         "open_cwd_in_file_manager",
+        // Twenty-seven more aliases that `from_name` has always accepted while
+        // this list hid them, found once the reverse-coverage guard below
+        // stopped pinning two hand-written names and started deriving the set
+        // from `from_name` itself. Each shares an arm with a canonical name
+        // that was already listed, so users who learned the short spelling from
+        // Terminator saw `--list-actions` deny an action that works.
+        "bell_attention",
+        "bell_both",
+        "bell_off",
+        "bell_visual",
+        "copy_on_select_toggle",
+        "cursor_blink_toggle",
+        "layout_picker",
+        "line_down",
+        "line_up",
+        "mouse_hide_toggle",
+        "move_pane_down",
+        "move_pane_left",
+        "move_pane_right",
+        "move_pane_up",
+        "open_config",
+        "open_help",
+        "page_down",
+        "page_up",
+        "preferences_keybindings",
+        "read_only",
+        "scrollbar_always",
+        "scrollbar_auto",
+        "scrollbar_never",
+        "select_to_first_line",
+        "select_to_last_line",
+        "toggle_pane_read_only",
+        "toggle_scaled_zoom",
     ];
     v.sort_unstable();
     v
@@ -2108,23 +2140,61 @@ mod tests {
                 "action_names returned {n:?} but from_name rejects it"
             );
         }
-        // Reverse guard: these two bindable actions were accepted by
-        // `from_name` (each with a round-trip test) yet missing from
-        // `action_names()`, so `kettle --list-actions` silently hid them. Pin
-        // them so the omission can't recur. (The general reverse-coverage check —
-        // every Action variant has a listed spelling — would need an Action
-        // iterator/strum; this targeted guard covers the gap that actually bit.)
-        for must in ["insert_pane_name", "open_cwd_in_file_manager"] {
-            assert!(
-                names.contains(&must),
-                "{must:?} is bindable (from_name accepts it) but absent from \
-                 action_names() — `--list-actions` would hide it"
-            );
-            assert!(Action::from_name(must).is_some());
+        // Reverse guard. This used to pin two hand-written names, which is a
+        // guard that cannot enforce what `docs/CONFIG.md` promises: that
+        // `--list-actions` prints *every* accepted alias. Deriving the set from
+        // `from_name`'s own arms is what makes that promise checkable — when it
+        // first ran it found twenty-seven aliases this list had been hiding.
+        let listed: std::collections::BTreeSet<String> =
+            names.iter().map(|n| n.replace('-', "_")).collect();
+        let body = from_name_body();
+        let mut accepted: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+        let mut hidden: Vec<String> = Vec::new();
+        for lit in body.split('"').skip(1).step_by(2) {
+            // Parametric prefixes (`goto_tab:`), sentinels (`unbind`) and
+            // non-name literals all fail `from_name`, which is the filter.
+            if Action::from_name(lit).is_none() {
+                continue;
+            }
+            let normalized = lit.replace('-', "_");
+            accepted.insert(normalized.clone());
+            if !listed.contains(&normalized) && !hidden.contains(&normalized) {
+                hidden.push(normalized);
+            }
         }
-        // Also pin `goto_tab:N` (the only parametric form). It isn't
-        // in `action_names` because N is unbounded, but it must parse.
+        // Count DISTINCT names, not literal occurrences. Most arms carry both
+        // the underscore and hyphen spelling, so an occurrence count runs ~40%
+        // ahead of the real set and a floor set against it would still be met
+        // after the extraction silently lost a third of the table. The floor
+        // sits just under the current distinct count for the same reason.
+        assert!(
+            accepted.len() >= 210,
+            "only {} distinct accepted names found in from_name — the body \
+             extraction is wrong, so this guard would pass vacuously",
+            accepted.len()
+        );
+        // Truncation check. `from_name_body` matches braces without lexing, so
+        // a future `// }}` comment could close the body early; the count floor
+        // would still pass because the lost arms are at the end. Pin a name
+        // from the last arm instead, which no early close can leave in view.
+        assert!(
+            accepted.contains("toggle_pane_read_only"),
+            "the extracted from_name body is missing its final arms, so every \
+             alias past the truncation point is invisible to this guard"
+        );
+        assert!(
+            hidden.is_empty(),
+            "from_name accepts {} name(s) that action_names() omits, so \
+             `--list-actions` hides them: {hidden:?}",
+            hidden.len()
+        );
+        // The three parametric forms cannot be listed (N is unbounded), so
+        // `--list-actions` prints each as a trailing note instead. Pin all
+        // three: `switch_to_tab_N` parsed but appeared in no output at all,
+        // which is what made the documented "complete set" claim false.
         assert!(Action::from_name("goto_tab:1").is_some());
+        assert!(Action::from_name("switch_to_tab_1").is_some());
+        assert!(Action::from_name("new_tab_shell_1").is_some());
         // And `unbind` is intentionally NOT a listed action — it's a
         // sentinel for `apply_keybind`, not a real Action variant.
         assert!(!names.contains(&"unbind"));
@@ -2407,13 +2477,45 @@ mod tests {
     /// so the section imported as nothing at all. The reverse fold in
     /// `from_name` closes it; this walks the table to prove there is no name
     /// that works in one spelling only, in either direction.
+    /// `from_name`'s body, delimited by brace matching rather than by the next
+    /// `pub fn` — the loose bound runs past the end of the method and sweeps in
+    /// literals from the key-name parser (`ctrl`, `home`, `up`), which the
+    /// reverse-coverage guard would then demand `--list-actions` publish as
+    /// actions. Asserted below rather than assumed.
+    fn from_name_body() -> String {
+        let src = production_source();
+        let start = src.find("    pub fn from_name(").expect("from_name");
+        let open = src[start..].find('{').expect("from_name body") + start;
+        let mut depth = 0usize;
+        let mut end = None;
+        for (offset, ch) in src[open..].char_indices() {
+            match ch {
+                '{' => depth += 1,
+                '}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        end = Some(open + offset + ch.len_utf8());
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        let body = src[start..end.expect("from_name body is brace-balanced")].to_owned();
+        // The key-name parser lives outside this method; if either literal is
+        // in the slice the bound ran past `from_name` and every count below is
+        // measuring the wrong text.
+        assert!(
+            !body.contains("\"ctrl\"") && !body.contains("\"pageup\""),
+            "from_name body extraction over-ran into the key-name parser"
+        );
+        body
+    }
+
     #[test]
     fn every_action_name_resolves_in_both_spellings() {
-        let src = production_source();
-        let start = src.find("pub fn from_name(").expect("from_name");
-        let body = &src[start..];
-        let end = body.find("\n    pub fn ").unwrap_or(body.len());
-        let body = &body[..end];
+        let body = from_name_body();
+        let body = body.as_str();
 
         let mut checked = 0usize;
         for lit in body.split('"').skip(1).step_by(2) {

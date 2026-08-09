@@ -549,9 +549,10 @@ stealing (or explicitly avoiding) independent of any single feature pick:
   kettle now uses `scrollback-bytes` for the same deterministic worst-case
   memory-bound goal and keeps `scrollback` as the line-count cap.
 - **Config-as-docs** — Ghostty's entire config reference site is generated
-  from `Config.zig` doc comments. kettle already lives this philosophy for
-  actions (`--list-actions` prints straight from the parser); extending it
-  to config keys would stop CONFIG.md drift (~120 hand-maintained rows).
+  from `Config.zig` doc comments. kettle approximates this for actions
+  (`--list-actions` prints a table beside the parser, with a CI test deriving
+  every name the parser accepts so the table cannot omit one); extending the
+  idea to config keys would stop CONFIG.md drift (~120 hand-maintained rows).
 - **Conditional config / theme-as-config** — theme files are just config
   files, and a conditional-config engine re-resolves the conditional key set
   when the system light/dark state flips. Kettle now handles the direct

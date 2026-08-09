@@ -1303,12 +1303,19 @@ fn main() -> anyhow::Result<()> {
         // currently bound; this one shows what `keybind = trigger=…`
         // values are valid. Without this, users writing a new bind had
         // to grep the source or hit `--check-config` to confirm a name
-        // they guessed. `goto_tab:N` is parametric, so it gets a
-        // one-line tail blurb instead of an enumeration.
+        // they guessed. The parametric forms cannot be enumerated, so
+        // each gets a one-line tail blurb instead. Every one of them
+        // needs its own line: `switch_to_tab_N` was accepted by the
+        // parser and named nowhere in this output, which made the
+        // documented "complete set" claim false.
         for name in kettle_config::keybinds::action_names() {
             println!("{name}");
         }
         println!("goto_tab:N    (parametric; N is 1-based, 1..=255)");
+        println!(
+            "switch_to_tab_N    (parametric; Terminator's spelling of \
+         goto_tab:N, N is 1-based)"
+        );
         println!(
             "new_tab_shell_N    (parametric; N is 1-based — opens the Nth new-tab \
          dropdown entry, Ctrl+Shift+1..9 by default)"
