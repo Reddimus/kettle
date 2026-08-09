@@ -5431,27 +5431,19 @@ impl Terminal {
         out
     }
 
-    pub fn placeholder_tiles(&self) -> Vec<Placement> {
-        // Read the grid FIRST, and never while holding `virtuals`. The PTY
-        // reader holds `term` and then takes `virtuals` to replay a deferred
-        // kitty virtual chunk, so holding `virtuals` across a `term` acquisition
-        // here is the opposite order and deadlocks: a child that emits
-        // `CSI ? 2026 h`, a deferred virtual placement, placeholder cells and
-        // `CSI ? 2026 l` while the UI paints parks both threads forever and
-        // freezes the pane. `relative_tiles` below already keeps one order;
-        // this is the same discipline, and the two locks now never overlap.
-        let cells = self.placeholder_cells();
-        if cells.is_empty() {
-            return Vec::new();
-        }
-
-        let Ok(virtuals) = self.virtuals.lock() else {
-            return Vec::new();
-        };
+    /// Owned copy of the virtual placements plus, per image id, the smallest
+    /// placement id registered for it. `None` when there are none.
+    ///
+    /// The owned return type is the point: it makes the borrow checker — not a
+    /// comment or a source guard — prove the `virtuals` lock is released before
+    /// the caller touches `term`. A `MutexGuard` cannot escape through this
+    /// signature, so no edit inside can leave one live for `placeholder_tiles`.
+    #[allow(clippy::type_complexity)]
+    fn virtuals_snapshot(&self) -> Option<(HashMap<(u32, u32), VirtualEntry>, HashMap<u32, u32>)> {
+        let virtuals = self.virtuals.lock().ok()?;
         if virtuals.is_empty() {
-            return Vec::new();
+            return None;
         }
-
         // A zero/omitted underline placement id selects any virtual placement
         // for the image; the smallest id is chosen so rendering and tests are
         // deterministic. Resolving that per cell rescanned every virtual, which
@@ -5463,6 +5455,36 @@ impl Terminal {
                 .entry(*image_id)
                 .and_modify(|current| *current = (*current).min(*placement_id))
                 .or_insert(*placement_id);
+        }
+        // Bounded by the protocol's placement cap, and `ImageData` is
+        // `Arc`-backed, so this clone is far cheaper than the grid walk it lets
+        // the empty case skip.
+        Some((virtuals.clone(), smallest_for_image))
+    }
+
+    pub fn placeholder_tiles(&self) -> Vec<Placement> {
+        // Snapshot the virtual placements, then read the grid — the single
+        // lock-acquisition order that `relative_tiles` below already keeps.
+        // `virtuals` must never be held across a `term` acquisition: the PTY
+        // reader takes `term` and then `virtuals` to replay a deferred kitty
+        // virtual chunk, so the opposite order deadlocks, and a child emitting
+        // `CSI ? 2026 h`, a deferred virtual placement, placeholder cells and
+        // `CSI ? 2026 l` while the UI paints would park both threads forever
+        // and freeze the pane. `virtuals_snapshot` returns owned maps, so the
+        // guard provably cannot reach the `placeholder_cells` call below.
+        //
+        // Snapshotting first is also what makes the common case free. Every
+        // visible pane calls this every frame, and almost none of them have a
+        // kitty virtual placement; `placeholder_cells` walks the whole visible
+        // grid under the `term` lock, so testing `virtuals` afterwards paid for
+        // a full scan of every pane on every frame to reach an empty map.
+        let Some((virtuals, smallest_for_image)) = self.virtuals_snapshot() else {
+            return Vec::new();
+        };
+
+        let cells = self.placeholder_cells();
+        if cells.is_empty() {
+            return Vec::new();
         }
 
         let mut out = Vec::new();
@@ -7476,19 +7498,41 @@ mod cwd_reporting_tests {
 }
 
 /// The PTY reader holds `term` and then takes `virtuals` to replay a deferred
-/// kitty virtual chunk. Any render path that takes them in the opposite order
-/// is an ABBA deadlock: a child emitting `CSI ? 2026 h`, a deferred virtual
-/// placement, placeholder cells and `CSI ? 2026 l` while the UI paints parks
-/// both threads forever and freezes the pane. `placeholder_tiles` used to hold
-/// `virtuals` across a `placeholder_cells` call, which takes `term`.
+/// kitty virtual chunk. Any render path that holds `virtuals` while acquiring
+/// `term` is an ABBA deadlock: a child emitting `CSI ? 2026 h`, a deferred
+/// virtual placement, placeholder cells and `CSI ? 2026 l` while the UI paints
+/// parks both threads forever and freezes the pane. `placeholder_tiles` used to
+/// hold `virtuals` across a `placeholder_cells` call, which takes `term`.
 ///
-/// A behavioural test cannot force that interleaving deterministically, so pin
-/// the shape instead: the grid read must complete before `virtuals` is locked,
-/// and the two must never be held together.
+/// A behavioural test cannot force that interleaving deterministically, and no
+/// source-text guard can prove a `MutexGuard` was dropped — brace depth, `};`
+/// searches and call ordering all pass on a body that moves the guard out of
+/// its block and keeps it live. So the release is enforced by the type system
+/// instead: `placeholder_tiles` gets its data from `virtuals_snapshot`, whose
+/// owned return type no guard can escape through. That much is a compile error
+/// to break, not a review note.
+///
+/// **What the test below does and does not cover**, because a guard that
+/// overstates its reach is how this function acquired the bug twice. It pins
+/// four things: `placeholder_tiles` contains no `virtuals.lock()` of its own;
+/// it consults the snapshot before the grid read; `virtuals_snapshot` is the
+/// thing that locks; and that helper's signature still returns owned maps.
+///
+/// It is text matching. It cannot see a lock taken through indirection that
+/// never writes `virtuals.lock()` — a macro expanding to `$mutex.lock()`, a
+/// `let mutex = self.virtuals.as_ref()` rebind, or a helper taking
+/// `&Virtuals` and handing back a guard. Nor can it be a count of lock sites:
+/// the PTY reader locks `virtuals` in six other places and is right to, since
+/// it already holds `term` and so takes them in the safe order.
+///
+/// What actually rules out the deadlock in the code as written is the owned
+/// return type — a `MutexGuard` cannot escape through it, and the compiler
+/// enforces that. The test keeps `placeholder_tiles` pointed at that door;
+/// a new lock reached by indirection is review's job, not this file's.
 #[cfg(test)]
 mod placeholder_lock_order_tests {
     #[test]
-    fn placeholder_tiles_reads_the_grid_before_locking_virtuals() {
+    fn placeholder_tiles_reaches_virtuals_only_through_the_owned_snapshot() {
         // Normalized, like every other source guard in this file: the split
         // patterns below embed `\n`, so a CRLF checkout would silently find
         // nothing and fail on an unrelated-looking `expect`.
@@ -7499,17 +7543,66 @@ mod placeholder_lock_order_tests {
             .and_then(|rest| rest.split("\n    pub fn ").next())
             .expect("placeholder_tiles body");
 
+        assert!(
+            !body.contains("virtuals.lock()"),
+            "placeholder_tiles must not lock `virtuals` itself; taking the \
+             guard here lets a later edit hold it across `placeholder_cells`, \
+             which is the ABBA deadlock the reader's `term` -> `virtuals` \
+             order creates"
+        );
+
+        // `virtuals_snapshot` must be the thing that locks — otherwise the
+        // assertion above passes on a `placeholder_tiles` that gets its guard
+        // from somewhere else and the owned signature guards nothing.
+        //
+        // Deliberately not a count over the module: the PTY reader locks
+        // `virtuals` in six other places and is right to, because it already
+        // holds `term` and so takes them in the safe order. A "exactly one lock
+        // site" assertion reads well and is simply false about this file.
+        let snapshot_body = src
+            .split("fn virtuals_snapshot(")
+            .nth(1)
+            .and_then(|rest| rest.split("\n    fn ").next())
+            .and_then(|rest| rest.split("\n    pub fn ").next())
+            .expect("virtuals_snapshot body");
+        assert!(
+            snapshot_body.contains("virtuals.lock()"),
+            "virtuals_snapshot must be the lock site `placeholder_tiles` goes \
+             through; if it stops locking, the owned signature below is \
+             guarding nothing"
+        );
+
+        let snapshot_at = body
+            .find("self.virtuals_snapshot()")
+            .expect("placeholder_tiles must consult the virtual map");
         let cells_at = body
             .find("self.placeholder_cells()")
             .expect("placeholder_tiles must read the grid");
-        let virtuals_at = body
-            .find("self.virtuals.lock()")
-            .expect("placeholder_tiles must consult the virtual map");
-
         assert!(
-            cells_at < virtuals_at,
-            "placeholder_tiles must finish its `term` read before locking \
-             `virtuals`; the reader takes those in the opposite order"
+            snapshot_at < cells_at,
+            "placeholder_tiles must consult `virtuals` before walking the grid; \
+             otherwise every pane pays a full visible-cell scan per frame to \
+             discover it has no virtual placements"
+        );
+
+        // The owned signature is what makes the release a compile error rather
+        // than a review note. Pin it: widening the return type to borrow from
+        // the guard would silently restore the deadlock.
+        // All whitespace removed, and the trailing comma rustfmt only emits in
+        // the wrapped form dropped, so the signature may be rewrapped freely.
+        let signature = src
+            .split("fn virtuals_snapshot(")
+            .nth(1)
+            .and_then(|rest| rest.split(" {\n").next())
+            .expect("virtuals_snapshot signature")
+            .split_whitespace()
+            .collect::<String>()
+            .replace(",)", ")");
+        assert_eq!(
+            signature, "&self)->Option<(HashMap<(u32,u32),VirtualEntry>,HashMap<u32,u32>)>",
+            "virtuals_snapshot must keep returning owned maps; a borrowed \
+             return type would let the `virtuals` guard escape to a caller \
+             that then locks `term`"
         );
     }
 
