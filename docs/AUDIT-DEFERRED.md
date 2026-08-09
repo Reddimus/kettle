@@ -83,6 +83,21 @@ tracked here so they are not lost.
   stored window. The UI consumes only completed snapshots; it never walks the
   OS process table. Linux retains no cwd string per process, reads cwd only for
   the selected foreground pid, and applies byte/node/task/argv bounds.
+- ~~**`placeholder_tiles` scanned the grid before checking for any virtuals**~~
+  Fixed in the next release. `placeholder_tiles` ran `placeholder_cells` — a
+  walk of every visible cell under the `term` lock — and only then locked
+  `virtuals` to discover the map was empty, which it is in every pane that has
+  never received a kitty virtual placement. It now snapshots `virtuals` first,
+  drops that guard, and reads the grid only when there is something to resolve.
+  Measured on a 300x80 grid of text, `opt-level = 1`, Apple Silicon:
+  **127 µs per call**, paid per visible pane per frame, and paid while holding
+  the mutex the PTY reader blocks on. The snapshot-then-read order is
+  `relative_tiles`' existing discipline, so the ABBA hazard is unchanged. The
+  snapshot lives in `virtuals_snapshot`, whose owned return type makes the lock
+  release a compile-time property rather than a review note: the previous source
+  guard asserted text order and passed on a flattened body that held the guard
+  across the grid read, and a brace-depth rewrite of it still passed on a body
+  that moved the guard out of its block.
 - **PTY I/O worker consolidation:** each pane currently uses a parser thread
   plus a blocking pump thread so DEC 2026 deadlines remain independent of a
   blocked native read. The channel is bounded and buffers are recycled, so this
