@@ -118,9 +118,12 @@ creates the throttle state and performs no network request; the first automatic
 install shows a one-time notification explaining how to opt out.
 
 ```ini
-update-policy = auto      # default: install in the background, use after next restart
-update-policy = notify    # only show a passive new-version banner
-update-policy = off       # no automatic network request
+# default: install in the background, use after next restart
+update-policy = auto
+# only show a passive new-version banner
+update-policy = notify
+# no automatic network request
+update-policy = off
 
 # How often the background check may contact the feed, in hours (default 24 =
 # daily; floored at 1). `update-policy = off` disables checking regardless.
