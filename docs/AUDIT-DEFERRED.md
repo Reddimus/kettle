@@ -95,39 +95,25 @@ tracked here so they are not lost.
 
 ## Deferred from the 2026-08-07 full-repo audit
 
-- **`handle_action`'s tail resizes unconditionally, so queued actions still
-  double-resize.** PR #168 deferred every `editing_title` transition to a
-  once-per-frame flush in `redraw`, and its commit message claims the child then
-  "sees one resize to the final geometry, or none at all". That is true for the
-  paths #168 changed and **false** for actions dispatched through
-  `handle_action`, whose tail (`crates/kettle-ui/src/app.rs`, after
-  `note_focus_change`) calls `self.resize_all(ws)` after *every* action,
-  unconditionally.
+- **~~`handle_action`'s tail resizes unconditionally~~ — fixed.** Recorded when
+  PR #168 shipped, because #168's commit message claimed the child "sees one
+  resize to the final geometry, or none at all" and that was true only for the
+  paths it changed. `handle_action`'s tail called `resize_all` after *every*
+  action, so a Lua hook queueing `EditWindowTitle` then `CommandPalette` before
+  a redraw still produced a shrink and a grow for a net-zero frame.
 
-  Trigger: a Lua hook or automation queues two geometry-affecting actions —
-  `EditWindowTitle` then `CommandPalette`, say — and the loop processes both
-  before any redraw. The tail resizes after each, producing a shrink and a grow
-  for a net-zero frame; #168's dirty-flag flush then finds nothing to do. The
-  user sees nothing wrong, but a PTY child gets two `SIGWINCH`s and vim, tmux or
-  htop redraw twice.
+  Deferred at the time on a stated risk: that `save_session`, which runs
+  immediately after the tail, might depend on the resize having happened. That
+  risk turned out to be unfounded when it was finally checked — `SGeometry` is
+  the OS window rect from winit and `STab` is the split tree; neither records
+  the PTY grid. The tail now marks the frame dirty instead, and a windowless
+  path still resizes eagerly because a deferred resize that never flushes is
+  worse than an eager one that fires twice.
 
-  Not fixed here, deliberately. That tail runs after every action in the
-  application, and it predates #168 — it exists for splits, focus moves and tab
-  changes, not for title edits. Two candidate fixes, neither safe to take
-  unverified at the end of an unrelated change:
-
-  1. Defer the tail like the rest: set `chrome_geometry_dirty` instead of
-     resizing. Needs proof that nothing between the tail and the next frame
-     depends on the resize having already happened — `save_session` runs
-     immediately after it and snapshots window geometry.
-  2. Make the tail conditional on a real net change by comparing the computed
-     layout before and after, rather than relying on the per-PTY dedup in
-     `try_resize_geometry`, which cannot see that an intermediate state will be
-     undone.
-
-  Severity medium: narrow trigger, no visual defect, and no data loss. Recorded
-  rather than left implied, because #168's own message overstates what it
-  achieved.
+  Worth keeping the entry rather than deleting it: the deferral was justified by
+  an assumption nobody had verified, and presented as a measured trade-off. That
+  is a different and less defensible thing than deferring on measured evidence,
+  which is what the other items here rest on.
 
 - **The Linux installer smoke's online leg can fail on a transient network
   blip, and it gates every pull request.** Observed on PR #162, run

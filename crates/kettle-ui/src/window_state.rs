@@ -576,8 +576,14 @@ pub(crate) struct WindowState {
     /// When `Some`, the user is editing a window/tab/pane title via
     /// an inline overlay.
     pub(crate) editing_title: Option<TitleEditState>,
-    /// Set when a modal transition changed the chrome that consumes content
-    /// area, so the PTYs need re-sizing before the next frame.
+    /// Set when something changed the layout the PTYs are sized against, so
+    /// they need re-sizing before the next frame.
+    ///
+    /// Deliberately NOT named for chrome: `handle_action`'s tail marks it after
+    /// every action, not only after a chrome-strip transition. It began life as
+    /// `chrome_geometry_dirty` and was renamed once that stopped being true —
+    /// a flag whose name claims narrower semantics than its use invites exactly
+    /// the wrong assumption at the next call site.
     ///
     /// Deferred rather than resized on the spot because `close_all_modals`
     /// runs immediately BEFORE most modal openers. Resizing there and again in
@@ -587,7 +593,7 @@ pub(crate) struct WindowState {
     /// Coalescing to one flush per frame makes the intermediate state
     /// unobservable no matter what a caller does next, without threading a
     /// "will install another modal" flag through seventeen call sites.
-    pub(crate) chrome_geometry_dirty: bool,
+    pub(crate) pending_resize: bool,
     /// When `Some`, a confirm modal is open. Keyboard input routes
     /// to modal dispatch and the renderer paints the centered modal panel.
     pub(crate) confirm_dialog: Option<ConfirmDialogState>,
@@ -826,7 +832,7 @@ impl WindowState {
             context_menu: None,
             theme_preview: None,
             editing_title: None,
-            chrome_geometry_dirty: false,
+            pending_resize: false,
             confirm_dialog: None,
             window_focused: true,
             window_occluded: false,

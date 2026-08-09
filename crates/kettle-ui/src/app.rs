@@ -10250,8 +10250,8 @@ impl App {
         // geometry change on the floor: the strip had appeared or gone, and
         // nothing ever told the PTYs. Leaving the flag set defers it to the
         // first frame after the renderer is rebuilt.
-        if ws.chrome_geometry_dirty && ws.renderer.is_some() {
-            ws.chrome_geometry_dirty = false;
+        if ws.pending_resize && ws.renderer.is_some() {
+            ws.pending_resize = false;
             self.resize_all(ws);
         }
         // v2.34.0: keep the OS titlebar in step with the active palette.
@@ -10894,7 +10894,7 @@ impl App {
         // is safe: the confirm-open path clears-then-sets in that order.
         ws.confirm_dialog = None;
         if title_edit_was_open {
-            ws.chrome_geometry_dirty = true;
+            ws.pending_resize = true;
         }
     }
 
@@ -11044,7 +11044,7 @@ impl App {
     /// overlay. The scope decides which setter is invoked.
     fn apply_title_edit(&mut self, ws: &mut WindowState) {
         if let Some(state) = ws.editing_title.take() {
-            ws.chrome_geometry_dirty = true;
+            ws.pending_resize = true;
             let value = state.input;
             match state.scope {
                 TitleEditScope::Window => {
@@ -13695,7 +13695,7 @@ impl App {
                     input: current,
                     bulk: GroupBulkScope::Single,
                 });
-                ws.chrome_geometry_dirty = true;
+                ws.pending_resize = true;
                 if let Some(w) = &ws.window {
                     w.request_redraw();
                 }
@@ -13713,7 +13713,7 @@ impl App {
                     input: current,
                     bulk: GroupBulkScope::Single,
                 });
-                ws.chrome_geometry_dirty = true;
+                ws.pending_resize = true;
                 if let Some(w) = &ws.window {
                     w.request_redraw();
                 }
@@ -13730,7 +13730,7 @@ impl App {
                     input: current,
                     bulk: GroupBulkScope::Single,
                 });
-                ws.chrome_geometry_dirty = true;
+                ws.pending_resize = true;
                 if let Some(w) = &ws.window {
                     w.request_redraw();
                 }
@@ -13752,7 +13752,7 @@ impl App {
                     input: current,
                     bulk: GroupBulkScope::Single,
                 });
-                ws.chrome_geometry_dirty = true;
+                ws.pending_resize = true;
                 if let Some(w) = &ws.window {
                     w.request_redraw();
                 }
@@ -13773,7 +13773,7 @@ impl App {
                     input: String::new(),
                     bulk,
                 });
-                ws.chrome_geometry_dirty = true;
+                ws.pending_resize = true;
                 if let Some(w) = &ws.window {
                     w.request_redraw();
                 }
@@ -14191,7 +14191,7 @@ impl App {
         // deferred resize that never runs is worse than an eager one that runs
         // twice.
         if ws.window.is_some() {
-            ws.chrome_geometry_dirty = true;
+            ws.pending_resize = true;
         } else {
             self.resize_all(ws);
         }
@@ -24463,7 +24463,7 @@ impl App {
                             // this modal disappears now, so the content
                             // rectangle changes and the PTYs must follow it.
                             ws.editing_title = None;
-                            ws.chrome_geometry_dirty = true;
+                            ws.pending_resize = true;
                         }
                         Key::Named(NamedKey::Enter) => {
                             self.apply_title_edit(ws);
