@@ -115,6 +115,15 @@ jobs:
         # encoding, Markdown-link, PNG, and SFNT checks.
         if: runner.os == 'Linux'
         run: just tracked-audit
+      - name: Mermaid diagram compilation
+        # Same Linux leg as the other platform-independent documentation
+        # checks. REQUIRED=1 turns the script's local skip into a failure, so a
+        # missing browser on the runner surfaces instead of silently disabling
+        # the gate — the failure mode this whole check exists to prevent.
+        if: runner.os == 'Linux'
+        env:
+          KETTLE_MERMAID_REQUIRED: "1"
+        run: just mermaid-check
       - name: macOS comparator score self-test
         # This fixture is GUI-free, but the guarded scorer is shipped only by
         # the macOS comparator. Keep its required leg with that platform.

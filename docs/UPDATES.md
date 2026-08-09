@@ -139,6 +139,36 @@ downstream distribution can own update policy. Explicit CLI checks still work.
 
 ## Verification and recovery
 
+Every gate below rejects rather than repairs: the update either survives the
+whole chain or does not happen. Nothing writable exists between verification
+and application.
+
+```mermaid
+flowchart TD
+    fetch["fetch kettle-update-manifest.json<br/>+ detached Ed25519 signature"]
+    sig{"signature valid over the<br/>domain-separated payload?"}
+    fresh{"published within 90 days<br/>and not &gt;24h in the future?"}
+    newer{"candidate strictly newer than<br/>running AND installed?"}
+    dl["download, capped at 256 MiB<br/>into one private handle / reserved buffer"]
+    digest{"exact byte length and<br/>SHA-256 from the manifest?"}
+    parse["parse archive in memory<br/>max 128 entries, 512 MiB output<br/>reject traversal, links, dupes, device names"]
+    inner{"inner kettle-package-manifest.json<br/>matches every path, size, SHA-256, mode?"}
+    apply["take the install-prefix lock,<br/>journal, then atomically replace<br/>each destination on its own filesystem"]
+    reject["rejected — nothing is written"]
+
+    fetch --> sig
+    sig -- no --> reject
+    sig -- yes --> fresh
+    fresh -- no --> reject
+    fresh -- yes --> newer
+    newer -- no --> reject
+    newer -- yes --> dl --> digest
+    digest -- no --> reject
+    digest -- yes --> parse --> inner
+    inner -- no --> reject
+    inner -- yes --> apply
+```
+
 Each stable release publishes `kettle-update-manifest.json` and a detached
 Ed25519 signature. Kettle embeds only the dedicated public key. Before parsing
 or using metadata it verifies the signature over a domain-separated payload.
@@ -175,6 +205,30 @@ inner manifest before packaging, then extracts the final downloaded artifact
 and verifies it again with `scripts/package-manifest.py` before signing or
 publication. The macOS `.app` is not installed by Kettle's self-updater and does
 not use this inner manifest.
+
+The transaction journal is what makes an interrupted update recoverable rather
+than a broken install. Its durable phase is the only thing a restarted process
+trusts:
+
+```mermaid
+stateDiagram-v2
+    [*] --> prepared: journal written,<br/>backups taken
+    prepared --> applying: first destination mutated
+    applying --> committed: every destination published
+    applying --> rolling_back: interrupted or failed
+    prepared --> rolling_back: interrupted before publication
+    rolling_back --> rolling_back: resumes from<br/>the last checkpoint
+    rolling_back --> [*]: destinations restored
+    committed --> [*]: journal and backup discarded only after a<br/>process at least the target version reaches<br/>the managed startup checkpoint
+
+    note right of rolling_back
+        Restoring a destination requires its current
+        size and SHA-256 to equal the journalled
+        replacement fingerprint. If another writer
+        changed it, rollback stops and preserves
+        everything for manual resolution.
+    end note
+```
 
 The schema-2 transaction journal records a transaction id, target version,
 durable phase (`prepared`, `applying`, `rolling_back`, or `committed`), and each

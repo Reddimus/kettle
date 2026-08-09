@@ -935,6 +935,25 @@ its navigation statuses were Wrapped/Match/Match/Match. These are local Linux
 artifacts, not substitutes for the still-pending workspace/strict gates,
 GitHub CI, or native Windows/macOS checks.
 
+## Diagram gate
+
+`just mermaid-check` compiles every ```` ```mermaid ```` block in tracked
+Markdown with the mermaid CLI. A diagram that does not parse is replaced by a
+red "Unable to render rich display" panel on GitHub, which reads as a broken
+document rather than a broken snippet — and one had shipped that way, a node
+label containing backslash-escaped quotes, because nothing looked.
+
+It skips when there is no Node toolchain or no Chrome/Chromium, so the suite
+still runs on a machine without them. CI sets `KETTLE_MERMAID_REQUIRED=1`,
+which turns that skip into a failure: a gate that silently stops running is the
+failure mode this one exists to prevent.
+
+Two mermaid traps it catches, both found by writing it:
+
+- `;` separates statements in a sequence diagram, so a literal semicolon in
+  message text (`OSC 133;A`) truncates the line. Write `#59;`.
+- Quotes inside a node label must be `&quot;`, not `\"`.
+
 ## Supply-chain fixture gates
 
 Release and installer changes have hermetic regression suites in addition to
