@@ -58,44 +58,32 @@ Each is multi-day. Combined: multi-week.
 
 ## Architecture
 
-```
-            ┌──────────────────────────────────────┐
-            │  kettle-muxd  (the server)           │
-            │                                      │
-            │  ┌──────┐  ┌──────┐  ┌──────┐        │
-            │  │ PTY  │  │ PTY  │  │ PTY  │  ...   │
-            │  │  1   │  │  2   │  │  3   │        │
-            │  └──┬───┘  └──┬───┘  └──┬───┘        │
-            │     │         │         │            │
-            │     ▼         ▼         ▼            │
-            │  ┌─────────────────────────────┐     │
-            │  │  Mux core (tabs / splits)   │     │
-            │  └────────────┬────────────────┘     │
-            │               │                      │
-            │               ▼                      │
-            │  ┌─────────────────────────────┐     │
-            │  │  Wire protocol server       │     │
-            │  └────────────┬────────────────┘     │
-            │               │                      │
-            └───────────────┼──────────────────────┘
-                            │
-            ┌───────────────┼──────────────────────┐
-            │  unix socket /run/.../kettle.sock    │
-            └───────────────┬──────────────────────┘
-                            │
-            ┌───────────────┼──────────────────────┐
-            │               ▼                      │
-            │  ┌─────────────────────────────┐     │
-            │  │  Wire protocol client       │     │
-            │  └────────────┬────────────────┘     │
-            │               │                      │
-            │               ▼                      │
-            │  ┌─────────────────────────────┐     │
-            │  │  Renderer (winit + wgpu)    │     │
-            │  └─────────────────────────────┘     │
-            │                                      │
-            │  kettle  (the client GUI)            │
-            └──────────────────────────────────────┘
+```mermaid
+flowchart TB
+    subgraph server["kettle-muxd — the server"]
+        direction TB
+        pty1["PTY 1"]
+        pty2["PTY 2"]
+        pty3["PTY 3 …"]
+        mux["Mux core<br/>tabs / splits"]
+        wire_s["Wire protocol server"]
+        pty1 --> mux
+        pty2 --> mux
+        pty3 --> mux
+        mux --> wire_s
+    end
+
+    sock(["unix socket<br/>/run/…/kettle.sock"])
+
+    subgraph client["kettle — the client GUI"]
+        direction TB
+        wire_c["Wire protocol client"]
+        render["Renderer<br/>winit + wgpu"]
+        wire_c --> render
+    end
+
+    wire_s <--> sock
+    sock <--> wire_c
 ```
 
 ### Where today's code lives vs the split

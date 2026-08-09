@@ -230,6 +230,30 @@ not expose a previously registered ScriptBlock that Kettle could safely call.
 
 ## Marks
 
+The four `OSC 133` marks bracket one command. What kettle gets from them is a
+prompt boundary it can jump to, and — because `C` without a matching `D` means
+a command is still running — a reliable answer to "is this pane busy?".
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant Shell
+    participant Kettle
+    Shell->>Kettle: OSC 133#59;A — prompt start
+    Note over Kettle: jump target for<br/>Ctrl+Up / Ctrl+Down
+    Shell->>Kettle: OSC 7 — current working directory
+    Note over Kettle: hostname validated against this machine,<br/>so an ssh session's remote cwd is never adopted
+    Shell->>Kettle: OSC 133#59;B — end of prompt, input starts
+    Note over Kettle: pane is idle at a prompt →<br/>close skips the confirm dialog
+    Shell->>Kettle: OSC 133#59;C — command started
+    Note over Kettle: pane counts as busy
+    Shell->>Kettle: OSC 133#59;D#59;code — finished, with exit code
+    Note over Kettle: back to idle
+```
+
+A shell with no integration never sends `C` or `D`, so it always counts as
+busy and its close behaviour is unchanged.
+
 - `OSC 133;A` — prompt start (used for jump targets)
 - `OSC 133;B` — end of prompt / input start
 - `OSC 133;C` — command started executing

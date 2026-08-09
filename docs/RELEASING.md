@@ -5,6 +5,23 @@ annotated tag**, in that order. The two-PR split is project policy;
 `scripts/release.sh` validates repository state but does not query GitHub to
 prove that a separate prep pull request was merged.
 
+```mermaid
+flowchart TD
+    prep["1 · prep PR<br/>promote [Unreleased] to [X.Y.Z] — date"] --> prep_m{{"merged to main"}}
+    prep_m --> cut["2 · cut PR<br/>scripts/release.sh X.Y.Z<br/>versions, Cargo.lock, flake.nix, docs<br/>commits with git commit -S"]
+    cut --> cut_m{{"merged to main"}}
+    cut_m --> tag["3 · scripts/tag-release.sh X.Y.Z<br/>git tag -s, verify-tag, push tag only"]
+    tag --> gate{"release.yml:<br/>GitHub reports<br/>verification.verified"}
+    gate -- "false" --> stop["release fails closed<br/>no artifacts published"]
+    gate -- "true" --> build["test + build 4 packages<br/>each with a SHA-256 sidecar"]
+    build --> sign["finalizer proves the secret matches<br/>packaging/update-public.pem,<br/>signs the domain-separated manifest"]
+    sign --> publish["publish job reverifies size + SHA-256<br/>of the exact remote set, then makes it public"]
+```
+
+The gate after the tag is the one that catches a mistake late: a tag signed
+with a key GitHub does not know is *locally* valid and still fails the
+release. See [Signing prerequisites](#signing-prerequisites).
+
 ## 1. Merge the changelog prep pull request
 
 Create `release/prep-vX.Y.Z` from synchronized `main`. Promote

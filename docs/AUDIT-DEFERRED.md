@@ -314,11 +314,15 @@ tracked here so they are not lost.
 
   **Rate revised upward, 2026-08-09.** The 2/30 figure above came from repeated
   runs of one binary on one host. Counting the macOS leg of this cycle's pull
-  requests instead gives a worse picture: **3 failures in 11 CI runs**, every
-  one `exec_streams_stdout_and_exits_zero`, every one green on an unmodified
-  re-run (PR #176 once, PR #180 twice). ~27% per pull request is not
-  "occasionally"; it means roughly
-  one PR in five goes red on macOS for no reason, and every one of those costs a
+  requests instead gives a worse picture: **4 failures in 13 CI runs** — three
+  `exec_streams_stdout_and_exits_zero` (PR #176 once, PR #180 twice) and one
+  `exec_record_writes_replayable_asciicast` (PR #181), every one green on an
+  unmodified re-run. The fourth landed while this entry was being written and
+  is the corrected framing arriving on schedule: a repeat showed up as a
+  different test name, which is precisely what makes "re-run once and
+  investigate if it repeats" the wrong stopping rule. ~31% per pull request is
+  not "occasionally"; it means roughly
+  one PR in three goes red on macOS for no reason, and every one of those costs a
   human the judgement call this entry exists to answer. Treat the harness fix as
   higher priority than the 2/30 framing implied, and record the run count when
   updating this figure — a rate measured by re-running one binary and a rate

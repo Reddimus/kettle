@@ -189,6 +189,19 @@ tracked-audit:
     python scripts/test-audit-tracked-files.py
     python scripts/audit-tracked-files.py --output target/diagnostics/tracked-files-audit.json
 
+# Compile every ```mermaid block in tracked Markdown. A diagram that does not
+# parse renders as a red error panel on GitHub, which reads as a broken
+# document rather than a broken snippet — one shipped that way unnoticed.
+# Skips without a Node toolchain or a Chrome unless KETTLE_MERMAID_REQUIRED=1,
+# which CI sets so the gate cannot quietly stop running.
+[unix]
+mermaid-check:
+    python3 scripts/check-mermaid.py
+
+[windows]
+mermaid-check:
+    python scripts/check-mermaid.py
+
 # Guard the temporary RUSTSEC-2026-0192 ignore. This must pass while #36 is
 # open, and should print the "remove ignores" instruction once upstream makes
 # `ttf-parser` disappear from the tree.

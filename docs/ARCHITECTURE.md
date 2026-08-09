@@ -196,7 +196,7 @@ graph LR
     mcp --> ipc
     ipc --> srv["control SERVER<br/>(hosted in kettle-ui)"]
     srv -->|UserEvent::Ctl| app["App main thread<br/>(windows map)"]
-    reg["discovery registry<br/>reserved kind field<br/>(\"gui\" today, \"muxd\" later)"] -.-> ipc
+    reg["discovery registry<br/>reserved kind field<br/>(&quot;gui&quot; today, &quot;muxd&quot; later)"] -.-> ipc
 ```
 
 Two roles split cleanly across the bin and the GUI:
