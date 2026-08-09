@@ -165,6 +165,14 @@ fn write_incident(
     error: Option<&str>,
 ) -> io::Result<PathBuf> {
     let dir = diagnostic_dir(shared.cache_dir.as_deref());
+    // Create AND repair the directory before writing into it.
+    // `create_private_file_new` below creates missing ancestors at 0700, but it
+    // returns early when the directory already exists — so a `<cache>/kettle`
+    // an earlier run left group-writable under a 002 umask is never narrowed,
+    // and the private-path verifier then refuses the write. Recognizing that
+    // directory as kettle's own was necessary but not sufficient; something has
+    // to ask for the repair, and this is the caller that needs it.
+    kettle_state::create_private_dirs(&dir)?;
     let timestamp = unix_millis();
     let (path, mut file) = create_private_file(&dir, timestamp, std::process::id())?;
     let incident = Incident {
@@ -277,6 +285,52 @@ mod tests {
         let output = sanitize(&input);
         assert!(!output.contains('\n'));
         assert_eq!(output.chars().count(), MAX_ERROR_CHARS);
+    }
+
+    /// The state a machine that ran an older kettle under a 002 umask is
+    /// actually in: `<cache>/kettle` already exists and is group-writable.
+    ///
+    /// Creating missing ancestors at 0700 does not help there — the directory
+    /// is not missing. Without an explicit repair the private-path verifier
+    /// refuses the write, and a crash diagnostic is exactly the thing you want
+    /// to survive that.
+    #[cfg(unix)]
+    #[test]
+    fn an_existing_group_writable_cache_directory_is_repaired_before_writing() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let root = kettle_test_support::private_tempdir("kettle-diag-repair-");
+        let kettle_dir = root.path().join("kettle");
+        std::fs::create_dir_all(kettle_dir.join("diagnostics")).expect("pre-existing tree");
+        for dir in [&kettle_dir, &kettle_dir.join("diagnostics")] {
+            std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o775))
+                .expect("pre-existing mode");
+        }
+        // SAFETY: single-threaded test, before any spawn. The base list keys on
+        // the real environment, so the scratch root has to look like a base.
+        unsafe { std::env::set_var("XDG_CACHE_HOME", root.path()) };
+
+        let shared = Shared {
+            phase: Mutex::new(PhaseState {
+                name: "redraw",
+                entered: Instant::now(),
+            }),
+            windows: AtomicUsize::new(1),
+            stop: AtomicBool::new(false),
+            stall_written: AtomicBool::new(false),
+            cache_dir: Some(root.path().to_path_buf()),
+            version: "test".to_string(),
+        };
+        let phase = shared.phase.lock().unwrap().clone();
+        let written = write_incident(&shared, "test", &phase, None)
+            .expect("a group-writable cache directory must not block a diagnostic");
+
+        assert!(written.exists(), "the incident was written");
+        assert_eq!(
+            std::fs::metadata(&kettle_dir).unwrap().permissions().mode() & 0o777,
+            0o700,
+            "the kettle-owned cache directory should have been repaired"
+        );
     }
 
     #[cfg(unix)]
