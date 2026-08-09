@@ -1835,6 +1835,61 @@ fn paste_confirm_prompt(text: &str) -> String {
     format!("Paste {commands} lines into a shell-like target?")
 }
 
+/// Pin a single-pane paste request to its current pane. Broadcast deliberately
+/// carries no pane id: confirmation keeps the live group semantics, and if the
+/// scope has been turned off while the prompt is open there is no safe pane to
+/// fall back to.
+fn confirmed_paste_target(mux: &Mux) -> Option<u64> {
+    if mux.is_broadcast_on() {
+        None
+    } else {
+        mux.active_focus()
+    }
+}
+
+/// Deliver a confirmed non-broadcast text paste to the pane named when the
+/// prompt opened. Mode lookup and delivery use the same stable id.
+fn paste_text_into_target(
+    mux: &mut Mux,
+    target: Option<u64>,
+    text: &str,
+) -> Option<PaneInputResult> {
+    let pane = mux.panes.get_mut(&target?)?;
+    let bracketed = pane
+        .term
+        .term
+        .lock()
+        .ok()
+        .map(|term| term.mode().contains(kettle_core::TermMode::BRACKETED_PASTE))
+        .unwrap_or(false);
+    let bytes = input::paste_payload(text, bracketed);
+    Some(pane.feed_input(&bytes))
+}
+
+/// Deliver a confirmed non-broadcast path paste to the pane named when the
+/// prompt opened. Shell formatting, mode lookup, and delivery all use it.
+fn paste_paths_into_target(
+    mux: &mut Mux,
+    target: Option<u64>,
+    paths: &[std::path::PathBuf],
+    trailing_space: bool,
+) -> Option<PaneInputResult> {
+    let pane = mux.panes.get_mut(&target?)?;
+    let mut text = crate::mux::format_paths_for_paste(&pane.argv, paths);
+    if trailing_space {
+        text.push(' ');
+    }
+    let bracketed = pane
+        .term
+        .term
+        .lock()
+        .ok()
+        .map(|term| term.mode().contains(kettle_core::TermMode::BRACKETED_PASTE))
+        .unwrap_or(false);
+    let bytes = input::paste_payload(&text, bracketed);
+    Some(pane.feed_input(&bytes))
+}
+
 /// Pure: when the mouse is over chrome (tab bar or any modal overlay), the
 /// OS cursor should be the standard arrow rather than the text I-beam —
 /// matches iTerm2 / WezTerm / Ghostty / kitty: chrome surfaces are
@@ -3539,13 +3594,17 @@ pub enum ConfirmAction {
     /// may be a tmux or agent session the user never selected.
     ClosePane(u64),
     /// Send a clipboard/PRIMARY paste after the user accepted the multi-line
-    /// paste protection prompt.
-    PasteText(Box<str>),
+    /// paste protection prompt. `target` is `Some` for a single-pane paste and
+    /// pins the pane the prompt was about. Broadcast carries `None` and keeps
+    /// live group semantics instead of inventing one pinned pane.
+    PasteText { text: Box<str>, target: Option<u64> },
     /// Format and send original file paths per target pane after paste
-    /// protection confirmation.
+    /// protection confirmation. See [`ConfirmAction::PasteText`] for the
+    /// `target` contract.
     PastePaths {
         paths: Box<[std::path::PathBuf]>,
         trailing_space: bool,
+        target: Option<u64>,
     },
     /// Finish a Settings keybind rebind that would otherwise silently steal
     /// a chord already bound to a different action (audit v2.38.2). Applies
@@ -7539,8 +7598,8 @@ impl App {
     }
 
     /// Shared paste path — size validation, broadcast scoping, bracketed-paste
-    /// wrap, write to the focused PTY. Extracted so `paste_clipboard` and
-    /// `paste_primary` (and any future paste channel) can't drift on the
+    /// wrap, and stable single-pane targeting. Extracted so `paste_clipboard`
+    /// and `paste_primary` (and any future paste channel) can't drift on the
     /// safety/scoping rules.
     fn paste_text(&mut self, ws: &mut WindowState, text: String) {
         if text.is_empty() {
@@ -7553,6 +7612,7 @@ impl App {
             self.report_input_result(PaneInputResult::Oversize);
             return;
         }
+        let target = confirmed_paste_target(&ws.mux);
         let text = text.as_str();
         let raw_target = if ws.mux.is_broadcast_on() {
             // Ask every window the broadcast can reach, not just this one. A
@@ -7583,34 +7643,28 @@ impl App {
                     },
                 ],
                 focus_idx: 0,
-                on_confirm: ConfirmAction::PasteText(text.to_string().into_boxed_str()),
+                on_confirm: ConfirmAction::PasteText {
+                    text: text.to_string().into_boxed_str(),
+                    target,
+                },
             });
             return;
         }
-        self.paste_text_confirmed(ws, text);
+        self.paste_text_confirmed(ws, target, text);
     }
 
-    fn paste_text_confirmed(&mut self, ws: &mut WindowState, text: &str) {
+    fn paste_text_confirmed(&mut self, ws: &mut WindowState, target: Option<u64>, text: &str) {
         if text.is_empty() {
             return;
         }
-        // Record that a paste happened and its length — NEVER the
-        // pasted content (a common secret vector). The per-key hook captures
-        // the Ctrl+V chord; this marker captures the size without the bytes.
-        if let Some(rec) = self.recorder.as_mut() {
-            rec.record_marker(&format!("kettle:paste len={}", text.chars().count()));
-        }
-        // Broadcast paste: with the
-        // group-input mode on (Ctrl+Shift+G), keystrokes go to every
-        // pane in the active tab — paste is also user input and
-        // should follow the same scoping. Each pane gets its own
-        // `BRACKETED_PASTE` decision (different panes may have
-        // different mode state), so the wrap is per-pane, not a
-        // single shared payload.
+        // Broadcast owns a group scope, not one pane. It deliberately ignores
+        // the optional single-pane target and retains its per-pane mode
+        // encoding plus cross-window named-group fan-out.
         if ws.mux.is_broadcast_on() {
+            if let Some(rec) = self.recorder.as_mut() {
+                rec.record_marker(&format!("kettle:paste len={}", text.chars().count()));
+            }
             let mut result = ws.mux.broadcast_paste(text);
-            // A named group spans windows, and a paste is user input under the
-            // same scope as a keystroke — see `App::broadcast_input`.
             if crate::mux::Mux::scope_crosses_windows(&ws.mux.broadcast) {
                 let scope = ws.mux.broadcast.clone();
                 for other in self.windows.values_mut() {
@@ -7620,13 +7674,18 @@ impl App {
             self.report_input_result(result);
             return;
         }
-        let bracketed = self
-            .focused_mode(ws)
-            .contains(kettle_core::TermMode::BRACKETED_PASTE);
-        let bytes = input::paste_payload(text, bracketed);
-        if let Some(p) = ws.mux.focused() {
-            // Paste is user input — a read-only pane drops it.
-            let result = p.feed_input(&bytes);
+        // A broadcast prompt carries no pane id. If its scope was disabled
+        // while the modal was open, fail closed instead of choosing focus.
+        if target.is_none_or(|id| !ws.mux.panes.contains_key(&id)) {
+            return;
+        }
+        // Record that a paste happened and its length — NEVER the
+        // pasted content (a common secret vector). The per-key hook captures
+        // the Ctrl+V chord; this marker captures the size without the bytes.
+        if let Some(rec) = self.recorder.as_mut() {
+            rec.record_marker(&format!("kettle:paste len={}", text.chars().count()));
+        }
+        if let Some(result) = paste_text_into_target(&mut ws.mux, target, text) {
             self.report_input_result(result);
         }
     }
@@ -7640,6 +7699,7 @@ impl App {
         if paths.is_empty() {
             return;
         }
+        let target = confirmed_paste_target(&ws.mux);
         let mut preview = crate::mux::format_paths_for_paste(&ws.mux.focused_argv(), &paths);
         if trailing_space {
             preview.push(' ');
@@ -7691,23 +7751,25 @@ impl App {
                 on_confirm: ConfirmAction::PastePaths {
                     paths: paths.into_boxed_slice(),
                     trailing_space,
+                    target,
                 },
             });
             return;
         }
-        self.paste_paths_confirmed(ws, &paths, trailing_space);
+        self.paste_paths_confirmed(ws, target, &paths, trailing_space);
     }
 
     fn paste_paths_confirmed(
         &mut self,
         ws: &mut WindowState,
+        target: Option<u64>,
         paths: &[std::path::PathBuf],
         trailing_space: bool,
     ) {
-        if let Some(recorder) = self.recorder.as_mut() {
-            recorder.record_marker(&format!("kettle:paste paths={}", paths.len()));
-        }
         if ws.mux.is_broadcast_on() {
+            if let Some(recorder) = self.recorder.as_mut() {
+                recorder.record_marker(&format!("kettle:paste paths={}", paths.len()));
+            }
             let scope = ws.mux.broadcast.clone();
             let mut result = ws
                 .mux
@@ -7726,16 +7788,13 @@ impl App {
             return;
         }
 
-        let mut text = crate::mux::format_paths_for_paste(&ws.mux.focused_argv(), paths);
-        if trailing_space {
-            text.push(' ');
+        if target.is_none_or(|id| !ws.mux.panes.contains_key(&id)) {
+            return;
         }
-        let bracketed = self
-            .focused_mode(ws)
-            .contains(kettle_core::TermMode::BRACKETED_PASTE);
-        let bytes = input::paste_payload(&text, bracketed);
-        if let Some(pane) = ws.mux.focused() {
-            let result = pane.feed_input(&bytes);
+        if let Some(recorder) = self.recorder.as_mut() {
+            recorder.record_marker(&format!("kettle:paste paths={}", paths.len()));
+        }
+        if let Some(result) = paste_paths_into_target(&mut ws.mux, target, paths, trailing_space) {
             self.report_input_result(result);
         }
     }
@@ -14765,14 +14824,15 @@ impl App {
                     w.request_redraw();
                 }
             }
-            ConfirmAction::PasteText(text) => {
-                self.paste_text_confirmed(ws, &text);
+            ConfirmAction::PasteText { text, target } => {
+                self.paste_text_confirmed(ws, target, &text);
             }
             ConfirmAction::PastePaths {
                 paths,
                 trailing_space,
+                target,
             } => {
-                self.paste_paths_confirmed(ws, &paths, trailing_space);
+                self.paste_paths_confirmed(ws, target, &paths, trailing_space);
             }
             ConfirmAction::RebindKeybind {
                 trig,
@@ -25347,12 +25407,13 @@ mod modal_discipline_guard {
 #[cfg(test)]
 mod tests {
     use super::{
-        AUTOMATION_RETRY_MIN, App, AutomationRetry, ContextMenuItem, MAX_REMOTE_COMMANDS_PER_BATCH,
-        Osc52ClipboardChannel, PaneDrag, ParsedRemoteCommandBatch, PendingLuaCommand,
-        PendingLuaCommands, PendingRemoteCommand, RemoteBatchClaim, SplitDrag,
-        apply_bs_del_binding, apply_output_generation_outcome, apply_remote_title_transition,
-        argv_is_nonlocal_client, assign_mnemonics, background_is_dark_enough_to_reveal_early,
-        broadcast_scope_for_default, cached_pane_cursor_blinking, claim_remote_command_file,
+        AUTOMATION_RETRY_MIN, App, AutomationRetry, ConfirmAction, ConfirmButton,
+        ConfirmDialogState, ContextMenuItem, MAX_REMOTE_COMMANDS_PER_BATCH, Osc52ClipboardChannel,
+        PaneDrag, ParsedRemoteCommandBatch, PendingLuaCommand, PendingLuaCommands,
+        PendingRemoteCommand, RemoteBatchClaim, SplitDrag, apply_bs_del_binding,
+        apply_output_generation_outcome, apply_remote_title_transition, argv_is_nonlocal_client,
+        assign_mnemonics, background_is_dark_enough_to_reveal_early, broadcast_scope_for_default,
+        cached_pane_cursor_blinking, claim_remote_command_file, confirmed_paste_target,
         context_menu_item_columns, context_menu_max_scroll_offset,
         context_menu_scroll_for_highlight, context_menu_snapshot_reuse_safe,
         context_menu_surface_can_fit_row, count_rows_fitting, ctl_input_error, filter_disabled,
@@ -25360,8 +25421,9 @@ mod tests {
         input_rejection_message, local_paste_within_limit, macos_effective_modifiers,
         modal_swallows_pointer, osc52_clipboard_channel, output_generation_advanced,
         output_wakeup_needs_paint, pane_cursor_blinking_with, pane_snapshot_keys_match,
-        parse_remote_command_batch, production_source, rank_layouts, sanitize_native_window_title,
-        sanitize_title, selection_kind, session_sweep_due, should_notify_input_rejection,
+        parse_remote_command_batch, paste_paths_into_target, paste_text_into_target,
+        production_source, rank_layouts, sanitize_native_window_title, sanitize_title,
+        selection_kind, session_sweep_due, should_notify_input_rejection,
         should_poll_remote_window, should_restore_session, should_reveal_after_renderer_init,
         should_reveal_before_first_surface_frame, stage_applied_remote_probe,
         stage_output_generations_for_frame, stage_remote_targets, stamp_accepted_input,
@@ -25377,6 +25439,54 @@ mod tests {
     use std::collections::HashSet;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+
+    fn paste_test_mux() -> (Mux, u64, u64) {
+        #[cfg(unix)]
+        let argv = vec!["/bin/cat".to_string()];
+        #[cfg(windows)]
+        let argv = vec!["cmd.exe".to_string(), "/d".to_string(), "/q".to_string()];
+
+        let cfg = kettle_config::Config {
+            shell_integration: false,
+            login_shell: false,
+            ..kettle_config::Config::default()
+        };
+        let waker: kettle_core::Waker = Arc::new(|| {});
+        let mut mux = Mux::new();
+        mux.new_tab_with(&cfg, 80, 24, 8, 16, waker.clone(), &argv, None)
+            .expect("spawn paste target pane");
+        let target = mux.active_focus().expect("target pane id");
+        mux.split_with(Dir::Horizontal, &cfg, 80, 24, 8, 16, waker, argv, None)
+            .expect("spawn sibling pane");
+        let sibling = mux.active_focus().expect("sibling pane id");
+        assert_ne!(target, sibling);
+        assert!(mux.focus_pane(target));
+        (mux, target, sibling)
+    }
+
+    fn make_paste_target_observable(mux: &mut Mux, target: u64, sibling: u64) {
+        assert!(!mux.panes.get(&target).unwrap().read_only);
+        assert!(!mux.panes.get(&sibling).unwrap().read_only);
+        mux.panes.get_mut(&target).unwrap().read_only = true;
+    }
+
+    fn confirm_text_dialog(mux: &mut Mux, dialog: ConfirmDialogState) -> Option<PaneInputResult> {
+        match dialog.on_confirm {
+            ConfirmAction::PasteText { text, target } => paste_text_into_target(mux, target, &text),
+            _ => panic!("text confirmation carried the wrong action"),
+        }
+    }
+
+    fn confirm_paths_dialog(mux: &mut Mux, dialog: ConfirmDialogState) -> Option<PaneInputResult> {
+        match dialog.on_confirm {
+            ConfirmAction::PastePaths {
+                paths,
+                trailing_space,
+                target,
+            } => paste_paths_into_target(mux, target, &paths, trailing_space),
+            _ => panic!("path confirmation carried the wrong action"),
+        }
+    }
 
     #[test]
     fn global_group_autoclean_keeps_foreign_members_and_clears_empty_scopes() {
@@ -25656,6 +25766,46 @@ mod tests {
                     && body.contains("self.windows.values_mut()"),
                 "the {path} path must walk the other windows when the scope \
                  reaches across them"
+            );
+        }
+        // The paste needles now also pin the ordering contract: an active
+        // broadcast must take its existing group path before either helper can
+        // interpret the optional single-pane target.
+        for (entry, targeted_delivery) in [
+            ("fn paste_text_confirmed(", "paste_text_into_target"),
+            ("fn paste_paths_confirmed(", "paste_paths_into_target"),
+        ] {
+            let body = src.split(entry).nth(1).expect("confirmed paste body");
+            let end = body.find("\n    fn ").unwrap_or(body.len());
+            let body = &body[..end];
+            let broadcast = body
+                .find("if ws.mux.is_broadcast_on()")
+                .expect("confirmed paste keeps broadcast semantics");
+            let targeted = body
+                .find(targeted_delivery)
+                .expect("confirmed paste has pinned-pane delivery");
+            assert!(
+                broadcast < targeted,
+                "broadcast must branch before the pinned single-pane delivery"
+            );
+            for stale_focus_lookup in [".focused()", "focused_mode(ws)", "focused_argv()"] {
+                assert!(
+                    !body.contains(stale_focus_lookup),
+                    "confirmed single-pane paste must not resolve through {stale_focus_lookup}"
+                );
+            }
+        }
+        let confirm_arms = src
+            .split("fn dispatch_confirm_action_arms(")
+            .nth(1)
+            .expect("confirm dispatch arms");
+        for call in [
+            "paste_text_confirmed(ws, target, &text)",
+            "paste_paths_confirmed(ws, target, &paths, trailing_space)",
+        ] {
+            assert!(
+                confirm_arms.contains(call),
+                "the confirmation dispatcher must carry the prompt's target into {call}"
             );
         }
         let dropped = src
@@ -32041,6 +32191,146 @@ mod tests {
             paste_confirm_prompt("one\r\ntwo\nthree"),
             "Paste 3 lines into a shell-like target?"
         );
+    }
+
+    /// The confirmation action must retain pane A even if focus moves to pane
+    /// B while the modal is open. Only A becomes read-only after the prompt is
+    /// raised, so the input result identifies which pane received the write
+    /// without depending on the child process echoing it.
+    #[test]
+    fn confirmed_text_paste_never_follows_focus_to_a_sibling() {
+        let (mut mux, target, sibling) = paste_test_mux();
+        mux.broadcast = BroadcastScope::Tab;
+        assert_eq!(
+            confirmed_paste_target(&mux),
+            None,
+            "broadcast prompts intentionally pin no single pane"
+        );
+        mux.broadcast = BroadcastScope::Off;
+        let marker = "KETTLE_TEXT_TARGET_A\nsecond line";
+        assert!(
+            super::paste_needs_confirmation(marker, true, true),
+            "fixture must genuinely require the paste-protection prompt"
+        );
+        let dialog = ConfirmDialogState {
+            prompt: "Paste 2 lines into a shell-like target?".into(),
+            buttons: vec![
+                ConfirmButton::Cancel,
+                ConfirmButton::Confirm {
+                    label: "Paste".into(),
+                    destructive: false,
+                },
+            ],
+            focus_idx: 1,
+            on_confirm: ConfirmAction::PasteText {
+                text: marker.into(),
+                target: confirmed_paste_target(&mux),
+            },
+        };
+        // Change writability only after the prompt has captured its target.
+        // Pane B stays writable, making ReadOnly unique to pane A.
+        make_paste_target_observable(&mut mux, target, sibling);
+        assert!(mux.focus_pane(sibling), "focus moved while prompt was open");
+        assert_eq!(
+            confirm_text_dialog(&mut mux, dialog),
+            Some(PaneInputResult::ReadOnly),
+            "confirmation must write to the original read-only target, not the writable sibling"
+        );
+
+        // The target exits while a second prompt is open. Its sibling is now
+        // focused, but confirmation must resolve to nowhere, never to focus.
+        assert!(mux.focus_pane(target));
+        let dead_marker = "KETTLE_TEXT_DEAD_TARGET\nsecond line";
+        let dead_dialog = ConfirmDialogState {
+            prompt: "Paste 2 lines into a shell-like target?".into(),
+            buttons: vec![
+                ConfirmButton::Cancel,
+                ConfirmButton::Confirm {
+                    label: "Paste".into(),
+                    destructive: false,
+                },
+            ],
+            focus_idx: 1,
+            on_confirm: ConfirmAction::PasteText {
+                text: dead_marker.into(),
+                target: confirmed_paste_target(&mux),
+            },
+        };
+        assert!(!mux.close_focused(), "the sibling keeps the tab alive");
+        assert_eq!(mux.active_focus(), Some(sibling));
+        assert_eq!(confirm_text_dialog(&mut mux, dead_dialog), None);
+    }
+
+    /// Path confirmation has the same stable-target contract, plus its shell
+    /// formatting must come from that target rather than the newly focused
+    /// sibling. A newline in the synthetic path is what raises paste safety.
+    #[test]
+    fn confirmed_path_paste_never_follows_focus_or_argv_to_a_sibling() {
+        let (mut mux, target, sibling) = paste_test_mux();
+        mux.panes.get_mut(&target).unwrap().argv = vec!["wsl.exe".into()];
+        mux.panes.get_mut(&sibling).unwrap().argv = vec!["pwsh.exe".into()];
+
+        let path = std::path::PathBuf::from("C:\\Users\\me\\KETTLE_PATH_TARGET_A\nnext.txt");
+        let preview =
+            crate::mux::format_paths_for_paste(&["wsl.exe".into()], std::slice::from_ref(&path));
+        let sibling_preview =
+            crate::mux::format_paths_for_paste(&["pwsh.exe".into()], std::slice::from_ref(&path));
+        assert_ne!(
+            preview, sibling_preview,
+            "fixture must distinguish the original target's argv from the sibling's"
+        );
+        assert!(
+            super::paste_needs_confirmation(&preview, true, true),
+            "fixture must genuinely require the paste-protection prompt"
+        );
+        let dialog = ConfirmDialogState {
+            prompt: super::paste_confirm_prompt(&preview),
+            buttons: vec![
+                ConfirmButton::Cancel,
+                ConfirmButton::Confirm {
+                    label: "Paste".into(),
+                    destructive: false,
+                },
+            ],
+            focus_idx: 1,
+            on_confirm: ConfirmAction::PastePaths {
+                paths: vec![path].into_boxed_slice(),
+                trailing_space: true,
+                target: confirmed_paste_target(&mux),
+            },
+        };
+        // Preserve the writable state used to raise the prompt; only after it
+        // exists do we make pane A's delivery result distinguishable.
+        make_paste_target_observable(&mut mux, target, sibling);
+        assert!(mux.focus_pane(sibling), "focus moved while prompt was open");
+        assert_eq!(
+            confirm_paths_dialog(&mut mux, dialog),
+            Some(PaneInputResult::ReadOnly),
+            "confirmation must write to the original read-only target, not the writable sibling"
+        );
+
+        assert!(mux.focus_pane(target));
+        let dead_path =
+            std::path::PathBuf::from("C:\\Users\\me\\KETTLE_PATH_DEAD_TARGET\nnext.txt");
+        let dead_dialog = ConfirmDialogState {
+            prompt: "Paste 2 lines into a shell-like target?".into(),
+            buttons: vec![
+                ConfirmButton::Cancel,
+                ConfirmButton::Confirm {
+                    label: "Paste".into(),
+                    destructive: false,
+                },
+            ],
+            focus_idx: 1,
+            on_confirm: ConfirmAction::PastePaths {
+                paths: vec![dead_path].into_boxed_slice(),
+                trailing_space: true,
+                target: confirmed_paste_target(&mux),
+            },
+        };
+        assert!(!mux.close_focused(), "the sibling keeps the tab alive");
+        assert_eq!(mux.active_focus(), Some(sibling));
+        assert_eq!(confirm_paths_dialog(&mut mux, dead_dialog), None);
     }
 
     /// The title-edit overlay must be wide enough to show what you are typing.
