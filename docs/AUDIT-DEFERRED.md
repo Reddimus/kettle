@@ -312,6 +312,23 @@ tracked here so they are not lost.
   flush; all three tests drive a PTY child to completion and read what it wrote.
   Still deferred, but it should be fixed at the harness rather than per test.
 
+  **It does not reproduce locally, 2026-08-09.** Thirty runs of the full
+  26-test binary and forty runs of `exec_streams_stdout_and_exits_zero` alone
+  under saturating CPU load, on an Apple-silicon macOS host at `9f3da01`:
+  **zero failures**. That is a negative result worth recording, because it
+  redirects the next attempt: the difference is the GitHub macOS runner, not
+  the code path on any macOS. Do not spend another session trying to reproduce
+  it on a developer machine.
+
+  So the test now diagnoses itself. On failure it re-runs the same command
+  **without** `--strip-ansi` and reports both, which answers the one question
+  the symptom cannot: an empty stripped result is equally consistent with the
+  child producing nothing and with the read or strip path losing it. If the raw
+  retry contains the marker, the loss is on this side; if it does not, look at
+  the child or the PTY read. At roughly one pull request in three, the next
+  occurrence should not be long, and it will arrive with evidence attached
+  rather than a symptom every candidate cause shares.
+
   **Rate revised upward, 2026-08-09.** The 2/30 figure above came from repeated
   runs of one binary on one host. Counting the macOS leg of this cycle's pull
   requests instead gives a worse picture: **4 failures in 13 CI runs** — three

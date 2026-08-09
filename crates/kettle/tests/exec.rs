@@ -343,10 +343,28 @@ fn exec_streams_stdout_and_exits_zero() {
     // the difference between "the child produced nothing" and "we stopped
     // reading too early". Without it the failure report says only that stdout
     // was empty, which is the symptom every candidate cause shares.
-    assert!(
-        out.contains("agent-marker-7f3"),
-        "stdout was: {out:?}; stderr was: {err:?}"
-    );
+    if !out.contains("agent-marker-7f3") {
+        // Self-diagnose, because this fires only on CI. Thirty full-binary
+        // runs and forty single-test runs under CPU load reproduced it zero
+        // times on an Apple-silicon host at this commit, so the next CI
+        // occurrence is the evidence — and it is worth more than the symptom.
+        //
+        // The question the symptom cannot answer: did the child produce
+        // nothing, or did we stop reading before it did? `--strip-ansi` is on
+        // above, so an empty result is also consistent with the stripper
+        // consuming everything. Re-run raw, and report both.
+        let (raw_code, raw_out, raw_err) = run_exec(&[], &argv, None);
+        panic!(
+            "exec produced no marker.\n\
+             stripped: code={code} stdout={out:?} stderr={err:?}\n\
+             raw retry: code={raw_code} stdout={raw_out:?} stderr={raw_err:?}\n\
+             raw retry contained the marker: {}\n\
+             If the raw retry DOES contain it, the loss is in this run's read \
+             or strip path, not in the child. If it does NOT, the child or the \
+             PTY read is the place to look. See docs/AUDIT-DEFERRED.md.",
+            raw_out.contains("agent-marker-7f3")
+        );
+    }
 }
 
 #[test]
