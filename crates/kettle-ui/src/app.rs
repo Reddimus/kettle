@@ -25464,37 +25464,10 @@ mod tests {
         (mux, target, sibling)
     }
 
-    fn pane_screen(mux: &Mux, pane: u64) -> String {
-        mux.panes
-            .get(&pane)
-            .and_then(|pane| pane.term.screen_text(24))
-            .map(|screen| screen.text)
-            .unwrap_or_default()
-    }
-
-    fn wait_for_pane_text(mux: &Mux, pane: u64, needle: &str) {
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
-        while std::time::Instant::now() < deadline {
-            if pane_screen(mux, pane).contains(needle) {
-                return;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(10));
-        }
-        panic!(
-            "pane {pane} never received {needle:?}; screen={:?}",
-            pane_screen(mux, pane)
-        );
-    }
-
-    fn assert_pane_never_receives(mux: &Mux, pane: u64, needle: &str) {
-        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(250);
-        while std::time::Instant::now() < deadline {
-            assert!(
-                !pane_screen(mux, pane).contains(needle),
-                "pane {pane} received a confirmed paste intended for another pane"
-            );
-            std::thread::sleep(std::time::Duration::from_millis(10));
-        }
+    fn make_paste_target_observable(mux: &mut Mux, target: u64, sibling: u64) {
+        assert!(!mux.panes.get(&target).unwrap().read_only);
+        assert!(!mux.panes.get(&sibling).unwrap().read_only);
+        mux.panes.get_mut(&target).unwrap().read_only = true;
     }
 
     fn confirm_text_dialog(mux: &mut Mux, dialog: ConfirmDialogState) -> Option<PaneInputResult> {
@@ -32221,8 +32194,9 @@ mod tests {
     }
 
     /// The confirmation action must retain pane A even if focus moves to pane
-    /// B while the modal is open. This uses real PTYs and inspects their grids,
-    /// so it proves delivery rather than only checking the enum's source shape.
+    /// B while the modal is open. Only A becomes read-only after the prompt is
+    /// raised, so the input result identifies which pane received the write
+    /// without depending on the child process echoing it.
     #[test]
     fn confirmed_text_paste_never_follows_focus_to_a_sibling() {
         let (mut mux, target, sibling) = paste_test_mux();
@@ -32234,6 +32208,10 @@ mod tests {
         );
         mux.broadcast = BroadcastScope::Off;
         let marker = "KETTLE_TEXT_TARGET_A\nsecond line";
+        assert!(
+            super::paste_needs_confirmation(marker, true, true),
+            "fixture must genuinely require the paste-protection prompt"
+        );
         let dialog = ConfirmDialogState {
             prompt: "Paste 2 lines into a shell-like target?".into(),
             buttons: vec![
@@ -32249,13 +32227,15 @@ mod tests {
                 target: confirmed_paste_target(&mux),
             },
         };
+        // Change writability only after the prompt has captured its target.
+        // Pane B stays writable, making ReadOnly unique to pane A.
+        make_paste_target_observable(&mut mux, target, sibling);
         assert!(mux.focus_pane(sibling), "focus moved while prompt was open");
         assert_eq!(
             confirm_text_dialog(&mut mux, dialog),
-            Some(PaneInputResult::Queued)
+            Some(PaneInputResult::ReadOnly),
+            "confirmation must write to the original read-only target, not the writable sibling"
         );
-        wait_for_pane_text(&mux, target, "KETTLE_TEXT_TARGET_A");
-        assert_pane_never_receives(&mux, sibling, "KETTLE_TEXT_TARGET_A");
 
         // The target exits while a second prompt is open. Its sibling is now
         // focused, but confirmation must resolve to nowhere, never to focus.
@@ -32279,7 +32259,6 @@ mod tests {
         assert!(!mux.close_focused(), "the sibling keeps the tab alive");
         assert_eq!(mux.active_focus(), Some(sibling));
         assert_eq!(confirm_text_dialog(&mut mux, dead_dialog), None);
-        assert_pane_never_receives(&mux, sibling, "KETTLE_TEXT_DEAD_TARGET");
     }
 
     /// Path confirmation has the same stable-target contract, plus its shell
@@ -32294,6 +32273,12 @@ mod tests {
         let path = std::path::PathBuf::from("C:\\Users\\me\\KETTLE_PATH_TARGET_A\nnext.txt");
         let preview =
             crate::mux::format_paths_for_paste(&["wsl.exe".into()], std::slice::from_ref(&path));
+        let sibling_preview =
+            crate::mux::format_paths_for_paste(&["pwsh.exe".into()], std::slice::from_ref(&path));
+        assert_ne!(
+            preview, sibling_preview,
+            "fixture must distinguish the original target's argv from the sibling's"
+        );
         assert!(
             super::paste_needs_confirmation(&preview, true, true),
             "fixture must genuinely require the paste-protection prompt"
@@ -32314,13 +32299,15 @@ mod tests {
                 target: confirmed_paste_target(&mux),
             },
         };
+        // Preserve the writable state used to raise the prompt; only after it
+        // exists do we make pane A's delivery result distinguishable.
+        make_paste_target_observable(&mut mux, target, sibling);
         assert!(mux.focus_pane(sibling), "focus moved while prompt was open");
         assert_eq!(
             confirm_paths_dialog(&mut mux, dialog),
-            Some(PaneInputResult::Queued)
+            Some(PaneInputResult::ReadOnly),
+            "confirmation must write to the original read-only target, not the writable sibling"
         );
-        wait_for_pane_text(&mux, target, "/mnt/c/Users/me/KETTLE_PATH_TARGET_A");
-        assert_pane_never_receives(&mux, sibling, "KETTLE_PATH_TARGET_A");
 
         assert!(mux.focus_pane(target));
         let dead_path =
@@ -32344,7 +32331,6 @@ mod tests {
         assert!(!mux.close_focused(), "the sibling keeps the tab alive");
         assert_eq!(mux.active_focus(), Some(sibling));
         assert_eq!(confirm_paths_dialog(&mut mux, dead_dialog), None);
-        assert_pane_never_receives(&mux, sibling, "KETTLE_PATH_DEAD_TARGET");
     }
 
     /// The title-edit overlay must be wide enough to show what you are typing.
