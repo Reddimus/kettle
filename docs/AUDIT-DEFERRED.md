@@ -155,6 +155,21 @@ tracked here so they are not lost.
   such gate configured today; whether their runners could host one is untested
   rather than known to be impossible.
 
+## Deferred from the 2026-08-09 umask work
+
+- **The config-reload watcher keeps a handle it may never have registered.**
+  `app.rs` ignores the result of both the directory create and
+  `w.watch(&dir, …)`, then stores `Some(w)` regardless. If the watch call fails,
+  kettle holds a live watcher that is watching nothing and live config reload is
+  silently off for the session — the same failure shape as the umask bug it sits
+  next to, which is how it was noticed.
+
+  Not fixed with that work because the fix is a decision, not a line: a config
+  directory that cannot be watched is not obviously fatal to startup, so the
+  choice is between failing the launch, retrying, and surfacing it in the UI
+  rather than a log. The remote-command block below it already fails closed
+  through the private-file helpers and logs, which is the shape to copy.
+
 ## Deferred from the 2026-08-07 full-repo audit
 
 - **~~`handle_action`'s tail resizes unconditionally~~ — fixed.** Recorded when
@@ -278,6 +293,18 @@ tracked here so they are not lost.
   The shared suspect remains recording finalization racing the child's final
   flush; all three tests drive a PTY child to completion and read what it wrote.
   Still deferred, but it should be fixed at the harness rather than per test.
+
+  **Rate revised upward, 2026-08-09.** The 2/30 figure above came from repeated
+  runs of one binary on one host. Counting the macOS leg of this cycle's pull
+  requests instead gives a worse picture: **3 failures in 11 CI runs**, every
+  one `exec_streams_stdout_and_exits_zero`, every one green on an unmodified
+  re-run (PR #176 once, PR #180 twice). ~27% per pull request is not
+  "occasionally"; it means roughly
+  one PR in five goes red on macOS for no reason, and every one of those costs a
+  human the judgement call this entry exists to answer. Treat the harness fix as
+  higher priority than the 2/30 framing implied, and record the run count when
+  updating this figure — a rate measured by re-running one binary and a rate
+  measured across CI runs are not the same number.
 
 - **`kettle ctl screenshot` times out on macOS, so the live-UI smoke cannot
   finish there.** This is the blocker for `just agent-tui-smoke` on macOS, which
