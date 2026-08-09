@@ -1,5 +1,16 @@
 //! `kettle mcp`: a bounded Model Context Protocol server over stdio.
 //!
+//! **Dual-era.** MCP 2026-07-28 removed the `initialize` handshake from the
+//! protocol core — not just from the HTTP transport — so a client on that
+//! revision sends no handshake at all and carries its version, identity and
+//! capabilities in each request's `_meta`. A server that only speaks the
+//! handshake is "legacy" in that revision's terms, and its compatibility
+//! matrix scores modern-client-to-legacy-server as *Fails*. This server
+//! therefore answers both: a request carrying `_meta` protocol fields is
+//! served statelessly, an `initialize` selects legacy semantics, and
+//! `server/discover` answers either way because it is also the stdio probe a
+//! dual-era client uses to tell the two apart.
+//!
 //! MCP uses one JSON-RPC 2.0 object per UTF-8 line. Stdout is exclusively the
 //! protocol channel; diagnostics remain on stderr. Tool calls run on a bounded
 //! worker pool so one PTY command cannot block ping, cancellation, or unrelated
@@ -14,8 +25,22 @@ use std::time::{Duration, Instant};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
+/// The "modern" revision: no handshake, every request self-describing.
+const MCP_MODERN_VERSION: &str = "2026-07-28";
+/// Newest handshake-based ("legacy") revision this server negotiates.
 const MCP_PROTOCOL_VERSION: &str = "2025-11-25";
 const MCP_COMPAT_VERSION: &str = "2025-06-18";
+/// Advertised newest-first, which is the order a client picking from
+/// `supported` should prefer.
+const MCP_SUPPORTED_VERSIONS: [&str; 3] =
+    [MCP_MODERN_VERSION, MCP_PROTOCOL_VERSION, MCP_COMPAT_VERSION];
+
+/// `_meta` keys a modern request carries. The prefix is reserved for MCP, and
+/// the two marked required in the specification are required here: a request
+/// missing either is malformed, not a request to guess about.
+const META_PROTOCOL_VERSION: &str = "io.modelcontextprotocol/protocolVersion";
+const META_CLIENT_CAPABILITIES: &str = "io.modelcontextprotocol/clientCapabilities";
+const META_SERVER_INFO: &str = "io.modelcontextprotocol/serverInfo";
 const MAX_MCP_REQUEST_BYTES: usize = 1024 * 1024;
 const MAX_MCP_RESPONSE_BYTES: usize = 768 * 1024;
 // A 1 MiB line can pack roughly a million `[`/`{` characters, and byte size
@@ -30,8 +55,15 @@ const MAX_MCP_RESPONSE_BYTES: usize = 768 * 1024;
 const MAX_JSON_NESTING_DEPTH: u32 = 64;
 const TOOL_WORKERS: usize = 4;
 const TOOL_QUEUE_CAPACITY: usize = 16;
+// -32002 is what the legacy revisions used here. 2026-07-28 forbids emitting
+// it (it meant "resource not found" there, and is replaced by -32602), so it
+// is reachable only on the legacy path, where a legacy client understands it.
 const SERVER_NOT_INITIALIZED: i64 = -32002;
 const SERVER_BUSY: i64 = -32003;
+/// `UnsupportedProtocolVersionError`. Spec-defined; the -32020..=-32099 range
+/// belongs to the specification and must be used only with its meanings.
+const UNSUPPORTED_PROTOCOL_VERSION: i64 = -32022;
+const INVALID_PARAMS: i64 = -32602;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Lifecycle {
@@ -63,6 +95,9 @@ struct ToolJob {
     key: String,
     params: Value,
     cancelled: Arc<AtomicBool>,
+    /// Which era asked. Carried on the job because the worker builds the
+    /// response and the era is not recoverable from the tool result.
+    modern: bool,
 }
 
 type Pending = Arc<Mutex<HashMap<String, Arc<AtomicBool>>>>;
@@ -365,6 +400,51 @@ fn respond(responses: &Responder, message: Value) {
     }
 }
 
+/// What `server/discover` reports. Identity, the versions a client may pick
+/// from, and the capabilities it can use — in one round trip, so a client does
+/// not have to probe with `tools/list` to find out what is here.
+fn discover_result() -> Value {
+    json!({
+        "supportedVersions": MCP_SUPPORTED_VERSIONS,
+        "capabilities": {"tools": {}},
+        // Declared because this result is cacheable and the shape says so.
+        "ttlMs": 3_600_000,
+        "cacheScope": "public",
+        "instructions": "Use kettle_run for bounded one-shot PTY commands. \
+    Other tools inspect or drive a running Kettle control server.",
+    })
+}
+
+/// Serve one modern request. No lifecycle state is consulted, because on this
+/// revision there is none to consult: every request carries what the server
+/// needs to answer it.
+fn dispatch_modern(
+    id: Value,
+    method: &str,
+    params: Value,
+    jobs: &crossbeam_channel::Sender<ToolJob>,
+    responses: &Responder,
+    pending: &Pending,
+) {
+    match method {
+        "server/discover" => respond(responses, success(id, modernize(discover_result()))),
+        "tools/list" => respond(
+            responses,
+            success(
+                id,
+                modernize(json!({"tools": crate::mcp_tools::tool_specs()})),
+            ),
+        ),
+        // The tool path is shared with the legacy era on purpose: the tools and
+        // their bounds do not differ between revisions, only the envelope does.
+        "tools/call" => schedule_tool(id, params, jobs, responses, pending, true),
+        _ => respond(
+            responses,
+            error_response(id, -32601, &format!("method not found: {method}")),
+        ),
+    }
+}
+
 fn dispatch_message(
     message: Value,
     lifecycle: &mut Lifecycle,
@@ -427,6 +507,47 @@ fn dispatch_message(
     }
     let id = id.unwrap();
 
+    // Era selection. A request carrying `_meta` protocol fields is modern and
+    // is served statelessly — no handshake, no lifecycle gate, because on this
+    // revision "an open connection, such as a STDIO process, is not a
+    // conversation or session". An `initialize` selects legacy semantics
+    // below. Both eras are served on the same process, which is what makes a
+    // modern client work against kettle at all: before this, one got
+    // SERVER_NOT_INITIALIZED for every call it made.
+    let era = request_era(&params);
+    if let Era::Malformed(reason) = era {
+        respond(responses, error_response(id, INVALID_PARAMS, reason));
+        return;
+    }
+    if let Era::Modern(requested) = era {
+        if requested != MCP_MODERN_VERSION {
+            respond(responses, unsupported_protocol_version(id, requested));
+            return;
+        }
+        // Both fields the specification marks required are required. A request
+        // missing one is malformed, not a request to fill in defaults for.
+        // An object, not merely present: a `null` or a string here would let a
+        // request through that the server cannot actually characterize.
+        if !params
+            .get("_meta")
+            .and_then(|meta| meta.get(META_CLIENT_CAPABILITIES))
+            .is_some_and(Value::is_object)
+        {
+            respond(
+                responses,
+                error_response(
+                    id,
+                    INVALID_PARAMS,
+                    "modern requests must carry an object at \
+                     _meta[\"io.modelcontextprotocol/clientCapabilities\"]",
+                ),
+            );
+            return;
+        }
+        dispatch_modern(id, method, params, jobs, responses, pending);
+        return;
+    }
+
     if method == "initialize" {
         if *lifecycle != Lifecycle::Uninitialized {
             respond(
@@ -469,7 +590,7 @@ fn dispatch_message(
                 success(id, json!({"tools": crate::mcp_tools::tool_specs()})),
             );
         }
-        "tools/call" => schedule_tool(id, params, jobs, responses, pending),
+        "tools/call" => schedule_tool(id, params, jobs, responses, pending, false),
         _ => {
             respond(
                 responses,
@@ -485,6 +606,9 @@ fn schedule_tool(
     jobs: &crossbeam_channel::Sender<ToolJob>,
     responses: &Responder,
     pending: &Pending,
+    // The tools and their bounds are identical across revisions; only the
+    // result envelope differs, and only the caller knows which era asked.
+    modern: bool,
 ) {
     if let Err(message) = crate::mcp_tools::validate_tool_call(&params) {
         respond(responses, error_response(id, -32602, &message));
@@ -514,6 +638,7 @@ fn schedule_tool(
         key: key.clone(),
         params,
         cancelled,
+        modern,
     };
     if jobs.try_send(job).is_err() {
         if let Ok(mut requests) = pending.lock() {
@@ -535,7 +660,7 @@ fn tool_worker(jobs: crossbeam_channel::Receiver<ToolJob>, responses: Responder,
             if job.cancelled.load(Ordering::Acquire) {
                 None
             } else {
-                Some(bounded_tool_success(job.id.clone(), result))
+                Some(bounded_tool_success(job.id.clone(), result, job.modern))
             }
         };
         let completed_before_cancellation =
@@ -665,8 +790,17 @@ fn handle_initialize(id: Value, params: &Value) -> Result<Value, Value> {
             &format!("invalid initialize params: {error}"),
         )
     })?;
+    // Answering an unknown version with our own newest is not a bug here, it is
+    // what this revision requires: "If the server supports the requested
+    // protocol version, it MUST respond with the same version. Otherwise, the
+    // server MUST respond with another protocol version it supports." The
+    // client then decides whether it can speak that, and disconnects if not.
+    //
+    // Do NOT return UnsupportedProtocolVersion (-32022) here. That is the
+    // modern negotiation, and a legacy client has no rule for interpreting it —
+    // an earlier version of this change made exactly that mistake and turned a
+    // conforming handshake into a hard failure.
     let version = match params.protocol_version.as_str() {
-        MCP_PROTOCOL_VERSION => MCP_PROTOCOL_VERSION,
         MCP_COMPAT_VERSION => MCP_COMPAT_VERSION,
         _ => MCP_PROTOCOL_VERSION,
     };
@@ -685,11 +819,78 @@ fn handle_initialize(id: Value, params: &Value) -> Result<Value, Value> {
     ))
 }
 
+/// `UnsupportedProtocolVersionError`, carrying the list a client should pick
+/// from. The spec requires the `supported`/`requested` pair so a client can
+/// retry without a second round trip.
+fn unsupported_protocol_version(id: Value, requested: &str) -> Value {
+    json!({
+        "jsonrpc": "2.0",
+        "id": id,
+        "error": {
+            "code": UNSUPPORTED_PROTOCOL_VERSION,
+            "message": "Unsupported protocol version",
+            "data": {
+                "supported": MCP_SUPPORTED_VERSIONS,
+                "requested": requested,
+            },
+        },
+    })
+}
+
+fn server_info() -> Value {
+    json!({"name": "kettle", "version": env!("CARGO_PKG_VERSION")})
+}
+
+/// Which era a request belongs to.
+///
+/// The specification says a dual-era server picks its behaviour from how the
+/// client opens; on stdio that signal is the presence of the `_meta` protocol
+/// version. `Malformed` exists so a modern client with a small bug — a version
+/// sent as a number, say — is told what is wrong, rather than falling silently
+/// through to the legacy path and being told it never initialized.
+enum Era<'a> {
+    Modern(&'a str),
+    Malformed(&'static str),
+    Legacy,
+}
+
+fn request_era(params: &Value) -> Era<'_> {
+    let Some(meta) = params.get("_meta") else {
+        return Era::Legacy;
+    };
+    if !meta.is_object() {
+        return Era::Malformed("params._meta must be an object");
+    }
+    match meta.get(META_PROTOCOL_VERSION) {
+        None => Era::Legacy,
+        Some(Value::String(version)) => Era::Modern(version),
+        Some(_) => {
+            Era::Malformed("_meta[\"io.modelcontextprotocol/protocolVersion\"] must be a string")
+        }
+    }
+}
+
+/// Modern results carry `resultType` and identify the server without any prior
+/// connection state. Legacy results must NOT gain these fields, so this is
+/// applied per response rather than folded into `success`.
+fn modernize(mut result: Value) -> Value {
+    if let Some(object) = result.as_object_mut() {
+        object.insert("resultType".into(), json!("complete"));
+        object
+            .entry("_meta")
+            .or_insert_with(|| json!({}))
+            .as_object_mut()
+            .map(|meta| meta.insert(META_SERVER_INFO.into(), server_info()));
+    }
+    result
+}
+
 fn success(id: Value, result: Value) -> Value {
     json!({"jsonrpc": "2.0", "id": id, "result": result})
 }
 
-fn bounded_tool_success(id: Value, result: Value) -> Value {
+fn bounded_tool_success(id: Value, result: Value, modern: bool) -> Value {
+    let result = if modern { modernize(result) } else { result };
     let response = success(id.clone(), result.clone());
     let Ok(encoded) = serde_json::to_vec(&response) else {
         return error_response(id, -32603, "tool response could not be encoded");
@@ -1179,6 +1380,7 @@ mod tests {
             &jobs_tx,
             &responses_tx,
             &pending,
+            false,
         );
         cancel_request(&json!({"requestId": 11}), &pending);
         drop(jobs_tx);
@@ -1203,6 +1405,7 @@ mod tests {
             &jobs_tx,
             &responses_tx,
             &pending,
+            false,
         );
         let original = pending.lock().unwrap().get("n:7").unwrap().clone();
         schedule_tool(
@@ -1211,6 +1414,7 @@ mod tests {
             &jobs_tx,
             &responses_tx,
             &pending,
+            false,
         );
         let duplicate = responses_rx.recv().unwrap();
         assert_eq!(duplicate["error"]["code"], -32600);
@@ -1225,6 +1429,7 @@ mod tests {
             &jobs_tx,
             &responses_tx,
             &pending,
+            false,
         );
         let busy = responses_rx.recv().unwrap();
         assert_eq!(busy["id"], 8);
@@ -1246,6 +1451,7 @@ mod tests {
             &jobs_tx,
             &responses_tx,
             &pending,
+            false,
         );
         schedule_tool(
             json!(4),
@@ -1253,6 +1459,7 @@ mod tests {
             &jobs_tx,
             &responses_tx,
             &pending,
+            false,
         );
 
         for id in [3, 4] {
@@ -1276,6 +1483,7 @@ mod tests {
             &jobs_tx,
             &responses_tx,
             &pending,
+            false,
         );
         drop(jobs_tx);
         tool_worker(jobs_rx, responses_tx, pending.clone());
@@ -1293,7 +1501,7 @@ mod tests {
             "content": [{"type": "text", "text": "\"".repeat(512 * 1024)}],
             "structuredContent": {"truncated": false},
         });
-        let response = bounded_tool_success(json!(17), result);
+        let response = bounded_tool_success(json!(17), result, false);
         let encoded = serde_json::to_vec(&response).unwrap();
 
         assert!(encoded.len() <= MAX_MCP_RESPONSE_BYTES);

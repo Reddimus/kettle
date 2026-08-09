@@ -372,6 +372,28 @@ Or a project-scoped `.mcp.json`:
 { "mcpServers": { "kettle": { "command": "kettle", "args": ["mcp"] } } }
 ```
 
+### Protocol revisions
+
+The server is **dual-era**. MCP 2026-07-28 removed the `initialize` handshake
+from the protocol *core* — not only from the HTTP transport — so a client on
+that revision sends no handshake and carries its version, identity and
+capabilities in every request's `_meta`. That revision's compatibility matrix
+scores a modern client against a handshake-only server as **Fails**, so kettle
+answers both eras on the same stdio process:
+
+| the client opens with | kettle serves |
+|---|---|
+| `_meta["io.modelcontextprotocol/protocolVersion"]` | `2026-07-28`, statelessly — no handshake, results carry `resultType` and `serverInfo` |
+| `initialize` | the negotiated legacy revision (`2025-11-25`, or `2025-06-18`) |
+| `server/discover` | either — it is also the stdio probe a dual-era client uses to tell the two apart |
+
+The two eras negotiate differently, and conflating them breaks one of them. A
+**modern** request declaring a version kettle does not speak is refused with
+`UnsupportedProtocolVersion` (`-32022`) naming the versions it does, so the
+client can retry. A **legacy** `initialize` is not refused: 2025-11-25 requires
+the server to "respond with another protocol version it supports", and the
+client disconnects if it cannot speak that.
+
 Tools: `kettle_run` (headless one-shot — needs no running kettle),
 `kettle_list_panes`, `kettle_read_screen`, `kettle_read_cells`,
 `kettle_ui_geometry`, `kettle_screenshot`, `kettle_send_text`,
