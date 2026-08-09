@@ -250,6 +250,18 @@ mod private_dir_chain_umask_tests {
         root
     }
 
+    /// Make `root` a directory kettle would put its namespace in.
+    ///
+    /// `is_kettle_owned_dir_name` requires the parent to be an XDG base or the
+    /// temp root, not merely that the name matches — a scratch directory is
+    /// neither, so without this these tests would be asserting against a shape
+    /// production never produces. Safe here: only the isolated child calls it,
+    /// before any thread starts, exactly like the `umask` call below.
+    fn make_base(root: &Path) {
+        // SAFETY: single-threaded re-executed child, before any spawn.
+        unsafe { std::env::set_var("XDG_STATE_HOME", root) };
+    }
+
     fn in_child(name: &str, body: impl FnOnce()) {
         if std::env::var_os(CHILD_ENV).is_none() {
             let status = std::process::Command::new(std::env::current_exe().unwrap())
@@ -273,6 +285,7 @@ mod private_dir_chain_umask_tests {
              a_permissive_umask_cannot_leave_kettles_own_directory_group_writable",
             || {
                 let root = scratch("create");
+                make_base(&root);
                 let owned = root.join("kettle");
                 let leaf = owned.join("ctl");
 
@@ -299,6 +312,7 @@ mod private_dir_chain_umask_tests {
              an_existing_group_writable_kettle_directory_is_repaired",
             || {
                 let root = scratch("repair");
+                make_base(&root);
                 let owned = root.join("kettle");
                 // Exactly what an earlier kettle left behind on a 002 umask.
                 std::fs::create_dir_all(&owned).expect("pre-existing directory");
@@ -325,6 +339,7 @@ mod private_dir_chain_umask_tests {
              a_pre_existing_nested_chain_is_repaired_at_every_level",
             || {
                 let root = scratch("nested-repair");
+                make_base(&root);
                 let outer = root.join("kettle-1000");
                 let middle = outer.join("state");
                 let inner = middle.join("kettle");
@@ -358,6 +373,7 @@ mod private_dir_chain_umask_tests {
              a_kettle_named_target_repairs_itself_not_just_its_ancestors",
             || {
                 let root = scratch("self-repair");
+                make_base(&root);
                 // `~/.config/kettle` is passed as the TARGET by the config
                 // write-back and the update-check cache, not as a parent.
                 let owned = root.join("kettle");
@@ -394,6 +410,7 @@ mod private_dir_chain_umask_tests {
              symlink_repair_skips_the_final_component_and_resolves_ancestors",
             || {
                 let root = scratch("symlink");
+                make_base(&root);
                 let real = root.join("elsewhere");
                 std::fs::create_dir_all(&real).expect("link target");
                 std::fs::set_permissions(&real, std::fs::Permissions::from_mode(0o775))
@@ -431,6 +448,7 @@ mod private_dir_chain_umask_tests {
                 .expect("inner mode");
                 let inner_link = root.join("inner-link");
                 std::os::unix::fs::symlink(&inner_real, &inner_link).expect("inner symlink");
+                make_base(&inner_link);
                 create_private_dirs(&inner_link.join("kettle").join("ctl"))
                     .expect("an intermediate link resolves like any path");
                 // O_NOFOLLOW protects the FINAL component only. An ancestor
@@ -470,6 +488,7 @@ mod private_dir_chain_umask_tests {
              every_kettle_named_ancestor_is_private_not_just_the_innermost",
             || {
                 let root = scratch("nested");
+                make_base(&root);
                 let outer = root.join("kettle-1000");
                 let middle = outer.join("state");
                 let inner = middle.join("kettle");

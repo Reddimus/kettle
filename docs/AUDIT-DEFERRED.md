@@ -140,9 +140,27 @@ tracked here so they are not lost.
   on that machine with nothing but a log line to say so, and no automated test
   in the repo caught it before #178 added one.
 
-  So the gap is demonstrated but the remedy is not yet measured: no live
-  scenario has been observed passing under Xvfb, because the first attempt hit a
-  real bug before it could. A first gate should rerun `search-history` on Linux
+  **Rerun after the fix, 2026-08-09.** `search-history` under Xvfb on the same
+  machine now gets **past** the control server — the probe succeeds, the
+  scenario body runs, and it writes real screen dumps
+  (`bottom.cells.json`, `bottom.screen.json`). It then fails at the next step,
+  which is a different and previously unreachable problem:
+
+      kettle ctl screenshot failed: screenshot output file could not be opened:
+      private path crosses an untrusted directory edge at ~/Repos/kettle:
+      parent /home/kevim/Repos has mode 0775
+
+  The screenshot lands under the checkout's `target/diagnostics`, so the
+  private-path verifier judges the *user's* directories. Refusing is arguably
+  right for a path kettle did not create, but a screenshot diagnostic is not
+  private state, and requiring `~/Repos` to be `0700` to take one is a policy
+  nobody would choose. Either the screenshot path should not go through the
+  private-file writer, or the writer needs a mode for artifacts the user asked
+  for by name. Not fixed here because it is a policy decision, not a bug.
+
+  So the gap is demonstrated and the remedy is partly measured: the scenario now
+  reaches and drives a running kettle, which is what no automated test does, and
+  the next blocker is known and named rather than guessed at. A first gate should rerun `search-history` on Linux
   now that #178 and #180 are in, and only then pin it — quarantined as
   non-blocking until its flake rate is known over a week.
 

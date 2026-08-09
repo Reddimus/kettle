@@ -4,30 +4,77 @@ use std::fs::File;
 use std::io;
 use std::path::Path;
 
-/// Whether `path` names a directory kettle chose the name of.
+/// The directories kettle creates its own namespace directly inside: the XDG
+/// bases and the temp root. Read from the environment because that is where the
+/// call sites read them from.
+fn kettle_base_dirs() -> Vec<std::path::PathBuf> {
+    let mut bases = vec![std::env::temp_dir()];
+    let env_path = |key: &str| {
+        std::env::var_os(key)
+            .map(std::path::PathBuf::from)
+            .filter(|path| path.is_absolute())
+    };
+    // APPDATA as well as LOCALAPPDATA: `Config::default_path` resolves the
+    // Windows config directory under `%APPDATA%\kettle`, deliberately not
+    // LOCALAPPDATA. This predicate is only consulted from the Unix
+    // implementation today, so omitting it changed nothing — but a base list
+    // that is missing one the resolvers actually use is a trap for whoever
+    // wires this up on Windows.
+    for key in [
+        "XDG_RUNTIME_DIR",
+        "XDG_STATE_HOME",
+        "XDG_CONFIG_HOME",
+        "APPDATA",
+        "LOCALAPPDATA",
+    ] {
+        bases.extend(env_path(key));
+    }
+    if let Some(home) = env_path("HOME") {
+        bases.push(home.join(".local/state"));
+        bases.push(home.join(".config"));
+    }
+    bases.push(std::path::PathBuf::from("/tmp"));
+    bases
+}
+
+/// Whether `path` is the namespace directory kettle creates for itself.
 ///
-/// Everything kettle puts under an XDG base or a temp root sits inside a
-/// directory it named: `<base>/kettle`, or `<tmp>/kettle-<uid>` for the
-/// uid-namespaced temp fallback. Those are kettle's to set the mode on. The
-/// conventional roots above them — `$XDG_RUNTIME_DIR`, `~/.config`, `/tmp` —
-/// belong to the system or the user and are never touched.
+/// Two conditions, and the second is the one that matters. The **name** must be
+/// `kettle`, or `kettle-<uid>` for the uid-namespaced temp fallback. And the
+/// **parent** must be a directory kettle actually puts that namespace in — an
+/// XDG base or the temp root.
 ///
-/// The `kettle-<uid>` form requires all digits after the dash rather than any
-/// `kettle-` prefix. A loose prefix reaches directories kettle never created:
-/// `XDG_STATE_HOME=~/kettle-dev/state` would make `~/kettle-dev` look owned,
-/// and setting a user's project directory to `0700` is not this function's
-/// business. It first showed up as a test whose own scratch directory was
-/// named `kettle-ctl-umask-…`, which is the same mistake with a smaller blast
-/// radius.
+/// Requiring only the name was a real bug, not a theoretical one: `~/Repos/kettle`
+/// is a source checkout, matches `kettle` exactly, and `kettle --config
+/// ~/Repos/kettle/dev.config` therefore set the whole checkout to `0700`. It
+/// was measured going `0775 -> 0700` before this check existed. Anyone who
+/// keeps kettle's source in a directory called `kettle` — which is everyone —
+/// was one `--config` away from it.
+///
+/// The `kettle-<uid>` form also requires digits after the dash rather than any
+/// `kettle-` prefix, so `XDG_STATE_HOME=~/kettle-dev/state` cannot claim
+/// `~/kettle-dev`. That one first showed up as a test failing on its own
+/// scratch directory, named `kettle-ctl-umask-…`.
+///
+/// Directories *below* a matched namespace are still kettle's; the callers walk
+/// down from it rather than asking this again.
 pub fn is_kettle_owned_dir_name(path: &Path) -> bool {
-    path.file_name()
+    let named = path
+        .file_name()
         .and_then(|name| name.to_str())
         .is_some_and(|name| {
             name == "kettle"
                 || name.strip_prefix("kettle-").is_some_and(|rest| {
                     !rest.is_empty() && rest.bytes().all(|b| b.is_ascii_digit())
                 })
-        })
+        });
+    if !named {
+        return false;
+    }
+    let Some(parent) = path.parent() else {
+        return false;
+    };
+    kettle_base_dirs().iter().any(|base| base == parent)
 }
 
 /// Create `directory`, giving every kettle-named ancestor an explicit `0700`
@@ -119,7 +166,12 @@ fn create_private_dirs_impl(directory: &Path) -> io::Result<()> {
         }
         cursor = path.parent();
     }
-    for path in repair {
+    // Outermost first. Repairing leaf-to-root opens each deeper path while its
+    // ancestors are still group-writable, which is a window a group peer can
+    // use to swap one — and `O_NOFOLLOW` only protects the final component, so
+    // the redirected open would look legitimate. Narrowing each ancestor before
+    // descending through it closes that ordering.
+    for path in repair.iter().rev() {
         repair_private_dir_mode(path)?;
     }
     Ok(())
@@ -942,6 +994,23 @@ mod unix {
         uid == current_user() || uid == 0
     }
 
+    /// The remedy sentence, but only when the offending directory is one kettle
+    /// named for itself.
+    ///
+    /// `chmod 700` is right for `<base>/kettle`, which kettle created and which
+    /// nothing else has business writing to. It is bad advice for a directory
+    /// that merely happens to sit on the path — running a live-UI scenario from
+    /// a checkout produced "restore it with `chmod 700 /home/user/Repos`",
+    /// telling the user to lock down every project they own so kettle could
+    /// write a screenshot. Refusing is still correct there; instructing is not.
+    pub(super) fn chmod_remedy(path: &Path) -> String {
+        if super::is_kettle_owned_dir_name(path) {
+            format!(" — restore it with `chmod 700 {}`", path.display())
+        } else {
+            String::new()
+        }
+    }
+
     fn require_trusted_directory_edge(
         parent: &std::fs::Metadata,
         child: &std::fs::Metadata,
@@ -968,10 +1037,10 @@ mod unix {
             // remedy was first added only to the leaf-policy check below, so
             // the case that motivated it was the one case that never showed it.
             format!(
-                "parent {} has mode {:04o}; group/other write bits are unsafe (set an explicit directory mode instead of relying on the process umask) — restore it with `chmod 700 {}`",
+                "parent {} has mode {:04o}; group/other write bits are unsafe (set an explicit directory mode instead of relying on the process umask){}",
                 parent_path.display(),
                 parent.mode() & 0o7777,
-                parent_path.display()
+                chmod_remedy(parent_path)
             )
         } else {
             format!(
@@ -1244,7 +1313,7 @@ mod unix {
             // itself off, and "writable by an untrusted principal" does not
             // tell them that one chmod restores it.
             let remedy = if trusted_identity(parent.uid()) {
-                format!(" — restore it with `chmod 700 {}`", self.path.display())
+                chmod_remedy(&self.path)
             } else {
                 String::new()
             };
@@ -3488,6 +3557,67 @@ mod windows {
 mod tests {
     use super::*;
     use std::io::Write as _;
+
+    /// A source checkout is called `kettle` too, and matching on the name alone
+    /// meant `kettle --config ~/Repos/kettle/dev.config` set the whole checkout
+    /// to `0700`. Measured going `0775 -> 0700` before the parent check existed.
+    #[cfg(unix)]
+    #[test]
+    fn a_source_checkout_named_kettle_is_not_kettles_own_directory() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let root = crate::test_tempdir();
+        let checkout = root.path().join("Repos").join("kettle");
+        std::fs::create_dir_all(checkout.join("target")).unwrap();
+        std::fs::set_permissions(&checkout, std::fs::Permissions::from_mode(0o775)).unwrap();
+
+        assert!(
+            !is_kettle_owned_dir_name(&checkout),
+            "a checkout whose parent is not an XDG base is not kettle's to chmod"
+        );
+        create_private_dirs(&checkout.join("target").join("diag")).unwrap();
+        assert_eq!(
+            std::fs::metadata(&checkout).unwrap().permissions().mode() & 0o777,
+            0o775,
+            "the repair narrowed a user's source checkout"
+        );
+        assert_eq!(
+            unix::chmod_remedy(&checkout),
+            "",
+            "kettle must not advise a chmod on a checkout it did not create"
+        );
+    }
+
+    /// The remedy is advice, and advice about somebody else's directory is
+    /// wrong even when the refusal is right.
+    #[cfg(unix)]
+    #[test]
+    fn the_chmod_remedy_is_offered_only_for_directories_kettle_named() {
+        use std::path::Path;
+        // Derived from the real base list, not hardcoded: `/run/user/<uid>` is
+        // only a base when `XDG_RUNTIME_DIR` says so, which is untrue on macOS
+        // and was how the first version of this test failed.
+        for base in super::kettle_base_dirs() {
+            for name in ["kettle", "kettle-1000"] {
+                let owned = base.join(name);
+                let remedy = unix::chmod_remedy(&owned);
+                assert!(
+                    remedy.contains("chmod 700") && remedy.contains(&*owned.to_string_lossy()),
+                    "kettle's own directory should carry the remedy: {}",
+                    owned.display()
+                );
+            }
+        }
+        // The live-UI run produced exactly this: a screenshot under a checkout,
+        // refused because `~/Repos` is 0775, with the message telling the user
+        // to lock down every project they own.
+        for foreign in ["/home/user/Repos", "/home/user/.config", "/tmp"] {
+            assert_eq!(
+                unix::chmod_remedy(Path::new(foreign)),
+                "",
+                "kettle must not tell a user to chmod {foreign}"
+            );
+        }
+    }
 
     #[cfg(unix)]
     #[test]
