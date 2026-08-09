@@ -6,6 +6,8 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+## [2.55.0] — 2026-08-09
+
 ### Fixed
 
 - **The confirm bar clipped its own rightmost button.** Every close-confirm,
@@ -88,6 +90,17 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   frame on a 300x80 grid, held against the mutex the PTY reader blocks on. It now
   checks first and scans only when there is something to draw. (#176)
 
+### Added
+
+- **`kettle mcp` answers modern MCP clients, not just handshake-based ones.**
+  MCP 2026-07-28 removed the `initialize` handshake from the protocol *core*,
+  so a client on that revision sends none and carries its version and
+  capabilities in every request. Against a handshake-only server that does not
+  degrade — the specification's own compatibility matrix scores it *Fails*, and
+  in practice every call returned "server is not initialized". kettle now
+  serves both eras on the same stdio process, implements `server/discover`, and
+  refuses a version it does not speak by naming the ones it does. (#183)
+
 ### Changed
 
 - Four CI gates that existed but were dispatched by nothing now run on every
@@ -97,6 +110,13 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 - Removed `scripts/check-underline-scroll-smoke.sh`, superseded by the
   cross-platform live-UI driver its recipe already dispatched. (#171)
+
+- Every `mermaid` diagram in tracked Markdown is compiled in CI. One in
+  `docs/ARCHITECTURE.md` had never rendered — a node label with escaped quotes,
+  showing as a red error panel on GitHub — and nothing caught it because
+  nothing looked. Four diagrams were added where prose was carrying more
+  structure than prose can: the release flow, the update verification chain,
+  the update transaction journal, and the OSC 133 command lifecycle. (#182)
 
 - `docs/AUDIT-DEFERRED.md` records why the eleven live-UI scenarios still run in
   no automated gate, with the evidence that the recorded reason — a GPU and
