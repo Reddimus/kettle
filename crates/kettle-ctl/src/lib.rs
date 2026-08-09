@@ -150,18 +150,73 @@ pub(crate) fn ensure_owned_dir(dir: &std::path::Path) -> std::io::Result<()> {
     Ok(())
 }
 
-pub(crate) fn ensure_private_dir(dir: &std::path::Path) -> std::io::Result<()> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::{DirBuilderExt as _, MetadataExt as _, PermissionsExt as _};
+/// Whether `path` is a directory kettle named for itself.
+///
+/// Everything kettle puts under an XDG base or a temp root lives inside one
+/// directory it chose the name of: `<base>/kettle`, or `<tmp>/kettle-<uid>` for
+/// the length-safe socket fallback. Those are ours to set the mode on. The
+/// conventional roots above them — `$XDG_RUNTIME_DIR`, `~/.local/state`, `/tmp`
+/// — belong to the system or the user and are never touched.
+#[cfg(unix)]
+pub(crate) fn is_kettle_owned_dir_name(path: &std::path::Path) -> bool {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name == "kettle" || name.starts_with("kettle-"))
+}
 
-        if let Some(parent) = dir.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
+/// Create `dir` and kettle's own directory above it with an explicit `0700`,
+/// leaving only the conventional roots above that to the ambient umask.
+///
+/// This used to be `create_dir_all(parent)` followed by a mode-carrying builder
+/// for the leaf alone, which made kettle create the very directory its own
+/// checks then reject. On a `002` umask — Debian/Ubuntu's per-user-group
+/// default — `$XDG_RUNTIME_DIR/kettle` landed at `0775`, and because
+/// `kettle-state`'s private-path verifier walks *ancestors*, every private path
+/// beneath it was refused. Observed on Ubuntu 24.04: single-instance
+/// activation, the remote-command watcher and the update-check throttle all
+/// silently disabled themselves, each reporting only a warning in a log.
+///
+/// `DirBuilder::mode` applies to every directory a recursive create makes, not
+/// just the last one, so naming the mode is all that is required. An existing
+/// kettle-owned directory left group-writable by an earlier run is repaired,
+/// since otherwise the fix would only help installations that never ran.
+#[cfg(unix)]
+pub(crate) fn create_private_dir_chain(dir: &std::path::Path) -> std::io::Result<()> {
+    use std::os::unix::fs::{DirBuilderExt as _, MetadataExt as _, PermissionsExt as _};
+
+    let private = |path: &std::path::Path| {
         std::fs::DirBuilder::new()
             .recursive(true)
             .mode(0o700)
-            .create(dir)?;
+            .create(path)
+    };
+
+    if let Some(parent) = dir.parent() {
+        if is_kettle_owned_dir_name(parent) {
+            if let Some(root) = parent.parent() {
+                std::fs::create_dir_all(root)?;
+            }
+            private(parent)?;
+            let metadata = std::fs::symlink_metadata(parent)?;
+            if metadata.file_type().is_dir()
+                && metadata.uid() == unsafe { libc::geteuid() }
+                && metadata.mode() & 0o077 != 0
+            {
+                std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700))?;
+            }
+        } else {
+            std::fs::create_dir_all(parent)?;
+        }
+    }
+    private(dir)
+}
+
+pub(crate) fn ensure_private_dir(dir: &std::path::Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+
+        create_private_dir_chain(dir)?;
         let metadata = std::fs::symlink_metadata(dir)?;
         if !metadata.file_type().is_dir() || metadata.uid() != unsafe { libc::geteuid() } {
             return Err(std::io::Error::new(
@@ -201,6 +256,110 @@ pub(crate) fn test_scratch_root() -> std::path::PathBuf {
     #[cfg(not(windows))]
     {
         std::env::temp_dir()
+    }
+}
+
+/// The `002` umask regression, reproduced rather than reasoned about.
+///
+/// A permissive umask is process-wide, so these run in a re-executed child (the
+/// same shape `kettle-state`'s restrictive-umask test uses) instead of racing
+/// every other test in this binary.
+#[cfg(all(test, unix))]
+mod private_dir_chain_umask_tests {
+    use super::{create_private_dir_chain, ensure_private_dir, test_scratch_root};
+    use std::os::unix::fs::PermissionsExt as _;
+    use std::path::{Path, PathBuf};
+
+    const CHILD_ENV: &str = "KETTLE_CTL_PERMISSIVE_UMASK_CHILD";
+
+    fn mode_of(path: &Path) -> u32 {
+        std::fs::symlink_metadata(path)
+            .unwrap_or_else(|error| panic!("stat {}: {error}", path.display()))
+            .permissions()
+            .mode()
+            & 0o7777
+    }
+
+    fn scratch(tag: &str) -> PathBuf {
+        let root = test_scratch_root().join(format!(
+            "kettle-ctl-umask-{tag}-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        // The conventional root stands in for `$XDG_RUNTIME_DIR`: created
+        // before the umask changes, and expected to survive untouched.
+        std::fs::create_dir_all(&root).expect("scratch root");
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o755)).expect("root mode");
+        root
+    }
+
+    fn in_child(name: &str, body: impl FnOnce()) {
+        if std::env::var_os(CHILD_ENV).is_none() {
+            let status = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", name, "--nocapture"])
+                .env(CHILD_ENV, "1")
+                .status()
+                .expect("re-exec the test binary");
+            assert!(status.success(), "permissive-umask child failed: {status}");
+            return;
+        }
+        // SAFETY: only the isolated child reaches here, before it starts any
+        // application threads.
+        unsafe { libc::umask(0o002) };
+        body();
+    }
+
+    #[test]
+    fn a_permissive_umask_cannot_leave_kettles_own_directory_group_writable() {
+        in_child(
+            "private_dir_chain_umask_tests::\
+             a_permissive_umask_cannot_leave_kettles_own_directory_group_writable",
+            || {
+                let root = scratch("create");
+                let owned = root.join("kettle");
+                let leaf = owned.join("ctl");
+
+                create_private_dir_chain(&leaf).expect("create the private chain");
+
+                // The regression: this was 0775, and because kettle-state's
+                // verifier walks ancestors, every private path under it failed.
+                assert_eq!(mode_of(&owned), 0o700, "kettle's own directory");
+                assert_eq!(mode_of(&leaf), 0o700, "the leaf");
+                assert_eq!(
+                    mode_of(&root),
+                    0o755,
+                    "the conventional root above kettle's directory is not ours to change"
+                );
+                let _ = std::fs::remove_dir_all(&root);
+            },
+        );
+    }
+
+    #[test]
+    fn an_existing_group_writable_kettle_directory_is_repaired() {
+        in_child(
+            "private_dir_chain_umask_tests::\
+             an_existing_group_writable_kettle_directory_is_repaired",
+            || {
+                let root = scratch("repair");
+                let owned = root.join("kettle");
+                // Exactly what an earlier kettle left behind on a 002 umask.
+                std::fs::create_dir_all(&owned).expect("pre-existing directory");
+                std::fs::set_permissions(&owned, std::fs::Permissions::from_mode(0o775))
+                    .expect("pre-existing mode");
+                assert_eq!(mode_of(&owned), 0o775);
+
+                ensure_private_dir(&owned.join("instances")).expect("ensure_private_dir");
+
+                assert_eq!(
+                    mode_of(&owned),
+                    0o700,
+                    "an installation that already ran must be repaired, not left broken"
+                );
+                let _ = std::fs::remove_dir_all(&root);
+            },
+        );
     }
 }
 
