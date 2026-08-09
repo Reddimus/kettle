@@ -187,7 +187,7 @@ Then search **"kettle"** in GNOME Activities / KDE Krunner / Ubuntu's
 Super-key, or run `kettle` from any shell on your `$PATH`.
 
 Pin a specific version by replacing the `| sh` at the end of the command
-above with `| KETTLE_VERSION=v2.54.0 sh` — the assignment has to be part of
+above with `| KETTLE_VERSION=v2.55.0 sh` — the assignment has to be part of
 the pipeline, not a separate command.
 System-wide install: `| KETTLE_PREFIX=/usr/local sh` (needs write access).
 Uninstall later: `~/.local/share/kettle/install.sh --uninstall`.
