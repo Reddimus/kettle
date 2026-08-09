@@ -720,13 +720,19 @@ mod tests {
         )
     }
 
-    fn test_paths(label: &str) -> (PathBuf, ActivationPaths) {
-        let dir = crate::test_scratch_root().join(format!(
-            "kettle-activation-test-{}-{label}",
-            std::process::id()
-        ));
-        let _ = std::fs::remove_dir_all(&dir);
-        let paths = activation_paths(&dir);
+    /// A scratch directory that removes itself.
+    ///
+    /// This used to build a path from the pid and delete whatever the *previous*
+    /// run with that pid and label had left, never its own — so every test run
+    /// leaked one directory, and since the pid varies they accumulated without
+    /// bound. A sweep of a Windows machine found 148 `kettle*` entries in
+    /// `%TEMP%`, most of them from this helper. `PrivateTempDir` owns a
+    /// `TempDir`, so the directory goes away when the returned guard drops;
+    /// callers that name it `_dir` keep it alive for the test body, which is
+    /// what the binding was already doing.
+    fn test_paths(label: &str) -> (kettle_test_support::PrivateTempDir, ActivationPaths) {
+        let dir = kettle_test_support::private_tempdir(&format!("kettle-activation-{label}-"));
+        let paths = activation_paths(dir.path());
         (dir, paths)
     }
 

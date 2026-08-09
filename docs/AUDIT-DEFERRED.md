@@ -110,6 +110,24 @@ tracked here so they are not lost.
 
 ## Testing coverage
 
+- **Test scratch directories accumulated without bound, 2026-08-09.** A sweep
+  of the Windows machine found **148** `kettle*` entries in `%TEMP%`; the Ubuntu
+  machine had its own smaller set. Most came from one helper:
+  `activation.rs::test_paths` built a path from the pid and deleted whatever a
+  *previous* run with the same pid and label had left — never its own. Since the
+  pid varies, every run leaked one directory, forever, on every machine that
+  ever ran the suite.
+
+  Fixed by switching it to `kettle_test_support::private_tempdir`, whose
+  `TempDir` removes the directory when the guard drops. Verified by counting
+  before and after a run: unchanged. The entries already on disk are historical
+  and safe to delete by hand.
+
+  Worth noting how it was found: no test failed, no gate fired, and reading the
+  helper would have looked reasonable — it *does* call `remove_dir_all`. Only
+  looking at a machine that had run the suite hundreds of times made it visible.
+
+
 - **Ten live-UI scenarios run in no automated gate.**
   `scripts/check-live-ui-smoke.py` launches a real windowed kettle and drives it
   through ten scenarios (`tabbar`, `tab-title`, `tearoff`, `split-titlebar`,
