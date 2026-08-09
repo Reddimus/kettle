@@ -2016,7 +2016,10 @@ enum DefaultConfigWrite {
 /// atomic decision, and refuses to follow a symlink.
 fn write_default_config(path: &std::path::Path) -> anyhow::Result<DefaultConfigWrite> {
     if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir).map_err(|e| {
+        // Private from creation: `--write-default-config` is often the very
+        // first thing to make `~/.config/kettle`, so it decides the mode every
+        // later private path under it is checked against.
+        kettle_state::create_private_dirs(dir).map_err(|e| {
             anyhow::anyhow!("could not create config directory {}: {e}", dir.display())
         })?;
     }

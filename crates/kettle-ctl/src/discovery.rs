@@ -284,17 +284,12 @@ pub fn register(dir: &std::path::Path, entry: &RegistryEntry) -> std::io::Result
     {
         // Create the leaf dir 0700 from the start (DirBuilder applies the mode
         // at creation) so there is no create-then-chmod window where it is
-        // briefly world-readable. Parents are created first without the mode
-        // (they are conventional XDG dirs); then re-assert 0700 on the leaf in
-        // case it already existed with looser perms.
-        use std::os::unix::fs::{DirBuilderExt, MetadataExt as _, PermissionsExt};
-        if let Some(parent) = dir.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        std::fs::DirBuilder::new()
-            .recursive(true)
-            .mode(0o700)
-            .create(dir)?;
+        // briefly world-readable, and give kettle's own directory above it the
+        // same treatment — leaving that one to the umask is what let a `002`
+        // umask make this whole subtree unusable. Then re-assert 0700 on the
+        // leaf in case it already existed with looser perms.
+        use std::os::unix::fs::{MetadataExt as _, PermissionsExt};
+        kettle_state::create_private_dirs(dir)?;
         let metadata = std::fs::symlink_metadata(dir)?;
         if !metadata.file_type().is_dir() || metadata.uid() != unsafe { libc::geteuid() } {
             return Err(std::io::Error::new(

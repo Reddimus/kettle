@@ -4,6 +4,183 @@ use std::fs::File;
 use std::io;
 use std::path::Path;
 
+/// Whether `path` names a directory kettle chose the name of.
+///
+/// Everything kettle puts under an XDG base or a temp root sits inside a
+/// directory it named: `<base>/kettle`, or `<tmp>/kettle-<uid>` for the
+/// uid-namespaced temp fallback. Those are kettle's to set the mode on. The
+/// conventional roots above them — `$XDG_RUNTIME_DIR`, `~/.config`, `/tmp` —
+/// belong to the system or the user and are never touched.
+///
+/// The `kettle-<uid>` form requires all digits after the dash rather than any
+/// `kettle-` prefix. A loose prefix reaches directories kettle never created:
+/// `XDG_STATE_HOME=~/kettle-dev/state` would make `~/kettle-dev` look owned,
+/// and setting a user's project directory to `0700` is not this function's
+/// business. It first showed up as a test whose own scratch directory was
+/// named `kettle-ctl-umask-…`, which is the same mistake with a smaller blast
+/// radius.
+pub fn is_kettle_owned_dir_name(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| {
+            name == "kettle"
+                || name.strip_prefix("kettle-").is_some_and(|rest| {
+                    !rest.is_empty() && rest.bytes().all(|b| b.is_ascii_digit())
+                })
+        })
+}
+
+/// Create `directory`, giving every kettle-named ancestor an explicit `0700`
+/// and leaving only the conventional roots above them to the ambient umask.
+///
+/// `create_dir_all` takes the process umask, so on a `002` umask — Debian and
+/// Ubuntu's per-user-group default — kettle created its own directories at
+/// `0775`. The verifier in this module walks *ancestors*, so it then refused
+/// every private path beneath them: on Ubuntu 24.04 that silently disabled
+/// single-instance activation, the remote-command watcher and the update-check
+/// throttle, each reporting only a warning in a log.
+///
+/// Ancestors are walked upward while they are kettle-named rather than one
+/// fixed level, because the no-`HOME` fallback nests two of them
+/// (`<tmp>/kettle-<uid>/state/kettle/ctl`) and leaving the outer one at the
+/// umask's mercy would reproduce the same refusal.
+///
+/// Directories an earlier run left group-writable are repaired when this user
+/// owns them, since a fix that only helps installations that never ran would
+/// leave every affected machine broken. The repair covers *every* component
+/// from the outermost kettle-named ancestor down to `directory`, not just that
+/// ancestor: on a no-`HOME` machine the old code left all four of
+/// `<tmp>/kettle-<uid>/state/kettle/ctl` at `0775`, and repairing only the top
+/// one leaves the verifier refusing the path for a directory below it.
+///
+/// A symlink at the final component is never repaired through: the open uses
+/// `O_NOFOLLOW`, so a dotfile-manager link is skipped and left to the ownership
+/// checks at the call site. An ancestor link resolves as it does for any path,
+/// so the real directory behind it is repaired — which is what a
+/// dotfile-managed tree wants, and is not the same as "never follows a link".
+pub fn create_private_dirs(directory: &Path) -> io::Result<()> {
+    create_private_dirs_impl(directory)
+}
+
+#[cfg(unix)]
+fn create_private_dirs_impl(directory: &Path) -> io::Result<()> {
+    use std::os::unix::fs::DirBuilderExt as _;
+
+    let private = |path: &Path| {
+        std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(path)
+    };
+
+    // The outermost kettle-named directory at or above `directory`.
+    // `DirBuilder::mode` applies to every directory a recursive create makes,
+    // so creating from there down names the mode for the whole kettle-owned
+    // run in one call.
+    //
+    // The walk starts at `directory` itself, not its parent: three call sites
+    // pass a kettle-named directory AS the target rather than as an ancestor —
+    // the config write-back and the update-check cache both hand over
+    // `~/.config/kettle` directly. Starting one level up left those with no
+    // owned directory at all, so the repair below never ran for the case it
+    // exists for, and a `~/.config/kettle` an earlier run left at 0775 stayed
+    // there.
+    let mut owned: Option<&Path> = None;
+    let mut cursor = Some(directory);
+    while let Some(path) = cursor {
+        if is_kettle_owned_dir_name(path) {
+            owned = Some(path);
+        }
+        cursor = path.parent();
+    }
+
+    let Some(owned) = owned else {
+        if let Some(parent) = directory.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        return private(directory);
+    };
+
+    if let Some(root) = owned.parent() {
+        std::fs::create_dir_all(root)?;
+    }
+    private(directory)?;
+
+    // Repair every component from `owned` down. A fresh create is already
+    // correct — the recursive builder above names the mode for each directory
+    // it makes — so this only affects components an earlier run left behind,
+    // which a create against an existing path silently leaves alone.
+    let mut repair: Vec<&Path> = Vec::new();
+    let mut cursor = Some(directory);
+    while let Some(path) = cursor {
+        repair.push(path);
+        if path == owned {
+            break;
+        }
+        cursor = path.parent();
+    }
+    for path in repair {
+        repair_private_dir_mode(path)?;
+    }
+    Ok(())
+}
+
+/// Set one existing directory to `0700`, through a file descriptor rather than
+/// a path.
+///
+/// Path-based `set_permissions` follows symlinks and re-resolves the name, so
+/// the inspect-then-chmod pair is two lookups an attacker could interleave.
+/// That is hard to reach here — the directories being repaired sit under
+/// `$XDG_RUNTIME_DIR` or `~/.config`, and the one under a shared `/tmp` is
+/// protected by the sticky bit plus the owner check below — but opening once
+/// with `O_NOFOLLOW | O_DIRECTORY` and calling `fchmod` removes the question
+/// rather than arguing it. A symlink at the path fails the open outright.
+///
+/// A missing directory is not an error: a concurrent teardown between the
+/// create above and this call is the same outcome as never having existed.
+#[cfg(unix)]
+fn repair_private_dir_mode(path: &Path) -> io::Result<()> {
+    use std::os::fd::AsRawFd as _;
+    use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _};
+
+    let directory = match std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_DIRECTORY | libc::O_CLOEXEC)
+        .open(path)
+    {
+        Ok(directory) => directory,
+        // ELOOP/ENOTDIR: the name is a symlink, or not a directory at all.
+        // Leave it to the ownership checks at the call site rather than
+        // chmod'ing a target somebody else chose. Matched on raw errno because
+        // the matching `ErrorKind`s are unstable on this MSRV.
+        Err(error)
+            if matches!(
+                error.raw_os_error(),
+                Some(libc::ENOENT | libc::ELOOP | libc::ENOTDIR)
+            ) =>
+        {
+            return Ok(());
+        }
+        Err(error) => return Err(error),
+    };
+
+    // Both checks now read the object we hold open, not the name.
+    let metadata = directory.metadata()?;
+    if metadata.uid() != unsafe { libc::geteuid() } || metadata.mode() & 0o077 == 0 {
+        return Ok(());
+    }
+    // SAFETY: `directory` owns a live descriptor for the duration of the call.
+    if unsafe { libc::fchmod(directory.as_raw_fd(), 0o700) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn create_private_dirs_impl(directory: &Path) -> io::Result<()> {
+    std::fs::create_dir_all(directory)
+}
+
 /// Create a new private regular file without an inherited-permission window.
 ///
 /// The operation fails when `path` already exists. Unix applies mode `0600`
@@ -786,10 +963,15 @@ mod unix {
                 current_user()
             )
         } else if !sticky {
+            // Name the remedy here too. This is the message the umask bug
+            // actually produced — a group-writable *ancestor* — while the
+            // remedy was first added only to the leaf-policy check below, so
+            // the case that motivated it was the one case that never showed it.
             format!(
-                "parent {} has mode {:04o}; group/other write bits are unsafe (set an explicit directory mode instead of relying on the process umask)",
+                "parent {} has mode {:04o}; group/other write bits are unsafe (set an explicit directory mode instead of relying on the process umask) — restore it with `chmod 700 {}`",
                 parent_path.display(),
-                parent.mode() & 0o7777
+                parent.mode() & 0o7777,
+                parent_path.display()
             )
         } else {
             format!(
@@ -1057,10 +1239,19 @@ mod unix {
             {
                 return Ok(());
             }
+            // Name the remedy. This refusal is usually the first and only
+            // thing a user learns about a feature that has quietly turned
+            // itself off, and "writable by an untrusted principal" does not
+            // tell them that one chmod restores it.
+            let remedy = if trusted_identity(parent.uid()) {
+                format!(" — restore it with `chmod 700 {}`", self.path.display())
+            } else {
+                String::new()
+            };
             Err(io::Error::new(
                 io::ErrorKind::PermissionDenied,
                 format!(
-                    "private parent is writable by an untrusted principal: {} (mode {:o})",
+                    "private parent is writable by an untrusted principal: {} (mode {:o}){remedy}",
                     self.path.display(),
                     parent.mode() & 0o7777
                 ),

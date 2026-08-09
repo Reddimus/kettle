@@ -5498,7 +5498,14 @@ impl App {
                     }
                 })
             {
-                let _ = std::fs::create_dir_all(&dir);
+                // This is the FIRST thing to create the config directory on a
+                // fresh install, so it decides the mode every later private
+                // path under it is checked against. Creating it at the ambient
+                // umask here is what left the remote-command watcher below
+                // refusing its own parent on a 002 umask, reporting `mode 775`
+                // even in a run where a later write-back would have repaired
+                // it — the repair simply came after this check.
+                let _ = kettle_state::create_private_dirs(&dir);
                 let _ = w.watch(&dir, notify::RecursiveMode::NonRecursive);
                 watcher = Some(w);
             }
@@ -5518,6 +5525,12 @@ impl App {
             let p = proxy.clone();
             let watched = path.clone();
             let pending = remote_command_pending.clone();
+            // `remote.cmd` is a command channel into this terminal, so its
+            // parent must be private before the lock below touches anything.
+            // Repairing here rather than relying on some other subsystem
+            // having run first is the difference between the watcher working
+            // on this launch and on the next one.
+            let _ = kettle_state::create_private_dirs(&dir);
             use notify::Watcher;
             if let Ok(mut w) =
                 notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
