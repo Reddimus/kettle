@@ -3502,18 +3502,18 @@ enum ContextMenuItem {
 /// Anchor is the post-clamp panel top-left; rows mirror the renderer's
 /// `ContextMenu` slice but carry the live `Action` for dispatch.
 /// Terminator parity: title-edit overlay state.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TitleEditScope {
     /// Edit the OS window title (winit Window::set_title).
     Window,
-    /// Edit the active tab's title_override (overrides what the
+    /// Edit the tab active when the overlay opens (overrides what the
     /// tab-bar shows independent of any OSC 1/2 from a pane).
     Tab,
-    /// Edit the focused pane's title (used for the future per-pane
+    /// Edit the pane focused when the overlay opens (used for the future per-pane
     /// titlebar render Bucket-D + as the OSC-1 equivalent).
     Pane,
     /// Terminator parity, titlebar Bucket-D:
-    /// edit the focused pane's broadcast-group name. Writes to
+    /// edit the opening pane's broadcast-group name. Writes to
     /// pane.group_name. Empty input clears the group.
     Group,
 }
@@ -3524,11 +3524,11 @@ pub enum TitleEditScope {
 /// typed name applies to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum GroupBulkScope {
-    /// Default: just the focused pane (existing
+    /// Default: just the pane focused when the overlay opens (existing
     /// `EditPaneGroup` / `CreateGroup` behavior).
     #[default]
     Single,
-    /// Every pane in the focused tab gets the typed group name.
+    /// Every pane in the tab active when the overlay opens gets the typed name.
     Tab,
     /// Every pane in every tab.
     Window,
@@ -3537,13 +3537,179 @@ pub enum GroupBulkScope {
 #[derive(Debug, Clone)]
 pub struct TitleEditState {
     pub scope: TitleEditScope,
+    /// Stable identity captured when the edit opens. Pane ids are never reused;
+    /// a tab is named by every pane it held so it survives index shifts and one
+    /// of its panes exiting.
+    pub target: TitleEditTarget,
     /// Current text the user has typed. Pre-filled with the existing
     /// title so the user can edit in place vs starting blank.
     pub input: String,
     /// When `scope == Group`, which panes Apply writes
-    /// to. Single = focused only (existing behavior); Tab/Window
+    /// to. Single = opening pane only (existing behavior); Tab/Window
     /// = bulk-assign via `Action::GroupTab`/`GroupWindow`.
     pub bulk: GroupBulkScope,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TitleEditTarget {
+    /// The owning `WindowState`. Window-title edits and window-bulk group edits
+    /// deliberately keep live window membership: the state itself cannot move
+    /// to another window, and `GroupWindow` still means every pane present in
+    /// this window when the name is applied.
+    Window,
+    /// All pane ids held by the target tab when the edit opened. Resolving any
+    /// surviving id finds the same tab after reordering or sibling exits.
+    Tab(Vec<u64>),
+    /// One pane, used by pane-title and single-pane group edits.
+    Pane(u64),
+}
+
+fn begin_title_edit(
+    mux: &Mux,
+    scope: TitleEditScope,
+    bulk: GroupBulkScope,
+    window_title: &str,
+) -> Option<TitleEditState> {
+    let target = match (scope, bulk) {
+        (TitleEditScope::Window, _) | (TitleEditScope::Group, GroupBulkScope::Window) => {
+            TitleEditTarget::Window
+        }
+        (TitleEditScope::Tab, _) | (TitleEditScope::Group, GroupBulkScope::Tab) => {
+            let panes = mux.tab_anchor_panes(mux.active);
+            if panes.is_empty() {
+                return None;
+            }
+            TitleEditTarget::Tab(panes)
+        }
+        (TitleEditScope::Pane, _) | (TitleEditScope::Group, GroupBulkScope::Single) => {
+            TitleEditTarget::Pane(mux.active_focus()?)
+        }
+    };
+    let input = match (scope, bulk, &target) {
+        (TitleEditScope::Window, _, TitleEditTarget::Window) => window_title.to_string(),
+        (TitleEditScope::Tab, _, TitleEditTarget::Tab(panes)) => {
+            let idx = mux.tab_index_of_any_pane(panes)?;
+            mux.tabs[idx].title_override.clone().unwrap_or_default()
+        }
+        (TitleEditScope::Pane, _, TitleEditTarget::Pane(id)) => mux.panes.get(id)?.title.clone(),
+        (TitleEditScope::Group, GroupBulkScope::Single, TitleEditTarget::Pane(id)) => {
+            mux.panes.get(id)?.group_name.clone().unwrap_or_default()
+        }
+        (TitleEditScope::Group, GroupBulkScope::Tab, TitleEditTarget::Tab(_))
+        | (TitleEditScope::Group, GroupBulkScope::Window, TitleEditTarget::Window) => String::new(),
+        _ => return None,
+    };
+    Some(TitleEditState {
+        scope,
+        target,
+        input,
+        bulk,
+    })
+}
+
+fn title_edit_target_is_live(mux: &Mux, state: &TitleEditState) -> bool {
+    match (state.scope, state.bulk, &state.target) {
+        (TitleEditScope::Window, _, TitleEditTarget::Window)
+        | (TitleEditScope::Group, GroupBulkScope::Window, TitleEditTarget::Window) => true,
+        (TitleEditScope::Tab, _, TitleEditTarget::Tab(panes))
+        | (TitleEditScope::Group, GroupBulkScope::Tab, TitleEditTarget::Tab(panes)) => {
+            mux.tab_index_of_any_pane(panes).is_some()
+        }
+        (TitleEditScope::Pane, _, TitleEditTarget::Pane(id))
+        | (TitleEditScope::Group, GroupBulkScope::Single, TitleEditTarget::Pane(id)) => {
+            mux.panes.contains_key(id)
+        }
+        _ => false,
+    }
+}
+
+fn clear_stale_title_edit(mux: &Mux, editing: &mut Option<TitleEditState>) -> bool {
+    if editing
+        .as_ref()
+        .is_some_and(|state| !title_edit_target_is_live(mux, state))
+    {
+        *editing = None;
+        true
+    } else {
+        false
+    }
+}
+
+fn apply_mux_title_edit(mux: &mut Mux, state: &TitleEditState) -> bool {
+    let value = &state.input;
+    match (state.scope, state.bulk, &state.target) {
+        (TitleEditScope::Window, _, _) => false,
+        (TitleEditScope::Tab, _, TitleEditTarget::Tab(panes)) => {
+            let Some(idx) = mux.tab_index_of_any_pane(panes) else {
+                return false;
+            };
+            let tab = &mut mux.tabs[idx];
+            tab.title_override = if value.is_empty() {
+                None
+            } else {
+                Some(value.clone())
+            };
+            true
+        }
+        (TitleEditScope::Pane, _, TitleEditTarget::Pane(id)) => {
+            let Some(pane) = mux.panes.get_mut(id) else {
+                return false;
+            };
+            // Empty restores shell-driven titles; anything else pins the name
+            // against the next OSC 0/2.
+            if value.trim().is_empty() {
+                pane.title = "kettle".into();
+                pane.title_is_placeholder = true;
+                pane.title_origin = PaneTitleOrigin::Placeholder;
+            } else {
+                pane.title = value.clone();
+                pane.title_is_placeholder = false;
+                pane.title_origin = PaneTitleOrigin::Manual;
+            }
+            true
+        }
+        (TitleEditScope::Group, bulk, target) => {
+            let next = if value.is_empty() {
+                None
+            } else {
+                Some(value.clone())
+            };
+            match (bulk, target) {
+                (GroupBulkScope::Single, TitleEditTarget::Pane(id)) => {
+                    let Some(pane) = mux.panes.get_mut(id) else {
+                        return false;
+                    };
+                    pane.group_name = next;
+                    true
+                }
+                (GroupBulkScope::Tab, TitleEditTarget::Tab(panes)) => {
+                    let Some(idx) = mux.tab_index_of_any_pane(panes) else {
+                        return false;
+                    };
+                    let ids = mux
+                        .tabs
+                        .get(idx)
+                        .map(|tab| tab.root.leaf_ids())
+                        .unwrap_or_default();
+                    let applied = !ids.is_empty();
+                    for id in ids {
+                        if let Some(pane) = mux.panes.get_mut(&id) {
+                            pane.group_name = next.clone();
+                        }
+                    }
+                    applied
+                }
+                (GroupBulkScope::Window, TitleEditTarget::Window) => {
+                    for pane in mux.panes.values_mut() {
+                        pane.group_name = next.clone();
+                    }
+                    true
+                }
+                _ => false,
+            }
+        }
+        _ => false,
+    }
 }
 
 /// Phase 2 of [`TERMINATOR-CONFIRM-DIALOG-DESIGN.md`](
@@ -10422,6 +10588,12 @@ impl App {
             // its sidechannel — otherwise the shell's last line is lost from the trace.
             self.flush_recorder_output(ws);
             let mux_empty = ws.mux.reap();
+            if clear_stale_title_edit(&ws.mux, &mut ws.editing_title) {
+                ws.pending_resize = true;
+                if let Some(window) = &ws.window {
+                    window.request_redraw();
+                }
+            }
             self.hoover_groups(ws);
             if mux_empty {
                 return;
@@ -11104,9 +11276,9 @@ impl App {
     fn apply_title_edit(&mut self, ws: &mut WindowState) {
         if let Some(state) = ws.editing_title.take() {
             ws.pending_resize = true;
-            let value = state.input;
             match state.scope {
                 TitleEditScope::Window => {
+                    let value = state.input;
                     // Empty clears the override and restores the
                     // `window-title-format` behaviour; anything else pins it
                     // so `sync_window_title` stops recomputing over the top.
@@ -11120,60 +11292,8 @@ impl App {
                     }
                     ws.last_title = value;
                 }
-                TitleEditScope::Tab => {
-                    if let Some(t) = ws.mux.tabs.get_mut(ws.mux.active) {
-                        t.title_override = if value.is_empty() { None } else { Some(value) };
-                    }
-                }
-                TitleEditScope::Pane => {
-                    if let Some(p) = ws.mux.focused() {
-                        // Empty restores shell-driven titles; anything else
-                        // pins the name against the next OSC 0/2.
-                        if value.trim().is_empty() {
-                            p.title = "kettle".into();
-                            p.title_is_placeholder = true;
-                            p.title_origin = PaneTitleOrigin::Placeholder;
-                        } else {
-                            p.title = value;
-                            p.title_is_placeholder = false;
-                            p.title_origin = PaneTitleOrigin::Manual;
-                        }
-                    }
-                }
-                TitleEditScope::Group => {
-                    // Bulk-apply branches on
-                    // `state.bulk`. Single = focused pane only
-                    // (preserves the original single-pane group-edit behavior); Tab/Window
-                    // = bulk-assign via Action::GroupTab/Window.
-                    let next = if value.is_empty() { None } else { Some(value) };
-                    match state.bulk {
-                        GroupBulkScope::Single => {
-                            if let Some(p) = ws.mux.focused() {
-                                p.group_name = next;
-                            }
-                        }
-                        GroupBulkScope::Tab => {
-                            let ids: Vec<u64> = ws
-                                .mux
-                                .tabs
-                                .get(ws.mux.active)
-                                .map(|t| t.root.leaf_ids())
-                                .unwrap_or_default();
-                            for id in ids {
-                                if let Some(p) = ws.mux.panes.get_mut(&id) {
-                                    p.group_name = next.clone();
-                                }
-                            }
-                        }
-                        GroupBulkScope::Window => {
-                            let ids: Vec<u64> = ws.mux.panes.keys().copied().collect();
-                            for id in ids {
-                                if let Some(p) = ws.mux.panes.get_mut(&id) {
-                                    p.group_name = next.clone();
-                                }
-                            }
-                        }
-                    }
+                _ => {
+                    apply_mux_title_edit(&mut ws.mux, &state);
                 }
             }
         }
@@ -13748,12 +13868,12 @@ impl App {
             // shape to the `Action::CommandPalette` overlay).
             Action::EditWindowTitle => {
                 self.close_all_modals(ws);
-                let current = ws.last_title.clone();
-                ws.editing_title = Some(TitleEditState {
-                    scope: TitleEditScope::Window,
-                    input: current,
-                    bulk: GroupBulkScope::Single,
-                });
+                ws.editing_title = begin_title_edit(
+                    &ws.mux,
+                    TitleEditScope::Window,
+                    GroupBulkScope::Single,
+                    &ws.last_title,
+                );
                 ws.pending_resize = true;
                 if let Some(w) = &ws.window {
                     w.request_redraw();
@@ -13761,17 +13881,12 @@ impl App {
             }
             Action::EditTabTitle => {
                 self.close_all_modals(ws);
-                let current = ws
-                    .mux
-                    .tabs
-                    .get(ws.mux.active)
-                    .and_then(|t| t.title_override.clone())
-                    .unwrap_or_default();
-                ws.editing_title = Some(TitleEditState {
-                    scope: TitleEditScope::Tab,
-                    input: current,
-                    bulk: GroupBulkScope::Single,
-                });
+                ws.editing_title = begin_title_edit(
+                    &ws.mux,
+                    TitleEditScope::Tab,
+                    GroupBulkScope::Single,
+                    &ws.last_title,
+                );
                 ws.pending_resize = true;
                 if let Some(w) = &ws.window {
                     w.request_redraw();
@@ -13779,16 +13894,12 @@ impl App {
             }
             Action::EditPaneTitle => {
                 self.close_all_modals(ws);
-                let current = ws
-                    .mux
-                    .focused()
-                    .map(|p| p.title.clone())
-                    .unwrap_or_default();
-                ws.editing_title = Some(TitleEditState {
-                    scope: TitleEditScope::Pane,
-                    input: current,
-                    bulk: GroupBulkScope::Single,
-                });
+                ws.editing_title = begin_title_edit(
+                    &ws.mux,
+                    TitleEditScope::Pane,
+                    GroupBulkScope::Single,
+                    &ws.last_title,
+                );
                 ws.pending_resize = true;
                 if let Some(w) = &ws.window {
                     w.request_redraw();
@@ -13801,16 +13912,12 @@ impl App {
                 // EditPaneTitle. `CreateGroup` (Terminator name)
                 // and `EditPaneGroup` (kettle name) share dispatch.
                 self.close_all_modals(ws);
-                let current = ws
-                    .mux
-                    .focused()
-                    .and_then(|p| p.group_name.clone())
-                    .unwrap_or_default();
-                ws.editing_title = Some(TitleEditState {
-                    scope: TitleEditScope::Group,
-                    input: current,
-                    bulk: GroupBulkScope::Single,
-                });
+                ws.editing_title = begin_title_edit(
+                    &ws.mux,
+                    TitleEditScope::Group,
+                    GroupBulkScope::Single,
+                    &ws.last_title,
+                );
                 ws.pending_resize = true;
                 if let Some(w) = &ws.window {
                     w.request_redraw();
@@ -13827,11 +13934,8 @@ impl App {
                 } else {
                     GroupBulkScope::Window
                 };
-                ws.editing_title = Some(TitleEditState {
-                    scope: TitleEditScope::Group,
-                    input: String::new(),
-                    bulk,
-                });
+                ws.editing_title =
+                    begin_title_edit(&ws.mux, TitleEditScope::Group, bulk, &ws.last_title);
                 ws.pending_resize = true;
                 if let Some(w) = &ws.window {
                     w.request_redraw();
@@ -24599,6 +24703,12 @@ impl App {
         // e.g. a fast `-e cmd` session).
         self.flush_recorder_output(ws);
         let mux_empty = ws.mux.reap();
+        if clear_stale_title_edit(&ws.mux, &mut ws.editing_title) {
+            ws.pending_resize = true;
+            if let Some(window) = &ws.window {
+                window.request_redraw();
+            }
+        }
         self.hoover_groups(ws);
         if mux_empty && ws.window.is_some() {
             self.save_session(ws);
@@ -25408,13 +25518,14 @@ mod modal_discipline_guard {
 mod tests {
     use super::{
         AUTOMATION_RETRY_MIN, App, AutomationRetry, ConfirmAction, ConfirmButton,
-        ConfirmDialogState, ContextMenuItem, MAX_REMOTE_COMMANDS_PER_BATCH, Osc52ClipboardChannel,
-        PaneDrag, ParsedRemoteCommandBatch, PendingLuaCommand, PendingLuaCommands,
-        PendingRemoteCommand, RemoteBatchClaim, SplitDrag, apply_bs_del_binding,
-        apply_output_generation_outcome, apply_remote_title_transition, argv_is_nonlocal_client,
-        assign_mnemonics, background_is_dark_enough_to_reveal_early, broadcast_scope_for_default,
-        cached_pane_cursor_blinking, claim_remote_command_file, confirmed_paste_target,
-        context_menu_item_columns, context_menu_max_scroll_offset,
+        ConfirmDialogState, ContextMenuItem, GroupBulkScope, MAX_REMOTE_COMMANDS_PER_BATCH,
+        Osc52ClipboardChannel, PaneDrag, ParsedRemoteCommandBatch, PendingLuaCommand,
+        PendingLuaCommands, PendingRemoteCommand, RemoteBatchClaim, SplitDrag, TitleEditScope,
+        apply_bs_del_binding, apply_mux_title_edit, apply_output_generation_outcome,
+        apply_remote_title_transition, argv_is_nonlocal_client, assign_mnemonics,
+        background_is_dark_enough_to_reveal_early, begin_title_edit, broadcast_scope_for_default,
+        cached_pane_cursor_blinking, claim_remote_command_file, clear_stale_title_edit,
+        confirmed_paste_target, context_menu_item_columns, context_menu_max_scroll_offset,
         context_menu_scroll_for_highlight, context_menu_snapshot_reuse_safe,
         context_menu_surface_can_fit_row, count_rows_fitting, ctl_input_error, filter_disabled,
         find_menu_row_y, fit_context_menu_row, group_scope_is_globally_stale,
@@ -25464,6 +25575,40 @@ mod tests {
         (mux, target, sibling)
     }
 
+    fn title_test_config() -> kettle_config::Config {
+        kettle_config::Config {
+            shell_integration: false,
+            login_shell: false,
+            ..kettle_config::Config::default()
+        }
+    }
+
+    fn title_test_argv() -> Vec<String> {
+        #[cfg(unix)]
+        {
+            vec!["/bin/cat".to_string()]
+        }
+        #[cfg(windows)]
+        {
+            vec!["cmd.exe".to_string(), "/d".to_string(), "/q".to_string()]
+        }
+    }
+
+    fn title_test_split_mux() -> (Mux, u64, u64) {
+        let cfg = title_test_config();
+        let argv = title_test_argv();
+        let waker: kettle_core::Waker = Arc::new(|| {});
+        let mut mux = Mux::new();
+        mux.new_tab_with(&cfg, 80, 24, 8, 16, waker.clone(), &argv, None)
+            .expect("spawn title target pane");
+        let target = mux.active_focus().expect("target pane id");
+        mux.split_with(Dir::Horizontal, &cfg, 80, 24, 8, 16, waker, argv, None)
+            .expect("spawn title sibling pane");
+        let sibling = mux.active_focus().expect("sibling pane id");
+        assert!(mux.focus_pane(target));
+        (mux, target, sibling)
+    }
+
     fn make_paste_target_observable(mux: &mut Mux, target: u64, sibling: u64) {
         assert!(!mux.panes.get(&target).unwrap().read_only);
         assert!(!mux.panes.get(&sibling).unwrap().read_only);
@@ -25486,6 +25631,212 @@ mod tests {
             } => paste_paths_into_target(mux, target, &paths, trailing_space),
             _ => panic!("path confirmation carried the wrong action"),
         }
+    }
+
+    fn title_test_tab_mux(count: usize) -> (Mux, Vec<u64>) {
+        let cfg = title_test_config();
+        let argv = title_test_argv();
+        let waker: kettle_core::Waker = Arc::new(|| {});
+        let mut mux = Mux::new();
+        let mut panes = Vec::new();
+        for _ in 0..count {
+            mux.new_tab_with(&cfg, 80, 24, 8, 16, waker.clone(), &argv, None)
+                .expect("spawn title test tab");
+            panes.push(mux.active_focus().expect("tab pane id"));
+        }
+        (mux, panes)
+    }
+
+    #[test]
+    fn pane_title_edit_never_follows_focus_to_a_sibling() {
+        let (mut mux, target, sibling) = title_test_split_mux();
+        mux.panes.get_mut(&target).unwrap().title = "pane-a-before".into();
+        mux.panes.get_mut(&sibling).unwrap().title = "pane-b-before".into();
+        let mut edit =
+            begin_title_edit(&mux, TitleEditScope::Pane, GroupBulkScope::Single, "window")
+                .expect("pane edit opens");
+        edit.input = "pane-a-after".into();
+
+        assert!(mux.focus_pane(sibling), "focus drifted while edit was open");
+        assert!(apply_mux_title_edit(&mut mux, &edit));
+        assert_eq!(mux.panes[&target].title, "pane-a-after");
+        assert_eq!(mux.panes[&sibling].title, "pane-b-before");
+
+        let (mut mux, target, sibling) = title_test_split_mux();
+        mux.panes.get_mut(&sibling).unwrap().title = "survivor".into();
+        let mut edit =
+            begin_title_edit(&mux, TitleEditScope::Pane, GroupBulkScope::Single, "window")
+                .expect("pane edit opens");
+        edit.input = "dead-target-title".into();
+        mux.panes.get_mut(&target).unwrap().closed = true;
+        assert!(!mux.reap(), "the sibling keeps the mux alive");
+        assert_eq!(mux.active_focus(), Some(sibling));
+        let mut open_edit = Some(edit.clone());
+        assert!(clear_stale_title_edit(&mux, &mut open_edit));
+        assert!(open_edit.is_none(), "a dead pane cannot retain its modal");
+        assert!(!apply_mux_title_edit(&mut mux, &edit));
+        assert_eq!(mux.panes[&sibling].title, "survivor");
+
+        // The behavioral helper above is wired immediately after every
+        // production reap, before either path can return on an empty mux.
+        let source = production_source();
+        let reap_sites = source.matches("let mux_empty = ws.mux.reap();").count();
+        assert_eq!(reap_sites, 2, "update this guard when a reap site is added");
+        assert_eq!(
+            source
+                .split("let mux_empty = ws.mux.reap();")
+                .skip(1)
+                .filter(|tail| tail[..tail.len().min(400)]
+                    .contains("clear_stale_title_edit(&ws.mux, &mut ws.editing_title)"))
+                .count(),
+            reap_sites,
+            "every reap path must dismiss a title edit whose pinned target died"
+        );
+    }
+
+    #[test]
+    fn tab_title_edit_uses_its_anchor_after_focus_and_index_drift() {
+        let (mut mux, panes) = title_test_tab_mux(3);
+        let [before, target, sibling] = panes.as_slice() else {
+            panic!("three test tabs")
+        };
+        assert!(mux.focus_pane(*target));
+        let mut edit =
+            begin_title_edit(&mux, TitleEditScope::Tab, GroupBulkScope::Single, "window")
+                .expect("tab edit opens");
+        edit.input = "target-tab".into();
+
+        let before_idx = mux.tab_index_of_any_pane(&[*before]).unwrap();
+        assert!(!mux.close_tab_at(before_idx), "other tabs remain");
+        assert!(mux.focus_pane(*sibling), "focus drifted to another tab");
+        assert!(apply_mux_title_edit(&mut mux, &edit));
+        let target_idx = mux.tab_index_of_any_pane(&[*target]).unwrap();
+        let sibling_idx = mux.tab_index_of_any_pane(&[*sibling]).unwrap();
+        assert_eq!(
+            mux.tabs[target_idx].title_override.as_deref(),
+            Some("target-tab")
+        );
+        assert_eq!(mux.tabs[sibling_idx].title_override, None);
+
+        // A tab anchor contains every opening pane, so one pane can be reaped
+        // without killing an edit over the tab that its sibling still owns.
+        let (mut mux, exiting, survivor) = title_test_split_mux();
+        let mut edit =
+            begin_title_edit(&mux, TitleEditScope::Tab, GroupBulkScope::Single, "window")
+                .expect("split-tab edit opens");
+        edit.input = "split-tab-survives".into();
+        mux.panes.get_mut(&exiting).unwrap().closed = true;
+        assert!(!mux.reap(), "the split sibling keeps the tab alive");
+        assert_eq!(mux.active_focus(), Some(survivor));
+        let mut open_edit = Some(edit.clone());
+        assert!(!clear_stale_title_edit(&mux, &mut open_edit));
+        assert!(open_edit.is_some(), "the target tab still exists");
+        assert!(apply_mux_title_edit(&mut mux, &edit));
+        let survivor_tab = mux.tab_index_of_any_pane(&[survivor]).unwrap();
+        assert_eq!(
+            mux.tabs[survivor_tab].title_override.as_deref(),
+            Some("split-tab-survives")
+        );
+
+        let (mut mux, panes) = title_test_tab_mux(2);
+        let target = panes[0];
+        let sibling = panes[1];
+        assert!(mux.focus_pane(target));
+        let mut edit =
+            begin_title_edit(&mux, TitleEditScope::Tab, GroupBulkScope::Single, "window")
+                .expect("tab edit opens");
+        edit.input = "dead-tab-title".into();
+        let target_idx = mux.tab_index_of_any_pane(&[target]).unwrap();
+        assert!(!mux.close_tab_at(target_idx), "the sibling tab remains");
+        assert_eq!(mux.active_focus(), Some(sibling));
+        let mut open_edit = Some(edit.clone());
+        assert!(clear_stale_title_edit(&mux, &mut open_edit));
+        assert!(open_edit.is_none(), "a dead tab cannot retain its modal");
+        assert!(!apply_mux_title_edit(&mut mux, &edit));
+        assert_eq!(mux.tabs[0].title_override, None);
+    }
+
+    #[test]
+    fn single_group_edit_never_follows_focus_to_a_sibling() {
+        let (mut mux, target, sibling) = title_test_split_mux();
+        let mut edit = begin_title_edit(
+            &mux,
+            TitleEditScope::Group,
+            GroupBulkScope::Single,
+            "window",
+        )
+        .expect("group edit opens");
+        edit.input = "fleet".into();
+
+        assert!(mux.focus_pane(sibling), "focus drifted while edit was open");
+        assert!(apply_mux_title_edit(&mut mux, &edit));
+        assert_eq!(mux.panes[&target].group_name.as_deref(), Some("fleet"));
+        assert_eq!(mux.panes[&sibling].group_name, None);
+
+        let (mut mux, target, sibling) = title_test_split_mux();
+        let mut edit = begin_title_edit(
+            &mux,
+            TitleEditScope::Group,
+            GroupBulkScope::Single,
+            "window",
+        )
+        .expect("group edit opens");
+        edit.input = "dead-target-group".into();
+        mux.panes.get_mut(&target).unwrap().closed = true;
+        assert!(!mux.reap(), "the sibling keeps the mux alive");
+        assert_eq!(mux.active_focus(), Some(sibling));
+        let mut open_edit = Some(edit.clone());
+        assert!(clear_stale_title_edit(&mux, &mut open_edit));
+        assert!(
+            open_edit.is_none(),
+            "a dead group target cannot retain its modal"
+        );
+        assert!(!apply_mux_title_edit(&mut mux, &edit));
+        assert_eq!(mux.panes[&sibling].group_name, None);
+    }
+
+    #[test]
+    fn bulk_group_edits_keep_pinned_tab_and_live_window_semantics() {
+        let (mut mux, first, second) = title_test_split_mux();
+        let cfg = title_test_config();
+        let argv = title_test_argv();
+        let waker: kettle_core::Waker = Arc::new(|| {});
+        mux.new_tab_with(&cfg, 80, 24, 8, 16, waker, &argv, None)
+            .expect("spawn other group tab");
+        let other = mux.active_focus().expect("other tab pane");
+
+        assert!(mux.focus_pane(first));
+        let mut tab_edit =
+            begin_title_edit(&mux, TitleEditScope::Group, GroupBulkScope::Tab, "window")
+                .expect("tab group edit opens");
+        tab_edit.input = "tab-fleet".into();
+        assert!(mux.focus_pane(other), "focus drifted to another tab");
+        assert!(apply_mux_title_edit(&mut mux, &tab_edit));
+        assert_eq!(mux.panes[&first].group_name.as_deref(), Some("tab-fleet"));
+        assert_eq!(mux.panes[&second].group_name.as_deref(), Some("tab-fleet"));
+        assert_eq!(mux.panes[&other].group_name, None);
+
+        let mut window_edit = begin_title_edit(
+            &mux,
+            TitleEditScope::Group,
+            GroupBulkScope::Window,
+            "window",
+        )
+        .expect("window group edit opens");
+        window_edit.input = "window-fleet".into();
+        assert!(apply_mux_title_edit(&mut mux, &window_edit));
+        assert!(
+            mux.panes
+                .values()
+                .all(|pane| pane.group_name.as_deref() == Some("window-fleet"))
+        );
+
+        window_edit.input.clear();
+        assert!(apply_mux_title_edit(&mut mux, &window_edit));
+        assert!(
+            mux.panes.values().all(|pane| pane.group_name.is_none()),
+            "an empty GroupWindow edit still clears every live pane"
+        );
     }
 
     #[test]
