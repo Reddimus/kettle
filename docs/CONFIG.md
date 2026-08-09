@@ -237,7 +237,8 @@ switch by time instead:
 theme-mode     = auto
 light-theme    = TokyoNight Day
 dark-theme     = TokyoNight Night
-theme-schedule = 19:00 dark,07:00 light   # dark at 19:00, light at 07:00
+# dark at 19:00, light at 07:00
+theme-schedule = 19:00 dark,07:00 light
 ```
 
 …or compute sunrise/sunset from your location:
@@ -247,7 +248,8 @@ theme-mode          = auto
 light-theme         = TokyoNight Day
 dark-theme          = TokyoNight Night
 theme-schedule      = auto
-theme-schedule-lat  = 33.77       # e.g. Long Beach, CA
+# e.g. Long Beach, CA
+theme-schedule-lat  = 33.77
 theme-schedule-long = -118.19
 ```
 

@@ -35,8 +35,10 @@ background-type = starfield
 background controls still apply to it:
 
 ```ini
-background-animation = always   # always (default) | when-focused | off (frozen)
-chrome-background = theme        # tab/status bar color over the field
+# always (default) | when-focused | off (frozen)
+background-animation = always
+# tab/status bar color over the field
+chrome-background = theme
 ```
 
 > A pure-black starfield pairs well with `chrome-background = theme` (a distinct
@@ -51,10 +53,13 @@ Point kettle at any PNG / JPEG / WebP / BMP, or an animated GIF / APNG / WebP:
 
 ```ini
 background-type  = image
-background-image = ~/path/to/wallpaper.png   # editable in Settings → Background
-background-animation = always                # always | when-focused | off
+# editable in Settings → Background
+background-image = ~/path/to/wallpaper.png
+# always | when-focused | off
+background-animation = always
 background-image-mode = stretch_and_fill
-chrome-background = auto                      # tab/status bar tint from the image
+# tab/status bar tint from the image
+chrome-background = auto
 ```
 
 The image path is editable **inline in Settings → Background** (no config edit

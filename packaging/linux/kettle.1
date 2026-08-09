@@ -763,9 +763,14 @@ or
 .IR %APPDATA%\\kettle\\config
 (Windows). Format is Ghostty-style
 .RI """ key " = " value """
-lines; everything after
+lines. A
 .B #
-is a comment.
+starts a comment only at the beginning of a line; inside a value it is
+literal, which is what makes hex colours such as
+.B background = #1a1b26
+work. A trailing
+.B #
+on a value line is therefore part of the value, not a comment.
 .PP
 See
 .B kettle\ \-\-print\-default\-config
