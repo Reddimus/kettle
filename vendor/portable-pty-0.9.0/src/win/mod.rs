@@ -6,11 +6,14 @@ use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 use winapi::shared::minwindef::DWORD;
-use winapi::shared::winerror::ERROR_ACCESS_DENIED;
-use winapi::um::minwinbase::STILL_ACTIVE;
+use winapi::shared::winerror::{ERROR_ACCESS_DENIED, WAIT_TIMEOUT};
+use winapi::um::jobapi2::QueryInformationJobObject;
 use winapi::um::processthreadsapi::*;
 use winapi::um::synchapi::WaitForSingleObject;
-use winapi::um::winbase::{INFINITE, WAIT_FAILED};
+use winapi::um::winbase::{INFINITE, WAIT_FAILED, WAIT_OBJECT_0};
+use winapi::um::winnt::{
+    JobObjectBasicAccountingInformation, JOBOBJECT_BASIC_ACCOUNTING_INFORMATION,
+};
 
 pub mod conpty;
 mod procthreadattr;
@@ -21,6 +24,9 @@ use filedescriptor::OwnedHandle;
 #[derive(Debug)]
 pub struct WinChild {
     proc: Mutex<OwnedHandle>,
+    /// Present when the caller requested pre-resume process-tree containment.
+    /// Closing or terminating this Job Object reaches every inherited child.
+    job: Option<Arc<OwnedHandle>>,
     /// Present once a waiter thread exists for this child, so repeated polls
     /// update its waker instead of spawning another thread.
     waiter: Option<Arc<WaiterShared>>,
@@ -52,8 +58,22 @@ fn clone_handle(handle: &OwnedHandle) -> IoResult<OwnedHandle> {
 
 impl WinChild {
     fn is_complete(&mut self) -> IoResult<Option<ExitStatus>> {
-        let mut status: DWORD = 0;
         let proc = clone_handle(&self.proc.lock().unwrap())?;
+        // `STILL_ACTIVE` is also a legal process exit code (259). The process
+        // handle's signalled state is the authoritative liveness test; treating
+        // the numeric status as liveness makes a child that deliberately exits
+        // 259 look alive forever.
+        match unsafe { WaitForSingleObject(proc.as_raw_handle() as _, 0) } {
+            WAIT_TIMEOUT => return Ok(None),
+            WAIT_OBJECT_0 => {}
+            WAIT_FAILED => return Err(IoError::last_os_error()),
+            other => {
+                return Err(IoError::other(format!(
+                    "unexpected process wait result {other:#x}"
+                )));
+            }
+        }
+        let mut status: DWORD = 0;
         let res = unsafe { GetExitCodeProcess(proc.as_raw_handle() as _, &mut status) };
         if res == 0 {
             // A failed query is not "still running". Reporting Ok(None) here
@@ -61,16 +81,26 @@ impl WinChild {
             // callers waited on something they could no longer observe.
             return Err(IoError::last_os_error());
         }
-        if status == STILL_ACTIVE {
-            Ok(None)
-        } else {
-            Ok(Some(ExitStatus::with_exit_code(status)))
-        }
+        Ok(Some(ExitStatus::with_exit_code(status)))
     }
 
     fn do_kill(&mut self) -> IoResult<()> {
+        if let Some(job) = &self.job {
+            if unsafe { winapi::um::jobapi2::TerminateJobObject(job.as_raw_handle() as _, 1) } != 0
+            {
+                return Ok(());
+            }
+            // ERROR_ACCESS_DENIED is normalized only for TerminateProcess on a
+            // process that already exited. A live Job Object, even an empty
+            // one, accepts TerminateJobObject; every failure here is real.
+            return Err(IoError::last_os_error());
+        }
         let proc = clone_handle(&self.proc.lock().unwrap())?;
-        terminate(proc.as_raw_handle())
+        match terminate(proc.as_raw_handle()) {
+            Ok(()) => Ok(()),
+            Err(err) if already_exited(&err) => Ok(()),
+            Err(err) => Err(err),
+        }
     }
 }
 
@@ -78,12 +108,7 @@ impl ChildKiller for WinChild {
     fn kill(&mut self) -> IoResult<()> {
         // Report the outcome. Swallowing it meant a caller that failed to
         // terminate a child had no way to know, and no reason to escalate.
-        match self.do_kill() {
-            Ok(()) => Ok(()),
-            // The child finishing on its own is the outcome kill wanted.
-            Err(err) if already_exited(&err) => Ok(()),
-            Err(err) => Err(err),
-        }
+        self.do_kill()
     }
 
     fn clone_killer(&self) -> Box<dyn ChildKiller + Send + Sync> {
@@ -95,7 +120,11 @@ impl ChildKiller for WinChild {
             .lock()
             .ok()
             .and_then(|proc| clone_handle(&proc).ok());
-        Box::new(WinChildKiller { proc })
+        // Arc cloning is infallible. A contained killer must never silently
+        // degrade to direct-process termination because DuplicateHandle was
+        // exhausted for the Job Object.
+        let job = self.job.clone();
+        Box::new(WinChildKiller { proc, job })
     }
 }
 
@@ -113,10 +142,18 @@ pub struct WinChildKiller {
     /// than aborting: losing the ability to kill one child is recoverable,
     /// crashing the terminal is not.
     proc: Option<OwnedHandle>,
+    job: Option<Arc<OwnedHandle>>,
 }
 
 impl ChildKiller for WinChildKiller {
     fn kill(&mut self) -> IoResult<()> {
+        if let Some(job) = self.job.as_ref() {
+            if unsafe { winapi::um::jobapi2::TerminateJobObject(job.as_raw_handle() as _, 1) } != 0
+            {
+                return Ok(());
+            }
+            return Err(IoError::last_os_error());
+        }
         let Some(proc) = self.proc.as_ref() else {
             return Err(IoError::other("no process handle available to terminate"));
         };
@@ -129,7 +166,8 @@ impl ChildKiller for WinChildKiller {
 
     fn clone_killer(&self) -> Box<dyn ChildKiller + Send + Sync> {
         let proc = self.proc.as_ref().and_then(|proc| clone_handle(proc).ok());
-        Box::new(WinChildKiller { proc })
+        let job = self.job.clone();
+        Box::new(WinChildKiller { proc, job })
     }
 }
 
@@ -170,6 +208,27 @@ impl Child for WinChild {
     fn as_raw_handle(&self) -> Option<std::os::windows::io::RawHandle> {
         let proc = self.proc.lock().unwrap();
         Some(proc.as_raw_handle())
+    }
+
+    fn process_tree_active_processes(&self) -> IoResult<Option<u32>> {
+        let Some(job) = self.job.as_ref() else {
+            return Ok(None);
+        };
+        let mut accounting: JOBOBJECT_BASIC_ACCOUNTING_INFORMATION = unsafe { std::mem::zeroed() };
+        let queried = unsafe {
+            QueryInformationJobObject(
+                job.as_raw_handle() as _,
+                JobObjectBasicAccountingInformation,
+                &mut accounting as *mut _ as *mut _,
+                std::mem::size_of_val(&accounting) as DWORD,
+                std::ptr::null_mut(),
+            )
+        };
+        if queried == 0 {
+            Err(IoError::last_os_error())
+        } else {
+            Ok(Some(accounting.ActiveProcesses))
+        }
     }
 }
 
@@ -245,10 +304,43 @@ impl std::future::Future for WinChild {
 
 #[cfg(test)]
 mod waiter_tests {
-    use super::WaiterShared;
+    use super::{WaiterShared, WinChild};
+    use crate::Child as _;
+    use filedescriptor::OwnedHandle;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
     use std::task::{Wake, Waker};
+
+    /// `STILL_ACTIVE` is the numeric value 259, and Windows permits a process
+    /// to exit with it. Liveness must come from the process handle, not from
+    /// interpreting this otherwise valid status as a sentinel forever.
+    #[test]
+    fn exit_code_259_is_reported_after_the_process_handle_signals() {
+        let child = std::process::Command::new("cmd.exe")
+            .args(["/d", "/c", "exit", "259"])
+            .spawn()
+            .expect("spawn exit-259 child");
+        let proc = OwnedHandle::dup(&child).expect("retain process handle");
+        drop(child);
+        let mut child = WinChild {
+            proc: std::sync::Mutex::new(proc),
+            job: None,
+            waiter: None,
+        };
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let status = loop {
+            if let Some(status) = child.try_wait().expect("poll exit-259 child") {
+                break status;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "exit code 259 was mistaken for a permanently live process"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        };
+        assert_eq!(status.exit_code(), 259);
+    }
 
     struct CountingWaker(AtomicUsize);
 

@@ -61,8 +61,9 @@ already reserves a `kind` field (`"gui"` today, `"muxd"` later).
 
 Run a command under a real PTY (full VT emulation) with no GPU and no window,
 and stream its output to real stdout. Propagates the child's exit code (124 when
-`--timeout` expires before a child status is collected, 74 when stdout delivery
-fails, 125 on an internal error).
+the complete `--timeout` deadline expires and teardown of the owned process
+scope is verified, 74 when stdout delivery fails, 125 on an internal error or
+unverified teardown).
 
 On Unix a child killed by a signal reports the shell's `128 + signal`, so
 `143` is SIGTERM, `137` is SIGKILL and `130` is SIGINT. Automation can therefore
@@ -73,7 +74,7 @@ to a generic `1`, indistinguishable from the command running `exit 1`.
 kettle exec -- python -c "print(2+2)"           # → 4
 kettle exec --strip-ansi -- ls --color=always   # plain text, escapes stripped
 kettle exec --json -- some-tui                   # NDJSON: start/output/title/exit
-kettle exec --timeout 5 -- slow-thing            # kill + exit 124 after 5s
+kettle exec --timeout 5 -- slow-thing            # bounded teardown + exit 124
 kettle exec --record run.cast -- make            # also save an asciicast trace
 ```
 
@@ -83,13 +84,23 @@ control sequences), `--strip-ansi` (plain text, good for assertions), `--json`
 
 The timeout also bounds trailing output after the child exits. If stdout is
 still stalled at the deadline, Kettle abandons output the downstream consumer
-cannot accept and returns an already-collected child status, or 124 when no
-status was available. MCP cancellation takes precedence at every lifecycle
-stage and returns 130.
+cannot accept and returns 124 once owned-process teardown is verified. A
+collected child status cannot turn incomplete lossless PTY delivery into
+success. MCP cancellation takes precedence at every lifecycle stage and returns
+130 when teardown is verified; either path returns 125 when it is not.
+
+Kettle owns the PTY-created process group on macOS and the PTY-created session
+on Linux. A Unix descendant that deliberately calls `setsid()` leaves that
+boundary; Kettle will not infer ownership from ancestry or an open PTY
+descriptor and risk killing an unrelated same-user process. Fully containing
+that case requires an OS-owned supervisor/cgroup. When Kettle cannot verify the
+scope it did own was terminated, timeout/cancellation reports 125 rather than a
+misleading 124/130.
 
 A real stdout write or flush failure is different from deadline abandonment.
-Kettle reports it on stderr, stops and reaps the child tree, and returns 74;
-JSON mode cannot promise a final exit event after its output sink has failed.
+Kettle reports it on stderr, stops and reaps the owned process scope, and
+returns 74 when that teardown is verified (125 otherwise); JSON mode cannot
+promise a final exit event after its output sink has failed.
 `--cwd DIR` validates an explicit directory before PTY creation and never falls
 back to HOME: a missing path or regular file returns 125 without spawning the
 command. Omitting `--cwd` inherits Kettle's current directory.
@@ -119,6 +130,22 @@ On Windows the child runs under a ConPTY (pseudoconsole). Two consequences:
 - **A command that exits in well under ~50 ms** can have its output collapsed by
   ConPTY's screen-differ before kettle ever sees it. `kettle exec` adds a short
   settle-drain to mitigate this, but a near-instant command may still under-emit.
+- **ConPTY can keep its output handle open after the child and final repaint are
+  gone.** A bounded quiet window therefore starts an asynchronous pseudoconsole
+  close while the reader remains live, but only after the command's Job Object
+  has no live descendant. A same-console descendant may still emit after its
+  direct parent exits, and closing ConPTY first would terminate it and truncate
+  that tail. Quiet does not complete the command.
+  Completion waits for the resulting real EOF and reader-channel disconnect.
+  Source status, generation, and pending work are one atomic snapshot, so a
+  read racing the quiet check either postpones the close or is drained before
+  the disconnect. A stuck close fails explicitly after five seconds.
+- **Timeout containment is established before user code runs.** The ConPTY
+  backend creates the process suspended, assigns it to a kill-on-close Job
+  Object, and only then resumes its primary thread. Immediate descendants
+  therefore inherit the job instead of racing a later attachment. Process-handle
+  signalling, not the ambiguous `STILL_ACTIVE` number, determines liveness, so
+  exit code 259 propagates normally.
 
 ### Stdin forwarding
 

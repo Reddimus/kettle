@@ -662,10 +662,65 @@ and cancellation therefore remain observable after child exit, while ordinary
 completion still drains losslessly.
 Every stdout write and flush returns through a worker-outcome channel to the
 lifecycle thread. A genuine write/flush failure is not an abandonment: Kettle
-diagnoses it on stderr, terminates and reaps the command tree, finalizes any
-recording, and returns 74 (`EX_IOERR`) instead of the child's status. A deadline
+diagnoses it on stderr, terminates and reaps the owned process scope, finalizes
+any recording, and returns 74 (`EX_IOERR`) when teardown is verified (125
+otherwise) instead of the child's status. A deadline
 that finds a merely stalled consumer retains the separate bounded-abandonment
-contract and its `stdout was not fully delivered` warning.
+contract and its `stdout was not fully delivered` warning, and returns 124 when
+teardown is verified even if the direct child already reported success: the
+deadline covers the complete lossless-delivery operation.
+
+PTY completion is a separate platform contract. The core reader publishes
+`Reading`, orderly `Eof`, or sticky `Failed` before its sole raw-output sender
+drops, so a disconnected channel cannot relabel an unexpected read error as
+success. Failure does not discard earlier admitted chunks: completion waits for
+the parser handoff, raw channel, and stdout worker to drain, then returns 125.
+If the parser itself disappears while its source counter still names work only
+that parser could retire, the disconnected transport fails immediately rather
+than preserving an impossible pending count forever.
+Unix has no elapsed-time success fallback: it requires that orderly EOF, with a
+five-second no-EOF bound that fails status 125. Direct-child exit is observed
+without reaping through `waitid(WNOWAIT)`, so the bound starts even when an
+inherited slave prevents the reader's Exit event; the retained zombie remains a
+Linux identity anchor until ordinary output/recording completion. ConPTY may retain its output
+handle after the final repaint, so a bounded quiet interval starts an
+asynchronous pseudoconsole close while the reader remains live, after a Job
+Object accounting query proves that no same-console descendant remains able to
+write. Windows still
+requires the resulting EOF and reader-channel disconnect before success; a
+stuck close fails after five seconds. If the lifecycle exits while that close
+is still blocked, the close worker—not `Terminal::drop`—publishes reader stop
+after `ClosePseudoConsole` really returns. Reader status, source generation, and
+pending work occupy one atomic state word, so the quiet check cannot combine
+fields from different moments. A stdout command already accepted by the writer
+remains non-idle until its OS-facing write returns. The final source-progress
+sample is therefore taken behind an authoritative disconnect, when no new pump
+read can race it. Linux process teardown uses the session created for the PTY
+as its ownership boundary. Session membership survives reparenting and cannot be
+joined by an unrelated process. Before any numeric group signal or session scan,
+teardown stops the original leader through its pidfd and revalidates its PID plus
+start time; that unreaped anchor prevents the kernel from recycling the
+session/group ids. If the anchor cannot be proven, numeric targeting is refused.
+Each discovered member is then opened and revalidated through its own pidfd, so
+PID reuse cannot redirect a signal. Scanning all session members also covers
+children created by non-leader threads and workers which closed their PTY
+descriptor. The complete procfs
+inspection has explicit time and process bounds and reports when it exhausts
+them. SIGSTOP delivery is acknowledged through each retained identity before a
+scan is called stable, so a still-running member cannot fork after the final
+scan. If procfs or pidfds are unavailable, teardown says that the complete
+session could not be proven, refuses unauthenticated numeric targeting, and
+returns an unverified outcome that the exec lifecycle surfaces as status 125
+rather than a successful timeout/cancellation. On
+Windows, the vendored ConPTY backend
+creates an opted-in headless command suspended, assigns a kill-on-close Job
+Object, and resumes only after assignment succeeds; timeout containment exists
+before arbitrary child code can create a descendant. The Job handle is shared
+infallibly by cloned killers, Job termination errors are never normalized as an
+already-exited direct process, and spawn rollback waits for the suspended child
+to terminate before returning an assignment/resume error. Process completion is
+determined by a zero-time handle wait before reading the exit status, because
+the Win32 `STILL_ACTIVE` value is also a valid process exit code (259).
 Its independent PTY writer arbiter gives the bounded 64-message terminal-reply
 lane priority over forwarded stdin and incremental Unix VEOF injection. Reply
 admission and the arbiter's final reply recheck plus one nonblocking VEOF

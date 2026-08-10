@@ -1536,6 +1536,7 @@ impl Mux {
             TerminalCapabilities {
                 osc52_copy: self.osc52_copy_allowed,
                 unnegotiated_modified_enter: unnegotiated_modified_enter(cfg.modify_other_keys),
+                contain_process_tree: false,
             },
             tx,
             waker.clone(),

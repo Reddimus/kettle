@@ -446,13 +446,13 @@ time bound as the fallback for platforms where the reader outlives the child
 (Windows ConPTY), so the loop still cannot hang. Lengthening `SETTLE` is not a
 fix — it moves the race rather than removing it.
 
-**Fixed.** `try_recv` already distinguished the two cases and the code was
-throwing the distinction away with `let Ok(bytes) = ... else`. The drain now
-latches EOF only on `Disconnected`, and wrap-up requires that latch — with the
-elapsed-time arm (`PTY_DRAIN_GRACE`) kept purely as the bound for ConPTY, whose
-reader holds its handle open past the child. On Unix the master read fails as
-soon as the child closes the slave, so the disconnect arrives immediately and
-nothing waits.
+**Superseded by the 2026-08-10 fix recorded in `AUDIT-DEFERRED.md`.** Merely
+latching channel disconnection was insufficient: the lifecycle still retained
+an elapsed-time success arm on every platform. Unix now requires orderly reader
+EOF and disconnection. ConPTY quiet starts an asynchronous pseudoconsole close
+while the reader remains live, then likewise requires the resulting EOF and
+disconnect; elapsed time can fail an incomplete drain but cannot turn it into
+success.
 
 The initial call was to defer this — one observation, on an unrelated PR, in the
 riskiest file in the repository, with no macOS loop to verify against. The

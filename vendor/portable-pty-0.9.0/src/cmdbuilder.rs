@@ -124,7 +124,10 @@ fn get_shell() -> String {
 
     // POSIX gives an empty `pw_shell` the meaning "the implementation's default
     // shell", which is what the fallback below already is.
-    if let Some(shell) = current_passwd_entry().shell.filter(|shell| !shell.is_empty()) {
+    if let Some(shell) = current_passwd_entry()
+        .shell
+        .filter(|shell| !shell.is_empty())
+    {
         match shell.into_string() {
             Err(_) => {
                 log::warn!(
@@ -221,8 +224,9 @@ fn get_base_env() -> BTreeMap<OsString, EnvEntry> {
                     // buffer and then an empty string — silently replacing the
                     // variable's value with nothing. Preferring the unexpanded
                     // text keeps a usable value in that case.
-                    let needed =
-                        unsafe { ExpandEnvironmentStringsW(wide.as_ptr(), std::ptr::null_mut(), 0) };
+                    let needed = unsafe {
+                        ExpandEnvironmentStringsW(wide.as_ptr(), std::ptr::null_mut(), 0)
+                    };
                     if needed == 0 {
                         return Ok(unexpanded);
                     }
@@ -314,6 +318,10 @@ pub struct CommandBuilder {
     #[cfg(unix)]
     pub(crate) umask: Option<libc::mode_t>,
     controlling_tty: bool,
+    /// Windows-only opt-in for atomically containing the spawned process and
+    /// all descendants in a kill-on-close Job Object.
+    #[cfg_attr(feature = "serde_support", serde(default))]
+    contain_process_tree: bool,
 }
 
 impl CommandBuilder {
@@ -327,6 +335,7 @@ impl CommandBuilder {
             #[cfg(unix)]
             umask: None,
             controlling_tty: true,
+            contain_process_tree: false,
         }
     }
 
@@ -339,6 +348,7 @@ impl CommandBuilder {
             #[cfg(unix)]
             umask: None,
             controlling_tty: true,
+            contain_process_tree: false,
         }
     }
 
@@ -356,6 +366,17 @@ impl CommandBuilder {
         self.controlling_tty
     }
 
+    /// Require Windows to attach the process to a kill-on-close Job Object
+    /// before its primary thread is allowed to execute.
+    pub fn set_process_tree_containment(&mut self, contain: bool) {
+        self.contain_process_tree = contain;
+    }
+
+    #[cfg(windows)]
+    pub(crate) fn process_tree_containment(&self) -> bool {
+        self.contain_process_tree
+    }
+
     /// Create a new builder instance that will run some idea of a default
     /// program.  Such a builder will panic if `arg` is called on it.
     pub fn new_default_prog() -> Self {
@@ -366,6 +387,7 @@ impl CommandBuilder {
             #[cfg(unix)]
             umask: None,
             controlling_tty: true,
+            contain_process_tree: false,
         }
     }
 
@@ -997,6 +1019,39 @@ mod tests {
             println!("iterated_envs: {:?}", iterated_envs);
             assert!(iterated_envs.is_empty());
         }
+    }
+
+    #[cfg(feature = "serde_support")]
+    #[test]
+    fn older_serialized_builder_defaults_process_tree_containment_off() {
+        let mut original = CommandBuilder::new("dummy");
+        // JSON object keys must be strings, while a populated environment can
+        // contain non-Unicode OsStrings. The field under test is independent;
+        // an empty environment keeps this compatibility fixture portable.
+        original.env_clear();
+        let mut serialized = serde_json::to_value(&original).expect("serialize command builder");
+        serialized
+            .as_object_mut()
+            .expect("builder serializes as an object")
+            .remove("contain_process_tree");
+
+        let restored: CommandBuilder =
+            serde_json::from_value(serialized).expect("deserialize pre-containment builder");
+        assert_eq!(restored, original);
+
+        let mut contained = original;
+        contained.set_process_tree_containment(true);
+        let serialized = serde_json::to_value(&contained).expect("serialize contained builder");
+        assert_eq!(
+            serialized
+                .get("contain_process_tree")
+                .and_then(serde_json::Value::as_bool),
+            Some(true),
+            "the opt-in must be represented in the stable serialized form"
+        );
+        let restored: CommandBuilder =
+            serde_json::from_value(serialized).expect("round-trip contained builder");
+        assert_eq!(restored, contained);
     }
 
     /// A scratch directory that removes itself, so these tests need no

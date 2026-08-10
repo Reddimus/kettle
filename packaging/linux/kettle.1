@@ -428,10 +428,10 @@ Run
 under a real PTY, headlessly, and stream its output to stdout (the
 non-interactive counterpart to the GUI). Propagates the child's exit code;
 .B 124
-on
+on a completed
 .BR \-\-timeout ,
 .B 125
-on an internal error. Options:
+on an internal error or unverified teardown. Options:
 .B \-\-cols
 .IR N " / " \fB\-\-rows\fP " " N
 (terminal size; default: probe the console, else 80x24),
@@ -439,8 +439,8 @@ on an internal error. Options:
 .IR DIR " (also " \fB\-d\fP " " DIR ;
 working directory, default inherit),
 .BI \-\-timeout " SECS"
-(kill + exit 124 after
-.IR SECS ),
+(bounded teardown + exit 124 after
+.IR SECS " when teardown is verified; otherwise 125),"
 .B \-\-strip\-ansi
 (emit plain text — good for assertions),
 .B \-\-json

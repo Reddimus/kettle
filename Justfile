@@ -141,10 +141,11 @@ vendor-parser-check:
 # Exercise the patched portable-pty package on the current native platform.
 # Run this on both Unix and Windows: only Windows compiles and executes the
 # PIPE_NOWAIT/ConPTY regression, while Linux covers the retained Unix package
-# surface. CI runs both native legs.
+# surface. `serde_support` also pins backward compatibility for the added
+# containment field. CI runs both native legs.
 vendor-pty-check:
-    cargo test --locked --manifest-path vendor/Cargo.toml --target-dir target/vendor-check -p portable-pty
-    cargo clippy --locked --manifest-path vendor/Cargo.toml --target-dir target/vendor-check -p portable-pty --all-targets -- -D warnings
+    cargo test --locked --manifest-path vendor/Cargo.toml --target-dir target/vendor-check -p portable-pty --features serde_support
+    cargo clippy --locked --manifest-path vendor/Cargo.toml --target-dir target/vendor-check -p portable-pty --all-targets --features serde_support -- -D warnings
 
 # Complete direct validation for all patched crates on the current OS.
 vendor-check: vendor-parser-check vendor-pty-check

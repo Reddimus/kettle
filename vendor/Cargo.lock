@@ -295,6 +295,7 @@ dependencies = [
  "nix",
  "serde",
  "serde_derive",
+ "serde_json",
  "serial2",
  "shared_library",
  "shell-words",
