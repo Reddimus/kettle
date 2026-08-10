@@ -1141,7 +1141,7 @@ mod unix {
 
     pub(super) fn require_trusted_symbolic_link(
         uid: u32,
-        links: u64,
+        links: libc::nlink_t,
         path: &Path,
     ) -> io::Result<()> {
         if !trusted_identity(uid) {
@@ -1992,7 +1992,7 @@ mod unix {
             ));
         }
         guard.require_leaf_policy(before.st_uid)?;
-        require_trusted_symbolic_link(before.st_uid, u64::from(before.st_nlink), &requested)?;
+        require_trusted_symbolic_link(before.st_uid, before.st_nlink, &requested)?;
 
         // Read the link relative to the held immediate parent. Recheck both
         // the parent chain and the link inode before trusting the selected
