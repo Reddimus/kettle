@@ -54,8 +54,11 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   window's dispatch epilogue.** The pending close was one app-global Boolean;
   cross-window control dispatch already needed a special case to avoid closing
   the focused window instead of its target. Requests are now keyed by window
-  id and consumed only by that window. This removes a Kettle-side path by which
-  one exiting CLI pane could make separate terminal windows disappear.
+  id and consumed only by that window. A focused live regression now terminates
+  one detached window's child through the PTY reap path and proves its sibling
+  still accepts terminal input. This removes a Kettle-side path by which one
+  exiting CLI pane could make separate terminal windows disappear; the child
+  program itself (shell, Codex, or another TUI) is not causal.
 
 - **`kettle exec` could report exit 0 before Unix PTY output arrived.** The
   lifecycle correctly distinguished an empty raw-output channel from a

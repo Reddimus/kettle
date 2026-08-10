@@ -129,12 +129,13 @@ tracked here so they are not lost.
   looking at a machine that had run the suite hundreds of times made it visible.
 
 
-- **Ten live-UI scenarios still run in no automated gate.**
+- **Eleven live-UI scenarios still run in no automated gate.**
   `scripts/check-live-ui-smoke.py` launches a real windowed kettle and drives it
-  through eleven scenarios (`tabbar`, `tab-title`, `tearoff`, `split-titlebar`,
+  through twelve scenarios (`tabbar`, `tab-title`, `tearoff`, `split-titlebar`,
   `zoom-keybind`, `underline`, `agent-tui`, `search-history`, `interaction`,
-  `hover-wheel`, `touchpad-scroll`). `search-history` is now the first automated
-  scenario; the other ten remain manual. Its other three `case` values do less:
+  `hover-wheel`, `window-close-isolation`, `touchpad-scroll`). `search-history`
+  is now the first automated scenario; the other eleven remain manual. Its
+  other three `case` values do less:
   `all` runs the ten broad scenarios (the interaction walk already includes
   `hover-wheel`), `session-check` only asserts that a graphical session is
   usable and returns without launching kettle, and `self-test` exercises the

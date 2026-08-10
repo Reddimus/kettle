@@ -1278,6 +1278,12 @@ These need a real display and are run by hand (or on real hardware):
     GLES adapter that renders but lacks swapchain `COPY_SRC` can still supply
     native pointer-routing evidence; the broad interaction scenario retains
     its strict screenshot assertions.
+    `just window-close-isolation-smoke` detaches a tab into a second native
+    window, exits only that window's shell, and then proves the original window
+    and pane still accept terminal input. The child program is deliberately the
+    native shell: Kettle receives the same PTY exit/reap event whether the child
+    was a shell, Codex, or another TUI, while the shell keeps the check
+    deterministic and credential-independent.
   - **`kettle exec`**: `kettle exec -- echo ok` — output is piped to stdout and
     the child's exit code propagates (`kettle exec -- sh -c 'exit 7'` → 7).
     On Unix/WSL, also verify stdin-driven one-shots:

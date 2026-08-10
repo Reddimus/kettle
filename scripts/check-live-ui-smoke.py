@@ -6406,6 +6406,144 @@ def run_tearoff(kettle: str, root: Path) -> Path:
     return out
 
 
+def run_window_close_isolation(kettle: str, root: Path) -> Path:
+    """Terminate one detached window's child and prove its sibling survives.
+
+    The reported failure involved Codex, but the child program is immaterial to
+    Kettle's reap/window-lifecycle path. Using the native shell makes the test
+    deterministic on every platform while exercising the same PTY exit event
+    that an exited CLI produces.
+    """
+    out = root / f"window-close-isolation-{time.strftime('%Y%m%d-%H%M%S')}"
+    out.mkdir(parents=True, exist_ok=True)
+    cfg = out / "config"
+    cfg.write_text(
+        "\n".join(
+            [
+                "agent-server = full",
+                "tab-bar = always",
+                "tab-bar-position = top",
+                "detachable-tabs = true",
+                "ask-before-closing = never",
+                "exit-action = close",
+                "status-bar = off",
+                "restore-session = false",
+                "update-check = false",
+                "window-width = 120",
+                "window-height = 30",
+            ]
+        )
+        + "\n"
+    )
+    with LiveKettle(kettle, cfg, out / "kettle.log") as live:
+        initial = live.json_ctl("list_tabs")
+        initial_rows = [
+            row for row in initial.get("tabs", []) if isinstance(row, dict)
+        ]
+        if len(initial_rows) != 1:
+            raise SystemExit(
+                "window-close-isolation smoke: expected one initial tab, "
+                f"got {initial}"
+            )
+        original_window = initial_rows[0].get("window")
+        original_pane = initial_rows[0].get("focused_pane")
+        if not isinstance(original_window, int) or not isinstance(original_pane, int):
+            raise SystemExit(
+                "window-close-isolation smoke: initial inventory is malformed: "
+                f"{initial_rows[0]}"
+            )
+
+        live.ctl("perform_action", params={"action": "new_tab"})
+        live.ctl("perform_action", params={"action": "move_tab_to_new_window"})
+        split: Dict[str, object] = {}
+        split_rows: List[Dict[str, object]] = []
+        for _ in range(80):
+            split = live.json_ctl("list_tabs")
+            split_rows = [
+                row for row in split.get("tabs", []) if isinstance(row, dict)
+            ]
+            if len(split_rows) == 2 and len({row.get("window") for row in split_rows}) == 2:
+                break
+            time.sleep(0.1)
+        else:
+            raise SystemExit(
+                "window-close-isolation smoke: tab did not detach into a second window: "
+                f"{split}"
+            )
+
+        detached = [row for row in split_rows if row.get("window") != original_window]
+        if len(detached) != 1 or not isinstance(detached[0].get("focused_pane"), int):
+            raise SystemExit(
+                "window-close-isolation smoke: detached inventory is malformed: "
+                f"{split_rows}"
+            )
+        detached_window = detached[0]["window"]
+        detached_pane = detached[0]["focused_pane"]
+
+        # Terminate the detached child, rather than clicking chrome, so the
+        # asynchronous PTY reap path is the one under test. That is the path a
+        # CLI exiting inside one of several Kettle windows takes.
+        live.ctl("send_text", params={"pane": detached_pane, "text": "exit\n"})
+        remaining: Dict[str, object] = {}
+        for _ in range(100):
+            if live.proc.poll() is not None:
+                raise SystemExit(
+                    "window-close-isolation smoke: the Kettle process exited with a "
+                    "sibling window still expected"
+                )
+            remaining = live.json_ctl("list_tabs")
+            rows = [
+                row for row in remaining.get("tabs", []) if isinstance(row, dict)
+            ]
+            if len(rows) == 1 and rows[0].get("window") == original_window:
+                break
+            time.sleep(0.1)
+        else:
+            raise SystemExit(
+                "window-close-isolation smoke: detached child exit did not remove only "
+                f"its own window: before={split} after={remaining}"
+            )
+
+        marker = "KETTLE_WINDOW_CLOSE_SIBLING_SURVIVED"
+        command = (
+            f"Write-Output {marker}\n"
+            if platform.system() == "Windows"
+            else f"printf '{marker}\\n'\n"
+        )
+        live.ctl("send_text", params={"pane": original_pane, "text": command})
+        sibling_screen: Dict[str, object] = {}
+        for _ in range(50):
+            sibling_screen = live.json_ctl(
+                "read_screen",
+                params={"pane": original_pane, "scrollback_lines": 20},
+            )
+            if marker in str(sibling_screen.get("text", "")):
+                break
+            time.sleep(0.1)
+        else:
+            raise SystemExit(
+                "window-close-isolation smoke: surviving sibling no longer accepted "
+                f"terminal input: {sibling_screen}"
+            )
+
+        (out / "analysis.json").write_text(
+            json.dumps(
+                {
+                    "original_window": original_window,
+                    "original_pane": original_pane,
+                    "closed_window": detached_window,
+                    "closed_pane": detached_pane,
+                    "tabs_before_close": split,
+                    "tabs_after_close": remaining,
+                    "sibling_marker": marker,
+                },
+                indent=2,
+            )
+            + "\n"
+        )
+    return out
+
+
 def run_tab_title(kettle: str, root: Path) -> Path:
     out = root / f"tab-title-{time.strftime('%Y%m%d-%H%M%S')}"
     out.mkdir(parents=True, exist_ok=True)
@@ -7121,6 +7259,7 @@ def main() -> int:
             "search-history",
             "interaction",
             "hover-wheel",
+            "window-close-isolation",
             "touchpad-scroll",
             "session-check",
             "self-test",
@@ -7254,6 +7393,9 @@ def main() -> int:
     if args.case == "hover-wheel":
         out = run_hover_wheel(args.kettle, root)
         print(f"hover-wheel smoke: OK artifacts={out}")
+    if args.case == "window-close-isolation":
+        out = run_window_close_isolation(args.kettle, root)
+        print(f"window-close-isolation smoke: OK artifacts={out}")
     if args.case in ("touchpad-scroll", "all"):
         out = run_touchpad_scroll(args.kettle, root)
         print(f"touchpad-scroll smoke: OK artifacts={out}")
