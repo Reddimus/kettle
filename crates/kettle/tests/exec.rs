@@ -1118,6 +1118,11 @@ fn exec_waits_for_a_live_conpty_descendant_before_closing_the_transport() {
 
 #[cfg(windows)]
 #[test]
+// The parent branch must exit without waiting: the outer test verifies that
+// Kettle keeps ConPTY open for a same-console descendant after its direct
+// child is gone. The descendant is contained and cleaned up by Kettle's Job
+// Object; waiting here would erase the lifetime ordering under test.
+#[allow(clippy::zombie_processes)]
 fn windows_conpty_late_descendant_helper() {
     match std::env::var(CONPTY_LATE_DESCENDANT_ENV).as_deref() {
         Ok("parent") => {
