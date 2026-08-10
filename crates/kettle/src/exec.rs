@@ -1319,7 +1319,7 @@ fn run_exec_engine(
         // identity until stdout and recording have both acknowledged ordinary
         // completion, so a later deadline can still authenticate Linux session
         // teardown. Windows process handles have no reaping identity hazard.
-        let observed_child_status = if child_gone_at.is_none() {
+        let observed_child_status: std::io::Result<Option<i32>> = if child_gone_at.is_none() {
             #[cfg(unix)]
             {
                 term.child_exit_code_unreaped()
