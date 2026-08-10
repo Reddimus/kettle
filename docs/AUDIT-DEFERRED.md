@@ -232,8 +232,8 @@ tracked here so they are not lost.
   is a different and less defensible thing than deferring on measured evidence,
   which is what the other items here rest on.
 
-- **The Linux installer smoke's online leg can fail on a transient network
-  blip, and it gates every pull request.** Observed on PR #162, run
+- **~~The Linux installer smoke's online leg can fail on a transient network
+  blip, and it gates every pull request.~~ — fixed.** Observed on PR #162, run
   31255512657:
 
       kettle install-online.sh: v2.53.0 must ship a bounded Ed25519-signed
@@ -251,10 +251,20 @@ tracked here so they are not lost.
   backoff, distinguishing a transport failure from a manifest that is genuinely
   absent or oversized, and failing closed only after the retries are exhausted.
 
-  Not attempted here because `install-online.sh` is a shipped, security-relevant
-  script and a release cut is the wrong moment to change how it fetches
-  signatures. Until then, a red `build (ubuntu-latest)` on this step should be
-  re-run once and investigated only if it repeats.
+  Every bounded fetch now gives curl two retries with its exponential backoff,
+  including connection-refused failures. Retry admission closes after 30
+  seconds and every started attempt retains the existing 600-second limit, so a
+  server-provided `Retry-After` cannot choose an unbounded wait. curl's
+  classifier is deliberately retained: timeouts, 408/429 and selected 5xx
+  responses are transient; a 404 or `--max-filesize` refusal is permanent and
+  gets no second attempt. `-q` is the first argument so user curl configuration
+  cannot widen that classifier. Hermetic local-TLS cases drive the installed
+  curl through manifest recovery, exhaustion after exactly three total
+  attempts, a refused 60-second `Retry-After`, and the single-attempt
+  permanent/unknown-length-oversize paths. The oversize case removes curl's
+  userspace limit and requires `SIGXFSZ`, so it proves the kernel guard rather
+  than a generic failure. Authentication and archive limits are evaluated
+  exactly as before after a successful transfer.
 
 
 - **Two `production_source` forms that leave test-only text in the slice.**

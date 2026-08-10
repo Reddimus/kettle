@@ -5,15 +5,21 @@ from __future__ import annotations
 
 from io import BytesIO
 import hashlib
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import os
 from pathlib import Path
 import platform
 import shutil
+import signal
+import ssl
 import subprocess
 import tarfile
 import tempfile
+import threading
+import time
 import unittest
+from urllib.parse import urlsplit
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -69,13 +75,31 @@ class OnlineInstallerTests(unittest.TestCase):
         script.write_text(
             """#!/bin/sh
 set -eu
+disable_config=0
+if [ "${1-}" = "-q" ]; then
+  disable_config=1
+  shift
+fi
 if [ "${1-}" = "--help" ] && [ "${2-}" = "all" ]; then
   echo "     --max-filesize <bytes>"
+  echo "     --retry-connrefused"
   exit 0
 fi
-printf '%s\\n' "$*" >> "${FIXTURE_CURL_LOG:?}"
 output=
 url=
+retries=0
+retry_delay=
+retry_max_time=
+retry_connrefused=0
+proto=
+proto_redir=
+tls=0
+max_redirs=
+connect_timeout=
+total_timeout=
+low_speed_bytes=
+low_speed_seconds=
+max_filesize=
 while [ "$#" -gt 0 ]; do
   case "$1" in
     -o)
@@ -83,6 +107,55 @@ while [ "$#" -gt 0 ]; do
       shift 2
       ;;
     --max-filesize)
+      max_filesize=$2
+      shift 2
+      ;;
+    --retry)
+      retries=$2
+      shift 2
+      ;;
+    --retry-delay)
+      retry_delay=$2
+      shift 2
+      ;;
+    --retry-max-time)
+      retry_max_time=$2
+      shift 2
+      ;;
+    --retry-connrefused)
+      retry_connrefused=1
+      shift
+      ;;
+    --proto)
+      proto=$2
+      shift 2
+      ;;
+    --proto-redir)
+      proto_redir=$2
+      shift 2
+      ;;
+    --tlsv1.2)
+      tls=1
+      shift
+      ;;
+    --max-redirs)
+      max_redirs=$2
+      shift 2
+      ;;
+    --connect-timeout)
+      connect_timeout=$2
+      shift 2
+      ;;
+    --max-time)
+      total_timeout=$2
+      shift 2
+      ;;
+    --speed-limit)
+      low_speed_bytes=$2
+      shift 2
+      ;;
+    --speed-time)
+      low_speed_seconds=$2
       shift 2
       ;;
     *)
@@ -92,6 +165,13 @@ while [ "$#" -gt 0 ]; do
   esac
 done
 [ -n "$output" ] || exit 2
+printf 'config=%s max=%s retry=%s delay=%s retry-max=%s refused=%s proto=%s redir=%s tls=%s redirs=%s connect=%s total=%s low-bytes=%s low-seconds=%s\\n' \
+  "$disable_config" "$max_filesize" "$retries" "$retry_delay" \
+  "$retry_max_time" "$retry_connrefused" \
+  "$proto" "$proto_redir" "$tls" "$max_redirs" "$connect_timeout" \
+  "$total_timeout" "$low_speed_bytes" "$low_speed_seconds" \
+  >> "${FIXTURE_CURL_LOG:?}"
+
 case "$url" in
   *.tar.gz.sha256)
     cp "${FIXTURE_SIDECAR:?}" "$output"
@@ -103,11 +183,7 @@ case "$url" in
     cp "${FIXTURE_MANIFEST:?}" "$output"
     ;;
   *.tar.gz)
-    if [ "${FIXTURE_OVERSIZE:-0}" = 1 ]; then
-      truncate -s 268435457 "$output"
-    else
-      cp "${FIXTURE_ARCHIVE:?}" "$output"
-    fi
+    cp "${FIXTURE_ARCHIVE:?}" "$output"
     ;;
   *)
     exit 22
@@ -118,6 +194,207 @@ esac
             newline="\n",
         )
         script.chmod(0o755)
+
+    def _write_real_curl_proxy(self) -> None:
+        """Route production curl arguments to the local TLS fixture.
+
+        The first transport tests modeled curl's classifier inside the fake,
+        which made them self-fulfilling: a fake that elects not to retry a 404
+        cannot prove the real invocation would do the same. This proxy changes
+        only the destination and CA; the installed curl parses and executes the
+        exact retry, failure, timeout, and size-limit flags from the installer.
+        """
+        script = self.fake_bin / "curl"
+        script.write_text(
+            """#!/usr/bin/env python3
+import os
+import subprocess
+import sys
+from urllib.parse import urlsplit
+
+args = sys.argv[1:]
+real_curl = os.environ["FIXTURE_REAL_CURL"]
+if "--help" in args:
+    raise SystemExit(subprocess.run([real_curl, *args], check=False).returncode)
+
+endpoint = os.environ["FIXTURE_HTTPS_ENDPOINT"]
+original = urlsplit(args[-1])
+local = urlsplit(endpoint)
+args[-1] = endpoint + original.path
+if original.query:
+    args[-1] += "?" + original.query
+
+# `-q` must remain curl's first argument or it does not suppress .curlrc.
+insert_at = 1 if args and args[0] == "-q" else 0
+if os.environ.get("FIXTURE_STRIP_MAX_FILESIZE") == "1":
+    stripped = []
+    index = 0
+    while index < len(args):
+        if args[index] == "--max-filesize":
+            index += 2
+        else:
+            stripped.append(args[index])
+            index += 1
+    args = stripped
+args[insert_at:insert_at] = [
+    "--resolve",
+    f"github.com:{local.port}:127.0.0.1",
+    "--noproxy",
+    "github.com",
+    "--cacert",
+    os.environ["FIXTURE_HTTPS_CERT"],
+]
+result = subprocess.run([real_curl, *args], check=False)
+status_log = os.environ.get("FIXTURE_REAL_CURL_STATUS_LOG")
+if status_log:
+    with open(status_log, "a", encoding="ascii") as stream:
+        stream.write(str(result.returncode) + "\\n")
+raise SystemExit(result.returncode)
+""",
+            encoding="ascii",
+            newline="\n",
+        )
+        script.chmod(0o755)
+
+    def _run_with_real_curl(
+        self,
+        archive: Path,
+        scenario: str,
+        *,
+        strip_max_filesize: bool = False,
+    ) -> tuple[subprocess.CompletedProcess[str], dict[str, int], list[int]]:
+        real_curl = shutil.which("curl")
+        real_openssl = shutil.which("openssl")
+        if real_curl is None or real_openssl is None:
+            self.skipTest("real curl retry fixtures require curl and openssl")
+
+        cert = self.root / "fixture-cert.pem"
+        key = self.root / "fixture-key.pem"
+        generated = subprocess.run(
+            [
+                real_openssl,
+                "req",
+                "-x509",
+                "-newkey",
+                "rsa:2048",
+                "-sha256",
+                "-nodes",
+                "-keyout",
+                str(key),
+                "-out",
+                str(cert),
+                "-days",
+                "1",
+                "-subj",
+                "/CN=github.com",
+                "-addext",
+                "subjectAltName=DNS:github.com",
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        if generated.returncode != 0:
+            self.skipTest(f"openssl cannot make the TLS fixture: {generated.stderr}")
+
+        counts: dict[str, int] = {}
+        archive_bytes = archive.read_bytes()
+        test = self
+
+        class Handler(BaseHTTPRequestHandler):
+            def log_message(self, _format: str, *_args: object) -> None:
+                return
+
+            def reply(
+                self,
+                status: int,
+                body: bytes = b"",
+                *,
+                length: bool = True,
+                headers: dict[str, str] | None = None,
+            ) -> None:
+                self.send_response(status)
+                if length:
+                    self.send_header("Content-Length", str(len(body)))
+                for name, value in (headers or {}).items():
+                    self.send_header(name, value)
+                self.end_headers()
+                try:
+                    self.wfile.write(body)
+                except (BrokenPipeError, ConnectionResetError, ssl.SSLError):
+                    pass
+
+            def do_GET(self) -> None:
+                path = urlsplit(self.path).path
+                counts[path] = counts.get(path, 0) + 1
+                if path.endswith("/kettle-update-manifest.json"):
+                    if scenario == "recover-manifest" and counts[path] <= 2:
+                        self.reply(503)
+                    elif scenario == "exhaust-manifest":
+                        self.reply(503)
+                    elif scenario == "long-retry-after":
+                        self.reply(503, headers={"Retry-After": "60"})
+                    elif scenario == "missing-manifest":
+                        self.reply(404)
+                    elif scenario == "oversize-manifest":
+                        self.reply(200, b"x" * 131_073, length=False)
+                    else:
+                        self.reply(
+                            200,
+                            (test.root / "kettle-update-manifest.json").read_bytes(),
+                        )
+                elif path.endswith("/kettle-update-manifest.json.sig"):
+                    self.reply(
+                        200,
+                        (test.root / "kettle-update-manifest.json.sig").read_bytes(),
+                    )
+                elif path.endswith(".tar.gz.sha256"):
+                    self.reply(200, test.sidecar.read_bytes())
+                elif path.endswith(".tar.gz"):
+                    self.reply(200, archive_bytes)
+                else:
+                    self.reply(404)
+
+        self._write_real_curl_proxy()
+        server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        thread: threading.Thread | None = None
+        status_log = self.root / "real-curl-status.log"
+        try:
+            context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+            context.load_cert_chain(cert, key)
+            server.socket = context.wrap_socket(server.socket, server_side=True)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            result = self._run(
+                archive,
+                version="v2.36.0",
+                signed=True,
+                extra_environment={
+                    "FIXTURE_REAL_CURL": real_curl,
+                    "FIXTURE_HTTPS_ENDPOINT": (
+                        f"https://github.com:{server.server_port}"
+                    ),
+                    "FIXTURE_HTTPS_CERT": str(cert),
+                    "FIXTURE_REAL_CURL_STATUS_LOG": str(status_log),
+                    "FIXTURE_STRIP_MAX_FILESIZE": (
+                        "1" if strip_max_filesize else "0"
+                    ),
+                    # If `-q` ever stops being curl's first argument, this makes
+                    # permanent errors retry and the request-count tests fail.
+                    "FIXTURE_HOSTILE_CURLRC": "1",
+                },
+            )
+        finally:
+            if thread is not None:
+                server.shutdown()
+            server.server_close()
+            if thread is not None:
+                thread.join(timeout=5)
+        statuses = [
+            int(line)
+            for line in status_log.read_text(encoding="ascii").splitlines()
+        ]
+        return result, counts, statuses
 
     def _write_fake_openssl(self, *, verification_succeeds: bool = True) -> None:
         """Stand-in for openssl.
@@ -325,6 +602,10 @@ fi
         prefix = self.root / "prefix"
         home = self.root / "home"
         home.mkdir(exist_ok=True)
+        xdg_config = home / "xdg-config"
+        xdg_config.mkdir(exist_ok=True)
+        fixture_tmp = self.root / "tmp"
+        fixture_tmp.mkdir(exist_ok=True)
         self.curl_log.unlink(missing_ok=True)
         manifest = self.root / "kettle-update-manifest.json"
         signature = self.root / "kettle-update-manifest.json.sig"
@@ -368,6 +649,9 @@ fi
             {
                 "PATH": f"{self.fake_bin}{os.pathsep}{environment['PATH']}",
                 "HOME": str(home),
+                "CURL_HOME": str(home),
+                "XDG_CONFIG_HOME": str(xdg_config),
+                "TMPDIR": str(fixture_tmp),
                 "KETTLE_PREFIX": str(prefix),
                 "KETTLE_VERSION": version,
                 "FIXTURE_ARCHIVE": str(archive),
@@ -379,14 +663,39 @@ fi
         )
         if extra_environment:
             environment.update(extra_environment)
-        return subprocess.run(
-            ["sh", str(INSTALLER)],
+        if environment.get("FIXTURE_HOSTILE_CURLRC") == "1":
+            (home / ".curlrc").write_text(
+                "retry-all-errors\n",
+                encoding="ascii",
+                newline="\n",
+            )
+        command = ["sh", str(INSTALLER)]
+        process = subprocess.Popen(
+            command,
             cwd=ROOT,
             env=environment,
-            check=False,
-            capture_output=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
             text=True,
-            timeout=30,
+            start_new_session=True,
+        )
+        try:
+            stdout, stderr = process.communicate(timeout=30)
+        except subprocess.TimeoutExpired:
+            # curl is a grandchild behind the POSIX installer shell. Killing
+            # only `sh` leaves the proxy, curl and TLS request alive; own a
+            # process group so a failed fixture cannot leak any of them.
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            process.communicate()
+            raise
+        return subprocess.CompletedProcess(
+            command,
+            process.returncode,
+            stdout,
+            stderr,
         )
 
     def test_safe_checksum_only_archive_installs_after_bounded_checksum(self):
@@ -395,16 +704,97 @@ fi
         self.assertIn("same-origin checksum only", result.stdout)
         self.assertTrue((self.root / "prefix" / "bin" / "kettle").is_file())
         calls = self.curl_log.read_text(encoding="ascii")
-        self.assertIn("--proto =https", calls)
-        self.assertIn("--proto-redir =https", calls)
-        self.assertIn("--tlsv1.2", calls)
-        self.assertIn("--max-redirs 5", calls)
-        self.assertIn("--connect-timeout 15", calls)
-        self.assertIn("--max-time 600", calls)
-        self.assertIn("--speed-limit 1024", calls)
-        self.assertIn("--speed-time 30", calls)
-        self.assertIn("--max-filesize 268435456", calls)
-        self.assertIn("--max-filesize 1024", calls)
+        common = (
+            "config=1",
+            "retry=2",
+            "delay=0",
+            "retry-max=30",
+            "refused=1",
+            "proto==https",
+            "redir==https",
+            "tls=1",
+            "redirs=5",
+            "connect=15",
+            "total=600",
+            "low-bytes=1024",
+            "low-seconds=30",
+        )
+        for call in calls.splitlines():
+            with self.subTest(call=call):
+                for field in common:
+                    self.assertIn(field, call)
+        self.assertIn("max=268435456", calls)
+        self.assertIn("max=1024", calls)
+
+    def test_real_curl_retries_a_transient_manifest_then_installs(self):
+        result, counts, _statuses = self._run_with_real_curl(
+            self._archive(include_manifest=True),
+            "recover-manifest",
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(
+            sum(
+                count
+                for path, count in counts.items()
+                if path.endswith("/kettle-update-manifest.json")
+            ),
+            3,
+        )
+        self.assertTrue((self.root / "prefix" / "bin" / "kettle").is_file())
+
+    def test_real_curl_exhausts_the_manifest_attempt_bound(self):
+        result, counts, _statuses = self._run_with_real_curl(
+            self._archive(include_manifest=True),
+            "exhaust-manifest",
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(
+            sum(
+                count
+                for path, count in counts.items()
+                if path.endswith("/kettle-update-manifest.json")
+            ),
+            3,
+        )
+        self.assertIn("must ship a bounded Ed25519-signed manifest", result.stderr)
+        self.assertFalse((self.root / "prefix").exists())
+
+    def test_retry_after_cannot_choose_an_unbounded_wait(self):
+        started = time.monotonic()
+        result, counts, _statuses = self._run_with_real_curl(
+            self._archive(include_manifest=True),
+            "long-retry-after",
+        )
+        elapsed = time.monotonic() - started
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(
+            sum(
+                count
+                for path, count in counts.items()
+                if path.endswith("/kettle-update-manifest.json")
+            ),
+            1,
+            "a retry beyond the 30-second admission timer must not start",
+        )
+        self.assertLess(elapsed, 10, "curl waited for the server's 60-second delay")
+
+    def test_real_curl_does_not_retry_a_missing_manifest(self):
+        result, counts, _statuses = self._run_with_real_curl(
+            self._archive(include_manifest=True),
+            "missing-manifest",
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(
+            sum(
+                count
+                for path, count in counts.items()
+                if path.endswith("/kettle-update-manifest.json")
+            ),
+            1,
+            "404 must stay permanent even with retry-all-errors in .curlrc",
+        )
+        self.assertIn("must ship a bounded Ed25519-signed manifest", result.stderr)
+        self.assertFalse((self.root / "prefix").exists())
 
     def test_authenticated_archive_without_hardened_helper_is_refused(self):
         result = self._run(self._archive(include_helper=False))
@@ -480,12 +870,27 @@ fi
         self.assertFalse((self.root / "prefix").exists())
 
     def test_kernel_file_limit_stops_unknown_length_oversize_response(self):
-        result = self._run(
-            self._archive(),
-            extra_environment={"FIXTURE_OVERSIZE": "1"},
+        result, counts, statuses = self._run_with_real_curl(
+            self._archive(include_manifest=True),
+            "oversize-manifest",
+            strip_max_filesize=True,
+        )
+        self.assertIn(
+            -signal.SIGXFSZ,
+            statuses,
+            "with curl's userspace limit removed, RLIMIT_FSIZE must stop the body",
         )
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn("download failed", result.stderr)
+        self.assertEqual(
+            sum(
+                count
+                for path, count in counts.items()
+                if path.endswith("/kettle-update-manifest.json")
+            ),
+            1,
+            "the kernel size-limit failure must not become retryable",
+        )
+        self.assertIn("must ship a bounded Ed25519-signed manifest", result.stderr)
         self.assertFalse((self.root / "prefix").exists())
 
     def test_modern_release_cannot_downgrade_when_manifest_is_suppressed(self):

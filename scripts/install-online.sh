@@ -100,6 +100,18 @@ CURL_TOTAL_TIMEOUT_SECONDS=600
 CURL_LOW_SPEED_SECONDS=30
 CURL_LOW_SPEED_BYTES=1024
 CURL_MAX_REDIRECTS=5
+# Two retries make every fetch at most three attempts. A zero retry delay asks
+# curl for its exponential backoff (normally 1s, then 2s) instead of hammering
+# a sick endpoint; the aggregate timer below also bounds server-provided
+# Retry-After delays. curl's own retry classifier is load-bearing: it retries
+# timeouts, connection refusals, 408/429 and selected 5xx responses, but not a
+# permanent 404 or `--max-filesize` failure.
+CURL_RETRY_COUNT=2
+CURL_RETRY_DELAY_SECONDS=0
+# Retry admission closes after 30 seconds. A retry that starts before then keeps
+# its ordinary 600-second per-attempt limit, so even a hostile Retry-After
+# cannot turn this into an unbounded wait.
+CURL_RETRY_MAX_TIME_SECONDS=30
 POSIX_FILE_LIMIT_BLOCK_BYTES=512
 
 # --- Platform check ------------------------------------------------
@@ -158,9 +170,14 @@ for cmd in awk cat chmod cp curl dirname find grep mkdir mktemp od rm sed tail t
   fi
 done
 
-if ! curl --help all 2>/dev/null | grep -q -- '--max-filesize'; then
+if ! curl -q --help all 2>/dev/null | grep -q -- '--max-filesize'; then
   echo "kettle install-online.sh: curl lacks --max-filesize support." >&2
   echo "Install a current curl so downloads can be bounded before re-running." >&2
+  exit 1
+fi
+if ! curl -q --help all 2>/dev/null | grep -q -- '--retry-connrefused'; then
+  echo "kettle install-online.sh: curl lacks --retry-connrefused support." >&2
+  echo "Install a current curl so transient fetches can be retried safely." >&2
   exit 1
 fi
 if ! tar --version 2>/dev/null | grep -q 'GNU tar'; then
@@ -182,9 +199,9 @@ download_limited() {
 
   rm -f "$download_path"
   if [ "$download_progress" -eq 1 ]; then
-    curl_flags="-fL --proto =https --proto-redir =https --tlsv1.2 --max-redirs ${CURL_MAX_REDIRECTS} --connect-timeout ${CURL_CONNECT_TIMEOUT_SECONDS} --max-time ${CURL_TOTAL_TIMEOUT_SECONDS} --speed-limit ${CURL_LOW_SPEED_BYTES} --speed-time ${CURL_LOW_SPEED_SECONDS} --max-filesize ${download_limit} --progress-bar"
+    curl_flags="-q -fL --proto =https --proto-redir =https --tlsv1.2 --max-redirs ${CURL_MAX_REDIRECTS} --connect-timeout ${CURL_CONNECT_TIMEOUT_SECONDS} --max-time ${CURL_TOTAL_TIMEOUT_SECONDS} --speed-limit ${CURL_LOW_SPEED_BYTES} --speed-time ${CURL_LOW_SPEED_SECONDS} --max-filesize ${download_limit} --retry ${CURL_RETRY_COUNT} --retry-delay ${CURL_RETRY_DELAY_SECONDS} --retry-max-time ${CURL_RETRY_MAX_TIME_SECONDS} --retry-connrefused --progress-bar"
   else
-    curl_flags="-fsSL --proto =https --proto-redir =https --tlsv1.2 --max-redirs ${CURL_MAX_REDIRECTS} --connect-timeout ${CURL_CONNECT_TIMEOUT_SECONDS} --max-time ${CURL_TOTAL_TIMEOUT_SECONDS} --speed-limit ${CURL_LOW_SPEED_BYTES} --speed-time ${CURL_LOW_SPEED_SECONDS} --max-filesize ${download_limit}"
+    curl_flags="-q -fsSL --proto =https --proto-redir =https --tlsv1.2 --max-redirs ${CURL_MAX_REDIRECTS} --connect-timeout ${CURL_CONNECT_TIMEOUT_SECONDS} --max-time ${CURL_TOTAL_TIMEOUT_SECONDS} --speed-limit ${CURL_LOW_SPEED_BYTES} --speed-time ${CURL_LOW_SPEED_SECONDS} --max-filesize ${download_limit} --retry ${CURL_RETRY_COUNT} --retry-delay ${CURL_RETRY_DELAY_SECONDS} --retry-max-time ${CURL_RETRY_MAX_TIME_SECONDS} --retry-connrefused"
   fi
   # Word splitting here is intentional: every flag is a fixed token assembled
   # above; URLs and paths remain separately quoted arguments.
@@ -226,12 +243,16 @@ download_headers_limited() {
   rm -f "$download_path"
   if ! (
     ulimit -f "$download_blocks"
-    curl -fsSLI --proto '=https' --proto-redir '=https' --tlsv1.2 \
+    curl -q -fsSLI --proto '=https' --proto-redir '=https' --tlsv1.2 \
       --max-redirs "$CURL_MAX_REDIRECTS" \
       --connect-timeout "$CURL_CONNECT_TIMEOUT_SECONDS" \
       --max-time "$CURL_TOTAL_TIMEOUT_SECONDS" \
       --speed-limit "$CURL_LOW_SPEED_BYTES" \
       --speed-time "$CURL_LOW_SPEED_SECONDS" \
+      --retry "$CURL_RETRY_COUNT" \
+      --retry-delay "$CURL_RETRY_DELAY_SECONDS" \
+      --retry-max-time "$CURL_RETRY_MAX_TIME_SECONDS" \
+      --retry-connrefused \
       -o "$download_path" "$download_url"
   ); then
     rm -f "$download_path"

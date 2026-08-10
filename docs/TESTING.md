@@ -1125,11 +1125,24 @@ python3 scripts/test-install-online.py
 
 The current suites cover seven signed-update-manifest cases, six exact
 draft-release cases, seventeen package-manifest cases (with platform-dependent
-skips), and nine POSIX online-installer cases. They pin the checked-in Ed25519
+skips), and fifteen POSIX online-installer cases. They pin the checked-in Ed25519
 trust root, canonical manifest bytes and sidecars, no-follow same-handle
 artifact hashing, exact local-to-GitHub name/size/SHA-256 binding, bounded
 archive structure and extraction, modern no-downgrade behavior, compatible
 legacy sidecars, and hostile archive/network/parser fixtures.
+The online-installer transport cases route the installed curl through a
+hermetic local HTTPS server: transient manifest failures recover or stop after
+exactly three total attempts, while a permanent HTTP refusal and an
+unknown-length response stopped by the kernel file limit remain single-attempt
+failures. The size case deliberately removes curl's userspace
+`--max-filesize` inside the test proxy and requires the real process to die with
+`SIGXFSZ`, proving the kernel guard independently. A hostile `.curlrc` enables
+`retry-all-errors` from an isolated `CURL_HOME`, so the request counts also
+prove that first-argument `-q` keeps user configuration out of the policy. A
+60-second `Retry-After` is refused by the 30-second retry-admission timer without
+sleeping. The fake-curl cases pin the common flags on every fetch, including
+`--retry-connrefused` and curl's exponential-backoff mode; resilience cannot
+drift into an unbounded loop or a retry of security limits.
 Extraction canonicalizes its already-existing output parent before the
 no-link walk. This intentionally accepts an alias anywhere in that existing
 parent chain—including macOS `/var` to `/private/var`—then pins the canonical
