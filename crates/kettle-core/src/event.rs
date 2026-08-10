@@ -157,6 +157,9 @@ pub struct EventProxy {
     tx: Sender<TermEvent>,
     waker: Waker,
     output_wake: Option<Arc<OutputWakeGate>>,
+    /// Semantic/lifecycle work must not be mistaken for paint-only output.
+    /// The UI consumes this edge before applying its output-generation gate.
+    lifecycle_pending: Arc<AtomicBool>,
     osc52_copy_allowed: Arc<AtomicBool>,
     overflowed: Arc<AtomicBool>,
 }
@@ -167,6 +170,7 @@ impl EventProxy {
             tx,
             waker,
             output_wake: None,
+            lifecycle_pending: Arc::new(AtomicBool::new(false)),
             // Compatibility constructor: callers that do not provide a live
             // policy retain Kettle's default copy-enabled behavior.
             osc52_copy_allowed: Arc::new(AtomicBool::new(true)),
@@ -208,9 +212,14 @@ impl EventProxy {
             tx,
             waker,
             output_wake: Some(output_wake),
+            lifecycle_pending: Arc::new(AtomicBool::new(false)),
             osc52_copy_allowed,
             overflowed,
         }
+    }
+
+    pub(crate) fn lifecycle_pending(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.lifecycle_pending)
     }
 }
 
@@ -239,7 +248,10 @@ impl EventListener for EventProxy {
             return;
         }
         match self.tx.try_send(event) {
-            Ok(()) => (self.waker)(),
+            Ok(()) => {
+                self.lifecycle_pending.store(true, Ordering::Release);
+                (self.waker)();
+            }
             Err(crossbeam_channel::TrySendError::Full(_)) => {
                 // The parser calls this while holding the terminal mutex, so
                 // blocking here would deadlock the UI renderer. A full bounded
@@ -248,6 +260,7 @@ impl EventListener for EventProxy {
                 // pretending the pane is healthy, and wake the owner to tear
                 // the hostile/stalled pane down.
                 if !self.overflowed.swap(true, Ordering::AcqRel) {
+                    self.lifecycle_pending.store(true, Ordering::Release);
                     (self.waker)();
                 }
             }
@@ -273,9 +286,12 @@ mod tests {
                 woke2.fetch_add(1, Ordering::SeqCst);
             }),
         );
+        let lifecycle_pending = proxy.lifecycle_pending();
 
         proxy.send_event(TermEvent::Wakeup);
+        assert!(lifecycle_pending.swap(false, Ordering::AcqRel));
         proxy.send_event(TermEvent::Bell);
+        assert!(lifecycle_pending.swap(false, Ordering::AcqRel));
 
         // Both events arrive on the channel in order…
         assert!(matches!(rx.try_recv(), Ok(TermEvent::Wakeup)));
@@ -283,6 +299,20 @@ mod tests {
         assert!(rx.try_recv().is_err());
         // …and the waker fired once per event.
         assert_eq!(woke.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn suppressed_engine_wakeup_is_not_a_semantic_lifecycle_edge() {
+        let (tx, rx) = crossbeam_channel::unbounded();
+        let waker: super::Waker = Arc::new(|| {});
+        let output_wake = Arc::new(OutputWakeGate::new(waker.clone()));
+        let proxy = EventProxy::with_output_wake(tx, waker, output_wake);
+        let lifecycle_pending = proxy.lifecycle_pending();
+
+        proxy.send_event(TermEvent::Wakeup);
+
+        assert!(rx.is_empty());
+        assert!(!lifecycle_pending.load(Ordering::Acquire));
     }
 
     #[test]

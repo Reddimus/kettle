@@ -127,6 +127,7 @@ enum PtyTransportEnd {
     Pending,
     Eof,
     Failed,
+    EofTimeout,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -157,6 +158,13 @@ fn observed_pty_transport_end(
         PtyReadStatus::Failed => {
             if channel_disconnected {
                 PtyTransportEnd::Failed
+            } else {
+                PtyTransportEnd::Pending
+            }
+        }
+        PtyReadStatus::EofTimeout => {
+            if channel_disconnected {
+                PtyTransportEnd::EofTimeout
             } else {
                 PtyTransportEnd::Pending
             }
@@ -233,6 +241,13 @@ fn pty_drain_decision(
                 // remaining source count is irreducible, so fail as soon as
                 // downstream delivery is idle rather than waiting forever.
                 PtyDrainDecision::Failed(PtyDrainFailure::Read)
+            };
+        }
+        PtyTransportEnd::EofTimeout => {
+            return if !transport_idle {
+                PtyDrainDecision::Wait
+            } else {
+                PtyDrainDecision::Failed(PtyDrainFailure::EofTimeout)
             };
         }
         PtyTransportEnd::Pending => {}
@@ -3915,6 +3930,30 @@ mod tests {
                 0,
             ),
             PtyDrainDecision::Failed(PtyDrainFailure::Read)
+        );
+    }
+
+    #[test]
+    fn a_core_eof_timeout_remains_an_eof_timeout_after_output_drains() {
+        assert_eq!(
+            observed_pty_transport_end(false, PtyReadStatus::EofTimeout),
+            PtyTransportEnd::Pending,
+            "chunks ordered ahead of the timeout marker must still drain"
+        );
+        assert_eq!(
+            observed_pty_transport_end(true, PtyReadStatus::EofTimeout),
+            PtyTransportEnd::EofTimeout
+        );
+        assert_eq!(
+            pty_drain_decision(
+                false,
+                PtyTransportEnd::EofTimeout,
+                Duration::from_secs(5),
+                Duration::from_secs(5),
+                true,
+                0,
+            ),
+            PtyDrainDecision::Failed(PtyDrainFailure::EofTimeout)
         );
     }
 

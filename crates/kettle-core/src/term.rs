@@ -33,6 +33,13 @@ use crate::persistence::{AsyncFileWriter, AsyncWriterStatus};
 
 const PTY_READ_BUFFER_BYTES: usize = 64 * 1024;
 const PTY_PUMP_QUEUE_DEPTH: usize = 4;
+/// Maximum time to wait for EOF after the direct child exits.
+///
+/// A daemonized descendant can retain the slave descriptor forever. The
+/// reader still drains every byte that arrives during this window, but it must
+/// eventually publish an ordered terminal exit so GUI Close/Restart/Hold
+/// policy cannot be held hostage by a process outside the pane's child scope.
+pub const PTY_CHILD_EXIT_EOF_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 #[cfg(windows)]
 const CONPTY_NONBLOCKING_WRITE_BYTES: usize = 1024;
 /// Bound consecutive full-pipe waits in legacy complete-message writer APIs.
@@ -847,6 +854,7 @@ pub enum PtyReadStatus {
     Reading = 0,
     Eof = 1,
     Failed = 2,
+    EofTimeout = 3,
 }
 
 /// Source-side progress of the PTY read pipeline.
@@ -868,6 +876,7 @@ impl PtyReadStatus {
         match status {
             1 => Self::Eof,
             2 => Self::Failed,
+            3 => Self::EofTimeout,
             _ => Self::Reading,
         }
     }
@@ -953,6 +962,425 @@ fn pty_read_error_status(error: &io::Error) -> PtyReadStatus {
     PtyReadStatus::Failed
 }
 
+/// Observe a direct Unix child without consuming its wait status.
+///
+/// The PTY startup guard uses this while it temporarily retains Kettle's
+/// slave descriptor: a silent child must be allowed to close the master, but a
+/// child whose output has not reached the reader yet must keep that output
+/// anchored. `WNOWAIT` leaves the actual reap to the existing child owner.
+#[cfg(unix)]
+fn unix_child_exit_code_unreaped(pid: u32) -> io::Result<Option<u32>> {
+    let pid = libc::pid_t::try_from(pid)
+        .map_err(|_| io::Error::other("PTY child process id is out of range"))?;
+
+    // SAFETY: `info` is initialized for the kernel, `pid` identifies this
+    // process's direct child, and WNOWAIT explicitly leaves its wait status
+    // available to portable-pty's later `try_wait`.
+    let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+    loop {
+        let result = unsafe {
+            libc::waitid(
+                libc::P_PID,
+                pid as libc::id_t,
+                &mut info,
+                libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
+            )
+        };
+        if result == 0 {
+            // POSIX reports a successful WNOHANG probe with si_pid == 0 while
+            // the selected child is still running.
+            if unsafe { info.si_pid() } == 0 {
+                return Ok(None);
+            }
+            let status = unsafe { info.si_status() };
+            let code = match info.si_code {
+                libc::CLD_EXITED => status as u32,
+                libc::CLD_KILLED | libc::CLD_DUMPED => 128u32.saturating_add(status as u32),
+                // WEXITED excludes stop/continue notifications. Treat an
+                // unexpected code as an observation failure, not success.
+                other => {
+                    return Err(io::Error::other(format!(
+                        "waitid returned unexpected child status code {other}"
+                    )));
+                }
+            };
+            return Ok(Some(code));
+        }
+        let error = io::Error::last_os_error();
+        if error.kind() != io::ErrorKind::Interrupted {
+            return Err(error);
+        }
+    }
+}
+
+#[cfg(unix)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum UnixStartupWake {
+    Output,
+    ChildExit,
+    OutputAndChildExit,
+}
+
+/// Event-driven PTY readability and direct-child exit observation.
+///
+/// Linux exposes child exit as a pollable pidfd; macOS exposes it through
+/// EVFILT_PROC. Both can wait alongside master readability without a timer.
+/// The same watcher first protects Kettle's retained startup slave, then stays
+/// with the pump so a descendant cannot retain its slave forever after the
+/// direct child exits. Other Unix targets retain a bounded, exponentially
+/// backed-off fallback so portability does not turn a quiet pane into a 20 Hz
+/// wakeup loop.
+#[cfg(unix)]
+struct UnixPtyWatcher {
+    pid: u32,
+    fallback_timeout_ms: i32,
+    #[cfg(target_os = "linux")]
+    pidfd: Option<OwnedFd>,
+    #[cfg(target_os = "macos")]
+    kqueue: Option<OwnedFd>,
+}
+
+#[cfg(unix)]
+impl UnixPtyWatcher {
+    fn new(pid: u32, _master_fd: RawFd) -> Self {
+        #[cfg(target_os = "linux")]
+        let pidfd = {
+            let raw = unsafe { libc::syscall(libc::SYS_pidfd_open, pid, 0) };
+            if raw < 0 {
+                log::debug!(
+                    "pidfd_open unavailable for PTY startup guard; using bounded fallback: {}",
+                    io::Error::last_os_error()
+                );
+                None
+            } else {
+                // SAFETY: a successful pidfd_open returns a new descriptor
+                // owned by this watcher.
+                Some(unsafe { OwnedFd::from_raw_fd(raw as RawFd) })
+            }
+        };
+
+        #[cfg(target_os = "macos")]
+        let kqueue = Self::macos_kqueue(pid, _master_fd).map_or_else(
+            |error| {
+                log::debug!(
+                    "kqueue unavailable for PTY startup guard; using bounded fallback: {error}"
+                );
+                None
+            },
+            Some,
+        );
+
+        Self {
+            pid,
+            fallback_timeout_ms: 1,
+            #[cfg(target_os = "linux")]
+            pidfd,
+            #[cfg(target_os = "macos")]
+            kqueue,
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    fn macos_kqueue(pid: u32, master_fd: RawFd) -> io::Result<OwnedFd> {
+        let raw = unsafe { libc::kqueue() };
+        if raw < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        // SAFETY: kqueue returned a new descriptor owned by this function.
+        let queue = unsafe { OwnedFd::from_raw_fd(raw) };
+        let changes = [
+            libc::kevent {
+                ident: master_fd as libc::uintptr_t,
+                filter: libc::EVFILT_READ,
+                flags: libc::EV_ADD | libc::EV_ENABLE,
+                fflags: 0,
+                data: 0,
+                udata: std::ptr::null_mut(),
+            },
+            libc::kevent {
+                ident: pid as libc::uintptr_t,
+                filter: libc::EVFILT_PROC,
+                flags: libc::EV_ADD | libc::EV_ENABLE,
+                fflags: libc::NOTE_EXIT,
+                data: 0,
+                udata: std::ptr::null_mut(),
+            },
+        ];
+        let registered = unsafe {
+            libc::kevent(
+                queue.as_raw_fd(),
+                changes.as_ptr(),
+                changes.len() as i32,
+                std::ptr::null_mut(),
+                0,
+                std::ptr::null(),
+            )
+        };
+        if registered < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(queue)
+    }
+
+    fn wait(
+        &mut self,
+        master_fd: RawFd,
+        deadline: Option<std::time::Instant>,
+    ) -> io::Result<Option<UnixStartupWake>> {
+        #[cfg(target_os = "linux")]
+        if let Some(pidfd) = &self.pidfd {
+            let mut fds = [
+                libc::pollfd {
+                    fd: master_fd,
+                    events: libc::POLLIN,
+                    revents: 0,
+                },
+                libc::pollfd {
+                    fd: pidfd.as_raw_fd(),
+                    events: libc::POLLIN,
+                    revents: 0,
+                },
+            ];
+            loop {
+                let timeout = deadline.map(poll_timeout_ms_until).unwrap_or(-1);
+                let result = unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as _, timeout) };
+                if result == 0 {
+                    return Ok(None);
+                }
+                if result >= 0 {
+                    let output =
+                        fds[0].revents & (libc::POLLIN | libc::POLLHUP | libc::POLLERR) != 0;
+                    let child_exit = fds[1].revents != 0;
+                    if output && child_exit {
+                        return Ok(Some(UnixStartupWake::OutputAndChildExit));
+                    }
+                    if output {
+                        return Ok(Some(UnixStartupWake::Output));
+                    }
+                    if child_exit {
+                        return Ok(Some(UnixStartupWake::ChildExit));
+                    }
+                    return Err(io::Error::other(
+                        "PTY startup poll woke without output or child exit",
+                    ));
+                }
+                let error = io::Error::last_os_error();
+                if error.kind() != io::ErrorKind::Interrupted {
+                    return Err(error);
+                }
+            }
+        }
+
+        #[cfg(target_os = "macos")]
+        if let Some(queue) = &self.kqueue {
+            let mut events: [libc::kevent; 2] = unsafe { std::mem::zeroed() };
+            loop {
+                let timeout = deadline.map(kqueue_timeout_until);
+                let count = unsafe {
+                    libc::kevent(
+                        queue.as_raw_fd(),
+                        std::ptr::null(),
+                        0,
+                        events.as_mut_ptr(),
+                        events.len() as i32,
+                        timeout
+                            .as_ref()
+                            .map_or(std::ptr::null(), |value| value as *const libc::timespec),
+                    )
+                };
+                if count == 0 {
+                    return Ok(None);
+                }
+                if count >= 0 {
+                    let mut output = false;
+                    let mut child_exit = false;
+                    for event in events.iter().take(count as usize) {
+                        let flags = event.flags;
+                        let data = event.data;
+                        if flags & libc::EV_ERROR != 0 && data != 0 {
+                            return Err(io::Error::from_raw_os_error(data as i32));
+                        }
+                        let filter = event.filter;
+                        if filter == libc::EVFILT_READ {
+                            output = true;
+                        }
+                        if filter == libc::EVFILT_PROC {
+                            let fflags = event.fflags;
+                            child_exit |= fflags & libc::NOTE_EXIT != 0;
+                        }
+                    }
+                    if output && child_exit {
+                        return Ok(Some(UnixStartupWake::OutputAndChildExit));
+                    }
+                    if output {
+                        return Ok(Some(UnixStartupWake::Output));
+                    }
+                    if child_exit {
+                        return Ok(Some(UnixStartupWake::ChildExit));
+                    }
+                    return Err(io::Error::other(
+                        "PTY startup kqueue woke without output or child exit",
+                    ));
+                }
+                let error = io::Error::last_os_error();
+                if error.kind() != io::ErrorKind::Interrupted {
+                    return Err(error);
+                }
+            }
+        }
+
+        self.wait_fallback(master_fd, deadline)
+    }
+
+    fn wait_fallback(
+        &mut self,
+        master_fd: RawFd,
+        deadline: Option<std::time::Instant>,
+    ) -> io::Result<Option<UnixStartupWake>> {
+        loop {
+            let mut poll_fd = libc::pollfd {
+                fd: master_fd,
+                events: libc::POLLIN,
+                revents: 0,
+            };
+            let timeout = deadline
+                .map(poll_timeout_ms_until)
+                .map_or(self.fallback_timeout_ms, |remaining| {
+                    remaining.min(self.fallback_timeout_ms)
+                });
+            let result = unsafe { libc::poll(&mut poll_fd, 1, timeout) };
+            if result > 0 && poll_fd.revents & (libc::POLLIN | libc::POLLHUP | libc::POLLERR) != 0 {
+                return Ok(Some(UnixStartupWake::Output));
+            }
+            if result < 0 {
+                let error = io::Error::last_os_error();
+                if error.kind() == io::ErrorKind::Interrupted {
+                    continue;
+                }
+                return Err(error);
+            }
+            if deadline.is_some_and(|deadline| std::time::Instant::now() >= deadline) {
+                return Ok(None);
+            }
+            if unix_child_exit_code_unreaped(self.pid)?.is_some() {
+                return Ok(Some(UnixStartupWake::ChildExit));
+            }
+            self.fallback_timeout_ms = (self.fallback_timeout_ms * 2).min(1_000);
+        }
+    }
+}
+
+#[cfg(unix)]
+fn poll_timeout_ms_until(deadline: std::time::Instant) -> i32 {
+    let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+    if remaining.is_zero() {
+        return 0;
+    }
+    remaining
+        .as_millis()
+        .saturating_add(1)
+        .min(i32::MAX as u128) as i32
+}
+
+#[cfg(unix)]
+fn wait_for_master_until(master_fd: RawFd, deadline: std::time::Instant) -> io::Result<bool> {
+    loop {
+        let mut fd = libc::pollfd {
+            fd: master_fd,
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        let result = unsafe { libc::poll(&mut fd, 1, poll_timeout_ms_until(deadline)) };
+        if result == 0 {
+            return Ok(false);
+        }
+        if result > 0 {
+            if fd.revents & (libc::POLLIN | libc::POLLHUP | libc::POLLERR) != 0 {
+                return Ok(true);
+            }
+            return Err(io::Error::other(
+                "PTY master poll woke without readability, hangup, or error",
+            ));
+        }
+        let error = io::Error::last_os_error();
+        if error.kind() != io::ErrorKind::Interrupted {
+            return Err(error);
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn kqueue_timeout_until(deadline: std::time::Instant) -> libc::timespec {
+    let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+    libc::timespec {
+        tv_sec: remaining.as_secs().min(libc::time_t::MAX as u64) as libc::time_t,
+        tv_nsec: remaining.subsec_nanos() as libc::c_long,
+    }
+}
+
+/// Wait for the direct ConPTY child without consuming its status or holding
+/// the `Child` mutex. The duplicate process handle remains signalled after
+/// exit, while the original handle stays with `Terminal` for ordinary status
+/// collection and teardown.
+#[cfg(windows)]
+fn spawn_windows_child_exit_observer(
+    child: &(dyn portable_pty::Child + Send + Sync),
+    observed_at: Arc<Mutex<Option<std::time::Instant>>>,
+    lifecycle_pending: Arc<AtomicBool>,
+    waker: Waker,
+) -> io::Result<()> {
+    use std::os::windows::io::{AsRawHandle as _, FromRawHandle as _, OwnedHandle};
+    use windows_sys::Win32::Foundation::{
+        DUPLICATE_SAME_ACCESS, DuplicateHandle, HANDLE, WAIT_FAILED, WAIT_OBJECT_0,
+    };
+    use windows_sys::Win32::System::Threading::{GetCurrentProcess, INFINITE, WaitForSingleObject};
+
+    let source = child
+        .as_raw_handle()
+        .ok_or_else(|| io::Error::other("ConPTY child has no process handle"))?;
+    let process = unsafe { GetCurrentProcess() };
+    let mut duplicate: HANDLE = std::ptr::null_mut();
+    let duplicated = unsafe {
+        DuplicateHandle(
+            process,
+            source as HANDLE,
+            process,
+            &mut duplicate,
+            0,
+            0,
+            DUPLICATE_SAME_ACCESS,
+        )
+    };
+    if duplicated == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: DuplicateHandle returned a new owned process handle.
+    let handle = unsafe { OwnedHandle::from_raw_handle(duplicate) };
+    std::thread::Builder::new()
+        .name("kettle-child-observer".into())
+        .spawn(move || {
+            let result = unsafe { WaitForSingleObject(handle.as_raw_handle() as HANDLE, INFINITE) };
+            match result {
+                WAIT_OBJECT_0 => {
+                    let now = std::time::Instant::now();
+                    if let Ok(mut slot) = observed_at.lock() {
+                        *slot = Some(now);
+                    }
+                    lifecycle_pending.store(true, Ordering::Release);
+                    waker();
+                }
+                WAIT_FAILED => {
+                    log::error!(
+                        "ConPTY child observer wait failed: {}",
+                        io::Error::last_os_error()
+                    );
+                }
+                other => log::error!("ConPTY child observer returned unexpected status {other}"),
+            }
+        })
+        .map(|_| ())
+}
+
 impl PtyOutputSender {
     pub fn best_effort(sender: crossbeam_channel::Sender<Vec<u8>>) -> Self {
         Self::BestEffort(sender)
@@ -998,6 +1426,10 @@ pub struct TerminalCapabilities {
     /// Spawn the command inside an OS-owned descendant containment boundary.
     /// Currently meaningful for headless automation on Windows.
     pub contain_process_tree: bool,
+    /// Observe direct-child exit independently of PTY EOF for interactive UI
+    /// drain policy. Headless exec already owns process-status polling and
+    /// must not allocate a redundant observer.
+    pub observe_child_exit: bool,
 }
 
 impl Default for TerminalCapabilities {
@@ -1006,6 +1438,7 @@ impl Default for TerminalCapabilities {
             osc52_copy: true,
             unnegotiated_modified_enter: true,
             contain_process_tree: false,
+            observe_child_exit: false,
         }
     }
 }
@@ -2301,6 +2734,14 @@ pub struct Terminal {
     /// Status, source generation, and pending parser work in one atomic word so
     /// headless completion cannot observe a combination that never existed.
     pty_read_progress: Arc<PtyReadProgressState>,
+    /// Direct-child exit observed without consuming its status. PTY EOF can
+    /// legitimately follow later; the timestamp starts the bounded drain only
+    /// when a descendant keeps the transport open indefinitely.
+    direct_child_exit_at: Arc<Mutex<Option<std::time::Instant>>>,
+    /// Edge published for semantic terminal events and direct-child exit.
+    /// Unlike output generation, this remains meaningful for quiet and hidden
+    /// panes.
+    lifecycle_pending: Arc<AtomicBool>,
     // Cooperative stop flag for the reader thread. The detached teardown
     // worker sets it only after closing the PTY master. Keeping it false while
     // `ClosePseudoConsole` runs is required on Windows before 11 24H2, where
@@ -2538,14 +2979,10 @@ fn merge_windows_paths(
 
 /// Terminates a freshly spawned child unless terminal construction completes.
 ///
-/// `spawn_command` starts the process, but several steps after it can still
-/// fail — taking the master's polling descriptor, taking the non-blocking
-/// writer, cloning the reader, and spawning the PTY reader thread. Dropping a
-/// `Box<dyn Child>` does NOT terminate the process it represents, so any of
-/// those failures returned an error and left a live shell behind with no owner,
-/// no reaper, and no handle for kettle to reach it by. A user whose machine
-/// reliably fails one of those steps leaked a process every time a pane was
-/// opened, and each one held its end of a pseudoconsole.
+/// Reader and writer setup now finishes before `spawn_command`, so a setup
+/// error cannot start a child at all. Dropping a `Box<dyn Child>` still does not
+/// terminate the process it represents, however, so the guard covers the final
+/// ownership handoff and protects an unwind while the value is assembled.
 ///
 /// `Terminal`'s own `Drop` takes over once construction succeeds, so the guard
 /// is disarmed immediately before the value is built — the covered window is
@@ -4111,14 +4548,6 @@ impl Terminal {
                 }
             }
         }
-        let child = pair.slave.spawn_command(cmd)?;
-        // The child is running from here on, and construction is not finished:
-        // taking the master's descriptor, taking the non-blocking writer,
-        // cloning the reader, and spawning the reader thread can each still
-        // fail. Arm the guard before any of them.
-        let mut spawned = SpawnedChildGuard::arm(child.clone_killer());
-        drop(pair.slave);
-
         #[cfg(unix)]
         let reader_poll_fd = pair
             .master
@@ -4141,6 +4570,7 @@ impl Terminal {
             osc52_copy_allowed.clone(),
             event_overflowed.clone(),
         );
+        let lifecycle_pending = proxy.lifecycle_pending();
         // Seed the engine's *default* cursor style from the user config; the
         // engine seeds `cursor_style` lazily from this, and programs can flip
         // both fields at runtime — `?12 h/l` for blinking (honored live via
@@ -4249,6 +4679,22 @@ impl Terminal {
         let out_gen = Arc::new(std::sync::atomic::AtomicU64::new(0));
         let out_gen_reader = out_gen.clone();
         let pty_read_progress = Arc::new(PtyReadProgressState::new());
+        let direct_child_exit_at = Arc::new(Mutex::new(None));
+        // A short-lived child can write and close the slave before a newly
+        // spawned reader thread gets its first timeslice. Most PTY backends
+        // retain that tail, but macOS discards it if no read is pending. The
+        // readiness channel alone cannot prove that a thread was not
+        // descheduled between its send and its first read, so Unix also hands
+        // Kettle's slave descriptor to the pump after spawning. The pump keeps
+        // that descriptor alive until it reads the first bytes, or observes a
+        // silent direct child exit, making the tail durable across that gap.
+        let (reader_ready_tx, reader_ready_rx) =
+            crossbeam_channel::bounded::<Result<(), String>>(1);
+        #[cfg(unix)]
+        let (startup_slave_tx, startup_slave_rx) = crossbeam_channel::bounded::<(
+            Box<dyn portable_pty::SlavePty + Send>,
+            UnixPtyWatcher,
+        )>(1);
 
         let reader_thread = {
             let term = term.clone();
@@ -4276,6 +4722,8 @@ impl Terminal {
             let stop = stop.clone();
             let drain_output = drain_output.clone();
             let reader_progress = Arc::clone(&pty_read_progress);
+            #[cfg(unix)]
+            let reader_child_exit_at = Arc::clone(&direct_child_exit_at);
             std::thread::Builder::new()
                 .name("kettle-pty-reader".into())
                 .spawn(move || {
@@ -4298,13 +4746,112 @@ impl Terminal {
                         let pump_drain_output = drain_output.clone();
                         let pump_recycle_tx = recycle_tx.clone();
                         let pump_progress = Arc::clone(&reader_progress);
+                        let pump_ready_tx = reader_ready_tx.clone();
                         if let Err(error) = std::thread::Builder::new()
                             .name("kettle-pty-pump".into())
                             .spawn(move || {
+                                // This proves the worker can receive the Unix
+                                // startup guard. It deliberately does not claim
+                                // a read is pending: the guard below is what
+                                // preserves output across that scheduling gap.
+                                if pump_ready_tx.send(Ok(())).is_err() {
+                                    return;
+                                }
+                                #[cfg(unix)]
+                                let (mut startup_slave_guard, mut lifecycle_watcher) =
+                                    match startup_slave_rx.recv() {
+                                        Ok((slave, watcher)) => (Some(slave), watcher),
+                                        // `spawn_command` failed, so there is
+                                        // no child and the constructor dropped
+                                        // its channel without handing us a
+                                        // descriptor to service.
+                                        Err(_) => return,
+                                    };
+                                #[cfg(unix)]
+                                let mut child_exit_deadline = None;
                                 let mut drain_buffer = None;
                                 loop {
                                     if pump_stop.load(Ordering::Relaxed) {
                                         break;
+                                    }
+                                    #[cfg(unix)]
+                                    {
+                                        let lifecycle_wake =
+                                            if let Some(deadline) = child_exit_deadline {
+                                                wait_for_master_until(reader_poll_fd, deadline).map(
+                                                    |readable| {
+                                                        readable.then_some(UnixStartupWake::Output)
+                                                    },
+                                                )
+                                            } else {
+                                                lifecycle_watcher.wait(reader_poll_fd, None)
+                                            };
+                                        let mut record_child_exit = || {
+                                            // The direct child is gone, but a
+                                            // daemonized descendant may still
+                                            // own the slave. Record the bounded
+                                            // drain window without consuming
+                                            // the wait status. The caller owns
+                                            // when Kettle's retained startup
+                                            // slave is released: a simultaneous
+                                            // readable event must be read first
+                                            // or macOS discards that final tail.
+                                            let observed = std::time::Instant::now();
+                                            if let Ok(mut slot) = reader_child_exit_at.lock()
+                                                && slot.is_none()
+                                            {
+                                                *slot = Some(observed);
+                                            }
+                                            child_exit_deadline
+                                                .get_or_insert(observed + PTY_CHILD_EXIT_EOF_TIMEOUT);
+                                        };
+                                        match lifecycle_wake {
+                                            Ok(Some(UnixStartupWake::Output)) => {}
+                                            Ok(Some(UnixStartupWake::OutputAndChildExit)) => {
+                                                // Record the process event, but
+                                                // keep the retained slave until
+                                                // the readable bytes below have
+                                                // actually been consumed.
+                                                record_child_exit();
+                                            }
+                                            Ok(Some(UnixStartupWake::ChildExit)) => {
+                                                record_child_exit();
+                                                startup_slave_guard.take();
+                                                continue;
+                                            }
+                                            Ok(None) => {
+                                                // EOF never arrived after the
+                                                // direct child exited. Every
+                                                // chunk read before this
+                                                // deadline is already ordered
+                                                // ahead of the marker; stop
+                                                // waiting on an out-of-scope
+                                                // slave holder.
+                                                pump_progress
+                                                    .set_status(PtyReadStatus::EofTimeout);
+                                                if !pump_drain_output.load(Ordering::Acquire) {
+                                                    let _ = raw_tx.send(None);
+                                                }
+                                                break;
+                                            }
+                                            Err(error) => {
+                                                // This watcher is what bounds a
+                                                // slave retained by a
+                                                // descendant; falling back to a
+                                                // blocking read would recreate
+                                                // the permanent pane hang. Fail
+                                                // the reader explicitly instead.
+                                                log::error!(
+                                                    "PTY lifecycle watcher failed: {error}"
+                                                );
+                                                startup_slave_guard.take();
+                                                pump_progress.set_status(PtyReadStatus::Failed);
+                                                if !pump_drain_output.load(Ordering::Acquire) {
+                                                    let _ = raw_tx.send(None);
+                                                }
+                                                break;
+                                            }
+                                        }
                                     }
                                     let mut buffer = drain_buffer
                                         .take()
@@ -4359,6 +4906,8 @@ impl Terminal {
                                             break;
                                         }
                                         Ok(n) => {
+                                            #[cfg(unix)]
+                                            startup_slave_guard.take();
                                             buffer.truncate(n);
                                             // Publish activity before this chunk can block behind
                                             // either the parser queue or a lossless raw-output
@@ -4391,10 +4940,12 @@ impl Terminal {
                             // through the normal exit event instead of silently
                             // waiting on a channel with no sender.
                             log::error!("failed to spawn PTY pump thread: {error}");
+                            let _ = reader_ready_tx.send(Err(error.to_string()));
                             reader_progress.set_status(PtyReadStatus::Failed);
                             proxy.send_event_exit();
                             return;
                         }
+                        drop(reader_ready_tx);
                     }
                     let mut image_pruner = ImageHistoryPruner::default();
                     let mut deferred_graphics = DeferredGraphicsJournal::new();
@@ -5114,10 +5665,40 @@ impl Terminal {
                 })?
         };
 
-        // Every fallible step is behind us and the value below owns the child,
-        // whose `Drop` runs the reaper. Disarming here rather than earlier is
-        // the whole point: the window the guard covers is exactly the window
-        // where nothing else would have terminated the process.
+        reader_ready_rx
+            .recv()
+            .context("PTY reader stopped before reporting readiness")?
+            .map_err(anyhow::Error::msg)?;
+        let child = pair.slave.spawn_command(cmd)?;
+        // No fallible terminal setup remains after the child starts, but keep
+        // the guard armed across the final value construction so an unwind
+        // cannot strand a running child that no returned Terminal owns.
+        let mut spawned = SpawnedChildGuard::arm(child.clone_killer());
+        #[cfg(unix)]
+        {
+            let child_pid = child
+                .process_id()
+                .context("Unix PTY child has no process id for startup guarding")?;
+            let lifecycle_watcher = UnixPtyWatcher::new(child_pid, reader_poll_fd);
+            startup_slave_tx
+                .send((pair.slave, lifecycle_watcher))
+                .map_err(|_| anyhow::anyhow!("PTY pump stopped before accepting startup guard"))?;
+        }
+        #[cfg(not(unix))]
+        drop(pair.slave);
+        #[cfg(windows)]
+        if capabilities.observe_child_exit {
+            spawn_windows_child_exit_observer(
+                child.as_ref(),
+                Arc::clone(&direct_child_exit_at),
+                Arc::clone(&lifecycle_pending),
+                waker.clone(),
+            )
+            .context("spawn ConPTY child-exit observer")?;
+        }
+
+        // The value below takes ownership of the child and its `Drop` runs the
+        // reaper. Disarm only at that handoff.
         spawned.disarm();
 
         Ok(Terminal {
@@ -5134,6 +5715,8 @@ impl Terminal {
             child: Arc::new(Mutex::new(child)),
             reader_thread: Some(reader_thread),
             pty_read_progress,
+            direct_child_exit_at,
+            lifecycle_pending,
             stop,
             drain_output,
             cols,
@@ -5407,47 +5990,7 @@ impl Terminal {
             .map_err(|_| io::Error::other("child handle is poisoned"))?
             .process_id()
             .ok_or_else(|| io::Error::other("PTY child has no process id"))?;
-        let pid = libc::pid_t::try_from(pid)
-            .map_err(|_| io::Error::other("PTY child process id is out of range"))?;
-
-        // SAFETY: `info` is initialized for the kernel, `pid` identifies this
-        // process's direct child, and WNOWAIT explicitly leaves its wait status
-        // available to portable-pty's later `try_wait`.
-        let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
-        loop {
-            let result = unsafe {
-                libc::waitid(
-                    libc::P_PID,
-                    pid as libc::id_t,
-                    &mut info,
-                    libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
-                )
-            };
-            if result == 0 {
-                // POSIX reports a successful WNOHANG probe with si_pid == 0
-                // while the selected child is still running.
-                if unsafe { info.si_pid() } == 0 {
-                    return Ok(None);
-                }
-                let status = unsafe { info.si_status() };
-                let code = match info.si_code {
-                    libc::CLD_EXITED => status as u32,
-                    libc::CLD_KILLED | libc::CLD_DUMPED => 128u32.saturating_add(status as u32),
-                    // WEXITED excludes stop/continue notifications. Treat an
-                    // unexpected code as an observation failure, not success.
-                    other => {
-                        return Err(io::Error::other(format!(
-                            "waitid returned unexpected child status code {other}"
-                        )));
-                    }
-                };
-                return Ok(Some(code));
-            }
-            let error = io::Error::last_os_error();
-            if error.kind() != io::ErrorKind::Interrupted {
-                return Err(error);
-            }
-        }
+        unix_child_exit_code_unreaped(pid)
     }
 
     /// Start closing the ConPTY master without blocking the lifecycle thread.
@@ -5509,6 +6052,19 @@ impl Terminal {
     /// Source-side activity and outstanding work in the PTY reader pipeline.
     pub fn pty_read_progress(&self) -> PtyReadProgress {
         self.pty_read_progress.load()
+    }
+
+    /// When the direct child was observed exited without consuming its wait
+    /// status. EOF may follow later after the PTY reader drains its tail.
+    pub fn direct_child_exit_at(&self) -> Option<std::time::Instant> {
+        self.direct_child_exit_at.lock().ok().and_then(|slot| *slot)
+    }
+
+    /// Consume the edge that says semantic/lifecycle work is waiting. This is
+    /// deliberately independent of output generation: a quiet child exit and
+    /// a hidden window still need UI policy even when no frame can be painted.
+    pub fn take_lifecycle_wake(&self) -> bool {
+        self.lifecycle_pending.swap(false, Ordering::AcqRel)
     }
 
     /// Terminator parity (`command_notify.py`): pop every
@@ -11286,33 +11842,369 @@ mod teardown_tests {
         );
     }
 
-    /// The mechanism above is only useful if it is wired across the whole
-    /// window. Structural, like `drop_detaches_reader_never_joins` above: the
-    /// failures it guards are injected by the operating system, so they cannot
-    /// be provoked from a test, but their ORDER can be checked directly.
     #[test]
-    fn the_spawn_guard_covers_every_fallible_step_after_spawn() {
+    fn direct_child_observation_is_opt_in_for_interactive_callers() {
+        assert!(
+            !TerminalCapabilities::default().observe_child_exit,
+            "headless/default terminals must not allocate the UI-only child observer"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unix_pty_watcher_wakes_for_master_output() {
+        use std::io::Write as _;
+        use std::os::unix::net::UnixStream;
+
+        let (reader, mut writer) = UnixStream::pair().expect("create pollable pair");
+        let mut watcher = UnixPtyWatcher::new(std::process::id(), reader.as_raw_fd());
+        writer.write_all(b"x").expect("make master readable");
+
+        assert_eq!(
+            watcher
+                .wait(reader.as_raw_fd(), None)
+                .expect("watch output"),
+            Some(UnixStartupWake::Output)
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unix_pty_watcher_observes_child_exit_without_reaping_it() {
+        use std::os::unix::net::UnixStream;
+
+        let (reader, _writer) = UnixStream::pair().expect("create unreadable pair");
+        let mut child = std::process::Command::new("/bin/sh")
+            .args(["-c", "exit 0"])
+            .spawn()
+            .expect("spawn silent child");
+        let mut watcher = UnixPtyWatcher::new(child.id(), reader.as_raw_fd());
+
+        assert_eq!(
+            watcher
+                .wait(reader.as_raw_fd(), None)
+                .expect("watch child exit"),
+            Some(UnixStartupWake::ChildExit)
+        );
+        assert_eq!(
+            child
+                .wait()
+                .expect("watcher left status for child owner")
+                .code(),
+            Some(0)
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unix_pty_watcher_handles_a_child_that_exited_before_registration() {
+        use std::os::unix::net::UnixStream;
+
+        let (reader, _writer) = UnixStream::pair().expect("create unreadable pair");
+        let mut child = std::process::Command::new("/bin/sh")
+            .args(["-c", "exit 7"])
+            .spawn()
+            .expect("spawn already-exited child");
+        std::thread::sleep(Duration::from_millis(25));
+        let mut watcher = UnixPtyWatcher::new(child.id(), reader.as_raw_fd());
+
+        assert_eq!(
+            watcher
+                .wait(reader.as_raw_fd(), None)
+                .expect("observe pre-registration exit"),
+            Some(UnixStartupWake::ChildExit)
+        );
+        assert_eq!(
+            child.wait().expect("status remains reapable").code(),
+            Some(7)
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unix_pty_watcher_honors_a_bounded_wait() {
+        use std::os::unix::net::UnixStream;
+
+        let (reader, _writer) = UnixStream::pair().expect("create unreadable pair");
+        let mut watcher = UnixPtyWatcher::new(std::process::id(), reader.as_raw_fd());
+        let deadline = std::time::Instant::now() + Duration::from_millis(20);
+
+        assert_eq!(
+            watcher
+                .wait(reader.as_raw_fd(), Some(deadline))
+                .expect("bounded wait"),
+            None
+        );
+        assert!(
+            std::time::Instant::now() >= deadline,
+            "the watcher returned before its deadline without an event"
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn simultaneous_kqueue_output_is_read_before_the_retained_slave_is_dropped() {
+        use std::io::Read as _;
+        use std::os::fd::{AsRawFd as _, FromRawFd as _, OwnedFd};
+
+        let mut master = -1;
+        let mut slave = -1;
+        assert_eq!(
+            unsafe {
+                libc::openpty(
+                    &mut master,
+                    &mut slave,
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                )
+            },
+            0,
+            "openpty: {}",
+            io::Error::last_os_error()
+        );
+        let mut gate = [-1; 2];
+        assert_eq!(unsafe { libc::pipe(gate.as_mut_ptr()) }, 0);
+        let child_pid = unsafe { libc::fork() };
+        assert!(child_pid >= 0, "fork: {}", io::Error::last_os_error());
+        if child_pid == 0 {
+            unsafe {
+                libc::close(master);
+                libc::close(gate[1]);
+                let mut byte = 0u8;
+                let _ = libc::read(gate[0], (&mut byte as *mut u8).cast(), 1);
+                let _ = libc::write(slave, b"tail".as_ptr().cast(), 4);
+                libc::_exit(0);
+            }
+        }
+        // SAFETY: the parent owns each descriptor returned above exactly once.
+        let mut master = std::fs::File::from(unsafe { OwnedFd::from_raw_fd(master) });
+        let slave = unsafe { OwnedFd::from_raw_fd(slave) };
+        let gate_read = unsafe { OwnedFd::from_raw_fd(gate[0]) };
+        let gate_write = unsafe { OwnedFd::from_raw_fd(gate[1]) };
+        drop(gate_read);
+        let mut watcher = UnixPtyWatcher::new(child_pid as u32, master.as_raw_fd());
+        assert_eq!(
+            unsafe { libc::write(gate_write.as_raw_fd(), b"x".as_ptr().cast(), 1) },
+            1
+        );
+        drop(gate_write);
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        while unix_child_exit_code_unreaped(child_pid as u32)
+            .expect("observe child without reaping")
+            .is_none()
+        {
+            assert!(std::time::Instant::now() < deadline, "child did not exit");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(
+            watcher
+                .wait(master.as_raw_fd(), None)
+                .expect("wait for both edges"),
+            Some(UnixStartupWake::OutputAndChildExit)
+        );
+        let mut tail = [0u8; 4];
+        master
+            .read_exact(&mut tail)
+            .expect("read before slave release");
+        assert_eq!(&tail, b"tail");
+        drop(slave);
+        let mut status = 0;
+        assert_eq!(
+            unsafe { libc::waitpid(child_pid, &mut status, 0) },
+            child_pid
+        );
+        assert!(libc::WIFEXITED(status));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_child_observer_does_not_consume_process_status() {
+        let mut child = std::process::Command::new("cmd.exe")
+            .args(["/c", "exit", "9"])
+            .spawn()
+            .expect("spawn short Windows child");
+        let observed = Arc::new(Mutex::new(None));
+        let lifecycle_pending = Arc::new(AtomicBool::new(false));
+        let (wake_tx, wake_rx) = std::sync::mpsc::channel();
+        let waker: Waker = Arc::new(move || {
+            let _ = wake_tx.send(());
+        });
+        spawn_windows_child_exit_observer(
+            &child,
+            Arc::clone(&observed),
+            Arc::clone(&lifecycle_pending),
+            waker,
+        )
+        .expect("spawn process-handle observer");
+
+        wake_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("observer wakes on process exit");
+        assert!(observed.lock().unwrap().is_some());
+        assert!(lifecycle_pending.load(Ordering::Acquire));
+        assert!(
+            wake_rx.recv_timeout(Duration::from_millis(100)).is_err(),
+            "the observer must exit after one process edge instead of retaining a handle and thread for ten seconds"
+        );
+        assert_eq!(
+            portable_pty::Child::wait(&mut child)
+                .expect("original handle still owns status")
+                .exit_code(),
+            9
+        );
+    }
+
+    /// A daemonized descendant can keep the PTY slave open after the direct
+    /// shell exits. The GUI reader must still emit its ordered Exit marker
+    /// after the bounded drain rather than leaving Close/Restart/Hold pending
+    /// forever. Linux supplies `setsid(1)` for this exact containment escape;
+    /// the companion headless test uses the same fixture shape.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn leaked_slave_cannot_hold_the_terminal_exit_event_forever() {
+        struct KillOnDrop(Option<libc::pid_t>);
+        impl Drop for KillOnDrop {
+            fn drop(&mut self) {
+                if let Some(pid) = self.0 {
+                    unsafe {
+                        libc::kill(-pid, libc::SIGKILL);
+                        libc::kill(pid, libc::SIGKILL);
+                    };
+                }
+            }
+        }
+
+        let argv = vec![
+            "/bin/sh".to_string(),
+            "-c".to_string(),
+            "setsid sh -c 'trap \"\" HUP; sleep 30' & pid=$!; sleep 0.1; \
+             printf 'LEAKED_SLAVE_PID %s\\n' \"$pid\""
+                .to_string(),
+        ];
+        let (tx, rx) = crossbeam_channel::unbounded();
+        let waker: Waker = Arc::new(|| {});
+        let term = Terminal::new(
+            &argv,
+            None,
+            100,
+            80,
+            24,
+            8,
+            16,
+            false,
+            CursorShape::Block,
+            None,
+            tx,
+            waker,
+        )
+        .expect("spawn leaked-slave fixture");
+        let mut cleanup = KillOnDrop(None);
+        let deadline =
+            std::time::Instant::now() + PTY_CHILD_EXIT_EOF_TIMEOUT + Duration::from_secs(3);
+        let mut saw_exit = false;
+        while std::time::Instant::now() < deadline && !saw_exit {
+            while let Ok(event) = rx.try_recv() {
+                match event {
+                    TermEvent::PtyWrite(reply) => term.write(reply.as_bytes()),
+                    TermEvent::Exit => saw_exit = true,
+                    _ => {}
+                }
+            }
+            if cleanup.0.is_none()
+                && let Some(screen) = term.screen_text(0)
+                && let Some(pid) = screen
+                    .text
+                    .split("LEAKED_SLAVE_PID ")
+                    .nth(1)
+                    .and_then(|tail| {
+                        tail.chars()
+                            .take_while(char::is_ascii_digit)
+                            .collect::<String>()
+                            .parse::<libc::pid_t>()
+                            .ok()
+                    })
+            {
+                cleanup.0 = Some(pid);
+            }
+            if !saw_exit {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        }
+
+        assert!(
+            cleanup.0.is_some(),
+            "fixture did not report its descendant pid"
+        );
+        assert!(
+            saw_exit,
+            "a retained slave held the terminal Exit event past its bound"
+        );
+        assert_eq!(term.pty_read_status(), PtyReadStatus::EofTimeout);
+        assert_eq!(term.child_exit_code(), Some(0));
+    }
+
+    /// Pin the construction order and the Unix ownership handoff that close the
+    /// short-child output race. Readiness alone is insufficient: a pump can be
+    /// descheduled immediately after sending it, so the parent slave must stay
+    /// alive until the pump owns it.
+    #[test]
+    fn the_pty_reader_owns_the_startup_slave_before_the_parent_releases_it() {
         let src = super::production_source();
+        let ready = src
+            .find("reader_ready_rx\n            .recv()")
+            .expect("constructor waits for PTY reader readiness");
         let spawn = src
             .find("let child = pair.slave.spawn_command(cmd)?;")
             .expect("child spawn present");
         let arm = src
             .find("SpawnedChildGuard::arm(child.clone_killer())")
             .expect("spawn guard armed");
+        let handoff = src
+            .find(".send((pair.slave, lifecycle_watcher))")
+            .expect("Unix startup slave is handed to the pump");
+        let receive = src
+            .find("match startup_slave_rx.recv()")
+            .expect("pump receives the Unix startup slave");
+        let combined = src
+            .find("Ok(Some(UnixStartupWake::OutputAndChildExit)) => {")
+            .expect("combined output/exit arm");
+        let read = src
+            .find("match reader.read(&mut buffer) {")
+            .expect("pump read");
+        let release_after_read = src
+            .find("Ok(n) => {\n                                            #[cfg(unix)]\n                                            startup_slave_guard.take();")
+            .expect("pump releases the Unix startup slave after reading");
         let disarm = src.find("spawned.disarm();").expect("spawn guard disarmed");
         let construct = src
             .find("\n        Ok(Terminal {")
             .expect("terminal construction present");
 
         assert!(
-            spawn < arm && arm < disarm && disarm < construct,
-            "the guard must be armed immediately after the spawn and disarmed \
-             only once construction can no longer fail"
+            receive < ready
+                && ready < spawn
+                && spawn < arm
+                && arm < handoff
+                && handoff < disarm
+                && disarm < construct,
+            "the pump must be ready to receive the slave before child spawn; \
+             the child and slave ownership guards stay live through handoff"
         );
-        // Nothing between arming and disarming may return early without the
-        // guard running — which `?` cannot do, since it drops locals. What
-        // WOULD escape it is an explicit `return` that bypasses the disarm, so
-        // the covered region must contain none.
+        assert!(
+            receive < release_after_read,
+            "the pump must retain the startup slave until a read returns"
+        );
+        let combined_arm = &src[combined
+            ..src[combined..]
+                .find("Ok(Some(UnixStartupWake::ChildExit))")
+                .map(|offset| combined + offset)
+                .expect("child-only exit arm")];
+        assert!(
+            combined < read
+                && read < release_after_read
+                && !combined_arm.contains("startup_slave_guard.take()"),
+            "simultaneous output/exit must record exit but keep the slave through the read"
+        );
         assert!(
             !src[arm..disarm].contains("return Ok("),
             "a success path that returns without disarming would kill a live \
