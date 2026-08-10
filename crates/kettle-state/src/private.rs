@@ -4436,7 +4436,17 @@ mod tests {
 
         let root = crate::test_tempdir();
         let directory = root.path().join("one/two/three/four/five/six");
-        create_private_dirs(&directory).unwrap();
+        // The whole synthetic path is part of this trust fixture. Name the
+        // mode for every component rather than relying on the ambient umask:
+        // `create_private_dirs` deliberately repairs only directories in a
+        // real kettle namespace, so a `002` umask otherwise leaves `one/` at
+        // 0775 and this test fails the trust check before measuring FD use.
+        use std::os::unix::fs::DirBuilderExt as _;
+        std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(&directory)
+            .unwrap();
 
         // SAFETY: only the isolated child changes its own process limit, after
         // fixture creation and before spawning any application threads.
