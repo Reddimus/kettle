@@ -24,6 +24,18 @@ use std::path::Path;
 /// this list, and a filesystem sweep of a real `002`-umask machine found
 /// exactly the consequence: `~/.cache/kettle` sitting at 0775 with private
 /// 0700/0600 content beneath it, unrecognized and so never repaired.
+///
+/// The residual risk, written down rather than left implicit: every entry that
+/// comes from an environment variable lets the user redirect what counts as a
+/// base, so `XDG_CACHE_HOME=$HOME/Repos` would make a `~/Repos/kettle` checkout
+/// kettle's own directory again — the bug the parent check exists to stop,
+/// re-entered through the front door. It is not new to the cache variable:
+/// `XDG_CONFIG_HOME` and `XDG_STATE_HOME` have carried exactly this exposure
+/// from the start. Dropping the variable and honouring only a fixed `~/.cache`
+/// trades it for a worse one — the 0775 refusal comes back for everyone who
+/// sets the variable for its intended purpose, which is the defect this list
+/// was widened to fix. What would actually close it is provenance kettle can
+/// verify (a marker it wrote itself), not a shorter list of names.
 fn kettle_base_dirs() -> Vec<std::path::PathBuf> {
     let mut bases = vec![std::env::temp_dir()];
     let env_path = |key: &str| {
@@ -3581,6 +3593,17 @@ mod tests {
     /// missing base is invisible until someone sweeps a real machine. This
     /// enumerates the ones kettle names a `kettle/` directory inside, so a new
     /// resolver that omits its base fails here rather than years later.
+    ///
+    /// What this does NOT do, so nobody reads more into it than it checks: the
+    /// suffixes below are written out by hand, because the resolvers live in
+    /// kettle-ui and kettle-config and this crate cannot depend on either. So it
+    /// pins one hand-written list against another, and a resolver that moves its
+    /// directory passes here unchanged. The test that actually calls a resolver
+    /// and feeds its answer to `is_kettle_owned_dir_name` is
+    /// `the_resolved_cache_directory_is_recognized_as_kettles_own`, over in
+    /// kettle-ui where both halves are visible. Likewise the `HOME` branch is
+    /// skipped rather than failed when `HOME` is unset, so a stripped
+    /// environment gets the temp-root assertion alone.
     #[cfg(unix)]
     #[test]
     fn every_base_a_resolver_uses_is_recognized() {

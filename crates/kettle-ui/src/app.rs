@@ -5487,17 +5487,22 @@ impl App {
             let watched = path.clone();
             let pending = config_reload_pending.clone();
             use notify::Watcher;
-            if let Ok(mut w) =
-                notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
-                    if let Ok(ev) = res
-                        && watcher_event_matches(&ev, &watched)
-                    {
-                        queue_watcher_event(&pending, || {
-                            p.send_event(UserEvent::ReloadConfig).is_ok()
-                        });
-                    }
-                })
-            {
+            let built = notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
+                if let Ok(ev) = res
+                    && watcher_event_matches(&ev, &watched)
+                {
+                    queue_watcher_event(&pending, || p.send_event(UserEvent::ReloadConfig).is_ok());
+                }
+            });
+            // The platform can refuse to construct a watcher at all — inotify
+            // instances exhausted, or a filesystem the backend cannot subscribe
+            // to. Dropping that error left live reload off with nothing anywhere
+            // to say why, which is the same silence this block was fixed for one
+            // level down.
+            if let Err(error) = &built {
+                log::warn!("config live-reload unavailable: {error}");
+            }
+            if let Ok(mut w) = built {
                 // This is the FIRST thing to create the config directory on a
                 // fresh install, so it decides the mode every later private
                 // path under it is checked against. Creating it at the ambient
@@ -5517,12 +5522,25 @@ impl App {
                 // everything else works, and reload is a convenience. So warn
                 // and continue rather than refusing to start — but do not
                 // pretend the watcher exists.
+                //
+                // The repair is advisory and its failure is NOT a reason to
+                // skip the watch: a subscription is read-only and needs no
+                // privacy guarantee from the directory it reads. Gating the
+                // watch on it turned "kettle could not chmod this" into "live
+                // reload is off" for a tree that watches perfectly well — a
+                // read-only bind view being the case that reaches it. The
+                // remote-command block below has always had this shape.
                 if let Err(error) = kettle_state::create_private_dirs(&dir) {
-                    log::warn!("config live-reload disabled for {}: {error}", dir.display());
-                } else if let Err(error) = w.watch(&dir, notify::RecursiveMode::NonRecursive) {
-                    log::warn!("config live-reload disabled for {}: {error}", dir.display());
-                } else {
-                    watcher = Some(w);
+                    log::debug!(
+                        "config directory repair skipped for {}: {error}",
+                        dir.display()
+                    );
+                }
+                match w.watch(&dir, notify::RecursiveMode::NonRecursive) {
+                    Ok(()) => watcher = Some(w),
+                    Err(error) => {
+                        log::warn!("config live-reload disabled for {}: {error}", dir.display());
+                    }
                 }
             }
         }
@@ -5548,17 +5566,22 @@ impl App {
             // on this launch and on the next one.
             let _ = kettle_state::create_private_dirs(&dir);
             use notify::Watcher;
-            if let Ok(mut w) =
-                notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
-                    if let Ok(ev) = res
-                        && watcher_event_matches(&ev, &watched)
-                    {
-                        queue_watcher_event(&pending, || {
-                            p.send_event(UserEvent::RemoteCommand).is_ok()
-                        });
-                    }
-                })
-            {
+            let built = notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
+                if let Ok(ev) = res
+                    && watcher_event_matches(&ev, &watched)
+                {
+                    queue_watcher_event(&pending, || {
+                        p.send_event(UserEvent::RemoteCommand).is_ok()
+                    });
+                }
+            });
+            // Same silent constructor as the config watcher above, and the same
+            // reason to report it: this one carries remote commands, so a
+            // channel that never subscribes is worth a line in the log.
+            if let Err(error) = &built {
+                log::warn!("remote-command watcher unavailable: {error}");
+            }
+            if let Ok(mut w) = built {
                 // Create or harden the control file before registering its
                 // watcher, and truncate through that verified handle so a
                 // reparse/path swap cannot redirect startup cleanup. Commands
@@ -25209,16 +25232,54 @@ mod modal_discipline_guard {
     #[test]
     fn a_watcher_is_stored_only_when_its_registration_succeeded() {
         let src = production_source();
-        assert!(
-            !src.contains("let _ = w.watch("),
-            "a watcher whose registration failed must not be stored; the \
-             handle would watch nothing and report nothing"
+        // Scope to the config-watcher block. The remote block below stores its
+        // own handle at two sites, so a whole-file count would be measuring the
+        // wrong thing — and `remote_watcher = Some(w)` contains
+        // `watcher = Some(w)` as a substring, which is how a naive count passes
+        // while checking nothing.
+        let start = src
+            .find("let mut watcher = None;")
+            .expect("the config watcher block starts by declaring the handle");
+        let end = src
+            .find("// Remote-control watcher.")
+            .expect("the config watcher block ends where the remote one begins");
+        let block = &src[start..end];
+
+        // Banning one spelling is not a contract. `let _ = w.watch(...)` was the
+        // shape that shipped, but `let ok = w.watch(...);` followed by an
+        // unconditional store satisfies any such ban while reintroducing the
+        // exact bug. Pin the store instead: there is one place the handle is
+        // stored, and it is the success arm of the registration itself.
+        let stores = block.matches("watcher = Some(").count();
+        assert_eq!(
+            stores, 1,
+            "exactly one site may store the config watcher handle, found {stores}"
         );
-        // And the failure has to be visible: a silent `if let Ok` would satisfy
-        // the check above while still telling the user nothing.
+        let normalized = block.split_whitespace().collect::<Vec<_>>().join(" ");
         assert!(
-            src.contains("config live-reload disabled for"),
-            "a failed config watcher must say so"
+            normalized.contains(
+                "match w.watch(&dir, notify::RecursiveMode::NonRecursive) { Ok(()) => watcher = Some(w),"
+            ),
+            "the one store must be the Ok arm of the watch registration, so a \
+             handle cannot outlive a failed subscription"
+        );
+        // And every way it can fail has to be visible. Both were silent: a
+        // failed registration stored a watcher that watched nothing, and a
+        // watcher the platform refused to construct at all was dropped by an
+        // `if let Ok` with no else.
+        assert!(
+            normalized.contains("config live-reload disabled for"),
+            "a failed config watcher registration must say so"
+        );
+        assert!(
+            normalized.contains("config live-reload unavailable"),
+            "a watcher the platform would not construct must say so too"
+        );
+        // The repair is advisory and must not gate the subscription: watching is
+        // read-only, so a directory kettle could not chmod is still watchable.
+        assert!(
+            !normalized.contains("if let Err(error) = kettle_state::create_private_dirs(&dir) { log::warn!(\"config live-reload disabled"),
+            "a failed privacy repair must not disable live reload"
         );
     }
     #[test]
@@ -33125,6 +33186,39 @@ mod tests {
         assert_eq!(
             p,
             std::path::PathBuf::from("kettle-logs/kettle-1716422400-9876.log")
+        );
+    }
+
+    /// The join neither crate can check on its own.
+    ///
+    /// `cache_dir_from_env` decides where kettle puts its `kettle/` directory;
+    /// `kettle_state::is_kettle_owned_dir_name` decides whether that directory
+    /// may be repaired to `0700`. kettle-state builds its base list from the
+    /// environment and cannot depend on kettle-ui to ask where the cache went,
+    /// so a resolver base missing from that list is invisible to every test in
+    /// either crate. That is precisely how `~/.cache/kettle` sat at `0775` on a
+    /// real machine with `0600` content underneath it — found by sweeping the
+    /// filesystem, not by any test here.
+    ///
+    /// Read-only on the environment, and deliberately asserted against what this
+    /// machine resolves rather than a synthetic path: the base list keys on the
+    /// real environment too, so a synthetic one would pin the two halves against
+    /// nothing.
+    #[test]
+    fn the_resolved_cache_directory_is_recognized_as_kettles_own() {
+        use super::cache_dir_from_env;
+
+        let Some(cache) = cache_dir_from_env(|k| std::env::var(k).ok()) else {
+            // Every probe unset — a stripped container. There is no resolved
+            // directory, so there is nothing to recognize.
+            return;
+        };
+        assert!(
+            kettle_state::is_kettle_owned_dir_name(&cache.join("kettle")),
+            "the resolver puts kettle's cache in {}, which the private-path base \
+             list does not recognize — kettle cannot repair its own directory \
+             there, and every private path under it stays refused",
+            cache.join("kettle").display()
         );
     }
 

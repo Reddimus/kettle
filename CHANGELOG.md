@@ -6,6 +6,30 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+### Fixed
+
+- **Live config reload could be silently off for a whole session.** A watcher
+  whose registration failed was stored anyway, so kettle held a handle that
+  watched nothing and reported nothing — indistinguishable from a config nobody
+  was editing. The handle is now stored only on a successful subscription, and
+  the two ways it can fail both say so: a rejected registration, and a watcher
+  the platform declines to construct at all (an exhausted inotify budget), which
+  was dropped by an `if let Ok` with no `else`. The remote-command watcher had
+  the same silent constructor and got the same line. (#187)
+- **Crash diagnostics were refused on machines with a group-writable cache
+  directory.** `<cache>/kettle` left at 0775 by an earlier run under a 002 umask
+  was never narrowed — missing ancestors are created at 0700, but an existing
+  directory is not touched — and the private-path verifier then refused every
+  write beneath it, including the incident report. The cache root is now a
+  recognized base and the diagnostic writer asks for the repair. Found by
+  sweeping a real machine, where `~/.cache/kettle` sat at 0775 over 0600
+  content. (#187)
+- **The activation tests leaked a scratch directory per run.** The helper built
+  a path from the pid and deleted whatever the *previous* run with that pid had
+  left, never its own; a sweep of a Windows machine found 148 `kettle*` entries
+  in `%TEMP%`. The directory is now owned by a guard that removes it on drop,
+  and a test asserts it is really gone rather than assuming it. (#187)
+
 ## [2.55.0] — 2026-08-09
 
 ### Fixed

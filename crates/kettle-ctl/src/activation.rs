@@ -803,6 +803,38 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 
+    /// The leak this helper was rewritten to stop, checked instead of assumed.
+    ///
+    /// `spawn_server` moves the `Primary` — and with it the open `activation.lock`
+    /// handle — into a thread that outlives the test, so the guard drops while a
+    /// descriptor is still open. Unix unlinks a file somebody still holds without
+    /// complaint. Windows may refuse to remove a directory that still contains an
+    /// open handle's name, and `TempDir::drop` discards the error, so the leak
+    /// would have moved from `%TEMP%` to `%LOCALAPPDATA%` while looking fixed —
+    /// a sweep found 148 of the old ones on a real machine, and nothing here
+    /// would have noticed the new ones.
+    ///
+    /// Asserting the removal, on every platform, is the only version of this
+    /// claim worth making.
+    #[test]
+    fn the_scratch_directory_is_really_gone_once_its_guard_drops() {
+        let (dir, paths) = test_paths("cleanup");
+        let outcome = activate_or_elect_at(request(Some("dir:aaaa")), &paths).unwrap();
+        let ActivationOutcome::Primary(primary) = outcome else {
+            panic!("the first launch must become primary");
+        };
+        spawn_server(primary, |_| true).unwrap();
+
+        let path = dir.path().to_path_buf();
+        drop(dir);
+        assert!(
+            !path.exists(),
+            "the scratch directory outlived its guard at {}: the leak moved \
+             rather than stopped",
+            path.display()
+        );
+    }
+
     #[test]
     fn incompatible_or_rejected_launch_falls_back_to_standalone() {
         let (_dir, paths) = test_paths("incompatible");
