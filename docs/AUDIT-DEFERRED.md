@@ -554,41 +554,21 @@ listed above.
 
 ## Deferred from the #187 review round
 
-- **Config load applies no directory trust check.** `read_config_bytes` rejects
-  a symlink and a non-regular file and caps the size, but nothing verifies that
-  the config *directory* is free of untrusted write access. A group-writable
-  `~/.config/kettle` is therefore read and applied at every launch, and a
-  `RunCommand` trigger in it is executed. Live reload does not create this; it
-  only removes the wait for a relaunch, which is why the config watcher declines
-  to subscribe when it could not make the directory private — a blunt stand-in
-  for the check that is missing. The real fix is a read-only verifier in
-  kettle-state (`is_trusted_directory(path)`) applied to the load path, and then
-  used by the watcher so "could not repair" stops being conflated with "unsafe".
-  Deferred because it needs a new public API on a security boundary plus Windows
-  DACL equivalence, which is more than this branch should carry.
-- **Activation test servers cannot be stopped.** `spawn_server` hands the
-  `Primary` — and its `activation.lock` — to a thread that owns it for the
-  process lifetime, deliberately. The lock is opened without delete sharing (as
-  it should be: a replaceable lock pathname would weaken single-instance
-  exclusion), so on Windows the scratch directory cannot be removed while the
-  test process lives; `private_tempdir` sweeps it on a later run instead. The
-  proper fix is a test-only server guard that sets a stop flag, wakes the accept
-  loop with one connection, and joins the thread, so the lock closes before the
-  scratch guard drops. Deferred rather than attempted from a machine that cannot
-  run the Windows path it targets.
-- **The watcher source guard is textual and remains bypassable.** It now scopes
-  to the config block, pins the single store to the `Ok` arm, and bans the
-  `replace`/`insert`/`get_or_insert` spellings, but a shadowed binding, a later
-  `take()`, or an unregistered handle stored on a different path would still
-  pass. The durable fix is to extract registration into a small generic helper
-  — candidate plus registration closure — and assert behaviourally that `Ok`
-  yields `Some(candidate)` and `Err` yields `None`, leaving source checks for
-  wiring only.
-- **`the_resolved_cache_directory_is_recognized_as_kettles_own` self-skips in a
-  stripped environment.** With every probe unset it returns early and reports
-  success; under `env -i` it passes while checking nothing. It also exercises
-  one resolver branch per machine — `HOME/.cache` on Unix CI, `%LOCALAPPDATA%`
-  on Windows — so the `XDG_CACHE_HOME` branch is covered on neither. The fix is
-  a re-executed child per branch with controlled absolute values and the
-  conflicting variables cleared, in the shape kettle-ctl's umask tests already
-  use.
+- ~~**Config load applies no directory trust check.**~~ Fixed in the next
+  release. Implicit default/profile reads hold a verified parent chain through
+  the regular-file open and check leaf ownership, mutation rights and link
+  count on Unix and Windows; symlinked configs validate both locations. The
+  watcher uses the same read-only verifier after best-effort repair, while an
+  explicit `--config FILE` is represented as a deliberate trust grant.
+- ~~**Activation test servers cannot be stopped.**~~ Fixed. Test servers now
+  own a stop/wake/join guard, so the listener and non-delete-shared Windows
+  election lock close before the scratch directory guard drops. The stale
+  sweep remains only for process aborts and historical leftovers.
+- ~~**The watcher source guard is textual and remains bypassable.**~~ Fixed.
+  Registration is a generic candidate-plus-closure helper whose behavioral
+  test proves success retains the candidate and failure drops it; the brittle
+  source parser was removed.
+- ~~**The cache-resolver ownership test can self-skip.**~~ Fixed. The real
+  resolver runs in re-executed children with conflicting variables cleared for
+  each XDG/HOME/LOCALAPPDATA branch, and kettle-state's base-list helper is also
+  exercised with controlled absolute values rather than ambient environment.

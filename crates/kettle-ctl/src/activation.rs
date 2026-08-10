@@ -451,9 +451,21 @@ fn server_loop(
     handler: Arc<dyn Fn(ActivationRequest) -> bool + Send + Sync>,
     worker_started: Arc<dyn Fn() + Send + Sync>,
 ) {
+    server_loop_until(primary, handler, worker_started, None);
+}
+
+fn server_loop_until(
+    primary: Primary,
+    handler: Arc<dyn Fn(ActivationRequest) -> bool + Send + Sync>,
+    worker_started: Arc<dyn Fn() + Send + Sync>,
+    stop: Option<&std::sync::atomic::AtomicBool>,
+) {
     let active = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let ledger = Arc::new(LaunchLedger::default());
     loop {
+        if stop.is_some_and(|stop| stop.load(std::sync::atomic::Ordering::Acquire)) {
+            break;
+        }
         let stream = match primary.listener.accept() {
             Ok(stream) => stream,
             Err(error) => {
@@ -461,6 +473,9 @@ fn server_loop(
                 continue;
             }
         };
+        if stop.is_some_and(|stop| stop.load(std::sync::atomic::Ordering::Acquire)) {
+            break;
+        }
         match stream.peer_is_same_user() {
             Ok(true) => {}
             Ok(false) => {
@@ -736,6 +751,66 @@ mod tests {
         (dir, paths)
     }
 
+    struct TestServer {
+        stop: Arc<std::sync::atomic::AtomicBool>,
+        endpoint: String,
+        thread: Option<std::thread::JoinHandle<()>>,
+    }
+
+    impl Drop for TestServer {
+        fn drop(&mut self) {
+            self.stop.store(true, std::sync::atomic::Ordering::Release);
+            // The accept loop is deliberately blocking in production. A local
+            // connection is its platform-neutral wakeup for test teardown; the
+            // stop check runs before that stream is dispatched to a worker.
+            let _ = transport::connect(&self.endpoint);
+            if let Some(thread) = self.thread.take() {
+                thread.join().expect("activation test server panicked");
+            }
+        }
+    }
+
+    fn spawn_test_server(
+        handle: PrimaryHandle,
+        endpoint: &str,
+        handler: impl Fn(ActivationRequest) -> bool + Send + Sync + 'static,
+    ) -> io::Result<TestServer> {
+        spawn_test_server_inner(handle, endpoint, Arc::new(handler), Arc::new(|| {}))
+    }
+
+    fn spawn_test_server_inner(
+        handle: PrimaryHandle,
+        endpoint: &str,
+        handler: Arc<dyn Fn(ActivationRequest) -> bool + Send + Sync>,
+        worker_started: Arc<dyn Fn() + Send + Sync>,
+    ) -> io::Result<TestServer> {
+        let primary = handle
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+            .ok_or_else(|| {
+                io::Error::new(io::ErrorKind::AlreadyExists, "primary already consumed")
+            })?;
+        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let stop_for_thread = stop.clone();
+        let thread = std::thread::Builder::new()
+            .name("kettle-activation-test".to_string())
+            .spawn(move || {
+                server_loop_until(
+                    primary,
+                    handler,
+                    worker_started,
+                    Some(stop_for_thread.as_ref()),
+                )
+            })?;
+        Ok(TestServer {
+            stop,
+            endpoint: endpoint.to_string(),
+            thread: Some(thread),
+        })
+    }
+
     /// Both halves of the key's contract: launches never share one, and a
     /// retry — the same request value sent again — keeps the one it has.
     #[test]
@@ -797,10 +872,11 @@ mod tests {
         let ActivationOutcome::Primary(primary) = first else {
             panic!("first launch must become primary");
         };
-        spawn_server(primary, |_| true).unwrap();
+        let server = spawn_test_server(primary, &paths.endpoint, |_| true).unwrap();
         let second = activate_or_elect_at(request(Some("dir:aaaa")), &paths).unwrap();
         assert!(matches!(second, ActivationOutcome::Activated));
-        let _ = std::fs::remove_dir_all(dir);
+        drop(server);
+        drop(dir);
     }
 
     /// What the guard can and cannot clean, asserted rather than assumed.
@@ -824,44 +900,26 @@ mod tests {
         );
     }
 
-    /// And the case the guard cannot win, characterized instead of wished away.
-    ///
-    /// `spawn_server` hands the `Primary` — with its open `activation.lock` — to
-    /// a thread that owns it for the process lifetime, deliberately, so the
-    /// directory is still pinned when the guard drops. Unix unlinks it anyway.
-    /// Windows refuses and `TempDir::drop` discards the error, which is what the
-    /// Windows job reported when this was first asserted: the 148-entry `%TEMP%`
-    /// leak had not been fixed by the guard, only moved to `%LOCALAPPDATA%`.
-    ///
-    /// Nothing in this process can clear it, so `private_tempdir`'s sweep clears
-    /// it on a later run. If Windows or `remove_dir_all` ever starts unlinking
-    /// through an open handle, the Windows arm fails and this comment is what
-    /// tells the next reader to tighten it.
+    /// The test server must close the election lock before its scratch guard
+    /// drops. Windows cannot remove an open lock file, so a detached
+    /// process-lifetime thread leaked one directory per test run there.
     #[test]
-    fn a_scratch_directory_pinned_by_the_server_thread_is_left_to_the_sweep() {
-        let (dir, paths) = test_paths("cleanup-pinned");
+    fn a_stopped_test_server_releases_its_scratch_directory() {
+        let (dir, paths) = test_paths("cleanup-stopped");
         let outcome = activate_or_elect_at(request(Some("dir:aaaa")), &paths).unwrap();
         let ActivationOutcome::Primary(primary) = outcome else {
             panic!("the first launch must become primary");
         };
-        spawn_server(primary, |_| true).unwrap();
+        let server = spawn_test_server(primary, &paths.endpoint, |_| true).unwrap();
 
         let path = dir.path().to_path_buf();
+        drop(server);
         drop(dir);
-        if cfg!(windows) {
-            assert!(
-                path.exists(),
-                "Windows is expected to refuse removal while the server thread \
-                 holds the lock; if this now succeeds, drop the sweep's reason \
-                 for existing rather than this assertion"
-            );
-        } else {
-            assert!(
-                !path.exists(),
-                "an open descriptor does not stop the unlink here: {}",
-                path.display()
-            );
-        }
+        assert!(
+            !path.exists(),
+            "the stopped activation server kept its scratch directory pinned: {}",
+            path.display()
+        );
     }
 
     #[test]
@@ -871,7 +929,7 @@ mod tests {
         let ActivationOutcome::Primary(primary) = first else {
             panic!("first launch must become primary");
         };
-        spawn_server(primary, |_| false).unwrap();
+        let _server = spawn_test_server(primary, &paths.endpoint, |_| false).unwrap();
         assert!(matches!(
             activate_or_elect_at(request(Some("dir:bbbb")), &paths).unwrap(),
             ActivationOutcome::Standalone
@@ -898,7 +956,7 @@ mod tests {
         };
         let opened = Arc::new(AtomicUsize::new(0));
         let counter = opened.clone();
-        spawn_server(primary, move |_| {
+        let _server = spawn_test_server(primary, &paths.endpoint, move |_| {
             counter.fetch_add(1, Ordering::Relaxed);
             true
         })
@@ -949,7 +1007,7 @@ mod tests {
         let (entered_tx, entered_rx) = std::sync::mpsc::channel();
         let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
         let release_rx = Mutex::new(release_rx);
-        spawn_server(primary, move |_| {
+        let _server = spawn_test_server(primary, &paths.endpoint, move |_| {
             counter.fetch_add(1, Ordering::Relaxed);
             let _ = entered_tx.send(());
             let _ = release_rx
@@ -1013,7 +1071,7 @@ mod tests {
         let (entered_tx, entered_rx) = std::sync::mpsc::channel();
         let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
         let release_rx = Mutex::new(release_rx);
-        spawn_server(primary, move |_| {
+        let _server = spawn_test_server(primary, &paths.endpoint, move |_| {
             let _ = entered_tx.send(());
             let _ = release_rx
                 .lock()
@@ -1105,8 +1163,9 @@ mod tests {
             panic!("first launch must become primary");
         };
         let (started_tx, started_rx) = std::sync::mpsc::channel();
-        spawn_server_inner(
+        let _server = spawn_test_server_inner(
             primary,
+            &paths.endpoint,
             Arc::new(|_| true),
             Arc::new(move || {
                 let _ = started_tx.send(());

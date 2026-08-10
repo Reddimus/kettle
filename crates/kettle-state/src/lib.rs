@@ -21,7 +21,8 @@ pub(crate) fn test_tempdir() -> kettle_test_support::PrivateTempDir {
 pub use private::{
     create_private_dirs, create_private_file_new, discard_created_private_file,
     is_kettle_owned_dir_name, open_existing_private_file, open_private_file,
-    open_private_file_append, remove_open_private_file, restrict_private_file,
+    open_private_file_append, open_trusted_file_read, open_trusted_file_read_following_leaf,
+    remove_open_private_file, restrict_private_file, validate_trusted_directory,
 };
 
 /// Maximum on-disk size of the shared remote-command spool.

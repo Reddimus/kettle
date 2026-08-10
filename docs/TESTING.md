@@ -337,6 +337,13 @@ discipline here.
   first-write backups, and symlinked dotfile targets while refusing
   non-regular/oversized files, newly malformed edits, and external changes
   observed by the final pre-stage comparison;
+  implicit config provenance tests reject group-writable requested and symlink
+  target directories, pin trusted ownership and a single name for the requested
+  link itself, and retain a legitimate user-owned dotfile link while the
+  explicit-path mode loads the same bounded regular files; the corresponding
+  Lua tests prove automatic `init.lua` uses the trusted path, explicit
+  `--lua-script` keeps its escape hatch, and a dotfile-manager symlink loads only
+  through a trusted link and resolved target;
   CLI `--check-config` exercises the same bounded reader against a resolved
   default-path FIFO and oversized file, and verifies UTF-16LE/BE BOM decoding;
   session load/save atomic + corruption-backup contracts;
@@ -367,6 +374,12 @@ discipline here.
   process temp directory because a machine policy may intentionally grant
   sandbox principals delete-child access there; the production policy rejects
   such an ancestor instead of weakening its trust requirements.
+  Trusted-read tests keep verified parent handles through the leaf open, reject
+  writable/multiply-linked Unix leaves, and on native Windows reject an
+  otherwise valid config whose protected DACL grants `GENERIC_WRITE` to
+  Everyone without rewriting that ACL. A re-executed Unix test lowers
+  `RLIMIT_NOFILE` and holds forty parent guards at once, proving steady guard
+  descriptor use stays O(1) rather than growing with path depth.
   Configuration, session, diagnostics, screenshots, pasted images, recording,
   remote-command, and updater callers fail closed when the shared primitive
   fails.
@@ -613,12 +626,22 @@ discipline here.
   whose first attempt never finishes still receives a status inside its own
   read deadline rather than waiting out the request and getting nothing. A
   ledger-level test pins that a full ledger evicts only settled launches, never
-  one still inside the handler.
+  one still inside the handler. Test-only activation servers carry a
+  stop/wake/join guard; dropping it releases the listener and election lock
+  before the scratch directory, which is asserted on native Windows as well as
+  Unix.
   Live-reload regressions additionally pin the filesystem event-kind matrix:
   opens, reads, closes, unrelated paths, and backend-specific `Other` events do
   not reload; create/modify/remove and imprecise `Any` changes to the exact file
   do. Concurrent notifications prove the one-in-flight latch, failed sends
-  prove re-arming, and process-level source guards require one config load
+  prove re-arming, and a behavioral registration helper proves a rejected
+  subscription cannot retain its candidate handle. Re-executed cache-resolver
+  tests exercise each platform environment branch without mutating the shared
+  test process. Trust fixtures reproduce mode-bit mutation on Unix, extended
+  ACL mutation on macOS, and both generic-write and generic-all DACL grants on
+  Windows; the latter remains a native-runner gate. Diagnostics fixtures use
+  explicit private creation so `umask 002` still reaches the parser/size
+  assertions they exist to test. Process-level guards require one config load
   followed by application to every mapped window while preserving per-window
   runtime zoom on a no-op reload.
 

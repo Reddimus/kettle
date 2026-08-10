@@ -294,7 +294,9 @@ struct Cli {
     /// (typing `--config ~/.config/kettle` when you meant the file inside
     /// it), and a permission-denied file is a hard error too. The
     /// out-of-the-box default-path fallback only kicks in when this flag
-    /// is omitted entirely.
+    /// is omitted entirely. Supplying this flag explicitly trusts the file's
+    /// containing directory; default and `--profile` configs instead require a
+    /// directory chain that untrusted local principals cannot modify.
     #[arg(long = "config", value_name = "FILE")]
     config: Option<std::path::PathBuf>,
 
@@ -490,17 +492,18 @@ struct Cli {
     remote_file: Option<std::path::PathBuf>,
 
     /// Execute a Lua script at startup (WezTerm parity; this is the
-    /// foundational layer). The script runs once with a `kettle` global
-    /// namespace exposing read-only introspection:
+    /// The script runs once with a `kettle` global namespace exposing runtime
+    /// state, event hooks, bounded terminal actions, notifications, menu items,
+    /// and URL handlers. Supplying this flag explicitly trusts PATH; the
+    /// automatically discovered `<config-dir>/init.lua` instead requires the
+    /// same trusted directory and file provenance as the default config.
     ///
     ///   kettle.version()      → string, e.g. "1.7.x"
     ///   kettle.config_path()  → string|nil, the resolved config path
     ///   kettle.theme()        → string, the resolved theme name
     ///
-    /// Future work adds side-effect APIs (send_text,
-    /// notify, event hooks). Errors in the script print to stderr
-    /// (log::warn) but don't fail the kettle launch — same shape
-    /// as malformed-config tolerance.
+    /// Errors in the script print to stderr (log::warn) but don't fail the
+    /// kettle launch — same shape as malformed-config tolerance.
     ///
     /// Example: print kettle's version on every launch:
     ///
@@ -1273,7 +1276,7 @@ fn main() -> anyhow::Result<()> {
         // commands; falls back to the default config path. Also honors
         // `--profile NAME`.
         let cfg = match resolve_config_path(&cli) {
-            Some(p) if p.exists() => kettle_config::Config::load_from(&p),
+            Some(p) if p.exists() => load_resolved_config(&cli, &p),
             _ => kettle_config::Config::default(),
         };
         for line in format_ssh_hosts(&cfg.ssh_hosts) {
@@ -1334,7 +1337,7 @@ fn main() -> anyhow::Result<()> {
         // Honor `--profile NAME` here too.
         let lines = match resolve_config_path(&cli) {
             Some(p) if p.exists() => {
-                let cfg = kettle_config::Config::load_from(&p);
+                let cfg = load_resolved_config(&cli, &p);
                 kettle_config::keybinds::describe(&cfg.keybinds)
             }
             _ => kettle_config::keybinds::describe_defaults(),
@@ -1357,7 +1360,7 @@ fn main() -> anyhow::Result<()> {
         // recovery path would pick, so the output is faithful to the
         // configured windowed run. No GUI / PTY needed.
         let cfg = match resolve_config_path(&cli) {
-            Some(p) if p.exists() => kettle_config::Config::load_from(&p),
+            Some(p) if p.exists() => load_resolved_config(&cli, &p),
             _ => kettle_config::Config::default(),
         };
         let info = kettle_render::gpu_info(&cfg)?;
@@ -1382,7 +1385,9 @@ fn main() -> anyhow::Result<()> {
         // explicit `--config` regular-file precheck, and configs may be UTF-16.
         let mut read_error: Option<String> = None;
         let (cfg, unknown, malformed) = match &path {
-            Some(p) if p.exists() => match kettle_config::Config::read_from_with_diagnostics(p) {
+            Some(p) if p.exists() => match prepare_resolved_config(&cli, p).and_then(|()| {
+                kettle_config::Config::read_from_with_trust(p, resolved_config_trust(&cli))
+            }) {
                 Ok(loaded) => (loaded.config, loaded.unknown_keys, loaded.malformed_values),
                 Err(e) => {
                     read_error = Some(format!("could not read {}: {e}", p.display()));
@@ -1597,7 +1602,7 @@ fn main() -> anyhow::Result<()> {
         // thought their config said.
         // Honor `--profile NAME` here too.
         let mut cfg = match resolve_config_path(&cli) {
-            Some(p) if p.exists() => kettle_config::Config::load_from(&p),
+            Some(p) if p.exists() => load_resolved_config(&cli, &p),
             _ => kettle_config::Config::default(),
         };
         // --accent CLI flag wins over the config
@@ -1674,6 +1679,7 @@ fn main() -> anyhow::Result<()> {
     // Resolve --profile if --config didn't override it. --config wins
     // when both are given so a user can quickly debug a profile
     // against an explicit config file.
+    let config_trust = resolved_config_trust(&cli);
     let config_path = cli.config.or_else(|| {
         cli.profile
             .as_deref()
@@ -1758,6 +1764,7 @@ fn main() -> anyhow::Result<()> {
         version: Some(KETTLE_VERSION.to_string()),
         cwd: cli.working_directory,
         config: config_path,
+        config_trust,
         layout: cli.layout,
         restore: cli.restore,
         agent_server: cli.agent_server.map(|m| match m {
@@ -1912,6 +1919,38 @@ fn resolve_config_path(cli: &Cli) -> Option<std::path::PathBuf> {
                 .and_then(kettle_config::Config::path_for_profile)
         })
         .or_else(kettle_config::Config::default_path)
+}
+
+fn resolved_config_trust(cli: &Cli) -> kettle_config::ConfigTrust {
+    if cli.config.is_some() {
+        kettle_config::ConfigTrust::ExplicitPath
+    } else {
+        kettle_config::ConfigTrust::VerifyDirectory
+    }
+}
+
+fn prepare_resolved_config(cli: &Cli, path: &std::path::Path) -> std::io::Result<()> {
+    if resolved_config_trust(cli) == kettle_config::ConfigTrust::ExplicitPath {
+        return Ok(());
+    }
+    let parent = path.parent().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("config path has no parent: {}", path.display()),
+        )
+    })?;
+    if let Err(error) = kettle_state::create_private_dirs(parent) {
+        log::warn!(
+            "could not repair config directory for {}: {error}",
+            path.display()
+        );
+    }
+    Ok(())
+}
+
+fn load_resolved_config(cli: &Cli, path: &std::path::Path) -> kettle_config::Config {
+    let _ = prepare_resolved_config(cli, path);
+    kettle_config::Config::load_from_with_trust(path, resolved_config_trust(cli))
 }
 
 /// Render `ssh-host` entries as the `--list-ssh-hosts` table: alphabetical
@@ -2519,7 +2558,8 @@ mod tests {
     use super::{
         Cli, DefaultConfigWrite, append_remote_command, append_remote_command_with_timeout,
         config_path_problem, encode_remote_send_command, extra_check_config_lines,
-        flag_value_problem, format_ssh_hosts, ignores_profile, write_default_config,
+        flag_value_problem, format_ssh_hosts, ignores_profile, resolved_config_trust,
+        write_default_config,
     };
     use clap::Parser;
 
@@ -2694,6 +2734,28 @@ mod tests {
                 !ignores_profile(&cli),
                 "{args:?} resolves the profile's config, so a typo must be \
                  reported rather than silently showing the wrong thing"
+            );
+        }
+    }
+
+    #[test]
+    fn only_an_explicit_config_path_bypasses_directory_verification() {
+        let explicit = Cli::parse_from(["kettle", "--config", "project.config"]);
+        assert_eq!(
+            resolved_config_trust(&explicit),
+            kettle_config::ConfigTrust::ExplicitPath
+        );
+
+        for args in [
+            vec!["kettle"],
+            vec!["kettle", "--profile", "dev"],
+            vec!["kettle", "--profile", "dev", "--layout", "work"],
+        ] {
+            let cli = Cli::parse_from(&args);
+            assert_eq!(
+                resolved_config_trust(&cli),
+                kettle_config::ConfigTrust::VerifyDirectory,
+                "{args:?} is kettle-discovered and must not inherit explicit trust"
             );
         }
     }

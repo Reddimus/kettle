@@ -22,7 +22,13 @@ ignored** so a Start-menu launch and a shell launch read the same config — set
 `XDG_CONFIG_HOME` if you genuinely want `~/.config` on Windows. Always run
 `kettle --config-path` for the authoritative resolved location, or
 `kettle --check-config` to validate it (resolved settings + any unrecognized
-keys). The file is **watched and reloaded live**.
+keys). Default and `--profile` configs are loaded only through directory chains
+that another local principal cannot modify; Kettle-owned directories left too
+permissive by an older release are repaired first. The file is **watched and
+reloaded live** only under the same trust policy, and a refused reload keeps the
+last known-good settings active. `--config FILE` is the deliberate exception:
+supplying an exact path is an explicit trust grant for project-local or shared
+configuration, while the regular-file and 1 MiB size checks still apply.
 
 ### Syntax
 
@@ -335,6 +341,14 @@ per-key audit against Terminator's source.
 | `detachable-tabs` | bool | `true` | Allow cross-window tab tear-off / re-dock and the `move_tab_to_new_window` action. `false` keeps in-window tab switching and reordering but disables detach |
 | `ask-before-closing` | enum | `multiple-terminals` | Close-confirmation policy: `always`, `multiple-terminals`, or `never`. Applies to close-window, close-tab, and close-pane actions; panes sitting idle at an integrated-shell prompt do not count as work to lose |
 | `lua-sandbox` | enum | `safe` | Lua plugin trust level. `restricted` — `kettle.send_text` and `kettle.exec_action` refuse, so a plugin can observe, notify and restyle but cannot drive the terminal; use it for a plugin you have not read. `safe` (default) — nils `os.execute` / `os.exit` / `io.open` / `io.popen` etc, **but a plugin can still run commands by typing them**, since `send_text` reaches the shell and a newline submits the line (the shipped example clears the screen that way). Safe mode guards against a careless plugin, not a hostile one. `trusted` — full stdlib. See [`docs/examples/init.lua`](examples/init.lua) for the `kettle.*` Lua API surface (URL handlers, event hooks, menu items) with Launchpad / APT URL handlers ported from Terminator's `url_handlers.py` |
+
+The automatically discovered `<config-dir>/init.lua` uses the same trusted
+directory and leaf checks as the default config because even `safe` Lua can type
+commands into the shell. A dotfile-manager link remains supported only when the
+link itself has trusted ownership and one name and its resolved target passes
+the same checks. `--lua-script FILE` is the explicit-path escape hatch for
+project or shared scripts; it retains the 4 MiB bounded read and is a deliberate
+trust grant, just as `--config FILE` is for configuration.
 
 `kettle --gpu-info` honors the GPU settings above, including `--config` and
 `--profile`, without opening a window. It reports the requested backend policy,

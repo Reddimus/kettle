@@ -8,6 +8,24 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Fixed
 
+- **Implicit configuration could be replaced by another local principal.** The
+  bounded reader rejected symlink leaves and special files, but it did not keep
+  a trusted directory chain held through the open. Default and named-profile
+  configs now validate the requested and resolved target directories plus the
+  leaf's mutation permissions, ownership and link count on Unix and Windows. A
+  dotfile-manager symlink is followed only after the link object itself is
+  proven user/root-owned and single-linked, so narrowing an old `0775` config
+  directory cannot bless a link another group member planted before repair;
+  macOS extended ACLs and Windows generic access masks are included rather than
+  trusting mode/specific-right bits alone. Live reload uses the same policy and
+  retains the last known-good settings on refusal. Automatically discovered
+  `init.lua` now carries the same provenance because even safe-mode Lua can type
+  commands into the shell; both Lua paths also read once through a held handle
+  under the 4 MiB cap. `--config FILE` and `--lua-script FILE` remain explicit
+  trust grants for project/shared files. Parent guards retain one immediate
+  directory capability and revalidate ancestor identities on demand, avoiding
+  path-depth-scaled descriptor pressure. (#188)
+
 - **Live config reload could be silently off for a whole session.** A watcher
   whose registration failed was stored anyway, so kettle held a handle that
   watched nothing and reported nothing — indistinguishable from a config nobody
@@ -32,11 +50,11 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   entry overstated the fix: the activation server thread owns the election lock
   for the process lifetime by design and opens it without delete sharing, so
   `remove_dir_all` is refused and `TempDir::drop` discards the error — the leak
-  would have moved to `%LOCALAPPDATA%` rather than stopped. Nothing in that
-  process can clear it, so each run now also sweeps what earlier runs left, and
-  the tests assert both halves instead of assuming either. Removing it outright
-  needs stoppable test servers, recorded in `docs/AUDIT-DEFERRED.md`. Test-only
-  either way — no shipped code path is affected. (#187)
+  would have moved to `%LOCALAPPDATA%` rather than stopped. The test server now
+  has a stop/wake/join guard that closes the listener and election lock before
+  the scratch guard drops on every platform; the age-gated sweep remains only
+  for abrupt test-process termination and historical leftovers. Test-only
+  either way — no shipped code path is affected. (#187, #188)
 
 ## [2.55.0] — 2026-08-09
 

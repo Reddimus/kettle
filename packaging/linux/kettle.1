@@ -84,6 +84,9 @@ window; every launch carrying other arguments is already isolated.
 Load configuration from
 .I FILE
 instead of the auto-detected path. Hard-fails if the path doesn't exist.
+Supplying this flag explicitly trusts the selected regular file; the
+auto-detected config instead requires trusted directory, link, and target
+provenance before kettle reads or live-reloads it.
 .
 .SS Introspection (prints and exits)
 .TP
@@ -378,7 +381,10 @@ as the init script instead of the default
 .IR ~/.config/kettle/init.lua .
 The script runs in the
 .B lua-sandbox = safe
-sandbox by default.
+sandbox by default. Supplying this flag explicitly trusts
+.IR PATH ;
+the automatically discovered init script instead requires the same trusted
+directory and file provenance as the default configuration.
 .TP
 .BI \-\-annotate \ TEXT
 Overlay

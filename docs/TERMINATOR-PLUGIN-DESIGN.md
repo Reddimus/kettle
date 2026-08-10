@@ -98,7 +98,11 @@ end)
 ```
 
 Discovery: `~/.config/kettle/init.lua` is auto-loaded at startup if
-present, complementing the existing `--lua-script PATH` CLI flag.
+present, complementing the existing `--lua-script PATH` CLI flag. The automatic
+path is accepted only through the same trusted-directory and trusted-leaf
+policy as the default config; `--lua-script PATH` is an explicit trust grant
+for project-local or shared scripts. Both reads are handle-bound and capped at
+4 MiB.
 
 ## Architecture
 
