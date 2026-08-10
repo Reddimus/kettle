@@ -127,7 +127,7 @@ pub fn tool_specs() -> Vec<Value> {
                 "properties": {
                     "pane": {"type": "integer", "description": "pane id (default: focused pane)"},
                     "full_window": {"type": "boolean", "description": "capture the whole target window instead of cropping to a pane"},
-                    "path": {"type": "string", "description": "output PNG path (default: cache/kettle/shots/kettle-<time>-<pid>.png)"}
+                    "path": {"type": "string", "minLength": 1, "pattern": "\\S", "description": "new output PNG leaf beneath an already-existing parent; existing leaves are never overwritten (default: cache/kettle/shots/kettle-<time>-<pid>.png)"}
                 },
                 "additionalProperties": false
             }
@@ -750,6 +750,23 @@ mod tests {
             .find(|s| s["name"] == "kettle_run")
             .expect("kettle_run present");
         assert_eq!(run["inputSchema"]["required"][0], "command");
+
+        let screenshot = specs
+            .iter()
+            .find(|spec| spec["name"] == "kettle_screenshot")
+            .expect("kettle_screenshot present");
+        let path_description = screenshot["inputSchema"]["properties"]["path"]["description"]
+            .as_str()
+            .expect("screenshot path description");
+        assert!(
+            path_description.contains("already-existing parent")
+                && path_description.contains("never overwritten"),
+            "the MCP schema must disclose the screenshot path's creation semantics"
+        );
+        assert_eq!(
+            screenshot["inputSchema"]["properties"]["path"]["pattern"], "\\S",
+            "schema-valid screenshot paths must contain a non-whitespace character"
+        );
     }
 
     #[test]

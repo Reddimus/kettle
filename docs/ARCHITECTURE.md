@@ -73,6 +73,28 @@ share these primitives. Advisory locks let callers serialize compound
 operations; configuration persistence holds one across the complete read,
 validate, backup, and replacement transaction.
 
+Screenshot persistence has two deliberately separate policies. UI/default
+screenshots are private state and therefore require Kettle-owned, verified
+ancestors. An explicit ctl/MCP `path` is a user-selected export: its parent must
+already exist, but it may be an ordinary user directory. Creation pins that
+parent, derives the child from the held object, publishes only a new owner-only
+regular file, and revalidates the parent before returning. Unix uses `openat`
+and identity-matched descriptor-relative cleanup. Because Darwin ACLs can grant
+read access independently of mode bits, macOS first creates an empty owner-only,
+ACL-free staging directory in the selected parent, secures the file there, and
+publishes it with `renameatx_np(RENAME_EXCL)`; the final name is never visible
+with an inherited ACL. Windows denies parent deletion while creating the leaf under a
+protected current-user DACL and rejects NUL, alternate-stream, and trailing
+dot/space aliases before Win32 normalization can erase them. Neither policy
+overwrites or follows an existing leaf. A writable export parent can still
+rename or remove the pathname immediately after the instantaneous verification,
+including while PNG bytes are still being encoded and written. The open file
+object remains the one Kettle created, and failure cleanup removes only that
+object when it still occupies the selected leaf, reports cleanup failure to the
+caller, and never removes a replacement, but the pathname is not a
+durable capability. This policy is not a substitute for private-state storage
+and is never used implicitly.
+
 Configuration reads carry provenance across the CLI/UI boundary. Default and
 named-profile paths open through `kettle-state` while their verified parent
 handles remain live; Unix rejects writable or untrusted directory edges,

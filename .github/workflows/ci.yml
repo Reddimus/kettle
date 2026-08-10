@@ -410,6 +410,31 @@ jobs:
             grep -qiE "panic|thread .* panicked" /tmp/out.log && { echo "panic in run"; cat /tmp/out.log; exit 1; }; \
             test $rc -eq 124 -o $rc -eq 0 || { echo "bad exit $rc"; cat /tmp/out.log; exit 1; }; \
             echo "headless run OK (exit $rc)"'
+      - name: Live UI ctl + search-history smoke (Linux, quarantined)
+        if: runner.os == 'Linux'
+        # This is the first real scenario promoted from the manual live-UI
+        # driver. It launches a window under Xvfb, drives the control server,
+        # searches retained history, validates pixels in the reported search
+        # and match rectangles, and captures screen/cell/PNG evidence.
+        # Keep it non-blocking for one week while its hosted-runner flake rate
+        # is measured; the result remains visible and its artifacts are always
+        # uploaded. Promote it to required only from observed CI evidence.
+        continue-on-error: true
+        timeout-minutes: 5
+        env:
+          LIBGL_ALWAYS_SOFTWARE: "1"
+        run: |
+          xvfb-run -a python3 scripts/check-live-ui-smoke.py search-history \
+            --kettle ./target/release/kettle \
+            --out-dir target/diagnostics/live-ui-ci
+      - name: Upload live UI search-history evidence
+        if: runner.os == 'Linux' && always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: live-ui-search-history-${{ github.run_id }}-${{ github.run_attempt }}
+          path: target/diagnostics/live-ui-ci
+          if-no-files-found: warn
+          retention-days: 7
       - name: --gpu-info diagnostic smoke (Linux/macOS)
         # Pin that the `--gpu-info` flag resolves
         # an adapter + prints the expected key:value layout under the

@@ -6,6 +6,23 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+### Fixed
+
+- **An explicit `kettle ctl screenshot --json '{"path":"PATH"}'` was refused unless every parent
+  directory was private.** A user-selected export beneath an ordinary `0755`
+  or `0775` project/diagnostics directory was routed through the private-state
+  writer, so the live-UI smoke could drive a real window and read its screen but
+  could not save the evidence. Explicit screenshot paths now require an
+  already-existing parent and create a new owner-only leaf atomically without
+  following or overwriting one. The selected parent is pinned and revalidated
+  during creation; macOS secures the file in an ACL-free same-filesystem
+  staging directory before atomic no-replace publication, and Windows rejects
+  alternate streams, trailing-dot/space aliases, embedded NULs, and parent
+  replacement while applying a protected current-user DACL. Default screenshot
+  locations retain the stricter private-state ancestor policy. An encode or
+  flush failure removes the exact partial leaf when it still occupies the
+  selected name, reports cleanup failure, and never deletes a replacement.
+
 ## [2.56.0] — 2026-08-09
 
 ### Fixed

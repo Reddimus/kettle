@@ -128,59 +128,51 @@ tracked here so they are not lost.
   looking at a machine that had run the suite hundreds of times made it visible.
 
 
-- **Ten live-UI scenarios run in no automated gate.**
+- **Nine live-UI scenarios still run in no automated gate.**
   `scripts/check-live-ui-smoke.py` launches a real windowed kettle and drives it
   through ten scenarios (`tabbar`, `tab-title`, `tearoff`, `split-titlebar`,
   `zoom-keybind`, `underline`, `agent-tui`, `search-history`, `interaction`,
-  `touchpad-scroll`). Its other three `case` values do less: `all` runs those
-  ten, `session-check` only asserts that a graphical session is usable and
-  returns without launching kettle, and `self-test` exercises the helper's own
-  pure functions. **CI runs `self-test` only**, on all three OSes; every real
-  scenario is a `just` recipe a human has to remember.
+  `touchpad-scroll`). `search-history` is now the first automated scenario; the
+  other nine remain manual. Its other three `case` values do less: `all` runs
+  those ten, `session-check` only asserts that a graphical session is usable and
+  returns without launching kettle, and `self-test` exercises the helper's pure
+  functions.
 
-  Note what is and is not missing. CI does launch a real kettle under Xvfb, and
-  the Nix workflow's runtime smoke waits until an installed kettle creates a
-  visible X11 window. Neither drives the control server, and neither asserts
-  anything about what was rendered. That narrower gap — nothing automated speaks
-  to a running kettle over ctl — is the real one.
+  This closes the narrower gap that mattered: CI previously launched a window
+  under Xvfb but never spoke to a running kettle over ctl or asserted rendered
+  state. The recorded GPU/interactive-desktop reason was wrong for Linux; CI
+  already installs `xvfb` and `mesa-vulkan-drivers`.
 
-  The recorded reason for the gap was a GPU/interactive-desktop requirement, and
-  Linux already has the infrastructure to test it: CI installs `xvfb` and
-  `mesa-vulkan-drivers`, and `search-history` was run under `xvfb-run` with
-  `LIBGL_ALWAYS_SOFTWARE=1` on Ubuntu 24.04 for this audit.
+  Getting there exposed two real product defects. The first run timed out on the
+  control server because the `002`-umask directory bug disabled three features
+  with only a log warning (#178/#180). The 2026-08-09 rerun reached ctl and wrote
+  real screen/cell dumps, then failed because an explicitly named diagnostic PNG
+  under the checkout was treated as private state and therefore required the
+  user's whole `~/Repos` tree to be `0700`.
 
-  **That run failed, and the failure was worth having.** It reported
-  `timed out waiting for control server` — the helper's 25-second `ctl
-  list_panes` probe never succeeded, so the scenario body never ran. What it
-  proves on its own is only that kettle stayed alive for those 25 seconds; it is
-  the warning kettle logged alongside it that identified the cause, the
-  `002`-umask directory bug fixed in #178 and #180. Three features were disabled
-  on that machine with nothing but a log line to say so, and no automated test
-  in the repo caught it before #178 added one.
+  **Successful rerun, 2026-08-10.** On the same Ubuntu 24.04 host,
+  `search-history` ran under `xvfb-run` with
+  `LIBGL_ALWAYS_SOFTWARE=1`, reached the control server, exercised bottom/old/
+  middle/reverse/new search states, and exited zero. That initial run wrote five
+  97–105 KiB PNGs plus screen, cell, geometry, dispatch, log, and analysis
+  evidence. Every
+  PNG was created `0600` beneath the ordinary diagnostics parent. The fix keeps
+  implicit screenshots on the private-state path while giving an explicit ctl/
+  MCP `path` a separate new-file-only, owner-only export policy.
 
-  **Rerun after the fix, 2026-08-09.** `search-history` under Xvfb on the same
-  machine now gets **past** the control server — the probe succeeds, the
-  scenario body runs, and it writes real screen dumps
-  (`bottom.cells.json`, `bottom.screen.json`). It then fails at the next step,
-  which is a different and previously unreachable problem:
-
-      kettle ctl screenshot failed: screenshot output file could not be opened:
-      private path crosses an untrusted directory edge at ~/Repos/kettle:
-      parent /home/kevim/Repos has mode 0775
-
-  The screenshot lands under the checkout's `target/diagnostics`, so the
-  private-path verifier judges the *user's* directories. Refusing is arguably
-  right for a path kettle did not create, but a screenshot diagnostic is not
-  private state, and requiring `~/Repos` to be `0700` to take one is a policy
-  nobody would choose. Either the screenshot path should not go through the
-  private-file writer, or the writer needs a mode for artifacts the user asked
-  for by name. Not fixed here because it is a policy decision, not a bug.
-
-  So the gap is demonstrated and the remedy is partly measured: the scenario now
-  reaches and drives a running kettle, which is what no automated test does, and
-  the next blocker is known and named rather than guessed at. A first gate should rerun `search-history` on Linux
-  now that #178 and #180 are in, and only then pin it — quarantined as
-  non-blocking until its flake rate is known over a week.
+  CI now runs the strengthened scenario on Linux and uploads its evidence. In
+  addition to the control-plane checks above, it compares controlled captures:
+  query/status pixels must change inside an unchanged search rectangle, then a
+  focused match and a no-match state must retain the same row count and display
+  offset while pixels change inside the exact active match-cell rectangles
+  reported by `ui_geometry`. This replaced an initial broad-difference check
+  that could be satisfied by viewport reflow rather than the intended paint. A
+  Tower rerun measured 1,749 changed query/status pixels and 3,120 changed
+  pixels inside the one reported match rectangle (633 required); all seven PNGs
+  were `0600`. It is
+  deliberately `continue-on-error` for one week while hosted-runner flake rate
+  is measured; after that observation window it should become required if the
+  evidence supports it, or record and fix the specific flake if not.
 
   Add cases one at a time rather than enabling `all`; whether each survives Xvfb
   has to be established, not assumed. Note that the pointer-driven tear/re-dock
