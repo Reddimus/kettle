@@ -407,7 +407,8 @@ For Search automation, call `kettle_perform_action` with `start_search`, then
 send individual character/chord tokens through `kettle_dispatch_ui_key` and
 observe `kettle_ui_geometry`. The diagnostic object reports the target pane,
 bar/reserved-row geometry, each control rectangle and focus state, status,
-match/truncation booleans, Wrap, Smart/Match/Ignore, and Invert. It intentionally
+match/truncation booleans, active match pixel rectangles, Wrap,
+Smart/Match/Ignore, and Invert. It intentionally
 does **not** return the query or matched terminal text; screenshots and
 `read_cells` are the evidence for highlight placement. A **Results limited**
 status or `visible_truncated = true` is not a definitive
@@ -422,7 +423,10 @@ The control surface also exposes `screenshot`, which saves a live PNG using the
 same renderer readback path as the UI screenshot action. It requires
 `agent-server=full` because it writes to the filesystem; by default it captures
 the focused pane crop, and `--json '{"full_window":true}'` captures the whole
-window.
+window. An explicit `path` must name a new leaf beneath an already-existing
+parent; Kettle creates it owner-only and never overwrites or follows an existing
+leaf. Omitting `path` uses Kettle's private diagnostics location and its stricter
+verified-ancestor policy.
 
 `kettle mcp --self-test` runs an in-process handshake + `tools/list` + one
 `kettle_run`, for CI.

@@ -370,6 +370,20 @@ discipline here.
   failed-create cleanup deletes the created object through its handle and that
   Win32 trailing-dot aliases and NTFS alternate-data-stream leaf names are
   rejected without changing the intended file.
+  User-selected-output tests keep that private-state policy intact while
+  allowing a new `0600`/current-user-only leaf beneath an existing public
+  parent. Native Unix displaces the parent after it is opened and proves the
+  helper fails without writing into the replacement; macOS seeds an inheritable
+  read ACL and proves atomic publication from an ACL-free staging directory
+  leaves the new leaf with no extended ACL. Native Windows pins the
+  parent against rename, verifies the protected DACL, and rejects alternate
+  streams, trailing-dot aliases, and embedded NULs before path normalization.
+  The missing-parent and existing-leaf cases fail without creating or changing
+  anything on every platform. Injected PNG encoder and flush failures (the
+  latter after enough data to reach the underlying file) prove both output
+  policies remove the exact partial leaf they created. A displacement test
+  replaces the selected leaf before cleanup and proves the replacement survives;
+  cleanup errors are surfaced instead of silently claiming retry is available.
   Windows test scratch files live under the current profile rather than the
   process temp directory because a machine policy may intentionally grant
   sandbox principals delete-child access there; the production policy rejects
@@ -497,8 +511,10 @@ discipline here.
   blank-menu render-pass-order regression class that bare logic
   tests can't see. Live-screenshot unit coverage verifies whole-frame
   preservation, exact row/column cropping, out-of-surface rejection, and
-  truncated-source rejection; the native live smoke exercises the asynchronous
-  readback path.
+  truncated-source rejection. Separate file-policy regressions prove an
+  explicit output succeeds beneath a public existing parent while the default
+  private-state policy rejects the same tree. The native live smoke exercises
+  the asynchronous readback path.
 
 - **kettle-ui** (290+ tests): split-tree layout tiles with no
   gaps/overlap, `remove_leaf` collapses to the sibling, nested
@@ -1348,6 +1364,16 @@ name the shape of bug each pass caught.
   catches broken intra-doc-links, malformed examples; rustdoc is
   platform-agnostic so one runner suffices).
 - A **headless GPU smoke** under Xvfb + software Vulkan on Linux.
+- A quarantined Linux **live-UI `search-history` smoke** launches the release
+  binary under Xvfb, drives ctl, validates search state, and compares controlled
+  screenshots against reported geometry. Query/status pixels must change inside
+  an unchanged search rectangle; then a focused match is compared with a
+  no-match capture at the identical row count and display offset, and pixels
+  must change inside the exact active match-cell rectangles reported by
+  `ui_geometry`. PNG/screen/cell/geometry evidence is uploaded for
+  seven days. It remains
+  `continue-on-error` only during its initial one-week flake-rate observation;
+  do not count it as a required gate until that quarantine is removed.
 - The **`--screenshot` end-to-end** +
   **`--screenshot-menu` visual regression** smokes on Linux
   (both run the release binary under `LIBGL_ALWAYS_SOFTWARE=1`).

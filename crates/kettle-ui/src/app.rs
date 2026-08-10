@@ -13897,6 +13897,7 @@ impl App {
                     let path_str = path.display().to_string();
                     let request = kettle_render::ScreenshotRequest {
                         out_path: path,
+                        output_policy: kettle_render::ScreenshotOutputPolicy::PrivateState,
                         crop,
                         completion: None,
                     };
@@ -16011,6 +16012,41 @@ impl App {
         } else {
             0.0
         };
+        let active_search_match_rects: Vec<serde_json::Value> = target
+            .search
+            .target_pane
+            .filter(|_| target.search.open)
+            .and_then(|pane_id| {
+                pane_layout
+                    .iter()
+                    .find(|(candidate, _)| *candidate == pane_id)
+                    .map(|(_, rect)| (pane_id, *rect))
+            })
+            .map(|(pane_id, pane_rect)| {
+                let origin = kettle_render::pane_grid_origin(
+                    pane_rect,
+                    (self.cfg.padding_x, self.cfg.padding_y),
+                    pane_titlebar_h,
+                    self.cfg.title_at_bottom,
+                );
+                self.overlay(target, false)
+                    .highlights
+                    .into_iter()
+                    .filter(|highlight| highlight.active)
+                    .map(|highlight| {
+                        serde_json::json!({
+                            "pane": pane_id,
+                            "rect": rect_json((
+                                origin.0 + highlight.col as f32 * cell_w,
+                                origin.1 + highlight.row as f32 * cell_h,
+                                highlight.width as f32 * cell_w,
+                                cell_h,
+                            )),
+                        })
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
         let home = crate::mux::home_dir_string();
         let focus = target.mux.active_focus();
         let pane_titlebars: Vec<serde_json::Value> = if pane_titlebar_h > 0.0 {
@@ -16164,6 +16200,7 @@ impl App {
                 "rows": geometry.rows,
                 "status": effective_search_status(&target.search).label(),
                 "has_match": target.search.focused.is_some(),
+                "match_rects": active_search_match_rects,
                 "visible_truncated": target.search.visible_truncated,
                 "wrap": target.search.wrap,
                 "case": map_search_case_mode(target.search.case_mode).label(),
@@ -17229,13 +17266,13 @@ impl App {
                     .map(|(_, rect)| rect)
             })
         };
-        let path = match req.params.get("path").and_then(|v| v.as_str()) {
+        let (path, output_policy) = match req.params.get("path").and_then(|v| v.as_str()) {
             // I1 (audit v2.38.2): reject an existing destination up front for
             // a prompt response; the renderer independently enforces
             // create-new, owner-only publication after this metadata probe.
             // See `validate_screenshot_path` for the full threat model.
             Some(s) => match validate_screenshot_path(s) {
-                Ok(p) => p,
+                Ok(p) => (p, kettle_render::ScreenshotOutputPolicy::UserSelected),
                 Err(message) => {
                     let _ = reply.send(Response::err(req.id, ec::BAD_PARAMS, message));
                     return;
@@ -17247,7 +17284,10 @@ impl App {
                     .map(|d| d.as_secs())
                     .unwrap_or(0);
                 let cache = cache_dir_from_env(|k| std::env::var(k).ok());
-                session_screenshot_path(secs, std::process::id(), cache.as_deref())
+                (
+                    session_screenshot_path(secs, std::process::id(), cache.as_deref()),
+                    kettle_render::ScreenshotOutputPolicy::PrivateState,
+                )
             }
         };
         let (done_tx, done_rx) = std::sync::mpsc::channel();
@@ -17268,6 +17308,7 @@ impl App {
         };
         let screenshot = kettle_render::ScreenshotRequest {
             out_path: path.clone(),
+            output_policy,
             crop,
             completion: Some(done_tx),
         };
