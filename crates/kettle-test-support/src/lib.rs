@@ -753,7 +753,7 @@ pub fn sweep_stale_scratch_for_test(base: &Path, prefix: &str, max_age: std::tim
 /// the shared temporary directory can grant deletion rights to other users.
 ///
 /// Removal is belt and braces: the guard clears it when the test ends, and this
-/// clears anything a previous run could not. See [`sweep_stale_scratch`] for why
+/// clears anything a previous run could not. See `sweep_stale_scratch` for why
 /// the guard is not sufficient on its own.
 pub fn private_tempdir(prefix: &str) -> PrivateTempDir {
     let mut builder = tempfile::Builder::new();
