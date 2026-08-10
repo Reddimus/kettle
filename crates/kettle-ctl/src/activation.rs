@@ -803,22 +803,43 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 
-    /// The leak this helper was rewritten to stop, checked instead of assumed.
+    /// What the guard can and cannot clean, asserted rather than assumed.
     ///
-    /// `spawn_server` moves the `Primary` — and with it the open `activation.lock`
-    /// handle — into a thread that outlives the test, so the guard drops while a
-    /// descriptor is still open. Unix unlinks a file somebody still holds without
-    /// complaint. Windows may refuse to remove a directory that still contains an
-    /// open handle's name, and `TempDir::drop` discards the error, so the leak
-    /// would have moved from `%TEMP%` to `%LOCALAPPDATA%` while looking fixed —
-    /// a sweep found 148 of the old ones on a real machine, and nothing here
-    /// would have noticed the new ones.
-    ///
-    /// Asserting the removal, on every platform, is the only version of this
-    /// claim worth making.
+    /// With nothing holding the directory open it goes on every platform, which
+    /// covers most callers here.
     #[test]
-    fn the_scratch_directory_is_really_gone_once_its_guard_drops() {
-        let (dir, paths) = test_paths("cleanup");
+    fn a_guard_removes_its_scratch_directory_when_nothing_holds_it_open() {
+        let (dir, paths) = test_paths("cleanup-idle");
+        let outcome = activate_or_elect_at(request(Some("dir:aaaa")), &paths).unwrap();
+        assert!(matches!(outcome, ActivationOutcome::Primary(_)));
+        // The elected primary owns the lock; it has to close before the guard.
+        drop(outcome);
+
+        let path = dir.path().to_path_buf();
+        drop(dir);
+        assert!(
+            !path.exists(),
+            "the scratch directory outlived its guard at {}",
+            path.display()
+        );
+    }
+
+    /// And the case the guard cannot win, characterized instead of wished away.
+    ///
+    /// `spawn_server` hands the `Primary` — with its open `activation.lock` — to
+    /// a thread that owns it for the process lifetime, deliberately, so the
+    /// directory is still pinned when the guard drops. Unix unlinks it anyway.
+    /// Windows refuses and `TempDir::drop` discards the error, which is what the
+    /// Windows job reported when this was first asserted: the 148-entry `%TEMP%`
+    /// leak had not been fixed by the guard, only moved to `%LOCALAPPDATA%`.
+    ///
+    /// Nothing in this process can clear it, so `private_tempdir`'s sweep clears
+    /// it on a later run. If Windows or `remove_dir_all` ever starts unlinking
+    /// through an open handle, the Windows arm fails and this comment is what
+    /// tells the next reader to tighten it.
+    #[test]
+    fn a_scratch_directory_pinned_by_the_server_thread_is_left_to_the_sweep() {
+        let (dir, paths) = test_paths("cleanup-pinned");
         let outcome = activate_or_elect_at(request(Some("dir:aaaa")), &paths).unwrap();
         let ActivationOutcome::Primary(primary) = outcome else {
             panic!("the first launch must become primary");
@@ -827,12 +848,20 @@ mod tests {
 
         let path = dir.path().to_path_buf();
         drop(dir);
-        assert!(
-            !path.exists(),
-            "the scratch directory outlived its guard at {}: the leak moved \
-             rather than stopped",
-            path.display()
-        );
+        if cfg!(windows) {
+            assert!(
+                path.exists(),
+                "Windows is expected to refuse removal while the server thread \
+                 holds the lock; if this now succeeds, drop the sweep's reason \
+                 for existing rather than this assertion"
+            );
+        } else {
+            assert!(
+                !path.exists(),
+                "an open descriptor does not stop the unlink here: {}",
+                path.display()
+            );
+        }
     }
 
     #[test]

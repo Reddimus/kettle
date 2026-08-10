@@ -693,12 +693,68 @@ impl std::ops::Deref for PrivateTempDir {
     }
 }
 
+/// How old a scratch directory must be before a later run will remove it.
+///
+/// Long enough that a concurrently running test process is never in range —
+/// the whole suite finishes in minutes — and short enough that the leftovers
+/// never accumulate across a working session.
+const STALE_SCRATCH_AFTER: std::time::Duration = std::time::Duration::from_secs(60 * 60);
+
+/// Remove scratch directories that *earlier processes* left behind.
+///
+/// A guard cannot always win. `spawn_server` hands the activation `Primary` —
+/// and with it an open `activation.lock` — to a thread that owns it for the
+/// process lifetime, by design, so the directory is still pinned when the guard
+/// drops at the end of the test. Unix unlinks a file someone still holds and the
+/// directory goes; Windows refuses, and `TempDir::drop` discards the error. That
+/// is how 148 `kettle*` entries accumulated in a real `%TEMP%`, and switching to
+/// a guard alone would only have moved them to `%LOCALAPPDATA%` — which is
+/// exactly what the Windows job reported when the claim was finally asserted
+/// rather than assumed.
+///
+/// Nothing can clear those during the run that pinned them, so each run clears
+/// what previous runs left. Matching on the caller's own prefix keeps this to
+/// directories this helper made: a real `kettle-<uid>` temp directory shares no
+/// prefix with `kettle-activation-…`.
+fn sweep_stale_scratch(base: &Path, prefix: &str, max_age: std::time::Duration) {
+    let Ok(entries) = std::fs::read_dir(base) else {
+        return;
+    };
+    let now = std::time::SystemTime::now();
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else { continue };
+        if !name.starts_with(prefix) {
+            continue;
+        }
+        let stale = entry
+            .metadata()
+            .ok()
+            .and_then(|metadata| metadata.modified().ok())
+            .and_then(|modified| now.duration_since(modified).ok())
+            .is_some_and(|age| age >= max_age);
+        if stale {
+            // Still best-effort: the process that pinned it may yet be alive.
+            let _ = std::fs::remove_dir_all(entry.path());
+        }
+    }
+}
+
+#[doc(hidden)]
+pub fn sweep_stale_scratch_for_test(base: &Path, prefix: &str, max_age: std::time::Duration) {
+    sweep_stale_scratch(base, prefix, max_age);
+}
+
 /// Create an automatically cleaned-up scratch directory suitable for private
 /// Kettle state.
 ///
 /// Unix requests owner-only permissions explicitly instead of inheriting a
 /// permissive ambient umask. Windows stages beneath the user profile because
 /// the shared temporary directory can grant deletion rights to other users.
+///
+/// Removal is belt and braces: the guard clears it when the test ends, and this
+/// clears anything a previous run could not. See [`sweep_stale_scratch`] for why
+/// the guard is not sufficient on its own.
 pub fn private_tempdir(prefix: &str) -> PrivateTempDir {
     let mut builder = tempfile::Builder::new();
     builder.prefix(prefix);
@@ -709,17 +765,69 @@ pub fn private_tempdir(prefix: &str) -> PrivateTempDir {
         builder.permissions(std::fs::Permissions::from_mode(0o700));
     }
     #[cfg(windows)]
-    let dir = {
-        let base = std::env::var_os("LOCALAPPDATA")
+    let base = std::path::PathBuf::from(
+        std::env::var_os("LOCALAPPDATA")
             .or_else(|| std::env::var_os("USERPROFILE"))
-            .expect("Windows tests require LOCALAPPDATA or USERPROFILE");
-        builder
-            .tempdir_in(base)
-            .expect("create private test directory in the user profile")
-    };
+            .expect("Windows tests require LOCALAPPDATA or USERPROFILE"),
+    );
     #[cfg(not(windows))]
-    let dir = builder.tempdir().expect("create private test directory");
+    let base = std::env::temp_dir();
+
+    sweep_stale_scratch(&base, prefix, STALE_SCRATCH_AFTER);
+
+    let dir = builder
+        .tempdir_in(&base)
+        .expect("create private test directory");
     PrivateTempDir(dir)
+}
+
+#[cfg(test)]
+mod sweep_tests {
+    /// The sweep has to remove what an earlier run pinned, and leave everything
+    /// else alone — including the live directories of a run happening right now,
+    /// which is the failure mode that would turn this cleanup into flakiness.
+    ///
+    /// Age is the only thing separating the two, so it is passed in here rather
+    /// than waiting an hour for the real threshold.
+    #[test]
+    fn stale_scratch_goes_and_everything_else_stays() {
+        let base = super::private_tempdir("kettle-sweep-base-");
+
+        let stale = base.path().join("kettle-swept-aaaa");
+        let fresh = base.path().join("kettle-swept-bbbb");
+        let foreign = base.path().join("kettle-1000");
+        for dir in [&stale, &fresh, &foreign] {
+            std::fs::create_dir(dir).expect("fixture directory");
+        }
+
+        // Zero age: everything matching the prefix is old enough to go.
+        super::sweep_stale_scratch_for_test(
+            base.path(),
+            "kettle-swept-aaaa",
+            std::time::Duration::ZERO,
+        );
+        assert!(!stale.exists(), "a stale scratch directory must be removed");
+        assert!(
+            fresh.exists(),
+            "a directory outside the prefix must survive"
+        );
+
+        // The real call shape: same prefix as the live directories, but an age
+        // no directory created moments ago can meet.
+        super::sweep_stale_scratch_for_test(
+            base.path(),
+            "kettle-swept-",
+            std::time::Duration::from_secs(3600),
+        );
+        assert!(
+            fresh.exists(),
+            "a concurrent run's live directory must not be swept"
+        );
+        assert!(
+            foreign.exists(),
+            "a real kettle-<uid> directory shares no prefix and must be untouched"
+        );
+    }
 }
 
 #[cfg(test)]

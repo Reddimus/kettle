@@ -27,8 +27,16 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 - **The activation tests leaked a scratch directory per run.** The helper built
   a path from the pid and deleted whatever the *previous* run with that pid had
   left, never its own; a sweep of a Windows machine found 148 `kettle*` entries
-  in `%TEMP%`. The directory is now owned by a guard that removes it on drop,
-  and a test asserts it is really gone rather than assuming it. (#187)
+  in `%TEMP%`. The directory is now owned by a guard that removes it on drop.
+  On Windows the guard is not enough on its own and the first version of this
+  entry overstated the fix: the activation server thread owns the election lock
+  for the process lifetime by design and opens it without delete sharing, so
+  `remove_dir_all` is refused and `TempDir::drop` discards the error — the leak
+  would have moved to `%LOCALAPPDATA%` rather than stopped. Nothing in that
+  process can clear it, so each run now also sweeps what earlier runs left, and
+  the tests assert both halves instead of assuming either. Removing it outright
+  needs stoppable test servers, recorded in `docs/AUDIT-DEFERRED.md`. Test-only
+  either way — no shipped code path is affected. (#187)
 
 ## [2.55.0] — 2026-08-09
 

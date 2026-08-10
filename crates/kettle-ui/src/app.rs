@@ -5523,23 +5523,36 @@ impl App {
                 // and continue rather than refusing to start — but do not
                 // pretend the watcher exists.
                 //
-                // The repair is advisory and its failure is NOT a reason to
-                // skip the watch: a subscription is read-only and needs no
-                // privacy guarantee from the directory it reads. Gating the
-                // watch on it turned "kettle could not chmod this" into "live
-                // reload is off" for a tree that watches perfectly well — a
-                // read-only bind view being the case that reaches it. The
-                // remote-command block below has always had this shape.
+                // The repair is a precondition, not an optimisation, and it stays
+                // one until something can verify the directory instead. Reload
+                // re-parses the config and installs its triggers, and a
+                // `RunCommand` trigger spawns a program — so subscribing to a
+                // directory a group peer can write turns "the peer edited a file"
+                // into "kettle ran their command", without waiting for a
+                // relaunch. There is no read-only trust check to lean on here:
+                // the verifier in kettle-state is fused to opening a file. A
+                // directory kettle could not narrow is one it knows nothing good
+                // about, so it declines to subscribe.
+                //
+                // The cost is real, and is why this was briefly the other way
+                // round: a config directory on a read-only mount cannot be
+                // chmod'ed and loses live reload even though it watches fine.
+                // That is the lesser loss. Separating "could not repair" from "is
+                // unsafe" needs a read-only verifier — recorded in
+                // docs/AUDIT-DEFERRED.md, along with the larger hole beside it:
+                // `read_config_bytes` applies no directory trust check at all, so
+                // the same peer's config is loaded at the next launch either way.
                 if let Err(error) = kettle_state::create_private_dirs(&dir) {
-                    log::debug!(
-                        "config directory repair skipped for {}: {error}",
-                        dir.display()
-                    );
-                }
-                match w.watch(&dir, notify::RecursiveMode::NonRecursive) {
-                    Ok(()) => watcher = Some(w),
-                    Err(error) => {
-                        log::warn!("config live-reload disabled for {}: {error}", dir.display());
+                    log::warn!("config live-reload disabled for {}: {error}", dir.display());
+                } else {
+                    match w.watch(&dir, notify::RecursiveMode::NonRecursive) {
+                        Ok(()) => watcher = Some(w),
+                        Err(error) => {
+                            log::warn!(
+                                "config live-reload disabled for {}: {error}",
+                                dir.display()
+                            );
+                        }
                     }
                 }
             }
@@ -25275,11 +25288,30 @@ mod modal_discipline_guard {
             normalized.contains("config live-reload unavailable"),
             "a watcher the platform would not construct must say so too"
         );
-        // The repair is advisory and must not gate the subscription: watching is
-        // read-only, so a directory kettle could not chmod is still watchable.
+        // `= Some(` is not the only way to fill an Option. `watcher.replace(w)`
+        // and `watcher.insert(w)` store just as well and would sail past the
+        // count above, which is exactly how a store on the Err arm could come
+        // back wearing a different spelling.
+        for spelling in [
+            "watcher.replace(",
+            "watcher.insert(",
+            "watcher.get_or_insert(",
+        ] {
+            assert!(
+                !block.contains(spelling),
+                "`{spelling}` stores the handle outside the pinned Ok arm; if it \
+                 is wanted, pin it there instead of adding a second way in"
+            );
+        }
+        // And the repair still gates the subscription. Reload installs config
+        // triggers and `RunCommand` spawns a program, so a directory kettle
+        // could not narrow is not one to subscribe to — see the block itself for
+        // the trade-off and what would let it be relaxed.
         assert!(
-            !normalized.contains("if let Err(error) = kettle_state::create_private_dirs(&dir) { log::warn!(\"config live-reload disabled"),
-            "a failed privacy repair must not disable live reload"
+            normalized.contains(
+                "if let Err(error) = kettle_state::create_private_dirs(&dir) { log::warn!"
+            ),
+            "a config directory kettle could not make private must not be watched"
         );
     }
     #[test]
