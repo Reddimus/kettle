@@ -401,41 +401,48 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn incident_is_private_and_rotated() {
-        use std::os::unix::fs::PermissionsExt as _;
+        in_child(
+            "runtime_diagnostics::tests::incident_is_private_and_rotated",
+            || {
+                use std::os::unix::fs::PermissionsExt as _;
 
-        let root = std::env::temp_dir().join(format!(
-            "kettle-runtime-diagnostic-test-{}",
-            std::process::id()
-        ));
-        let _ = std::fs::remove_dir_all(&root);
-        let shared = Shared {
-            phase: Mutex::new(PhaseState {
-                name: "redraw",
-                entered: Instant::now(),
-            }),
-            windows: AtomicUsize::new(2),
-            stop: AtomicBool::new(false),
-            stall_written: AtomicBool::new(false),
-            cache_dir: Some(root.clone()),
-            version: "test".to_string(),
-        };
-        for _ in 0..12 {
-            let phase = shared.phase.lock().unwrap().clone();
-            write_incident(&shared, "test", &phase, Some("safe error")).unwrap();
-        }
-        let dir = diagnostic_dir(Some(&root));
-        let files: Vec<_> = std::fs::read_dir(&dir).unwrap().collect();
-        assert_eq!(files.len(), RETAINED_INCIDENTS);
-        for file in files {
-            assert_eq!(
-                file.unwrap().metadata().unwrap().permissions().mode() & 0o777,
-                0o600
-            );
-        }
-        assert_eq!(
-            std::fs::metadata(&dir).unwrap().permissions().mode() & 0o777,
-            0o700
+                // The cache root is part of the private-path trust chain. Use
+                // an owner-only scratch guard and make it the real XDG cache
+                // base, rather than creating an ad-hoc child at the ambient
+                // umask. The re-executed child makes that environment change
+                // safe for the parallel Rust test harness.
+                let root = kettle_test_support::private_tempdir("kettle-runtime-diagnostic-test-");
+                // SAFETY: only the isolated child reaches this closure.
+                unsafe { std::env::set_var("XDG_CACHE_HOME", root.path()) };
+                let shared = Shared {
+                    phase: Mutex::new(PhaseState {
+                        name: "redraw",
+                        entered: Instant::now(),
+                    }),
+                    windows: AtomicUsize::new(2),
+                    stop: AtomicBool::new(false),
+                    stall_written: AtomicBool::new(false),
+                    cache_dir: Some(root.path().to_path_buf()),
+                    version: "test".to_string(),
+                };
+                for _ in 0..12 {
+                    let phase = shared.phase.lock().unwrap().clone();
+                    write_incident(&shared, "test", &phase, Some("safe error")).unwrap();
+                }
+                let dir = diagnostic_dir(Some(root.path()));
+                let files: Vec<_> = std::fs::read_dir(&dir).unwrap().collect();
+                assert_eq!(files.len(), RETAINED_INCIDENTS);
+                for file in files {
+                    assert_eq!(
+                        file.unwrap().metadata().unwrap().permissions().mode() & 0o777,
+                        0o600
+                    );
+                }
+                assert_eq!(
+                    std::fs::metadata(&dir).unwrap().permissions().mode() & 0o777,
+                    0o700
+                );
+            },
         );
-        let _ = std::fs::remove_dir_all(&root);
     }
 }
