@@ -110,6 +110,24 @@ tracked here so they are not lost.
 
 ## Testing coverage
 
+- **Test scratch directories accumulated without bound, 2026-08-09.** A sweep
+  of the Windows machine found **148** `kettle*` entries in `%TEMP%`; the Ubuntu
+  machine had its own smaller set. Most came from one helper:
+  `activation.rs::test_paths` built a path from the pid and deleted whatever a
+  *previous* run with the same pid and label had left — never its own. Since the
+  pid varies, every run leaked one directory, forever, on every machine that
+  ever ran the suite.
+
+  Fixed by switching it to `kettle_test_support::private_tempdir`, whose
+  `TempDir` removes the directory when the guard drops. Verified by counting
+  before and after a run: unchanged. The entries already on disk are historical
+  and safe to delete by hand.
+
+  Worth noting how it was found: no test failed, no gate fired, and reading the
+  helper would have looked reasonable — it *does* call `remove_dir_all`. Only
+  looking at a machine that had run the suite hundreds of times made it visible.
+
+
 - **Ten live-UI scenarios run in no automated gate.**
   `scripts/check-live-ui-smoke.py` launches a real windowed kettle and drives it
   through ten scenarios (`tabbar`, `tab-title`, `tearoff`, `split-titlebar`,
@@ -174,6 +192,15 @@ tracked here so they are not lost.
   rather than known to be impossible.
 
 ## Deferred from the 2026-08-09 umask work
+
+- ~~**The config-reload watcher keeps a handle it may never have registered.**~~
+  Fixed in the next release. The decision it was waiting on: a config directory
+  that cannot be watched is not fatal — everything else works and reload is a
+  convenience — so it warns and continues, but does not pretend the watcher
+  exists. Both results are now checked, matching the remote-command block below
+  it, and a source guard pins that neither `watch(` call is discarded.
+
+  Original entry:
 
 - **The config-reload watcher keeps a handle it may never have registered.**
   `app.rs` ignores the result of both the directory create and
@@ -312,13 +339,30 @@ tracked here so they are not lost.
   flush; all three tests drive a PTY child to completion and read what it wrote.
   Still deferred, but it should be fixed at the harness rather than per test.
 
-  **It does not reproduce locally, 2026-08-09.** Thirty runs of the full
-  26-test binary and forty runs of `exec_streams_stdout_and_exits_zero` alone
-  under saturating CPU load, on an Apple-silicon macOS host at `9f3da01`:
-  **zero failures**. That is a negative result worth recording, because it
-  redirects the next attempt: the difference is the GitHub macOS runner, not
-  the code path on any macOS. Do not spend another session trying to reproduce
-  it on a developer machine.
+  **It reproduces locally — under `cargo test --workspace`, 2026-08-09.**
+  An earlier version of this paragraph said it did not, on the strength of
+  thirty runs of the exec binary and forty of one test under CPU load. That
+  scoping was wrong and the conclusion it invited — "do not try to reproduce
+  this on a developer machine" — would have sent the next investigator away
+  from the one recipe that works.
+
+  Running the **whole workspace** reproduces it at roughly **1 in 14** on an
+  Apple-silicon macOS host: forty-five `cargo test --workspace` runs, one
+  failure. The failing test that time was
+  `exec_raw_mode_eof_is_explicit_and_does_not_destroy_terminal_replies` —
+  the third name in the table above, and the same family of symptom
+  (`missing explicit raw-mode EOF diagnostic: ""`, an empty read where output
+  was expected).
+
+  So the missing condition is not CPU load, it is **whole-workspace
+  concurrency**: many test binaries and their PTY children running at once.
+  That is also what CI does, which is why CI sees it and an exec-only loop
+  does not. Reproduce with:
+
+      for i in $(seq 1 30); do cargo test --workspace --no-fail-fast; done
+
+  and expect roughly two failures. That is a tractable loop for whoever
+  attacks the harness fix, and it is the thing this entry was missing.
 
   So the test now diagnoses itself. On failure it re-runs the same command
   **without** `--strip-ansi` and reports both, which answers the one question
@@ -507,3 +551,44 @@ destination cells, pixel offsets, aspect ratio, and cursor-movement intent.
 These fixes do **not** close the acknowledgement/query, existing-id
 retransmission lifecycle, or exact `(image id, placement id)` `Q=` parent gaps
 listed above.
+
+## Deferred from the #187 review round
+
+- **Config load applies no directory trust check.** `read_config_bytes` rejects
+  a symlink and a non-regular file and caps the size, but nothing verifies that
+  the config *directory* is free of untrusted write access. A group-writable
+  `~/.config/kettle` is therefore read and applied at every launch, and a
+  `RunCommand` trigger in it is executed. Live reload does not create this; it
+  only removes the wait for a relaunch, which is why the config watcher declines
+  to subscribe when it could not make the directory private — a blunt stand-in
+  for the check that is missing. The real fix is a read-only verifier in
+  kettle-state (`is_trusted_directory(path)`) applied to the load path, and then
+  used by the watcher so "could not repair" stops being conflated with "unsafe".
+  Deferred because it needs a new public API on a security boundary plus Windows
+  DACL equivalence, which is more than this branch should carry.
+- **Activation test servers cannot be stopped.** `spawn_server` hands the
+  `Primary` — and its `activation.lock` — to a thread that owns it for the
+  process lifetime, deliberately. The lock is opened without delete sharing (as
+  it should be: a replaceable lock pathname would weaken single-instance
+  exclusion), so on Windows the scratch directory cannot be removed while the
+  test process lives; `private_tempdir` sweeps it on a later run instead. The
+  proper fix is a test-only server guard that sets a stop flag, wakes the accept
+  loop with one connection, and joins the thread, so the lock closes before the
+  scratch guard drops. Deferred rather than attempted from a machine that cannot
+  run the Windows path it targets.
+- **The watcher source guard is textual and remains bypassable.** It now scopes
+  to the config block, pins the single store to the `Ok` arm, and bans the
+  `replace`/`insert`/`get_or_insert` spellings, but a shadowed binding, a later
+  `take()`, or an unregistered handle stored on a different path would still
+  pass. The durable fix is to extract registration into a small generic helper
+  — candidate plus registration closure — and assert behaviourally that `Ok`
+  yields `Some(candidate)` and `Err` yields `None`, leaving source checks for
+  wiring only.
+- **`the_resolved_cache_directory_is_recognized_as_kettles_own` self-skips in a
+  stripped environment.** With every probe unset it returns early and reports
+  success; under `env -i` it passes while checking nothing. It also exercises
+  one resolver branch per machine — `HOME/.cache` on Unix CI, `%LOCALAPPDATA%`
+  on Windows — so the `XDG_CACHE_HOME` branch is covered on neither. The fix is
+  a re-executed child per branch with controlled absolute values and the
+  conflicting variables cleared, in the shape kettle-ctl's umask tests already
+  use.

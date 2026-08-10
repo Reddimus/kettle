@@ -7,6 +7,35 @@ use std::path::Path;
 /// The directories kettle creates its own namespace directly inside: the XDG
 /// bases and the temp root. Read from the environment because that is where the
 /// call sites read them from.
+///
+/// What does NOT belong here, and why the distinction matters: this list is for
+/// the roots kettle keeps *private state* under, not everywhere it writes.
+/// `~/.local/share/kettle` is kettle-named and kettle-created, but it holds the
+/// installed program — `install.sh`, the shell-integration snippets — which are
+/// deliberately world-readable. Adding it would make the repair narrow an
+/// install directory to `0700` and break a multi-user install, fixing nothing,
+/// since nothing under it goes through the private-path verifier. The same goes
+/// for a `--screenshot` path, which is wherever the user pointed.
+///
+/// The cache base belongs here for the same reason the others do:
+/// `cache_dir_from_env` resolves `XDG_CACHE_HOME`, then `~/.cache` on Unix and
+/// `%LOCALAPPDATA%` on Windows, and kettle puts recordings, diagnostics and
+/// crash logs under `<that>/kettle`. It was missing from the first version of
+/// this list, and a filesystem sweep of a real `002`-umask machine found
+/// exactly the consequence: `~/.cache/kettle` sitting at 0775 with private
+/// 0700/0600 content beneath it, unrecognized and so never repaired.
+///
+/// The residual risk, written down rather than left implicit: every entry that
+/// comes from an environment variable lets the user redirect what counts as a
+/// base, so `XDG_CACHE_HOME=$HOME/Repos` would make a `~/Repos/kettle` checkout
+/// kettle's own directory again — the bug the parent check exists to stop,
+/// re-entered through the front door. It is not new to the cache variable:
+/// `XDG_CONFIG_HOME` and `XDG_STATE_HOME` have carried exactly this exposure
+/// from the start. Dropping the variable and honouring only a fixed `~/.cache`
+/// trades it for a worse one — the 0775 refusal comes back for everyone who
+/// sets the variable for its intended purpose, which is the defect this list
+/// was widened to fix. What would actually close it is provenance kettle can
+/// verify (a marker it wrote itself), not a shorter list of names.
 fn kettle_base_dirs() -> Vec<std::path::PathBuf> {
     let mut bases = vec![std::env::temp_dir()];
     let env_path = |key: &str| {
@@ -24,6 +53,7 @@ fn kettle_base_dirs() -> Vec<std::path::PathBuf> {
         "XDG_RUNTIME_DIR",
         "XDG_STATE_HOME",
         "XDG_CONFIG_HOME",
+        "XDG_CACHE_HOME",
         "APPDATA",
         "LOCALAPPDATA",
     ] {
@@ -32,6 +62,7 @@ fn kettle_base_dirs() -> Vec<std::path::PathBuf> {
     if let Some(home) = env_path("HOME") {
         bases.push(home.join(".local/state"));
         bases.push(home.join(".config"));
+        bases.push(home.join(".cache"));
     }
     bases.push(std::path::PathBuf::from("/tmp"));
     bases
@@ -3557,6 +3588,50 @@ mod windows {
 mod tests {
     use super::*;
     use std::io::Write as _;
+
+    /// The base list must match where the resolvers actually put things, and a
+    /// missing base is invisible until someone sweeps a real machine. This
+    /// enumerates the ones kettle names a `kettle/` directory inside, so a new
+    /// resolver that omits its base fails here rather than years later.
+    ///
+    /// What this does NOT do, so nobody reads more into it than it checks: the
+    /// suffixes below are written out by hand, because the resolvers live in
+    /// kettle-ui and kettle-config and this crate cannot depend on either. So it
+    /// pins one hand-written list against another, and a resolver that moves its
+    /// directory passes here unchanged. The test that actually calls a resolver
+    /// and feeds its answer to `is_kettle_owned_dir_name` is
+    /// `the_resolved_cache_directory_is_recognized_as_kettles_own`, over in
+    /// kettle-ui where both halves are visible. Likewise the `HOME` branch is
+    /// skipped rather than failed when `HOME` is unset, so a stripped
+    /// environment gets the temp-root assertion alone.
+    #[cfg(unix)]
+    #[test]
+    fn every_base_a_resolver_uses_is_recognized() {
+        // The Unix fallbacks the resolvers use when the XDG vars are unset.
+        let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
+        if let Some(home) = home {
+            for suffix in [".config", ".local/state", ".cache"] {
+                let expected = home.join(suffix);
+                assert!(
+                    super::kettle_base_dirs().contains(&expected),
+                    "{} is a resolver fallback and must be a recognized base",
+                    expected.display()
+                );
+                assert!(
+                    is_kettle_owned_dir_name(&expected.join("kettle")),
+                    "{}/kettle must be recognized as kettle's own",
+                    expected.display()
+                );
+            }
+        }
+        // And the temp root, for the uid-namespaced socket fallback.
+        assert!(
+            is_kettle_owned_dir_name(
+                &std::env::temp_dir().join(format!("kettle-{}", unsafe { libc::geteuid() }))
+            ),
+            "the uid-namespaced temp directory must be recognized"
+        );
+    }
 
     /// A source checkout is called `kettle` too, and matching on the name alone
     /// meant `kettle --config ~/Repos/kettle/dev.config` set the whole checkout

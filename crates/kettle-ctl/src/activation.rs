@@ -720,13 +720,19 @@ mod tests {
         )
     }
 
-    fn test_paths(label: &str) -> (PathBuf, ActivationPaths) {
-        let dir = crate::test_scratch_root().join(format!(
-            "kettle-activation-test-{}-{label}",
-            std::process::id()
-        ));
-        let _ = std::fs::remove_dir_all(&dir);
-        let paths = activation_paths(&dir);
+    /// A scratch directory that removes itself.
+    ///
+    /// This used to build a path from the pid and delete whatever the *previous*
+    /// run with that pid and label had left, never its own — so every test run
+    /// leaked one directory, and since the pid varies they accumulated without
+    /// bound. A sweep of a Windows machine found 148 `kettle*` entries in
+    /// `%TEMP%`, most of them from this helper. `PrivateTempDir` owns a
+    /// `TempDir`, so the directory goes away when the returned guard drops;
+    /// callers that name it `_dir` keep it alive for the test body, which is
+    /// what the binding was already doing.
+    fn test_paths(label: &str) -> (kettle_test_support::PrivateTempDir, ActivationPaths) {
+        let dir = kettle_test_support::private_tempdir(&format!("kettle-activation-{label}-"));
+        let paths = activation_paths(dir.path());
         (dir, paths)
     }
 
@@ -795,6 +801,67 @@ mod tests {
         let second = activate_or_elect_at(request(Some("dir:aaaa")), &paths).unwrap();
         assert!(matches!(second, ActivationOutcome::Activated));
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// What the guard can and cannot clean, asserted rather than assumed.
+    ///
+    /// With nothing holding the directory open it goes on every platform, which
+    /// covers most callers here.
+    #[test]
+    fn a_guard_removes_its_scratch_directory_when_nothing_holds_it_open() {
+        let (dir, paths) = test_paths("cleanup-idle");
+        let outcome = activate_or_elect_at(request(Some("dir:aaaa")), &paths).unwrap();
+        assert!(matches!(outcome, ActivationOutcome::Primary(_)));
+        // The elected primary owns the lock; it has to close before the guard.
+        drop(outcome);
+
+        let path = dir.path().to_path_buf();
+        drop(dir);
+        assert!(
+            !path.exists(),
+            "the scratch directory outlived its guard at {}",
+            path.display()
+        );
+    }
+
+    /// And the case the guard cannot win, characterized instead of wished away.
+    ///
+    /// `spawn_server` hands the `Primary` — with its open `activation.lock` — to
+    /// a thread that owns it for the process lifetime, deliberately, so the
+    /// directory is still pinned when the guard drops. Unix unlinks it anyway.
+    /// Windows refuses and `TempDir::drop` discards the error, which is what the
+    /// Windows job reported when this was first asserted: the 148-entry `%TEMP%`
+    /// leak had not been fixed by the guard, only moved to `%LOCALAPPDATA%`.
+    ///
+    /// Nothing in this process can clear it, so `private_tempdir`'s sweep clears
+    /// it on a later run. If Windows or `remove_dir_all` ever starts unlinking
+    /// through an open handle, the Windows arm fails and this comment is what
+    /// tells the next reader to tighten it.
+    #[test]
+    fn a_scratch_directory_pinned_by_the_server_thread_is_left_to_the_sweep() {
+        let (dir, paths) = test_paths("cleanup-pinned");
+        let outcome = activate_or_elect_at(request(Some("dir:aaaa")), &paths).unwrap();
+        let ActivationOutcome::Primary(primary) = outcome else {
+            panic!("the first launch must become primary");
+        };
+        spawn_server(primary, |_| true).unwrap();
+
+        let path = dir.path().to_path_buf();
+        drop(dir);
+        if cfg!(windows) {
+            assert!(
+                path.exists(),
+                "Windows is expected to refuse removal while the server thread \
+                 holds the lock; if this now succeeds, drop the sweep's reason \
+                 for existing rather than this assertion"
+            );
+        } else {
+            assert!(
+                !path.exists(),
+                "an open descriptor does not stop the unlink here: {}",
+                path.display()
+            );
+        }
     }
 
     #[test]
