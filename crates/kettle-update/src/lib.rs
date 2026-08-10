@@ -42,7 +42,15 @@ pub const SIGNING_CONTEXT: &[u8] = b"kettle-update-manifest-v1\0";
 
 /// Rust target identifier used in signed manifests for this build.
 pub const fn current_target() -> Option<&'static str> {
-    if cfg!(all(target_os = "windows", target_arch = "x86_64")) {
+    // Kettle does not publish a native Windows ARM archive, so production ARM
+    // builds remain intentionally unsupported by the managed updater. The
+    // crate's unit-test harness is different: all Windows transaction and ACL
+    // tests describe the shipped x86_64 package contract and should still run
+    // on an ARM contributor machine. Restrict that substitution to cfg(test),
+    // leaving integration consumers and the built library truthful.
+    if cfg!(all(test, target_os = "windows", target_arch = "aarch64"))
+        || cfg!(all(target_os = "windows", target_arch = "x86_64"))
+    {
         Some("x86_64-pc-windows-msvc")
     } else if cfg!(all(target_os = "linux", target_arch = "x86_64")) {
         Some("x86_64-unknown-linux-gnu")
@@ -50,5 +58,14 @@ pub const fn current_target() -> Option<&'static str> {
         Some("aarch64-unknown-linux-gnu")
     } else {
         None
+    }
+}
+
+#[cfg(test)]
+mod target_tests {
+    #[cfg(all(target_os = "windows", target_arch = "aarch64"))]
+    #[test]
+    fn windows_arm_harness_exercises_the_shipped_x64_update_contract() {
+        assert_eq!(super::current_target(), Some("x86_64-pc-windows-msvc"));
     }
 }

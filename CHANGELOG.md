@@ -18,6 +18,24 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   source builds are now documented and exercised separately from the shipped
   x86_64 artifact.
 
+- **The `kettle-update` test binary could not run as a standard Windows
+  user.** Its generated `kettle_update-<hash>.exe` had no execution manifest,
+  so Windows installer detection inferred from the name that it required
+  elevation and Cargo stopped the workspace suite with error 740. Windows test
+  harnesses for that crate now carry an explicit `asInvoker` manifest; native
+  Windows ARM64 development no longer requires elevating the build. Its test
+  build exercises the shipped x86_64 package contract while production ARM
+  builds truthfully retain an unsupported managed updater, because no ARM
+  archive is published.
+
+- **Parallel Windows update tests intermittently lost cleanup races to a file
+  scanner.** A newly written journal or backup could be opened briefly without
+  delete sharing; Kettle treated the resulting error 32 as permanent and left
+  a committed transaction unconfirmed. Windows update-owned opens now retry
+  only sharing/lock violations for a bounded 250 ms, then perform the same
+  handle-based identity and content validation. Other I/O failures remain
+  immediate.
+
 - **Wheel input in a split window followed keyboard focus instead of the
   pointer.** Scrolling over an unfocused pane changed the focused pane's
   scrollback, sent mouse-tracking reports to the wrong TUI, or synthesized

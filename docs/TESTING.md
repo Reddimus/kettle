@@ -87,6 +87,16 @@ the job of hosted Windows CI and the physical x86_64 Windows machine. Record
 the exact commit and adapter for each guest run, then stop the guest when the
 batch is complete.
 
+Run Windows tests as the ordinary signed-in user, not from an elevated shell.
+The `kettle-update` unit-test harness deliberately embeds an `asInvoker`
+manifest: without it, Windows installer detection sees `update` in the
+generated executable name and refuses to start it with error 740. This is a
+build-policy regression if it returns, not a reason to make Cargo
+administrator-only. Because no native Windows ARM archive is published, its
+unit-test build explicitly exercises the shipped x86_64 update/package
+contract; the production ARM library continues to report the managed updater
+as unsupported.
+
 Read test output for `no GPU adapter ... skipped` and `no PTY ...` messages.
 Those messages leave the portable suite green by design; record the missing
 coverage instead of treating the exit code alone as platform validation.
