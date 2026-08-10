@@ -1141,8 +1141,41 @@ impl LuaEngine {
     /// `anyhow` error so the user gets a clear diagnostic rather
     /// than an OOM mid-load.
     pub fn exec_file(&self, path: &Path) -> Result<()> {
+        let file = std::fs::File::open(path)
+            .with_context(|| format!("open lua script {}", path.display()))?;
+        self.exec_open_file(file, path)
+    }
+
+    /// Run an implicitly discovered Lua file only when both the link location
+    /// and its resolved target are safe executable-config sources.
+    ///
+    /// `--lua-script` is an explicit trust grant and continues through
+    /// [`Self::exec_file`]. The automatically discovered `init.lua` is not: it
+    /// can type commands into the user's shell even under the default sandbox,
+    /// so it follows the same directory and leaf policy as an implicit config.
+    /// Resolve a leaf symlink for dotfile-manager compatibility, but verify the
+    /// requested directory before resolving and the target through the held
+    /// file handle afterwards.
+    pub fn exec_trusted_file(&self, path: &Path) -> Result<()> {
+        let requested = std::path::absolute(path)
+            .with_context(|| format!("resolve lua script path {}", path.display()))?;
+        let requested_parent = requested
+            .parent()
+            .ok_or_else(|| anyhow::anyhow!("lua script path has no parent: {}", path.display()))?;
+        kettle_state::validate_trusted_directory(requested_parent).with_context(|| {
+            format!("verify lua script directory {}", requested_parent.display())
+        })?;
+        let (file, resolved) = kettle_state::open_trusted_file_read_following_leaf(&requested)
+            .with_context(|| format!("open trusted lua script {}", requested.display()))?;
+        self.exec_open_file(file, &resolved)
+    }
+
+    fn exec_open_file(&self, file: std::fs::File, path: &Path) -> Result<()> {
+        use std::io::Read as _;
+
         const MAX_LUA_SCRIPT_BYTES: u64 = 4 * 1024 * 1024;
-        let size = std::fs::metadata(path)
+        let size = file
+            .metadata()
             .with_context(|| format!("stat lua script {}", path.display()))?
             .len();
         if size > MAX_LUA_SCRIPT_BYTES {
@@ -1151,8 +1184,15 @@ impl LuaEngine {
                 path.display()
             );
         }
-        let text = std::fs::read_to_string(path)
+        let mut text = String::new();
+        std::io::Read::read_to_string(&mut file.take(MAX_LUA_SCRIPT_BYTES + 1), &mut text)
             .with_context(|| format!("read lua script {}", path.display()))?;
+        if text.len() as u64 > MAX_LUA_SCRIPT_BYTES {
+            anyhow::bail!(
+                "lua script {} grew past {MAX_LUA_SCRIPT_BYTES} bytes while being read; refusing to load",
+                path.display()
+            );
+        }
         self.arm_budget();
         self.lua
             .load(&text)
@@ -2087,6 +2127,51 @@ mod tests {
         let v = eng.eval_str("return answer").expect("eval");
         assert_eq!(v, env!("CARGO_PKG_VERSION"));
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn implicit_lua_requires_a_trusted_source_but_explicit_lua_remains_usable() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let root = kettle_test_support::private_tempdir("kettle-lua-trust-");
+        let shared = root.join("shared");
+        std::fs::create_dir(&shared).unwrap();
+        std::fs::set_permissions(&shared, std::fs::Permissions::from_mode(0o775)).unwrap();
+        let path = shared.join("init.lua");
+        std::fs::write(&path, "answer = 42\n").unwrap();
+
+        let trusted = LuaEngine::new("Default").unwrap();
+        let error = trusted
+            .exec_trusted_file(&path)
+            .expect_err("an auto-loaded script in a writable directory must be refused");
+        assert!(error.to_string().contains("verify lua script directory"));
+
+        let explicit = LuaEngine::new("Default").unwrap();
+        explicit
+            .exec_file(&path)
+            .expect("--lua-script is an explicit trust grant");
+        assert_eq!(explicit.eval_str("return answer").unwrap(), "42");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn implicit_lua_follows_a_symlink_only_to_a_trusted_target() {
+        use std::os::unix::fs::symlink;
+
+        let root = kettle_test_support::private_tempdir("kettle-lua-trusted-link-");
+        let target = root.join("tracked-init.lua");
+        let mut created = kettle_state::create_private_file_new(&target).unwrap();
+        std::io::Write::write_all(&mut created, b"answer = 43\n").unwrap();
+        drop(created);
+        let link = root.join("init.lua");
+        symlink(&target, &link).unwrap();
+
+        let engine = LuaEngine::new("Default").unwrap();
+        engine
+            .exec_trusted_file(&link)
+            .expect("a dotfile-manager link to a trusted target must load");
+        assert_eq!(engine.eval_str("return answer").unwrap(), "43");
     }
 
     /// An oversized Lua script must be refused

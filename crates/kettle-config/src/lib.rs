@@ -1805,6 +1805,21 @@ pub struct LoadedConfig {
     pub malformed_values: Vec<String>,
 }
 
+/// Provenance of the config path selected for a read.
+///
+/// Default and named-profile paths are discovered by kettle and therefore
+/// require a trusted directory chain before executable settings such as
+/// `trigger = ... RunCommand` are accepted. `--config FILE` is an explicit
+/// user choice and remains usable for project-local and shared files; the file
+/// is still bounded, opened without following a leaf link, and required to be
+/// regular.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub enum ConfigTrust {
+    #[default]
+    VerifyDirectory,
+    ExplicitPath,
+}
+
 /// A user-defined right-click menu entry from
 /// `menu-item = LABEL = CMD`. The label is shown in the menu;
 /// the command is sent as PTY input + `\n` when the row is
@@ -2159,6 +2174,10 @@ fn read_config_bytes(path: &Path) -> std::io::Result<Vec<u8>> {
             return Err(error);
         }
     };
+    read_config_file(file, path)
+}
+
+fn read_config_file(file: std::fs::File, path: &Path) -> std::io::Result<Vec<u8>> {
     let metadata = file.metadata()?;
     if !metadata.file_type().is_file() {
         return Err(invalid_config_file(path));
@@ -3021,13 +3040,27 @@ impl Config {
 
     pub fn load() -> Config {
         match Self::default_path() {
-            Some(p) if p.exists() => Self::load_from(&p),
+            Some(p) if p.exists() => {
+                if let Some(parent) = p.parent()
+                    && let Err(error) = kettle_state::create_private_dirs(parent)
+                {
+                    log::warn!(
+                        "could not repair config directory {}: {error}",
+                        parent.display()
+                    );
+                }
+                Self::load_from(&p)
+            }
             _ => Config::default(),
         }
     }
 
     pub fn load_from(path: &Path) -> Config {
-        let (cfg, unknown, malformed) = Self::load_from_with_diagnostics(path);
+        Self::load_from_with_trust(path, ConfigTrust::VerifyDirectory)
+    }
+
+    pub fn load_from_with_trust(path: &Path, trust: ConfigTrust) -> Config {
+        let (cfg, unknown, malformed) = Self::load_from_with_diagnostics_and_trust(path, trust);
         if !unknown.is_empty() {
             log::warn!(
                 "{}: unrecognized config keys: {}",
@@ -3046,8 +3079,30 @@ impl Config {
     }
 
     pub fn read_from_with_diagnostics(path: &Path) -> std::io::Result<LoadedConfig> {
-        let read_path = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
-        let text = decode_config_text(&read_config_bytes(&read_path)?);
+        Self::read_from_with_trust(path, ConfigTrust::VerifyDirectory)
+    }
+
+    pub fn read_from_with_trust(path: &Path, trust: ConfigTrust) -> std::io::Result<LoadedConfig> {
+        let bytes = match trust {
+            ConfigTrust::ExplicitPath => {
+                let read_path = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+                read_config_bytes(&read_path)?
+            }
+            ConfigTrust::VerifyDirectory => {
+                let requested = std::path::absolute(path)?;
+                let requested_parent = requested.parent().ok_or_else(|| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::InvalidInput,
+                        format!("config path has no parent: {}", requested.display()),
+                    )
+                })?;
+                kettle_state::validate_trusted_directory(requested_parent)?;
+                let (file, read_path) =
+                    kettle_state::open_trusted_file_read_following_leaf(&requested)?;
+                read_config_file(file, &read_path)?
+            }
+        };
+        let text = decode_config_text(&bytes);
         let (config, unknown_keys) = Self::parse_collect(&text);
         let malformed_values = Self::detect_malformed_values(&text);
         Ok(LoadedConfig {
@@ -3083,6 +3138,13 @@ impl Config {
     /// allocation. Same defense-in-depth shape as `MAX_SESSION_BYTES`
     /// (session.json) and `MAX_BG_IMAGE_BYTES` (bg-image).
     pub fn load_from_with_diagnostics(path: &Path) -> (Config, Vec<String>, Vec<String>) {
+        Self::load_from_with_diagnostics_and_trust(path, ConfigTrust::VerifyDirectory)
+    }
+
+    pub fn load_from_with_diagnostics_and_trust(
+        path: &Path,
+        trust: ConfigTrust,
+    ) -> (Config, Vec<String>, Vec<String>) {
         // Decode by BOM rather than `read_to_string`, which hard-fails on a
         // non-UTF-8 file. A Windows user who runs the documented `kettle
         // --print-default-config > config` in **PowerShell 5.1** gets a
@@ -3103,7 +3165,7 @@ impl Config {
         // Fall back to the raw path when canonicalization fails (a missing
         // config, the common case, then yields the NotFound handled below as
         // defaults; a non-regular target is rejected by the reader itself).
-        match Self::read_from_with_diagnostics(path) {
+        match Self::read_from_with_trust(path, trust) {
             Ok(loaded) => (loaded.config, loaded.unknown_keys, loaded.malformed_values),
             // `read_config_bytes` folds the size + cap into the error
             // message itself (`InvalidData`), so surface it as-is rather
@@ -8687,24 +8749,19 @@ split_horiz = <Control><Shift>j
         // values silently dropped. The diagnostics variant returns both
         // lists so chrome callers can render them (the public log path
         // wraps it).
-        let dir = std::env::temp_dir().join(format!(
-            "kettle-load-from-diag-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_nanos())
-                .unwrap_or(0)
-        ));
-        std::fs::create_dir_all(&dir).expect("tmp dir");
+        let dir = tempdir_for("load-from-diag");
         let path = dir.join("kettle.conf");
-        std::fs::write(
-            &path,
+        let mut file = kettle_state::create_private_file_new(&path).expect("private config file");
+        std::io::Write::write_all(
+            &mut file,
             "font-size = wrong\n\
              totally-not-a-key = whatever\n\
              theme = TokyoNight Night\n\
-             font-family Jetbrains Mono\n",
+             font-family Jetbrains Mono\n"
+                .as_bytes(),
         )
         .expect("write");
+        drop(file);
         let (cfg, unknown, malformed) = Config::load_from_with_diagnostics(&path);
         // Cfg parsed cleanly past the typos (`theme` set, others defaulted).
         assert_eq!(cfg.theme_name, "TokyoNight Night");
@@ -8724,9 +8781,6 @@ split_horiz = <Control><Shift>j
                 .any(|m| m.contains("missing `=` separator")),
             "malformed: {malformed:?}"
         );
-        // Cleanup; ignore failures (race-safe).
-        let _ = std::fs::remove_file(&path);
-        let _ = std::fs::remove_dir(&dir);
     }
 
     /// Drift guard: an oversized config file (swap-attack
@@ -8736,15 +8790,7 @@ split_horiz = <Control><Shift>j
     /// function falls through to Config::default() rather than allocating.
     #[test]
     fn load_from_with_diagnostics_rejects_oversize_config() {
-        let dir = std::env::temp_dir().join(format!(
-            "kettle-load-from-diag-oversize-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_nanos())
-                .unwrap_or(0)
-        ));
-        std::fs::create_dir_all(&dir).expect("tmp dir");
+        let dir = tempdir_for("load-from-diag-oversize");
         let path = dir.join("kettle.conf");
         // Write a 2 MiB file (1 MiB over the cap). Content is
         // valid-looking config lines so the test verifies the size
@@ -8753,7 +8799,9 @@ split_horiz = <Control><Shift>j
         let line = "font-size = 14\n";
         let copies = (2 * 1024 * 1024) / line.len() + 1;
         let oversize: String = line.repeat(copies);
-        std::fs::write(&path, &oversize).expect("write oversize config");
+        let mut file = kettle_state::create_private_file_new(&path).expect("private config file");
+        std::io::Write::write_all(&mut file, oversize.as_bytes()).expect("write oversize config");
+        drop(file);
         let (cfg, unknown, malformed) = Config::load_from_with_diagnostics(&path);
         // Defaults returned; no parsing happened.
         let default_cfg = Config::default();
@@ -8765,8 +8813,6 @@ split_horiz = <Control><Shift>j
             .expect("the single-read API must retain the typed read failure");
         assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
         assert!(error.to_string().contains("cap"));
-        let _ = std::fs::remove_file(&path);
-        let _ = std::fs::remove_dir(&dir);
     }
 
     /// The primary startup/reload load path (`load_from_with_diagnostics`,
@@ -8782,29 +8828,22 @@ split_horiz = <Control><Shift>j
     /// be handled safely here).
     #[test]
     fn load_from_with_diagnostics_rejects_non_regular_config_path() {
-        let dir = std::env::temp_dir().join(format!(
-            "kettle-load-from-diag-non-regular-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_nanos())
-                .unwrap_or(0)
-        ));
+        let dir = tempdir_for("load-from-diag-non-regular");
         // Use the directory itself as the "config path": a directory is
         // the one non-regular-file shape that's trivially constructible
         // on every platform (FIFOs are Unix-only; see the symlink-specific
         // test below for Unix's other special-file guard).
-        std::fs::create_dir_all(&dir).expect("tmp dir");
-        let (cfg, unknown, malformed) = Config::load_from_with_diagnostics(&dir);
+        let path = dir.join("not-a-file");
+        std::fs::create_dir(&path).expect("non-regular config fixture");
+        let (cfg, unknown, malformed) = Config::load_from_with_diagnostics(&path);
         let default_cfg = Config::default();
         assert_eq!(cfg.font_size, default_cfg.font_size);
         assert!(unknown.is_empty(), "no diagnostics for a refused path");
         assert!(malformed.is_empty(), "no diagnostics for a refused path");
-        let error = Config::read_from_with_diagnostics(&dir)
+        let error = Config::read_from_with_diagnostics(&path)
             .err()
             .expect("the single-read API must reject a non-regular path");
         assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
-        let _ = std::fs::remove_dir(&dir);
     }
 
     // NB: startup config loading deliberately DOES follow a symlink to its
@@ -11164,7 +11203,9 @@ split_horiz = <Control><Shift>j
         let dir = tempdir_for("startup-symlink-follow");
         let target = dir.join("real-config");
         let link = dir.join("config");
-        std::fs::write(&target, "font-size = 17\n").unwrap();
+        let mut created = kettle_state::create_private_file_new(&target).unwrap();
+        std::io::Write::write_all(&mut created, b"font-size = 17\n").unwrap();
+        drop(created);
         symlink(&target, &link).unwrap();
 
         let (cfg, _unknown, _malformed) = super::Config::load_from_with_diagnostics(&link);
@@ -11182,6 +11223,52 @@ split_horiz = <Control><Shift>j
         let (defaulted, _, _) = super::Config::load_from_with_diagnostics(&bad_link);
         assert_eq!(defaulted.font_size, Config::default().font_size);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn implicit_config_rejects_an_untrusted_directory_but_explicit_path_loads() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let root = tempdir_for("config-trust-provenance");
+        let shared = root.join("shared");
+        std::fs::create_dir(&shared).unwrap();
+        std::fs::set_permissions(&shared, std::fs::Permissions::from_mode(0o775)).unwrap();
+        let path = shared.join("config");
+        std::fs::write(&path, "font-size = 19\n").unwrap();
+
+        let error = super::Config::read_from_with_trust(&path, super::ConfigTrust::VerifyDirectory)
+            .err()
+            .expect("an implicitly discovered config in a writable directory must be refused");
+        assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
+
+        let loaded = super::Config::read_from_with_trust(&path, super::ConfigTrust::ExplicitPath)
+            .expect("--config is an explicit trust grant");
+        assert_eq!(loaded.config.font_size, 19.0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn implicit_symlinked_config_checks_the_target_directory() {
+        use std::os::unix::fs::{PermissionsExt as _, symlink};
+
+        let root = tempdir_for("config-trust-symlink-target");
+        let shared = root.join("shared");
+        std::fs::create_dir(&shared).unwrap();
+        std::fs::set_permissions(&shared, std::fs::Permissions::from_mode(0o775)).unwrap();
+        let target = shared.join("config");
+        std::fs::write(&target, "font-size = 21\n").unwrap();
+        let link = root.join("config");
+        symlink(&target, &link).unwrap();
+
+        let error = super::Config::read_from_with_trust(&link, super::ConfigTrust::VerifyDirectory)
+            .err()
+            .expect("the safe link directory must not hide a writable target directory");
+        assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
+
+        let loaded = super::Config::read_from_with_trust(&link, super::ConfigTrust::ExplicitPath)
+            .expect("an explicit config may point into a shared project");
+        assert_eq!(loaded.config.font_size, 21.0);
     }
 
     #[test]

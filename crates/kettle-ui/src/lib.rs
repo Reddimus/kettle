@@ -82,8 +82,11 @@ pub struct Options {
     pub version: Option<String>,
     /// Working directory for the first tab (`kettle -d DIR`).
     pub cwd: Option<std::path::PathBuf>,
-    /// Explicit config file (`kettle --config FILE`); `None` = default path.
+    /// Resolved config file. `None` uses the default path.
     pub config: Option<std::path::PathBuf>,
+    /// Whether the path was an explicit user selection or one kettle
+    /// discovered as the default/profile config.
+    pub config_trust: kettle_config::ConfigTrust,
     /// Named-layout session profile. When set, kettle saves
     /// and restores from `<config-dir>/layouts/<NAME>.json` instead of
     /// the default `<config-dir>/session.json`. Lets a user persist

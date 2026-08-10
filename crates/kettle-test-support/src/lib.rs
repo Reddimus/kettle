@@ -702,20 +702,12 @@ const STALE_SCRATCH_AFTER: std::time::Duration = std::time::Duration::from_secs(
 
 /// Remove scratch directories that *earlier processes* left behind.
 ///
-/// A guard cannot always win. `spawn_server` hands the activation `Primary` —
-/// and with it an open `activation.lock` — to a thread that owns it for the
-/// process lifetime, by design, so the directory is still pinned when the guard
-/// drops at the end of the test. Unix unlinks a file someone still holds and the
-/// directory goes; Windows refuses, and `TempDir::drop` discards the error. That
-/// is how 148 `kettle*` entries accumulated in a real `%TEMP%`, and switching to
-/// a guard alone would only have moved them to `%LOCALAPPDATA%` — which is
-/// exactly what the Windows job reported when the claim was finally asserted
-/// rather than assumed.
-///
-/// Nothing can clear those during the run that pinned them, so each run clears
-/// what previous runs left. Matching on the caller's own prefix keeps this to
-/// directories this helper made: a real `kettle-<uid>` temp directory shares no
-/// prefix with `kettle-activation-…`.
+/// A guard cannot run after an abrupt process termination, and an earlier
+/// activation-test server also pinned its lock until process exit on Windows.
+/// Activation tests now own a stoppable server guard, but sweeping old entries
+/// remains useful for crashes and for cleaning the historical leftovers. Each
+/// prefix can reach only directories this helper made: a real `kettle-<uid>`
+/// runtime directory shares no prefix with `kettle-activation-…`.
 fn sweep_stale_scratch(base: &Path, prefix: &str, max_age: std::time::Duration) {
     let Ok(entries) = std::fs::read_dir(base) else {
         return;
@@ -752,9 +744,8 @@ pub fn sweep_stale_scratch_for_test(base: &Path, prefix: &str, max_age: std::tim
 /// permissive ambient umask. Windows stages beneath the user profile because
 /// the shared temporary directory can grant deletion rights to other users.
 ///
-/// Removal is belt and braces: the guard clears it when the test ends, and this
-/// clears anything a previous run could not. See `sweep_stale_scratch` for why
-/// the guard is not sufficient on its own.
+/// Removal is belt and braces: the guard clears it when the test ends, and the
+/// age-gated sweep clears anything an earlier crashed process left behind.
 pub fn private_tempdir(prefix: &str) -> PrivateTempDir {
     let mut builder = tempfile::Builder::new();
     builder.prefix(prefix);

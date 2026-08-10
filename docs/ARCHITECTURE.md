@@ -73,6 +73,27 @@ share these primitives. Advisory locks let callers serialize compound
 operations; configuration persistence holds one across the complete read,
 validate, backup, and replacement transaction.
 
+Configuration reads carry provenance across the CLI/UI boundary. Default and
+named-profile paths open through `kettle-state` while their verified parent
+handles remain live; Unix rejects writable or untrusted directory edges,
+writable or multiply-linked leaves, and symlink substitution. Dotfile-manager
+leaf links remain supported, but the link object is owner/link-count checked
+and resolved relative to the held parent before the target receives the same
+full-chain verification. macOS also
+inspects each held object's extended ACL for mutation grants to untrusted
+identities; Windows applies the equivalent owner, reparse-point, hard-link, and
+mutation-DACL checks, including generic access masks. The config watcher uses
+the same read-only directory verifier after a best-effort repair, so a safe
+read-only mount can still reload and an unsafe directory cannot turn an edit
+into a `RunCommand` trigger. An explicit `--config FILE` is represented as a
+separate provenance value and intentionally retains bounded regular-file
+loading for project/shared configs. A failed live read leaves the last
+known-good configuration installed rather than replacing it with defaults.
+Each filesystem guard retains only the immediate-parent capability used for
+relative operations; ancestor identities are recorded and the complete chain
+is reopened and revalidated around publication. This keeps steady descriptor
+use O(1) per guard rather than O(path depth) without weakening path-swap checks.
+
 Pasted clipboard bitmaps add a narrower ephemeral-file lifecycle on top of
 those primitives. One process owns at most 64 PNG handles and 256 MiB of final
 encoded PNG bytes; the streaming writer refuses a write that would cross the
@@ -1205,6 +1226,11 @@ boundary — `kettle.send_text` types into the shell and a newline runs the
 line — so `restricted` is the level for a plugin you have not read: it
 refuses `send_text` and `exec_action` and leaves the rest working. See
 [`docs/TERMINATOR-PLUGIN-DESIGN.md`](TERMINATOR-PLUGIN-DESIGN.md).
+The auto-loaded `init.lua` therefore shares the implicit-config trust policy:
+its requested and resolved directories and opened leaf must reject untrusted
+mutation. `--lua-script FILE` is explicit provenance and may intentionally run
+a project-local or shared script. Both paths read once through a held handle
+with a 4 MiB cap, so a path replacement cannot bypass the size decision.
 
 ### Settings overlay + interactive keybind editor
 

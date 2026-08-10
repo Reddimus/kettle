@@ -37,9 +37,16 @@ use std::path::Path;
 /// was widened to fix. What would actually close it is provenance kettle can
 /// verify (a marker it wrote itself), not a shorter list of names.
 fn kettle_base_dirs() -> Vec<std::path::PathBuf> {
-    let mut bases = vec![std::env::temp_dir()];
-    let env_path = |key: &str| {
-        std::env::var_os(key)
+    kettle_base_dirs_from(|key| std::env::var_os(key), std::env::temp_dir())
+}
+
+fn kettle_base_dirs_from(
+    mut lookup: impl FnMut(&str) -> Option<std::ffi::OsString>,
+    temp_dir: std::path::PathBuf,
+) -> Vec<std::path::PathBuf> {
+    let mut bases = vec![temp_dir];
+    let mut env_path = |key: &str| {
+        lookup(key)
             .map(std::path::PathBuf::from)
             .filter(|path| path.is_absolute())
     };
@@ -90,6 +97,10 @@ fn kettle_base_dirs() -> Vec<std::path::PathBuf> {
 /// Directories *below* a matched namespace are still kettle's; the callers walk
 /// down from it rather than asking this again.
 pub fn is_kettle_owned_dir_name(path: &Path) -> bool {
+    is_kettle_owned_dir_name_in(path, &kettle_base_dirs())
+}
+
+fn is_kettle_owned_dir_name_in(path: &Path, bases: &[std::path::PathBuf]) -> bool {
     let named = path
         .file_name()
         .and_then(|name| name.to_str())
@@ -105,7 +116,56 @@ pub fn is_kettle_owned_dir_name(path: &Path) -> bool {
     let Some(parent) = path.parent() else {
         return false;
     };
-    kettle_base_dirs().iter().any(|base| base == parent)
+    bases.iter().any(|base| base == parent)
+}
+
+/// Verify that `directory` is safe to read private, executable configuration
+/// from without creating or modifying anything.
+///
+/// This is the read-only counterpart to [`create_private_dirs`]. It reuses the
+/// same descriptor/handle-based parent-chain checks as the private-file APIs:
+/// Unix rejects untrusted ownership, writable directory edges and
+/// user-controlled symlink ancestors; macOS additionally rejects extended ACL
+/// mutation grants to principals other than this user, root, wheel, or local
+/// administrators; Windows rejects reparse points and DACLs that grant
+/// path/content mutation to an untrusted principal. The directory itself is
+/// the target edge, so an untrusted peer must not be able to replace files
+/// inside it.
+///
+/// The synthetic leaf is never opened. It only lets the existing parent guard
+/// validate `directory` as the immediate parent while retaining the guard's
+/// race-resistant, platform-specific implementation.
+pub fn validate_trusted_directory(directory: &Path) -> io::Result<()> {
+    let guard = guard_private_parent(&directory.join(".kettle-directory-trust-check"))?;
+    guard.verify_directory()
+}
+
+/// Open a regular file for reading while holding its verified parent chain.
+///
+/// Unlike the private-file APIs, this does not change the leaf's permissions:
+/// configuration files are commonly `0644` on Unix or inherit trusted
+/// Administrator/SYSTEM entries on Windows. It does reject a leaf that an
+/// untrusted principal can modify, a reparse/symlink leaf, or a multiply-linked
+/// leaf, and verifies that the parent path still names the held directories
+/// after the open completes.
+pub fn open_trusted_file_read(path: &Path) -> io::Result<File> {
+    open_trusted_file_read_impl(path)
+}
+
+/// Open an implicitly discovered trusted file, following at most its leaf link.
+///
+/// A dotfile manager commonly installs `config` or `init.lua` as a symbolic
+/// link. Following that link is safe only when the link itself has trusted
+/// provenance: an older kettle may first repair a `0775` directory in which a
+/// group peer could already have planted a link. This operation validates and
+/// holds the requested leaf while resolving it, then applies
+/// [`open_trusted_file_read`] to the resolved regular target. The returned path
+/// names the object represented by the returned handle and is suitable for
+/// diagnostics.
+pub fn open_trusted_file_read_following_leaf(
+    path: &Path,
+) -> io::Result<(File, std::path::PathBuf)> {
+    open_trusted_file_read_following_leaf_impl(path)
 }
 
 /// Create `directory`, giving every kettle-named ancestor an explicit `0700`
@@ -393,6 +453,18 @@ fn open_existing_private_file_impl(path: &Path) -> io::Result<File> {
 }
 
 #[cfg(unix)]
+fn open_trusted_file_read_impl(path: &Path) -> io::Result<File> {
+    unix::open_trusted_file_read(path)
+}
+
+#[cfg(unix)]
+fn open_trusted_file_read_following_leaf_impl(
+    path: &Path,
+) -> io::Result<(File, std::path::PathBuf)> {
+    unix::open_trusted_file_read_following_leaf(path)
+}
+
+#[cfg(unix)]
 fn open_private_file_append_impl(path: &Path) -> io::Result<File> {
     match unix::create_private_file_new(path, true) {
         Ok(file) => Ok(file),
@@ -422,6 +494,18 @@ fn open_private_file_impl(path: &Path) -> io::Result<File> {
 #[cfg(windows)]
 fn open_existing_private_file_impl(path: &Path) -> io::Result<File> {
     windows::open_existing_private_file(path, false)
+}
+
+#[cfg(windows)]
+fn open_trusted_file_read_impl(path: &Path) -> io::Result<File> {
+    windows::open_trusted_file_read(path)
+}
+
+#[cfg(windows)]
+fn open_trusted_file_read_following_leaf_impl(
+    path: &Path,
+) -> io::Result<(File, std::path::PathBuf)> {
+    windows::open_trusted_file_read_following_leaf(path)
 }
 
 #[cfg(windows)]
@@ -466,6 +550,22 @@ fn open_existing_private_file_impl(path: &Path) -> io::Result<File> {
         .open(path)?;
     require_regular_file(&file, path)?;
     Ok(file)
+}
+
+#[cfg(not(any(unix, windows)))]
+fn open_trusted_file_read_impl(path: &Path) -> io::Result<File> {
+    let file = File::open(path)?;
+    require_regular_file(&file, path)?;
+    Ok(file)
+}
+
+#[cfg(not(any(unix, windows)))]
+fn open_trusted_file_read_following_leaf_impl(
+    path: &Path,
+) -> io::Result<(File, std::path::PathBuf)> {
+    let resolved = std::fs::canonicalize(path)?;
+    let file = open_trusted_file_read_impl(&resolved)?;
+    Ok((file, resolved))
 }
 
 #[cfg(not(any(unix, windows)))]
@@ -635,6 +735,16 @@ pub(super) fn owned_by_current_token_owner(file: &File) -> io::Result<bool> {
 }
 
 #[cfg(all(test, windows))]
+pub(super) fn grant_world_write_for_test(file: &File) -> io::Result<()> {
+    windows::grant_world_write_for_test(file)
+}
+
+#[cfg(all(test, windows))]
+pub(super) fn grant_world_all_for_test(file: &File) -> io::Result<()> {
+    windows::grant_world_all_for_test(file)
+}
+
+#[cfg(all(test, windows))]
 pub(super) fn dacl_signature(path: &Path) -> io::Result<(Option<Vec<u8>>, bool)> {
     windows::dacl_signature(path)
 }
@@ -716,6 +826,10 @@ impl PrivateParentGuard {
     pub(super) fn verify(&self) -> io::Result<()> {
         Ok(())
     }
+
+    pub(super) fn verify_directory(&self) -> io::Result<()> {
+        Ok(())
+    }
 }
 
 #[cfg(not(any(unix, windows)))]
@@ -769,7 +883,7 @@ mod unix {
     use super::*;
     use std::ffi::{CString, OsStr, OsString};
     use std::os::fd::{AsRawFd as _, FromRawFd as _, IntoRawFd as _};
-    use std::os::unix::ffi::OsStrExt as _;
+    use std::os::unix::ffi::{OsStrExt as _, OsStringExt as _};
     use std::os::unix::fs::MetadataExt as _;
     use std::path::{Component, PathBuf};
 
@@ -1025,6 +1139,32 @@ mod unix {
         uid == current_user() || uid == 0
     }
 
+    pub(super) fn require_trusted_symbolic_link(
+        uid: u32,
+        links: libc::nlink_t,
+        path: &Path,
+    ) -> io::Result<()> {
+        if !trusted_identity(uid) {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                format!(
+                    "trusted symbolic link is owned by an untrusted user: {}",
+                    path.display()
+                ),
+            ));
+        }
+        if links != 1 {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                format!(
+                    "trusted symbolic link has an unexpected hard-link count: {}",
+                    path.display()
+                ),
+            ));
+        }
+        Ok(())
+    }
+
     /// The remedy sentence, but only when the offending directory is one kettle
     /// named for itself.
     ///
@@ -1237,6 +1377,13 @@ mod unix {
                 "filesystem root is not a directory",
             ));
         }
+        #[cfg(target_os = "macos")]
+        macos_acl::require_no_untrusted_mutation_grant(
+            &root,
+            Path::new("/"),
+            macos_acl::DANGEROUS_DIRECTORY_RIGHTS,
+            "trusted directory chain",
+        )?;
         identities.push(FileIdentity::from_metadata(&root_metadata));
         handles.push(root);
 
@@ -1259,6 +1406,13 @@ mod unix {
                 ));
             }
             require_trusted_directory_edge(&parent_metadata, &child_metadata, &cursor)?;
+            #[cfg(target_os = "macos")]
+            macos_acl::require_no_untrusted_mutation_grant(
+                &child,
+                &cursor,
+                macos_acl::DANGEROUS_DIRECTORY_RIGHTS,
+                "trusted directory chain",
+            )?;
             identities.push(FileIdentity::from_metadata(&child_metadata));
             handles.push(child);
         }
@@ -1297,25 +1451,34 @@ mod unix {
         path: PathBuf,
         leaf: OsString,
         identities: Vec<FileIdentity>,
-        handles: Vec<File>,
+        directory: File,
     }
 
     impl PrivateParentGuard {
         pub(super) fn new(path: &Path) -> io::Result<Self> {
             let (parent, leaf) = split_path(path)?;
-            let (handles, identities) = open_verified_parent_chain(&parent)?;
+            let (mut handles, identities) = open_verified_parent_chain(&parent)?;
+            // Operations are relative to the immediate parent capability. The
+            // ancestor handles are not needed after construction: `verify`
+            // reopens the complete chain and compares every identity before or
+            // after publication. Retaining all of them made each guard consume
+            // O(path depth) descriptors and pushed the parallel config suite
+            // past macOS's 256-FD soft limit; one held parent is sufficient and
+            // makes steady descriptor use O(1).
+            let directory = handles
+                .pop()
+                .expect("the verified chain always contains the root");
+            drop(handles);
             Ok(Self {
                 path: parent,
                 leaf,
                 identities,
-                handles,
+                directory,
             })
         }
 
         fn directory(&self) -> &File {
-            self.handles
-                .last()
-                .expect("a parent guard always contains its immediate parent")
+            &self.directory
         }
 
         fn validate_path(&self, path: &Path) -> io::Result<OsString> {
@@ -1372,6 +1535,15 @@ mod unix {
                     ),
                 ))
             }
+        }
+
+        pub(crate) fn verify_directory(&self) -> io::Result<()> {
+            self.require_leaf_policy(current_user())?;
+            // `open_verified_parent_chain`, used by `verify`, also rechecks
+            // macOS mutation ACLs on every reopened component. Keeping that
+            // check in the reopen avoids both stale ACL observations and a
+            // retained descriptor per ancestor.
+            self.verify()
         }
 
         fn entry_matches(&self, file: &File, name: &OsStr) -> io::Result<bool> {
@@ -1700,6 +1872,323 @@ mod unix {
         Ok(file)
     }
 
+    pub(super) fn open_trusted_file_read(path: &Path) -> io::Result<File> {
+        use std::os::unix::fs::MetadataExt as _;
+
+        let guard = PrivateParentGuard::new(path)?;
+        let file = open_at(&guard, path, libc::O_RDONLY, 0)?;
+        require_regular_file(&file, path)?;
+        let metadata = file.metadata()?;
+        guard.require_leaf_policy(metadata.uid())?;
+        if !trusted_identity(metadata.uid()) {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                format!(
+                    "trusted file is owned by an untrusted user: {}",
+                    path.display()
+                ),
+            ));
+        }
+        if metadata.mode() & 0o022 != 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                format!(
+                    "trusted file is writable by an untrusted principal: {} (mode {:o})",
+                    path.display(),
+                    metadata.mode() & 0o7777
+                ),
+            ));
+        }
+        if metadata.nlink() != 1 {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                format!(
+                    "trusted file has an unexpected hard-link count: {}",
+                    path.display()
+                ),
+            ));
+        }
+        #[cfg(target_os = "macos")]
+        macos_acl::require_no_untrusted_mutation_grant(
+            &file,
+            path,
+            macos_acl::DANGEROUS_FILE_RIGHTS,
+            "trusted file",
+        )?;
+        guard.verify_directory()?;
+        if !guard.entry_matches(&file, &guard.leaf)? {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "trusted path changed while it was opened",
+            ));
+        }
+        Ok(file)
+    }
+
+    fn read_link_at(guard: &PrivateParentGuard, path: &Path) -> io::Result<PathBuf> {
+        const MAX_LINK_BYTES: usize = 64 * 1024;
+
+        let name = guard.validate_path(path)?;
+        let name = c_name(&name, "trusted link name")?;
+        let mut capacity = 256usize;
+        loop {
+            let mut bytes = vec![0_u8; capacity];
+            // SAFETY: the held parent descriptor and NUL-terminated name are
+            // valid, and `bytes` exposes `capacity` writable bytes.
+            let read = unsafe {
+                libc::readlinkat(
+                    guard.directory().as_raw_fd(),
+                    name.as_ptr(),
+                    bytes.as_mut_ptr().cast(),
+                    bytes.len(),
+                )
+            };
+            if read < 0 {
+                return Err(io::Error::last_os_error());
+            }
+            let read = read as usize;
+            if read < bytes.len() {
+                bytes.truncate(read);
+                return Ok(PathBuf::from(OsString::from_vec(bytes)));
+            }
+            capacity = capacity.checked_mul(2).ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "trusted link target is too long",
+                )
+            })?;
+            if capacity > MAX_LINK_BYTES {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!("trusted link target exceeds {MAX_LINK_BYTES} bytes"),
+                ));
+            }
+        }
+    }
+
+    pub(super) fn open_trusted_file_read_following_leaf(
+        path: &Path,
+    ) -> io::Result<(File, PathBuf)> {
+        let guard = PrivateParentGuard::new(path)?;
+        let requested = guard.path.join(&guard.leaf);
+        let before = entry_stat(guard.directory(), &guard.leaf)?.ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("trusted path does not exist: {}", requested.display()),
+            )
+        })?;
+
+        if stat_is_regular(&before) {
+            drop(guard);
+            return Ok((open_trusted_file_read(&requested)?, requested));
+        }
+        if before.st_mode & libc::S_IFMT != libc::S_IFLNK {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "trusted path is not a regular file or symbolic link: {}",
+                    requested.display()
+                ),
+            ));
+        }
+        guard.require_leaf_policy(before.st_uid)?;
+        require_trusted_symbolic_link(before.st_uid, before.st_nlink, &requested)?;
+
+        // Read the link relative to the held immediate parent. Recheck both
+        // the parent chain and the link inode before trusting the selected
+        // target; a repair from 0775 to 0700 cannot bless a link a group peer
+        // planted before the repair.
+        let target = read_link_at(&guard, &requested)?;
+        guard.verify_directory()?;
+        let after = entry_stat(guard.directory(), &guard.leaf)?.ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "trusted symbolic link disappeared while it was resolved",
+            )
+        })?;
+        if FileIdentity::from_stat(&before) != FileIdentity::from_stat(&after) {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "trusted symbolic link changed while it was resolved",
+            ));
+        }
+        let target = if target.is_absolute() {
+            target
+        } else {
+            guard.path.join(target)
+        };
+        let resolved = std::fs::canonicalize(target)?;
+        let file = open_trusted_file_read(&resolved)?;
+        Ok((file, resolved))
+    }
+
+    #[cfg(target_os = "macos")]
+    mod macos_acl {
+        use super::*;
+        use std::ffi::c_void;
+
+        type Acl = *mut c_void;
+        type AclEntry = *mut c_void;
+
+        const ACL_TYPE_EXTENDED: i32 = 0x0000_0100;
+        const ACL_FIRST_ENTRY: i32 = 0;
+        const ACL_NEXT_ENTRY: i32 = -1;
+        const ACL_EXTENDED_ALLOW: i32 = 1;
+
+        const ACL_WRITE_DATA: u64 = 1 << 2;
+        const ACL_DELETE: u64 = 1 << 4;
+        const ACL_APPEND_DATA: u64 = 1 << 5;
+        const ACL_DELETE_CHILD: u64 = 1 << 6;
+        const ACL_WRITE_ATTRIBUTES: u64 = 1 << 8;
+        const ACL_WRITE_EXTATTRIBUTES: u64 = 1 << 10;
+        const ACL_WRITE_SECURITY: u64 = 1 << 12;
+        const ACL_CHANGE_OWNER: u64 = 1 << 13;
+
+        pub(super) const DANGEROUS_DIRECTORY_RIGHTS: u64 = ACL_WRITE_DATA
+            | ACL_DELETE
+            | ACL_APPEND_DATA
+            | ACL_DELETE_CHILD
+            | ACL_WRITE_ATTRIBUTES
+            | ACL_WRITE_EXTATTRIBUTES
+            | ACL_WRITE_SECURITY
+            | ACL_CHANGE_OWNER;
+        pub(super) const DANGEROUS_FILE_RIGHTS: u64 = ACL_WRITE_DATA
+            | ACL_DELETE
+            | ACL_APPEND_DATA
+            | ACL_WRITE_ATTRIBUTES
+            | ACL_WRITE_EXTATTRIBUTES
+            | ACL_WRITE_SECURITY
+            | ACL_CHANGE_OWNER;
+
+        unsafe extern "C" {
+            fn acl_get_fd_np(fd: libc::c_int, kind: libc::c_int) -> Acl;
+            fn acl_get_entry(acl: Acl, entry_id: libc::c_int, entry: *mut AclEntry) -> libc::c_int;
+            fn acl_get_tag_type(entry: AclEntry, tag: *mut libc::c_int) -> libc::c_int;
+            fn acl_get_permset_mask_np(entry: AclEntry, mask: *mut u64) -> libc::c_int;
+            fn acl_get_qualifier(entry: AclEntry) -> *mut c_void;
+            fn acl_free(object: *mut c_void) -> libc::c_int;
+            fn mbr_uid_to_uuid(uid: libc::uid_t, uuid: *mut [u8; 16]) -> libc::c_int;
+            fn mbr_gid_to_uuid(gid: libc::gid_t, uuid: *mut [u8; 16]) -> libc::c_int;
+        }
+
+        struct OwnedAcl(Acl);
+
+        impl Drop for OwnedAcl {
+            fn drop(&mut self) {
+                // SAFETY: acl_get_fd_np returned this allocated ACL.
+                let _ = unsafe { acl_free(self.0) };
+            }
+        }
+
+        fn identity_uuid(id: u32, group: bool) -> io::Result<[u8; 16]> {
+            let mut uuid = [0_u8; 16];
+            // SAFETY: `uuid` is a writable 16-byte UUID output buffer.
+            let status = unsafe {
+                if group {
+                    mbr_gid_to_uuid(id, &mut uuid)
+                } else {
+                    mbr_uid_to_uuid(id, &mut uuid)
+                }
+            };
+            if status == 0 {
+                Ok(uuid)
+            } else {
+                Err(io::Error::from_raw_os_error(status))
+            }
+        }
+
+        fn trusted_qualifier(entry: AclEntry) -> io::Result<bool> {
+            // Darwin ACL qualifiers are allocated UUID values. Trust only this
+            // user, root, wheel, and the local administrators group; an ACL
+            // grant to staff/everyone is precisely the cross-user mutation
+            // path this verifier exists to reject.
+            // SAFETY: `entry` came from the live ACL iterator.
+            let qualifier = unsafe { acl_get_qualifier(entry) };
+            if qualifier.is_null() {
+                return Err(io::Error::last_os_error());
+            }
+            let mut actual = [0_u8; 16];
+            // SAFETY: a Darwin ACL qualifier points to one uuid_t.
+            unsafe {
+                std::ptr::copy_nonoverlapping(qualifier.cast::<u8>(), actual.as_mut_ptr(), 16);
+            }
+            // SAFETY: acl_get_qualifier allocated the qualifier.
+            let free_status = unsafe { acl_free(qualifier) };
+            if free_status != 0 {
+                return Err(io::Error::last_os_error());
+            }
+            let trusted = [
+                identity_uuid(current_user(), false)?,
+                identity_uuid(0, false)?,
+                identity_uuid(0, true)?,
+                identity_uuid(80, true)?,
+            ];
+            Ok(trusted.contains(&actual))
+        }
+
+        pub(super) fn require_no_untrusted_mutation_grant(
+            object: &File,
+            path: &Path,
+            dangerous_rights: u64,
+            description: &str,
+        ) -> io::Result<()> {
+            // SAFETY: object owns a live descriptor and ACL_TYPE_EXTENDED is
+            // Darwin's descriptor-based NFSv4 ACL class.
+            let raw = unsafe { acl_get_fd_np(object.as_raw_fd(), ACL_TYPE_EXTENDED) };
+            if raw.is_null() {
+                let error = io::Error::last_os_error();
+                // Darwin reports an object with no extended ACL as ENOENT.
+                // A filesystem that cannot store this ACL class cannot carry
+                // an out-of-band mutation grant either, so its mode bits are
+                // the complete permission set. Every other retrieval failure
+                // stays fail-closed.
+                if matches!(error.raw_os_error(), Some(libc::ENOENT | libc::ENOTSUP)) {
+                    return Ok(());
+                }
+                return Err(error);
+            }
+            let acl = OwnedAcl(raw);
+            let mut entry = std::ptr::null_mut();
+            let mut entry_id = ACL_FIRST_ENTRY;
+            loop {
+                // SAFETY: `acl` stays allocated and `entry` is an output slot.
+                let found = unsafe { acl_get_entry(acl.0, entry_id, &mut entry) };
+                if found != 0 {
+                    let error = io::Error::last_os_error();
+                    // Darwin uses EINVAL to signal that the iterator has no
+                    // first/next entry; unlike some POSIX ACL APIs, success is
+                    // zero rather than one.
+                    if error.raw_os_error() == Some(libc::EINVAL) {
+                        return Ok(());
+                    }
+                    return Err(error);
+                }
+                entry_id = ACL_NEXT_ENTRY;
+
+                let mut tag = 0;
+                let mut mask = 0_u64;
+                // SAFETY: the iterator returned a live ACL entry.
+                if unsafe { acl_get_tag_type(entry, &mut tag) } != 0
+                    || unsafe { acl_get_permset_mask_np(entry, &mut mask) } != 0
+                {
+                    return Err(io::Error::last_os_error());
+                }
+                if tag == ACL_EXTENDED_ALLOW
+                    && mask & dangerous_rights != 0
+                    && !trusted_qualifier(entry)?
+                {
+                    return Err(io::Error::new(
+                        io::ErrorKind::PermissionDenied,
+                        format!(
+                            "{description} grants mutation rights to an untrusted ACL principal: {}",
+                            path.display()
+                        ),
+                    ));
+                }
+            }
+        }
+    }
+
     pub(super) fn discard_created_private_file(file: File, path: &Path) {
         if let Ok(guard) = PrivateParentGuard::new(path)
             && let Ok(name) = guard.validate_path(path)
@@ -1748,6 +2237,8 @@ mod windows {
     use windows_sys::Win32::Security::Authorization::{
         GetSecurityInfo, SE_FILE_OBJECT, SetSecurityInfo,
     };
+    #[cfg(test)]
+    use windows_sys::Win32::Security::WinWorldSid;
     use windows_sys::Win32::Security::{
         ACCESS_ALLOWED_ACE, ACL, ACL_REVISION, AddAccessAllowedAceEx, CreateWellKnownSid,
         DACL_SECURITY_INFORMATION, EqualSid, GetAce, GetLengthSid, GetSecurityDescriptorControl,
@@ -1766,8 +2257,8 @@ mod windows {
         FILE_ATTRIBUTE_REPARSE_POINT, FILE_DELETE_CHILD, FILE_DISPOSITION_INFO,
         FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_ID_INFO,
         FILE_LIST_DIRECTORY, FILE_READ_ATTRIBUTES, FILE_RENAME_INFO, FILE_SHARE_DELETE,
-        FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_TRAVERSE, FileDispositionInfo, FileIdInfo,
-        FileRenameInfoEx, GetFileInformationByHandle, GetFileInformationByHandleEx,
+        FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_TRAVERSE, FILE_WRITE_DATA, FileDispositionInfo,
+        FileIdInfo, FileRenameInfoEx, GetFileInformationByHandle, GetFileInformationByHandleEx,
         GetFinalPathNameByHandleW, OPEN_EXISTING, READ_CONTROL, ReOpenFile,
         SetFileInformationByHandle, VOLUME_NAME_GUID, WRITE_DAC, WRITE_OWNER,
     };
@@ -2418,6 +2909,97 @@ mod windows {
         Ok(file)
     }
 
+    pub(super) fn open_trusted_file_read(path: &Path) -> io::Result<File> {
+        reject_parent_components(path)?;
+        let path = std::path::absolute(path)?;
+        let parent = PrivateParentGuard::new(&path)?;
+        let stable_path = std::ffi::OsString::from_wide(&parent.stable_path(&path)?);
+        let mut options = std::fs::OpenOptions::new();
+        options
+            .access_mode(GENERIC_READ | FILE_READ_ATTRIBUTES | READ_CONTROL)
+            .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
+            // Opening a directory on Windows requires BACKUP_SEMANTICS. Keep
+            // that open possible so `require_regular_non_reparse` can classify
+            // a directory as `InvalidInput`; without it CreateFileW stops at
+            // ERROR_ACCESS_DENIED and the cross-platform API reports the wrong
+            // failure class before its object checks run.
+            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT);
+        let file = options.open(&stable_path)?;
+        require_regular_non_reparse(&file, &path)?;
+        require_single_link(&file, &path)?;
+        let current_user = current_user_sid()?;
+        let administrators = builtin_administrators_sid()?;
+        let system = well_known_sid(WinLocalSystemSid)?;
+        require_trusted_object_security(
+            &file,
+            &path,
+            current_user.sid,
+            administrators.sid,
+            system.sid,
+            DANGEROUS_FILE_RIGHTS,
+            "trusted file",
+        )?;
+        parent.verify()?;
+        Ok(file)
+    }
+
+    pub(super) fn open_trusted_file_read_following_leaf(
+        path: &Path,
+    ) -> io::Result<(File, PathBuf)> {
+        reject_parent_components(path)?;
+        let requested = std::path::absolute(path)?;
+        let parent = PrivateParentGuard::new(&requested)?;
+        let stable_path = std::ffi::OsString::from_wide(&parent.stable_path(&requested)?);
+        let mut options = std::fs::OpenOptions::new();
+        options
+            .access_mode(FILE_READ_ATTRIBUTES | READ_CONTROL)
+            // Deliberately omit delete sharing. While this handle lives, the
+            // requested reparse leaf cannot be renamed between validation and
+            // canonicalization.
+            .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
+            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT);
+        let requested_handle = options.open(&stable_path)?;
+        let information = file_information(&requested_handle)?;
+        if information.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT == 0 {
+            drop(requested_handle);
+            drop(parent);
+            return Ok((open_trusted_file_read(&requested)?, requested));
+        }
+        if information.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY != 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "trusted file link resolves through a directory reparse point: {}",
+                    requested.display()
+                ),
+            ));
+        }
+        require_single_link(&requested_handle, &requested)?;
+        let current_user = current_user_sid()?;
+        let administrators = builtin_administrators_sid()?;
+        let system = well_known_sid(WinLocalSystemSid)?;
+        require_trusted_object_security(
+            &requested_handle,
+            &requested,
+            current_user.sid,
+            administrators.sid,
+            system.sid,
+            DANGEROUS_FILE_RIGHTS,
+            "trusted file link",
+        )?;
+        parent.verify()?;
+
+        // `requested_handle` denies delete sharing and the guard holds every
+        // ancestor without it, so this resolution is bound to the reparse
+        // object and directory chain just inspected rather than to a mutable
+        // drive-letter pathname.
+        let resolved = std::fs::canonicalize(&stable_path)?;
+        let file = open_trusted_file_read(&resolved)?;
+        parent.verify()?;
+        drop(requested_handle);
+        Ok((file, resolved))
+    }
+
     pub(super) fn remove_open_private_file(file: File, path: &Path) -> io::Result<()> {
         require_regular_non_reparse(&file, path)?;
         require_single_link(&file, path)?;
@@ -2746,13 +3328,22 @@ mod windows {
     /// creation while passing a check that looked only for the specific ones.
     const DANGEROUS_CONTENT_RIGHTS: u32 = GENERIC_WRITE | FILE_ADD_FILE | FILE_ADD_SUBDIRECTORY;
 
-    fn require_trusted_directory_security(
-        directory: &File,
+    const DANGEROUS_FILE_RIGHTS: u32 = GENERIC_ALL
+        | GENERIC_WRITE
+        | FILE_WRITE_DATA
+        | FILE_APPEND_DATA
+        | DELETE
+        | WRITE_DAC
+        | WRITE_OWNER;
+
+    fn require_trusted_object_security(
+        object: &File,
         path: &Path,
         current_user: PSID,
         administrators: PSID,
         system: PSID,
-        is_target_directory: bool,
+        dangerous_rights: u32,
+        description: &str,
     ) -> io::Result<()> {
         let mut owner = std::ptr::null_mut();
         let mut dacl = std::ptr::null_mut();
@@ -2761,7 +3352,7 @@ mod windows {
         // pointer is valid. The returned owner/DACL are anchored in descriptor.
         let status = unsafe {
             GetSecurityInfo(
-                directory.as_raw_handle() as HANDLE,
+                object.as_raw_handle() as HANDLE,
                 SE_FILE_OBJECT,
                 OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION,
                 &mut owner,
@@ -2778,24 +3369,18 @@ mod windows {
         if !trusted_windows_sid(owner, current_user, administrators, system) {
             return Err(io::Error::new(
                 io::ErrorKind::PermissionDenied,
-                format!("private parent has an untrusted owner: {}", path.display()),
+                format!("{description} has an untrusted owner: {}", path.display()),
             ));
         }
         if dacl.is_null() || unsafe { IsValidAcl(dacl) } == 0 {
             return Err(io::Error::new(
                 io::ErrorKind::PermissionDenied,
                 format!(
-                    "private parent has no valid access-control list: {}",
+                    "{description} has no valid access-control list: {}",
                     path.display()
                 ),
             ));
         }
-
-        let dangerous_rights = if is_target_directory {
-            DANGEROUS_PATH_RIGHTS | DANGEROUS_CONTENT_RIGHTS
-        } else {
-            DANGEROUS_PATH_RIGHTS
-        };
         for index in 0..unsafe { (*dacl).AceCount } {
             let mut ace = std::ptr::null_mut();
             // SAFETY: index is bounded by the validated ACL's AceCount.
@@ -2826,7 +3411,7 @@ mod windows {
                 return Err(io::Error::new(
                     io::ErrorKind::PermissionDenied,
                     format!(
-                        "private parent has an unverified object-specific mutation ACE: {}",
+                        "{description} has an unverified object-specific mutation ACE: {}",
                         path.display()
                     ),
                 ));
@@ -2836,13 +3421,37 @@ mod windows {
                 return Err(io::Error::new(
                     io::ErrorKind::PermissionDenied,
                     format!(
-                        "private parent grants deletion/control rights to an untrusted principal: {}",
+                        "{description} grants mutation rights to an untrusted principal: {}",
                         path.display()
                     ),
                 ));
             }
         }
         Ok(())
+    }
+
+    fn require_trusted_directory_security(
+        directory: &File,
+        path: &Path,
+        current_user: PSID,
+        administrators: PSID,
+        system: PSID,
+        is_target_directory: bool,
+    ) -> io::Result<()> {
+        let dangerous_rights = if is_target_directory {
+            DANGEROUS_PATH_RIGHTS | DANGEROUS_CONTENT_RIGHTS
+        } else {
+            DANGEROUS_PATH_RIGHTS
+        };
+        require_trusted_object_security(
+            directory,
+            path,
+            current_user,
+            administrators,
+            system,
+            dangerous_rights,
+            "private parent",
+        )
     }
 
     pub(crate) struct PrivateParentGuard {
@@ -2902,6 +3511,10 @@ mod windows {
                     ),
                 ))
             }
+        }
+
+        pub(crate) fn verify_directory(&self) -> io::Result<()> {
+            self.verify()
         }
 
         pub(super) fn replace_with_open_file(
@@ -3464,6 +4077,59 @@ mod windows {
     }
 
     #[cfg(test)]
+    fn grant_world_access_for_test(file: &File, world_access: u32) -> io::Result<()> {
+        let current_user = current_user_sid()?;
+        let world = well_known_sid(WinWorldSid)?;
+        let ace_bytes = |sid: PSID| {
+            std::mem::size_of::<ACCESS_ALLOWED_ACE>() - std::mem::size_of::<u32>()
+                + unsafe { GetLengthSid(sid) } as usize
+        };
+        let acl_len = std::mem::size_of::<ACL>()
+            .checked_add(ace_bytes(current_user.sid))
+            .and_then(|len| len.checked_add(ace_bytes(world.sid)))
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "ACL size overflow"))?;
+        let mut storage = vec![0_u64; acl_len.div_ceil(std::mem::size_of::<u64>())];
+        let acl = storage.as_mut_ptr().cast::<ACL>();
+        let capacity = u32::try_from(storage.len() * std::mem::size_of::<u64>())
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "ACL is too large"))?;
+        if unsafe { InitializeAcl(acl, capacity, ACL_REVISION) } == 0
+            || unsafe {
+                AddAccessAllowedAceEx(acl, ACL_REVISION, 0, FILE_ALL_ACCESS, current_user.sid)
+            } == 0
+            || unsafe { AddAccessAllowedAceEx(acl, ACL_REVISION, 0, world_access, world.sid) } == 0
+        {
+            return Err(io::Error::last_os_error());
+        }
+        let handle = reopen_for_acl(file)?;
+        let status = unsafe {
+            SetSecurityInfo(
+                handle.as_raw_handle() as HANDLE,
+                SE_FILE_OBJECT,
+                DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                acl,
+                std::ptr::null(),
+            )
+        };
+        if status == 0 {
+            Ok(())
+        } else {
+            Err(io::Error::from_raw_os_error(status as i32))
+        }
+    }
+
+    #[cfg(test)]
+    pub(super) fn grant_world_write_for_test(file: &File) -> io::Result<()> {
+        grant_world_access_for_test(file, GENERIC_WRITE)
+    }
+
+    #[cfg(test)]
+    pub(super) fn grant_world_all_for_test(file: &File) -> io::Result<()> {
+        grant_world_access_for_test(file, GENERIC_ALL)
+    }
+
+    #[cfg(test)]
     pub(super) fn dacl_signature(path: &Path) -> io::Result<(Option<Vec<u8>>, bool)> {
         let preserved = capture_destination_dacl(path, true)?;
         let bytes = preserved.storage.as_ref().map(|storage| {
@@ -3594,43 +4260,55 @@ mod tests {
     /// enumerates the ones kettle names a `kettle/` directory inside, so a new
     /// resolver that omits its base fails here rather than years later.
     ///
-    /// What this does NOT do, so nobody reads more into it than it checks: the
-    /// suffixes below are written out by hand, because the resolvers live in
-    /// kettle-ui and kettle-config and this crate cannot depend on either. So it
-    /// pins one hand-written list against another, and a resolver that moves its
-    /// directory passes here unchanged. The test that actually calls a resolver
-    /// and feeds its answer to `is_kettle_owned_dir_name` is
-    /// `the_resolved_cache_directory_is_recognized_as_kettles_own`, over in
-    /// kettle-ui where both halves are visible. Likewise the `HOME` branch is
-    /// skipped rather than failed when `HOME` is unset, so a stripped
-    /// environment gets the temp-root assertion alone.
-    #[cfg(unix)]
+    /// The suffixes below remain a hand-written contract because the resolvers
+    /// live in other crates, but every branch is fed a controlled absolute value
+    /// here. The cross-crate cache test calls the real resolver in re-executed
+    /// children, one environment branch at a time.
     #[test]
     fn every_base_a_resolver_uses_is_recognized() {
-        // The Unix fallbacks the resolvers use when the XDG vars are unset.
-        let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
-        if let Some(home) = home {
-            for suffix in [".config", ".local/state", ".cache"] {
-                let expected = home.join(suffix);
-                assert!(
-                    super::kettle_base_dirs().contains(&expected),
-                    "{} is a resolver fallback and must be a recognized base",
-                    expected.display()
-                );
-                assert!(
-                    is_kettle_owned_dir_name(&expected.join("kettle")),
-                    "{}/kettle must be recognized as kettle's own",
-                    expected.display()
-                );
-            }
-        }
-        // And the temp root, for the uid-namespaced socket fallback.
-        assert!(
-            is_kettle_owned_dir_name(
-                &std::env::temp_dir().join(format!("kettle-{}", unsafe { libc::geteuid() }))
-            ),
-            "the uid-namespaced temp directory must be recognized"
+        let root = if cfg!(windows) {
+            std::path::PathBuf::from(r"C:\controlled")
+        } else {
+            std::path::PathBuf::from("/controlled")
+        };
+        let values = std::collections::BTreeMap::from([
+            ("XDG_RUNTIME_DIR", root.join("runtime")),
+            ("XDG_STATE_HOME", root.join("state")),
+            ("XDG_CONFIG_HOME", root.join("config")),
+            ("XDG_CACHE_HOME", root.join("cache")),
+            ("APPDATA", root.join("appdata")),
+            ("LOCALAPPDATA", root.join("localappdata")),
+            ("HOME", root.join("home")),
+        ]);
+        let temp = root.join("tmp");
+        let bases = super::kettle_base_dirs_from(
+            |key| values.get(key).map(|path| path.as_os_str().to_os_string()),
+            temp.clone(),
         );
+        let expected: [std::path::PathBuf; 10] = [
+            temp,
+            root.join("runtime"),
+            root.join("state"),
+            root.join("config"),
+            root.join("cache"),
+            root.join("appdata"),
+            root.join("localappdata"),
+            root.join("home").join(".local/state"),
+            root.join("home").join(".config"),
+            root.join("home").join(".cache"),
+        ];
+        for base in expected {
+            assert!(
+                bases.contains(&base),
+                "missing resolver base {}",
+                base.display()
+            );
+            assert!(
+                super::is_kettle_owned_dir_name_in(&base.join("kettle"), &bases),
+                "{}/kettle must be recognized as kettle's own",
+                base.display()
+            );
+        }
     }
 
     /// A source checkout is called `kettle` too, and matching on the name alone
@@ -3713,6 +4391,248 @@ mod tests {
         assert!(message.contains(&format!("parent {}", writable.display())));
         assert!(message.contains("mode 0775"));
         assert!(message.contains("process umask"));
+    }
+
+    #[test]
+    fn trusted_directory_validation_is_read_only_and_accepts_a_private_directory() {
+        let root = crate::test_tempdir();
+        let directory = root.path().join("config");
+        create_private_dirs(&directory).unwrap();
+
+        let before = std::fs::metadata(&directory).unwrap().permissions();
+        validate_trusted_directory(&directory).unwrap();
+        let after = std::fs::metadata(&directory).unwrap().permissions();
+
+        assert_eq!(before.readonly(), after.readonly());
+        assert!(
+            !directory.join(".kettle-directory-trust-check").exists(),
+            "the read-only verifier created its synthetic leaf"
+        );
+    }
+
+    /// A guard needs one stable capability to its immediate parent, not one
+    /// descriptor per path component. The latter was correct but scaled steady
+    /// FD use with path depth; parallel config tests crossed macOS's default
+    /// 256-descriptor soft limit and failed unrelated opens with `EMFILE`.
+    ///
+    /// `RLIMIT_NOFILE` is process-wide, so the low-limit proof runs in a
+    /// re-executed child rather than racing the shared test harness.
+    #[cfg(unix)]
+    #[test]
+    fn parent_guards_hold_one_descriptor_each_under_a_low_process_limit() {
+        const CHILD: &str = "KETTLE_PARENT_GUARD_FD_CHILD";
+        const TEST: &str =
+            "private::tests::parent_guards_hold_one_descriptor_each_under_a_low_process_limit";
+
+        if std::env::var_os(CHILD).is_none() {
+            let status = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", TEST, "--nocapture"])
+                .env(CHILD, "1")
+                .status()
+                .expect("re-exec the low-FD guard test");
+            assert!(status.success(), "low-FD guard child failed: {status}");
+            return;
+        }
+
+        let root = crate::test_tempdir();
+        let directory = root.path().join("one/two/three/four/five/six");
+        create_private_dirs(&directory).unwrap();
+
+        // SAFETY: only the isolated child changes its own process limit, after
+        // fixture creation and before spawning any application threads.
+        unsafe {
+            let mut limit = std::mem::zeroed::<libc::rlimit>();
+            assert_eq!(libc::getrlimit(libc::RLIMIT_NOFILE, &mut limit), 0);
+            limit.rlim_cur = limit.rlim_cur.min(96);
+            assert!(
+                limit.rlim_cur >= 64,
+                "test requires at least 64 descriptors"
+            );
+            assert_eq!(libc::setrlimit(libc::RLIMIT_NOFILE, &limit), 0);
+        }
+
+        let guards: Vec<_> = (0..40)
+            .map(|index| {
+                guard_private_parent(&directory.join(format!("config-{index}")))
+                    .expect("one guard should consume one steady descriptor")
+            })
+            .collect();
+        assert_eq!(guards.len(), 40);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn trusted_directory_validation_rejects_a_group_writable_target() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let root = crate::test_tempdir();
+        let directory = root.path().join("config");
+        std::fs::create_dir(&directory).unwrap();
+        std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o775)).unwrap();
+
+        let error = validate_trusted_directory(&directory).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+        assert!(error.to_string().contains("mode 775"), "{error}");
+        assert_eq!(
+            std::fs::metadata(&directory).unwrap().permissions().mode() & 0o777,
+            0o775,
+            "validation repaired the directory instead of remaining read-only"
+        );
+    }
+
+    #[test]
+    fn trusted_read_accepts_a_regular_file_without_changing_it() {
+        let root = crate::test_tempdir();
+        let path = root.path().join("config");
+        let mut created = create_private_file_new(&path).unwrap();
+        std::io::Write::write_all(&mut created, b"theme = TokyoNight Night\n").unwrap();
+        drop(created);
+        let before = std::fs::metadata(&path).unwrap().permissions();
+
+        let mut file = open_trusted_file_read(&path).unwrap();
+        let mut contents = String::new();
+        std::io::Read::read_to_string(&mut file, &mut contents).unwrap();
+
+        assert_eq!(contents, "theme = TokyoNight Night\n");
+        assert_eq!(
+            before.readonly(),
+            std::fs::metadata(&path).unwrap().permissions().readonly()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn trusted_leaf_follow_accepts_a_user_owned_dotfile_link() {
+        use std::os::unix::fs::symlink;
+
+        let root = crate::test_tempdir();
+        let target = root.path().join("tracked-config");
+        let mut created = create_private_file_new(&target).unwrap();
+        created.write_all(b"font-size = 18\n").unwrap();
+        drop(created);
+        let link = root.path().join("config");
+        symlink(&target, &link).unwrap();
+
+        let (mut file, resolved) = open_trusted_file_read_following_leaf(&link).unwrap();
+        let mut contents = String::new();
+        std::io::Read::read_to_string(&mut file, &mut contents).unwrap();
+        assert_eq!(contents, "font-size = 18\n");
+        assert_eq!(resolved, target.canonicalize().unwrap());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_preexisting_link_requires_trusted_ownership_and_one_name() {
+        let current = unsafe { libc::geteuid() };
+        let foreign = if current == 1 { 2 } else { 1 };
+        let path = Path::new("/trusted-parent/config");
+
+        unix::require_trusted_symbolic_link(current, 1, path).unwrap();
+        if current != 0 {
+            unix::require_trusted_symbolic_link(0, 1, path).unwrap();
+        }
+        let owner_error = unix::require_trusted_symbolic_link(foreign, 1, path).unwrap_err();
+        assert_eq!(owner_error.kind(), io::ErrorKind::PermissionDenied);
+        let links_error = unix::require_trusted_symbolic_link(current, 2, path).unwrap_err();
+        assert_eq!(links_error.kind(), io::ErrorKind::PermissionDenied);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn trusted_read_rejects_a_writable_or_multiply_linked_leaf_without_repairing_it() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let root = crate::test_tempdir();
+        let writable = root.path().join("writable-config");
+        std::fs::write(&writable, b"font-size = 99\n").unwrap();
+        std::fs::set_permissions(&writable, std::fs::Permissions::from_mode(0o664)).unwrap();
+        let error = open_trusted_file_read(&writable).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+        assert_eq!(
+            std::fs::metadata(&writable).unwrap().permissions().mode() & 0o777,
+            0o664,
+            "a read-only trust check chmod'd the config"
+        );
+
+        let target = root.path().join("target-config");
+        let alias = root.path().join("linked-config");
+        std::fs::write(&target, b"font-size = 98\n").unwrap();
+        std::fs::hard_link(&target, &alias).unwrap();
+        let error = open_trusted_file_read(&alias).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+        assert_eq!(std::fs::read(&target).unwrap(), b"font-size = 98\n");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn trusted_config_rejects_extended_acl_mutation_grants() {
+        let root = crate::test_tempdir();
+        let directory = root.path().join("config-dir");
+        create_private_dirs(&directory).unwrap();
+        let path = directory.join("config");
+        let mut created = create_private_file_new(&path).unwrap();
+        std::io::Write::write_all(&mut created, b"font-size = 99\n").unwrap();
+        drop(created);
+
+        validate_trusted_directory(&directory).unwrap();
+        open_trusted_file_read(&path).unwrap();
+
+        let status = std::process::Command::new("chmod")
+            .args(["+a", "everyone allow add_file,delete_child"])
+            .arg(&directory)
+            .status()
+            .expect("run macOS chmod for the directory ACL fixture");
+        assert!(status.success(), "install the directory ACL fixture");
+        let error = validate_trusted_directory(&directory).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+        assert!(error.to_string().contains("ACL principal"), "{error}");
+
+        let status = std::process::Command::new("chmod")
+            .arg("-N")
+            .arg(&directory)
+            .status()
+            .expect("remove the directory ACL fixture");
+        assert!(status.success(), "remove the directory ACL fixture");
+
+        let status = std::process::Command::new("chmod")
+            .args(["+a", "everyone allow write,delete,writesecurity"])
+            .arg(&path)
+            .status()
+            .expect("run macOS chmod for the file ACL fixture");
+        assert!(status.success(), "install the file ACL fixture");
+        let error = open_trusted_file_read(&path).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+        assert!(error.to_string().contains("ACL principal"), "{error}");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn trusted_read_rejects_a_file_acl_that_grants_world_write() {
+        let root = crate::test_tempdir();
+        let path = root.path().join("config");
+        let mut file = create_private_file_new(&path).unwrap();
+        file.write_all(b"font-size = 99\n").unwrap();
+        grant_world_write_for_test(&file).unwrap();
+        drop(file);
+
+        let error = open_trusted_file_read(&path).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+        assert_eq!(std::fs::read(&path).unwrap(), b"font-size = 99\n");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn trusted_read_rejects_a_file_acl_that_grants_world_generic_all() {
+        let root = crate::test_tempdir();
+        let path = root.path().join("config");
+        let mut file = create_private_file_new(&path).unwrap();
+        file.write_all(b"font-size = 99\n").unwrap();
+        grant_world_all_for_test(&file).unwrap();
+        drop(file);
+
+        let error = open_trusted_file_read(&path).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+        assert_eq!(std::fs::read(&path).unwrap(), b"font-size = 99\n");
     }
 
     #[test]
@@ -3900,6 +4820,12 @@ mod tests {
         assert!(open_private_file(&link).is_err());
         assert!(open_private_file_append(&link).is_err());
         assert_eq!(std::fs::read(&target).unwrap(), b"unchanged");
+        let (mut trusted, resolved) = open_trusted_file_read_following_leaf(&link)
+            .expect("a current-user file link to a trusted target must be readable");
+        let mut contents = Vec::new();
+        std::io::Read::read_to_end(&mut trusted, &mut contents).unwrap();
+        assert_eq!(contents, b"unchanged");
+        assert_eq!(resolved, target.canonicalize().unwrap());
 
         let real_parent = dir.path().join("real-parent");
         let linked_parent = dir.path().join("linked-parent");

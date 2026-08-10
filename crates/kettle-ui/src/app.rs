@@ -12,8 +12,8 @@ use anyhow::Result;
 #[cfg(any(target_os = "macos", test))]
 use kettle_config::MacosOptionAsAlt;
 use kettle_config::{
-    Action, Bindings, Config, Key as KKey, Mods, Osc52, StatusBarMode, TabBarMode, TabBarPos,
-    Trigger,
+    Action, Bindings, Config, ConfigTrust, Key as KKey, Mods, Osc52, StatusBarMode, TabBarMode,
+    TabBarPos, Trigger,
 };
 use kettle_core::{ClipboardType, PtyGeometry, Scroll, TermEvent};
 use kettle_render::{
@@ -3233,6 +3233,47 @@ fn queue_watcher_event(
     }
 }
 
+fn registered_watcher<W, E>(
+    mut watcher: W,
+    register: impl FnOnce(&mut W) -> Result<(), E>,
+) -> Result<W, E> {
+    register(&mut watcher)?;
+    Ok(watcher)
+}
+
+fn prepare_config_directory(path: &std::path::Path, trust: ConfigTrust) -> std::io::Result<()> {
+    if trust == ConfigTrust::ExplicitPath {
+        return Ok(());
+    }
+    let directory = path.parent().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("config path has no parent: {}", path.display()),
+        )
+    })?;
+    if let Err(error) = kettle_state::create_private_dirs(directory) {
+        log::debug!(
+            "config directory repair skipped for {}: {error}",
+            directory.display()
+        );
+    }
+    kettle_state::validate_trusted_directory(directory)
+}
+
+fn resolved_init_lua_script(
+    explicit: Option<std::path::PathBuf>,
+    default_config: Option<std::path::PathBuf>,
+) -> Option<(std::path::PathBuf, ConfigTrust)> {
+    explicit
+        .map(|path| (path, ConfigTrust::ExplicitPath))
+        .or_else(|| {
+            default_config
+                .and_then(|path| path.parent().map(|dir| dir.join("init.lua")))
+                .filter(|path| path.exists())
+                .map(|path| (path, ConfigTrust::VerifyDirectory))
+        })
+}
+
 fn reloaded_font_size(configured_changed: bool, configured: f32, runtime: Option<f32>) -> f32 {
     if configured_changed {
         configured
@@ -5104,8 +5145,11 @@ pub struct App {
     /// The most-recent auto-theme "schedule decision" (true=dark)
     /// we've applied, so a boundary-crossing fires the swap exactly once.
     last_schedule_decision: Option<bool>,
-    /// Explicit `--config` file (persists for live reload).
+    /// Resolved non-default config file (explicit path or named profile).
     config_path: Option<std::path::PathBuf>,
+    /// Provenance paired with `config_path`; profile switching resets this to
+    /// directory verification even when the process started with `--config`.
+    config_trust: ConfigTrust,
     /// The malformed-value diagnostics surfaced on the previous live reload,
     /// so the reload notification is edge-triggered — kettle's own
     /// settings-persistence writes reload the config and must not re-fire an
@@ -5483,76 +5527,35 @@ impl App {
         if let Some(path) = startup.config.clone().or_else(Config::default_path)
             && let Some(dir) = path.parent().map(|p| p.to_path_buf())
         {
-            let p = proxy.clone();
-            let watched = path.clone();
-            let pending = config_reload_pending.clone();
-            use notify::Watcher;
-            let built = notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
-                if let Ok(ev) = res
-                    && watcher_event_matches(&ev, &watched)
-                {
-                    queue_watcher_event(&pending, || p.send_event(UserEvent::ReloadConfig).is_ok());
+            match prepare_config_directory(&path, startup.config_trust) {
+                Err(error) => {
+                    log::warn!("config live-reload disabled for {}: {error}", dir.display())
                 }
-            });
-            // The platform can refuse to construct a watcher at all — inotify
-            // instances exhausted, or a filesystem the backend cannot subscribe
-            // to. Dropping that error left live reload off with nothing anywhere
-            // to say why, which is the same silence this block was fixed for one
-            // level down.
-            if let Err(error) = &built {
-                log::warn!("config live-reload unavailable: {error}");
-            }
-            if let Ok(mut w) = built {
-                // This is the FIRST thing to create the config directory on a
-                // fresh install, so it decides the mode every later private
-                // path under it is checked against. Creating it at the ambient
-                // umask here is what left the remote-command watcher below
-                // refusing its own parent on a 002 umask, reporting `mode 775`
-                // even in a run where a later write-back would have repaired
-                // it — the repair simply came after this check.
-                // Both results are checked. Storing the handle regardless left
-                // kettle holding a watcher that watches nothing whenever
-                // registration failed — live config reload silently off for the
-                // session, with no way for the user to tell it apart from a
-                // config that simply was not being edited. The remote-command
-                // block below already fails closed and logs; this is the same
-                // shape.
-                //
-                // A config directory that cannot be watched is not fatal:
-                // everything else works, and reload is a convenience. So warn
-                // and continue rather than refusing to start — but do not
-                // pretend the watcher exists.
-                //
-                // The repair is a precondition, not an optimisation, and it stays
-                // one until something can verify the directory instead. Reload
-                // re-parses the config and installs its triggers, and a
-                // `RunCommand` trigger spawns a program — so subscribing to a
-                // directory a group peer can write turns "the peer edited a file"
-                // into "kettle ran their command", without waiting for a
-                // relaunch. There is no read-only trust check to lean on here:
-                // the verifier in kettle-state is fused to opening a file. A
-                // directory kettle could not narrow is one it knows nothing good
-                // about, so it declines to subscribe.
-                //
-                // The cost is real, and is why this was briefly the other way
-                // round: a config directory on a read-only mount cannot be
-                // chmod'ed and loses live reload even though it watches fine.
-                // That is the lesser loss. Separating "could not repair" from "is
-                // unsafe" needs a read-only verifier — recorded in
-                // docs/AUDIT-DEFERRED.md, along with the larger hole beside it:
-                // `read_config_bytes` applies no directory trust check at all, so
-                // the same peer's config is loaded at the next launch either way.
-                if let Err(error) = kettle_state::create_private_dirs(&dir) {
-                    log::warn!("config live-reload disabled for {}: {error}", dir.display());
-                } else {
-                    match w.watch(&dir, notify::RecursiveMode::NonRecursive) {
-                        Ok(()) => watcher = Some(w),
-                        Err(error) => {
-                            log::warn!(
-                                "config live-reload disabled for {}: {error}",
-                                dir.display()
-                            );
-                        }
+                Ok(()) => {
+                    let p = proxy.clone();
+                    let watched = path.clone();
+                    let pending = config_reload_pending.clone();
+                    use notify::Watcher;
+                    let built =
+                        notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
+                            if let Ok(ev) = res
+                                && watcher_event_matches(&ev, &watched)
+                            {
+                                queue_watcher_event(&pending, || {
+                                    p.send_event(UserEvent::ReloadConfig).is_ok()
+                                });
+                            }
+                        });
+                    match built.and_then(|w| {
+                        registered_watcher(w, |w| {
+                            w.watch(&dir, notify::RecursiveMode::NonRecursive)
+                        })
+                    }) {
+                        Ok(w) => watcher = Some(w),
+                        Err(error) => log::warn!(
+                            "config live-reload unavailable for {}: {error}",
+                            dir.display()
+                        ),
                     }
                 }
             }
@@ -5658,11 +5661,42 @@ impl App {
         // Inlining the `Config::load*` inside the struct-init lost
         // access to a local name for the triggers; the bare `cfg.…`
         // would otherwise hit the `cfg!()` macro.
-        let mut initial_cfg = startup
-            .config
-            .as_deref()
-            .map(Config::load_from)
-            .unwrap_or_else(Config::load);
+        let initial_path = startup.config.clone().or_else(Config::default_path);
+        let mut initial_cfg = match initial_path.as_deref().filter(|path| path.exists()) {
+            Some(path) => match prepare_config_directory(path, startup.config_trust)
+                .and_then(|()| Config::read_from_with_trust(path, startup.config_trust))
+            {
+                Ok(loaded) => {
+                    if !loaded.unknown_keys.is_empty() {
+                        log::warn!(
+                            "{}: unrecognized config keys: {}",
+                            path.display(),
+                            loaded.unknown_keys.join(", ")
+                        );
+                    }
+                    if !loaded.malformed_values.is_empty() {
+                        log::warn!(
+                            "{}: malformed values (ignored): {}",
+                            path.display(),
+                            loaded.malformed_values.join(", ")
+                        );
+                    }
+                    loaded.config
+                }
+                Err(error) => {
+                    log::warn!("config {} ignored: {error}", path.display());
+                    fire_notify(
+                        "kettle: config ignored",
+                        &format!(
+                            "Could not safely read {}. Kettle is using defaults.\n{error}",
+                            path.display()
+                        ),
+                    );
+                    Config::default()
+                }
+            },
+            None => Config::default(),
+        };
         // Peacock parity: --accent CLI flag wins over the
         // config `accent-color` key. Applied here once at startup;
         // a runtime reload (via the config-file watcher above) would reread the config but
@@ -5730,19 +5764,22 @@ impl App {
         //   1. --lua-script PATH (explicit; overrides)
         //   2. <config-dir>/init.lua  (auto-loaded; default for plugins)
         // where <config-dir> is the parent of Config::default_path().
-        let init_lua_path: Option<std::path::PathBuf> = startup.lua_script.clone().or_else(|| {
-            kettle_config::Config::default_path()
-                .and_then(|p| p.parent().map(|d| d.join("init.lua")))
-                .filter(|p| p.exists())
-        });
+        let init_lua = resolved_init_lua_script(
+            startup.lua_script.clone(),
+            kettle_config::Config::default_path(),
+        );
         let mut lua_engine: Option<crate::LuaEngine> = None;
-        if let Some(script) = &init_lua_path {
+        if let Some((script, trust)) = &init_lua {
             match crate::LuaEngine::new_with_sandbox(
                 &initial_cfg.theme_name,
                 initial_cfg.lua_sandbox,
             ) {
                 Ok(eng) => {
-                    if let Err(e) = eng.exec_file(script) {
+                    let executed = match trust {
+                        ConfigTrust::ExplicitPath => eng.exec_file(script),
+                        ConfigTrust::VerifyDirectory => eng.exec_trusted_file(script),
+                    };
+                    if let Err(e) = executed {
                         log::warn!("lua script {}: {e:#}", script.display());
                     } else {
                         log::info!("lua script {}: executed", script.display());
@@ -5936,6 +5973,7 @@ impl App {
             last_remote_poll: None,
             last_schedule_decision: None,
             config_path: startup.config.clone(),
+            config_trust: startup.config_trust,
             config_malformed_last: Vec::new(),
             startup,
             _watcher: watcher,
@@ -12516,6 +12554,7 @@ impl App {
                 ws.context_menu = None;
                 if let Some(p) = kettle_config::Config::path_for_profile(&name) {
                     self.config_path = Some(p);
+                    self.config_trust = ConfigTrust::VerifyDirectory;
                     self.reload_config(ws);
                 }
             }
@@ -14133,6 +14172,7 @@ impl App {
                     );
                     if let Some(p) = kettle_config::Config::path_for_profile(&next) {
                         self.config_path = Some(p);
+                        self.config_trust = ConfigTrust::VerifyDirectory;
                         self.reload_config(ws);
                     }
                 }
@@ -15100,23 +15140,44 @@ impl App {
     /// each window keeps its session-local zoom.
     fn load_reloaded_config(&mut self) -> bool {
         let previous_config_font_size = self.cfg.font_size;
-        let mut new = self
+        let path = self
             .config_path
-            .as_deref()
-            .map(Config::load_from)
-            .unwrap_or_else(Config::load);
+            .clone()
+            .or_else(Config::default_path)
+            .filter(|path| path.exists());
+        let (mut new, malformed) = match path {
+            Some(path) => match prepare_config_directory(&path, self.config_trust)
+                .and_then(|()| Config::read_from_with_trust(&path, self.config_trust))
+            {
+                Ok(loaded) => {
+                    if !loaded.unknown_keys.is_empty() {
+                        log::warn!(
+                            "{}: unrecognized config keys: {}",
+                            path.display(),
+                            loaded.unknown_keys.join(", ")
+                        );
+                    }
+                    (loaded.config, loaded.malformed_values)
+                }
+                Err(error) => {
+                    log::warn!("config reload refused for {}: {error}", path.display());
+                    fire_notify(
+                        "kettle: config reload refused",
+                        &format!(
+                            "The last known good settings remain active.\n{}: {error}",
+                            path.display()
+                        ),
+                    );
+                    return false;
+                }
+            },
+            None => (Config::default(), Vec::new()),
+        };
         // Surface malformed values (typos the parser silently ignores, e.g.
         // `cursor-style = beem`) on live reload. `--check-config` already
         // catches these at the CLI, but a live edit otherwise reverted with no
         // feedback. Edge-triggered via `should_notify_malformed` so kettle's
         // own settings-persistence writes don't spam an unchanged warning.
-        let malformed = self
-            .config_path
-            .clone()
-            .or_else(Config::default_path)
-            .filter(|p| p.exists())
-            .map(|p| Config::load_from_with_diagnostics(&p).2)
-            .unwrap_or_default();
         if should_notify_malformed(&malformed, &self.config_malformed_last) {
             fire_notify(
                 "kettle: config values ignored",
@@ -25236,84 +25297,6 @@ impl Drop for App {
 mod modal_discipline_guard {
     use super::{production_source, session_write_target};
 
-    /// A watcher handle is only worth keeping if it is actually watching.
-    ///
-    /// Both watcher setups used to discard the result of `watch()` and store
-    /// the handle anyway, so a failed registration left live reload silently
-    /// off — indistinguishable, from the user's side, from a config nobody was
-    /// editing. Pin that neither `watch(` call is discarded with `let _ =`.
-    #[test]
-    fn a_watcher_is_stored_only_when_its_registration_succeeded() {
-        let src = production_source();
-        // Scope to the config-watcher block. The remote block below stores its
-        // own handle at two sites, so a whole-file count would be measuring the
-        // wrong thing — and `remote_watcher = Some(w)` contains
-        // `watcher = Some(w)` as a substring, which is how a naive count passes
-        // while checking nothing.
-        let start = src
-            .find("let mut watcher = None;")
-            .expect("the config watcher block starts by declaring the handle");
-        let end = src
-            .find("// Remote-control watcher.")
-            .expect("the config watcher block ends where the remote one begins");
-        let block = &src[start..end];
-
-        // Banning one spelling is not a contract. `let _ = w.watch(...)` was the
-        // shape that shipped, but `let ok = w.watch(...);` followed by an
-        // unconditional store satisfies any such ban while reintroducing the
-        // exact bug. Pin the store instead: there is one place the handle is
-        // stored, and it is the success arm of the registration itself.
-        let stores = block.matches("watcher = Some(").count();
-        assert_eq!(
-            stores, 1,
-            "exactly one site may store the config watcher handle, found {stores}"
-        );
-        let normalized = block.split_whitespace().collect::<Vec<_>>().join(" ");
-        assert!(
-            normalized.contains(
-                "match w.watch(&dir, notify::RecursiveMode::NonRecursive) { Ok(()) => watcher = Some(w),"
-            ),
-            "the one store must be the Ok arm of the watch registration, so a \
-             handle cannot outlive a failed subscription"
-        );
-        // And every way it can fail has to be visible. Both were silent: a
-        // failed registration stored a watcher that watched nothing, and a
-        // watcher the platform refused to construct at all was dropped by an
-        // `if let Ok` with no else.
-        assert!(
-            normalized.contains("config live-reload disabled for"),
-            "a failed config watcher registration must say so"
-        );
-        assert!(
-            normalized.contains("config live-reload unavailable"),
-            "a watcher the platform would not construct must say so too"
-        );
-        // `= Some(` is not the only way to fill an Option. `watcher.replace(w)`
-        // and `watcher.insert(w)` store just as well and would sail past the
-        // count above, which is exactly how a store on the Err arm could come
-        // back wearing a different spelling.
-        for spelling in [
-            "watcher.replace(",
-            "watcher.insert(",
-            "watcher.get_or_insert(",
-        ] {
-            assert!(
-                !block.contains(spelling),
-                "`{spelling}` stores the handle outside the pinned Ok arm; if it \
-                 is wanted, pin it there instead of adding a second way in"
-            );
-        }
-        // And the repair still gates the subscription. Reload installs config
-        // triggers and `RunCommand` spawns a program, so a directory kettle
-        // could not narrow is not one to subscribe to — see the block itself for
-        // the trade-off and what would let it be relaxed.
-        assert!(
-            normalized.contains(
-                "if let Err(error) = kettle_state::create_private_dirs(&dir) { log::warn!"
-            ),
-            "a config directory kettle could not make private must not be watched"
-        );
-    }
     #[test]
     fn confirm_dialog_is_tracked_as_a_modal() {
         let src = production_source();
@@ -27476,6 +27459,57 @@ mod tests {
         let unrelated = notify::Event::new(EventKind::Modify(ModifyKind::Any))
             .add_path(std::path::PathBuf::from("/tmp/session.json"));
         assert!(!super::watcher_event_matches(&unrelated, watched));
+    }
+
+    #[test]
+    fn watcher_handle_survives_only_a_successful_registration() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        struct Candidate(Arc<AtomicUsize>);
+        impl Drop for Candidate {
+            fn drop(&mut self) {
+                self.0.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+
+        let dropped = Arc::new(AtomicUsize::new(0));
+        let kept = super::registered_watcher(Candidate(dropped.clone()), |_| Ok::<_, ()>(()));
+        assert!(kept.is_ok());
+        assert_eq!(dropped.load(Ordering::Relaxed), 0);
+        drop(kept);
+        assert_eq!(dropped.load(Ordering::Relaxed), 1);
+
+        let refused = super::registered_watcher(Candidate(dropped.clone()), |_| Err::<(), _>(()));
+        assert!(refused.is_err());
+        assert_eq!(
+            dropped.load(Ordering::Relaxed),
+            2,
+            "a failed subscription retained its unusable handle"
+        );
+    }
+
+    #[test]
+    fn automatic_and_explicit_lua_paths_keep_their_trust_provenance() {
+        let root = kettle_test_support::private_tempdir("kettle-init-lua-source-");
+        let default_config = root.join("config");
+        let automatic = root.join("init.lua");
+        std::fs::write(&automatic, "return true\n").unwrap();
+
+        assert_eq!(
+            super::resolved_init_lua_script(None, Some(default_config.clone())),
+            Some((
+                automatic.clone(),
+                kettle_config::ConfigTrust::VerifyDirectory
+            ))
+        );
+
+        let explicit = root.join("project.lua");
+        assert_eq!(
+            super::resolved_init_lua_script(Some(explicit.clone()), Some(default_config),),
+            Some((explicit, kettle_config::ConfigTrust::ExplicitPath)),
+            "an explicit path wins even when the automatic script exists"
+        );
     }
 
     #[test]
@@ -33232,19 +33266,56 @@ mod tests {
     /// real machine with `0600` content underneath it — found by sweeping the
     /// filesystem, not by any test here.
     ///
-    /// Read-only on the environment, and deliberately asserted against what this
-    /// machine resolves rather than a synthetic path: the base list keys on the
-    /// real environment too, so a synthetic one would pin the two halves against
-    /// nothing.
+    /// Each resolver branch runs in a re-executed child. Environment mutation in
+    /// this test process would race every other test's `getenv`, while checking
+    /// only the ambient branch self-skipped under `env -i` and never exercised
+    /// XDG on normal CI.
     #[test]
-    fn the_resolved_cache_directory_is_recognized_as_kettles_own() {
+    fn every_resolved_cache_directory_is_recognized_as_kettles_own() {
         use super::cache_dir_from_env;
 
-        let Some(cache) = cache_dir_from_env(|k| std::env::var(k).ok()) else {
-            // Every probe unset — a stripped container. There is no resolved
-            // directory, so there is nothing to recognize.
+        const CHILD: &str = "KETTLE_CACHE_RESOLVER_BRANCH";
+        if std::env::var_os(CHILD).is_none() {
+            let cases: &[(&str, &[(&str, &str)])] = if cfg!(windows) {
+                &[
+                    ("xdg", &[("XDG_CACHE_HOME", r"C:\cache-xdg")]),
+                    (
+                        "local-app-data",
+                        &[("LOCALAPPDATA", r"C:\Users\test\AppData\Local")],
+                    ),
+                ]
+            } else {
+                &[
+                    (
+                        "xdg",
+                        &[("XDG_CACHE_HOME", "/tmp/cache-xdg"), ("HOME", "/tmp/home")],
+                    ),
+                    ("home", &[("HOME", "/tmp/home")]),
+                ]
+            };
+            for (case, variables) in cases {
+                let mut child = std::process::Command::new(std::env::current_exe().unwrap());
+                child
+                    .args([
+                        "--exact",
+                        "app::tests::every_resolved_cache_directory_is_recognized_as_kettles_own",
+                        "--nocapture",
+                    ])
+                    .env(CHILD, case);
+                for key in ["XDG_CACHE_HOME", "HOME", "LOCALAPPDATA", "USERPROFILE"] {
+                    child.env_remove(key);
+                }
+                for (key, value) in *variables {
+                    child.env(key, value);
+                }
+                let status = child.status().expect("re-exec cache resolver test");
+                assert!(status.success(), "cache resolver child {case} failed");
+            }
             return;
-        };
+        }
+
+        let cache = cache_dir_from_env(|k| std::env::var(k).ok())
+            .expect("the controlled branch must resolve a cache directory");
         assert!(
             kettle_state::is_kettle_owned_dir_name(&cache.join("kettle")),
             "the resolver puts kettle's cache in {}, which the private-path base \
