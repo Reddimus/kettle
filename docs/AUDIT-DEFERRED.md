@@ -64,8 +64,9 @@ tracked here so they are not lost.
 - ~~**Surface malformed-config diagnostics in the GUI.**~~ Done in v2.36.5:
   live reload now fires an edge-triggered desktop notification listing the
   ignored malformed lines (`should_notify_malformed` + `load_reloaded_config`).
-- Keybind-capture should warn when reassigning an in-use chord; Settings
-  GPU/padding writes should surface a persist failure. Search now has a
+- ~~**Keybind-capture conflict and Settings persistence feedback.**~~ Fixed:
+  rebinding an in-use chord requires confirmation, and failed Settings writes
+  are surfaced instead of being silently treated as saved. Search now has a
   grapheme-aware editor with selection, caret/word movement, Home/End, and
   bounded paste; the command palette, layout picker, and other older text
   overlays still need that editor behavior consolidated behind one shared

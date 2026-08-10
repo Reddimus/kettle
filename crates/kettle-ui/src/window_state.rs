@@ -515,6 +515,15 @@ pub(crate) struct WindowState {
     /// its own independent pointer-event stream.
     pub(crate) wheel: crate::input::WheelAccum,
     pub(crate) selecting: bool,
+    /// Pane that owns the active primary-button selection gesture. Focus can
+    /// move through ctl/Lua while a drag is live; pinning the id prevents the
+    /// next frame from extending or scrolling an unrelated split.
+    pub(crate) selecting_pane: Option<u64>,
+    /// Vertical outer-client edge crossed by an active selection drag:
+    /// `1` = top/history, `-1` = bottom/present, `0` = pointer inside or a
+    /// horizontal exit. `CursorLeft` has no coordinate, so this latches the
+    /// direction inferred from the last in-client position.
+    pub(crate) selection_autoscroll_edge: i8,
     /// Distance from the pointer to the dragged thumb's top edge. Keeping the
     /// grab offset prevents the thumb from jumping when a drag starts.
     pub(crate) scrollbar_drag_offset: Option<f32>,
@@ -531,11 +540,12 @@ pub(crate) struct WindowState {
     /// app.rs (`update_links` re-scans only on output, scroll, or focus).
     pub(crate) links_scan_key: Option<LinksScanKey>,
     pub(crate) mouse_btn: Option<u8>,
-    /// Last `(row, col)` reported to a mouse-tracking app, so cell-motion
-    /// reports (1002/1003) fire only on a cell crossing — xterm coalesces
-    /// intra-cell moves; a fast drag would otherwise flood one SGR report
-    /// per pixel of travel.
-    pub(crate) last_mouse_cell: Option<(usize, usize)>,
+    /// Last `(pane, row, col)` reported to a mouse-tracking app, so
+    /// cell-motion reports (1002/1003) fire only on a cell crossing. Pane
+    /// identity is part of the key because wheel input can target a hovered
+    /// split without moving keyboard focus; a report in one pane must never
+    /// suppress the first same-coordinate report in another.
+    pub(crate) last_mouse_cell: Option<(u64, usize, usize)>,
     pub(crate) links: Vec<kettle_core::Link>,
     pub(crate) ssh_input: Option<String>,
     /// `Some((query, selected))` while the command palette is open.
@@ -814,6 +824,8 @@ impl WindowState {
             cursor: PhysicalPosition::new(0.0, 0.0),
             wheel: crate::input::WheelAccum::default(),
             selecting: false,
+            selecting_pane: None,
+            selection_autoscroll_edge: 0,
             scrollbar_drag_offset: None,
             scrollbar_hover: false,
             dragging_split: None,

@@ -386,9 +386,11 @@ putting a user path on the wire.
 - **Take-out/put-back dispatch** — the `ApplicationHandler` entry points
   remove the addressed window from the map, run the inner handlers with
   disjoint `&mut App` + `&mut WindowState` borrows, then reinsert it.
-  Window closes route through a single funnel (`pending_window_close` →
-  `finish_window_dispatch`), which exits the event loop only when no
-  windows remain.
+  Window closes route through a single funnel
+  (`pending_window_closes: BTreeSet<window id>` →
+  `finish_window_dispatch`). A request can be consumed only by the window id
+  that produced it, including when ctl dispatch temporarily checks out a
+  mapped sibling. The funnel exits the event loop only when no windows remain.
 - **One GPU context** — the wgpu `GpuContext { instance, adapter,
   device, queue }` is created with window 1 and shared; each subsequent
   window gets its own surface via `Renderer::new_with_gpu` (synchronous —

@@ -8,6 +8,27 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Fixed
 
+- **Wheel input in a split window followed keyboard focus instead of the
+  pointer.** Scrolling over an unfocused pane changed the focused pane's
+  scrollback, sent mouse-tracking reports to the wrong TUI, or synthesized
+  alternate-screen cursor keys in the wrong shell. Terminal wheel behavior now
+  targets the pane under the pointer without changing keyboard focus; chrome
+  and gaps retain the focused-pane fallback.
+
+- **Selection drags could freeze at the outer window edge or jump to another
+  split.** Some window backends stop sending coordinates after `CursorLeft`, so
+  dragging beyond the top or bottom stopped scrollback autoscroll until the
+  pointer moved again. The exit edge is now latched and drives the existing
+  frame timer. The gesture also pins its starting pane, so ctl/Lua focus changes
+  cannot redirect extension, autoscroll, or copy-on-release to a sibling.
+
+- **A close requested for one in-process window could be consumed by another
+  window's dispatch epilogue.** The pending close was one app-global Boolean;
+  cross-window control dispatch already needed a special case to avoid closing
+  the focused window instead of its target. Requests are now keyed by window
+  id and consumed only by that window. This removes a Kettle-side path by which
+  one exiting CLI pane could make separate terminal windows disappear.
+
 - **`kettle exec` could report exit 0 before Unix PTY output arrived.** The
   lifecycle correctly distinguished an empty raw-output channel from a
   disconnected one, but then overrode that proof after 810 ms on every
