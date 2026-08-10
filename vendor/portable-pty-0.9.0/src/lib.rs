@@ -153,6 +153,15 @@ pub trait Child: std::fmt::Debug + ChildKiller + Downcast + Send {
     /// Only available on Windows.
     #[cfg(windows)]
     fn as_raw_handle(&self) -> Option<std::os::windows::io::RawHandle>;
+
+    /// Number of live processes in the containment scope, when the backend
+    /// created one. A direct child may exit while a same-console descendant is
+    /// still able to write through ConPTY, so callers must not close the
+    /// pseudoconsole until this reaches zero.
+    #[cfg(windows)]
+    fn process_tree_active_processes(&self) -> IoResult<Option<u32>> {
+        Ok(None)
+    }
 }
 impl_downcast!(Child);
 

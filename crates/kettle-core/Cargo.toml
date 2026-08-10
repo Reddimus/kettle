@@ -52,6 +52,7 @@ libc = "0.2"
 # entries — winreg 0.10 is already in the graph as portable-pty's own dep.
 winreg = "0.56"
 windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
     "Win32_Storage_FileSystem",
 ] }
 

@@ -5,7 +5,7 @@ use std::collections::{HashMap, VecDeque};
 use std::io::{self, Read, Write};
 #[cfg(unix)]
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 
@@ -836,6 +836,123 @@ pub enum PtyOutputSender {
     Lossless(crossbeam_channel::Sender<Vec<u8>>),
 }
 
+/// Terminal state of the blocking PTY reader.
+///
+/// The raw-output side channel disconnects both after an orderly EOF and after
+/// an unexpected read failure. Headless callers must distinguish those cases:
+/// treating every disconnect as EOF can report success with truncated output.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub enum PtyReadStatus {
+    Reading = 0,
+    Eof = 1,
+    Failed = 2,
+}
+
+/// Source-side progress of the PTY read pipeline.
+///
+/// `generation` advances as soon as the blocking pump reads a non-empty chunk,
+/// before that chunk can wait behind the bounded parser queue or a lossless
+/// output subscriber. `pending_chunks` remains non-zero until the reader has
+/// parsed and published each admitted chunk. Headless completion uses both so
+/// ConPTY silence cannot hide an in-flight final repaint.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PtyReadProgress {
+    pub status: PtyReadStatus,
+    pub generation: u64,
+    pub pending_chunks: usize,
+}
+
+impl PtyReadStatus {
+    fn from_bits(status: u64) -> Self {
+        match status {
+            1 => Self::Eof,
+            2 => Self::Failed,
+            _ => Self::Reading,
+        }
+    }
+}
+
+/// One atomic word makes a progress sample a real snapshot. Reading status,
+/// generation, and pending work from separate atomics allowed a pump read and
+/// parser completion to pass between the loads and manufacture a state that
+/// never existed (old generation with zero pending work).
+struct PtyReadProgressState(AtomicU64);
+
+impl PtyReadProgressState {
+    const STATUS_MASK: u64 = 0b11;
+    const PENDING_SHIFT: u32 = 2;
+    const PENDING_BITS: u32 = 14;
+    const PENDING_ONE: u64 = 1 << Self::PENDING_SHIFT;
+    const PENDING_MASK: u64 = ((1 << Self::PENDING_BITS) - 1) << Self::PENDING_SHIFT;
+    const GENERATION_SHIFT: u32 = Self::PENDING_SHIFT + Self::PENDING_BITS;
+    const GENERATION_ONE: u64 = 1 << Self::GENERATION_SHIFT;
+
+    fn new() -> Self {
+        Self(AtomicU64::new(0))
+    }
+
+    fn load(&self) -> PtyReadProgress {
+        let state = self.0.load(Ordering::Acquire);
+        PtyReadProgress {
+            status: PtyReadStatus::from_bits(state & Self::STATUS_MASK),
+            generation: state >> Self::GENERATION_SHIFT,
+            pending_chunks: ((state & Self::PENDING_MASK) >> Self::PENDING_SHIFT) as usize,
+        }
+    }
+
+    fn set_status(&self, status: PtyReadStatus) {
+        let _ = self
+            .0
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |state| {
+                Some((state & !Self::STATUS_MASK) | status as u64)
+            });
+    }
+
+    fn mark_chunk_read(&self) {
+        let _ = self
+            .0
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |state| {
+                let pending = (state & Self::PENDING_MASK) >> Self::PENDING_SHIFT;
+                assert!(
+                    pending < (1 << Self::PENDING_BITS) - 1,
+                    "PTY pending-chunk counter overflowed"
+                );
+                Some(state.wrapping_add(Self::GENERATION_ONE + Self::PENDING_ONE))
+            });
+    }
+
+    fn mark_chunk_handled(&self) {
+        let _ = self
+            .0
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |state| {
+                let pending = (state & Self::PENDING_MASK) >> Self::PENDING_SHIFT;
+                debug_assert!(
+                    pending != 0,
+                    "a PTY parser chunk was not tracked by the pump"
+                );
+                (pending != 0).then_some(state - Self::PENDING_ONE)
+            });
+    }
+}
+
+fn pty_read_error_status(error: &io::Error) -> PtyReadStatus {
+    #[cfg(unix)]
+    if error.raw_os_error() == Some(libc::EIO) {
+        // Unix PTY masters commonly report the final slave close as EIO
+        // instead of an ordinary zero-byte read.
+        return PtyReadStatus::Eof;
+    }
+    #[cfg(windows)]
+    if error.kind() == io::ErrorKind::BrokenPipe
+        || error.raw_os_error() == Some(windows_sys::Win32::Foundation::ERROR_BROKEN_PIPE as i32)
+        || error.raw_os_error() == Some(windows_sys::Win32::Foundation::ERROR_NO_DATA as i32)
+    {
+        return PtyReadStatus::Eof;
+    }
+    PtyReadStatus::Failed
+}
+
 impl PtyOutputSender {
     pub fn best_effort(sender: crossbeam_channel::Sender<Vec<u8>>) -> Self {
         Self::BestEffort(sender)
@@ -878,6 +995,9 @@ pub struct PtyGeometry {
 pub struct TerminalCapabilities {
     pub osc52_copy: bool,
     pub unnegotiated_modified_enter: bool,
+    /// Spawn the command inside an OS-owned descendant containment boundary.
+    /// Currently meaningful for headless automation on Windows.
+    pub contain_process_tree: bool,
 }
 
 impl Default for TerminalCapabilities {
@@ -885,6 +1005,7 @@ impl Default for TerminalCapabilities {
         Self {
             osc52_copy: true,
             unnegotiated_modified_enter: true,
+            contain_process_tree: false,
         }
     }
 }
@@ -2121,6 +2242,35 @@ impl Write for LazySessionLogWriter {
     }
 }
 
+#[cfg(windows)]
+#[derive(Default)]
+struct ConPtyCloseState {
+    completed: AtomicBool,
+    drop_requested: AtomicBool,
+}
+
+#[cfg(windows)]
+impl ConPtyCloseState {
+    /// Called by the sole owner of the ConPTY master after
+    /// `ClosePseudoConsole` has really returned.
+    fn close_completed(&self, stop: &AtomicBool) {
+        self.completed.store(true, Ordering::Release);
+        if self.drop_requested.load(Ordering::Acquire) {
+            stop.store(true, Ordering::Release);
+        }
+    }
+
+    /// Transfer reader-stop ownership to the asynchronous close worker. If it
+    /// already finished, this side publishes the stop itself; otherwise the
+    /// worker observes the request after its blocking close returns.
+    fn terminal_dropped(&self, stop: &AtomicBool) {
+        self.drop_requested.store(true, Ordering::Release);
+        if self.completed.load(Ordering::Acquire) {
+            stop.store(true, Ordering::Release);
+        }
+    }
+}
+
 pub struct Terminal {
     pub term: SharedTerm,
     term_config: TermConfig,
@@ -2131,6 +2281,12 @@ pub struct Terminal {
     // moving a non-`Option` field out of `&mut self`. Always `Some` during
     // normal operation; only `None` transiently inside `Drop`.
     master: Option<Box<dyn portable_pty::MasterPty + Send>>,
+    /// State shared with an asynchronous ConPTY close. Once the master moves
+    /// to that worker, only it may publish `stop`: on older Windows releases
+    /// `ClosePseudoConsole` can wait for the reader to drain conout, so a later
+    /// `Terminal::drop` must not stop that reader first.
+    #[cfg(windows)]
+    pty_close: Option<Arc<ConPtyCloseState>>,
     writer: Arc<Mutex<Box<dyn Write + Send>>>,
     /// Unix `O_NONBLOCK` is status on the shared PTY master open-file
     /// description, not on one duplicated descriptor. Permit exactly one
@@ -2140,6 +2296,11 @@ pub struct Terminal {
     stdin_lease_phase: Arc<Mutex<PtyStdinLeasePhase>>,
     child: Arc<Mutex<Box<dyn portable_pty::Child + Send + Sync>>>,
     reader_thread: Option<JoinHandle<()>>,
+    /// Published before the reader's sole raw-output sender is dropped, so a
+    /// headless consumer can tell orderly EOF from an unexpected read error.
+    /// Status, source generation, and pending parser work in one atomic word so
+    /// headless completion cannot observe a combination that never existed.
+    pty_read_progress: Arc<PtyReadProgressState>,
     // Cooperative stop flag for the reader thread. The detached teardown
     // worker sets it only after closing the PTY master. Keeping it false while
     // `ClosePseudoConsole` runs is required on Windows before 11 24H2, where
@@ -3867,6 +4028,7 @@ impl Terminal {
         };
         #[cfg(windows)]
         overlay_windows_parent_env(&mut cmd, std::env::vars_os());
+        cmd.set_process_tree_containment(capabilities.contain_process_tree);
         // Apply user pane env before terminal identity env so `term` /
         // `colorterm` stay authoritative for those protocol-critical values.
         for (name, value) in extra_env {
@@ -4086,6 +4248,7 @@ impl Terminal {
         // `out_gen` struct field).
         let out_gen = Arc::new(std::sync::atomic::AtomicU64::new(0));
         let out_gen_reader = out_gen.clone();
+        let pty_read_progress = Arc::new(PtyReadProgressState::new());
 
         let reader_thread = {
             let term = term.clone();
@@ -4112,6 +4275,7 @@ impl Terminal {
             let log_generation = log_generation.clone();
             let stop = stop.clone();
             let drain_output = drain_output.clone();
+            let reader_progress = Arc::clone(&pty_read_progress);
             std::thread::Builder::new()
                 .name("kettle-pty-reader".into())
                 .spawn(move || {
@@ -4133,6 +4297,7 @@ impl Terminal {
                         let pump_stop = stop.clone();
                         let pump_drain_output = drain_output.clone();
                         let pump_recycle_tx = recycle_tx.clone();
+                        let pump_progress = Arc::clone(&reader_progress);
                         if let Err(error) = std::thread::Builder::new()
                             .name("kettle-pty-pump".into())
                             .spawn(move || {
@@ -4175,7 +4340,19 @@ impl Terminal {
                                             let _ = pump_recycle_tx.try_send(buffer);
                                             continue;
                                         }
-                                        Ok(0) | Err(_) => {
+                                        Ok(0) => {
+                                            pump_progress.set_status(PtyReadStatus::Eof);
+                                            if !pump_drain_output.load(Ordering::Acquire) {
+                                                let _ = raw_tx.send(None);
+                                            }
+                                            break;
+                                        }
+                                        Err(error) => {
+                                            let status = pty_read_error_status(&error);
+                                            if status == PtyReadStatus::Failed {
+                                                log::error!("PTY output read failed: {error}");
+                                            }
+                                            pump_progress.set_status(status);
                                             if !pump_drain_output.load(Ordering::Acquire) {
                                                 let _ = raw_tx.send(None);
                                             }
@@ -4183,6 +4360,11 @@ impl Terminal {
                                         }
                                         Ok(n) => {
                                             buffer.truncate(n);
+                                            // Publish activity before this chunk can block behind
+                                            // either the parser queue or a lossless raw-output
+                                            // subscriber. ConPTY completion must not treat that
+                                            // hidden work as a quiet transport.
+                                            pump_progress.mark_chunk_read();
                                             match forward_pty_buffer_or_drain(
                                                 &raw_tx,
                                                 &pump_drain_output,
@@ -4190,9 +4372,13 @@ impl Terminal {
                                             ) {
                                                 PtyPumpSend::Forwarded => {}
                                                 PtyPumpSend::Drain(buffer) => {
+                                                    pump_progress.mark_chunk_handled();
                                                     drain_buffer = Some(buffer);
                                                 }
-                                                PtyPumpSend::Disconnected => break,
+                                                PtyPumpSend::Disconnected => {
+                                                    pump_progress.mark_chunk_handled();
+                                                    break;
+                                                }
                                             }
                                         }
                                     }
@@ -4205,6 +4391,7 @@ impl Terminal {
                             // through the normal exit event instead of silently
                             // waiting on a channel with no sender.
                             log::error!("failed to spawn PTY pump thread: {error}");
+                            reader_progress.set_status(PtyReadStatus::Failed);
                             proxy.send_event_exit();
                             return;
                         }
@@ -4920,6 +5107,7 @@ impl Terminal {
                                     &out_gen_reader,
                                     &output_wake,
                                 );
+                                reader_progress.mark_chunk_handled();
                             }
                         }
                     }
@@ -4938,11 +5126,14 @@ impl Terminal {
             scrollback_line_limit: scrollback,
             scrollback_byte_limit: scrollback_bytes,
             master: Some(pair.master),
+            #[cfg(windows)]
+            pty_close: None,
             writer: Arc::new(Mutex::new(writer)),
             #[cfg(unix)]
             stdin_lease_phase: Arc::new(Mutex::new(PtyStdinLeasePhase::Available)),
             child: Arc::new(Mutex::new(child)),
             reader_thread: Some(reader_thread),
+            pty_read_progress,
             stop,
             drain_output,
             cols,
@@ -5198,6 +5389,126 @@ impl Terminal {
     /// process-tree walk. Read-only — does not consume the Child.
     pub fn child_pid(&self) -> Option<u32> {
         self.child.lock().ok().and_then(|c| c.process_id())
+    }
+
+    /// Observe an exited Unix child without consuming its wait status.
+    ///
+    /// `kettle exec` must know when to start its bounded PTY EOF wait, but on
+    /// Linux the unreaped child is also the kernel-held identity anchor that
+    /// prevents its session/process-group number from being recycled while a
+    /// later output deadline can still win. `waitid(..., WNOWAIT)` supplies
+    /// both facts: an exit code for ordinary completion and a zombie retained
+    /// until the final output/recording acknowledgement is complete.
+    #[cfg(unix)]
+    pub fn child_exit_code_unreaped(&self) -> io::Result<Option<u32>> {
+        let pid = self
+            .child
+            .lock()
+            .map_err(|_| io::Error::other("child handle is poisoned"))?
+            .process_id()
+            .ok_or_else(|| io::Error::other("PTY child has no process id"))?;
+        let pid = libc::pid_t::try_from(pid)
+            .map_err(|_| io::Error::other("PTY child process id is out of range"))?;
+
+        // SAFETY: `info` is initialized for the kernel, `pid` identifies this
+        // process's direct child, and WNOWAIT explicitly leaves its wait status
+        // available to portable-pty's later `try_wait`.
+        let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+        loop {
+            let result = unsafe {
+                libc::waitid(
+                    libc::P_PID,
+                    pid as libc::id_t,
+                    &mut info,
+                    libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
+                )
+            };
+            if result == 0 {
+                // POSIX reports a successful WNOHANG probe with si_pid == 0
+                // while the selected child is still running.
+                if unsafe { info.si_pid() } == 0 {
+                    return Ok(None);
+                }
+                let status = unsafe { info.si_status() };
+                let code = match info.si_code {
+                    libc::CLD_EXITED => status as u32,
+                    libc::CLD_KILLED | libc::CLD_DUMPED => 128u32.saturating_add(status as u32),
+                    // WEXITED excludes stop/continue notifications. Treat an
+                    // unexpected code as an observation failure, not success.
+                    other => {
+                        return Err(io::Error::other(format!(
+                            "waitid returned unexpected child status code {other}"
+                        )));
+                    }
+                };
+                return Ok(Some(code));
+            }
+            let error = io::Error::last_os_error();
+            if error.kind() != io::ErrorKind::Interrupted {
+                return Err(error);
+            }
+        }
+    }
+
+    /// Start closing the ConPTY master without blocking the lifecycle thread.
+    ///
+    /// This is used only after the child has exited and a bounded quiet period
+    /// has elapsed. The output reader deliberately remains live: older Windows
+    /// versions can block `ClosePseudoConsole` until conout has been drained,
+    /// and the resulting pipe close is the authoritative boundary after which
+    /// headless output may be finalized without racing a late repaint.
+    #[cfg(windows)]
+    pub fn begin_pty_output_close(&mut self) -> io::Result<bool> {
+        let Some(master) = self.master.take() else {
+            return Ok(false);
+        };
+        let close = Arc::new(Mutex::new(Some(master)));
+        let worker = Arc::clone(&close);
+        let state = Arc::new(ConPtyCloseState::default());
+        let worker_state = Arc::clone(&state);
+        let stop = Arc::clone(&self.stop);
+        match std::thread::Builder::new()
+            .name("kettle-pty-output-close".into())
+            .spawn(move || {
+                let master = worker
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .take();
+                drop(master);
+                worker_state.close_completed(&stop);
+            }) {
+            Ok(_) => {
+                self.pty_close = Some(state);
+                Ok(true)
+            }
+            Err(error) => {
+                self.master = close
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .take();
+                Err(error)
+            }
+        }
+    }
+
+    /// Number of processes still alive in this command's Windows Job Object.
+    /// `None` means the PTY child was not spawned with a containment scope.
+    #[cfg(windows)]
+    pub fn process_tree_active_processes(&self) -> io::Result<Option<u32>> {
+        self.child
+            .lock()
+            .map_err(|_| io::Error::other("child handle is poisoned"))?
+            .process_tree_active_processes()
+    }
+
+    /// Current terminal state of the blocking PTY output reader.
+    pub fn pty_read_status(&self) -> PtyReadStatus {
+        self.pty_read_progress.load().status
+    }
+
+    /// Source-side activity and outstanding work in the PTY reader pipeline.
+    pub fn pty_read_progress(&self) -> PtyReadProgress {
+        self.pty_read_progress.load()
     }
 
     /// Terminator parity (`command_notify.py`): pop every
@@ -6063,6 +6374,14 @@ impl Drop for Terminal {
         //    The indirection keeps the master alive if thread creation fails;
         //    leaking one failed teardown is preferable to synchronously
         //    entering a platform close that has no deadline.
+        #[cfg(windows)]
+        if let Some(close) = &self.pty_close {
+            close.terminal_dropped(&self.stop);
+        }
+        #[cfg(windows)]
+        let close_owns_reader_stop = self.pty_close.is_some();
+        #[cfg(not(windows))]
+        let close_owns_reader_stop = false;
         let teardown = Arc::new(Mutex::new(Some((self.child.clone(), self.master.take()))));
         let teardown_worker = Arc::clone(&teardown);
         let reaper_stop = Arc::clone(&self.stop);
@@ -6079,9 +6398,18 @@ impl Drop for Terminal {
                 if let Ok(mut child) = child.lock() {
                     let _ = child.kill();
                 }
-                close_pty_while_reader_is_live(&reaper_stop, || {
+                if close_owns_reader_stop {
+                    debug_assert!(master.is_none());
+                    // `begin_pty_output_close` moved the master to another
+                    // worker. That worker alone publishes `stop` after the
+                    // real platform close returns; doing it here first can
+                    // deadlock ClosePseudoConsole against its own reader.
                     drop(master);
-                });
+                } else {
+                    close_pty_while_reader_is_live(&reaper_stop, || {
+                        drop(master);
+                    });
+                }
                 if let Ok(mut child) = child.lock() {
                     let _ = child.wait();
                 }
@@ -10604,6 +10932,37 @@ mod teardown_tests {
         );
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn asynchronous_conpty_close_owns_reader_stop_across_terminal_drop() {
+        let stop = AtomicBool::new(false);
+        let close = ConPtyCloseState::default();
+
+        close.terminal_dropped(&stop);
+        assert!(
+            !stop.load(Ordering::Acquire),
+            "dropping Terminal while ClosePseudoConsole is blocked must keep its reader alive"
+        );
+        close.close_completed(&stop);
+        assert!(
+            stop.load(Ordering::Acquire),
+            "the close owner must stop the reader after the real close returns"
+        );
+
+        let stop = AtomicBool::new(false);
+        let close = ConPtyCloseState::default();
+        close.close_completed(&stop);
+        assert!(
+            !stop.load(Ordering::Acquire),
+            "ordinary close completion still lets the parser consume its EOF marker"
+        );
+        close.terminal_dropped(&stop);
+        assert!(
+            stop.load(Ordering::Acquire),
+            "a later Terminal drop must observe that close already completed"
+        );
+    }
+
     /// A full parser handoff must not pin the blocking pump during teardown.
     /// Once drain mode is published, the pump recovers its buffer and can
     /// continue consuming conout without waiting for parser progress.
@@ -10640,6 +10999,29 @@ mod teardown_tests {
             Some(vec![1])
         );
         pump.join().expect("pump handoff model thread");
+    }
+
+    #[test]
+    fn source_progress_tracks_chunks_hidden_in_the_parser_pipeline() {
+        let progress = PtyReadProgressState::new();
+
+        progress.mark_chunk_read();
+        progress.mark_chunk_read();
+        assert_eq!(
+            progress.load(),
+            PtyReadProgress {
+                status: PtyReadStatus::Reading,
+                generation: 2,
+                pending_chunks: 2,
+            }
+        );
+
+        progress.mark_chunk_handled();
+        assert_eq!(progress.load().pending_chunks, 1);
+        progress.mark_chunk_handled();
+        assert_eq!(progress.load().pending_chunks, 0);
+        progress.set_status(PtyReadStatus::Eof);
+        assert_eq!(progress.load().status, PtyReadStatus::Eof);
     }
 
     /// Regression guard (runtime). Dropping a `Terminal` whose
@@ -11698,6 +12080,33 @@ mod output_sender_tests {
         done_rx.recv_timeout(Duration::from_secs(1)).unwrap();
         assert_eq!(rx.recv().unwrap(), vec![2]);
         sender.join().unwrap();
+    }
+}
+
+#[cfg(test)]
+mod pty_read_status_tests {
+    use super::{PtyReadStatus, pty_read_error_status};
+
+    #[test]
+    fn an_unexpected_read_error_is_not_relabelled_as_eof() {
+        let error = std::io::Error::other("injected PTY reader failure");
+        assert_eq!(pty_read_error_status(&error), PtyReadStatus::Failed);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unix_eio_is_the_platforms_orderly_pty_hangup() {
+        let error = std::io::Error::from_raw_os_error(libc::EIO);
+        assert_eq!(pty_read_error_status(&error), PtyReadStatus::Eof);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_broken_pipe_is_the_platforms_orderly_conpty_hangup() {
+        let error = std::io::Error::from_raw_os_error(
+            windows_sys::Win32::Foundation::ERROR_BROKEN_PIPE as i32,
+        );
+        assert_eq!(pty_read_error_status(&error), PtyReadStatus::Eof);
     }
 }
 

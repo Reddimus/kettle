@@ -35,6 +35,9 @@ ignored = ["serde"]
 name = "portable_pty"
 path = "src/lib.rs"
 
+[dev-dependencies.serde_json]
+version = "1.0"
+
 [dependencies.anyhow]
 version = "1.0"
 
@@ -96,6 +99,7 @@ features = [
     "fileapi",
     "namedpipeapi",
     "synchapi",
+    "jobapi2",
 ]
 
 [target."cfg(windows)".dependencies.winreg]

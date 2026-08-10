@@ -999,9 +999,9 @@ fn exec_timeout_bounds_stalled_output_after_child_exit() {
     );
     assert_eq!(
         status.code(),
-        Some(STDOUT_BURST_CHILD_EXIT_CODE),
-        "a collected child status must win when only trailing output reaches \
-         the deadline; stderr={err:?}"
+        Some(124),
+        "the operation deadline covers lossless trailing-output delivery; a \
+         collected child status cannot turn abandoned output into success; stderr={err:?}"
     );
     assert!(
         err.contains("stdout was not fully delivered before the run stopped"),
@@ -1073,6 +1073,77 @@ fn exec_forwards_delimited_piped_stdin_through_conpty() {
         out.contains("WINDOWS_PIPE_DELIMITED_OK"),
         "native ConPTY child did not receive exact delimited input: {out:?}"
     );
+}
+
+#[cfg(windows)]
+const CONPTY_LATE_DESCENDANT_ENV: &str = "KETTLE_EXEC_CONPTY_LATE_DESCENDANT";
+
+/// The direct child may exit while a same-console descendant is still alive
+/// and able to write. Quiet is not permission to close ConPTY in that state:
+/// ClosePseudoConsole sends connected clients a close event and can erase the
+/// descendant's promised output while Kettle still reports the parent's zero.
+#[cfg(windows)]
+#[test]
+fn exec_waits_for_a_live_conpty_descendant_before_closing_the_transport() {
+    let helper = std::env::current_exe().expect("resolve integration-test helper");
+    let helper = helper.to_str().expect("integration-test path is UTF-8");
+    let argv = [
+        helper,
+        "--exact",
+        "windows_conpty_late_descendant_helper",
+        "--nocapture",
+        "--test-threads=1",
+    ];
+    let started = Instant::now();
+    let (code, out, err) = run_exec_with_env(
+        &["--timeout", "8.0", "--strip-ansi"],
+        &argv,
+        None,
+        &[(CONPTY_LATE_DESCENDANT_ENV, "parent")],
+    );
+    if no_pty(code, &err) {
+        eprintln!("skipping live ConPTY descendant check: no PTY");
+        return;
+    }
+    assert_eq!(code, 0, "stderr: {err}; stdout: {out:?}");
+    assert!(
+        out.contains("CONPTY_LATE_DESCENDANT_OUTPUT"),
+        "ConPTY closed before the live descendant wrote its tail: {out:?}; stderr: {err:?}"
+    );
+    assert!(
+        started.elapsed() >= Duration::from_millis(1_500),
+        "the direct child was mistaken for the complete contained process tree"
+    );
+}
+
+#[cfg(windows)]
+#[test]
+// The parent branch must exit without waiting: the outer test verifies that
+// Kettle keeps ConPTY open for a same-console descendant after its direct
+// child is gone. The descendant is contained and cleaned up by Kettle's Job
+// Object; waiting here would erase the lifetime ordering under test.
+#[allow(clippy::zombie_processes)]
+fn windows_conpty_late_descendant_helper() {
+    match std::env::var(CONPTY_LATE_DESCENDANT_ENV).as_deref() {
+        Ok("parent") => {
+            let mut child = std::process::Command::new(
+                std::env::current_exe().expect("resolve descendant helper"),
+            );
+            child.args([
+                "--exact",
+                "windows_conpty_late_descendant_helper",
+                "--nocapture",
+                "--test-threads=1",
+            ]);
+            child.env(CONPTY_LATE_DESCENDANT_ENV, "child");
+            child.spawn().expect("spawn same-console descendant");
+        }
+        Ok("child") => {
+            std::thread::sleep(Duration::from_secs(2));
+            println!("CONPTY_LATE_DESCENDANT_OUTPUT");
+        }
+        _ => {}
+    }
 }
 
 #[cfg(windows)]

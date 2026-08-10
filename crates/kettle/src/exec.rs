@@ -38,8 +38,8 @@ use std::time::{Duration, Instant};
 
 use crossbeam_channel::{Receiver, Sender};
 use kettle_core::{
-    CursorShape, PtyEofProgress, PtyGeometry, PtyOutputSender, PtyStdin, TermEvent, Terminal,
-    TerminalCapabilities, Waker, WorkingDirectoryPolicy,
+    CursorShape, PtyEofProgress, PtyGeometry, PtyOutputSender, PtyReadProgress, PtyReadStatus,
+    PtyStdin, TermEvent, Terminal, TerminalCapabilities, Waker, WorkingDirectoryPolicy,
 };
 
 /// How long to keep draining output after the child exits before we stop and
@@ -51,16 +51,18 @@ const SETTLE: Duration = Duration::from_millis(60);
 /// lifecycle loop polling during this window so cancellation and deadlines
 /// remain enforceable.
 const CHILD_EXIT_STATUS_WAIT: Duration = Duration::from_millis(250);
-/// How long to keep waiting for the PTY reader to reach EOF after the child is
-/// gone, before concluding it never will.
+/// How long ConPTY may keep its reader alive after the child is gone before
+/// ordinary completion closes the pseudoconsole to obtain a real EOF.
 ///
-/// Only the platforms whose reader outlives the child spend this: on Unix the
-/// master read fails once the child closes the slave, so the reader exits, the
-/// channel disconnects, and wrap-up proceeds immediately. Windows ConPTY keeps
-/// its handle open, so there the bound is the real path. Generous because
-/// spending it is invisible (the child has already exited and its output has
-/// already been printed) while cutting it short costs the tail of the output.
-const PTY_DRAIN_GRACE: Duration = Duration::from_millis(750);
+/// The close runs off-thread while the output reader remains live, as required
+/// by older Windows versions. Quiet is only permission to begin that close;
+/// it is never permission to report success with a reader still able to emit.
+const CONPTY_DRAIN_GRACE: Duration = Duration::from_millis(750);
+/// A command must never report the child's success while its PTY reader could
+/// still deliver bytes. Bound the wait so a leaked Unix slave descriptor or a
+/// stuck ConPTY close becomes an explicit internal failure rather than either
+/// an infinite hang or successful completion with truncated output.
+const PTY_EOF_TIMEOUT: Duration = Duration::from_secs(5);
 /// Semantic events emitted by the VT parser. A full queue is a fail-command
 /// condition because silently dropping a reply request can deadlock the child.
 const PTY_EVENT_QUEUE_DEPTH: usize = 1024;
@@ -80,8 +82,9 @@ const EVENT_SLICE_MESSAGES: usize = 256;
 /// completion indefinitely.
 const RECORD_FINISH_TIMEOUT: Duration = Duration::from_secs(2);
 
-/// Exit code for `--timeout` expiry when no child status was collected
-/// (coreutils `timeout(1)` convention).
+/// Exit code whenever the complete `--timeout` deadline expires (coreutils
+/// `timeout(1)` convention). A collected child status does not override an
+/// incomplete lossless-output contract.
 pub const EXIT_TIMEOUT: i32 = 124;
 /// Exit code when stdout cannot accept the complete child stream (`EX_IOERR`).
 pub const EXIT_OUTPUT_DELIVERY: i32 = 74;
@@ -117,6 +120,168 @@ type OutputResult<T> = Result<T, OutputDeliveryError>;
 enum LifecycleStop {
     Cancellation,
     Deadline,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PtyTransportEnd {
+    Pending,
+    Eof,
+    Failed,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PtyDrainFailure {
+    Read,
+    EofTimeout,
+    #[cfg(windows)]
+    Containment,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PtyDrainDecision {
+    Wait,
+    CloseTransport,
+    Finished,
+    Failed(PtyDrainFailure),
+}
+
+fn observed_pty_transport_end(
+    channel_disconnected: bool,
+    reader_status: PtyReadStatus,
+) -> PtyTransportEnd {
+    match reader_status {
+        // The failure is sticky, but the pump publishes it before its terminal
+        // marker can pass chunks already admitted to the parser. Wait for the
+        // raw sender to disconnect so those chunks can reach stdout first; the
+        // final decision remains failure and can never become success.
+        PtyReadStatus::Failed => {
+            if channel_disconnected {
+                PtyTransportEnd::Failed
+            } else {
+                PtyTransportEnd::Pending
+            }
+        }
+        PtyReadStatus::Eof => {
+            if channel_disconnected {
+                PtyTransportEnd::Eof
+            } else {
+                PtyTransportEnd::Pending
+            }
+        }
+        // A sender disappearing without first publishing an orderly EOF is a
+        // reader failure too. This catches panic/thread-exit paths in addition
+        // to explicit read errors.
+        PtyReadStatus::Reading => {
+            if channel_disconnected {
+                PtyTransportEnd::Failed
+            } else {
+                PtyTransportEnd::Pending
+            }
+        }
+    }
+}
+
+fn latest_pty_activity(
+    child_gone_at: Instant,
+    delivered_at: Instant,
+    source_read_at: Instant,
+) -> Instant {
+    std::cmp::max(child_gone_at, std::cmp::max(delivered_at, source_read_at))
+}
+
+/// Decide whether a child whose process status is already gone has finished
+/// producing observable PTY output.
+///
+/// The platform distinction is intentional. ConPTY can retain its reader
+/// handle after the child and final repaint are gone, so Windows needs a
+/// bounded quiet fallback. A Unix reader owns the sole raw-output sender and
+/// drops it after `read` reaches EOF; elapsed time can bound that wait but can
+/// never turn it into success. `transport_idle` keeps that hard bound from
+/// overriding bytes already queued for delivery or a busy stdout worker.
+fn pty_drain_decision(
+    conpty_may_outlive_child: bool,
+    transport_end: PtyTransportEnd,
+    child_gone_for: Duration,
+    transport_quiet_for: Duration,
+    transport_idle: bool,
+    source_pending_chunks: usize,
+) -> PtyDrainDecision {
+    match transport_end {
+        PtyTransportEnd::Eof => {
+            return if !transport_idle {
+                // The parser may have published a chunk to the stdout worker
+                // before dying without retiring its source-side count. The
+                // count can no longer reach zero, but the admitted write is
+                // still real work and must drain before the read failure wins.
+                PtyDrainDecision::Wait
+            } else if source_pending_chunks == 0 {
+                PtyDrainDecision::Finished
+            } else {
+                // The raw sender is gone, so no reader remains that can retire
+                // this count. Once downstream output is idle, waiting would
+                // hang forever after a reader panic.
+                PtyDrainDecision::Failed(PtyDrainFailure::Read)
+            };
+        }
+        PtyTransportEnd::Failed => {
+            return if !transport_idle {
+                // Failure is sticky, but already-admitted stdout must finish
+                // before the lifecycle reports it and exits the process.
+                PtyDrainDecision::Wait
+            } else {
+                // Channel disconnection proves the sole parser is gone. Any
+                // remaining source count is irreducible, so fail as soon as
+                // downstream delivery is idle rather than waiting forever.
+                PtyDrainDecision::Failed(PtyDrainFailure::Read)
+            };
+        }
+        PtyTransportEnd::Pending => {}
+    }
+    if conpty_may_outlive_child {
+        if transport_idle
+            && source_pending_chunks == 0
+            && transport_quiet_for >= SETTLE + CONPTY_DRAIN_GRACE
+        {
+            PtyDrainDecision::CloseTransport
+        } else {
+            PtyDrainDecision::Wait
+        }
+    } else if transport_idle && source_pending_chunks == 0 && child_gone_for >= PTY_EOF_TIMEOUT {
+        PtyDrainDecision::Failed(PtyDrainFailure::EofTimeout)
+    } else {
+        PtyDrainDecision::Wait
+    }
+}
+
+/// Production platform selection for PTY completion.
+///
+/// Keeping `cfg!(windows)` inside this seam lets native tests pin the actual
+/// selection instead of testing only a helper with hand-written booleans.
+fn native_pty_drain_decision(
+    transport_end: PtyTransportEnd,
+    child_gone_for: Duration,
+    transport_quiet_for: Duration,
+    transport_idle: bool,
+    source_pending_chunks: usize,
+) -> PtyDrainDecision {
+    pty_drain_decision(
+        cfg!(windows),
+        transport_end,
+        child_gone_for,
+        transport_quiet_for,
+        transport_idle,
+        source_pending_chunks,
+    )
+}
+
+fn lifecycle_stop_code(stop: LifecycleStop, _child_exit_code: Option<i32>) -> i32 {
+    match stop {
+        LifecycleStop::Cancellation => EXIT_CANCELLED,
+        // The deadline covers the complete operation, including lossless PTY
+        // delivery. A known child status cannot turn an incomplete stream into
+        // success once that deadline has expired.
+        LifecycleStop::Deadline => EXIT_TIMEOUT,
+    }
 }
 
 /// How the child's output is rendered to stdout.
@@ -539,7 +704,8 @@ pub fn run_exec_with(
 /// A bounded channel alone does not make an unbounded `try_recv` loop fair:
 /// the producer can refill each slot as soon as the owner removes it. Both a
 /// message and byte budget keep lifecycle checks reachable under that race.
-/// `pty_reached_eof` is latched when the raw channel reports *disconnected*
+/// `pty_channel_disconnected` is latched when the raw channel reports
+/// *disconnected*
 /// rather than merely empty.
 ///
 /// That distinction is the whole point. An empty channel is not evidence the
@@ -560,7 +726,8 @@ fn drain_output_slice(
     receiver: &Receiver<Vec<u8>>,
     recorder: &mut Option<kettle_core::record::Recorder>,
     output: &mut dyn ExecOutput,
-    pty_reached_eof: &std::cell::Cell<bool>,
+    pty_channel_disconnected: &std::cell::Cell<bool>,
+    last_pty_output_at: &std::cell::Cell<Instant>,
 ) -> OutputResult<bool> {
     let mut bytes_drained = 0usize;
     for _ in 0..OUTPUT_SLICE_MESSAGES {
@@ -574,10 +741,11 @@ fn drain_output_slice(
             Ok(bytes) => bytes,
             Err(crossbeam_channel::TryRecvError::Empty) => return Ok(false),
             Err(crossbeam_channel::TryRecvError::Disconnected) => {
-                pty_reached_eof.set(true);
+                pty_channel_disconnected.set(true);
                 return Ok(false);
             }
         };
+        last_pty_output_at.set(Instant::now());
         bytes_drained = bytes_drained.saturating_add(bytes.len());
         record_chunk(recorder, &bytes);
         output.output(bytes)?;
@@ -642,17 +810,22 @@ fn stop_after_output_failure(
         std::io::stderr(),
         "kettle exec: stdout delivery failed: {error}"
     );
-    process_tree.terminate(term);
+    let contained = process_tree.terminate(term);
     let _ = wait_for_exit_code(term);
     std::thread::sleep(SETTLE);
     drain_recording_slice(raw_output, recorder);
     finish_recording(recorder, Duration::ZERO);
-    let _ = output.finish(
-        EXIT_OUTPUT_DELIVERY,
-        started.elapsed(),
-        OutputFinish::AbandonPending,
-    );
-    EXIT_OUTPUT_DELIVERY
+    let code = if contained {
+        EXIT_OUTPUT_DELIVERY
+    } else {
+        let _ = writeln!(
+            std::io::stderr(),
+            "kettle exec: process-tree teardown was not verified; reporting internal failure"
+        );
+        EXIT_INTERNAL
+    };
+    let _ = output.finish(code, started.elapsed(), OutputFinish::AbandonPending);
+    code
 }
 
 /// Drain one bounded semantic-event slice and report whether work remains.
@@ -708,7 +881,7 @@ fn run_exec_engine(
     // Latched once the raw channel reports disconnected rather than empty --
     // see `drain_output_slice`. A `Cell` because the lifecycle loop is single
     // threaded and this is only ever set from inside it.
-    let pty_reached_eof = std::cell::Cell::new(false);
+    let pty_channel_disconnected = std::cell::Cell::new(false);
     let (stdin_tx, stdin_rx) = crossbeam_channel::bounded::<StdinPumpEvent>(4);
     let (pty_reply_tx, pty_reply_rx) = crossbeam_channel::bounded::<Vec<u8>>(64);
     let pty_reply_gate = Arc::new(Mutex::new(()));
@@ -733,7 +906,8 @@ fn run_exec_engine(
         None => None,
     };
 
-    let term = match Terminal::new_with_env_and_output_geometry_capabilities_and_cwd_policy(
+    #[allow(unused_mut)] // mutated only by the Windows ConPTY close handshake
+    let mut term = match Terminal::new_with_env_and_output_geometry_capabilities_and_cwd_policy(
         &opts.argv,
         cwd,
         // Modest scrollback — exec output streams out immediately, the grid is
@@ -755,6 +929,7 @@ fn run_exec_engine(
         // 52 when OSC 52 writes would be deliberately ignored.
         TerminalCapabilities {
             osc52_copy: false,
+            contain_process_tree: true,
             ..TerminalCapabilities::default()
         },
         // An explicit automation cwd is a contract. Passing it to the OS even
@@ -813,6 +988,10 @@ fn run_exec_engine(
     }
 
     let started = Instant::now();
+    let last_pty_output_at = std::cell::Cell::new(started);
+    let initial_read_progress = term.pty_read_progress();
+    let mut observed_read_generation = initial_read_progress.generation;
+    let last_pty_source_activity_at = std::cell::Cell::new(started);
     macro_rules! output_or_stop {
         ($operation:expr) => {
             match $operation {
@@ -837,6 +1016,8 @@ fn run_exec_engine(
     let mut child_exit_code: Option<i32> = None;
     let mut completion_code: Option<i32> = None;
     let mut recording_finish_deadline: Option<Instant> = None;
+    #[cfg(windows)]
+    let mut pty_close_started_at: Option<Instant> = None;
     let mut last_lifecycle_trace = started;
 
     loop {
@@ -848,16 +1029,11 @@ fn run_exec_engine(
         let elapsed = started.elapsed();
         let cancellation_requested = cancelled.is_some_and(|flag| flag.load(Ordering::Acquire));
         let timeout_expired = opts.timeout.is_some_and(|limit| elapsed >= limit);
-        // An exit event can lead the authoritative status by a few turns. Poll
-        // it before deciding an expired deadline so a status already available
-        // from the OS wins over the timeout sentinel.
-        if child_exit_code.is_none()
-            && (child_gone_at.is_some() || timeout_expired)
-            && let Some(code) = term.child_exit_code()
-        {
-            child_exit_code = Some(clamp_code(code));
-            child_gone_at.get_or_insert_with(Instant::now);
-        }
+        // Do not reap the direct child merely because a stop became due. On
+        // Linux its unreaped identity is the kernel-held anchor proving that
+        // the numeric PTY session and process-group ids have not been recycled.
+        // The status is collected only after ordinary PTY/output completion;
+        // timeout and cancellation have their own fixed exit codes.
         let lifecycle_stop = if cancellation_requested {
             Some(LifecycleStop::Cancellation)
         } else if timeout_expired {
@@ -866,14 +1042,26 @@ fn run_exec_engine(
             None
         };
         if let Some(stop) = lifecycle_stop {
-            let (reason, code) = match stop {
-                LifecycleStop::Cancellation => ("cancellation", EXIT_CANCELLED),
-                LifecycleStop::Deadline => ("timeout", child_exit_code.unwrap_or(EXIT_TIMEOUT)),
+            let reason = match stop {
+                LifecycleStop::Cancellation => "cancellation",
+                LifecycleStop::Deadline => "timeout",
             };
+            let requested_code = lifecycle_stop_code(stop, child_exit_code);
             log::debug!(
-                "kettle exec {reason} reached; starting bounded teardown with exit code {code}"
+                "kettle exec {reason} reached; starting bounded teardown with exit code \
+                 {requested_code}"
             );
-            process_tree.terminate(&term);
+            let contained = process_tree.terminate(&term);
+            let code = if contained {
+                requested_code
+            } else {
+                let _ = writeln!(
+                    std::io::stderr(),
+                    "kettle exec: {reason} process-tree teardown was not verified; \
+                     reporting internal failure instead of completed {reason}"
+                );
+                EXIT_INTERNAL
+            };
             if matches!(stop, LifecycleStop::Cancellation) {
                 // Reap the killed child where the PTY backend exposes its
                 // status; this prevents a cancelled long-running MCP tool from
@@ -908,6 +1096,11 @@ fn run_exec_engine(
                     .expect("ordinary completion must bound recorder finalization"),
             );
             if output_complete && recording_complete {
+                // This is the first point after status observation at which no
+                // timeout/cancellation can still supersede ordinary
+                // completion. Consume the Unix wait status now, releasing the
+                // Linux identity anchor immediately before returning.
+                let _ = term.child_exit_code();
                 return code;
             }
             std::thread::sleep(Duration::from_millis(8));
@@ -932,7 +1125,8 @@ fn run_exec_engine(
             &orx,
             &mut recorder,
             output,
-            &pty_reached_eof
+            &pty_channel_disconnected,
+            &last_pty_output_at
         ));
         if trace_lifecycle {
             log::debug!("kettle exec lifecycle output slice returned: backlog={output_backlog}");
@@ -1011,8 +1205,12 @@ fn run_exec_engine(
                     // well-formed without leaking a clipboard to a headless child).
                     TermEvent::ClipboardLoad(_, fmt) => queue_reply(fmt("").as_bytes()),
                     TermEvent::Exit | TermEvent::ChildExit(_) => {
-                        log::debug!("kettle exec handling child-exit event");
-                        child_gone_at.get_or_insert_with(Instant::now);
+                        // This event is a PTY/parser lifecycle notification,
+                        // not a portable non-reaping process-status query.
+                        // In particular, a leaked Unix slave prevents it from
+                        // arriving at all. The explicit status observation
+                        // below owns `child_gone_at` on every lifecycle turn.
+                        log::debug!("kettle exec handling terminal-exit event");
                     }
                     _ => {}
                 }
@@ -1095,14 +1293,15 @@ fn run_exec_engine(
                 std::io::stderr(),
                 "kettle exec: cannot safely service child PTY events: {error}"
             );
-            process_tree.terminate(&term);
+            let _ = process_tree.terminate(&term);
             let _ = wait_for_exit_code(&term);
             std::thread::sleep(SETTLE);
             let _ = output_or_stop!(drain_output_slice(
                 &orx,
                 &mut recorder,
                 output,
-                &pty_reached_eof
+                &pty_channel_disconnected,
+                &last_pty_output_at
             ));
             finish_recording(&mut recorder, Duration::ZERO);
             let _ = output.finish(
@@ -1112,25 +1311,72 @@ fn run_exec_engine(
             );
             return EXIT_INTERNAL;
         }
+
+        // Observe process exit independently of PTY EOF. A background process
+        // can inherit the slave and keep the reader alive after the direct
+        // child exits, which is exactly when Unix's bounded no-EOF clock must
+        // start. On Unix `waitid(WNOWAIT)` preserves the zombie and its numeric
+        // identity until stdout and recording have both acknowledged ordinary
+        // completion, so a later deadline can still authenticate Linux session
+        // teardown. Windows process handles have no reaping identity hazard.
+        let observed_child_status: std::io::Result<Option<i32>> = if child_gone_at.is_none() {
+            #[cfg(unix)]
+            {
+                term.child_exit_code_unreaped()
+                    .map(|status| status.map(clamp_code))
+            }
+            #[cfg(windows)]
+            {
+                Ok(term.child_exit_code().map(clamp_code))
+            }
+            #[cfg(not(any(unix, windows)))]
+            {
+                Ok(term.child_exit_code().map(clamp_code))
+            }
+        } else {
+            Ok(None)
+        };
+        match observed_child_status {
+            Ok(Some(code)) => {
+                child_gone_at = Some(Instant::now());
+                child_exit_code = Some(code);
+            }
+            Ok(None) => {}
+            Err(error) => {
+                let _ = writeln!(
+                    std::io::stderr(),
+                    "kettle exec: cannot observe child exit without losing teardown identity: \
+                     {error}"
+                );
+                let _ = process_tree.terminate(&term);
+                let _ = wait_for_exit_code(&term);
+                std::thread::sleep(SETTLE);
+                drain_recording_slice(&orx, &mut recorder);
+                finish_recording(&mut recorder, Duration::ZERO);
+                let _ = output.finish(
+                    EXIT_INTERNAL,
+                    started.elapsed(),
+                    OutputFinish::AbandonPending,
+                );
+                return EXIT_INTERNAL;
+            }
+        }
         if let Some(error) = stdin_forwarding_error {
             log::debug!("kettle exec checking child after PTY forwarding error");
-            if child_gone_at.is_none() && term.child_exited() {
-                child_gone_at = Some(Instant::now());
-                child_exit_code = term.child_exit_code().map(clamp_code);
-            }
             if child_gone_at.is_none() {
                 let _ = writeln!(
                     std::io::stderr(),
                     "kettle exec: cannot safely write child PTY input: {error}"
                 );
-                process_tree.terminate(&term);
+                let _ = process_tree.terminate(&term);
                 let _ = wait_for_exit_code(&term);
                 std::thread::sleep(SETTLE);
                 let _ = output_or_stop!(drain_output_slice(
                     &orx,
                     &mut recorder,
                     output,
-                    &pty_reached_eof
+                    &pty_channel_disconnected,
+                    &last_pty_output_at
                 ));
                 finish_recording(&mut recorder, Duration::ZERO);
                 let _ = output.finish(
@@ -1146,35 +1392,151 @@ fn run_exec_engine(
             // must still run this turn.
         }
 
-        // Exit detection: poll the real child status (authoritative), then
-        // settle-drain so trailing/late output (ConPTY repaint) is captured.
-        let child_exited = child_gone_at.is_none() && term.child_exited();
         if trace_lifecycle {
-            log::debug!("kettle exec lifecycle child-status poll returned: exited={child_exited}");
+            log::debug!(
+                "kettle exec lifecycle child-status poll returned: exited={}",
+                child_gone_at.is_some()
+            );
         }
-        if child_exited {
-            child_gone_at = Some(Instant::now());
-            child_exit_code = term.child_exit_code().map(clamp_code);
+        // Wrap-up needs the PTY to be *finished*, not merely quiet. On Unix the
+        // side channel must disconnect *and* the core reader must identify an
+        // orderly EOF; an unexpected read failure is an incomplete-output
+        // error. Windows retains the bounded ConPTY fallback because its output
+        // handle can legitimately outlive the child and final repaint.
+        #[allow(unused_mut)] // CloseTransport is native only on Windows
+        let (mut pty_drain, pty_drain_generation) = if let Some(gone) = child_gone_at {
+            let now = Instant::now();
+            let read_progress = term.pty_read_progress();
+            if read_progress.generation != observed_read_generation {
+                observed_read_generation = read_progress.generation;
+                last_pty_source_activity_at.set(now);
+            }
+            let transport_end =
+                observed_pty_transport_end(pty_channel_disconnected.get(), read_progress.status);
+            let quiet_since = latest_pty_activity(
+                gone,
+                last_pty_output_at.get(),
+                last_pty_source_activity_at.get(),
+            );
+            // An accepted stdout command may already be blocked in the OS even
+            // when both queues are empty. `drained` observes that outstanding
+            // work without joining the writer, so Unix's no-EOF bound and
+            // ConPTY's quiet fallback cannot abandon it.
+            let output_idle =
+                !output_backlog && orx.is_empty() && output_or_stop!(output.drained());
+            (
+                native_pty_drain_decision(
+                    transport_end,
+                    now.saturating_duration_since(gone),
+                    now.saturating_duration_since(quiet_since),
+                    output_idle,
+                    read_progress.pending_chunks,
+                ),
+                Some(read_progress.generation),
+            )
+        } else {
+            (PtyDrainDecision::Wait, None)
+        };
+        if pty_drain == PtyDrainDecision::CloseTransport {
+            #[cfg(windows)]
+            {
+                if pty_close_started_at.is_none() {
+                    match term.process_tree_active_processes() {
+                        // The direct child is already gone. Once its Job is
+                        // empty, no process remains that can create another
+                        // same-console descendant, so closing ConPTY cannot
+                        // cut off a later inherited write.
+                        Ok(Some(0)) => match term.begin_pty_output_close() {
+                            Ok(true) => pty_close_started_at = Some(Instant::now()),
+                            Ok(false) => {
+                                let _ = writeln!(
+                                    std::io::stderr(),
+                                    "kettle exec: ConPTY output close was already consumed before EOF"
+                                );
+                                pty_drain = PtyDrainDecision::Failed(PtyDrainFailure::Read);
+                            }
+                            Err(error) => {
+                                let _ = writeln!(
+                                    std::io::stderr(),
+                                    "kettle exec: cannot start ConPTY output close: {error}"
+                                );
+                                pty_drain = PtyDrainDecision::Failed(PtyDrainFailure::Read);
+                            }
+                        },
+                        Ok(Some(_)) => pty_drain = PtyDrainDecision::Wait,
+                        Ok(None) => {
+                            let _ = writeln!(
+                                std::io::stderr(),
+                                "kettle exec: ConPTY process-tree containment is unavailable"
+                            );
+                            pty_drain = PtyDrainDecision::Failed(PtyDrainFailure::Containment);
+                        }
+                        Err(error) => {
+                            let _ = writeln!(
+                                std::io::stderr(),
+                                "kettle exec: cannot inspect the ConPTY process tree: {error}"
+                            );
+                            pty_drain = PtyDrainDecision::Failed(PtyDrainFailure::Containment);
+                        }
+                    }
+                }
+                if pty_drain == PtyDrainDecision::CloseTransport {
+                    pty_drain = PtyDrainDecision::Wait;
+                }
+            }
+            #[cfg(not(windows))]
+            unreachable!("only native ConPTY completion closes a quiet transport");
         }
-        // Wrap-up needs the PTY to be *finished*, not merely quiet. The reader
-        // drops its sender only after EOF, so a disconnected channel proves it;
-        // an empty one proves nothing, because the reader may simply not have
-        // run yet. The elapsed-time arm stays as the bound for platforms where
-        // the reader outlives the child — Windows ConPTY holds its handle open
-        // — so this can still never wait forever.
-        let pty_finished = pty_reached_eof.get()
-            || child_gone_at.is_some_and(|gone| gone.elapsed() >= SETTLE + PTY_DRAIN_GRACE);
+        #[cfg(windows)]
+        if pty_drain == PtyDrainDecision::Wait
+            && pty_close_started_at.is_some_and(|started| started.elapsed() >= PTY_EOF_TIMEOUT)
+        {
+            pty_drain = PtyDrainDecision::Failed(PtyDrainFailure::EofTimeout);
+        }
+        if let PtyDrainDecision::Failed(failure) = pty_drain {
+            match failure {
+                PtyDrainFailure::Read => {
+                    let _ = writeln!(
+                        std::io::stderr(),
+                        "kettle exec: PTY output reader failed before EOF; output is incomplete"
+                    );
+                }
+                PtyDrainFailure::EofTimeout => {
+                    let _ = writeln!(
+                        std::io::stderr(),
+                        "kettle exec: PTY output did not reach EOF within {}s after the child \
+                         exited; output may be incomplete",
+                        PTY_EOF_TIMEOUT.as_secs()
+                    );
+                }
+                #[cfg(windows)]
+                PtyDrainFailure::Containment => {
+                    // The specific Job Object error was emitted at the query
+                    // site. Keep common teardown/finalization below.
+                }
+            }
+            let _ = process_tree.terminate(&term);
+            let _ = wait_for_exit_code(&term);
+            std::thread::sleep(SETTLE);
+            drain_recording_slice(&orx, &mut recorder);
+            finish_recording(&mut recorder, Duration::ZERO);
+            let _ = output.finish(
+                EXIT_INTERNAL,
+                started.elapsed(),
+                OutputFinish::AbandonPending,
+            );
+            return EXIT_INTERNAL;
+        }
+        let pty_finished = pty_drain == PtyDrainDecision::Finished;
         if let Some(gone) = child_gone_at
             && gone.elapsed() >= SETTLE
             && orx.is_empty()
             && pty_finished
         {
-            // The VT `Exit` event can arrive before the OS exposes an
-            // authoritative status. Poll it from normal lifecycle turns rather
-            // than blocking here, and retain the existing non-zero fallback if
-            // it never materializes.
-            let status_ready =
-                child_exit_code.is_some() || gone.elapsed() >= SETTLE + CHILD_EXIT_STATUS_WAIT;
+            // `child_gone_at` is set only by the status observer above, so the
+            // code is already authoritative here without consuming the Unix
+            // wait status that still anchors Linux teardown.
+            let status_ready = child_exit_code.is_some();
             if status_ready {
                 // Final drain in case something landed in the settle window.
                 // `drained` also waits for every command already admitted to
@@ -1183,9 +1545,21 @@ fn run_exec_engine(
                     &orx,
                     &mut recorder,
                     output,
-                    &pty_reached_eof
+                    &pty_channel_disconnected,
+                    &last_pty_output_at
                 ));
                 if !final_output_backlog && orx.is_empty() && output_or_stop!(output.drained()) {
+                    // The first progress snapshot preceded the final raw/output
+                    // drains. A ConPTY pump read can race into that interval;
+                    // revalidate only after every other completion predicate so
+                    // a stale zero-pending snapshot cannot close stdout over a
+                    // final repaint hidden in the parser pipeline.
+                    let final_progress = term.pty_read_progress();
+                    if !pty_completion_snapshot_is_current(pty_drain_generation, final_progress) {
+                        observed_read_generation = final_progress.generation;
+                        last_pty_source_activity_at.set(Instant::now());
+                        continue;
+                    }
                     if let Some(recorder) = recorder.as_mut() {
                         recorder.begin_finish();
                         recording_finish_deadline = Some(Instant::now() + RECORD_FINISH_TIMEOUT);
@@ -1216,6 +1590,15 @@ fn run_exec_engine(
     }
 }
 
+fn pty_completion_snapshot_is_current(
+    decision_generation: Option<u64>,
+    final_progress: PtyReadProgress,
+) -> bool {
+    decision_generation == Some(final_progress.generation)
+        && final_progress.status == PtyReadStatus::Eof
+        && final_progress.pending_chunks == 0
+}
+
 fn validate_exec_cwd(cwd: Option<&Path>) -> Result<Option<&str>, String> {
     let Some(cwd) = cwd else {
         return Ok(None);
@@ -1231,74 +1614,59 @@ fn validate_exec_cwd(cwd: Option<&Path>) -> Result<Option<&str>, String> {
         .ok_or_else(|| format!("{} is not valid UTF-8", cwd.display()))
 }
 
-/// Stop the complete command tree for timeout/cancellation. Killing only the
-/// PTY's immediate child leaves backgrounded or `setsid` descendants running.
-/// Linux exposes the parent relation through `/proc`; freeze the discovered
-/// tree before killing it so descendants cannot race by forking while it is
-/// being enumerated. Other Unix targets still kill the PTY process group, and
-/// every platform finishes with the portable-pty child handle.
+/// Stop the command's owned process scope for timeout/cancellation.
+///
+/// Linux freezes and kills the PTY-created session through identity-stable
+/// pidfds, while other Unix targets address the PTY process group. Windows
+/// containment is established inside the PTY backend before the suspended
+/// primary thread resumes, so the portable child kill reaches its Job Object.
 struct ExecProcessTree {
-    #[cfg(windows)]
-    job: Option<WindowsJob>,
+    root: Option<u32>,
+    #[cfg(target_os = "linux")]
+    session: Option<LinuxSession>,
 }
 
 impl ExecProcessTree {
-    fn attach(_term: &Terminal) -> Self {
-        #[cfg(windows)]
-        let job = _term
-            .child_pid()
-            .and_then(|pid| match WindowsJob::attach(pid) {
-                Ok(job) => Some(job),
-                Err(error) => {
-                    log::warn!("kettle exec could not attach child {pid} to a Job Object: {error}");
-                    None
-                }
-            });
+    fn attach(term: &Terminal) -> Self {
+        let root = term.child_pid();
+        #[cfg(target_os = "linux")]
+        let session = root.map(LinuxSession::attach);
         Self {
-            #[cfg(windows)]
-            job,
+            root,
+            #[cfg(target_os = "linux")]
+            session,
         }
     }
 
-    fn terminate(&self, term: &Terminal) {
-        let Some(root) = term.child_pid() else {
-            report_failed_termination(term.kill());
-            return;
+    /// Stop every process in the owned scope and report whether containment was
+    /// proven complete. A timeout/cancellation status is meaningful only when
+    /// the command cannot keep running after Kettle returns.
+    fn terminate(&self, term: &Terminal) -> bool {
+        let Some(root) = self.root.or_else(|| term.child_pid()) else {
+            let direct = report_failed_termination(term.kill());
+            #[cfg(unix)]
+            {
+                let _ = direct;
+                return false;
+            }
+            #[cfg(not(unix))]
+            return direct;
         };
+
+        let mut complete = true;
 
         #[cfg(target_os = "linux")]
         {
-            let mut frozen = std::collections::HashSet::new();
-            // SAFETY: root is the positive PID returned by portable-pty.
-            unsafe {
-                libc::kill(root as libc::pid_t, libc::SIGSTOP);
-            }
-            frozen.insert(root);
-            // A small fixed-point loop bounds work under a hostile fork load while
-            // freezing every process as soon as it becomes visible.
-            for _ in 0..8 {
-                let mut discovered = linux_descendants(root, 4096);
-                discovered.push(root);
-                let before = frozen.len();
-                for pid in discovered {
-                    if frozen.insert(pid) {
-                        // SAFETY: kill is called with a positive PID obtained from
-                        // procfs. Failure (already exited or permission denied) is
-                        // harmless and the portable child kill remains below.
-                        unsafe {
-                            libc::kill(pid as libc::pid_t, libc::SIGSTOP);
-                        }
-                    }
-                }
-                if frozen.len() == before {
-                    break;
-                }
-            }
-            for pid in frozen.iter().copied().filter(|pid| *pid != root) {
-                // SAFETY: as above; SIGKILL cannot invoke user handlers.
-                unsafe {
-                    libc::kill(pid as libc::pid_t, libc::SIGKILL);
-                }
+            let _ = root;
+            if let Some(session) = &self.session {
+                complete &= session.terminate();
+            } else {
+                let _ = writeln!(
+                    std::io::stderr(),
+                    "kettle exec: Linux session containment was not attached; \
+                     descendant teardown is unverified"
+                );
+                complete = false;
             }
         }
 
@@ -1309,27 +1677,29 @@ impl ExecProcessTree {
             if let Ok(group) = libc::pid_t::try_from(root) {
                 // SAFETY: group is a positive child PID; negating it selects only
                 // that child's process group.
-                unsafe {
-                    libc::kill(-group, libc::SIGKILL);
+                let result = unsafe { libc::kill(-group, libc::SIGKILL) };
+                if result != 0 {
+                    let error = std::io::Error::last_os_error();
+                    if error.raw_os_error() != Some(libc::ESRCH) {
+                        let _ = writeln!(
+                            std::io::stderr(),
+                            "kettle exec: could not terminate PTY process group {group}: {error}"
+                        );
+                    }
+                    complete = false;
                 }
+            } else {
+                complete = false;
             }
-        }
-
-        #[cfg(windows)]
-        if let Some(job) = &self.job {
-            log::debug!("kettle exec terminating Windows Job Object");
-            if let Err(error) = job.terminate() {
-                log::warn!("kettle exec could not terminate its Windows Job Object: {error}");
-            }
-            log::debug!("kettle exec finished Windows Job Object termination");
         }
 
         #[cfg(not(unix))]
         let _ = root;
 
         log::debug!("kettle exec terminating direct PTY child");
-        report_failed_termination(term.kill());
+        complete &= report_failed_termination(term.kill());
         log::debug!("kettle exec finished direct PTY child termination");
+        complete
     }
 }
 
@@ -1340,119 +1710,536 @@ impl ExecProcessTree {
 /// harness that will move on to the next command — needs to know. An
 /// already-exited child is not a failure and is reported as success by the
 /// layer below.
-fn report_failed_termination(outcome: std::io::Result<()>) {
-    if let Err(error) = outcome {
-        let _ = writeln!(
-            std::io::stderr(),
-            "kettle exec: could not terminate the child process; it may still be running: {error}"
-        );
-    }
-}
-
-#[cfg(windows)]
-struct WindowsJob(windows_sys::Win32::Foundation::HANDLE);
-
-#[cfg(windows)]
-impl WindowsJob {
-    fn attach(pid: u32) -> std::io::Result<Self> {
-        use windows_sys::Win32::Foundation::CloseHandle;
-        use windows_sys::Win32::System::JobObjects::{
-            AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
-            JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectExtendedLimitInformation,
-            SetInformationJobObject,
-        };
-        use windows_sys::Win32::System::Threading::{
-            OpenProcess, PROCESS_SET_QUOTA, PROCESS_TERMINATE,
-        };
-
-        // SAFETY: null attributes/name request a private unnamed job handle.
-        let job = unsafe { CreateJobObjectW(std::ptr::null(), std::ptr::null()) };
-        if job.is_null() {
-            return Err(std::io::Error::last_os_error());
+fn report_failed_termination(outcome: std::io::Result<()>) -> bool {
+    match outcome {
+        Ok(()) => true,
+        Err(error) => {
+            let _ = writeln!(
+                std::io::stderr(),
+                "kettle exec: could not terminate the child process; it may still be running: \
+                 {error}"
+            );
+            false
         }
-        let mut limits = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
-        limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
-        // SAFETY: `limits` has the exact structure and size required for the
-        // selected information class, and `job` remains valid for the call.
-        if unsafe {
-            SetInformationJobObject(
-                job,
-                JobObjectExtendedLimitInformation,
-                std::ptr::addr_of!(limits).cast(),
-                std::mem::size_of_val(&limits) as u32,
-            )
-        } == 0
-        {
-            let error = std::io::Error::last_os_error();
-            unsafe { CloseHandle(job) };
-            return Err(error);
-        }
-        // PROCESS_SET_QUOTA and PROCESS_TERMINATE are the documented rights
-        // required by AssignProcessToJobObject.
-        let process = unsafe { OpenProcess(PROCESS_SET_QUOTA | PROCESS_TERMINATE, 0, pid) };
-        if process.is_null() {
-            let error = std::io::Error::last_os_error();
-            unsafe { CloseHandle(job) };
-            return Err(error);
-        }
-        let assigned = unsafe { AssignProcessToJobObject(job, process) };
-        unsafe { CloseHandle(process) };
-        if assigned == 0 {
-            let error = std::io::Error::last_os_error();
-            unsafe { CloseHandle(job) };
-            return Err(error);
-        }
-        Ok(Self(job))
-    }
-
-    fn terminate(&self) -> std::io::Result<()> {
-        use windows_sys::Win32::System::JobObjects::TerminateJobObject;
-
-        // SAFETY: self owns a valid job handle until Drop. Termination reaches
-        // every process assigned directly or inherited through the job.
-        if unsafe { TerminateJobObject(self.0, EXIT_CANCELLED as u32) } == 0 {
-            Err(std::io::Error::last_os_error())
-        } else {
-            Ok(())
-        }
-    }
-}
-
-#[cfg(windows)]
-impl Drop for WindowsJob {
-    fn drop(&mut self) {
-        // SAFETY: WindowsJob exclusively owns this handle.
-        unsafe { windows_sys::Win32::Foundation::CloseHandle(self.0) };
     }
 }
 
 #[cfg(target_os = "linux")]
-fn linux_descendants(root: u32, limit: usize) -> Vec<u32> {
-    let mut result = Vec::new();
-    let mut pending = vec![root];
-    let mut seen = std::collections::HashSet::from([root]);
-    while let Some(parent) = pending.pop() {
-        if result.len() >= limit {
-            break;
+const LINUX_PROC_SCAN_TIME: Duration = Duration::from_millis(500);
+#[cfg(target_os = "linux")]
+const LINUX_PROC_SCAN_PROCESSES: usize = 16_384;
+#[cfg(target_os = "linux")]
+struct LinuxProcScanBudget {
+    deadline: Instant,
+    processes: usize,
+    exhausted: bool,
+}
+
+#[cfg(target_os = "linux")]
+impl LinuxProcScanBudget {
+    fn new() -> Self {
+        Self {
+            deadline: Instant::now() + LINUX_PROC_SCAN_TIME,
+            processes: 0,
+            exhausted: false,
         }
-        let path = format!("/proc/{parent}/task/{parent}/children");
-        let Ok(children) = std::fs::read_to_string(path) else {
-            continue;
+    }
+
+    fn process(&mut self) -> bool {
+        if self.processes >= LINUX_PROC_SCAN_PROCESSES || Instant::now() >= self.deadline {
+            self.exhausted = true;
+            return false;
+        }
+        self.processes += 1;
+        true
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+struct LinuxProcessIdentity {
+    pid: u32,
+    session: u32,
+    start_time: u64,
+}
+
+#[cfg(target_os = "linux")]
+impl LinuxProcessIdentity {
+    fn read(pid: u32) -> std::io::Result<Option<Self>> {
+        Ok(LinuxProcessStat::read(pid)?.map(|stat| stat.identity))
+    }
+
+    fn parse(pid: u32, stat: &str) -> Option<Self> {
+        // `comm` is parenthesized and may itself contain spaces or `)`. Split
+        // after its final close-paren; fields below are then 3 onward.
+        let tail = stat.rsplit_once(") ")?.1;
+        let fields = tail.split_ascii_whitespace().collect::<Vec<_>>();
+        Some(Self {
+            pid,
+            session: fields.get(3)?.parse().ok()?,
+            start_time: fields.get(19)?.parse().ok()?,
+        })
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct LinuxProcessStat {
+    identity: LinuxProcessIdentity,
+    state: u8,
+}
+
+#[cfg(target_os = "linux")]
+impl LinuxProcessStat {
+    fn read(pid: u32) -> std::io::Result<Option<Self>> {
+        let stat = match std::fs::read_to_string(format!("/proc/{pid}/stat")) {
+            Ok(stat) => stat,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(error),
         };
-        for child in children
-            .split_ascii_whitespace()
-            .filter_map(|value| value.parse::<u32>().ok())
-        {
-            if seen.insert(child) {
-                result.push(child);
-                pending.push(child);
-                if result.len() >= limit {
-                    break;
-                }
+        let tail = stat
+            .rsplit_once(") ")
+            .map(|(_, tail)| tail)
+            .ok_or_else(|| {
+                std::io::Error::new(std::io::ErrorKind::InvalidData, "malformed /proc stat")
+            })?;
+        let fields = tail.split_ascii_whitespace().collect::<Vec<_>>();
+        let state = fields
+            .first()
+            .and_then(|field| field.as_bytes().first())
+            .copied()
+            .ok_or_else(|| {
+                std::io::Error::new(std::io::ErrorKind::InvalidData, "missing process state")
+            })?;
+        let identity = LinuxProcessIdentity::parse(pid, &stat).ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "malformed process identity",
+            )
+        })?;
+        Ok(Some(Self { identity, state }))
+    }
+}
+
+#[cfg(target_os = "linux")]
+struct LinuxPidHandle {
+    identity: LinuxProcessIdentity,
+    fd: std::os::fd::OwnedFd,
+}
+
+#[cfg(target_os = "linux")]
+impl LinuxPidHandle {
+    fn open(identity: LinuxProcessIdentity) -> std::io::Result<Option<Self>> {
+        use std::os::fd::FromRawFd as _;
+
+        let raw = unsafe { libc::syscall(libc::SYS_pidfd_open, identity.pid, 0) };
+        if raw < 0 {
+            let error = std::io::Error::last_os_error();
+            return if error.raw_os_error() == Some(libc::ESRCH) {
+                Ok(None)
+            } else {
+                Err(error)
+            };
+        }
+        // SAFETY: pidfd_open returned a new owned descriptor.
+        let fd = unsafe { std::os::fd::OwnedFd::from_raw_fd(raw as libc::c_int) };
+        if LinuxProcessIdentity::read(identity.pid)? != Some(identity) {
+            return Ok(None);
+        }
+        Ok(Some(Self { identity, fd }))
+    }
+
+    fn signal(&self, signal: libc::c_int) -> std::io::Result<bool> {
+        use std::os::fd::AsRawFd as _;
+
+        // SAFETY: fd is a live pidfd, null siginfo requests ordinary signal
+        // semantics, and flags must be zero for pidfd_send_signal.
+        let result = unsafe {
+            libc::syscall(
+                libc::SYS_pidfd_send_signal,
+                self.fd.as_raw_fd(),
+                signal,
+                std::ptr::null::<libc::siginfo_t>(),
+                0,
+            )
+        };
+        if result == 0 {
+            Ok(true)
+        } else {
+            let error = std::io::Error::last_os_error();
+            if error.raw_os_error() == Some(libc::ESRCH) {
+                Ok(false)
+            } else {
+                Err(error)
             }
         }
     }
-    result
+
+    fn stopped_or_gone(&self) -> std::io::Result<bool> {
+        let Some(stat) = LinuxProcessStat::read(self.identity.pid)? else {
+            return Ok(true);
+        };
+        if stat.identity != self.identity {
+            return Ok(true);
+        }
+        Ok(matches!(stat.state, b'T' | b't' | b'Z' | b'X'))
+    }
+}
+
+#[cfg(target_os = "linux")]
+struct LinuxSession {
+    id: u32,
+    process_group: u32,
+    root_identity: Option<LinuxProcessIdentity>,
+    root: Option<LinuxPidHandle>,
+    attach_warning: Option<String>,
+}
+
+#[cfg(target_os = "linux")]
+impl LinuxSession {
+    fn attach(root: u32) -> Self {
+        let mut warning = None;
+        let identity = match LinuxProcessIdentity::read(root) {
+            Ok(identity) => identity,
+            Err(error) => {
+                warning = Some(format!("cannot read /proc/{root}/stat: {error}"));
+                None
+            }
+        };
+        let id = identity.map_or(root, |identity| identity.session);
+        let root_handle = match identity {
+            Some(identity) => match LinuxPidHandle::open(identity) {
+                Ok(Some(handle)) => Some(handle),
+                Ok(None) => {
+                    warning = Some(format!(
+                        "child {root} disappeared before its pidfd could be retained"
+                    ));
+                    None
+                }
+                Err(error) => {
+                    warning = Some(format!("cannot open pidfd for child {root}: {error}"));
+                    None
+                }
+            },
+            None => None,
+        };
+        Self {
+            id,
+            process_group: root,
+            root_identity: identity,
+            root: root_handle,
+            attach_warning: warning,
+        }
+    }
+
+    fn terminate(&self) -> bool {
+        let mut budget = LinuxProcScanBudget::new();
+        let mut handles = std::collections::HashMap::new();
+        let mut incomplete = false;
+        if let Some(warning) = &self.attach_warning {
+            incomplete = true;
+            let _ = writeln!(
+                std::io::stderr(),
+                "kettle exec: Linux session cleanup is degraded: {warning}"
+            );
+        }
+        let Some(root) = &self.root else {
+            let _ = writeln!(
+                std::io::stderr(),
+                "kettle exec: Linux session cleanup cannot authenticate the original leader; \
+                 refusing numeric session/process-group signals"
+            );
+            return false;
+        };
+        match root.fd.try_clone() {
+            Ok(fd) => {
+                handles.insert(
+                    root.identity,
+                    LinuxPidHandle {
+                        identity: root.identity,
+                        fd,
+                    },
+                );
+            }
+            Err(error) => {
+                let _ = writeln!(
+                    std::io::stderr(),
+                    "kettle exec: could not retain child pidfd for cleanup: {error}; \
+                     refusing numeric session/process-group signals"
+                );
+                return false;
+            }
+        }
+
+        // Stop the original leader through its pidfd first, then prove that
+        // the exact start-time identity remains present. While that stopped
+        // process (or its unreaped zombie) exists, Linux cannot recycle its PID
+        // as a new session or process-group id. Without this anchor a numeric
+        // scan or kill could reach a newly created, unrelated session.
+        let root_stopped = match root.signal(libc::SIGSTOP) {
+            Ok(signal_delivered) => {
+                let deadline = Instant::now() + Duration::from_millis(100);
+                loop {
+                    match LinuxProcessStat::read(root.identity.pid) {
+                        Ok(current)
+                            if linux_root_anchors_numeric_scope(self.root_identity, current) =>
+                        {
+                            break true;
+                        }
+                        Ok(Some(current)) if current.identity == root.identity => {
+                            // An unreaped exited child is already frozen and
+                            // still reserves its PID/session ids, but Linux
+                            // correctly reports ESRCH when asked to signal the
+                            // zombie through its pidfd. A live identity for
+                            // which no signal was delivered is not an anchor.
+                            if !signal_delivered {
+                                break false;
+                            }
+                        }
+                        Ok(_) => break false,
+                        Err(error) => {
+                            let _ = writeln!(
+                                std::io::stderr(),
+                                "kettle exec: cannot revalidate Linux session leader: {error}"
+                            );
+                            break false;
+                        }
+                    }
+                    if Instant::now() >= deadline {
+                        break false;
+                    }
+                    std::thread::sleep(Duration::from_millis(2));
+                }
+            }
+            Err(error) => {
+                let _ = writeln!(
+                    std::io::stderr(),
+                    "kettle exec: cannot stop Linux session leader through pidfd: {error}"
+                );
+                false
+            }
+        };
+        if !root_stopped {
+            let _ = writeln!(
+                std::io::stderr(),
+                "kettle exec: Linux session cleanup cannot prove the original leader still \
+                 anchors its numeric ids; refusing session/process-group signals"
+            );
+            return false;
+        }
+
+        // Cover the PTY's original process group even when procfs or pidfds
+        // are unavailable. This cannot reach a member that deliberately made a
+        // new group, but it is identity-safe: an existing process group keeps
+        // its numeric id reserved until its final member exits.
+        if !linux_signal_process_group(self.process_group, libc::SIGSTOP) {
+            incomplete = true;
+        }
+
+        // Session membership is inherited and cannot be joined by an
+        // unrelated process. Unlike ancestry it survives reparenting, and a
+        // full /proc scan also sees children created by non-leader threads.
+        // Hold pidfds before signaling so numeric PID reuse cannot redirect a
+        // stop or kill to a different process.
+        let mut stable = false;
+        for _ in 0..8 {
+            let before = handles.len();
+            let scan = linux_session_processes(self.id, 4096, &mut budget);
+            incomplete |= scan.incomplete;
+            for handle in scan.handles {
+                if let std::collections::hash_map::Entry::Vacant(entry) =
+                    handles.entry(handle.identity)
+                {
+                    if let Err(error) = handle.signal(libc::SIGSTOP) {
+                        incomplete = true;
+                        let _ = writeln!(
+                            std::io::stderr(),
+                            "kettle exec: could not stop Linux session member {}: {error}",
+                            handle.identity.pid
+                        );
+                    }
+                    entry.insert(handle);
+                }
+            }
+
+            // SIGSTOP delivery is asynchronous. Do not call a scan stable
+            // until every retained identity is observed stopped (or gone),
+            // because a still-running member can fork after the final scan.
+            let stop_deadline =
+                std::cmp::min(budget.deadline, Instant::now() + Duration::from_millis(100));
+            let all_stopped = loop {
+                let mut all_stopped = true;
+                for handle in handles.values() {
+                    match handle.stopped_or_gone() {
+                        Ok(true) => {}
+                        Ok(false) => all_stopped = false,
+                        Err(error) => {
+                            incomplete = true;
+                            all_stopped = false;
+                            let _ = writeln!(
+                                std::io::stderr(),
+                                "kettle exec: could not confirm Linux session member {} stopped: {error}",
+                                handle.identity.pid
+                            );
+                        }
+                    }
+                }
+                if all_stopped || Instant::now() >= stop_deadline {
+                    break all_stopped;
+                }
+                std::thread::sleep(Duration::from_millis(2));
+            };
+            if all_stopped && handles.len() == before {
+                stable = true;
+                break;
+            }
+            if budget.exhausted {
+                break;
+            }
+        }
+        if budget.exhausted || !stable || incomplete {
+            let _ = writeln!(
+                std::io::stderr(),
+                "kettle exec: Linux process cleanup could not prove the complete session was \
+                 frozen; falling back to the PTY process group, and a member in another group \
+                 may still be running"
+            );
+        }
+        for handle in handles.values() {
+            match handle.signal(libc::SIGKILL) {
+                Ok(_) => {}
+                Err(error) => {
+                    incomplete = true;
+                    let _ = handle.signal(libc::SIGCONT);
+                    let _ = writeln!(
+                        std::io::stderr(),
+                        "kettle exec: could not kill Linux session member {}: {error}",
+                        handle.identity.pid
+                    );
+                }
+            }
+        }
+        if !linux_signal_process_group(self.process_group, libc::SIGKILL) {
+            incomplete = true;
+        }
+        stable && !incomplete
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn linux_signal_process_group(group: u32, signal: libc::c_int) -> bool {
+    let Ok(group) = libc::pid_t::try_from(group) else {
+        return false;
+    };
+    let result = unsafe { libc::kill(-group, signal) };
+    if result == 0 {
+        true
+    } else {
+        let error = std::io::Error::last_os_error();
+        if error.raw_os_error() == Some(libc::ESRCH) {
+            // No member remains in this group. The retained root identity and
+            // pidfd-backed session scan provide the ownership proof; an empty
+            // fallback scope is already terminated.
+            return true;
+        }
+        let _ = writeln!(
+            std::io::stderr(),
+            "kettle exec: could not signal Linux PTY process group {group}: {error}"
+        );
+        false
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn linux_root_anchors_numeric_scope(
+    expected: Option<LinuxProcessIdentity>,
+    current: Option<LinuxProcessStat>,
+) -> bool {
+    matches!(
+        (expected, current),
+        (Some(expected), Some(current))
+            if current.identity == expected && matches!(current.state, b'T' | b't' | b'Z' | b'X')
+    )
+}
+
+#[cfg(target_os = "linux")]
+struct LinuxSessionScan {
+    handles: Vec<LinuxPidHandle>,
+    incomplete: bool,
+}
+
+#[cfg(target_os = "linux")]
+fn linux_session_processes(
+    session: u32,
+    limit: usize,
+    budget: &mut LinuxProcScanBudget,
+) -> LinuxSessionScan {
+    if limit == 0 {
+        budget.exhausted = true;
+        return LinuxSessionScan {
+            handles: Vec::new(),
+            incomplete: true,
+        };
+    }
+    let processes = match std::fs::read_dir("/proc") {
+        Ok(processes) => processes,
+        Err(_) => {
+            return LinuxSessionScan {
+                handles: Vec::new(),
+                incomplete: true,
+            };
+        }
+    };
+    let own_pid = std::process::id();
+    let mut members = Vec::new();
+    let mut incomplete = false;
+    for process in processes {
+        let process = match process {
+            Ok(process) => process,
+            Err(_) => {
+                incomplete = true;
+                continue;
+            }
+        };
+        if !budget.process() {
+            break;
+        }
+        let Some(pid) = process
+            .file_name()
+            .to_str()
+            .and_then(|name| name.parse::<u32>().ok())
+        else {
+            continue;
+        };
+        if pid == own_pid {
+            continue;
+        }
+        let identity = match LinuxProcessIdentity::read(pid) {
+            Ok(Some(identity)) => identity,
+            Ok(None) => continue,
+            Err(_) => {
+                incomplete = true;
+                continue;
+            }
+        };
+        if identity.session == session {
+            match LinuxPidHandle::open(identity) {
+                Ok(Some(handle)) => {
+                    members.push(handle);
+                    if members.len() >= limit {
+                        budget.exhausted = true;
+                        break;
+                    }
+                }
+                Ok(None) => {}
+                Err(_) => incomplete = true,
+            }
+        }
+    }
+    LinuxSessionScan {
+        handles: members,
+        incomplete,
+    }
 }
 
 fn record_chunk(recorder: &mut Option<kettle_core::record::Recorder>, bytes: &[u8]) {
@@ -1780,6 +2567,37 @@ fn consume_pending_sigpipe(error: &std::io::Error) {
 #[cfg(not(unix))]
 fn consume_pending_sigpipe(_error: &std::io::Error) {}
 
+/// Retire one command from the stdout worker.
+///
+/// Failure publication must precede the acknowledgement that drops
+/// `outstanding` to zero. The lifecycle samples that counter to decide whether
+/// an already-admitted write has drained; publishing in the opposite order
+/// creates a window where a failed write looks successfully complete.
+fn retire_output_command(
+    outstanding: &AtomicUsize,
+    result: std::io::Result<()>,
+    finished: bool,
+    publish_outcome: impl FnOnce(OutputResult<()>),
+) -> bool {
+    match result {
+        Ok(()) => {
+            let previous = outstanding.fetch_sub(1, Ordering::AcqRel);
+            debug_assert!(previous != 0, "stdout command was not tracked");
+            if finished {
+                publish_outcome(Ok(()));
+            }
+            finished
+        }
+        Err(error) => {
+            consume_pending_sigpipe(&error);
+            publish_outcome(Err(error.into()));
+            let previous = outstanding.fetch_sub(1, Ordering::AcqRel);
+            debug_assert!(previous != 0, "stdout command was not tracked");
+            true
+        }
+    }
+}
+
 impl WorkerOutput {
     fn spawn(mode: OutputMode, mut sink: impl Write + Send + 'static) -> std::io::Result<Self> {
         let (sender, receiver) = crossbeam_channel::bounded(OUTPUT_WRITER_QUEUE_DEPTH);
@@ -1788,47 +2606,43 @@ impl WorkerOutput {
         let worker_outstanding = Arc::clone(&outstanding);
         let worker = std::thread::Builder::new()
             .name("kettle-stdout-writer".into())
-            .spawn(move || {
-                let outcome = match block_sigpipe_for_current_thread() {
-                    Err(error) => Err(error.into()),
-                    Ok(()) => {
-                        let mut outputter = Outputter::new(mode);
-                        loop {
-                            let command = match receiver.recv() {
-                                Ok(command) => command,
-                                Err(_) => {
-                                    break Err(OutputDeliveryError::unexpected(
-                                        "stdout writer command channel closed before completion",
-                                    ));
-                                }
-                            };
-                            let (finished, result) = match command {
-                                OutputCommand::Start { cols, rows } => {
-                                    (false, outputter.start(&mut sink, cols, rows))
-                                }
-                                OutputCommand::Output(bytes) => {
-                                    (false, outputter.output(&mut sink, &bytes))
-                                }
-                                OutputCommand::Title(title) => {
-                                    (false, outputter.title(&mut sink, &title))
-                                }
-                                OutputCommand::Finish { code, duration } => {
-                                    (true, outputter.finish(&mut sink, code, duration))
-                                }
-                            };
-                            let previous = worker_outstanding.fetch_sub(1, Ordering::AcqRel);
-                            debug_assert!(previous != 0, "stdout command was not tracked");
-                            if let Err(error) = result {
-                                consume_pending_sigpipe(&error);
-                                break Err(error.into());
+            .spawn(move || match block_sigpipe_for_current_thread() {
+                Err(error) => {
+                    let _ = outcome_tx.send(Err(error.into()));
+                }
+                Ok(()) => {
+                    let mut outputter = Outputter::new(mode);
+                    loop {
+                        let command = match receiver.recv() {
+                            Ok(command) => command,
+                            Err(_) => {
+                                let _ = outcome_tx.send(Err(OutputDeliveryError::unexpected(
+                                    "stdout writer command channel closed before completion",
+                                )));
+                                break;
                             }
-                            if finished {
-                                break Ok(());
+                        };
+                        let (finished, result) = match command {
+                            OutputCommand::Start { cols, rows } => {
+                                (false, outputter.start(&mut sink, cols, rows))
                             }
+                            OutputCommand::Output(bytes) => {
+                                (false, outputter.output(&mut sink, &bytes))
+                            }
+                            OutputCommand::Title(title) => {
+                                (false, outputter.title(&mut sink, &title))
+                            }
+                            OutputCommand::Finish { code, duration } => {
+                                (true, outputter.finish(&mut sink, code, duration))
+                            }
+                        };
+                        if retire_output_command(&worker_outstanding, result, finished, |outcome| {
+                            let _ = outcome_tx.send(outcome);
+                        }) {
+                            break;
                         }
                     }
-                };
-                let _ = outcome_tx.send(outcome);
+                }
             })?;
         Ok(Self {
             mode,
@@ -1963,8 +2777,13 @@ impl ExecOutput for WorkerOutput {
         if !self.ready()? {
             return Ok(false);
         }
+        // Load before polling the outcome. On failure the worker publishes the
+        // error before its release decrement; observing zero here therefore
+        // makes that error visible to the following poll rather than allowing
+        // one false `Ok(true)` sample between the two operations.
+        let outstanding = self.outstanding.load(Ordering::Acquire);
         let _ = self.poll_worker_outcome()?;
-        Ok(self.outstanding.load(Ordering::Acquire) == 0)
+        Ok(outstanding == 0)
     }
 
     fn completion_ready(&mut self) -> OutputResult<bool> {
@@ -2642,10 +3461,11 @@ mod tests {
         let mut sink = Vec::new();
         let mut output = DirectOutput::new(OutputMode::Raw, &mut sink);
         let eof = std::cell::Cell::new(false);
+        let last = std::cell::Cell::new(Instant::now());
 
-        assert!(drain_output_slice(&receiver, &mut recorder, &mut output, &eof).unwrap());
+        assert!(drain_output_slice(&receiver, &mut recorder, &mut output, &eof, &last).unwrap());
         assert_eq!(receiver.len(), 1);
-        assert!(!drain_output_slice(&receiver, &mut recorder, &mut output, &eof).unwrap());
+        assert!(!drain_output_slice(&receiver, &mut recorder, &mut output, &eof, &last).unwrap());
         drop(output);
         assert_eq!(sink.len(), OUTPUT_SLICE_MESSAGES + 1);
     }
@@ -2653,8 +3473,9 @@ mod tests {
     /// An empty channel and a finished PTY are different facts, and the
     /// lifecycle loop used to act on the first while meaning the second.
     ///
-    /// The reader thread owns the only sender and drops it after EOF, so
-    /// "disconnected" is proof the output is complete; "empty" is equally
+    /// The reader thread owns the only sender, so "disconnected" proves it has
+    /// ended; the separately published reader status distinguishes orderly EOF
+    /// from an unexpected failure. "Empty" proves neither and is equally
     /// consistent with the reader simply not having run yet — routine on a
     /// loaded machine. Conflating them lost the child's output: for a command
     /// that writes a little and exits at once, the exit could be seen and the
@@ -2674,7 +3495,8 @@ mod tests {
         // been scheduled. It must NOT read as end-of-output.
         let (sender, receiver) = crossbeam_channel::unbounded::<Vec<u8>>();
         let eof = std::cell::Cell::new(false);
-        assert!(!drain_output_slice(&receiver, &mut recorder, &mut output, &eof).unwrap());
+        let last = std::cell::Cell::new(Instant::now());
+        assert!(!drain_output_slice(&receiver, &mut recorder, &mut output, &eof, &last).unwrap());
         assert!(
             !eof.get(),
             "an empty channel with a live reader must not latch EOF -- that is \
@@ -2683,7 +3505,7 @@ mod tests {
 
         // The bytes arrive late, exactly as they did in the race.
         sender.send(b"recmark-9z".to_vec()).unwrap();
-        assert!(!drain_output_slice(&receiver, &mut recorder, &mut output, &eof).unwrap());
+        assert!(!drain_output_slice(&receiver, &mut recorder, &mut output, &eof, &last).unwrap());
         assert!(
             !eof.get(),
             "delivering output is not EOF either; the reader may have more"
@@ -2691,11 +3513,11 @@ mod tests {
 
         // Now the reader exits and drops its sender. THAT is end-of-output.
         drop(sender);
-        assert!(!drain_output_slice(&receiver, &mut recorder, &mut output, &eof).unwrap());
+        assert!(!drain_output_slice(&receiver, &mut recorder, &mut output, &eof, &last).unwrap());
         assert!(
             eof.get(),
-            "a disconnected channel is the reader having finished, and is the \
-             only thing that proves the output is complete"
+            "a disconnected channel proves the reader ended; its status still \
+             decides whether that end was EOF or failure"
         );
 
         drop(output);
@@ -2703,6 +3525,433 @@ mod tests {
             sink, b"recmark-9z",
             "and the late bytes still reached stdout rather than being dropped \
              on the way to the conclusion"
+        );
+    }
+
+    /// The old lifecycle used the ConPTY fallback on every platform. At 810ms
+    /// a loaded Unix reader that had not run yet therefore looked complete,
+    /// even though its sole sender was still alive and the child's bytes were
+    /// in flight. That produced exit 0 with empty stdout and header-only casts.
+    #[test]
+    fn unix_elapsed_time_never_turns_missing_eof_into_success() {
+        let old_cross_platform_fallback = SETTLE + CONPTY_DRAIN_GRACE;
+        assert_eq!(
+            pty_drain_decision(
+                false,
+                PtyTransportEnd::Pending,
+                old_cross_platform_fallback,
+                old_cross_platform_fallback,
+                true,
+                0,
+            ),
+            PtyDrainDecision::Wait,
+            "the former 810ms fallback must not claim Unix output is complete"
+        );
+        assert_eq!(
+            pty_drain_decision(
+                false,
+                PtyTransportEnd::Pending,
+                PTY_EOF_TIMEOUT,
+                PTY_EOF_TIMEOUT,
+                true,
+                0,
+            ),
+            PtyDrainDecision::Failed(PtyDrainFailure::EofTimeout),
+            "a genuinely stuck Unix reader must fail closed, not hang forever"
+        );
+        assert_eq!(
+            pty_drain_decision(
+                false,
+                PtyTransportEnd::Eof,
+                Duration::ZERO,
+                Duration::ZERO,
+                true,
+                0,
+            ),
+            PtyDrainDecision::Finished,
+            "an orderly EOF remains immediate completion proof"
+        );
+        assert_eq!(
+            pty_drain_decision(
+                false,
+                PtyTransportEnd::Eof,
+                Duration::ZERO,
+                Duration::ZERO,
+                true,
+                1,
+            ),
+            PtyDrainDecision::Failed(PtyDrainFailure::Read),
+            "a disconnected reader cannot retire parser work it stranded"
+        );
+    }
+
+    #[test]
+    fn unix_eof_timeout_does_not_override_downstream_backpressure() {
+        assert_eq!(
+            pty_drain_decision(
+                false,
+                PtyTransportEnd::Pending,
+                PTY_EOF_TIMEOUT,
+                PTY_EOF_TIMEOUT,
+                false,
+                0,
+            ),
+            PtyDrainDecision::Wait,
+            "a queued raw chunk or busy stdout worker is delivery work, not a stuck PTY reader"
+        );
+    }
+
+    #[test]
+    fn an_accepted_stdout_command_is_not_idle_until_its_write_returns() {
+        struct GateWriter {
+            entered: Sender<()>,
+            release: Receiver<()>,
+        }
+
+        impl Write for GateWriter {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                let _ = self.entered.try_send(());
+                self.release
+                    .recv_timeout(Duration::from_secs(1))
+                    .expect("test releases the blocked stdout write");
+                Ok(bytes.len())
+            }
+
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let (entered_tx, entered_rx) = crossbeam_channel::bounded(1);
+        let (release_tx, release_rx) = crossbeam_channel::bounded(1);
+        let mut output = WorkerOutput::spawn(
+            OutputMode::Raw,
+            GateWriter {
+                entered: entered_tx,
+                release: release_rx,
+            },
+        )
+        .unwrap();
+        output.output(vec![b'x']).unwrap();
+        entered_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("stdout worker entered the OS-facing write");
+
+        assert!(
+            !output.drained().unwrap(),
+            "an empty command queue does not make its in-flight write idle"
+        );
+        release_tx.send(()).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while !output.drained().unwrap() && Instant::now() < deadline {
+            std::thread::yield_now();
+        }
+        assert!(output.drained().unwrap());
+    }
+
+    #[test]
+    fn stranded_reader_state_waits_for_an_admitted_stdout_write() {
+        struct GateWriter {
+            entered: Sender<()>,
+            release: Receiver<()>,
+        }
+
+        impl Write for GateWriter {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                let _ = self.entered.try_send(());
+                self.release
+                    .recv_timeout(Duration::from_secs(1))
+                    .expect("test releases the blocked stdout write");
+                Ok(bytes.len())
+            }
+
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let (entered_tx, entered_rx) = crossbeam_channel::bounded(1);
+        let (release_tx, release_rx) = crossbeam_channel::bounded(1);
+        let mut output = WorkerOutput::spawn(
+            OutputMode::Raw,
+            GateWriter {
+                entered: entered_tx,
+                release: release_rx,
+            },
+        )
+        .unwrap();
+        output.output(vec![b'x']).unwrap();
+        entered_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("stdout worker entered the OS-facing write");
+
+        for transport_end in [PtyTransportEnd::Eof, PtyTransportEnd::Failed] {
+            assert_eq!(
+                pty_drain_decision(
+                    cfg!(windows),
+                    transport_end,
+                    Duration::from_secs(60),
+                    Duration::from_secs(60),
+                    output.drained().unwrap(),
+                    1,
+                ),
+                PtyDrainDecision::Wait,
+                "{transport_end:?} with a stranded source count must not abandon an admitted write"
+            );
+        }
+
+        release_tx.send(()).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while !output.drained().unwrap() && Instant::now() < deadline {
+            std::thread::yield_now();
+        }
+        assert!(output.drained().unwrap());
+        for transport_end in [PtyTransportEnd::Eof, PtyTransportEnd::Failed] {
+            assert_eq!(
+                pty_drain_decision(
+                    cfg!(windows),
+                    transport_end,
+                    Duration::from_secs(60),
+                    Duration::from_secs(60),
+                    true,
+                    1,
+                ),
+                PtyDrainDecision::Failed(PtyDrainFailure::Read),
+                "{transport_end:?} must remain a read failure once admitted output drains"
+            );
+        }
+    }
+
+    #[test]
+    fn a_failed_stdout_write_is_published_before_its_drain_acknowledgement() {
+        let outstanding = AtomicUsize::new(1);
+        let mut published = false;
+        assert!(retire_output_command(
+            &outstanding,
+            Err(std::io::Error::other("synthetic stdout failure")),
+            false,
+            |outcome| {
+                assert_eq!(
+                    outstanding.load(Ordering::Acquire),
+                    1,
+                    "the worker must publish its error before it can look drained"
+                );
+                assert_eq!(
+                    outcome,
+                    Err(OutputDeliveryError::unexpected("synthetic stdout failure"))
+                );
+                published = true;
+            },
+        ));
+        assert!(published);
+        assert_eq!(outstanding.load(Ordering::Acquire), 0);
+
+        struct FailingWriter;
+
+        impl Write for FailingWriter {
+            fn write(&mut self, _bytes: &[u8]) -> std::io::Result<usize> {
+                Err(std::io::Error::other("synthetic stdout failure"))
+            }
+
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let mut output = WorkerOutput::spawn(OutputMode::Raw, FailingWriter).unwrap();
+        output.output(vec![b'x']).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(1);
+        loop {
+            match output.drained() {
+                Err(error) => {
+                    assert_eq!(
+                        error,
+                        OutputDeliveryError::unexpected("synthetic stdout failure")
+                    );
+                    break;
+                }
+                Ok(false) if Instant::now() < deadline => std::thread::yield_now(),
+                Ok(false) => panic!("stdout failure was not published within the test deadline"),
+                Ok(true) => panic!("a failed stdout write was reported as successfully drained"),
+            }
+        }
+    }
+
+    #[test]
+    fn final_completion_requires_a_stable_eof_snapshot() {
+        let quiet_snapshot = Some(7);
+        assert!(pty_completion_snapshot_is_current(
+            quiet_snapshot,
+            PtyReadProgress {
+                status: PtyReadStatus::Eof,
+                generation: 7,
+                pending_chunks: 0,
+            }
+        ));
+        assert!(!pty_completion_snapshot_is_current(
+            quiet_snapshot,
+            PtyReadProgress {
+                status: PtyReadStatus::Reading,
+                generation: 7,
+                pending_chunks: 0,
+            }
+        ));
+        assert!(!pty_completion_snapshot_is_current(
+            quiet_snapshot,
+            PtyReadProgress {
+                status: PtyReadStatus::Reading,
+                generation: 8,
+                pending_chunks: 1,
+            }
+        ));
+        assert!(!pty_completion_snapshot_is_current(
+            quiet_snapshot,
+            PtyReadProgress {
+                status: PtyReadStatus::Reading,
+                generation: 7,
+                pending_chunks: 1,
+            }
+        ));
+    }
+
+    #[test]
+    fn conpty_quiet_only_starts_an_authoritative_transport_close() {
+        let boundary = SETTLE + CONPTY_DRAIN_GRACE;
+        let base = Instant::now();
+        assert_eq!(
+            latest_pty_activity(
+                base,
+                base + Duration::from_millis(1),
+                base + Duration::from_millis(2),
+            ),
+            base + Duration::from_millis(2),
+            "a pump read restarts quiet time before lifecycle delivery"
+        );
+        assert_eq!(
+            pty_drain_decision(true, PtyTransportEnd::Pending, boundary, boundary, true, 0,),
+            PtyDrainDecision::CloseTransport,
+            "quiet permits closing ConPTY, not completing while it can still emit"
+        );
+        assert_eq!(
+            pty_drain_decision(
+                true,
+                PtyTransportEnd::Pending,
+                boundary + Duration::from_millis(1),
+                Duration::ZERO,
+                true,
+                0,
+            ),
+            PtyDrainDecision::Wait,
+            "a late repaint restarts the quiet window instead of inheriting the child-exit timer"
+        );
+        assert_eq!(
+            pty_drain_decision(
+                true,
+                PtyTransportEnd::Pending,
+                boundary * 2,
+                boundary,
+                false,
+                0,
+            ),
+            PtyDrainDecision::Wait,
+            "queued output or a busy writer is not quiet completion"
+        );
+        assert_eq!(
+            pty_drain_decision(
+                true,
+                PtyTransportEnd::Pending,
+                boundary * 2,
+                boundary,
+                true,
+                1,
+            ),
+            PtyDrainDecision::Wait,
+            "a source-read chunk hidden in the parser pipeline is not quiet completion"
+        );
+    }
+
+    #[test]
+    fn an_unexpected_reader_end_is_never_success() {
+        assert_eq!(
+            observed_pty_transport_end(false, PtyReadStatus::Failed),
+            PtyTransportEnd::Pending,
+            "failure is sticky, but chunks before its marker still have to drain"
+        );
+        assert_eq!(
+            observed_pty_transport_end(true, PtyReadStatus::Failed),
+            PtyTransportEnd::Failed
+        );
+        assert_eq!(
+            pty_drain_decision(
+                cfg!(windows),
+                PtyTransportEnd::Failed,
+                Duration::from_secs(60),
+                Duration::from_secs(60),
+                false,
+                0,
+            ),
+            PtyDrainDecision::Wait,
+            "an occupied stdout writer must finish already admitted bytes before failure"
+        );
+        assert_eq!(
+            pty_drain_decision(
+                cfg!(windows),
+                PtyTransportEnd::Failed,
+                Duration::from_secs(60),
+                Duration::from_secs(60),
+                true,
+                2,
+            ),
+            PtyDrainDecision::Failed(PtyDrainFailure::Read),
+            "a disconnected parser cannot retire its remaining pending count"
+        );
+        assert_eq!(
+            pty_drain_decision(
+                cfg!(windows),
+                PtyTransportEnd::Failed,
+                Duration::from_secs(60),
+                Duration::from_secs(60),
+                true,
+                0,
+            ),
+            PtyDrainDecision::Failed(PtyDrainFailure::Read)
+        );
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn native_unix_selection_rejects_the_old_conpty_fallback() {
+        let old_boundary = SETTLE + CONPTY_DRAIN_GRACE;
+        assert_eq!(
+            native_pty_drain_decision(
+                PtyTransportEnd::Pending,
+                old_boundary,
+                old_boundary,
+                true,
+                0,
+            ),
+            PtyDrainDecision::Wait,
+            "the production platform seam must select Unix EOF semantics"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn native_windows_selection_retains_the_conpty_fallback() {
+        let boundary = SETTLE + CONPTY_DRAIN_GRACE;
+        assert_eq!(
+            native_pty_drain_decision(PtyTransportEnd::Pending, boundary, boundary, true, 0,),
+            PtyDrainDecision::CloseTransport,
+            "the production platform seam must close ConPTY before completion"
+        );
+    }
+
+    #[test]
+    fn a_deadline_cannot_return_a_known_child_success_with_live_output() {
+        assert_eq!(
+            lifecycle_stop_code(LifecycleStop::Deadline, Some(0)),
+            EXIT_TIMEOUT,
+            "a successful child status does not complete the lossless PTY delivery contract"
         );
     }
 
@@ -2717,8 +3966,9 @@ mod tests {
         let mut sink = Vec::new();
         let mut output = DirectOutput::new(OutputMode::Raw, &mut sink);
         let eof = std::cell::Cell::new(false);
+        let last = std::cell::Cell::new(Instant::now());
 
-        assert!(drain_output_slice(&receiver, &mut recorder, &mut output, &eof).unwrap());
+        assert!(drain_output_slice(&receiver, &mut recorder, &mut output, &eof, &last).unwrap());
         drop(output);
         assert_eq!(sink.len(), chunk_len * 2);
         assert_eq!(receiver.len(), 1);
@@ -3486,14 +4736,14 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
-    fn timeout_kills_a_detached_descendant() {
+    fn timeout_kills_a_background_session_member() {
         let temp = tempfile::tempdir().unwrap();
         let pid_file = temp.path().join("detached.pid");
         let opts = ExecOpts {
             argv: vec![
                 "sh".into(),
                 "-c".into(),
-                "setsid sleep 30 & echo $! > \"$1\"; wait".into(),
+                "sleep 30 & echo $! > \"$1\"; wait".into(),
                 "kettle-exec-test".into(),
                 pid_file.to_string_lossy().into_owned(),
             ],
@@ -3526,7 +4776,432 @@ mod tests {
         }
         assert!(
             !process_path.exists(),
-            "detached descendant {pid} survived timeout"
+            "background session member {pid} survived timeout"
+        );
+    }
+
+    /// The direct child can exit before the deadline while a background member
+    /// of its PTY-created session is reparented and owns a worker which closes
+    /// every PTY descriptor. Neither remains reachable from the vanished
+    /// root's ancestry, but session membership survives both operations.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn deadline_after_root_exit_kills_reparented_session_member() {
+        let temp = tempfile::tempdir().unwrap();
+        let pid_file = temp.path().join("holder.pid");
+        let holder_script = temp.path().join("holder.sh");
+        std::fs::write(
+            &holder_script,
+            r#"#!/bin/sh
+sh -c 'echo $$ > "$1"; exec </dev/null >/dev/null 2>&1; sleep 30' worker "$1" &
+wait
+"#,
+        )
+        .unwrap();
+        let opts = ExecOpts {
+            argv: vec![
+                "sh".into(),
+                "-c".into(),
+                r#"sh -c 'trap "" HUP; exec sh "$1" "$2"' holder "$1" "$2" &
+                   while [ ! -s "$2" ]; do sleep 0.01; done"#
+                    .into(),
+                "kettle-exec-test".into(),
+                holder_script.to_string_lossy().into_owned(),
+                pid_file.to_string_lossy().into_owned(),
+            ],
+            cols: 80,
+            rows: 24,
+            cwd: None,
+            timeout: Some(Duration::from_millis(400)),
+            mode: OutputMode::Raw,
+            record: None,
+            forward_stdin: false,
+        };
+        let mut sink = Vec::new();
+
+        assert_eq!(run_exec_with(opts, &|| None, &mut sink), EXIT_TIMEOUT);
+        let pid: u32 = std::fs::read_to_string(&pid_file)
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        let process_path = PathBuf::from(format!("/proc/{pid}"));
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while process_path.exists() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        if process_path.exists() {
+            // Avoid leaking the fixture if the assertion fails.
+            unsafe {
+                libc::kill(pid as libc::pid_t, libc::SIGKILL);
+            }
+        }
+        assert!(
+            !process_path.exists(),
+            "descriptor-free reparented session member {pid} survived deadline teardown"
+        );
+    }
+
+    /// PTY EOF can precede lossless stdout completion. A later operation
+    /// deadline must still have the unreaped root identity needed to
+    /// authenticate and kill a descriptor-free session member.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn blocked_stdout_keeps_the_root_anchor_until_deadline_teardown() {
+        struct GateWriter {
+            entered: Sender<()>,
+            release: Receiver<()>,
+        }
+
+        impl Write for GateWriter {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                let _ = self.entered.try_send(());
+                self.release
+                    .recv_timeout(Duration::from_secs(5))
+                    .expect("test releases blocked stdout after lifecycle return");
+                Ok(bytes.len())
+            }
+
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let temp = tempfile::tempdir().unwrap();
+        let pid_file = temp.path().join("holder.pid");
+        let (entered_tx, entered_rx) = crossbeam_channel::bounded(1);
+        let (release_tx, release_rx) = crossbeam_channel::bounded(1);
+        let mut output = WorkerOutput::spawn(
+            OutputMode::Raw,
+            GateWriter {
+                entered: entered_tx,
+                release: release_rx,
+            },
+        )
+        .unwrap();
+        let opts = ExecOpts {
+            argv: vec![
+                "sh".into(),
+                "-c".into(),
+                r#"trap '' HUP
+                   sleep 30 </dev/null >/dev/null 2>&1 &
+                   echo $! > "$1"
+                   printf anchor-output"#
+                    .into(),
+                "kettle-exec-test".into(),
+                pid_file.to_string_lossy().into_owned(),
+            ],
+            cols: 80,
+            rows: 24,
+            cwd: None,
+            timeout: Some(Duration::from_millis(400)),
+            mode: OutputMode::Raw,
+            record: None,
+            forward_stdin: false,
+        };
+
+        let code = run_exec_engine(opts, &|| None, &mut output, None);
+        assert_eq!(code, EXIT_TIMEOUT);
+        entered_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("child output reached the blocked writer");
+        release_tx.send(()).unwrap();
+
+        let pid: u32 = std::fs::read_to_string(&pid_file)
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        let process_path = PathBuf::from(format!("/proc/{pid}"));
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while process_path.exists() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        if process_path.exists() {
+            unsafe { libc::kill(pid as libc::pid_t, libc::SIGKILL) };
+        }
+        assert!(
+            !process_path.exists(),
+            "late output deadline lost the root anchor and left session member {pid} alive"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_process_identity_parser_and_scan_cap_are_pinned() {
+        let parsed = LinuxProcessIdentity::parse(
+            42,
+            "42 (a worker ) name) S 1 2 77 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 999 20",
+        )
+        .expect("parse proc stat with spaces and a close-paren in comm");
+        assert_eq!(parsed.pid, 42);
+        assert_eq!(parsed.session, 77);
+        assert_eq!(parsed.start_time, 999);
+
+        let mut budget = LinuxProcScanBudget::new();
+        budget.processes = LINUX_PROC_SCAN_PROCESSES;
+        assert!(!budget.process());
+        assert!(budget.exhausted);
+
+        let own = LinuxProcessIdentity::read(std::process::id())
+            .expect("read own proc stat")
+            .expect("own process still exists");
+        let mut budget = LinuxProcScanBudget::new();
+        let _ = linux_session_processes(own.session, 0, &mut budget);
+        assert!(
+            budget.exhausted,
+            "a local result cap must be reported through the shared budget"
+        );
+
+        let expected = LinuxProcessIdentity {
+            pid: 42,
+            session: 42,
+            start_time: 999,
+        };
+        let stopped = LinuxProcessStat {
+            identity: expected,
+            state: b'T',
+        };
+        let zombie = LinuxProcessStat {
+            identity: expected,
+            state: b'Z',
+        };
+        let recycled = LinuxProcessStat {
+            identity: LinuxProcessIdentity {
+                start_time: 1_000,
+                ..expected
+            },
+            state: b'T',
+        };
+        assert!(linux_root_anchors_numeric_scope(
+            Some(expected),
+            Some(stopped)
+        ));
+        assert!(linux_root_anchors_numeric_scope(
+            Some(expected),
+            Some(zombie)
+        ));
+        assert!(
+            !linux_root_anchors_numeric_scope(Some(expected), None),
+            "a vanished leader cannot authenticate a numeric session id"
+        );
+        assert!(
+            !linux_root_anchors_numeric_scope(Some(expected), Some(recycled)),
+            "a reused pid with a different start time must fail closed"
+        );
+        assert!(
+            !linux_root_anchors_numeric_scope(None, Some(stopped)),
+            "attach failure cannot be upgraded into numeric ownership"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    const LINUX_FORK_FIXTURE: &str = "exec::tests::linux_active_fork_session_helper";
+    #[cfg(target_os = "linux")]
+    const LINUX_FORK_WORKER_FIXTURE: &str = "exec::tests::linux_active_fork_session_worker";
+
+    #[cfg(target_os = "linux")]
+    const LEAKED_SLAVE_FIXTURE: &str = "exec::tests::unix_leaked_slave_helper";
+
+    /// Exit the direct child while a descendant still owns the PTY slave. No
+    /// reader EOF or parser Exit event can arrive until Kettle tears down that
+    /// inherited descriptor, so this is the end-to-end discriminator for the
+    /// independent non-reaping process-status observation.
+    #[cfg(target_os = "linux")]
+    #[test]
+    #[allow(clippy::zombie_processes)] // the parent test owns cleanup through exec teardown
+    fn unix_leaked_slave_helper() {
+        if !invoked_as_fixture(LEAKED_SLAVE_FIXTURE) {
+            return;
+        }
+        use std::os::unix::process::CommandExt as _;
+
+        let mut command = std::process::Command::new("sleep");
+        command.arg("30");
+        // A same-session descendant is sent SIGHUP when the controlling PTY's
+        // leader exits on some Unix kernels. Move this fixture to a new session
+        // so it deterministically retains the inherited slave; the parent test
+        // owns its explicit cleanup because this is also the documented
+        // containment escape that needs an OS-owned supervisor/cgroup.
+        unsafe {
+            command.pre_exec(|| {
+                if libc::setsid() < 0 {
+                    Err(std::io::Error::last_os_error())
+                } else {
+                    Ok(())
+                }
+            });
+        }
+        let child = command.spawn().expect("spawn inherited-slave descendant");
+        println!("LEAKED_SLAVE_PID {}", child.id());
+        std::io::stdout().flush().expect("announce leaked slave");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn direct_child_exit_starts_the_bounded_unix_eof_wait() {
+        if invoked_as_fixture(LEAKED_SLAVE_FIXTURE) {
+            return;
+        }
+        let helper = std::env::current_exe().expect("resolve unit-test binary");
+        let opts = ExecOpts {
+            argv: vec![
+                helper.to_string_lossy().into_owned(),
+                "--exact".into(),
+                LEAKED_SLAVE_FIXTURE.into(),
+                "--nocapture".into(),
+                "--test-threads=1".into(),
+            ],
+            cols: 80,
+            rows: 24,
+            cwd: None,
+            timeout: None,
+            mode: OutputMode::Raw,
+            record: None,
+            forward_stdin: false,
+        };
+        let started = Instant::now();
+        let mut sink = Vec::new();
+        assert_eq!(run_exec_with(opts, &|| None, &mut sink), EXIT_INTERNAL);
+        assert!(
+            started.elapsed() < PTY_EOF_TIMEOUT + Duration::from_secs(3),
+            "a leaked slave must hit the five-second internal bound, not hang"
+        );
+
+        let output = String::from_utf8_lossy(&sink);
+        let pid = output
+            .split("LEAKED_SLAVE_PID ")
+            .nth(1)
+            .and_then(|tail| {
+                tail.chars()
+                    .take_while(char::is_ascii_digit)
+                    .collect::<String>()
+                    .parse::<libc::pid_t>()
+                    .ok()
+            })
+            .unwrap_or_else(|| panic!("fixture did not announce its descendant: {output:?}"));
+        if unsafe { libc::kill(pid, 0) } == 0 {
+            // The fixture intentionally called setsid, which is the documented
+            // escape from Kettle's Unix PTY-session ownership boundary. The
+            // assertion above is about reaching the EOF timeout; clean this
+            // deliberately unowned process up explicitly.
+            unsafe { libc::kill(pid, libc::SIGKILL) };
+        }
+    }
+
+    /// Keep creating session members until teardown freezes this process. A
+    /// stable collection of sleepers cannot prove the stop acknowledgement:
+    /// the bug was specifically a member forking after the final procfs scan.
+    #[cfg(target_os = "linux")]
+    #[test]
+    #[allow(clippy::zombie_processes)] // teardown deliberately kills the whole fixture session
+    fn linux_active_fork_session_helper() {
+        if !invoked_as_fixture(LINUX_FORK_FIXTURE) {
+            return;
+        }
+        use std::os::unix::process::CommandExt as _;
+
+        let helper = std::env::current_exe().expect("resolve active-fork test binary");
+        let mut worker = std::process::Command::new(helper)
+            .args([
+                "--exact",
+                LINUX_FORK_WORKER_FIXTURE,
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            // A separate process group in the SAME session is the essential
+            // discriminator: the PTY group's fallback signals cannot reach
+            // this worker, while the procfs session scan must.
+            .process_group(0)
+            .spawn()
+            .expect("spawn active-fork worker in a separate process group");
+        let _ = worker.wait();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    #[allow(clippy::zombie_processes)] // teardown deliberately kills the whole fixture session
+    fn linux_active_fork_session_worker() {
+        if !invoked_as_fixture(LINUX_FORK_WORKER_FIXTURE) {
+            return;
+        }
+        println!("FORK_PID {}", std::process::id());
+        let _ = std::io::stdout().flush();
+        loop {
+            let child = std::process::Command::new("sleep")
+                .arg("30")
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+                .expect("spawn active-fork descendant");
+            println!("FORK_PID {}", child.id());
+            let _ = std::io::stdout().flush();
+            std::thread::sleep(Duration::from_millis(2));
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn timeout_freezes_before_the_final_linux_session_scan() {
+        if invoked_as_fixture(LINUX_FORK_FIXTURE) {
+            return;
+        }
+        let helper = std::env::current_exe().expect("resolve the unit-test binary");
+        let opts = ExecOpts {
+            argv: vec![
+                helper.to_string_lossy().into_owned(),
+                "--exact".into(),
+                LINUX_FORK_FIXTURE.into(),
+                "--nocapture".into(),
+                "--test-threads=1".into(),
+            ],
+            cols: 80,
+            rows: 24,
+            cwd: None,
+            timeout: Some(Duration::from_millis(300)),
+            mode: OutputMode::Raw,
+            record: None,
+            forward_stdin: false,
+        };
+        let mut sink = Vec::new();
+        assert_eq!(run_exec_with(opts, &|| None, &mut sink), EXIT_TIMEOUT);
+
+        let output = String::from_utf8_lossy(&sink);
+        let pids = output
+            .split("FORK_PID ")
+            .skip(1)
+            .filter_map(|tail| {
+                tail.chars()
+                    .take_while(char::is_ascii_digit)
+                    .collect::<String>()
+                    .parse::<u32>()
+                    .ok()
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            pids.len() >= 8,
+            "fixture must still be forking when teardown starts; output={output:?}"
+        );
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while pids
+            .iter()
+            .any(|pid| PathBuf::from(format!("/proc/{pid}")).exists())
+            && Instant::now() < deadline
+        {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let survivors = pids
+            .iter()
+            .copied()
+            .filter(|pid| PathBuf::from(format!("/proc/{pid}")).exists())
+            .collect::<Vec<_>>();
+        for pid in &survivors {
+            unsafe { libc::kill(*pid as libc::pid_t, libc::SIGKILL) };
+        }
+        assert!(
+            survivors.is_empty(),
+            "session members created around the final scan survived: {survivors:?}"
         );
     }
 
@@ -3542,7 +5217,7 @@ mod tests {
     /// run as part of an ordinary suite. Reading argv is race-free, unlike the
     /// environment-variable guard the integration fixtures use — those are set
     /// on a `Command` by their parent, which `run_exec_with` has no way to do.
-    #[cfg(windows)]
+    #[cfg(any(windows, target_os = "linux"))]
     fn invoked_as_fixture(name: &str) -> bool {
         let mut exact = false;
         let mut named = false;

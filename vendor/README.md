@@ -98,6 +98,16 @@ to route graphics controls around the text parser.
   `conpty.dll`; Kettle does not support sideloaded OpenConsole, so it resolves
   only the system `kernel32.dll` exports and cannot execute a DLL found through
   the application directory, working directory, or `PATH` during pane creation.
+  A second opt-in command-builder flag creates Windows automation children
+  suspended, assigns them to a shared kill-on-close Job Object, and resumes only
+  after assignment succeeds. Rollback proves a failed assignment/resume really
+  terminated the suspended process; cloned killers retain the same Job handle
+  without a fallible duplication step. Job accounting exposes whether a live
+  descendant can still write before Kettle closes ConPTY, and process-handle
+  signalling disambiguates the valid exit code 259 from `STILL_ACTIVE`. This is performed inside
+  `CreateProcessW`'s owning backend because attaching from Kettle after spawn
+  leaves an unavoidable window in which immediate descendants do not inherit
+  the job.
   On Unix, dropping the master writer now closes only its duplicate descriptor
   and never writes a newline or VEOF byte into the terminal; deliberate EOF
   remains Kettle's live-termios `PtyStdin::try_signal_eof` path. Validation-only
@@ -116,7 +126,10 @@ to route graphics controls around the text parser.
   path through its PTY regressions; run the retained package-owned native unit
   tests directly with
   `cargo test --locked --manifest-path vendor/Cargo.toml --target-dir
-  target/vendor-check -p portable-pty`.
+  target/vendor-check -p portable-pty --features serde_support`. The feature is
+  intentional: it compiles the backward-compatible default for the new
+  containment field and its enabled round trip on every native vendor gate.
 
 Remove the `[patch.crates-io]` entry and this directory after upgrading to an
-upstream release that provides an equivalent nonblocking writer.
+upstream release that provides both an equivalent nonblocking writer and
+pre-resume process-tree containment.

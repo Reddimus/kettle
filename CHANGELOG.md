@@ -8,6 +8,54 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Fixed
 
+- **`kettle exec` could report exit 0 before Unix PTY output arrived.** The
+  lifecycle correctly distinguished an empty raw-output channel from a
+  disconnected one, but then overrode that proof after 810 ms on every
+  platform. Under whole-workspace scheduling, the direct child could exit
+  before the PTY reader ran; Kettle then closed stdout and the recorder while
+  the bytes were still in flight, producing empty stdout or a header-only
+  asciicast with the child's successful status. Windows ConPTY, whose output
+  handle can legitimately outlive its final repaint, now uses quiet only as
+  permission to close the pseudoconsole asynchronously; success still waits for
+  the resulting channel disconnection and orderly reader EOF. Unix requires the
+  same proof without the close step. Direct-child exit is observed with
+  `waitid(WNOWAIT)`, independently of PTY EOF, so an inherited slave starts the
+  five-second no-EOF bound instead of hanging forever while Linux retains the
+  unreaped identity needed for later teardown. Unexpected read errors are
+  latched immediately but bytes already admitted to the parser and stdout
+  worker drain before status 125 is returned. Queued output or a backpressured
+  stdout worker remains delivery work and is not timed out; if the parser
+  itself disappears with a pending count no surviving thread can retire,
+  Kettle fails explicitly instead of waiting forever. Reader status,
+  source-generation, and pending-chunk count now share one atomic snapshot, so
+  a pump read and parser completion cannot manufacture a falsely quiet state
+  while bytes are hidden in the bounded pipeline. An explicit
+  operation deadline now returns 124 even when the direct child already exited
+  0, because that status cannot make abandoned lossless output complete. The
+  final completion check resamples source progress after draining every queue;
+  because the reader has disconnected by then, nothing can race in afterward.
+  Linux teardown tracks the PTY-created session rather than treating possession
+  of its slave descriptor as process ownership. It first stops and revalidates
+  the original leader through its pidfd; that unreaped identity keeps the
+  numeric session and process-group ids reserved while every discovered member
+  is frozen and killed through its own pidfd. Numeric targeting is refused when
+  that anchor cannot be proven, so PID reuse cannot redirect a signal to an
+  unrelated process. Cleanup waits until retained members are actually stopped
+  before its final scan and bounds/reports the complete procfs scan. If procfs
+  or pidfds are unavailable, it fails closed rather than signaling a numeric
+  scope it cannot authenticate; timeout/cancellation reports 125 instead of
+  claiming a completed 124/130 teardown. Windows creates the command suspended,
+  assigns a shared kill-on-close Job Object, and resumes only after assignment
+  succeeds, closing the old post-spawn window in which an immediate descendant
+  could escape timeout. Failed assignment/resume now proves rollback completed,
+  cloned killers cannot silently lose Job containment, and a timed-out
+  asynchronous `ClosePseudoConsole` remains responsible for stopping its reader
+  only after the real close returns. Ordinary quiet close also waits until the
+  Job Object has no live descendant, so closing ConPTY cannot erase a late
+  inherited write while returning the direct parent's success. Windows process
+  liveness now comes from the process handle rather than the ambiguous numeric
+  `STILL_ACTIVE` value, preserving a legitimate child exit code of 259.
+
 - **An explicit `kettle ctl screenshot --json '{"path":"PATH"}'` was refused unless every parent
   directory was private.** A user-selected export beneath an ordinary `0755`
   or `0775` project/diagnostics directory was routed through the private-state

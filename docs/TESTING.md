@@ -862,6 +862,59 @@ parking the parser on a senderless channel. The raw-output sender tests
 separately prove a full best-effort plugin queue drops without blocking and a
 full lossless queue backpressures only until its receiver drains. `kettle exec`
 uses the latter with a four-slot queue.
+
+`kettle exec` also has platform-specific completion policy tests. Unix may
+report success only after the raw channel disconnects and the core reader
+publishes an orderly EOF; the former 810-ms cross-platform fallback is a failing
+mutant because silence can mean the reader has not been scheduled yet. An
+unexpected reader error and a five-second Unix no-EOF bound return explicit
+internal failures, but the bound does not override queued raw bytes or
+downstream stdout backpressure. A Linux self-reexec fixture exits its direct
+child while a `setsid()` descendant retains the slave, proving non-reaping child
+status—not the unavailable parser Exit event—starts that bound. A failed-reader
+model separately keeps multiple admitted parser chunks and an occupied stdout
+worker ahead of the final 125; a disconnected parser with an irreducible
+pending count must fail rather than deadlock. Windows ConPTY retains a bounded quiet interval
+because its pseudoconsole output handle can legitimately outlive the child and
+final repaint, but quiet now only starts an off-thread pseudoconsole close.
+Completion still requires the real EOF and reader disconnect, and a stuck close
+fails explicitly. A native close-ownership model proves a `Terminal` dropped
+during that stuck close cannot publish reader stop before the close worker
+returns. A single-word source-progress test pins the atomic
+status/generation/pending snapshot, while an accepted stdout command stays
+non-idle until its worker write returns. The native platform seam is tested
+directly, so changing production's selection back to ConPTY semantics fails on
+Unix rather than passing helper-only tests.
+
+The operation timeout covers lossless output delivery as well as the direct
+child. A short-deadline test pins exit 124 when the child already reported 0 but
+its PTY sender remains live. Linux coverage lets the root exit and a background
+session member be reparented, then proves deadline teardown reaches a
+descriptor-free worker without relying on vanished ancestry. Another test
+blocks the stdout worker after PTY EOF and lets the operation deadline win,
+proving the unreaped root anchor survives until lossless delivery completes. An
+active-fork fixture moves its worker into a different process group in the same
+session and keeps creating members as timeout begins; the PTY group fallback
+cannot satisfy it, so deleting the procfs scan makes the test fail. It also
+proves the freeze phase observes stopped states before its final scan. Separate Linux unit
+coverage pins `/proc/stat` parsing, pidfd-backed identities, rejection of a
+vanished or start-time-mismatched leader before numeric targeting, and reports a
+local or shared procfs work bound instead of silently truncating cleanup. Native
+Windows vendor coverage opens a real ConPTY, services its startup DSR,
+re-executes the small native test helper whose first action creates a descendant,
+retains that process handle before teardown, and proves the pre-resume Job
+Object kill reaches it. A product integration fixture then lets the direct
+child exit while its same-console descendant waits two seconds before writing,
+proving Job accounting postpones quiet close until that tail is delivered. A
+real native process exit of 259 separately pins handle-signalled liveness rather
+than the ambiguous `STILL_ACTIVE` value. The vendored gate enables `serde_support`, so both a
+serialized builder from before the containment field and a true containment
+round trip are compiled on Linux and Windows.
+The native integration
+suites continue to cover streamed stdout, replayable asciicast output, explicit
+raw-mode EOF, query replies, and child status propagation through the real
+PTY/ConPTY.
+
 Native lifecycle coverage also parks a child in a quiet PTY and requires
 `Terminal::Drop` to return promptly while pseudoconsole destruction and child
 reaping continue on the detached teardown worker. A cross-platform source guard

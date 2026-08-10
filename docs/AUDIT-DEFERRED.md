@@ -274,7 +274,7 @@ tracked here so they are not lost.
   than fixed under release pressure.
 
 
-- **The `kettle/tests/exec.rs` PTY suite is flaky on macOS — the whole suite, not one test.**
+- **~~The `kettle/tests/exec.rs` PTY suite is flaky on macOS — the whole suite, not one test~~ — fixed.**
   The test's own comment already records that it "has failed intermittently on
   macOS CI with empty stdout"; this entry adds the missing part, which is a
   measured rate and a decisive answer to whether the v2.54.0 change set caused
@@ -380,6 +380,63 @@ tracked here so they are not lost.
   higher priority than the 2/30 framing implied, and record the run count when
   updating this figure — a rate measured by re-running one binary and a rate
   measured across CI runs are not the same number.
+
+  **Resolved 2026-08-10.** The recorder was downstream evidence, not the
+  cause. `drain_output_slice` latched real EOF only when the raw channel
+  disconnected, but the lifecycle then declared the PTY finished after
+  `SETTLE + PTY_DRAIN_GRACE` (810 ms) on every platform. That contradicted the
+  constant's own comment: the elapsed fallback exists for Windows ConPTY,
+  whose output handle can outlive its final repaint. On Unix, a live sender at
+  810 ms is still a reader that may deliver bytes. Whole-workspace scheduling
+  made that interval reachable, so both stdout and the recorder were finalized
+  before the shared bytes arrived.
+
+  The policies are now separate. ConPTY retains a bounded *quiet* interval that
+  restarts as soon as the pump reads a chunk and remains closed while that chunk
+  is pending in the parser/output pipeline. Quiet now starts an asynchronous
+  pseudoconsole close while the reader remains live; it never finishes the
+  command. Windows and Unix both report success only after the raw channel
+  disconnects and the core reader identifies an orderly EOF; an
+  unexpected read error or five seconds without EOF becomes an explicit
+  status-125 incomplete-output failure instead of either a hang or false
+  success. The bound is applied only when the raw transport is idle, so queued
+  bytes and a stdout command already blocked in its OS-facing worker are still
+  allowed to drain. A complete
+  operation deadline returns 124 after verified teardown rather than laundering
+  abandoned bytes through a direct child's collected exit 0 (unverified
+  teardown returns 125). Reader status, generation, and pending
+  work share one atomic snapshot, so a pump read and parser completion cannot
+  manufacture a state that was never real. On Linux, teardown now uses the
+  PTY-created session as the ownership boundary and identity-stable pidfds for
+  signals. That reaches reparented and descriptor-free session members without
+  treating an unrelated process that opened the PTY slave as Kettle's child;
+  the bounded procfs scan acknowledges SIGSTOP before declaring its final scan
+  stable and reports degraded containment if procfs or pidfds are unavailable.
+  Windows containment moved into the PTY backend: the command is created
+  suspended, assigned to a kill-on-close Job Object, and resumed only after the
+  assignment succeeds, so an immediate descendant cannot escape between spawn
+  and attachment. Job accounting also prevents a quiet pseudoconsole close
+  while a live descendant can still emit, and handle signalling preserves the
+  otherwise ambiguous valid exit code 259.
+
+  Native platform-selection, close/EOF, reader-error, deadline, active-fork,
+  Linux reparenting, late-descendant output, exit-259, and real ConPTY Job Object tests fail against the
+  respective former behaviors. The macOS exec integration suite and focused
+  native Linux and Windows checks pass. The exact
+  whole-workspace reproduction loop above completed 30/30 on the pre-fix tree
+  during this investigation; that null run is retained honestly rather than
+  presented as proof of the fix.
+
+- **A Unix child can deliberately escape timeout teardown by creating a new
+  session.** Kettle owns the PTY-created session and can safely kill every
+  member of it, including reparented processes and new process groups. Once a
+  descendant successfully calls `setsid`, neither ancestry after reparenting
+  nor possession of an open PTY descriptor proves ownership: an unrelated
+  same-user process can independently open or receive that descriptor. Killing
+  by either signal would make an unrelated process a teardown target. A complete
+  guarantee needs an OS-owned containment primitive (a delegated Linux cgroup
+  or a supervisor/subreaper designed into process creation), not a procfs
+  heuristic; that is a separate architecture change.
 
 - **`kettle ctl screenshot` times out on macOS, so the live-UI smoke cannot
   finish there.** This is the blocker for `just agent-tui-smoke` on macOS, which
