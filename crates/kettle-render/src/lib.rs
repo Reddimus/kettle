@@ -1728,9 +1728,11 @@ pub struct RendererRecoveryState {
 /// consumes this in `render_frame`.
 #[derive(Debug, Clone)]
 pub struct ScreenshotRequest {
-    /// Where to save the PNG. Caller already computed this via
-    /// `session_screenshot_path(unix_secs, pid, cache_dir)`.
+    /// Where to save the PNG.
     pub out_path: std::path::PathBuf,
+    /// Whether the destination belongs to Kettle's private state or was
+    /// explicitly selected by the user.
+    pub output_policy: ScreenshotOutputPolicy,
     /// If `Some`, crop the captured frame to this pixel rect
     /// (the focused pane's geometry). If `None`, capture the
     /// whole window.
@@ -1739,6 +1741,18 @@ pub struct ScreenshotRequest {
     /// screenshot` / MCP). The UI action leaves this `None` and keeps its
     /// optimistic notification behavior.
     pub completion: Option<std::sync::mpsc::Sender<Result<std::path::PathBuf, String>>>,
+}
+
+/// Filesystem policy for a screenshot destination.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScreenshotOutputPolicy {
+    /// Kettle chose the path under its cache/state tree. Ancestors are created
+    /// and verified as private before the owner-only PNG is opened.
+    PrivateState,
+    /// The caller explicitly chose the path. Its parent must already exist,
+    /// but ordinary user directories are accepted; the leaf is still created
+    /// atomically and owner-only.
+    UserSelected,
 }
 
 const MAX_LIVE_SCREENSHOT_BYTES: u64 = 256 * 1024 * 1024;
@@ -2029,21 +2043,171 @@ fn finish_live_screenshot(job: ScreenshotJob) -> Result<std::path::PathBuf, Stri
     // `ImageBuffer::save`'s internal `File::create` pick up the process
     // umask, typically `0o644` on a `022` umask) closes that gap for the
     // render crate's screenshot path too.
-    let file = create_private_screenshot_file(&prepared.request.out_path)
+    let file = create_screenshot_file(&prepared.request.out_path, prepared.request.output_policy)
         .map_err(|error| format!("screenshot output file could not be opened: {error}"))?;
-    let mut writer = std::io::BufWriter::new(file);
-    image
-        .write_to(&mut writer, image::ImageFormat::Png)
-        .map_err(|error| format!("PNG save failed: {error}"))?;
-    std::io::Write::flush(&mut writer).map_err(|error| format!("PNG save failed: {error}"))?;
+    persist_screenshot_file(file, |writer| {
+        image
+            .write_to(writer, image::ImageFormat::Png)
+            .map_err(|error| format!("PNG save failed: {error}"))
+    })?;
     Ok(prepared.request.out_path)
 }
 
+#[derive(Debug)]
+enum ScreenshotFileKind {
+    Private(std::fs::File),
+    UserSelected(kettle_state::CreatedUserSelectedFile),
+}
+
+#[derive(Debug)]
+struct CreatedScreenshotFile {
+    file: Option<ScreenshotFileKind>,
+    path: std::path::PathBuf,
+}
+
+impl CreatedScreenshotFile {
+    fn file(&self) -> &std::fs::File {
+        match self
+            .file
+            .as_ref()
+            .expect("created screenshot file is present")
+        {
+            ScreenshotFileKind::Private(file) => file,
+            ScreenshotFileKind::UserSelected(file) => file,
+        }
+    }
+
+    fn file_mut(&mut self) -> &mut std::fs::File {
+        match self
+            .file
+            .as_mut()
+            .expect("created screenshot file is present")
+        {
+            ScreenshotFileKind::Private(file) => file,
+            ScreenshotFileKind::UserSelected(file) => file,
+        }
+    }
+
+    fn persist(mut self) -> std::fs::File {
+        match self
+            .file
+            .take()
+            .expect("created screenshot file is present")
+        {
+            ScreenshotFileKind::Private(file) => file,
+            ScreenshotFileKind::UserSelected(file) => file.persist(),
+        }
+    }
+
+    fn discard(mut self) -> std::io::Result<()> {
+        match self
+            .file
+            .take()
+            .expect("created screenshot file is present")
+        {
+            ScreenshotFileKind::Private(file) => {
+                kettle_state::discard_created_private_file_checked(file, &self.path)
+            }
+            ScreenshotFileKind::UserSelected(file) => file.discard(),
+        }
+    }
+}
+
+impl std::ops::Deref for CreatedScreenshotFile {
+    type Target = std::fs::File;
+
+    fn deref(&self) -> &Self::Target {
+        self.file()
+    }
+}
+
+impl std::io::Write for CreatedScreenshotFile {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        std::io::Write::write(self.file_mut(), buf)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        std::io::Write::flush(self.file_mut())
+    }
+}
+
+impl std::io::Seek for CreatedScreenshotFile {
+    fn seek(&mut self, position: std::io::SeekFrom) -> std::io::Result<u64> {
+        std::io::Seek::seek(self.file_mut(), position)
+    }
+}
+
+impl Drop for CreatedScreenshotFile {
+    fn drop(&mut self) {
+        if let Some(ScreenshotFileKind::Private(file)) = self.file.take() {
+            kettle_state::discard_created_private_file(file, &self.path);
+        }
+        // `CreatedUserSelectedFile` owns its descriptor-relative cleanup and
+        // removes the exact leaf when its variant is dropped while armed.
+    }
+}
+
+fn persist_screenshot_file(
+    file: CreatedScreenshotFile,
+    encode: impl FnOnce(&mut std::io::BufWriter<CreatedScreenshotFile>) -> Result<(), String>,
+) -> Result<(), String> {
+    persist_screenshot_file_with_flush(file, encode, std::io::Write::flush)
+}
+
+fn persist_screenshot_file_with_flush(
+    file: CreatedScreenshotFile,
+    encode: impl FnOnce(&mut std::io::BufWriter<CreatedScreenshotFile>) -> Result<(), String>,
+    flush: impl FnOnce(&mut std::io::BufWriter<CreatedScreenshotFile>) -> std::io::Result<()>,
+) -> Result<(), String> {
+    fn fail_file(file: CreatedScreenshotFile, error: String) -> Result<(), String> {
+        match file.discard() {
+            Ok(()) => Err(error),
+            Err(cleanup) => Err(format!("{error}; partial-file cleanup failed: {cleanup}")),
+        }
+    }
+
+    fn fail(
+        writer: std::io::BufWriter<CreatedScreenshotFile>,
+        error: String,
+    ) -> Result<(), String> {
+        let (file, _) = writer.into_parts();
+        fail_file(file, error)
+    }
+
+    let mut writer = std::io::BufWriter::new(file);
+    if let Err(error) = encode(&mut writer) {
+        return fail(writer, error);
+    }
+    if let Err(error) = flush(&mut writer) {
+        return fail(writer, format!("PNG save failed: {error}"));
+    }
+    let (file, buffered) = writer.into_parts();
+    match buffered {
+        Ok(bytes) if bytes.is_empty() => {}
+        Ok(_) => {
+            return fail_file(
+                file,
+                "PNG save failed: flush left buffered bytes".to_string(),
+            );
+        }
+        Err(_) => {
+            return fail_file(file, "PNG save failed: writer panicked".to_string());
+        }
+    }
+    drop(file.persist());
+    Ok(())
+}
+
 /// Creates `path` with owner-only permissions (`0600` on Unix, a protected
-/// current-user DACL on Windows), refusing any existing path or reparse-point
-/// parent. Used for screenshot PNGs, which — like recordings — may capture
-/// private on-screen content; see the call site in `finish_live_screenshot`.
-fn create_private_screenshot_file(path: &std::path::Path) -> std::io::Result<std::fs::File> {
+/// current-user DACL on Windows), refusing any existing leaf. Private-state
+/// outputs also reject untrusted ancestors; an explicit user-selected output
+/// pins and verifies its already-existing parent while creating the leaf.
+/// Screenshot PNGs may capture private on-screen content; see the call site in
+/// `finish_live_screenshot`.
+fn create_screenshot_file(
+    path: &std::path::Path,
+    policy: ScreenshotOutputPolicy,
+) -> std::io::Result<CreatedScreenshotFile> {
     // `create_new` (O_CREAT | O_EXCL, CREATE_NEW on Windows) is the security
     // boundary here, not the earlier `validate_screenshot_path` pre-check in
     // the ctl handler. That pre-check runs synchronously when the request
@@ -2055,7 +2219,18 @@ fn create_private_screenshot_file(path: &std::path::Path) -> std::io::Result<std
     // fails with `AlreadyExists` rather than following it and truncating the
     // target. The shared helper also applies the private descriptor in that
     // same create operation, before any screenshot bytes can be written.
-    kettle_state::create_private_file_new(path)
+    let file = match policy {
+        ScreenshotOutputPolicy::PrivateState => {
+            ScreenshotFileKind::Private(kettle_state::create_private_file_new(path)?)
+        }
+        ScreenshotOutputPolicy::UserSelected => {
+            ScreenshotFileKind::UserSelected(kettle_state::create_user_selected_file_new(path)?)
+        }
+    };
+    Ok(CreatedScreenshotFile {
+        file: Some(file),
+        path: path.to_path_buf(),
+    })
 }
 
 fn crop_screenshot(
@@ -2107,7 +2282,10 @@ fn crop_screenshot(
 
 #[cfg(test)]
 mod live_screenshot_tests {
-    use super::{create_private_screenshot_file, crop_screenshot};
+    use super::{
+        ScreenshotOutputPolicy, create_screenshot_file, crop_screenshot, persist_screenshot_file,
+        persist_screenshot_file_with_flush,
+    };
 
     fn test_tempdir() -> kettle_test_support::PrivateTempDir {
         kettle_test_support::private_tempdir("kettle-render-test-")
@@ -2163,7 +2341,8 @@ mod live_screenshot_tests {
         use std::os::unix::fs::PermissionsExt as _;
         let dir = test_tempdir();
         let path = dir.path().join("shot.png");
-        let file = create_private_screenshot_file(&path).expect("open");
+        let file =
+            create_screenshot_file(&path, ScreenshotOutputPolicy::PrivateState).expect("open");
         let mode = file.metadata().expect("metadata").permissions().mode() & 0o777;
         assert_eq!(mode, 0o600, "screenshot file must be owner-read/write only");
     }
@@ -2179,13 +2358,82 @@ mod live_screenshot_tests {
         let dir = test_tempdir();
         let path = dir.path().join("shot.png");
         std::fs::write(&path, b"stale").expect("seed file");
-        let err = create_private_screenshot_file(&path).expect_err("must refuse an existing path");
+        let err = create_screenshot_file(&path, ScreenshotOutputPolicy::PrivateState)
+            .expect_err("must refuse an existing path");
         assert_eq!(err.kind(), std::io::ErrorKind::AlreadyExists);
         assert_eq!(
             std::fs::read(&path).expect("original file untouched"),
             b"stale",
             "an existing file at the path must not be truncated or overwritten"
         );
+    }
+
+    #[test]
+    fn failed_screenshot_encode_removes_the_exact_created_leaf() {
+        use std::io::Write as _;
+
+        let dir = test_tempdir();
+        for (name, policy) in [
+            ("private.png", ScreenshotOutputPolicy::PrivateState),
+            ("selected.png", ScreenshotOutputPolicy::UserSelected),
+        ] {
+            let path = dir.path().join(name);
+            let file = create_screenshot_file(&path, policy).expect("create screenshot leaf");
+            let error = persist_screenshot_file(file, |writer| {
+                writer.write_all(b"partial PNG bytes").unwrap();
+                Err("injected encoder failure".to_string())
+            })
+            .expect_err("the injected encoder failure must propagate");
+            assert_eq!(error, "injected encoder failure");
+            assert!(
+                !path.exists(),
+                "an encode failure must not strand a path that blocks retry: {}",
+                path.display()
+            );
+        }
+    }
+
+    #[test]
+    fn failed_screenshot_flush_removes_an_on_disk_partial_leaf() {
+        use std::io::Write as _;
+
+        let dir = test_tempdir();
+        let path = dir.path().join("flush-failure.png");
+        let file = create_screenshot_file(&path, ScreenshotOutputPolicy::UserSelected)
+            .expect("create screenshot leaf");
+        let error = persist_screenshot_file_with_flush(
+            file,
+            |writer| {
+                writer
+                    .write_all(&vec![0x5a; 32 * 1024])
+                    .map_err(|error| error.to_string())
+            },
+            |_writer| Err(std::io::Error::other("injected flush failure")),
+        )
+        .expect_err("the injected flush failure must propagate");
+        assert!(error.contains("injected flush failure"));
+        assert!(
+            !path.exists(),
+            "a flush failure after underlying writes must remove the partial leaf"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn failed_selected_screenshot_never_deletes_a_replacement_leaf() {
+        let dir = test_tempdir();
+        let path = dir.path().join("selected.png");
+        let displaced = dir.path().join("displaced-partial.png");
+        let file = create_screenshot_file(&path, ScreenshotOutputPolicy::UserSelected)
+            .expect("create screenshot leaf");
+        std::fs::rename(&path, &displaced).expect("displace created leaf");
+        std::fs::write(&path, b"replacement").expect("install replacement leaf");
+
+        let error = persist_screenshot_file(file, |_writer| Err("injected failure".to_string()))
+            .expect_err("the injected failure must propagate");
+        assert_eq!(error, "injected failure");
+        assert_eq!(std::fs::read(&path).unwrap(), b"replacement");
+        assert!(displaced.exists(), "cleanup cannot reach a displaced inode");
     }
 
     /// The same O_EXCL guarantee, exercised against a symlink: a planted
@@ -2198,13 +2446,35 @@ mod live_screenshot_tests {
         std::fs::write(&sensitive, b"secret").expect("seed target");
         let link = dir.path().join("shot.png");
         std::os::unix::fs::symlink(&sensitive, &link).expect("plant symlink");
-        let err = create_private_screenshot_file(&link).expect_err("must refuse a symlink");
+        let err = create_screenshot_file(&link, ScreenshotOutputPolicy::UserSelected)
+            .expect_err("must refuse a symlink");
         assert_eq!(err.kind(), std::io::ErrorKind::AlreadyExists);
         assert_eq!(
             std::fs::read(&sensitive).expect("symlink target untouched"),
             b"secret",
             "the symlink target must not be truncated through the followed link"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn user_selected_screenshot_accepts_a_public_existing_parent() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let dir = test_tempdir();
+        let exports = dir.path().join("exports");
+        std::fs::create_dir(&exports).unwrap();
+        std::fs::set_permissions(&exports, std::fs::Permissions::from_mode(0o775)).unwrap();
+
+        let private_path = exports.join("private.png");
+        let error = create_screenshot_file(&private_path, ScreenshotOutputPolicy::PrivateState)
+            .expect_err("the private-state policy must retain ancestor checks");
+        assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
+
+        let selected_path = exports.join("selected.png");
+        let file = create_screenshot_file(&selected_path, ScreenshotOutputPolicy::UserSelected)
+            .expect("an explicit path may live under an ordinary user directory");
+        assert_eq!(file.metadata().unwrap().permissions().mode() & 0o777, 0o600);
     }
 }
 
@@ -12760,7 +13030,7 @@ mod clamp_font_size_tests {
 
 #[cfg(test)]
 mod renderer_recovery_state_tests {
-    use super::{RendererRecoveryState, ScreenshotRequest};
+    use super::{RendererRecoveryState, ScreenshotOutputPolicy, ScreenshotRequest};
     use kettle_config::Rgb;
     use std::sync::Arc;
 
@@ -12776,6 +13046,7 @@ mod renderer_recovery_state_tests {
             accent_override: Some(Rgb::new(0x12, 0x34, 0x56)),
             pending_screenshot: Some(ScreenshotRequest {
                 out_path: expected_path.clone(),
+                output_policy: ScreenshotOutputPolicy::UserSelected,
                 crop: Some((1.0, 2.0, 3.0, 4.0)),
                 completion: Some(completion),
             }),
@@ -12789,6 +13060,7 @@ mod renderer_recovery_state_tests {
         assert_eq!(retained.accent_override, Some(Rgb::new(0x12, 0x34, 0x56)));
         let request = retained.pending_screenshot.expect("queued screenshot");
         assert_eq!(request.out_path, expected_path);
+        assert_eq!(request.output_policy, ScreenshotOutputPolicy::UserSelected);
         assert_eq!(request.crop, Some((1.0, 2.0, 3.0, 4.0)));
         request
             .completion

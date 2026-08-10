@@ -471,6 +471,51 @@ def read_rgba_png(path: Path) -> Tuple[int, int, List[bytes]]:
     return width, height, rows
 
 
+def rgba_difference_count(
+    left: Tuple[int, int, List[bytes]],
+    right: Tuple[int, int, List[bytes]],
+    *,
+    rect: Optional[Dict[str, object]] = None,
+    outside_rect: bool = False,
+) -> int:
+    """Count pixels changed between equal RGBA screenshots in/outside `rect`."""
+    left_width, left_height, left_rows = left
+    right_width, right_height, right_rows = right
+    if (left_width, left_height) != (right_width, right_height):
+        raise SystemExit(
+            "live-ui smoke: screenshots changed dimensions while comparing rendered state: "
+            f"{left_width}x{left_height} != {right_width}x{right_height}"
+        )
+
+    bounds: Optional[Tuple[int, int, int, int]] = None
+    if rect is not None:
+        try:
+            x0 = max(0, int(float(rect["x"])))
+            y0 = max(0, int(float(rect["y"])))
+            x1 = min(left_width, int(float(rect["x"]) + float(rect["width"]) + 0.999))
+            y1 = min(left_height, int(float(rect["y"]) + float(rect["height"]) + 0.999))
+        except (KeyError, TypeError, ValueError) as error:
+            raise SystemExit(f"live-ui smoke: malformed comparison rectangle: {rect}") from error
+        if x0 >= x1 or y0 >= y1:
+            raise SystemExit(f"live-ui smoke: empty comparison rectangle: {rect}")
+        bounds = (x0, y0, x1, y1)
+
+    changed = 0
+    for y, (left_row, right_row) in enumerate(zip(left_rows, right_rows)):
+        for x in range(left_width):
+            inside = bounds is None or (
+                bounds[0] <= x < bounds[2] and bounds[1] <= y < bounds[3]
+            )
+            if outside_rect:
+                inside = not inside
+            if not inside:
+                continue
+            start = x * 4
+            if left_row[start : start + 4] != right_row[start : start + 4]:
+                changed += 1
+    return changed
+
+
 def parse_hex_rgb(value: str) -> Tuple[int, int, int]:
     if re.fullmatch(r"#[0-9a-fA-F]{6}", value) is None:
         raise ValueError(f"expected #rrggbb color, got {value!r}")
@@ -2799,6 +2844,32 @@ def wait_for_search_result(
     )
 
 
+def wait_for_search_no_match(
+    live: LiveKettle,
+    *,
+    timeout_s: float = 12.0,
+) -> Tuple[Dict[str, object], Dict[str, object]]:
+    """Wait for a settled no-match result without changing Search layout."""
+    deadline = time.monotonic() + timeout_s
+    last_geometry: Dict[str, object] = {}
+    last_screen: Dict[str, object] = {}
+    while time.monotonic() < deadline:
+        last_geometry = live.json_ctl("ui_geometry")
+        last_screen = live.json_ctl("read_screen")
+        search = last_geometry.get("search")
+        if (
+            isinstance(search, dict)
+            and search.get("has_match") is False
+            and search.get("status") == "No match"
+        ):
+            return last_geometry, last_screen
+        time.sleep(0.05)
+    raise SystemExit(
+        "search-history smoke: timed out waiting for a settled no-match state: "
+        f"search={last_geometry.get('search')} screen={screen_text(last_screen)!r}"
+    )
+
+
 def command_with_marker(
     command: str, marker: str, *, windows: Optional[bool] = None
 ) -> str:
@@ -3057,6 +3128,24 @@ def agent_output_contains_marker(
 
 
 def live_helper_selftest() -> None:
+    black = bytes([0, 0, 0, 255] * 2)
+    changed_top = bytes([255, 0, 0, 255, 0, 0, 0, 255])
+    changed_bottom = bytes([0, 0, 0, 255, 0, 255, 0, 255])
+    base_pixels = (2, 2, [black, black])
+    changed_pixels = (2, 2, [changed_top, changed_bottom])
+    top_left = {"x": 0, "y": 0, "width": 1, "height": 1}
+    assert rgba_difference_count(base_pixels, changed_pixels) == 2
+    assert rgba_difference_count(base_pixels, changed_pixels, rect=top_left) == 1
+    assert (
+        rgba_difference_count(
+            base_pixels,
+            changed_pixels,
+            rect=top_left,
+            outside_rect=True,
+        )
+        == 1
+    )
+
     assert macos_session_locked(
         plistlib.dumps([{"IOConsoleLocked": True}])
     ) is True
@@ -5493,6 +5582,7 @@ def run_search_history(kettle: str, root: Path) -> Path:
                 "search-history smoke: search controls do not match the interactive surface: "
                 f"{sorted(controls)}"
             )
+        states.append(capture_live_state(live, out, "search-open"))
 
         typed = live.json_ctl("dispatch_ui_key", {"keys": list(query)})
         (out / "query.dispatch.json").write_text(json.dumps(typed, indent=2) + "\n")
@@ -5551,6 +5641,76 @@ def run_search_history(kettle: str, root: Path) -> Path:
             if query in json.dumps(search):
                 raise SystemExit("search-history smoke: ui_geometry exposed the private query")
 
+        search_rect = reverse_geo.get("search", {}).get("rect")
+        if not isinstance(search_rect, dict):
+            raise SystemExit("search-history smoke: focused result omitted the search rectangle")
+        open_pixels = read_rgba_png(live_state_screenshot_path(out, "search-open"))
+        old_pixels = read_rgba_png(live_state_screenshot_path(out, "old-match"))
+        chrome_changed = rgba_difference_count(
+            open_pixels,
+            old_pixels,
+            rect=search_rect,
+        )
+        if chrome_changed < 100:
+            raise SystemExit(
+                "search-history smoke: typed query and result status did not visibly "
+                "render inside the unchanged Search rectangle "
+                f"({chrome_changed} changed pixels)"
+            )
+
+        match_rects = reverse_geo.get("search", {}).get("match_rects")
+        if not isinstance(match_rects, list) or not match_rects:
+            raise SystemExit("search-history smoke: focused result omitted match pixel rectangles")
+        impossible_query = "KETTLE_SEARCH_NO_SUCH_MATCH_9F7C"
+        select_all = "cmd+a" if platform.system() == "Darwin" else "ctrl+a"
+        live.json_ctl(
+            "dispatch_ui_key",
+            {"keys": [select_all, *list(impossible_query)]},
+        )
+        no_match_geo, no_match_screen = wait_for_search_no_match(live)
+        (out / "no-match.geometry.json").write_text(
+            json.dumps(no_match_geo, indent=2) + "\n"
+        )
+        (out / "no-match.screen.json").write_text(
+            json.dumps(no_match_screen, indent=2) + "\n"
+        )
+        if (
+            int(no_match_screen.get("display_offset", -1)) != reverse_offset
+            or int(no_match_screen.get("rows", -1)) != int(reverse_screen.get("rows", -2))
+        ):
+            raise SystemExit(
+                "search-history smoke: no-match control changed the viewport/layout, so "
+                "the focused-match pixel comparison would not be like-for-like: "
+                f"match={reverse_offset}/{reverse_screen.get('rows')} "
+                f"no-match={no_match_screen.get('display_offset')}/{no_match_screen.get('rows')}"
+            )
+        states.append(capture_live_state(live, out, "no-match"))
+
+        reverse_pixels = read_rgba_png(
+            live_state_screenshot_path(out, "reverse-middle-match")
+        )
+        no_match_pixels = read_rgba_png(live_state_screenshot_path(out, "no-match"))
+        highlight_changed = 0
+        highlight_area = 0
+        for item in match_rects:
+            rect = item.get("rect") if isinstance(item, dict) else None
+            if not isinstance(rect, dict):
+                raise SystemExit(f"search-history smoke: malformed match rectangle: {item}")
+            highlight_changed += rgba_difference_count(
+                reverse_pixels,
+                no_match_pixels,
+                rect=rect,
+            )
+            highlight_area += max(1, int(float(rect["width"]) * float(rect["height"])))
+        highlight_threshold = max(100, highlight_area // 5)
+        if highlight_changed < highlight_threshold:
+            raise SystemExit(
+                "search-history smoke: focused-match state changed in the control plane "
+                "but its reported cell rectangles did not visibly change against an "
+                "identical-layout no-match capture "
+                f"({highlight_changed}/{highlight_threshold} changed pixels)"
+            )
+
         live.json_ctl("dispatch_ui_key", {"keys": ["escape"]})
         closed = live.json_ctl("ui_geometry")
         (out / "search-closed.geometry.json").write_text(json.dumps(closed, indent=2) + "\n")
@@ -5568,6 +5728,12 @@ def run_search_history(kettle: str, root: Path) -> Path:
                 "fixture_lines": 1800,
                 "history_size": int(bottom.get("history_size", 0)),
                 "forward_offsets": offsets,
+                "rendered_pixels": {
+                    "search_chrome_changed": chrome_changed,
+                    "match_highlight_changed": highlight_changed,
+                    "match_highlight_threshold": highlight_threshold,
+                    "match_rectangles": len(match_rects),
+                },
                 "reverse_offset": reverse_offset,
                 "statuses": [
                     old_geo["search"]["status"],  # type: ignore[index]

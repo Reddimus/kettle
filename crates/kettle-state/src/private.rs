@@ -4,6 +4,105 @@ use std::fs::File;
 use std::io;
 use std::path::Path;
 
+type CreatedFileCleanup = Box<dyn FnOnce(&File) -> io::Result<()> + Send + 'static>;
+
+/// A newly created user-selected file whose path is removed if publication is
+/// abandoned before [`persist`](Self::persist).
+///
+/// This keeps the platform-specific parent/handle capability alive across the
+/// caller's write. [`discard`](Self::discard) reports cleanup failure; dropping
+/// the guard makes the same identity-matched attempt on a best-effort basis.
+/// Neither path ever removes a replacement entry.
+pub struct CreatedUserSelectedFile {
+    file: Option<File>,
+    cleanup: Option<CreatedFileCleanup>,
+}
+
+impl std::fmt::Debug for CreatedUserSelectedFile {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("CreatedUserSelectedFile")
+            .field("file", &self.file)
+            .field("cleanup_armed", &self.cleanup.is_some())
+            .finish()
+    }
+}
+
+impl CreatedUserSelectedFile {
+    fn new(file: File, cleanup: CreatedFileCleanup) -> Self {
+        Self {
+            file: Some(file),
+            cleanup: Some(cleanup),
+        }
+    }
+
+    /// Disarm failure cleanup and return the completed file.
+    pub fn persist(mut self) -> File {
+        self.cleanup = None;
+        self.file
+            .take()
+            .expect("created file is present until persist")
+    }
+
+    /// Remove the exact created leaf and report whether cleanup succeeded.
+    pub fn discard(mut self) -> io::Result<()> {
+        let cleanup = self.cleanup.take();
+        let result = match (cleanup, self.file.as_ref()) {
+            (Some(cleanup), Some(file)) => cleanup(file),
+            _ => Ok(()),
+        };
+        self.file.take();
+        result
+    }
+}
+
+impl std::ops::Deref for CreatedUserSelectedFile {
+    type Target = File;
+
+    fn deref(&self) -> &Self::Target {
+        self.file.as_ref().expect("created file remains present")
+    }
+}
+
+impl std::ops::DerefMut for CreatedUserSelectedFile {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.file.as_mut().expect("created file remains present")
+    }
+}
+
+impl io::Write for CreatedUserSelectedFile {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.file
+            .as_mut()
+            .expect("created file remains present")
+            .write(buf)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.file
+            .as_mut()
+            .expect("created file remains present")
+            .flush()
+    }
+}
+
+impl io::Seek for CreatedUserSelectedFile {
+    fn seek(&mut self, position: io::SeekFrom) -> io::Result<u64> {
+        self.file
+            .as_mut()
+            .expect("created file remains present")
+            .seek(position)
+    }
+}
+
+impl Drop for CreatedUserSelectedFile {
+    fn drop(&mut self) {
+        if let (Some(cleanup), Some(file)) = (self.cleanup.take(), self.file.as_ref()) {
+            let _ = cleanup(file);
+        }
+    }
+}
+
 /// The directories kettle creates its own namespace directly inside: the XDG
 /// bases and the temp root. Read from the environment because that is where the
 /// call sites read them from.
@@ -333,6 +432,27 @@ pub fn create_private_file_new(path: &Path) -> io::Result<File> {
     create_private_file_new_impl(path)
 }
 
+/// Create a new owner-only file at a path the user explicitly selected.
+///
+/// Unlike [`create_private_file_new`], this does not create or require private
+/// ancestor directories. The parent must already exist, and the leaf is still
+/// created atomically (`O_EXCL` / `CREATE_NEW`) with owner-only permissions.
+/// This is for exports such as an explicitly named screenshot; private Kettle
+/// state must continue to use [`create_private_file_new`].
+///
+/// The returned guard removes the exact created leaf if it is dropped before
+/// [`CreatedUserSelectedFile::persist`], so an encoder failure does not strand
+/// a partial file that blocks retry. A writable parent can rename or remove the
+/// new directory entry as soon as the instantaneous entry verification ends,
+/// including before this function returns and while the caller writes the
+/// file. That is inherent in exporting into a directory controlled by another
+/// principal; callers must not treat the returned pathname as a durable
+/// private-state capability.
+pub fn create_user_selected_file_new(path: &Path) -> io::Result<CreatedUserSelectedFile> {
+    let (file, cleanup) = create_user_selected_file_new_impl(path)?;
+    Ok(CreatedUserSelectedFile::new(file, cleanup))
+}
+
 /// Open a private regular file for reading and writing, creating it if absent.
 ///
 /// Existing Unix symbolic links and Windows reparse points are rejected.
@@ -385,7 +505,15 @@ pub fn remove_open_private_file(file: File, path: &Path) -> io::Result<()> {
 /// handles intentionally omit delete sharing, so they must be marked for
 /// deletion directly instead of being passed through that reopen-based API.
 pub fn discard_created_private_file(file: File, path: &Path) {
-    discard_created_private_file_impl(file, path);
+    let _ = discard_created_private_file_checked(file, path);
+}
+
+/// Remove a file through its creation handle, reporting cleanup failure.
+///
+/// This is the observable form of [`discard_created_private_file`] for callers
+/// that must not silently strand a partial output.
+pub fn discard_created_private_file_checked(file: File, path: &Path) -> io::Result<()> {
+    discard_created_private_file_checked_impl(file, path)
 }
 
 /// Enumerate, open, and remove matching children relative to the held parent
@@ -437,6 +565,11 @@ fn create_private_file_new_impl(path: &Path) -> io::Result<File> {
 }
 
 #[cfg(unix)]
+fn create_user_selected_file_new_impl(path: &Path) -> io::Result<(File, CreatedFileCleanup)> {
+    unix::create_user_selected_file_new(path)
+}
+
+#[cfg(unix)]
 fn open_private_file_impl(path: &Path) -> io::Result<File> {
     match unix::create_private_file_new(path, false) {
         Ok(file) => Ok(file),
@@ -478,6 +611,11 @@ fn open_private_file_append_impl(path: &Path) -> io::Result<File> {
 #[cfg(windows)]
 fn create_private_file_new_impl(path: &Path) -> io::Result<File> {
     windows::create_private_file_new(path)
+}
+
+#[cfg(windows)]
+fn create_user_selected_file_new_impl(path: &Path) -> io::Result<(File, CreatedFileCleanup)> {
+    windows::create_user_selected_file_new(path)
 }
 
 #[cfg(windows)]
@@ -528,6 +666,47 @@ fn create_private_file_new_impl(path: &Path) -> io::Result<File> {
         .open(path)?;
     require_regular_file(&file, path)?;
     Ok(file)
+}
+
+#[cfg(not(any(unix, windows)))]
+fn create_user_selected_file_new_impl(path: &Path) -> io::Result<(File, CreatedFileCleanup)> {
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    if !parent.is_dir() {
+        return Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            format!(
+                "user-selected output parent does not exist: {}",
+                parent.display()
+            ),
+        ));
+    }
+    let file = std::fs::OpenOptions::new()
+        .create_new(true)
+        .read(true)
+        .write(true)
+        .open(path)?;
+    require_regular_file(&file, path)?;
+    let cleanup_path = path.to_path_buf();
+    let expected = file.metadata()?;
+    let cleanup = Box::new(move |file: &File| {
+        let same = file.metadata().ok().is_some_and(|opened| {
+            std::fs::symlink_metadata(&cleanup_path)
+                .ok()
+                .is_some_and(|current| {
+                    current.file_type().is_file()
+                        && opened.len() == expected.len()
+                        && opened.modified().ok() == current.modified().ok()
+                })
+        });
+        if same {
+            std::fs::remove_file(&cleanup_path)?;
+        }
+        Ok(())
+    });
+    Ok((file, cleanup))
 }
 
 #[cfg(not(any(unix, windows)))]
@@ -601,8 +780,8 @@ fn remove_open_private_file_impl(file: File, path: &Path) -> io::Result<()> {
 }
 
 #[cfg(unix)]
-fn discard_created_private_file_impl(file: File, path: &Path) {
-    unix::discard_created_private_file(file, path);
+fn discard_created_private_file_checked_impl(file: File, path: &Path) -> io::Result<()> {
+    unix::discard_created_private_file_checked(file, path)
 }
 
 #[cfg(windows)]
@@ -616,9 +795,8 @@ fn remove_open_private_file_impl(file: File, path: &Path) -> io::Result<()> {
 }
 
 #[cfg(windows)]
-fn discard_created_private_file_impl(file: File, _path: &Path) {
-    windows::delete_on_close_best_effort(&file);
-    drop(file);
+fn discard_created_private_file_checked_impl(file: File, _path: &Path) -> io::Result<()> {
+    windows::discard_created_private_file_checked(file)
 }
 
 #[cfg(not(any(unix, windows)))]
@@ -645,9 +823,9 @@ fn remove_open_private_file_impl(file: File, path: &Path) -> io::Result<()> {
 }
 
 #[cfg(not(any(unix, windows)))]
-fn discard_created_private_file_impl(file: File, path: &Path) {
+fn discard_created_private_file_checked_impl(file: File, path: &Path) -> io::Result<()> {
     drop(file);
-    let _ = std::fs::remove_file(path);
+    std::fs::remove_file(path)
 }
 
 #[cfg(windows)]
@@ -1808,6 +1986,8 @@ mod unix {
                 "refusing to harden a private file with multiple hard links",
             ));
         }
+        #[cfg(target_os = "macos")]
+        macos_acl::clear_extended_acl(file)?;
         if !private_mode_needs_hardening(metadata.mode()) {
             return Ok(());
         }
@@ -1849,6 +2029,287 @@ mod unix {
             return Err(error);
         }
         Ok(file)
+    }
+
+    pub(super) fn create_user_selected_file_new(
+        path: &Path,
+    ) -> io::Result<(File, CreatedFileCleanup)> {
+        create_user_selected_file_new_with(path, || {})
+    }
+
+    fn open_user_selected_parent(path: &Path) -> io::Result<File> {
+        let parent_c = c_name(path.as_os_str(), "user-selected output parent")?;
+        #[cfg(any(target_os = "linux", target_os = "android"))]
+        let access = libc::O_PATH;
+        #[cfg(not(any(target_os = "linux", target_os = "android")))]
+        let access = libc::O_RDONLY;
+        // SAFETY: the path is NUL-terminated, and a successful open transfers
+        // ownership of the descriptor.
+        let fd = unsafe {
+            libc::open(
+                parent_c.as_ptr(),
+                access | libc::O_DIRECTORY | libc::O_CLOEXEC,
+            )
+        };
+        if fd < 0 {
+            Err(io::Error::last_os_error())
+        } else {
+            // SAFETY: open returned a new owned descriptor.
+            Ok(unsafe { File::from_raw_fd(fd) })
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    fn create_user_selected_file_without_acl_window(
+        parent: &File,
+        leaf_c: &CString,
+        path: &Path,
+    ) -> io::Result<File> {
+        use std::sync::atomic::{AtomicU64, Ordering};
+
+        unsafe extern "C" {
+            fn renameatx_np(
+                from_dir: libc::c_int,
+                from: *const libc::c_char,
+                to_dir: libc::c_int,
+                to: *const libc::c_char,
+                flags: libc::c_uint,
+            ) -> libc::c_int;
+        }
+
+        const RENAME_EXCL: libc::c_uint = 0x0000_0004;
+        const STAGING_ATTEMPTS: usize = 32;
+        static STAGING_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+        let payload_c = CString::new("payload").expect("static payload name has no NUL");
+        for _ in 0..STAGING_ATTEMPTS {
+            let sequence = STAGING_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+            let staging_name = OsString::from(format!(
+                ".kettle-screenshot-{}-{sequence:016x}",
+                std::process::id()
+            ));
+            let staging_c = c_name(&staging_name, "screenshot staging directory")?;
+            // The directory is empty while its inherited ACL is removed. The
+            // PNG is created only after this held directory object is 0700 and
+            // ACL-free, then published with an atomic no-replace rename.
+            if unsafe {
+                libc::mkdirat(
+                    parent.as_raw_fd(),
+                    staging_c.as_ptr(),
+                    0o700 as libc::mode_t,
+                )
+            } != 0
+            {
+                let error = io::Error::last_os_error();
+                if error.kind() == io::ErrorKind::AlreadyExists {
+                    continue;
+                }
+                return Err(error);
+            }
+
+            let stage_fd = unsafe {
+                libc::openat(
+                    parent.as_raw_fd(),
+                    staging_c.as_ptr(),
+                    libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+                )
+            };
+            if stage_fd < 0 {
+                let error = io::Error::last_os_error();
+                unsafe {
+                    libc::unlinkat(parent.as_raw_fd(), staging_c.as_ptr(), libc::AT_REMOVEDIR);
+                }
+                return Err(error);
+            }
+            let staging = unsafe { File::from_raw_fd(stage_fd) };
+            let staging_identity = FileIdentity::from_metadata(&staging.metadata()?);
+            let remove_staging_if_same = || {
+                let linked = entry_stat(parent, &staging_name)
+                    .ok()
+                    .flatten()
+                    .is_some_and(|stat| FileIdentity::from_stat(&stat) == staging_identity);
+                if linked {
+                    unsafe {
+                        libc::unlinkat(parent.as_raw_fd(), staging_c.as_ptr(), libc::AT_REMOVEDIR);
+                    }
+                }
+            };
+
+            let created = (|| {
+                let metadata = staging.metadata()?;
+                if !metadata.file_type().is_dir() || metadata.uid() != current_user() {
+                    return Err(io::Error::new(
+                        io::ErrorKind::PermissionDenied,
+                        "screenshot staging directory is not owned by the effective user",
+                    ));
+                }
+                // Mode bits and ACLs are independent on Darwin; both must be
+                // secured before the first content-bearing file is created.
+                if unsafe { libc::fchmod(staging.as_raw_fd(), 0o700) } != 0 {
+                    return Err(io::Error::last_os_error());
+                }
+                macos_acl::clear_extended_acl(&staging)?;
+
+                let fd = unsafe {
+                    libc::openat(
+                        staging.as_raw_fd(),
+                        payload_c.as_ptr(),
+                        libc::O_RDWR
+                            | libc::O_CREAT
+                            | libc::O_EXCL
+                            | libc::O_NOFOLLOW
+                            | libc::O_CLOEXEC,
+                        PRIVATE_FILE_MODE as libc::c_uint,
+                    )
+                };
+                if fd < 0 {
+                    return Err(io::Error::last_os_error());
+                }
+                let file = unsafe { File::from_raw_fd(fd) };
+                require_user_owned_regular(&file, path)?;
+                restrict_private_object(&file)?;
+
+                if unsafe {
+                    renameatx_np(
+                        staging.as_raw_fd(),
+                        payload_c.as_ptr(),
+                        parent.as_raw_fd(),
+                        leaf_c.as_ptr(),
+                        RENAME_EXCL,
+                    )
+                } != 0
+                {
+                    let error = io::Error::last_os_error();
+                    unsafe {
+                        libc::unlinkat(staging.as_raw_fd(), payload_c.as_ptr(), 0);
+                    }
+                    return Err(error);
+                }
+                Ok(file)
+            })();
+            if created.is_err() {
+                unsafe {
+                    libc::unlinkat(staging.as_raw_fd(), payload_c.as_ptr(), 0);
+                }
+            }
+            remove_staging_if_same();
+            return created;
+        }
+
+        Err(io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            "could not reserve a screenshot staging directory",
+        ))
+    }
+
+    pub(super) fn create_user_selected_file_new_with(
+        path: &Path,
+        after_parent_open: impl FnOnce(),
+    ) -> io::Result<(File, CreatedFileCleanup)> {
+        let path = std::path::absolute(path)?;
+        let leaf = path.file_name().ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("user-selected output has no file name: {}", path.display()),
+            )
+        })?;
+        let leaf_c = c_name(leaf, "user-selected output file name")?;
+        let parent_path = path.parent().ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("user-selected output has no parent: {}", path.display()),
+            )
+        })?;
+        // Resolve the caller's existing parent exactly once and retain that
+        // directory capability through creation and postcondition checks.
+        // Following a parent symlink is intentional for an explicit export;
+        // the leaf itself is never followed.
+        let parent = open_user_selected_parent(parent_path)?;
+        let parent_identity = FileIdentity::from_metadata(&parent.metadata()?);
+        after_parent_open();
+        #[cfg(target_os = "macos")]
+        let file = create_user_selected_file_without_acl_window(&parent, &leaf_c, &path)?;
+        #[cfg(not(target_os = "macos"))]
+        let file = {
+            // SAFETY: the held directory and NUL-terminated leaf are valid, and
+            // successful openat transfers ownership of the returned descriptor.
+            let fd = unsafe {
+                libc::openat(
+                    parent.as_raw_fd(),
+                    leaf_c.as_ptr(),
+                    libc::O_RDWR
+                        | libc::O_CREAT
+                        | libc::O_EXCL
+                        | libc::O_NOFOLLOW
+                        | libc::O_CLOEXEC,
+                    PRIVATE_FILE_MODE as libc::c_uint,
+                )
+            };
+            if fd < 0 {
+                return Err(io::Error::last_os_error());
+            }
+            // SAFETY: openat returned a new owned descriptor.
+            unsafe { File::from_raw_fd(fd) }
+        };
+        let result = (|| {
+            require_user_owned_regular(&file, &path)?;
+            restrict_private_object(&file)?;
+            let identity = FileIdentity::from_metadata(&file.metadata()?);
+            let linked = entry_stat(&parent, leaf)?
+                .is_some_and(|stat| FileIdentity::from_stat(&stat) == identity);
+            if !linked {
+                return Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    "user-selected output path no longer refers to the created file",
+                ));
+            }
+            let current_parent = open_user_selected_parent(parent_path)?;
+            if FileIdentity::from_metadata(&current_parent.metadata()?) != parent_identity {
+                return Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    "user-selected output parent changed while the file was created",
+                ));
+            }
+            Ok(())
+        })();
+        if let Err(error) = result {
+            let linked = entry_stat(&parent, leaf)
+                .ok()
+                .flatten()
+                .is_some_and(|stat| {
+                    file.metadata().ok().is_some_and(|metadata| {
+                        FileIdentity::from_stat(&stat) == FileIdentity::from_metadata(&metadata)
+                    })
+                });
+            if linked {
+                // SAFETY: `parent` is held and `leaf_c` is NUL-terminated. The
+                // identity check above prevents deleting a replacement entry.
+                unsafe {
+                    libc::unlinkat(parent.as_raw_fd(), leaf_c.as_ptr(), 0);
+                }
+            }
+            return Err(error);
+        }
+        let cleanup_leaf = leaf.to_os_string();
+        let cleanup_identity = FileIdentity::from_metadata(&file.metadata()?);
+        let cleanup: CreatedFileCleanup = Box::new(move |file: &File| {
+            let linked = entry_stat(&parent, &cleanup_leaf)?.is_some_and(|stat| {
+                file.metadata().ok().is_some_and(|metadata| {
+                    FileIdentity::from_stat(&stat) == cleanup_identity
+                        && FileIdentity::from_metadata(&metadata) == cleanup_identity
+                })
+            });
+            if linked {
+                let cleanup_leaf = c_name(&cleanup_leaf, "user-selected output file name")?;
+                // SAFETY: `parent` is retained by this cleanup capability and
+                // the identity check above excludes a replacement entry.
+                if unsafe { libc::unlinkat(parent.as_raw_fd(), cleanup_leaf.as_ptr(), 0) } != 0 {
+                    return Err(io::Error::last_os_error());
+                }
+            }
+            Ok(())
+        });
+        Ok((file, cleanup))
     }
 
     pub(super) fn open_existing_private_file(path: &Path, append: bool) -> io::Result<File> {
@@ -2023,7 +2484,7 @@ mod unix {
     }
 
     #[cfg(target_os = "macos")]
-    mod macos_acl {
+    pub(crate) mod macos_acl {
         use super::*;
         use std::ffi::c_void;
 
@@ -2062,6 +2523,8 @@ mod unix {
 
         unsafe extern "C" {
             fn acl_get_fd_np(fd: libc::c_int, kind: libc::c_int) -> Acl;
+            fn acl_init(count: libc::c_int) -> Acl;
+            fn acl_set_fd_np(fd: libc::c_int, acl: Acl, kind: libc::c_int) -> libc::c_int;
             fn acl_get_entry(acl: Acl, entry_id: libc::c_int, entry: *mut AclEntry) -> libc::c_int;
             fn acl_get_tag_type(entry: AclEntry, tag: *mut libc::c_int) -> libc::c_int;
             fn acl_get_permset_mask_np(entry: AclEntry, mask: *mut u64) -> libc::c_int;
@@ -2077,6 +2540,68 @@ mod unix {
             fn drop(&mut self) {
                 // SAFETY: acl_get_fd_np returned this allocated ACL.
                 let _ = unsafe { acl_free(self.0) };
+            }
+        }
+
+        pub(super) fn clear_extended_acl(file: &File) -> io::Result<()> {
+            // Darwin ACLs are independent of BSD mode bits. A shared export
+            // directory can carry inheritable read ACEs, so a newly created
+            // `0600` file is not owner-only until its extended ACL is removed.
+            // Inspect first: installing an empty ACL on an already ACL-free
+            // file still changes ctime and emits an FSEvents metadata event.
+            // Private files are reopened frequently (including lock files), so
+            // that apparent no-op would restore the watcher feedback and
+            // filesystem churn avoided by `private_mode_needs_hardening`.
+            if !has_any_extended_acl(file)? {
+                return Ok(());
+            }
+            // Darwin has no descriptor-based ACL-delete call. Installing an
+            // empty extended ACL is the handle-relative equivalent of
+            // `chmod -N`, without re-resolving a mutable pathname.
+            // SAFETY: acl_init returns an owned ACL or null on error.
+            let empty = unsafe { acl_init(0) };
+            if empty.is_null() {
+                return Err(io::Error::last_os_error());
+            }
+            let empty = OwnedAcl(empty);
+            // SAFETY: `file` owns a live descriptor and `empty` stays allocated
+            // for the complete call.
+            if unsafe { acl_set_fd_np(file.as_raw_fd(), empty.0, ACL_TYPE_EXTENDED) } == 0 {
+                Ok(())
+            } else {
+                let error = io::Error::last_os_error();
+                if error.raw_os_error() == Some(libc::ENOTSUP) {
+                    Ok(())
+                } else {
+                    Err(error)
+                }
+            }
+        }
+
+        pub(crate) fn has_any_extended_acl(file: &File) -> io::Result<bool> {
+            // SAFETY: `file` owns a live descriptor.
+            let raw = unsafe { acl_get_fd_np(file.as_raw_fd(), ACL_TYPE_EXTENDED) };
+            if raw.is_null() {
+                let error = io::Error::last_os_error();
+                return if matches!(error.raw_os_error(), Some(libc::ENOENT | libc::ENOTSUP)) {
+                    Ok(false)
+                } else {
+                    Err(error)
+                };
+            }
+            let acl = OwnedAcl(raw);
+            let mut entry = std::ptr::null_mut();
+            // SAFETY: `acl` remains live and `entry` is a writable output slot.
+            let found = unsafe { acl_get_entry(acl.0, ACL_FIRST_ENTRY, &mut entry) };
+            if found == 0 {
+                Ok(true)
+            } else {
+                let error = io::Error::last_os_error();
+                if error.raw_os_error() == Some(libc::EINVAL) {
+                    Ok(false)
+                } else {
+                    Err(error)
+                }
             }
         }
 
@@ -2189,13 +2714,12 @@ mod unix {
         }
     }
 
-    pub(super) fn discard_created_private_file(file: File, path: &Path) {
-        if let Ok(guard) = PrivateParentGuard::new(path)
-            && let Ok(name) = guard.validate_path(path)
-        {
-            guard.unlink_if_same(&file, &name);
-        }
+    pub(super) fn discard_created_private_file_checked(file: File, path: &Path) -> io::Result<()> {
+        let guard = PrivateParentGuard::new(path)?;
+        let name = guard.validate_path(path)?;
+        guard.unlink_open_file(&file, &name)?;
         drop(file);
+        Ok(())
     }
 
     pub(super) fn remove_open_private_file(file: File, path: &Path) -> io::Result<()> {
@@ -2746,6 +3270,127 @@ mod windows {
         create_private_file_new_with_access(path, GENERIC_READ | GENERIC_WRITE)
     }
 
+    pub(super) fn create_user_selected_file_new(
+        path: &Path,
+    ) -> io::Result<(File, CreatedFileCleanup)> {
+        create_user_selected_file_new_with(path, || {})
+    }
+
+    pub(super) fn create_user_selected_file_new_with(
+        path: &Path,
+        after_parent_open: impl FnOnce(),
+    ) -> io::Result<(File, CreatedFileCleanup)> {
+        let requested_leaf = path.file_name().ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("user-selected output has no file name: {}", path.display()),
+            )
+        })?;
+        // Reuse the private path's Win32 alias rules: in particular, `:` must
+        // not turn an export into an alternate stream on an existing file, and
+        // an embedded NUL must not truncate the intended leaf. Validate before
+        // `absolute`: Win32 path resolution normalizes trailing dots and spaces,
+        // which would erase exactly the alias syntax this boundary rejects.
+        private_component(requested_leaf)?;
+        let path = std::path::absolute(path)?;
+        let leaf = path.file_name().ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("user-selected output has no file name: {}", path.display()),
+            )
+        })?;
+        let parent_path = path.parent().ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("user-selected output has no parent: {}", path.display()),
+            )
+        })?;
+        let parent = open_user_selected_parent(parent_path)?;
+        let parent_identity = file_identity(&parent)?;
+        after_parent_open();
+        let current_user = current_user_sid()?;
+        let mut acl = private_acl(current_user.sid)?;
+        let mut descriptor =
+            private_security_descriptor(current_user.sid, acl.as_mut_ptr().cast())?;
+        let attributes = SECURITY_ATTRIBUTES {
+            nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
+            lpSecurityDescriptor: std::ptr::addr_of_mut!(descriptor).cast(),
+            bInheritHandle: 0,
+        };
+        let mut path_wide = stable_child_path(&parent, leaf)?;
+        path_wide.push(0);
+        // SAFETY: every pointer is valid for the call. The protected security
+        // descriptor is anchored above until CreateFileW returns.
+        let handle = unsafe {
+            CreateFileW(
+                path_wide.as_ptr(),
+                GENERIC_READ | GENERIC_WRITE | DELETE,
+                // Omitting delete sharing keeps the selected directory entry
+                // stable for the lifetime of the screenshot writer.
+                FILE_SHARE_READ | FILE_SHARE_WRITE,
+                &attributes,
+                CREATE_NEW,
+                FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT,
+                std::ptr::null_mut(),
+            )
+        };
+        if handle == INVALID_HANDLE_VALUE {
+            return Err(io::Error::last_os_error());
+        }
+        // SAFETY: CreateFileW transferred ownership of this valid handle.
+        let file = unsafe { File::from_raw_handle(handle as RawHandle) };
+        let result = (|| {
+            require_regular_non_reparse(&file, &path)?;
+            require_single_link(&file, &path)?;
+            if !owned_by_user_handle(&file, current_user.sid)?
+                || !has_current_user_only_dacl_handle(&file, current_user.sid)?
+            {
+                return Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    "new user-selected file did not retain its current-user owner and protected DACL",
+                ));
+            }
+            if file_identity(&open_user_selected_parent(parent_path)?)? != parent_identity {
+                return Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    "user-selected output parent changed while the file was created",
+                ));
+            }
+            Ok(())
+        })();
+        if let Err(error) = result {
+            delete_on_close_best_effort(&file);
+            drop(file);
+            return Err(error);
+        }
+        let cleanup: CreatedFileCleanup =
+            Box::new(|file: &File| mark_for_deletion(file.as_raw_handle() as HANDLE));
+        Ok((file, cleanup))
+    }
+
+    fn open_user_selected_parent(parent_path: &Path) -> io::Result<File> {
+        let mut parent_options = std::fs::OpenOptions::new();
+        parent_options
+            .access_mode(FILE_LIST_DIRECTORY | FILE_READ_ATTRIBUTES | FILE_TRAVERSE | READ_CONTROL)
+            // Denying delete sharing pins the selected parent object while the
+            // child path is derived and created. Parent reparse points are
+            // followed intentionally for an explicit user export.
+            .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
+            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS);
+        let parent = parent_options.open(parent_path)?;
+        let parent_info = file_information(&parent)?;
+        if parent_info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::NotADirectory,
+                format!(
+                    "user-selected output parent is not a directory: {}",
+                    parent_path.display()
+                ),
+            ));
+        }
+        Ok(parent)
+    }
+
     pub(super) fn create_private_file_new_append(path: &Path) -> io::Result<File> {
         create_private_file_new_with_access(path, FILE_APPEND_DATA)
     }
@@ -2809,7 +3454,7 @@ mod windows {
         Ok(file)
     }
 
-    fn mark_for_deletion(handle: HANDLE) -> io::Result<()> {
+    pub(super) fn mark_for_deletion(handle: HANDLE) -> io::Result<()> {
         let disposition = FILE_DISPOSITION_INFO { DeleteFile: true };
         // SAFETY: `handle` has DELETE access and the buffer matches
         // FileDispositionInfo.
@@ -2833,6 +3478,12 @@ mod windows {
         // empty private file behind; cleanup never falls back to a raceable
         // path deletion.
         let _ = mark_for_deletion(file.as_raw_handle() as HANDLE);
+    }
+
+    pub(super) fn discard_created_private_file_checked(file: File) -> io::Result<()> {
+        let result = mark_for_deletion(file.as_raw_handle() as HANDLE);
+        drop(file);
+        result
     }
 
     pub(super) fn open_existing_private_file(path: &Path, append: bool) -> io::Result<File> {
@@ -4254,6 +4905,194 @@ mod windows {
 mod tests {
     use super::*;
     use std::io::Write as _;
+
+    #[test]
+    fn user_selected_file_requires_an_existing_parent_and_a_new_leaf() {
+        let root = crate::test_tempdir();
+        let missing_parent = root.path().join("missing");
+        let missing_path = missing_parent.join("shot.png");
+        let error = create_user_selected_file_new(&missing_path)
+            .expect_err("an export must not create arbitrary parent directories");
+        assert_eq!(error.kind(), io::ErrorKind::NotFound);
+        assert!(!missing_parent.exists());
+
+        let existing = root.path().join("existing.png");
+        std::fs::write(&existing, b"keep").unwrap();
+        let error = create_user_selected_file_new(&existing)
+            .expect_err("an export must not overwrite an existing entry");
+        assert_eq!(error.kind(), io::ErrorKind::AlreadyExists);
+        assert_eq!(std::fs::read(existing).unwrap(), b"keep");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn user_selected_file_is_owner_only_beneath_a_public_parent() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let root = crate::test_tempdir();
+        let exports = root.path().join("exports");
+        std::fs::create_dir(&exports).unwrap();
+        std::fs::set_permissions(&exports, std::fs::Permissions::from_mode(0o775)).unwrap();
+        let path = exports.join("shot.png");
+
+        let private_error = create_private_file_new(&path)
+            .expect_err("private state must still reject a group-writable parent");
+        assert_eq!(private_error.kind(), io::ErrorKind::PermissionDenied);
+
+        let file = create_user_selected_file_new(&path)
+            .expect("an explicit export may target an existing public directory");
+        assert_eq!(file.metadata().unwrap().permissions().mode() & 0o777, 0o600);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn user_selected_file_fails_if_the_held_parent_is_displaced() {
+        let root = crate::test_tempdir();
+        let exports = root.path().join("exports");
+        let displaced = root.path().join("displaced");
+        std::fs::create_dir(&exports).unwrap();
+        let path = exports.join("shot.png");
+
+        let result = unix::create_user_selected_file_new_with(&path, || {
+            std::fs::rename(&exports, &displaced).unwrap();
+            std::fs::create_dir(&exports).unwrap();
+        });
+        let error = match result {
+            Err(error) => error,
+            Ok(_) => panic!("a replaced parent must not produce a successful path response"),
+        };
+        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+        assert!(
+            !exports.join("shot.png").exists(),
+            "the child open must not re-resolve through the replacement parent"
+        );
+        assert!(
+            !displaced.join("shot.png").exists(),
+            "a failed postcondition must remove the exact file through the held parent"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn user_selected_file_gets_a_protected_current_user_dacl() {
+        let root = crate::test_tempdir();
+        let path = root.path().join("shot.png");
+        let file = create_user_selected_file_new(&path).unwrap();
+        assert!(has_current_user_only_dacl(&file).unwrap());
+        assert!(owned_by_current_user(&file).unwrap());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn user_selected_file_pins_its_windows_parent_during_creation() {
+        let root = crate::test_tempdir();
+        let exports = root.path().join("exports");
+        let displaced = root.path().join("displaced");
+        std::fs::create_dir(&exports).unwrap();
+        let path = exports.join("shot.png");
+
+        let (file, _cleanup) = windows::create_user_selected_file_new_with(&path, || {
+            std::fs::rename(&exports, &displaced)
+                .expect_err("the held parent must deny rename/delete sharing");
+        })
+        .expect("the export should continue through the pinned parent");
+        drop(file);
+        assert!(path.exists());
+        assert!(!displaced.exists());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn user_selected_file_drops_inherited_extended_acl() {
+        let root = crate::test_tempdir();
+        let exports = root.path().join("exports");
+        std::fs::create_dir(&exports).unwrap();
+        let status = std::process::Command::new("/bin/chmod")
+            .args(["+a", "everyone allow read,file_inherit"])
+            .arg(&exports)
+            .status()
+            .expect("launch chmod to seed an inheritable ACL");
+        assert!(status.success(), "seed an inheritable macOS ACL");
+
+        let inherited = exports.join("inherited");
+        std::fs::write(&inherited, b"fixture").unwrap();
+        let inherited = File::open(&inherited).unwrap();
+        assert!(
+            unix::macos_acl::has_any_extended_acl(&inherited).unwrap(),
+            "the fixture must prove this directory really propagates an ACL"
+        );
+
+        let selected = exports.join("selected.png");
+        let file = create_user_selected_file_new(&selected).unwrap();
+        assert!(
+            !unix::macos_acl::has_any_extended_acl(&file).unwrap(),
+            "a 0600 screenshot with an inherited read ACE is not owner-only"
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn acl_free_private_hardening_is_a_metadata_noop() {
+        use std::os::unix::fs::MetadataExt as _;
+
+        let root = crate::test_tempdir();
+        let path = root.path().join("state");
+        let file = create_private_file_new(&path).unwrap();
+        assert!(!unix::macos_acl::has_any_extended_acl(&file).unwrap());
+        let before = file.metadata().unwrap();
+
+        // Give a real metadata write a distinct timestamp. APFS records
+        // nanoseconds, so this stays cheap while discriminating the old
+        // unconditional `acl_set_fd_np` call.
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        restrict_private_file(&file).unwrap();
+        let after = file.metadata().unwrap();
+        assert_eq!(
+            (after.ctime(), after.ctime_nsec()),
+            (before.ctime(), before.ctime_nsec()),
+            "hardening an ACL-free 0600 file must not emit metadata churn"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn user_selected_file_rejects_win32_alias_and_stream_syntax() {
+        use std::os::windows::ffi::{OsStrExt as _, OsStringExt as _};
+
+        let root = crate::test_tempdir();
+        let target = root.path().join("existing.png");
+        std::fs::write(&target, b"keep").unwrap();
+
+        let mut stream = target.as_os_str().to_os_string();
+        stream.push(":screenshot");
+        assert_eq!(
+            create_user_selected_file_new(Path::new(&stream))
+                .expect_err("an alternate data stream is not a new export file")
+                .kind(),
+            io::ErrorKind::InvalidInput
+        );
+
+        let mut trailing_dot = target.as_os_str().to_os_string();
+        trailing_dot.push(".");
+        assert_eq!(
+            create_user_selected_file_new(Path::new(&trailing_dot))
+                .expect_err("a trailing-dot alias is not a new export file")
+                .kind(),
+            io::ErrorKind::InvalidInput
+        );
+
+        let mut nul = target.as_os_str().encode_wide().collect::<Vec<_>>();
+        nul.push(0);
+        nul.extend("different.png".encode_utf16());
+        let nul = std::ffi::OsString::from_wide(&nul);
+        assert_eq!(
+            create_user_selected_file_new(Path::new(&nul))
+                .expect_err("an embedded NUL must not truncate the requested path")
+                .kind(),
+            io::ErrorKind::InvalidInput
+        );
+        assert_eq!(std::fs::read(target).unwrap(), b"keep");
+    }
 
     /// The base list must match where the resolvers actually put things, and a
     /// missing base is invisible until someone sweeps a real machine. This
