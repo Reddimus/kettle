@@ -3,6 +3,21 @@
 // into a build failure.
 use std::process::{Command, Stdio};
 
+/// Create the implicit config with the same owner-only file contract the
+/// production writer uses. Tower's `002` umask otherwise leaves a fixture at
+/// `0664`, so the trust gate correctly rejects the fixture before these tests
+/// reach the FIFO, size, or decoding behavior they are meant to exercise.
+fn create_config_file(path: &std::path::Path) -> std::fs::File {
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.mode(0o600);
+    }
+    options.open(path).expect("config")
+}
+
 fn check_config_command(config_home: &std::path::Path) -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_kettle"));
     command
@@ -59,7 +74,7 @@ fn check_config_rejects_fifo_at_resolved_default_path_without_blocking() {
     use std::ffi::CString;
     use std::os::unix::ffi::OsStrExt as _;
 
-    let root = tempfile::tempdir().expect("tempdir");
+    let root = kettle_test_support::private_tempdir("kettle-check-config-");
     let config_dir = root.path().join("kettle");
     std::fs::create_dir(&config_dir).expect("config dir");
     let path = config_dir.join("config");
@@ -82,11 +97,10 @@ fn check_config_rejects_fifo_at_resolved_default_path_without_blocking() {
 
 #[test]
 fn check_config_rejects_oversize_file_at_resolved_default_path() {
-    let root = tempfile::tempdir().expect("tempdir");
+    let root = kettle_test_support::private_tempdir("kettle-check-config-");
     let config_dir = root.path().join("kettle");
     std::fs::create_dir(&config_dir).expect("config dir");
-    std::fs::File::create(config_dir.join("config"))
-        .expect("config")
+    create_config_file(&config_dir.join("config"))
         .set_len(1024 * 1024 + 1)
         .expect("oversize config");
 
@@ -114,12 +128,13 @@ fn check_config_decodes_utf16_bom_at_resolved_default_path() {
             u16::to_be_bytes as fn(u16) -> [u8; 2],
         ),
     ] {
-        let root = tempfile::tempdir().expect("tempdir");
+        let root = kettle_test_support::private_tempdir("kettle-check-config-");
         let config_dir = root.path().join("kettle");
         std::fs::create_dir(&config_dir).expect("config dir");
         let mut bytes = bom.to_vec();
         bytes.extend(text.encode_utf16().flat_map(encode));
-        std::fs::write(config_dir.join("config"), bytes).expect("write encoded config");
+        let mut file = create_config_file(&config_dir.join("config"));
+        std::io::Write::write_all(&mut file, &bytes).expect("write encoded config");
 
         let output = check_config_command(root.path())
             .output()
