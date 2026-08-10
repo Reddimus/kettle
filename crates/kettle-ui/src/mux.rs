@@ -516,6 +516,17 @@ pub(crate) enum PaneTitleOrigin {
     Manual,
 }
 
+#[cfg(windows)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) enum PtyOutputClosePhase {
+    #[default]
+    NotStarted,
+    InProgress(std::time::Instant),
+    Failed {
+        retry_at: std::time::Instant,
+    },
+}
+
 pub struct Pane {
     pub term: Terminal,
     pub rx: Receiver<TermEvent>,
@@ -561,6 +572,21 @@ pub struct Pane {
     /// marks a pane deliberately KEPT on screen after its shell exited (Hold);
     /// reap skips it until the user explicitly closes it (which sets `closed`).
     pub held: bool,
+    /// A held pane keeps its grid but must not keep an exited direct child as a
+    /// zombie. `false` means the ordered PTY exit arrived before `try_wait`
+    /// could collect the process and about-to-wait must retry on a bounded
+    /// cadence.
+    pub held_child_reaped: bool,
+    /// The UI consumed the PTY's exit event after the reader drained preceding
+    /// output. Reaping from a direct process-status poll raced that event and
+    /// could drop a fast pane before its final bytes or `exit-action` policy
+    /// were applied.
+    pub exit_observed: bool,
+    /// Windows ConPTY close was started after the direct child exited but EOF
+    /// did not arrive within the bounded drain window. Unix enforces the same
+    /// bound in its pollable PTY pump.
+    #[cfg(windows)]
+    pub pty_output_close_phase: PtyOutputClosePhase,
     /// PTY output generation observed at the previous full redraw. This is the
     /// lock-free edge for tab activity and `scroll-on-output`; `None` keeps the
     /// first frame from treating pre-spawn output as new activity.
@@ -634,13 +660,13 @@ impl Pane {
     }
 }
 
-/// Pure reap predicate. A pane is removed when explicitly
-/// closed (Close / Restart / ClosePane set `closed`) OR its child exited and it
-/// is not being HELD on screen (`exit-action = hold`). Without the `!held` guard
-/// Hold behaved identically to Close — the dead shell vanished on the next
-/// event-loop turn, defeating the feature entirely.
-pub(crate) fn is_reapable(closed: bool, held: bool, child_exited: bool) -> bool {
-    closed || (!held && child_exited)
+/// Pure reap predicate. A pane is removed when explicitly closed (Close /
+/// Restart / ClosePane set `closed`) OR after the UI consumes its drained PTY
+/// exit event and it is not being HELD on screen (`exit-action = hold`). A raw
+/// child-status poll is deliberately insufficient: it can win before the
+/// reader publishes the child's final output and before exit policy runs.
+pub(crate) fn is_reapable(closed: bool, held: bool, exit_observed: bool) -> bool {
+    closed || (!held && exit_observed)
 }
 
 /// Whether splitting a pane launched as `argv` should start the configured
@@ -1537,6 +1563,7 @@ impl Mux {
                 osc52_copy: self.osc52_copy_allowed,
                 unnegotiated_modified_enter: unnegotiated_modified_enter(cfg.modify_other_keys),
                 contain_process_tree: false,
+                observe_child_exit: true,
             },
             tx,
             waker.clone(),
@@ -1573,6 +1600,10 @@ impl Mux {
                 group_name: None,
                 closed: false,
                 held: false,
+                held_child_reaped: false,
+                exit_observed: false,
+                #[cfg(windows)]
+                pty_output_close_phase: PtyOutputClosePhase::NotStarted,
                 last_output_generation: None,
                 argv: argv.to_vec(),
                 remote_context: None,
@@ -3052,7 +3083,7 @@ impl Mux {
             .panes
             .iter_mut()
             .filter_map(|(id, p)| {
-                if is_reapable(p.closed, p.held, p.term.child_exited()) {
+                if is_reapable(p.closed, p.held, p.exit_observed) {
                     Some(*id)
                 } else {
                     None
@@ -3064,6 +3095,21 @@ impl Mux {
         }
         Self::reap_tabs(&mut self.tabs, &mut self.active, &dead);
         self.tabs.is_empty()
+    }
+
+    /// Retry collection for a held pane whose ordered PTY EOF beat the direct
+    /// child's exit status. This never decides pane lifetime; it only prevents
+    /// Hold from leaving a zombie until the user eventually closes the pane.
+    /// Returns whether another bounded poll is still needed.
+    pub fn poll_held_child_statuses(&mut self) -> bool {
+        let mut pending = false;
+        for pane in self.panes.values_mut() {
+            if pane.held && pane.exit_observed && !pane.held_child_reaped {
+                pane.held_child_reaped = pane.term.child_exit_code().is_some();
+                pending |= !pane.held_child_reaped;
+            }
+        }
+        pending
     }
 
     /// Pure helper for `reap`'s tab-mutation step: walk every tab,
@@ -3102,8 +3148,8 @@ impl Mux {
                     // with `n` as the new root. Before this fix, any 2-pane
                     // tab + `exit` in either pane deleted the whole
                     // tab (the surviving sibling went with it).
-                    // Reachable in production via `child_exited()` in
-                    // `Mux::reap`. Mirrors the same Ok(n)/Err(Some(n))/
+                    // Reachable in production after `Mux::reap` consumes the
+                    // pane's drained PTY exit event. Mirrors the same Ok(n)/Err(Some(n))/
                     // Err(None) distinction already in `close_focused` below.
                     Ok(n) | Err(Some(n)) => {
                         tabs[ti].root = n;
@@ -6486,22 +6532,60 @@ mod node_tests {
         );
     }
 
-    /// `exit-action = hold` survival. Before the fix `reap`
-    /// removed any child-exited pane, so Hold behaved like Close. `is_reapable`
-    /// now keeps a held child-exited pane until it's explicitly closed.
+    /// `exit-action = hold` survival. Before the fix `reap` removed any
+    /// child-exited pane, so Hold behaved like Close. `is_reapable` now keeps a
+    /// held pane after its drained exit event until it is explicitly closed.
     #[test]
-    fn is_reapable_holds_child_exited_pane_until_closed() {
+    fn is_reapable_waits_for_the_drained_exit_event_and_honors_hold() {
         use super::is_reapable;
-        // Live pane (child still running) — never reaped.
+        // Live pane (no drained exit event) — never reaped.
         assert!(!is_reapable(false, false, false));
-        // Default (Close): child exited, not held -> reaped.
+        // Default (Close): drained exit observed, not held -> reaped.
         assert!(is_reapable(false, false, true));
-        // Hold: child exited but held -> NOT reaped (the fix above).
+        // Hold: exit observed but held -> NOT reaped (the fix above).
         assert!(!is_reapable(false, true, true));
         // Explicit close (ClosePane / Restart set `closed`) always reaps, even
         // a held pane — so the user can still dismiss a held dead shell.
         assert!(is_reapable(true, true, true));
         assert!(is_reapable(true, false, false));
+    }
+
+    #[test]
+    fn reap_never_consumes_child_status_ahead_of_the_pty_exit_event() {
+        let source = production_source();
+        let body = source
+            .split("pub fn reap(&mut self) -> bool {")
+            .nth(1)
+            .and_then(|rest| rest.split("\n    pub(crate) fn reap_tabs").next())
+            .expect("Mux::reap body");
+        assert!(
+            body.contains("p.exit_observed") && !body.contains("child_exited()"),
+            "Mux::reap must wait for the drained PTY exit event instead of \
+             consuming process status before final output and exit policy"
+        );
+    }
+
+    #[test]
+    fn interactive_panes_opt_into_direct_child_observation() {
+        assert!(
+            production_source().contains("observe_child_exit: true"),
+            "only the windowed pane constructor should request the independent child-exit edge"
+        );
+    }
+
+    #[test]
+    fn held_panes_retry_status_collection_only_after_ordered_exit() {
+        let source = production_source();
+        let body = source
+            .split("pub fn poll_held_child_statuses(&mut self) -> bool {")
+            .nth(1)
+            .and_then(|rest| rest.split("\n    pub(crate) fn reap_tabs").next())
+            .expect("held-child status poll body");
+        assert!(
+            body.contains("pane.held && pane.exit_observed && !pane.held_child_reaped")
+                && body.contains("pane.term.child_exit_code().is_some()"),
+            "Hold must collect a status that lagged PTY EOF, but only after the ordered exit event"
+        );
     }
 
     /// Companion to the close_focused neighbor-promotion fix —
@@ -6563,8 +6647,8 @@ mod node_tests {
     ///
     /// Latent bug surfaced by the broader audit of `reap_tabs`: any
     /// 2-pane tab + `exit` in either pane = both panes vanish.
-    /// Reachable in production via the `child_exited()` check in
-    /// `Mux::reap`.
+    /// Reachable in production after `Mux::reap` consumes the pane's drained
+    /// PTY exit event.
     #[test]
     fn reap_tabs_preserves_tab_when_2_pane_split_has_one_pane_exit() {
         let mut tabs = vec![Tab {

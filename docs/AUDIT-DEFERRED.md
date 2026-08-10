@@ -430,6 +430,43 @@ tracked here so they are not lost.
   during this investigation; that null run is retained honestly rather than
   presented as proof of the fix.
 
+  **Reopened and fixed at the construction boundary, 2026-08-10.** PR #200's
+  macOS job reproduced `exec_streams_stdout_and_exits_zero` after the lifecycle
+  fix: both the normal invocation and the raw diagnostic retry exited 0 with
+  empty stdout. The lifecycle was waiting for a truthful EOF, but construction
+  still spawned the child before cloning the master reader and starting its two
+  threads. A negative-control build inserted a two-second pause into the former
+  post-spawn setup window and reproduced the exact CI result twice in one test:
+  exit 0 with empty output, then the same result from the raw retry.
+
+  The first fix prepared the reader and waited for an explicit pump-ready signal
+  before `spawn_command`, but adversarial review showed that this only moved the
+  race: the pump could be descheduled after sending readiness and before its
+  first `read`. A two-second pause in that smaller window reproduced the same
+  double-empty failure. The corrected Unix path keeps Kettle's slave descriptor
+  alive in the pump until its first bytes are read; if the direct child exits
+  silently, Linux waits on master readability plus a pidfd and macOS uses one
+  kqueue for master readability plus `NOTE_EXIT`; the portable fallback uses an
+  exponentially backed-off poll plus `waitid(WNOWAIT)`. Each releases the
+  descriptor so EOF remains observable without stealing the child's wait
+  status, without leaving a quiet long-running pane on a periodic wakeup. A
+  simultaneous macOS output/exit edge keeps the descriptor through the actual
+  read; dropping it at notification time discarded the final bytes. The
+  observer remains active after startup and enforces a five-second drain when a
+  `setsid()` descendant retains the slave; a real Linux fixture proves the
+  reader still emits its ordered exit marker. The UI waits for that marker
+  before reaping the pane, so process status cannot win ahead of final output or
+  `exit-action`; Hold continues bounded status polling if EOF beats the direct
+  child's wait status. Windows interactive panes independently wait on a
+  duplicated process handle, publish a lifecycle wake that bypasses paint
+  generation, begin ConPTY close at the first bound, and start the second bound
+  only after close really starts. A close-worker spawn failure is retried rather
+  than retaining a live master under Hold. The same
+  post-readiness pause now passes the real integration test because the delayed
+  reader still receives the retained output. The ordinary fixed tree completed
+  30 whole-workspace runs with no failure, and native Linux, Windows ARM, and
+  macOS exec suites cover the platform paths. Tracked as #201.
+
 - **A Unix child can deliberately escape timeout teardown by creating a new
   session.** Kettle owns the PTY-created session and can safely kill every
   member of it, including reparented processes and new process groups. Once a

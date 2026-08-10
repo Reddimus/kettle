@@ -663,6 +663,13 @@ use a bounded best-effort sender and may drop under plugin backpressure;
 recording and `kettle exec` use lossless delivery. `kettle exec` pairs that
 policy with a four-slot queue, so a slow stdout pipe blocks the PTY reader before
 it takes the terminal lock and bounds memory without creating a lock cycle.
+Terminal construction starts that reader first and waits for the pump before
+spawning the child. A thread can still be descheduled between announcing
+readiness and entering `read`, so Unix hands Kettle's parent-side slave
+descriptor to the pump after spawn. The pump retains it until it reads the first
+bytes, or a non-reaping child-status probe proves the command exited silently.
+This makes short-command capture an ownership guarantee rather than relying on
+the scheduler or the OS to retain output written before a read is pending.
 Rendered stdout commands cross a second four-slot queue to a dedicated writer,
 keeping blocking OS writes off the lifecycle thread. The lifecycle counts
 admitted commands and polls their completion plus the final flush/join; timeout
@@ -679,26 +686,55 @@ teardown is verified even if the direct child already reported success: the
 deadline covers the complete lossless-delivery operation.
 
 PTY completion is a separate platform contract. The core reader publishes
-`Reading`, orderly `Eof`, or sticky `Failed` before its sole raw-output sender
-drops, so a disconnected channel cannot relabel an unexpected read error as
-success. Failure does not discard earlier admitted chunks: completion waits for
-the parser handoff, raw channel, and stdout worker to drain, then returns 125.
+`Reading`, orderly `Eof`, sticky `Failed`, or `EofTimeout` before its sole
+raw-output sender drops, so a disconnected channel cannot relabel an
+unexpected read error as success. Failure does not discard earlier admitted
+chunks: completion waits for the parser handoff, raw channel, and stdout worker
+to drain, then returns 125.
 If the parser itself disappears while its source counter still names work only
 that parser could retire, the disconnected transport fails immediately rather
 than preserving an impossible pending count forever.
+Unix construction closes a separate race before this completion policy begins.
+The pump is running before the child is spawned, then retains Kettle's slave
+descriptor through the first successful master read. A child-only exit releases
+it before waiting for EOF; when macOS reports output and `NOTE_EXIT` together,
+the exit timestamp is recorded but the descriptor is released only after the
+read, because closing it first discards the tail. Linux waits on the master and
+a pidfd in one `poll`; macOS registers
+master readability and `NOTE_EXIT` in one kqueue. Other Unix targets use a
+bounded exponential `poll` plus non-reaping `waitid(WNOWAIT)` fallback. The
+primary paths are event-driven, so a quiet long-running pane does not incur a
+timer wake. In the windowed UI, pane reaping is similarly ordered: the event
+drain latches the reader's exit event and applies `exit-action` before
+`Mux::reap` may remove the pane. A direct `try_wait` in `reap` would consume the
+status too early, while the upstream `ChildExit(status)` notification can
+precede the final PTY drain; neither is a lifecycle boundary. Only the ordered
+`Exit` event can drop the pane after preceding bytes have been parsed and
+drained. They need not have been presented in a frame first. A held pane whose
+status was not ready at that boundary is polled once per second until it is
+collected; the grid remains visible, but no zombie is retained indefinitely.
 Unix has no elapsed-time success fallback: it requires that orderly EOF, with a
-five-second no-EOF bound that fails status 125. Direct-child exit is observed
-without reaping through `waitid(WNOWAIT)`, so the bound starts even when an
-inherited slave prevents the reader's Exit event; the retained zombie remains a
-Linux identity anchor until ordinary output/recording completion. ConPTY may retain its output
-handle after the final repaint, so a bounded quiet interval starts an
-asynchronous pseudoconsole close while the reader remains live, after a Job
-Object accounting query proves that no same-console descendant remains able to
-write. Windows still
-requires the resulting EOF and reader-channel disconnect before success; a
-stuck close fails after five seconds. If the lifecycle exits while that close
-is still blocked, the close worker—not `Terminal::drop`—publishes reader stop
-after `ClosePseudoConsole` really returns. Reader status, source generation, and
+five-second no-EOF bound that fails status 125. The pump retains its child
+observer after startup and drains every readable master chunk until that bound,
+so a `setsid()` descendant retaining the slave cannot park GUI exit policy or
+the headless lifecycle forever. Direct-child exit is observed without reaping
+through `waitid(WNOWAIT)`; the retained zombie remains a Linux identity anchor
+until ordinary output/recording completion. ConPTY may retain its output handle
+after the final repaint, so a bounded quiet interval starts an asynchronous
+pseudoconsole close while the reader remains live, after a Job Object accounting
+query proves that no same-console descendant remains able to write. Windows
+still requires the resulting EOF and reader-channel disconnect before headless
+success; a stuck close fails after five seconds. The windowed path independently
+waits on a duplicated child-process handle only for interactive panes. The
+single process edge is a semantic wake, independent of output generation and
+window visibility; the event loop owns both deadlines instead of keeping the
+observer thread asleep. It begins ConPTY close after five seconds and starts a
+second five-second bound only after the close worker was created. A failed
+worker start is an explicit retry state, never a false "close in progress" that
+could apply Hold while the master remained live. If the lifecycle exits while
+that close is still blocked, the
+close worker—not `Terminal::drop`—publishes reader stop after
+`ClosePseudoConsole` really returns. Reader status, source generation, and
 pending work occupy one atomic state word, so the quiet check cannot combine
 fields from different moments. A stdout command already accepted by the writer
 remains non-idle until its OS-facing write returns. The final source-progress

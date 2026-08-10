@@ -31,8 +31,10 @@ use winit::window::{
 
 use crate::gpu_diagnostics::{IncidentLog, RecoveryAction, RecoveryState};
 use crate::input;
+#[cfg(windows)]
+use crate::mux::PtyOutputClosePhase;
 use crate::mux::{
-    BroadcastScope, Dir, Mux, PaneInputDelivery, PaneInputResult, PaneTitleOrigin, Rect,
+    BroadcastScope, Dir, Mux, Pane, PaneInputDelivery, PaneInputResult, PaneTitleOrigin, Rect,
 };
 use crate::window_state::{
     DpiResizeAction, DpiResizeEvent, FrameRecoveryAction, FrameRecoveryPoll, WindowState,
@@ -47,6 +49,117 @@ const ACCESSIBILITY_SEARCH_CONTAINER_ID: NodeId = NodeId(ACCESSIBILITY_SEARCH_ID
 const ACCESSIBILITY_SEARCH_TEXT_ID: NodeId = NodeId(ACCESSIBILITY_SEARCH_ID_MASK | 16);
 const ACCESSIBILITY_SEARCH_STATUS_ID: NodeId = NodeId(ACCESSIBILITY_SEARCH_ID_MASK | 17);
 const ACCESSIBILITY_UPDATE_INTERVAL: std::time::Duration = std::time::Duration::from_millis(100);
+
+fn apply_pane_exit_action(
+    action: kettle_config::ExitAction,
+    pane_id: u64,
+    pane: &mut Pane,
+    pending_restarts: &mut Vec<u64>,
+) {
+    if pane.exit_observed {
+        return;
+    }
+    pane.exit_observed = true;
+    match action {
+        kettle_config::ExitAction::Hold => {
+            pane.held = true;
+            // `try_wait` is now safe: the ordered PTY exit (or the bounded
+            // fallback below) has finished consuming output. Cache the status
+            // and release the Unix zombie while the held grid stays visible.
+            pane.held_child_reaped = pane.term.child_exit_code().is_some();
+        }
+        kettle_config::ExitAction::Restart => {
+            if !pending_restarts.contains(&pane_id) {
+                pending_restarts.push(pane_id);
+                log::info!("exit-action = restart: queued pane {pane_id} for respawn");
+            }
+            pane.closed = true;
+        }
+        kettle_config::ExitAction::Close => pane.closed = true,
+    }
+}
+
+#[cfg(any(windows, test))]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum BoundedPtyExitAction {
+    Wait,
+    BeginClose,
+    ApplyPolicy,
+}
+
+#[cfg(any(windows, test))]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum BoundedPtyExitPhase {
+    NotStarted,
+    InProgress(std::time::Duration),
+    Failed { retry_in: std::time::Duration },
+}
+
+#[cfg(any(windows, test))]
+fn bounded_pty_exit_action(
+    child_exited_for: std::time::Duration,
+    phase: BoundedPtyExitPhase,
+) -> BoundedPtyExitAction {
+    match phase {
+        BoundedPtyExitPhase::NotStarted
+            if child_exited_for >= kettle_core::term::PTY_CHILD_EXIT_EOF_TIMEOUT =>
+        {
+            // Even a badly delayed/coalesced first wake must start close before
+            // policy. Applying Hold while the live master remained owned made
+            // the reader permanent.
+            BoundedPtyExitAction::BeginClose
+        }
+        BoundedPtyExitPhase::InProgress(close_for)
+            if close_for >= kettle_core::term::PTY_CHILD_EXIT_EOF_TIMEOUT =>
+        {
+            BoundedPtyExitAction::ApplyPolicy
+        }
+        BoundedPtyExitPhase::Failed { retry_in } if retry_in.is_zero() => {
+            BoundedPtyExitAction::BeginClose
+        }
+        _ => BoundedPtyExitAction::Wait,
+    }
+}
+
+fn take_window_lifecycle_wakes(ws: &WindowState) -> bool {
+    // Do not use `Iterator::any`: its short-circuit would leave later panes'
+    // edges set and, because the process-wide Wakeup was already coalesced,
+    // could strand their semantic events without another turn.
+    let mut pending = false;
+    for pane in ws.mux.panes.values() {
+        pending |= pane.term.take_lifecycle_wake();
+    }
+    pending
+}
+
+#[cfg(windows)]
+fn next_bounded_pty_exit_wait(
+    ws: &WindowState,
+    now: std::time::Instant,
+) -> Option<std::time::Duration> {
+    ws.mux
+        .panes
+        .values()
+        .filter(|pane| !pane.exit_observed)
+        .filter_map(|pane| {
+            let child_exit_at = pane.term.direct_child_exit_at()?;
+            let deadline = match pane.pty_output_close_phase {
+                PtyOutputClosePhase::NotStarted => {
+                    child_exit_at + kettle_core::term::PTY_CHILD_EXIT_EOF_TIMEOUT
+                }
+                PtyOutputClosePhase::InProgress(started) => {
+                    started + kettle_core::term::PTY_CHILD_EXIT_EOF_TIMEOUT
+                }
+                PtyOutputClosePhase::Failed { retry_at } => retry_at,
+            };
+            Some(
+                deadline
+                    .saturating_duration_since(now)
+                    .max(std::time::Duration::from_millis(1)),
+            )
+        })
+        .min()
+}
 
 fn osc52_copy_is_available(policy: Osc52, clipboard_available: bool) -> bool {
     policy.can_copy() && clipboard_available
@@ -8685,43 +8798,80 @@ impl App {
                     // post-drain handler resurrects with the same
                     // argv via Mux::spawn_pane.
                     // Close (default): unchanged kettle behavior.
-                    TermEvent::Exit | TermEvent::ChildExit(_) => match self.cfg.exit_action {
-                        // Keep the dead shell on screen. Set
-                        // `held` so `reap()` skips this child-exited pane until
-                        // the user explicitly closes it — the previous empty arm
-                        // let reap remove it anyway, so Hold behaved like Close.
-                        kettle_config::ExitAction::Hold => pane.held = true,
-                        kettle_config::ExitAction::Restart => {
-                            // Queue for post-drain
-                            // respawn via Mux::new_tab_with. The
-                            // dead pane closes here; the post-drain
-                            // restart handling in `redraw` spawns a fresh shell with
-                            // the same argv + cwd in a new tab.
-                            //
-                            // alacritty_terminal v0.26
-                            // fires BOTH `Event::ChildExit(status)`
-                            // (event_loop.rs:263, only when status
-                            // is Some) and `Event::Exit` (term/
-                            // mod.rs:810, unconditionally via
-                            // terminal.lock().exit()) for the same
-                            // shell exit. Normal exits hit both;
-                            // signal exits hit only the second.
-                            // Without the dedup contains-check,
-                            // normal exits spawned TWO new tabs
-                            // per dead shell. pane.closed = true
-                            // is idempotent so the second event
-                            // just no-ops on it.
-                            if !pending_restarts_local.contains(&pane_id) {
-                                pending_restarts_local.push(pane_id);
-                                log::info!(
-                                    "exit-action = restart: queued pane {pane_id} for respawn"
-                                );
-                            }
-                            pane.closed = true;
-                        }
-                        kettle_config::ExitAction::Close => pane.closed = true,
-                    },
+                    TermEvent::Exit => {
+                        // The reader emits this only after preceding PTY bytes
+                        // have crossed its bounded parser queue. `Mux::reap`
+                        // keys off this latch instead of polling the process,
+                        // so a fast child cannot disappear before its final
+                        // output or exit policy is applied.
+                        apply_pane_exit_action(
+                            self.cfg.exit_action,
+                            pane_id,
+                            pane,
+                            &mut pending_restarts_local,
+                        );
+                    }
+                    TermEvent::ChildExit(_) => {
+                        // Process status is advisory, not a pane-lifecycle
+                        // boundary. alacritty_terminal can publish ChildExit
+                        // before its final PTY drain; only the ordered Exit
+                        // event above may apply exit policy or make this pane
+                        // reapable.
+                    }
                     _ => {}
+                }
+            }
+            #[cfg(windows)]
+            if !pane.exit_observed
+                && let Some(child_exit_at) = pane.term.direct_child_exit_at()
+            {
+                let now = std::time::Instant::now();
+                let phase = match pane.pty_output_close_phase {
+                    PtyOutputClosePhase::NotStarted => BoundedPtyExitPhase::NotStarted,
+                    PtyOutputClosePhase::InProgress(started) => {
+                        BoundedPtyExitPhase::InProgress(now.saturating_duration_since(started))
+                    }
+                    PtyOutputClosePhase::Failed { retry_at } => BoundedPtyExitPhase::Failed {
+                        retry_in: retry_at.saturating_duration_since(now),
+                    },
+                };
+                match bounded_pty_exit_action(now.saturating_duration_since(child_exit_at), phase) {
+                    BoundedPtyExitAction::Wait => {}
+                    BoundedPtyExitAction::BeginClose => {
+                        log::warn!(
+                            "PTY output stayed open after pane {pane_id}'s direct child exited; \
+                             starting bounded ConPTY close"
+                        );
+                        match pane.term.begin_pty_output_close() {
+                            Ok(_) => {
+                                pane.pty_output_close_phase =
+                                    PtyOutputClosePhase::InProgress(std::time::Instant::now())
+                            }
+                            Err(error) => {
+                                log::error!("cannot close pane {pane_id}'s ConPTY output: {error}");
+                                pane.pty_output_close_phase = PtyOutputClosePhase::Failed {
+                                    retry_at: std::time::Instant::now()
+                                        + std::time::Duration::from_secs(1),
+                                };
+                            }
+                        }
+                    }
+                    BoundedPtyExitAction::ApplyPolicy => {
+                        // Older ConPTY builds may park ClosePseudoConsole while
+                        // an inherited client remains attached. The close
+                        // worker is detached specifically for that platform
+                        // behavior; do not let it also park GUI exit policy.
+                        log::error!(
+                            "pane {pane_id}'s PTY did not finish within the bounded drain; final \
+                             output may be incomplete"
+                        );
+                        apply_pane_exit_action(
+                            self.cfg.exit_action,
+                            pane_id,
+                            pane,
+                            &mut pending_restarts_local,
+                        );
+                    }
                 }
             }
             if pane.term.event_queue_overflowed() || pane.pty_input_failed() {
@@ -8848,6 +8998,36 @@ impl App {
         // there).
         if !pending_restarts_local.is_empty() {
             ws.pending_pane_restarts.extend(pending_restarts_local);
+        }
+    }
+
+    fn process_pending_pane_restarts(&mut self, ws: &mut WindowState) {
+        if ws.pending_pane_restarts.is_empty() {
+            return;
+        }
+        let pane_ids: Vec<u64> = std::mem::take(&mut ws.pending_pane_restarts);
+        let waker = self.waker();
+        let (cols, rows) = self.grid_of(ws, self.area(ws));
+        let geometry = self.pty_geometry_for_grid(ws, cols, rows);
+        for pane_id in pane_ids {
+            let restart_info: Option<(Vec<String>, Option<String>)> = ws
+                .mux
+                .panes
+                .get(&pane_id)
+                .map(|pane| (pane.argv.clone(), pane.term.current_dir()));
+            if let Some((argv, cwd)) = restart_info {
+                if let Err(error) = ws.mux.new_tab_with_geometry(
+                    &self.cfg,
+                    geometry,
+                    waker.clone(),
+                    &argv,
+                    cwd.as_deref(),
+                ) {
+                    log::warn!("exit-action = restart: spawn failed for pane {pane_id}: {error}");
+                } else {
+                    self.fire_tab_add_event(ws);
+                }
+            }
         }
     }
 
@@ -10779,47 +10959,10 @@ impl App {
             // Reflect the focused pane's OSC 9;4 progress onto the OS
             // taskbar button (pwsh 7 / Windows Terminal parity). No-op off Windows.
             self.poll_taskbar_progress(ws);
-            // Process any pane-restart requests queued during
-            // drain_events. Done HERE (after drain) so we don't hold a
-            // &mut iter into ws.mux.panes when spawning a new tab.
-            // event_loop arg is unused for now (the spawn doesn't need it);
-            // kept in the signature for symmetry with other dispatchers.
-            if !ws.pending_pane_restarts.is_empty() {
-                let pane_ids: Vec<u64> = std::mem::take(&mut ws.pending_pane_restarts);
-                let waker = self.waker();
-                // Use the live grid (matches the existing surface)
-                // for the new tab. An earlier version hardcoded 80×24 which mismatched
-                // any non-default kettle window size — the new shell would
-                // start with a tiny grid then grow on next resize. Pulling
-                // from the current area means the restart shell starts at
-                // the size the user is actually using.
-                let (cols, rows) = self.grid_of(ws, self.area(ws));
-                let geometry = self.pty_geometry_for_grid(ws, cols, rows);
-                for pane_id in pane_ids {
-                    let restart_info: Option<(Vec<String>, Option<String>)> = ws
-                        .mux
-                        .panes
-                        .get(&pane_id)
-                        .map(|p| (p.argv.clone(), p.term.current_dir()));
-                    if let Some((argv, cwd)) = restart_info {
-                        if let Err(e) = ws.mux.new_tab_with_geometry(
-                            &self.cfg,
-                            geometry,
-                            waker.clone(),
-                            &argv,
-                            cwd.as_deref(),
-                        ) {
-                            log::warn!(
-                                "exit-action = restart: spawn failed for pane {pane_id}: {e}"
-                            );
-                        } else {
-                            // A respawned tab is a fresh tab
-                            // from the plugin's POV; fire TabAdd.
-                            self.fire_tab_add_event(ws);
-                        }
-                    }
-                }
-            }
+            // Process restart requests only after the pane iteration releases
+            // its mutable borrow. Lifecycle-only wakes use this same helper in
+            // about-to-wait, so hidden windows do not strand a Restart action.
+            self.process_pending_pane_restarts(ws);
             // Reflect the active pane (incl. after tab/focus switches).
             self.sync_window_title(ws);
             // Capture a just-exited pane's final output before reap drops
@@ -23154,6 +23297,13 @@ impl App {
                 self.handle_accessibility_action(ws, request);
             }
             UserEvent::Wakeup => {
+                // Semantic terminal events and direct-child lifecycle edges
+                // are not paint damage. Drain them before the output-generation
+                // gate so a quiet exit is applied even when the window is
+                // hidden, minimized, or has cursor blinking disabled.
+                if take_window_lifecycle_wakes(ws) {
+                    self.drain_events(ws);
+                }
                 // Apply current visibility/recovery policy, but leave enabled
                 // latches closed until redraw is ready to snapshot a frame.
                 // This prevents one queued event from reopening the flood gate
@@ -25018,6 +25168,23 @@ impl App {
         ws: &mut WindowState,
         event_loop: &ActiveEventLoop,
     ) -> Option<std::time::Instant> {
+        if take_window_lifecycle_wakes(ws) {
+            self.drain_events(ws);
+        }
+        #[cfg(windows)]
+        if ws
+            .mux
+            .panes
+            .values()
+            .any(|pane| !pane.exit_observed && pane.term.direct_child_exit_at().is_some())
+        {
+            // Direct-child timestamps remain level-triggered through both
+            // deadlines. This runs even for hidden windows and does not depend
+            // on output or cursor animation to keep the policy clock moving.
+            self.drain_events(ws);
+        }
+        self.process_pending_pane_restarts(ws);
+        let held_child_reap_pending = ws.mux.poll_held_child_statuses();
         // A log worker can fail after PTY output becomes silent. Its direct
         // event-loop wake reaches this poll even when output-generation gating
         // correctly decides there is no frame to paint.
@@ -25042,6 +25209,8 @@ impl App {
         ws.search_queries
             .retain(|pane_id, _| ws.mux.panes.contains_key(pane_id));
         let now = std::time::Instant::now();
+        #[cfg(windows)]
+        let bounded_pty_exit_wait = next_bounded_pty_exit_wait(ws, now);
         // Catch the session changes no gesture announces — see `SESSION_SWEEP`.
         // Deliberately NOT part of the returned deadline: this must never be a
         // reason to wake up.
@@ -25394,6 +25563,14 @@ impl App {
             wait = Some(wait.map_or(next, |current| current.min(next)));
         }
         if let Some(next) = automation_wait {
+            wait = Some(wait.map_or(next, |current| current.min(next)));
+        }
+        #[cfg(windows)]
+        if let Some(next) = bounded_pty_exit_wait {
+            wait = Some(wait.map_or(next, |current| current.min(next)));
+        }
+        if held_child_reap_pending {
+            let next = std::time::Duration::from_secs(1);
             wait = Some(wait.map_or(next, |current| current.min(next)));
         }
         if ws.output_pacer.is_deferred()
@@ -28818,6 +28995,150 @@ mod tests {
              the current focus is always known — clearing it only on \
              focus-change events leaks the latch on every other route focus \
              can take (tab switch, reap promoting a sibling, ctl, restore)"
+        );
+    }
+
+    #[test]
+    fn process_status_cannot_reap_a_pane_before_the_ordered_pty_exit() {
+        let src = production_source();
+        let drain = src
+            .split("fn drain_events(&mut self, ws: &mut WindowState) {")
+            .nth(1)
+            .and_then(|body| body.split("\n    fn ").next())
+            .expect("drain_events body");
+        let exit_arm = drain
+            .split("TermEvent::Exit => {")
+            .nth(1)
+            .and_then(|body| body.split("TermEvent::ChildExit(_) => {").next())
+            .expect("ordered Exit arm");
+        assert!(
+            exit_arm.contains("apply_pane_exit_action(")
+                && exit_arm.contains("self.cfg.exit_action"),
+            "the reader's ordered Exit event must latch reaping and apply \
+             exit-action policy"
+        );
+
+        let status_arm = drain
+            .split("TermEvent::ChildExit(_) => {")
+            .nth(1)
+            .and_then(|body| body.split("\n                    _ => {}").next())
+            .expect("advisory ChildExit arm");
+        for forbidden in [
+            "exit_observed",
+            "pane.closed",
+            "pane.held",
+            "pending_restarts",
+            "apply_pane_exit_action",
+        ] {
+            assert!(
+                !status_arm.contains(forbidden),
+                "ChildExit status must not perform lifecycle action {forbidden:?} \
+                 before the final PTY drain"
+            );
+        }
+        assert!(
+            drain.contains("pane.term.direct_child_exit_at()")
+                && drain.contains("pane.term.begin_pty_output_close()")
+                && drain.contains("bounded_pty_exit_action(")
+                && drain.matches("apply_pane_exit_action(").count() >= 2,
+            "the ConPTY path must have a bounded post-child drain and fallback"
+        );
+    }
+
+    #[test]
+    fn windows_child_exit_drain_has_two_distinct_bounds() {
+        use super::BoundedPtyExitPhase::{Failed, InProgress, NotStarted};
+        let bound = kettle_core::term::PTY_CHILD_EXIT_EOF_TIMEOUT;
+        assert_eq!(
+            super::bounded_pty_exit_action(bound - std::time::Duration::from_millis(1), NotStarted,),
+            super::BoundedPtyExitAction::Wait
+        );
+        assert_eq!(
+            super::bounded_pty_exit_action(bound, NotStarted),
+            super::BoundedPtyExitAction::BeginClose
+        );
+        assert_eq!(
+            super::bounded_pty_exit_action(bound * 2, NotStarted),
+            super::BoundedPtyExitAction::BeginClose,
+            "a delayed first wake must close before applying policy"
+        );
+        assert_eq!(
+            super::bounded_pty_exit_action(
+                bound * 2,
+                InProgress(bound - std::time::Duration::from_millis(1)),
+            ),
+            super::BoundedPtyExitAction::Wait,
+            "the second bound starts when close actually starts"
+        );
+        assert_eq!(
+            super::bounded_pty_exit_action(bound, InProgress(bound)),
+            super::BoundedPtyExitAction::ApplyPolicy,
+            "a parked close cannot hold GUI policy forever"
+        );
+        assert_eq!(
+            super::bounded_pty_exit_action(
+                bound * 2,
+                Failed {
+                    retry_in: std::time::Duration::from_millis(1),
+                },
+            ),
+            super::BoundedPtyExitAction::Wait,
+            "a failed worker start must not be recorded as an in-progress close"
+        );
+        assert_eq!(
+            super::bounded_pty_exit_action(
+                bound * 2,
+                Failed {
+                    retry_in: std::time::Duration::ZERO,
+                },
+            ),
+            super::BoundedPtyExitAction::BeginClose,
+            "worker-start failure is retried instead of applying Hold to a live master"
+        );
+    }
+
+    #[test]
+    fn lifecycle_wakes_are_drained_before_the_output_generation_gate() {
+        let src = production_source();
+        let inner = src
+            .split("fn user_event_inner(")
+            .nth(1)
+            .and_then(|body| body.split("\n    fn ").next())
+            .expect("user_event_inner body");
+        let wake = inner
+            .split("UserEvent::Wakeup => {")
+            .nth(1)
+            .and_then(|body| body.split("UserEvent::ReloadConfig").next())
+            .expect("Wakeup arm");
+        let lifecycle = wake
+            .find("take_window_lifecycle_wakes(ws)")
+            .expect("lifecycle edge consumption");
+        let drain = wake[lifecycle..]
+            .find("self.drain_events(ws);")
+            .map(|offset| lifecycle + offset)
+            .expect("semantic event drain");
+        let output_gate = wake
+            .find("output_wakeup_needs_paint(")
+            .expect("output generation gate");
+        assert!(
+            lifecycle < drain && drain < output_gate,
+            "quiet/hidden lifecycle events must be applied before a no-output wake can return"
+        );
+    }
+
+    #[test]
+    fn held_child_status_poll_keeps_an_idle_deadline_until_reaped() {
+        let src = production_source();
+        let about = src
+            .split("fn about_to_wait_inner(")
+            .nth(1)
+            .and_then(|body| body.split("\n    }\n}").next())
+            .expect("about_to_wait_inner body");
+        assert!(
+            about.contains("let held_child_reap_pending = ws.mux.poll_held_child_statuses();")
+                && about.contains("if held_child_reap_pending {")
+                && about.contains("std::time::Duration::from_secs(1)"),
+            "a held pane whose status lagged EOF needs a bounded idle wake until the zombie is collected"
         );
     }
 

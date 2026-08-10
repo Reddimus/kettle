@@ -86,6 +86,23 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   0, because that status cannot make abandoned lossless output complete. The
   final completion check resamples source progress after draining every queue;
   because the reader has disconnected by then, nothing can race in afterward.
+  At construction, the Unix pump now retains Kettle's slave descriptor through
+  the first successful master read. Linux waits on master readability
+  plus a pidfd, macOS uses one kqueue for `EVFILT_READ` plus `NOTE_EXIT`, and
+  other Unix targets use an exponentially backed-off `waitid(WNOWAIT)` fallback;
+  a quiet long-running pane therefore adds no periodic polling on the primary
+  platforms. The UI also reaps a pane only after consuming the reader's ordered
+  `Exit` event; the earlier `ChildExit(status)` notification is advisory and
+  cannot close or restart a pane ahead of final PTY output and `exit-action`
+  handling. Held panes continue collecting a direct-child status that was not
+  ready at PTY EOF, so Hold cannot leave a zombie until the pane is dismissed.
+  The child observer remains active after startup: a daemonized Unix
+  descendant retaining the slave now gets a five-second output-drain window
+  rather than parking GUI exit policy forever. Windows waits on a duplicated
+  child handle only for interactive panes. Its semantic wake bypasses paint
+  generation even while hidden; the event loop starts asynchronous ConPTY close
+  at that bound, starts the second bound only after the close worker exists, and
+  retries worker-start failure instead of applying Hold to a live master.
   Linux teardown tracks the PTY-created session rather than treating possession
   of its slave descriptor as process ownership. It first stops and revalidates
   the original leader through its pidfd; that unreaped identity keeps the
@@ -107,6 +124,16 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   inherited write while returning the direct parent's success. Windows process
   liveness now comes from the process handle rather than the ambiguous numeric
   `STILL_ACTIVE` value, preserving a legitimate child exit code of 259.
+  A later macOS CI run exposed an earlier construction race the lifecycle proof
+  could not cover: a short command was spawned before the master reader and its
+  pump existed, and both a normal and diagnostic retry exited 0 with empty
+  output. A forced two-second delay in that old construction window reproduced
+  the same double-empty failure deterministically. Kettle now establishes the
+  PTY pump before allowing the child to start. On Unix it also retains its own
+  slave descriptor in that pump until the first bytes are read, or until a
+  genuinely silent direct child exits; a readiness signal alone still had a
+  scheduling gap, and the same forced delay proved that first version could
+  lose all output too. (#201)
 
 - **An explicit `kettle ctl screenshot --json '{"path":"PATH"}'` was refused unless every parent
   directory was private.** A user-selected export beneath an ordinary `0755`

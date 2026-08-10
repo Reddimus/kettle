@@ -895,6 +895,38 @@ parking the parser on a senderless channel. The raw-output sender tests
 separately prove a full best-effort plugin queue drops without blocking and a
 full lossless queue backpressures only until its receiver drains. `kettle exec`
 uses the latter with a four-slot queue.
+`the_pty_reader_owns_the_startup_slave_before_the_parent_releases_it` pins the
+complementary startup invariant: the constructor receives the pump's runtime
+readiness signal before `spawn_command`, then transfers its Unix slave
+descriptor to that pump while the spawned-child rollback guard is still armed.
+The pump releases the descriptor only after a successful read or a child-only
+exit observed without reaping it. A macOS `openpty` fixture queues readability
+and `NOTE_EXIT` together and proves the tail is read before the retained slave
+is dropped; the opposite order loses those bytes. That same watcher remains active after
+startup: Linux exercises a master-plus-pidfd wait, macOS a
+master-plus-process kqueue, and the portable fallback backs off from one
+millisecond to one second rather than polling every frame. The Linux
+`leaked_slave_cannot_hold_the_terminal_exit_event_forever` test launches a
+`setsid()` descendant that retains the slave and proves the ordered exit marker
+still arrives at the five-second bound. The source guard also pins that
+`Mux::reap` keys on the UI-consumed exit event, not `child_exited()`, and that
+an earlier `ChildExit(status)` notification cannot apply exit policy, so neither
+can get ahead of the reader's final output; a held pane whose status lags EOF
+remains on a one-second status-collection deadline. Windows interactive panes
+wait on a duplicated child handle that exits after one semantic wake. Source
+and pure-state tests prove that wake drains lifecycle events before output-
+generation gating (including a hidden/quiet window), a delayed first wake still
+begins close, the second bound starts from successful close-worker creation, and
+worker-start failure retries instead of applying Hold to a live master.
+
+The first negative control inserts a two-second pause into the old post-spawn
+setup window on the pre-fix tree; the real integration test then exits 0 with
+empty output on both its normal run and raw diagnostic retry. The adversarial
+review found that a readiness signal by itself still preceded the actual read,
+so a second two-second pause immediately
+after that signal reproduced the same failure. With the slave-ownership guard,
+the second mutant passes because the delayed reader still receives the retained
+output.
 
 `kettle exec` also has platform-specific completion policy tests. Unix may
 report success only after the raw channel disconnects and the core reader
