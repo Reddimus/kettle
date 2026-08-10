@@ -8,6 +8,16 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Fixed
 
+- **Kettle could not create a GPU device on Parallels' otherwise usable
+  virtual adapter.** The GLES device advertises graphics and presentation but
+  zero compute workgroups; Kettle requested WebGPU's default 65,535 even though
+  it has no compute pipelines, so Windows 11 ARM renderer tests and an Ubuntu
+  ARM live launch failed before drawing. Every live, screenshot, offscreen, and
+  test device request now keeps the adapter's full 2D surface limit while
+  clamping all other defaults to its real capabilities. Native Windows ARM64
+  source builds are now documented and exercised separately from the shipped
+  x86_64 artifact.
+
 - **Wheel input in a split window followed keyboard focus instead of the
   pointer.** Scrolling over an unfocused pane changed the focused pane's
   scrollback, sent mouse-tracking reports to the wrong TUI, or synthesized

@@ -2566,10 +2566,20 @@ mod bg_image_worker_tests {
 }
 
 fn live_device_limits(adapter_limits: wgpu::Limits) -> wgpu::Limits {
+    // Start with Kettle's normal WebGPU defaults, keep the adapter's full
+    // surface resolution, then clamp every remaining request to what the
+    // adapter actually advertises. Virtual GLES adapters can legitimately
+    // expose no compute pipeline at all (`max_compute_workgroups... == 0`).
+    // Asking them for wgpu's default 65_535 workgroups fails device creation
+    // even though Kettle renders entirely through graphics pipelines. This is
+    // also safer than requesting every adapter maximum: the application keeps
+    // its deliberately small resource envelope except where presentation
+    // resolution requires more.
     wgpu::Limits {
         max_texture_dimension_2d: adapter_limits.max_texture_dimension_2d,
         ..Default::default()
     }
+    .or_worse_values_from(&adapter_limits)
 }
 
 /// Clamp a window size into the range `Surface::configure` will accept.
@@ -10349,6 +10359,7 @@ pub fn capture_png_with_annotation(
         let (device, queue) = adapter
             .request_device(&wgpu::DeviceDescriptor {
                 label: Some("kettle-screenshot"),
+                required_limits: live_device_limits(adapter.limits()),
                 ..Default::default()
             })
             .await
@@ -11120,6 +11131,7 @@ pub fn offscreen_selftest_with_config(cfg: &Config) -> anyhow::Result<bool> {
         let (device, queue) = adapter
             .request_device(&wgpu::DeviceDescriptor {
                 label: Some("kettle-selftest"),
+                required_limits: live_device_limits(adapter.limits()),
                 ..Default::default()
             })
             .await
@@ -11283,6 +11295,7 @@ mod gpu_tests {
         let (device, queue) = adapter
             .request_device(&wgpu::DeviceDescriptor {
                 label: Some("kettle-alpha-blend-test"),
+                required_limits: live_device_limits(adapter.limits()),
                 ..Default::default()
             })
             .await
@@ -11484,6 +11497,7 @@ mod gpu_tests {
         let (device, queue) = adapter
             .request_device(&wgpu::DeviceDescriptor {
                 label: Some("kettle-starfield-test"),
+                required_limits: live_device_limits(adapter.limits()),
                 ..Default::default()
             })
             .await
@@ -11780,6 +11794,7 @@ mod gpu_tests {
         let (device, queue) = adapter
             .request_device(&wgpu::DeviceDescriptor {
                 label: Some("kettle-premultiplied-clear-test"),
+                required_limits: live_device_limits(adapter.limits()),
                 ..Default::default()
             })
             .await
@@ -12021,7 +12036,10 @@ mod gpu_tests {
             .await
             .ok()?;
         let (device, queue) = adapter
-            .request_device(&wgpu::DeviceDescriptor::default())
+            .request_device(&wgpu::DeviceDescriptor {
+                required_limits: live_device_limits(adapter.limits()),
+                ..Default::default()
+            })
             .await
             .ok()?;
         let format = wgpu::TextureFormat::Rgba8UnormSrgb;
@@ -12254,6 +12272,7 @@ mod gpu_tests {
             let (device, queue) = adapter
                 .request_device(&wgpu::DeviceDescriptor {
                     label: Some("kettle-screenshot-grid-emit-test"),
+                    required_limits: live_device_limits(adapter.limits()),
                     ..Default::default()
                 })
                 .await
@@ -12401,6 +12420,7 @@ mod gpu_tests {
             let (device, queue) = adapter
                 .request_device(&wgpu::DeviceDescriptor {
                     label: Some("kettle-grid-prompt-blink"),
+                    required_limits: live_device_limits(adapter.limits()),
                     ..Default::default()
                 })
                 .await
@@ -12660,6 +12680,7 @@ mod gpu_tests {
             let (device, queue) = adapter
                 .request_device(&wgpu::DeviceDescriptor {
                     label: Some("kettle-srgb-test"),
+                    required_limits: live_device_limits(adapter.limits()),
                     ..Default::default()
                 })
                 .await
@@ -12970,8 +12991,35 @@ mod live_surface_dimension_tests {
             max_texture_dimension_2d: 16_384,
             ..Default::default()
         };
-        let requested = live_device_limits(adapter);
+        let requested = live_device_limits(adapter.clone());
         assert_eq!(requested.max_texture_dimension_2d, 16_384);
+        assert!(requested.check_limits(&adapter));
+    }
+
+    /// Parallels' virtual GLES adapter on Windows 11 ARM and Ubuntu ARM
+    /// advertises a valid graphics device with no compute dispatch capacity.
+    /// Kettle has no compute pipelines, so that must lower the device request
+    /// rather than making an otherwise usable terminal fail at startup.
+    #[test]
+    fn live_device_clamps_unused_compute_limits_to_the_adapter() {
+        let adapter = wgpu::Limits {
+            max_texture_dimension_2d: 16_384,
+            max_compute_workgroup_storage_size: 0,
+            max_compute_invocations_per_workgroup: 0,
+            max_compute_workgroup_size_x: 0,
+            max_compute_workgroup_size_y: 0,
+            max_compute_workgroup_size_z: 0,
+            max_compute_workgroups_per_dimension: 0,
+            ..Default::default()
+        };
+        let requested = live_device_limits(adapter.clone());
+
+        assert_eq!(requested.max_texture_dimension_2d, 16_384);
+        assert_eq!(requested.max_compute_workgroups_per_dimension, 0);
+        assert!(
+            requested.check_limits(&adapter),
+            "every requested limit must fit the virtual adapter"
+        );
     }
 }
 

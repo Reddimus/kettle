@@ -76,6 +76,17 @@ hardware or software adapter are. Windows uses DX12/WARP or another available
 wgpu backend; macOS uses Metal. The native PTY checks also need permission to
 create `/dev/ptmx` children on Unix or a ConPTY on Windows.
 
+Native ARM guest checks complement, but do not replace, the hosted release
+matrix. The Parallels Ubuntu ARM guest can build and run the aarch64 product,
+its PTY tests, and live Wayland scenarios. The Parallels Windows 11 ARM guest
+can build the complete workspace natively once its Visual Studio ARM64 MSVC and
+LLVM/Clang components are loaded with `VsDevCmd.bat -arch=arm64
+-host_arch=arm64`; it exercises ARM64 ConPTY and the Parallels virtual GPU. It
+does not produce or validate the shipped x86_64 Windows archive, which remains
+the job of hosted Windows CI and the physical x86_64 Windows machine. Record
+the exact commit and adapter for each guest run, then stop the guest when the
+batch is complete.
+
 Read test output for `no GPU adapter ... skipped` and `no PTY ...` messages.
 Those messages leave the portable suite green by design; record the missing
 coverage instead of treating the exit code alone as platform validation.
@@ -88,6 +99,16 @@ whole test binary down with `STATUS_ACCESS_VIOLATION` — reported against
 `kettle-render` with no test having failed, because the fault is in the driver
 rather than in Rust. A new test that creates an adapter, device, or surface
 belongs behind the same guard.
+
+Every renderer-owned device request uses the same limit policy as the live
+window. Kettle requests the adapter's full 2D texture dimension so a large
+high-DPI surface remains legal, but clamps every other WebGPU default to the
+adapter's advertised value. This matters on virtual GLES adapters which expose
+graphics and presentation while advertising zero compute workgroups: Kettle
+has no compute pipelines, so a default request for 65,535 workgroups must not
+reject an otherwise usable device. The pure limit regression is portable; a
+Parallels guest run is still required to prove the real virtual adapter creates
+the device and renders.
 
 Performance-harness changes first run GUI-free fixtures under both supported
 PowerShell hosts:
@@ -480,7 +501,9 @@ discipline here.
   `cap_axis_cells` GPU-texture safety guard, color
   resolve / dim / minimum-contrast WCAG math, the offscreen GPU
   pipeline self-test (real wgpu pipelines compile + render through
-  Vulkan/Metal/DX12), pure native-backend-order/fallback tests, and isolated
+  Vulkan/Metal/DX12/GLES), pure native-backend-order/fallback tests, uniform
+  device-limit clamping for virtual graphics adapters with no compute queues,
+  and isolated
   native Windows checks: the Auto test selects DX12 without first constructing
   an all-backend/Vulkan instance, the DX12-only stale-pin test preserves the
   platform-preferred adapter, and the explicit-Vulkan test works without a

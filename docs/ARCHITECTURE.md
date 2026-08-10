@@ -412,6 +412,12 @@ putting a user path on the wire.
   portable config never prevents startup. Because the device/surface graph
   can't hot-swap and every window shares the one adapter, GPU changes apply on
   the next launch (the settings panel shows a "restart to apply" hint).
+  Device creation retains the adapter's full 2D texture dimension for large
+  high-DPI surfaces but clamps every other WebGPU default to the adapter's
+  advertised limit. That common policy covers live windows, screenshots,
+  offscreen checks, and renderer tests. It permits graphics-only virtual GLES
+  adapters that advertise zero compute workgroups without inflating Kettle's
+  resource envelope to every hardware maximum; Kettle has no compute pipeline.
   A fatal wgpu error latches one bounded in-memory `GpuFault`; the event loop
   then rebuilds every renderer on a pure settle/backoff state machine
   (same physical GPU through an alternate backend → surface-preferred GPU →
