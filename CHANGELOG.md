@@ -6,6 +6,8 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+## [2.56.0] — 2026-08-09
+
 ### Fixed
 
 - **Implicit configuration could be replaced by another local principal.** The
