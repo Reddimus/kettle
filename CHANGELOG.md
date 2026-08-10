@@ -8,6 +8,58 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Fixed
 
+- **Kettle could not create a GPU device on Parallels' otherwise usable
+  virtual adapter.** The GLES device advertises graphics and presentation but
+  zero compute workgroups; Kettle requested WebGPU's default 65,535 even though
+  it has no compute pipelines, so Windows 11 ARM renderer tests and an Ubuntu
+  ARM live launch failed before drawing. Every live, screenshot, offscreen, and
+  test device request now keeps the adapter's full 2D surface limit while
+  clamping all other defaults to its real capabilities. Native Windows ARM64
+  source builds are now documented and exercised separately from the shipped
+  x86_64 artifact.
+
+- **The `kettle-update` test binary could not run as a standard Windows
+  user.** Its generated `kettle_update-<hash>.exe` had no execution manifest,
+  so Windows installer detection inferred from the name that it required
+  elevation and Cargo stopped the workspace suite with error 740. Windows test
+  harnesses for that crate now carry an explicit `asInvoker` manifest; native
+  Windows ARM64 development no longer requires elevating the build. Its test
+  build exercises the shipped x86_64 package contract while production ARM
+  builds truthfully retain an unsupported managed updater, because no ARM
+  archive is published.
+
+- **Parallel Windows update tests intermittently lost cleanup races to a file
+  scanner.** A newly written journal or backup could be opened briefly without
+  delete sharing; Kettle treated the resulting error 32 as permanent and left
+  a committed transaction unconfirmed. Windows update-owned opens now retry
+  only sharing/lock violations for a bounded 250 ms, then perform the same
+  handle-based identity and content validation. Other I/O failures remain
+  immediate.
+
+- **Wheel input in a split window followed keyboard focus instead of the
+  pointer.** Scrolling over an unfocused pane changed the focused pane's
+  scrollback, sent mouse-tracking reports to the wrong TUI, or synthesized
+  alternate-screen cursor keys in the wrong shell. Terminal wheel behavior now
+  targets the pane under the pointer without changing keyboard focus; chrome
+  and gaps retain the focused-pane fallback.
+
+- **Selection drags could freeze at the outer window edge or jump to another
+  split.** Some window backends stop sending coordinates after `CursorLeft`, so
+  dragging beyond the top or bottom stopped scrollback autoscroll until the
+  pointer moved again. The exit edge is now latched and drives the existing
+  frame timer. The gesture also pins its starting pane, so ctl/Lua focus changes
+  cannot redirect extension, autoscroll, or copy-on-release to a sibling.
+
+- **A close requested for one in-process window could be consumed by another
+  window's dispatch epilogue.** The pending close was one app-global Boolean;
+  cross-window control dispatch already needed a special case to avoid closing
+  the focused window instead of its target. Requests are now keyed by window
+  id and consumed only by that window. A focused live regression now terminates
+  one detached window's child through the PTY reap path and proves its sibling
+  still accepts terminal input. This removes a Kettle-side path by which one
+  exiting CLI pane could make separate terminal windows disappear; the child
+  program itself (shell, Codex, or another TUI) is not causal.
+
 - **`kettle exec` could report exit 0 before Unix PTY output arrived.** The
   lifecycle correctly distinguished an empty raw-output channel from a
   disconnected one, but then overrode that proof after 810 ms on every

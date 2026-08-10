@@ -3673,7 +3673,7 @@ fn open_cleanup_anchored_directory(path: &Path) -> Result<File, UpdateError> {
         .read(true)
         .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
         .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT);
-    let directory = options.open(path)?;
+    let directory = retry_windows_sharing_violation(|| options.open(path))?;
     let metadata = directory.metadata()?;
     if !metadata.file_type().is_dir()
         || metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
@@ -3741,7 +3741,7 @@ fn open_windows_held_file(prefix: &Path, relative: &Path) -> Result<WindowsHeldF
         .access_mode(GENERIC_READ | DELETE)
         .share_mode(FILE_SHARE_READ)
         .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
-    let file = options.open(&path)?;
+    let file = retry_windows_sharing_violation(|| options.open(&path))?;
     let metadata = file.metadata()?;
     {
         use std::os::windows::fs::MetadataExt as _;
@@ -3781,7 +3781,7 @@ fn open_windows_held_directory(
         .access_mode(FILE_LIST_DIRECTORY | FILE_READ_ATTRIBUTES | DELETE)
         .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
         .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT);
-    let directory = options.open(&path)?;
+    let directory = retry_windows_sharing_violation(|| options.open(&path))?;
     let metadata = directory.metadata()?;
     if !metadata.file_type().is_dir()
         || metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
@@ -4194,6 +4194,9 @@ fn open_regular_nofollow(path: &Path) -> Result<File, UpdateError> {
         use windows_sys::Win32::Storage::FileSystem::FILE_FLAG_OPEN_REPARSE_POINT;
         options.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
     }
+    #[cfg(windows)]
+    let file = retry_windows_sharing_violation(|| options.open(path))?;
+    #[cfg(not(windows))]
     let file = options.open(path)?;
     let metadata = file.metadata()?;
     #[cfg(windows)]
@@ -4211,6 +4214,41 @@ fn open_regular_nofollow(path: &Path) -> Result<File, UpdateError> {
         )));
     }
     Ok(file)
+}
+
+/// Windows security/indexing software can briefly open a newly written update
+/// journal or backup without sharing delete access. A single immediate retry
+/// is not sufficient under a parallel workspace run, while treating the file
+/// as permanently unavailable makes a committed update look corrupt. Retry
+/// only the two transient sharing errors, for a short fixed interval. Every
+/// successful caller still validates the opened handle before trusting or
+/// deleting anything; every other error remains immediate.
+#[cfg(windows)]
+fn retry_windows_sharing_violation<T>(
+    mut operation: impl FnMut() -> std::io::Result<T>,
+) -> std::io::Result<T> {
+    use windows_sys::Win32::Foundation::{ERROR_LOCK_VIOLATION, ERROR_SHARING_VIOLATION};
+
+    const RETRY_FOR: std::time::Duration = std::time::Duration::from_millis(250);
+    const RETRY_EVERY: std::time::Duration = std::time::Duration::from_millis(5);
+
+    let deadline = std::time::Instant::now() + RETRY_FOR;
+    loop {
+        match operation() {
+            Ok(value) => return Ok(value),
+            Err(error)
+                if matches!(
+                    error.raw_os_error(),
+                    Some(code)
+                        if code == ERROR_SHARING_VIOLATION as i32
+                            || code == ERROR_LOCK_VIOLATION as i32
+                ) && std::time::Instant::now() < deadline =>
+            {
+                std::thread::sleep(RETRY_EVERY);
+            }
+            Err(error) => return Err(error),
+        }
+    }
 }
 
 #[cfg(any(windows, target_os = "linux"))]
@@ -6287,6 +6325,42 @@ mod tests {
 
     fn test_tempdir() -> kettle_test_support::PrivateTempDir {
         kettle_test_support::private_tempdir("kettle-update-test-")
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_sharing_retry_is_narrow_and_recovers_after_a_transient_lock() {
+        use windows_sys::Win32::Foundation::ERROR_SHARING_VIOLATION;
+
+        let mut attempts = 0_u8;
+        let value = retry_windows_sharing_violation(|| {
+            attempts += 1;
+            if attempts < 3 {
+                Err(std::io::Error::from_raw_os_error(
+                    ERROR_SHARING_VIOLATION as i32,
+                ))
+            } else {
+                Ok(42)
+            }
+        })
+        .expect("a transient sharing violation should be retried");
+        assert_eq!(value, 42);
+        assert_eq!(attempts, 3);
+
+        let mut permanent_attempts = 0_u8;
+        let error = retry_windows_sharing_violation(|| -> std::io::Result<()> {
+            permanent_attempts += 1;
+            Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "not a sharing violation",
+            ))
+        })
+        .unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
+        assert_eq!(
+            permanent_attempts, 1,
+            "unrelated errors must not be retried"
+        );
     }
 
     /// Create fixture directories with the public installer mode instead of

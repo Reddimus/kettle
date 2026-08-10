@@ -2648,6 +2648,56 @@ fn selection_autoscroll_lines(y: f32, rect_top: f32, rect_bottom: f32) -> i32 {
     if dist > 0.0 { mag } else { -mag }
 }
 
+/// Which vertical edge an in-progress selection most likely crossed when the
+/// backend reports `CursorLeft` without an out-of-client coordinate. Corners
+/// resolve vertically on ties because horizontal selection overflow does not
+/// scroll, while losing the vertical intent freezes the gesture entirely.
+fn selection_leave_edge(x: f32, y: f32, width: f32, height: f32) -> i8 {
+    if !(x.is_finite() && y.is_finite() && width > 0.0 && height > 0.0) {
+        return 0;
+    }
+    let top = y.max(0.0);
+    let bottom = (height - y).max(0.0);
+    let left = x.max(0.0);
+    let right = (width - x).max(0.0);
+    if top <= bottom && top <= left && top <= right {
+        1
+    } else if bottom <= top && bottom <= left && bottom <= right {
+        -1
+    } else {
+        0
+    }
+}
+
+fn clear_selection_gesture(ws: &mut WindowState) {
+    ws.selecting = false;
+    ws.selecting_pane = None;
+    ws.selection_autoscroll_edge = 0;
+}
+
+fn take_window_close_request(pending: &mut std::collections::BTreeSet<u64>, seq: u64) -> bool {
+    pending.remove(&seq)
+}
+
+/// Select the terminal pane addressed by a wheel event without mutating
+/// keyboard focus. A pane under the pointer wins; chrome, gaps and coordinates
+/// outside the client area fall back to the focused pane.
+fn wheel_target_at(
+    layout: &[(u64, Rect)],
+    focused: Option<u64>,
+    x: f32,
+    y: f32,
+) -> Option<(u64, Rect)> {
+    layout
+        .iter()
+        .copied()
+        .find(|&(_, (rx, ry, rw, rh))| x >= rx && x < rx + rw && y >= ry && y < ry + rh)
+        .or_else(|| {
+            let focused = focused?;
+            layout.iter().copied().find(|(pane, _)| *pane == focused)
+        })
+}
+
 /// Render the OS window title from the user's `window-title-format`
 /// template with the active pane's title / cwd / 1-based tab index. While
 /// the pane title is still the initial placeholder ("kettle") and the cwd
@@ -5048,12 +5098,11 @@ pub struct App {
     /// at redraw (vs. per-mutation-site calls) can't drift when a new
     /// theme-mutation path is added (Lua, preview, reload, schedule, ...).
     native_theme_synced: Option<Option<WindowTheme>>,
-    /// C4: set by any "this window is done" path (last tab closed, X button,
-    /// reap drained the panes) while its WindowState is checked out of the
-    /// map. The dispatch wrappers consume it via `finish_window_dispatch`:
-    /// the window is dropped instead of reinserted, and the loop exits once
-    /// no windows remain.
-    pending_window_close: bool,
+    /// Window ids awaiting removal after their checked-out dispatch finishes.
+    /// This must be keyed by window: a process-global boolean can be set while
+    /// ctl/Lua dispatches into one mapped window and then consumed by another
+    /// window's epilogue, closing a sibling the user never asked to close.
+    pending_window_closes: std::collections::BTreeSet<u64>,
     /// C4: Quit semantics — drop every window and exit, regardless of how
     /// many are open.
     quit_requested: bool,
@@ -5411,8 +5460,16 @@ impl App {
             .find_map(|w| (w.window.as_ref().map(|x| x.id()) == Some(wid)).then_some(w.seq))
     }
 
+    fn request_window_close(&mut self, seq: u64) {
+        self.pending_window_closes.insert(seq);
+    }
+
+    fn window_close_pending(&self, seq: u64) -> bool {
+        self.pending_window_closes.contains(&seq)
+    }
+
     /// C4: the dispatch wrappers' epilogue. Reinserts the checked-out window
-    /// — or, when the inner handler flagged a close (`pending_window_close`)
+    /// — or, when the inner handler flagged this window for close
     /// or a quit, drops it (panes' PTYs die with their Mux) and exits the
     /// event loop once no windows remain. This is the ONLY place a window
     /// close reaches `event_loop.exit()`, so "exit only when the map is
@@ -5425,8 +5482,7 @@ impl App {
             event_loop.exit();
             return;
         }
-        if self.pending_window_close {
-            self.pending_window_close = false;
+        if take_window_close_request(&mut self.pending_window_closes, seq) {
             // v2.19.0 (tear-off UX): a dying window that is the
             // torn window or the manual-follow capture holder takes its
             // drag with it — abandon eagerly (clears the latched preview on
@@ -5936,7 +5992,7 @@ impl App {
             gpu_incident_started_for_loss: false,
             gpu_software_fallback: false,
             native_theme_synced: None,
-            pending_window_close: false,
+            pending_window_closes: std::collections::BTreeSet::new(),
             quit_requested: false,
             recorder: None,
             recording_start_failed: false,
@@ -6208,7 +6264,7 @@ impl App {
             match command {
                 PendingLuaCommand::ExecAction { action, .. } => {
                     self.handle_action(ws, action, event_loop);
-                    if self.pending_window_close || self.quit_requested {
+                    if self.window_close_pending(ws.seq) || self.quit_requested {
                         break;
                     }
                 }
@@ -7430,12 +7486,30 @@ impl App {
     }
 
     fn focused_rect(&self, ws: &WindowState, area: Rect) -> Option<Rect> {
-        let f = ws.mux.active_focus()?;
+        self.pane_rect(ws, area, ws.mux.active_focus()?)
+    }
+
+    fn pane_rect(&self, ws: &WindowState, area: Rect, pane_id: u64) -> Option<Rect> {
         ws.mux
             .layout(ws.mux.active, area)
             .into_iter()
-            .find(|(id, _)| *id == f)
+            .find(|(id, _)| *id == pane_id)
             .map(|(_, r)| r)
+    }
+
+    /// Terminal pane addressed by a wheel event. Pointer ownership is
+    /// independent of keyboard focus: a split under the cursor wins, while
+    /// chrome/gaps/out-of-window coordinates fall back to the focused pane.
+    /// Modal, tab-bar and Ctrl-zoom handling run before this helper is used.
+    fn wheel_target(&self, ws: &WindowState) -> Option<(u64, Rect)> {
+        let area = self.area(ws);
+        let layout = ws.mux.layout(ws.mux.active, area);
+        wheel_target_at(
+            &layout,
+            ws.mux.active_focus(),
+            ws.cursor.x as f32,
+            ws.cursor.y as f32,
+        )
     }
 
     /// Start a scrollbar drag and return the pointer's offset inside the thumb.
@@ -7606,6 +7680,7 @@ impl App {
         // `begin_selection`'s API — future viewport-aware variants may
         // need it for clamping.
         let _ = area;
+        clear_selection_gesture(ws);
         let Some(pane) = ws.mux.focused() else {
             return false;
         };
@@ -7633,7 +7708,6 @@ impl App {
         t.selection = Some(sel);
         // Like Semantic, a smart selection resolves on press; the
         // caller treats `selecting=false` so motion doesn't extend it.
-        ws.selecting = false;
         true
     }
 
@@ -7643,14 +7717,22 @@ impl App {
         area: Rect,
         ty: kettle_core::SelectionType,
     ) {
-        // Simple + Block are drags; word/line select immediately on click.
-        ws.selecting = matches!(
+        let dragging = matches!(
             ty,
             kettle_core::SelectionType::Simple | kettle_core::SelectionType::Block
         );
-        if let Some(rect) = self.focused_rect(ws, area) {
+        let Some(pane_id) = ws.mux.active_focus() else {
+            clear_selection_gesture(ws);
+            return;
+        };
+        let Some(rect) = self.pane_rect(ws, area, pane_id) else {
+            clear_selection_gesture(ws);
+            return;
+        };
+        let mut installed = false;
+        {
             let (vp, side) = self.px_to_point(ws, rect, ws.cursor.x as f32, ws.cursor.y as f32);
-            if let Some(pane) = ws.mux.focused()
+            if let Some(pane) = ws.mux.panes.get(&pane_id)
                 && let Ok(mut t) = pane.term.term.lock()
             {
                 // R1: store the grid-absolute point (viewport − display_offset)
@@ -7661,7 +7743,15 @@ impl App {
                 // drag trims the start cell when the press lands in its right half
                 // (Semantic/Lines ignore the side — they snap to token bounds).
                 t.selection = Some(kettle_core::Selection::new(ty, p, side));
+                installed = true;
             }
+        }
+        if installed && dragging {
+            ws.selecting = true;
+            ws.selecting_pane = Some(pane_id);
+            ws.selection_autoscroll_edge = 0;
+        } else {
+            clear_selection_gesture(ws);
         }
     }
 
@@ -8069,9 +8159,9 @@ impl App {
     }
 
     fn copy_selection(&mut self, ws: &mut WindowState) {
-        let sel = ws
-            .mux
-            .focused()
+        let target = ws.selecting_pane.or_else(|| ws.mux.active_focus());
+        let sel = target
+            .and_then(|id| ws.mux.panes.get(&id))
             .and_then(|p| {
                 p.term
                     .term
@@ -8108,20 +8198,28 @@ impl App {
         if !ws.selecting {
             return;
         }
-        if let Some(rect) = self.focused_rect(ws, area) {
-            let (vp, side) = self.px_to_point(ws, rect, ws.cursor.x as f32, ws.cursor.y as f32);
-            if let Some(pane) = ws.mux.focused()
-                && let Ok(mut t) = pane.term.term.lock()
-            {
-                // R1: convert to grid-absolute before the mutable `selection`
-                // borrow so the dragged end-point tracks scrollback too.
-                let p = viewport_point_to_grid(vp, t.grid().display_offset());
-                if let Some(sel) = t.selection.as_mut() {
-                    // The drag end carries the pointer's sub-cell side so the
-                    // boundary cell is included only once the pointer crosses its
-                    // midpoint (xterm/Alacritty parity) — not always.
-                    sel.update(p, side);
-                }
+        let Some(pane_id) = ws.selecting_pane else {
+            clear_selection_gesture(ws);
+            return;
+        };
+        let Some(rect) = self.pane_rect(ws, area, pane_id) else {
+            clear_selection_gesture(ws);
+            return;
+        };
+        let (vp, side) = self.px_to_point(ws, rect, ws.cursor.x as f32, ws.cursor.y as f32);
+        let Some(pane) = ws.mux.panes.get(&pane_id) else {
+            clear_selection_gesture(ws);
+            return;
+        };
+        if let Ok(mut t) = pane.term.term.lock() {
+            // R1: convert to grid-absolute before the mutable `selection`
+            // borrow so the dragged end-point tracks scrollback too.
+            let p = viewport_point_to_grid(vp, t.grid().display_offset());
+            if let Some(sel) = t.selection.as_mut() {
+                // The drag end carries the pointer's sub-cell side so the
+                // boundary cell is included only once the pointer crosses its
+                // midpoint (xterm/Alacritty parity) — not always.
+                sel.update(p, side);
             }
         }
     }
@@ -8171,7 +8269,9 @@ impl App {
             None => return false,
         };
         let (vp, side) = self.px_to_point(ws, rect, ws.cursor.x as f32, ws.cursor.y as f32);
-        if let Some(pane) = ws.mux.focused()
+        let pane_id = ws.mux.active_focus();
+        if let Some(pane_id) = pane_id
+            && let Some(pane) = ws.mux.panes.get(&pane_id)
             && let Ok(mut t) = pane.term.term.lock()
         {
             // R1: grid-absolute end-point so Shift+Click extends to the right
@@ -8184,6 +8284,8 @@ impl App {
                 // Enter drag mode so a follow-up mouse-move keeps extending —
                 // matches every Mac/Linux text-control: shift-click, then drag.
                 ws.selecting = true;
+                ws.selecting_pane = Some(pane_id);
+                ws.selection_autoscroll_edge = 0;
                 return true;
             }
         }
@@ -9984,15 +10086,14 @@ impl App {
         );
     }
 
-    /// `(row, col)` of the mouse within the focused pane, if any.
+    /// `(row, col)` of the mouse within `rect`.
     ///
     /// Clamped to the focused pane's live grid: a click in the right/bottom
     /// padding (the rect rounds up past an exact cell multiple) must report the
     /// LAST cell, never one past the edge. A mouse-tracking app that sees
     /// `col == cols` or `row == rows` mis-renders — xterm
     /// itself clamps the reported coordinate to the window.
-    fn cursor_cell(&self, ws: &WindowState) -> Option<(usize, usize)> {
-        let rect = self.focused_rect(ws, self.area(ws))?;
+    fn cursor_cell_in_rect(&self, ws: &WindowState, rect: Rect) -> (usize, usize) {
         // Mouse-tracking reports a cell, not a selection boundary — the sub-cell
         // side is irrelevant here, so discard it.
         let (p, _) = self.px_to_point(ws, rect, ws.cursor.x as f32, ws.cursor.y as f32);
@@ -10008,10 +10109,16 @@ impl App {
         let titlebar_h =
             self.pane_titlebar_inset(ws, ws.mux.layout(ws.mux.active, self.area(ws)).len());
         let (cols, rows) = self.grid_of_inset(ws, rect, titlebar_h);
-        Some((
+        (
             row.min(rows.saturating_sub(1)),
             col.min(cols.saturating_sub(1)),
-        ))
+        )
+    }
+
+    /// `(row, col)` of the mouse within the focused pane, if any.
+    fn cursor_cell(&self, ws: &WindowState) -> Option<(usize, usize)> {
+        let rect = self.focused_rect(ws, self.area(ws))?;
+        Some(self.cursor_cell_in_rect(ws, rect))
     }
 
     /// Scan the focused pane's visible grid for quick-select targets and
@@ -10066,10 +10173,16 @@ impl App {
     }
 
     fn focused_mode(&mut self, ws: &mut WindowState) -> kettle_core::TermMode {
-        ws.mux
-            .focused()
-            .and_then(|p| p.term.term.lock().ok().map(|t| *t.mode()))
+        let pane = ws.mux.active_focus();
+        pane.and_then(|pane| self.pane_mode(ws, pane))
             .unwrap_or(kettle_core::TermMode::empty())
+    }
+
+    fn pane_mode(&self, ws: &WindowState, pane_id: u64) -> Option<kettle_core::TermMode> {
+        ws.mux
+            .panes
+            .get(&pane_id)
+            .and_then(|p| p.term.term.lock().ok().map(|t| *t.mode()))
     }
 
     /// Forward a mouse event to the app via the active tracking protocol.
@@ -10087,6 +10200,24 @@ impl App {
     }
 
     fn send_mouse(&mut self, ws: &mut WindowState, btn: u8, pressed: bool, motion: bool) -> bool {
+        let Some(pane_id) = ws.mux.active_focus() else {
+            return false;
+        };
+        let Some(rect) = self.focused_rect(ws, self.area(ws)) else {
+            return false;
+        };
+        self.send_mouse_to(ws, pane_id, rect, btn, pressed, motion)
+    }
+
+    fn send_mouse_to(
+        &mut self,
+        ws: &mut WindowState,
+        pane_id: u64,
+        rect: Rect,
+        btn: u8,
+        pressed: bool,
+        motion: bool,
+    ) -> bool {
         // Shift held = "bypass mouse tracking, let kettle handle this
         // locally" — the xterm convention every modern terminal honors.
         // Without it, running htop/vim/tmux with mouse-mode locks out
@@ -10102,10 +10233,13 @@ impl App {
         // no mouse-tracking reports either. Returning false falls through to
         // kettle-local handling, so selection / scrollback still work for the
         // user — the same degradation VTE applies when input is disabled.
-        if ws.mux.focused().is_some_and(|p| p.read_only) {
+        if ws.mux.panes.get(&pane_id).is_some_and(|p| p.read_only) {
             return false;
         }
-        let (track, sgr) = input::mouse_tracking(self.focused_mode(ws));
+        let mode = self
+            .pane_mode(ws, pane_id)
+            .unwrap_or(kettle_core::TermMode::empty());
+        let (track, sgr) = input::mouse_tracking(mode);
         if track == input::MouseTracking::Off {
             return false;
         }
@@ -10123,26 +10257,27 @@ impl App {
                 return ws.mouse_btn.is_some();
             }
         }
-        let Some((row, col)) = self.cursor_cell(ws) else {
-            return false;
-        };
+        let (row, col) = self.cursor_cell_in_rect(ws, rect);
         // Cell-motion coalescing: a drag that stays inside one cell must not
         // re-report. xterm fires a 1002/1003 motion event only when the
         // pointer crosses into a new cell; without this a fast drag emits one
         // SGR report per pixel of travel, flooding the TUI.
         // Press/release always report (the guard is motion-only) and refresh
         // the baseline, so the next motion is compared against the right cell.
-        if !Self::motion_should_report(motion, ws.last_mouse_cell, (row, col)) {
+        let last = ws
+            .last_mouse_cell
+            .and_then(|(pane, row, col)| (pane == pane_id).then_some((row, col)));
+        if !Self::motion_should_report(motion, last, (row, col)) {
             return true;
         }
         let seq = input::mouse_encode(sgr, btn, pressed, motion, col, row, ws.mods);
-        if let Some(pane) = ws.mux.focused() {
+        if let Some(pane) = ws.mux.panes.get(&pane_id) {
             let result = pane.feed_input(&seq);
             if !result.is_queued() {
                 self.report_input_result(result);
             }
         }
-        ws.last_mouse_cell = Some((row, col));
+        ws.last_mouse_cell = Some((pane_id, row, col));
         true
     }
 
@@ -10740,11 +10875,16 @@ impl App {
             // below to anchor the selection's end to the new visible line.
             if ws.selecting {
                 let area = self.area(ws);
-                if let Some(rect) = self.focused_rect(ws, area) {
-                    let lines =
-                        selection_autoscroll_lines(ws.cursor.y as f32, rect.1, rect.1 + rect.3);
+                if let Some(pane_id) = ws.selecting_pane
+                    && let Some(rect) = self.pane_rect(ws, area, pane_id)
+                {
+                    let lines = if ws.selection_autoscroll_edge != 0 {
+                        i32::from(ws.selection_autoscroll_edge)
+                    } else {
+                        selection_autoscroll_lines(ws.cursor.y as f32, rect.1, rect.1 + rect.3)
+                    };
                     if lines != 0
-                        && let Some(p) = ws.mux.focused()
+                        && let Some(p) = ws.mux.panes.get(&pane_id)
                         && let Ok(mut t) = p.term.term.lock()
                     {
                         t.scroll_display(Scroll::Delta(lines));
@@ -10755,6 +10895,8 @@ impl App {
                         // scroll, not stuck on the original click-time row.
                         self.update_selection(ws, area);
                     }
+                } else {
+                    clear_selection_gesture(ws);
                 }
             }
             self.update_search(ws);
@@ -11237,7 +11379,7 @@ impl App {
         // A modal takes exclusive pointer ownership. Cancel any terminal drag
         // already in flight so its later motion/release cannot emit mouse
         // protocol bytes behind Search.
-        ws.selecting = false;
+        clear_selection_gesture(ws);
         ws.mouse_btn = None;
         ws.last_mouse_cell = None;
         ws.scrollbar_drag_offset = None;
@@ -11885,7 +12027,7 @@ impl App {
         if ws.selecting && self.cfg.copy_on_select {
             self.copy_selection(ws);
         }
-        ws.selecting = false;
+        clear_selection_gesture(ws);
         ws.scrollbar_drag_offset = None;
         ws.dragging_split = None;
         ws.mouse_btn = None;
@@ -13111,7 +13253,7 @@ impl App {
                 }
                 let was_last = ws.mux.close_focused();
                 if was_last {
-                    self.pending_window_close = true;
+                    self.request_window_close(ws.seq);
                 } else {
                     // Explicit redraw + focus-event
                     // refresh after a successful close-pane. Previously
@@ -13169,7 +13311,7 @@ impl App {
                 // helper.
                 let closing_idx = ws.mux.active;
                 if ws.mux.close_tab() {
-                    self.pending_window_close = true;
+                    self.request_window_close(ws.seq);
                 }
                 self.fire_tab_close_event(ws, closing_idx);
             }
@@ -14879,7 +15021,7 @@ impl App {
             ws.mux.close_window();
         }
         self.save_session(ws);
-        self.pending_window_close = true;
+        self.request_window_close(ws.seq);
     }
 
     /// Raise the `ask-before-closing` prompt if the policy calls for one.
@@ -14934,7 +15076,7 @@ impl App {
         &mut self,
         ws: &mut WindowState,
         action: ConfirmAction,
-        // C4: closes route through pending_window_close now, so the loop
+        // C4: closes route through the window-scoped pending set, so the loop
         // handle is unused — kept so the dispatch signature stays uniform
         // with the other key handlers.
         _event_loop: &winit::event_loop::ActiveEventLoop,
@@ -14956,7 +15098,7 @@ impl App {
         // which is how the original went missing. `resize_all` is what every
         // action already pays unconditionally, so no arm needs to opt out —
         // except a window on its way out, which has nothing left to resize.
-        if !self.pending_window_close {
+        if !self.window_close_pending(ws.seq) {
             self.resize_all(ws);
         }
     }
@@ -14986,7 +15128,7 @@ impl App {
                 self.fire_tab_close_event(ws, idx);
                 self.save_session(ws);
                 if last {
-                    self.pending_window_close = true;
+                    self.request_window_close(ws.seq);
                     return;
                 }
                 if let Some(w) = &ws.window {
@@ -15026,7 +15168,7 @@ impl App {
                 // cache + focus id are stale until a frame is scheduled).
                 if was_last {
                     self.save_session(ws);
-                    self.pending_window_close = true;
+                    self.request_window_close(ws.seq);
                     return;
                 }
                 self.save_session(ws);
@@ -16589,14 +16731,10 @@ impl App {
             );
         };
         let resp = self.ctl_send_mouse_for_window(&mut target, event_loop, req);
-        // Audit (v2.26.0): if the inner handler closed the target's last tab it
-        // set the App-global `pending_window_close`. That flag is normally
-        // consumed by `finish_window_dispatch` against the CHECKED-OUT (focused)
-        // window — which here would close the WRONG window and orphan this
-        // emptied target. Handle the target's close locally: drop it (its panes'
-        // PTYs die with the Mux) instead of re-inserting it.
-        if self.pending_window_close {
-            self.pending_window_close = false;
+        // A synthetic event can close this mapped target's last tab. Consume
+        // only that window's request here; the caller remains checked out and
+        // must not inherit the target's close.
+        if take_window_close_request(&mut self.pending_window_closes, target_seq) {
             if self
                 .torn_drag
                 .as_ref()
@@ -16862,7 +17000,7 @@ impl App {
                     if ws.mux.close_tab_at(seg.idx) {
                         self.fire_tab_close_event(ws, closing_idx);
                         self.save_session(ws);
-                        self.pending_window_close = true;
+                        self.request_window_close(ws.seq);
                     } else {
                         self.fire_tab_close_event(ws, closing_idx);
                         self.note_focus_change(ws, pre);
@@ -16923,7 +17061,7 @@ impl App {
             if ws.selecting && self.cfg.copy_on_select {
                 self.copy_selection(ws);
             }
-            ws.selecting = false;
+            clear_selection_gesture(ws);
             ws.scrollbar_drag_offset = None;
             ws.dragging_split = None;
             ws.tab_drag_active = false;
@@ -17104,12 +17242,17 @@ impl App {
             // mid-gesture Ctrl+wheel scroll the pane instead of zooming it.
             return true;
         }
+        let Some((wheel_pane, wheel_rect)) = self.wheel_target(ws) else {
+            return true;
+        };
         // Shift+wheel always scrolls the kettle scrollback even
         // when a TUI has mouse-tracking on (xterm convention).
         // Without this bypass, you can't scroll back through
         // your tmux/htop session — the TUI swallows every wheel
         // notch.
-        let mode = self.focused_mode(ws);
+        let mode = self
+            .pane_mode(ws, wheel_pane)
+            .unwrap_or(kettle_core::TermMode::empty());
         let (track, _) = input::mouse_tracking(mode);
         let track_active = track != input::MouseTracking::Off && !ws.mods.shift_key();
         if track_active {
@@ -17120,13 +17263,13 @@ impl App {
             if steps.lines != 0 {
                 let btn = if steps.lines > 0 { 64 } else { 65 };
                 for _ in 0..steps.lines.unsigned_abs().min(8) {
-                    reported |= self.send_mouse(ws, btn, true, false);
+                    reported |= self.send_mouse_to(ws, wheel_pane, wheel_rect, btn, true, false);
                 }
             }
             if steps.cols != 0 {
                 let btn = if steps.cols > 0 { 66 } else { 67 };
                 for _ in 0..steps.cols.unsigned_abs().min(8) {
-                    reported |= self.send_mouse(ws, btn, true, false);
+                    reported |= self.send_mouse_to(ws, wheel_pane, wheel_rect, btn, true, false);
                 }
             }
             if reported {
@@ -17143,7 +17286,8 @@ impl App {
         {
             let result = ws
                 .mux
-                .focused()
+                .panes
+                .get(&wheel_pane)
                 .map(|pane| pane.feed_input(&bytes))
                 .unwrap_or(PaneInputResult::Queued);
             self.report_input_result(result);
@@ -17152,7 +17296,7 @@ impl App {
             }
         }
         if steps.lines != 0 {
-            if let Some(pane) = ws.mux.focused()
+            if let Some(pane) = ws.mux.panes.get(&wheel_pane)
                 && let Ok(mut t) = pane.term.term.lock()
             {
                 t.scroll_display(Scroll::Delta(steps.lines));
@@ -22216,7 +22360,7 @@ impl App {
                 // so no event-loop exit). Session-save pairing: every other
                 // window-close path saves right before flagging the close.
                 self.save_session(ws);
-                self.pending_window_close = true;
+                self.request_window_close(ws.seq);
             }
         } else {
             // Manual-follow: `ws` is the SOURCE (capture holder); the torn
@@ -23315,6 +23459,17 @@ impl App {
             WindowEvent::CursorLeft { .. } => {
                 let prev = std::mem::take(&mut ws.detach_drag);
                 ws.detach_drag = prev.on_cursor_leave_window();
+                if ws.selecting
+                    && let Some(window) = &ws.window
+                {
+                    let size = window.inner_size();
+                    ws.selection_autoscroll_edge = selection_leave_edge(
+                        ws.cursor.x as f32,
+                        ws.cursor.y as f32,
+                        size.width as f32,
+                        size.height as f32,
+                    );
+                }
                 // v2.26.0: pointer left the window → drop the scrollbar hover so
                 // the overlay bar relaxes to its dim state.
                 ws.scrollbar_hover = false;
@@ -23325,12 +23480,14 @@ impl App {
             WindowEvent::CursorEntered { .. } => {
                 let prev = std::mem::take(&mut ws.detach_drag);
                 ws.detach_drag = prev.on_cursor_reenter_window();
+                ws.selection_autoscroll_edge = 0;
                 if let Some(w) = &ws.window {
                     w.request_redraw();
                 }
             }
             WindowEvent::CursorMoved { position, .. } => {
                 ws.cursor = position;
+                ws.selection_autoscroll_edge = 0;
                 // v2.19.0 (tear-off UX): client pointer events do NOT reach
                 // the torn window while the OS moves it (Windows: NC modal
                 // loop; X11: the WM holds an active pointer grab). The first
@@ -23355,7 +23512,7 @@ impl App {
                     self.finalize_torn_drag(ws, commit);
                     // A committed merge empties this window — it is closing;
                     // don't process the event against an empty mux.
-                    if self.pending_window_close {
+                    if self.window_close_pending(ws.seq) {
                         return;
                     }
                 }
@@ -23902,7 +24059,7 @@ impl App {
                                 // already save; this one was missed.
                                 self.fire_tab_close_event(ws, closing_idx);
                                 self.save_session(ws);
-                                self.pending_window_close = true;
+                                self.request_window_close(ws.seq);
                                 return;
                             }
                             self.fire_tab_close_event(ws, closing_idx);
@@ -24200,7 +24357,7 @@ impl App {
                     if ws.selecting && self.cfg.copy_on_select {
                         self.copy_selection(ws);
                     }
-                    ws.selecting = false;
+                    clear_selection_gesture(ws);
                     ws.search.dragging_editor = false;
                     ws.scrollbar_drag_offset = None;
                     // End any split-divider drag on left-button up.
@@ -24388,7 +24545,7 @@ impl App {
                     if ws.selecting && self.cfg.copy_on_select {
                         self.copy_selection(ws);
                     }
-                    ws.selecting = false;
+                    clear_selection_gesture(ws);
                     ws.scrollbar_drag_offset = None;
                     ws.scrollbar_hover = false;
                     ws.tab_drag_active = false;
@@ -24570,7 +24727,7 @@ impl App {
                     self.finalize_torn_drag(ws, commit);
                     // A committed merge empties this window — it is closing;
                     // don't process the key against an empty mux.
-                    if self.pending_window_close {
+                    if self.window_close_pending(ws.seq) {
                         return;
                     }
                 }
@@ -24879,7 +25036,7 @@ impl App {
         self.hoover_groups(ws);
         if mux_empty && ws.window.is_some() {
             self.save_session(ws);
-            self.pending_window_close = true;
+            self.request_window_close(ws.seq);
             return None;
         }
         ws.search_queries
@@ -24912,7 +25069,7 @@ impl App {
             (Some(wait), None) | (None, Some(wait)) => Some(wait),
             (None, None) => None,
         };
-        if self.pending_window_close || self.quit_requested {
+        if self.window_close_pending(ws.seq) || self.quit_requested {
             return None;
         }
         // Once the GPU device is lost we no longer paint (see the redraw guard).
@@ -25174,8 +25331,12 @@ impl App {
         // until the user wiggled the mouse.
         let autoscroll_active = !render_hidden && ws.selecting && {
             let area = self.area(ws);
-            self.focused_rect(ws, area)
-                .map(|r| selection_autoscroll_lines(ws.cursor.y as f32, r.1, r.1 + r.3) != 0)
+            ws.selecting_pane
+                .and_then(|id| self.pane_rect(ws, area, id))
+                .map(|r| {
+                    ws.selection_autoscroll_edge != 0
+                        || selection_autoscroll_lines(ws.cursor.y as f32, r.1, r.1 + r.3) != 0
+                })
                 .unwrap_or(false)
         };
         // A deferred (coalesced) output paint becomes due
@@ -25440,7 +25601,7 @@ mod modal_discipline_guard {
             .find("if last {")
             .expect("confirmed tab close must exit on the last tab");
         // Scoped to the TAB arm. Searching the whole dispatch for
-        // `pending_window_close` passed even with the assignment deleted from
+        // `request_window_close` passed even with the call deleted from
         // this arm, because the pane arm below contains one too.
         let tab_arm = &body[tab_close..];
         let tab_arm = &tab_arm[..tab_arm
@@ -25448,7 +25609,7 @@ mod modal_discipline_guard {
             .unwrap_or(tab_arm.len())];
         assert!(
             body.contains("ws.mux.tab_index_of_any_pane(&panes)")
-                && tab_arm.contains("self.pending_window_close = true;")
+                && tab_arm.contains("self.request_window_close(ws.seq);")
                 && tab_close < tab_event
                 && tab_event < tab_exit,
             "a confirmed tab close must re-resolve its target, emit the event \
@@ -25617,7 +25778,7 @@ mod modal_discipline_guard {
              pre-close size"
         );
         assert!(
-            wrapper.contains("if !self.pending_window_close"),
+            wrapper.contains("if !self.window_close_pending(ws.seq)"),
             "a window on its way out has nothing left to resize"
         );
         assert!(
@@ -28760,7 +28921,7 @@ mod tests {
             "self.flush_recorder_output(ws);",
             "rec.begin_finish();",
             "self.save_session(ws);",
-            "self.pending_window_close = true;",
+            "self.request_window_close(ws.seq);",
         ] {
             assert!(
                 teardown.contains(expected),
@@ -28831,7 +28992,7 @@ mod tests {
             .expect("Focused event arm");
         assert!(
             focused_arm.contains("if ws.selecting && self.cfg.copy_on_select {")
-                && focused_arm.contains("ws.selecting = false;")
+                && focused_arm.contains("clear_selection_gesture(ws);")
                 && focused_arm.contains("ws.search.dragging_editor = false;")
                 && focused_arm.contains("ws.tab_drag_active = false;\n                    ws.tab_drag_press = None;\n                    ws.tab_pressed_idx = None;\n                    // A focus loss also ends any split-divider drag.\n                    ws.dragging_split = None;\n                    ws.mouse_btn = None;"),
             "the Focused `!f` arm must disarm the latched drag flags"
@@ -28870,10 +29031,10 @@ mod tests {
     fn mouse_and_focus_reports_use_chronological_user_input() {
         let source = production_source();
         let mouse = source
-            .split("fn send_mouse(")
+            .split("fn send_mouse_to(")
             .nth(1)
             .and_then(|body| body.split("\n    fn ").next())
-            .expect("mouse sender");
+            .expect("target-aware mouse sender");
         assert!(mouse.contains("let result = pane.feed_input(&seq);"));
         assert!(!mouse.contains("queue_protocol_reply"));
 
@@ -29627,7 +29788,7 @@ mod tests {
     }
 
     /// C4 (multi-window) drift guard. A window close must NOT exit the event
-    /// loop directly — it sets `pending_window_close` and the single funnel
+    /// loop directly — it requests the exact window id and the single funnel
     /// (`finish_window_dispatch`) drops the window, exiting only when the
     /// windows map is empty. The only legitimate direct exits are the funnel
     /// itself (close + quit arms) and `resumed_inner`'s window-1 startup
@@ -29644,18 +29805,38 @@ mod tests {
             n_exits, 6,
             "expected exactly 6 event_loop.exit() sites (2 in \
              finish_window_dispatch + 4 resumed_inner startup failures); a \
-             new one must route through pending_window_close instead"
+             new one must route through request_window_close instead"
         );
         // The close paths all flag instead of exiting: keybind CloseTab /
         // ClosePane / CloseWindow, the three confirm-dialog arms, the OS
         // close button, the tab-bar ✕ on the last tab, and the reap path.
-        let flag_needle = concat!("self.pending_window_close", " = true;");
+        let flag_needle = concat!("self.request_window_close", "(ws.seq);");
         let n_flags = src.matches(flag_needle).count();
         assert!(
             n_flags >= 9,
-            "expected the 9 window-close paths to set pending_window_close \
+            "expected the 9 window-close paths to request their own window close \
              (found {n_flags})"
         );
+        assert!(
+            src.contains("pending_window_closes: std::collections::BTreeSet<u64>")
+                && src
+                    .contains("if take_window_close_request(&mut self.pending_window_closes, seq)"),
+            "close requests must be keyed and consumed by the dispatched window id"
+        );
+    }
+
+    #[test]
+    fn one_windows_close_request_cannot_be_consumed_by_a_sibling() {
+        use super::take_window_close_request;
+
+        let mut pending = std::collections::BTreeSet::from([20]);
+        assert!(!take_window_close_request(&mut pending, 10));
+        assert!(
+            pending.contains(&20),
+            "window 10 must leave window 20 armed"
+        );
+        assert!(take_window_close_request(&mut pending, 20));
+        assert!(pending.is_empty());
     }
 
     #[test]
@@ -30520,6 +30701,41 @@ mod tests {
         assert_eq!(selection_autoscroll_lines(205.0, 100.0, 200.0), -1);
         assert_eq!(selection_autoscroll_lines(220.0, 100.0, 200.0), -2);
         assert_eq!(selection_autoscroll_lines(280.0, 100.0, 200.0), -3);
+    }
+
+    #[test]
+    fn selection_leave_latches_only_the_nearest_vertical_edge() {
+        use super::selection_leave_edge;
+
+        assert_eq!(selection_leave_edge(400.0, 1.0, 800.0, 600.0), 1);
+        assert_eq!(selection_leave_edge(400.0, 599.0, 800.0, 600.0), -1);
+        assert_eq!(selection_leave_edge(1.0, 300.0, 800.0, 600.0), 0);
+        assert_eq!(selection_leave_edge(799.0, 300.0, 800.0, 600.0), 0);
+        assert_eq!(selection_leave_edge(1.0, 1.0, 800.0, 600.0), 1);
+        assert_eq!(selection_leave_edge(799.0, 599.0, 800.0, 600.0), -1);
+        assert_eq!(selection_leave_edge(f32::NAN, 1.0, 800.0, 600.0), 0);
+        assert_eq!(selection_leave_edge(1.0, 1.0, 0.0, 600.0), 0);
+    }
+
+    #[test]
+    fn wheel_target_follows_hover_without_changing_focus_and_falls_back() {
+        use super::wheel_target_at;
+
+        let layout = [
+            (10, (0.0, 0.0, 400.0, 600.0)),
+            (20, (400.0, 0.0, 400.0, 600.0)),
+        ];
+        assert_eq!(
+            wheel_target_at(&layout, Some(10), 650.0, 300.0),
+            Some(layout[1]),
+            "the non-focused pane under the pointer must own the wheel"
+        );
+        assert_eq!(
+            wheel_target_at(&layout, Some(10), 900.0, 300.0),
+            Some(layout[0]),
+            "outside pane geometry must preserve focused-pane behavior"
+        );
+        assert_eq!(wheel_target_at(&layout, None, 900.0, 300.0), None);
     }
 
     #[test]

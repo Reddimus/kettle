@@ -2074,6 +2074,7 @@ dependencies = [
  "thiserror 2.0.19",
  "ureq",
  "windows-sys 0.61.2",
+ "winresource",
  "zip",
 ]
 

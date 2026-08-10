@@ -910,6 +910,27 @@ interaction-smoke:
 interaction-smoke:
     python scripts/check-live-ui-smoke.py --cargo-release interaction
 
+# Focus only the cross-pane hover-wheel contract and require no surface-copy
+# support. Useful on virtual GLES adapters that render normally but cannot copy
+# a live swapchain image into the screenshot pipeline.
+[unix]
+hover-wheel-smoke:
+    python3 scripts/check-live-ui-smoke.py --cargo-release hover-wheel
+
+[windows]
+hover-wheel-smoke:
+    python scripts/check-live-ui-smoke.py --cargo-release hover-wheel
+
+# Terminate one detached window's child through the PTY reap path and prove the
+# sibling OS window and its pane remain live.
+[unix]
+window-close-isolation-smoke:
+    python3 scripts/check-live-ui-smoke.py --cargo-release window-close-isolation
+
+[windows]
+window-close-isolation-smoke:
+    python scripts/check-live-ui-smoke.py --cargo-release window-close-isolation
+
 # Reproduce a Windows Precision Touchpad gesture: a stream of sub-detent wheel
 # deltas (the units winit actually reports) instead of pre-quantized whole
 # lines. Guards the v2.41.0 fix where every such event rounded to zero on its

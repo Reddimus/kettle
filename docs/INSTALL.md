@@ -5,14 +5,16 @@
 | Platform | Arch | Support |
 |---|---|---|
 | Linux | x86_64 | **Tier 1** — glibc 2.35+, prebuilt binary + one-line installer |
-| Linux | aarch64 | **Tier 1 distribution** — glibc 2.35+, cross-built prebuilt binary + one-line installer; native ARM UI/runtime CI is not yet available |
+| Linux | aarch64 | **Tier 1 distribution** — glibc 2.35+, cross-built prebuilt binary + one-line installer; native ARM UI/runtime is manually verified but not yet in CI |
 | macOS | universal (Intel + Apple Silicon) | **Tier 1** — `.app` bundle (unsigned) |
 | Windows 11 | x86_64 | **Tier 1** — `.zip` + `install.ps1` |
+| Windows 11 | aarch64 | **Tier 2** — native source build verified; no prebuilt archive |
 | Linux/other | armv7l, i686, riscv64, … | **Tier 2** — source build only, *experimental* (wgpu/glyphon have no tier-1 GPU support on these targets) |
 
 Tier-1 targets are required before a release can publish. Linux aarch64 is
-cross-built and package/ABI validated on x86_64 CI; do not interpret that gate
-as a native ARM GPU/runtime pass. Every archive has a
+cross-built and package/ABI validated on x86_64 CI; a Parallels Ubuntu ARM
+guest supplies additional native build, PTY, software/virtual-GPU, and live-UI
+evidence, but is a manual check rather than a release gate. Every archive has a
 SHA-256 sidecar; Windows and Linux update metadata is additionally signed by a
 dedicated Ed25519 release key. Tier-2 targets have no prebuilt binary;
 `scripts/install-online.sh` points you at a source build (or `nix run
@@ -452,8 +454,22 @@ cd kettle
 cargo run --release
 ```
 
-macOS and Windows need only a stable Rust toolchain (`rustup`) — no extra
-system packages. Minimum supported Rust version is **1.89** (Cargo.toml
+macOS needs only a stable Rust toolchain (`rustup`). Windows needs the Visual
+Studio 2022 Build Tools **Desktop development with C++** workload and a Windows
+SDK in addition to Rust. A native Windows ARM64 build also needs the **MSVC
+ARM64 build tools** and **C++ Clang tools for Windows** components: `ring` uses
+the ARM64-hosted `clang.exe`, while other native crates use the ARM64 MSVC
+linker and libraries. Run Cargo from an ARM64 Developer Command Prompt, or
+initialize an ordinary shell first:
+
+```bat
+call "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\Common7\Tools\VsDevCmd.bat" -arch=arm64 -host_arch=arm64
+rustup target add aarch64-pc-windows-msvc
+cargo build --locked --workspace --all-targets
+```
+
+The optional `just` gate runner has a native ARM64 package (`winget install
+Casey.Just`). Minimum supported Rust version is **1.89** (Cargo.toml
 `rust-version`); `rustup update stable` will always satisfy it.
 
 ## Verifying your build

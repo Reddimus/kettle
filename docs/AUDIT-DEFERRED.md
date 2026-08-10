@@ -64,8 +64,9 @@ tracked here so they are not lost.
 - ~~**Surface malformed-config diagnostics in the GUI.**~~ Done in v2.36.5:
   live reload now fires an edge-triggered desktop notification listing the
   ignored malformed lines (`should_notify_malformed` + `load_reloaded_config`).
-- Keybind-capture should warn when reassigning an in-use chord; Settings
-  GPU/padding writes should surface a persist failure. Search now has a
+- ~~**Keybind-capture conflict and Settings persistence feedback.**~~ Fixed:
+  rebinding an in-use chord requires confirmation, and failed Settings writes
+  are surfaced instead of being silently treated as saved. Search now has a
   grapheme-aware editor with selection, caret/word movement, Home/End, and
   bounded paste; the command palette, layout picker, and other older text
   overlays still need that editor behavior consolidated behind one shared
@@ -128,15 +129,17 @@ tracked here so they are not lost.
   looking at a machine that had run the suite hundreds of times made it visible.
 
 
-- **Nine live-UI scenarios still run in no automated gate.**
+- **Eleven live-UI scenarios still run in no automated gate.**
   `scripts/check-live-ui-smoke.py` launches a real windowed kettle and drives it
-  through ten scenarios (`tabbar`, `tab-title`, `tearoff`, `split-titlebar`,
+  through twelve scenarios (`tabbar`, `tab-title`, `tearoff`, `split-titlebar`,
   `zoom-keybind`, `underline`, `agent-tui`, `search-history`, `interaction`,
-  `touchpad-scroll`). `search-history` is now the first automated scenario; the
-  other nine remain manual. Its other three `case` values do less: `all` runs
-  those ten, `session-check` only asserts that a graphical session is usable and
-  returns without launching kettle, and `self-test` exercises the helper's pure
-  functions.
+  `hover-wheel`, `window-close-isolation`, `touchpad-scroll`). `search-history`
+  is now the first automated scenario; the other eleven remain manual. Its
+  other three `case` values do less:
+  `all` runs the ten broad scenarios (the interaction walk already includes
+  `hover-wheel`), `session-check` only asserts that a graphical session is
+  usable and returns without launching kettle, and `self-test` exercises the
+  helper's pure functions.
 
   This closes the narrower gap that mattered: CI previously launched a window
   under Xvfb but never spoke to a running kettle over ctl or asserted rendered

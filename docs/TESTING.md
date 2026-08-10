@@ -76,6 +76,27 @@ hardware or software adapter are. Windows uses DX12/WARP or another available
 wgpu backend; macOS uses Metal. The native PTY checks also need permission to
 create `/dev/ptmx` children on Unix or a ConPTY on Windows.
 
+Native ARM guest checks complement, but do not replace, the hosted release
+matrix. The Parallels Ubuntu ARM guest can build and run the aarch64 product,
+its PTY tests, and live Wayland scenarios. The Parallels Windows 11 ARM guest
+can build the complete workspace natively once its Visual Studio ARM64 MSVC and
+LLVM/Clang components are loaded with `VsDevCmd.bat -arch=arm64
+-host_arch=arm64`; it exercises ARM64 ConPTY and the Parallels virtual GPU. It
+does not produce or validate the shipped x86_64 Windows archive, which remains
+the job of hosted Windows CI and the physical x86_64 Windows machine. Record
+the exact commit and adapter for each guest run, then stop the guest when the
+batch is complete.
+
+Run Windows tests as the ordinary signed-in user, not from an elevated shell.
+The `kettle-update` unit-test harness deliberately embeds an `asInvoker`
+manifest: without it, Windows installer detection sees `update` in the
+generated executable name and refuses to start it with error 740. This is a
+build-policy regression if it returns, not a reason to make Cargo
+administrator-only. Because no native Windows ARM archive is published, its
+unit-test build explicitly exercises the shipped x86_64 update/package
+contract; the production ARM library continues to report the managed updater
+as unsupported.
+
 Read test output for `no GPU adapter ... skipped` and `no PTY ...` messages.
 Those messages leave the portable suite green by design; record the missing
 coverage instead of treating the exit code alone as platform validation.
@@ -88,6 +109,16 @@ whole test binary down with `STATUS_ACCESS_VIOLATION` — reported against
 `kettle-render` with no test having failed, because the fault is in the driver
 rather than in Rust. A new test that creates an adapter, device, or surface
 belongs behind the same guard.
+
+Every renderer-owned device request uses the same limit policy as the live
+window. Kettle requests the adapter's full 2D texture dimension so a large
+high-DPI surface remains legal, but clamps every other WebGPU default to the
+adapter's advertised value. This matters on virtual GLES adapters which expose
+graphics and presentation while advertising zero compute workgroups: Kettle
+has no compute pipelines, so a default request for 65,535 workgroups must not
+reject an otherwise usable device. The pure limit regression is portable; a
+Parallels guest run is still required to prove the real virtual adapter creates
+the device and renders.
 
 Performance-harness changes first run GUI-free fixtures under both supported
 PowerShell hosts:
@@ -480,7 +511,9 @@ discipline here.
   `cap_axis_cells` GPU-texture safety guard, color
   resolve / dim / minimum-contrast WCAG math, the offscreen GPU
   pipeline self-test (real wgpu pipelines compile + render through
-  Vulkan/Metal/DX12), pure native-backend-order/fallback tests, and isolated
+  Vulkan/Metal/DX12/GLES), pure native-backend-order/fallback tests, uniform
+  device-limit clamping for virtual graphics adapters with no compute queues,
+  and isolated
   native Windows checks: the Auto test selects DX12 without first constructing
   an all-backend/Vulkan instance, the DX12-only stale-pin test preserves the
   platform-preferred adapter, and the explicit-Vulkan test works without a
@@ -1238,6 +1271,19 @@ These need a real display and are run by hand (or on real hardware):
     follows the visible scrolled viewport, modal state is reported by
     `ui_geometry`, title-edit chrome does not intersect the terminal content
     rect, and resize updates the focused pane grid.
+    `just hover-wheel-smoke` extracts the split-wheel portion as a focused
+    control-plane scenario: it fills two independent panes, keeps keyboard
+    focus on the left, hovers the right, and proves only the right viewport
+    moves. It deliberately requires no live-surface screenshot, so a virtual
+    GLES adapter that renders but lacks swapchain `COPY_SRC` can still supply
+    native pointer-routing evidence; the broad interaction scenario retains
+    its strict screenshot assertions.
+    `just window-close-isolation-smoke` detaches a tab into a second native
+    window, exits only that window's shell, and then proves the original window
+    and pane still accept terminal input. The child program is deliberately the
+    native shell: Kettle receives the same PTY exit/reap event whether the child
+    was a shell, Codex, or another TUI, while the shell keeps the check
+    deterministic and credential-independent.
   - **`kettle exec`**: `kettle exec -- echo ok` — output is piped to stdout and
     the child's exit code propagates (`kettle exec -- sh -c 'exit 7'` → 7).
     On Unix/WSL, also verify stdin-driven one-shots:
@@ -1341,7 +1387,8 @@ These need a real display and are run by hand (or on real hardware):
     kettle_run to echo a marker"` — Claude Code drives the MCP tools end-to-end.
   - **Live renderer/UI diagnostics**: on a Linux desktop or unlocked macOS Aqua
     session run
-    `just live-render-smoke`, `just interaction-smoke`, `just tabbar-click-smoke`,
+    `just live-render-smoke`, `just interaction-smoke`, `just hover-wheel-smoke`,
+    `just tabbar-click-smoke`,
     `just pane-drag-smoke`, `just tearoff-smoke`, `just tab-title-smoke`,
     `just split-titlebar-smoke`,
     `just zoom-keybind-smoke`, and `just underline-scroll-smoke`. Artifacts land under `target/diagnostics/*`
