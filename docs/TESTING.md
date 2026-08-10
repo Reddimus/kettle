@@ -1271,6 +1271,13 @@ These need a real display and are run by hand (or on real hardware):
     follows the visible scrolled viewport, modal state is reported by
     `ui_geometry`, title-edit chrome does not intersect the terminal content
     rect, and resize updates the focused pane grid.
+    `just hover-wheel-smoke` extracts the split-wheel portion as a focused
+    control-plane scenario: it fills two independent panes, keeps keyboard
+    focus on the left, hovers the right, and proves only the right viewport
+    moves. It deliberately requires no live-surface screenshot, so a virtual
+    GLES adapter that renders but lacks swapchain `COPY_SRC` can still supply
+    native pointer-routing evidence; the broad interaction scenario retains
+    its strict screenshot assertions.
   - **`kettle exec`**: `kettle exec -- echo ok` — output is piped to stdout and
     the child's exit code propagates (`kettle exec -- sh -c 'exit 7'` → 7).
     On Unix/WSL, also verify stdin-driven one-shots:
@@ -1374,7 +1381,8 @@ These need a real display and are run by hand (or on real hardware):
     kettle_run to echo a marker"` — Claude Code drives the MCP tools end-to-end.
   - **Live renderer/UI diagnostics**: on a Linux desktop or unlocked macOS Aqua
     session run
-    `just live-render-smoke`, `just interaction-smoke`, `just tabbar-click-smoke`,
+    `just live-render-smoke`, `just interaction-smoke`, `just hover-wheel-smoke`,
+    `just tabbar-click-smoke`,
     `just pane-drag-smoke`, `just tearoff-smoke`, `just tab-title-smoke`,
     `just split-titlebar-smoke`,
     `just zoom-keybind-smoke`, and `just underline-scroll-smoke`. Artifacts land under `target/diagnostics/*`

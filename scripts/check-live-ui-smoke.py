@@ -5750,6 +5750,160 @@ def run_search_history(kettle: str, root: Path) -> Path:
     return out
 
 
+def exercise_hovered_pane_wheel(live: LiveKettle, out: Path) -> Dict[str, int]:
+    """Prove terminal wheel routing follows hover without moving focus."""
+    split_geo = live.json_ctl("ui_geometry")
+    split_bars = sorted(
+        split_geo.get("pane_titlebars", []),  # type: ignore[union-attr]
+        key=lambda bar: float(bar["pane_rect"]["x"]),
+    )
+    if len(split_bars) != 2:
+        raise SystemExit(
+            f"hover-wheel smoke: expected two active split titlebars, got {split_bars}"
+        )
+    left_bar, right_bar = split_bars
+    left_id = int(left_bar["pane"])
+    right_id = int(right_bar["pane"])
+
+    for pane_id, prefix in [(left_id, "LEFT"), (right_id, "RIGHT")]:
+        done = f"KETTLE_HOVER_WHEEL_{prefix}_DONE"
+        if platform.system() == "Windows":
+            fill = (
+                "$esc=[char]27; [Console]::Write($esc + '[2J' + $esc + '[3J' + $esc + '[H'); "
+                f"1..140 | ForEach-Object {{ 'KETTLE_HOVER_WHEEL_{prefix}_{{0:D3}}' -f $_ }}; "
+                f"Write-Output {done}"
+            )
+        else:
+            fill = (
+                "printf '\\033[2J\\033[3J\\033[H'; "
+                f"for i in $(seq 1 140); do printf 'KETTLE_HOVER_WHEEL_{prefix}_%03d\\n' \"$i\"; done; "
+                f"printf '{done}\\n'"
+            )
+        live.ctl("send_text", params={"pane": pane_id, "text": fill})
+        live.ctl("send_keys", params={"pane": pane_id, "keys": ["enter"]})
+        waited = json.loads(
+            live.ctl(
+                "wait_for",
+                params={
+                    "pane": pane_id,
+                    "text": done,
+                    "timeout_ms": 12000,
+                    "quiet_ms": 200,
+                },
+                raw=True,
+                timeout=17.0,
+            ).stdout
+        )
+        if not waited.get("matched"):
+            raise SystemExit(
+                f"hover-wheel smoke: pane {pane_id} did not build scrollback: {waited}"
+            )
+
+    def pane_center(bar: Dict[str, object]) -> Tuple[float, float]:
+        rect = bar["pane_rect"]  # type: ignore[index]
+        return rect_center(rect)  # type: ignore[arg-type]
+
+    left_x, left_y = pane_center(left_bar)
+    right_x, right_y = pane_center(right_bar)
+    live.ctl(
+        "send_mouse",
+        params={"event": "click", "x": left_x, "y": left_y, "button": "left"},
+    )
+    time.sleep(0.15)
+    focused = live.json_ctl("list_panes")
+    focused_ids = [
+        int(pane["id"])
+        for pane in focused.get("panes", [])
+        if pane.get("focused")
+    ]
+    if focused_ids != [left_id]:
+        raise SystemExit(
+            f"hover-wheel smoke: could not focus left split {left_id}: {focused_ids}"
+        )
+
+    live.ctl("send_mouse", params={"event": "move", "x": right_x, "y": right_y})
+    live.ctl("send_mouse", params={"event": "wheel", "wheel_lines": 24})
+    time.sleep(0.2)
+    left_scrolled = live.json_ctl("read_screen", {"pane": left_id})
+    right_scrolled = live.json_ctl("read_screen", {"pane": right_id})
+    focused_after_wheel = live.json_ctl("list_panes")
+    (out / "hover-wheel-left.screen.json").write_text(
+        json.dumps(left_scrolled, indent=2) + "\n"
+    )
+    (out / "hover-wheel-right.screen.json").write_text(
+        json.dumps(right_scrolled, indent=2) + "\n"
+    )
+    (out / "hover-wheel-focus.json").write_text(
+        json.dumps(focused_after_wheel, indent=2) + "\n"
+    )
+    focused_ids = [
+        int(pane["id"])
+        for pane in focused_after_wheel.get("panes", [])
+        if pane.get("focused")
+    ]
+    if int(left_scrolled.get("display_offset", 0)) != 0:
+        raise SystemExit("hover-wheel smoke: hovered right wheel scrolled the focused left pane")
+    right_offset = int(right_scrolled.get("display_offset", 0))
+    if right_offset <= 0:
+        raise SystemExit("hover-wheel smoke: hovered right wheel did not scroll the right pane")
+    if focused_ids != [left_id]:
+        raise SystemExit(
+            "hover-wheel smoke: wheel changed keyboard focus "
+            f"from {left_id} to {focused_ids}"
+        )
+    live.ctl("send_mouse", params={"event": "wheel", "wheel_lines": -240})
+    time.sleep(0.15)
+    if int(live.json_ctl("read_screen", {"pane": right_id}).get("display_offset", 0)) != 0:
+        raise SystemExit("hover-wheel smoke: hovered right wheel did not return to live bottom")
+    return {"left_pane": left_id, "right_pane": right_id, "right_offset": right_offset}
+
+
+def run_hover_wheel(kettle: str, root: Path) -> Path:
+    """Focused live scenario for adapters that cannot copy a swapchain image."""
+    out = root / f"hover-wheel-{time.strftime('%Y%m%d-%H%M%S')}"
+    out.mkdir(parents=True, exist_ok=True)
+    cfg = out / "config"
+    cfg.write_text(
+        "\n".join(
+            [
+                "agent-server = full",
+                "text-renderer = grid",
+                "tab-bar = always",
+                "status-bar = off",
+                "restore-session = false",
+                "update-check = false",
+                "window-width = 110",
+                "window-height = 34",
+            ]
+        )
+        + "\n"
+    )
+    extra_args = (
+        ["-e", "powershell.exe", "-NoLogo", "-NoProfile"]
+        if platform.system() == "Windows"
+        else []
+    )
+    with LiveKettle(kettle, cfg, out / "kettle.log", extra_args=extra_args) as live:
+        marker = "KETTLE_HOVER_WHEEL_BASELINE"
+        command = (
+            "Write-Output hover-wheel-baseline"
+            if platform.system() == "Windows"
+            else "printf 'hover-wheel-baseline\\n'"
+        )
+        live_shell_command(live, command_with_marker(command, marker), marker)
+        live.json_ctl("perform_action", {"action": "split_right"})
+        for _ in range(50):
+            geometry = live.json_ctl("ui_geometry")
+            if len(geometry.get("pane_titlebars", [])) == 2:  # type: ignore[arg-type]
+                break
+            time.sleep(0.1)
+        else:
+            raise SystemExit("hover-wheel smoke: split did not produce two panes")
+        analysis = exercise_hovered_pane_wheel(live, out)
+        (out / "analysis.json").write_text(json.dumps(analysis, indent=2) + "\n")
+    return out
+
+
 def run_interaction(kettle: str, root: Path) -> Path:
     out = root / f"interaction-{time.strftime('%Y%m%d-%H%M%S')}"
     out.mkdir(parents=True, exist_ok=True)
@@ -5976,114 +6130,10 @@ def run_interaction(kettle: str, root: Path) -> Path:
         live_shell_command(live, command_with_marker("printf 'split-right-live\\n'" if platform.system() != "Windows" else "Write-Output split-right-live", split_marker), split_marker)
         states.append(capture_live_state(live, out, "split-right"))
 
-        # A terminal wheel belongs to the split under the pointer, not the
-        # keyboard-focused split. Fill both halves with independent scrollback,
-        # focus the left pane, hover the right without clicking, and prove only
-        # the right viewport moves. This is a live control-plane check rather
-        # than a geometry-only unit test: it crosses send_mouse -> event routing
-        # -> the addressed terminal grid and confirms focus never moved.
-        split_geo = live.json_ctl("ui_geometry")
-        split_bars = sorted(
-            split_geo.get("pane_titlebars", []),  # type: ignore[union-attr]
-            key=lambda bar: float(bar["pane_rect"]["x"]),
-        )
-        if len(split_bars) != 2:
-            raise SystemExit(
-                f"interaction smoke: expected two active split titlebars, got {split_bars}"
-            )
-        left_bar, right_bar = split_bars
-        left_id = int(left_bar["pane"])
-        right_id = int(right_bar["pane"])
-
-        for pane_id, prefix in [(left_id, "LEFT"), (right_id, "RIGHT")]:
-            done = f"KETTLE_HOVER_WHEEL_{prefix}_DONE"
-            if platform.system() == "Windows":
-                fill = (
-                    "$esc=[char]27; [Console]::Write($esc + '[2J' + $esc + '[3J' + $esc + '[H'); "
-                    f"1..140 | ForEach-Object {{ 'KETTLE_HOVER_WHEEL_{prefix}_{{0:D3}}' -f $_ }}; "
-                    f"Write-Output {done}"
-                )
-            else:
-                fill = (
-                    "printf '\\033[2J\\033[3J\\033[H'; "
-                    f"for i in $(seq 1 140); do printf 'KETTLE_HOVER_WHEEL_{prefix}_%03d\\n' \"$i\"; done; "
-                    f"printf '{done}\\n'"
-                )
-            live.ctl("send_text", params={"pane": pane_id, "text": fill})
-            live.ctl("send_keys", params={"pane": pane_id, "keys": ["enter"]})
-            waited = json.loads(
-                live.ctl(
-                    "wait_for",
-                    params={
-                        "pane": pane_id,
-                        "text": done,
-                        "timeout_ms": 12000,
-                        "quiet_ms": 200,
-                    },
-                    raw=True,
-                    timeout=17.0,
-                ).stdout
-            )
-            if not waited.get("matched"):
-                raise SystemExit(
-                    f"interaction smoke: pane {pane_id} did not build hover-wheel scrollback: {waited}"
-                )
-
-        def pane_center(bar: Dict[str, object]) -> Tuple[float, float]:
-            rect = bar["pane_rect"]  # type: ignore[index]
-            return rect_center(rect)  # type: ignore[arg-type]
-
-        left_x, left_y = pane_center(left_bar)
-        right_x, right_y = pane_center(right_bar)
-        live.ctl(
-            "send_mouse",
-            params={"event": "click", "x": left_x, "y": left_y, "button": "left"},
-        )
-        time.sleep(0.15)
-        focused = live.json_ctl("list_panes")
-        focused_ids = [
-            int(pane["id"])
-            for pane in focused.get("panes", [])
-            if pane.get("focused")
-        ]
-        if focused_ids != [left_id]:
-            raise SystemExit(
-                f"interaction smoke: could not focus left split {left_id}: {focused_ids}"
-            )
-
-        live.ctl("send_mouse", params={"event": "move", "x": right_x, "y": right_y})
-        live.ctl("send_mouse", params={"event": "wheel", "wheel_lines": 24})
-        time.sleep(0.2)
-        left_scrolled = live.json_ctl("read_screen", {"pane": left_id})
-        right_scrolled = live.json_ctl("read_screen", {"pane": right_id})
-        focused_after_wheel = live.json_ctl("list_panes")
-        (out / "hover-wheel-left.screen.json").write_text(
-            json.dumps(left_scrolled, indent=2) + "\n"
-        )
-        (out / "hover-wheel-right.screen.json").write_text(
-            json.dumps(right_scrolled, indent=2) + "\n"
-        )
-        (out / "hover-wheel-focus.json").write_text(
-            json.dumps(focused_after_wheel, indent=2) + "\n"
-        )
-        focused_ids = [
-            int(pane["id"])
-            for pane in focused_after_wheel.get("panes", [])
-            if pane.get("focused")
-        ]
-        if int(left_scrolled.get("display_offset", 0)) != 0:
-            raise SystemExit("interaction smoke: hovered right wheel scrolled the focused left pane")
-        if int(right_scrolled.get("display_offset", 0)) <= 0:
-            raise SystemExit("interaction smoke: hovered right wheel did not scroll the right pane")
-        if focused_ids != [left_id]:
-            raise SystemExit(
-                "interaction smoke: hovered-pane wheel changed keyboard focus "
-                f"from {left_id} to {focused_ids}"
-            )
-        live.ctl("send_mouse", params={"event": "wheel", "wheel_lines": -240})
-        time.sleep(0.15)
-        if int(live.json_ctl("read_screen", {"pane": right_id}).get("display_offset", 0)) != 0:
-            raise SystemExit("interaction smoke: hovered right wheel did not return to live bottom")
+        # Keep the same focused scenario embedded in the broad interaction
+        # walk, while also exposing it alone for virtual surfaces that cannot
+        # be copied into the screenshot pipeline.
+        exercise_hovered_pane_wheel(live, out)
 
         before_resize_geo = live.json_ctl("ui_geometry")
         before_resize_cells = live.read_cells()
@@ -7070,6 +7120,7 @@ def main() -> int:
             "agent-tui",
             "search-history",
             "interaction",
+            "hover-wheel",
             "touchpad-scroll",
             "session-check",
             "self-test",
@@ -7200,6 +7251,9 @@ def main() -> int:
     if args.case in ("interaction", "all"):
         out = run_interaction(args.kettle, root)
         print(f"interaction smoke: OK artifacts={out}")
+    if args.case == "hover-wheel":
+        out = run_hover_wheel(args.kettle, root)
+        print(f"hover-wheel smoke: OK artifacts={out}")
     if args.case in ("touchpad-scroll", "all"):
         out = run_touchpad_scroll(args.kettle, root)
         print(f"touchpad-scroll smoke: OK artifacts={out}")
