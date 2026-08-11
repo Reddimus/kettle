@@ -22,6 +22,26 @@ The gate after the tag is the one that catches a mistake late: a tag signed
 with a key GitHub does not know is *locally* valid and still fails the
 release. See [Signing prerequisites](#signing-prerequisites).
 
+### macOS appearance gate
+
+Before merging the release-cut pull request, run its universal `.app` on a
+native macOS 26 or later desktop and record a screenshot containing both a
+decorated Kettle window and its running Dock icon. Check two things that unit
+and image tests cannot establish:
+
+- the active theme reaches both rounded top corners without a mismatched strip,
+  while the traffic lights, drag region, first terminal row, and pointer targets
+  remain in their native positions; switch once between a light and dark theme
+  to prove the NSWindow background follows a palette change;
+- the running Dock icon's blue accent reaches the system mask without a second
+  transparent gutter or an inner pre-rounded outline.
+
+The static bundle icon intentionally remains compatible with macOS 11–15, so a
+closed or never-launched app can still look pre-rounded on macOS 26. The gate is
+about the running application icon that Kettle replaces after startup. Record
+an unavailable macOS 26 host as a skipped release check; do not infer this
+appearance from PNG opacity, `iconutil`, or a Linux CI run.
+
 ## 1. Merge the changelog prep pull request
 
 Create `release/prep-vX.Y.Z` from synchronized `main`. Promote

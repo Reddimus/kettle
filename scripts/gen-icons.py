@@ -1,10 +1,14 @@
 #!/usr/bin/env python3
-"""kettle — regenerate every icon artifact from the SVG design (Pillow).
+"""kettle — regenerate every icon source and raster from one geometry model.
 
-`packaging/linux/kettle.svg` is the single source of truth. This script
-reproduces its geometry with Pillow at 4x supersampling (2048 px canvas,
-LANCZOS downscale) and writes:
+This script owns the shared terminal-face geometry and emits both vector
+treatments: the compatible pre-rounded icon for Linux/Windows and macOS 11-15,
+plus an opaque full-bleed source that kettle applies at runtime on macOS 26+.
+It then renders the committed platform rasters with Pillow at 4x
+supersampling (2048 px canvas, LANCZOS downscale) and writes:
 
+  - packaging/{linux,macos}/kettle.svg                    (generated sources)
+  - packaging/macos/kettle-modern.png                     (macOS 26+ runtime)
   - packaging/linux/kettle-{16,24,32,48,64,128,256}.png  (hicolor theme +
     the `include_bytes!` embedded winit window icon, which needs a binary
     rebuild to pick up)
@@ -14,11 +18,9 @@ LANCZOS downscale) and writes:
     CI asserts the resolution count)
 
 Why Pillow and not rsvg-convert: the Windows dev host has no rsvg/
-ImageMagick/icotool, and an earlier Pillow-based reproduction was never
-committed — this script makes the icon pipeline reproducible everywhere
-Python + Pillow exist (`pip install Pillow`). `scripts/gen-icons.sh`
-remains the rsvg-convert path for Linux hosts; either rasterizer is fine,
-just commit one consistently.
+ImageMagick/icotool. One renderer also prevents the SVG and Pillow paths from
+producing different committed pixels. `scripts/gen-icons.sh` is retained as a
+compatibility wrapper around this script.
 
 All PNGs are 8-bit/color RGBA — GNOME Shell's loader silently fails on
 16-bit PNGs (the v2.1.1 Super-key blank-icon bug).
@@ -29,6 +31,7 @@ Usage (from anywhere): python scripts/gen-icons.py
 from __future__ import annotations
 
 import argparse
+from dataclasses import dataclass
 import struct
 import sys
 import tempfile
@@ -52,35 +55,140 @@ TEXT = (0xC0, 0xCA, 0xF5, 255)  # prompt chevron (theme foreground)
 
 S = 4  # supersample factor over the 512 viewBox → 2048 px canvas
 
+CANVAS = 512
+OUTER_BOX = (32, 32, 480, 480)
+OUTER_RADIUS = 64
+OUTER_STROKE = 20
+FACE_BOX = (42, 42, 470, 470)
+FACE_RADIUS = 54
+PROMPT_POINTS = ((156, 168), (260, 256), (156, 344))
+PROMPT_STROKE = 36
+CARET_BOX = (296, 326, 416, 354)
+CARET_RADIUS = 8
+
+
+@dataclass(frozen=True)
+class RectPrimitive:
+    box: tuple[int, int, int, int]
+    radius: int
+    fill: tuple[int, int, int, int]
+    stroke: tuple[int, int, int, int] | None = None
+    stroke_width: int = 0
+
+
+@dataclass(frozen=True)
+class PolylinePrimitive:
+    points: tuple[tuple[int, int], ...]
+    stroke: tuple[int, int, int, int]
+    stroke_width: int
+
+
+Primitive = RectPrimitive | PolylinePrimitive
+
+
+def icon_primitives(*, modern_macos: bool) -> tuple[Primitive, ...]:
+    """Return the one geometry model consumed by both SVG and Pillow."""
+    face = (
+        RectPrimitive((0, 0, CANVAS, CANVAS), 0, ACCENT),
+        RectPrimitive(FACE_BOX, FACE_RADIUS, BASE),
+    ) if modern_macos else (
+        RectPrimitive(OUTER_BOX, OUTER_RADIUS, BASE, ACCENT, OUTER_STROKE),
+    )
+    return (*face, PolylinePrimitive(PROMPT_POINTS, TEXT, PROMPT_STROKE),
+            RectPrimitive(CARET_BOX, CARET_RADIUS, ACCENT))
+
+
+def color_hex(color: tuple[int, int, int, int]) -> str:
+    return "#" + "".join(f"{component:02x}" for component in color[:3])
+
+
+def svg_source(*, modern_macos: bool) -> str:
+    """Return a vector artifact from the same primitives Pillow consumes."""
+    body: list[str] = []
+    for primitive in icon_primitives(modern_macos=modern_macos):
+        if isinstance(primitive, RectPrimitive):
+            left, top, right, bottom = primitive.box
+            attributes = [
+                f'x="{left}"', f'y="{top}"',
+                f'width="{right - left}"', f'height="{bottom - top}"',
+                f'rx="{primitive.radius}"', f'fill="{color_hex(primitive.fill)}"',
+            ]
+            if primitive.stroke is not None:
+                attributes.extend((f'stroke="{color_hex(primitive.stroke)}"',
+                                   f'stroke-width="{primitive.stroke_width}"'))
+            body.append(f"  <rect {' '.join(attributes)}/>")
+        else:
+            points = " ".join(f"{x},{y}" for x, y in primitive.points)
+            body.append(
+                f'  <polyline points="{points}" fill="none" '
+                f'stroke="{color_hex(primitive.stroke)}" '
+                f'stroke-width="{primitive.stroke_width}" '
+                'stroke-linecap="round" stroke-linejoin="round"/>'
+            )
+    treatment = (
+        "Full-bleed runtime source for macOS 26+; AppKit supplies the outer mask."
+        if modern_macos
+        else "Compatible pre-rounded source for Linux, Windows and macOS 11-15."
+    )
+    return (
+        '<?xml version="1.0" encoding="UTF-8"?>\n'
+        f'<!-- {treatment} Geometry below is generated from icon_primitives. -->\n'
+        f'<svg xmlns="http://www.w3.org/2000/svg" width="{CANVAS}" '
+        f'height="{CANVAS}" viewBox="0 0 {CANVAS} {CANVAS}">\n'
+        + "\n".join(body)
+        + "\n</svg>\n"
+    )
+
+
+def render_primitives(primitives: tuple[Primitive, ...]) -> Image.Image:
+    """Render the shared primitive model with Pillow."""
+    img = Image.new("RGBA", (CANVAS * S, CANVAS * S), (0, 0, 0, 0))
+    d = ImageDraw.Draw(img)
+    for primitive in primitives:
+        if isinstance(primitive, RectPrimitive):
+            box = [coordinate * S for coordinate in primitive.box]
+            if primitive.stroke is not None:
+                half = primitive.stroke_width // 2
+                outer = [
+                    (primitive.box[0] - half) * S,
+                    (primitive.box[1] - half) * S,
+                    (primitive.box[2] + half) * S,
+                    (primitive.box[3] + half) * S,
+                ]
+                d.rounded_rectangle(
+                    outer,
+                    radius=(primitive.radius + half) * S,
+                    fill=primitive.stroke,
+                )
+                box = [
+                    (primitive.box[0] + half) * S,
+                    (primitive.box[1] + half) * S,
+                    (primitive.box[2] - half) * S,
+                    (primitive.box[3] - half) * S,
+                ]
+                radius = (primitive.radius - half) * S
+            else:
+                radius = primitive.radius * S
+            d.rounded_rectangle(box, radius=radius, fill=primitive.fill)
+        else:
+            points = [(x * S, y * S) for x, y in primitive.points]
+            width = primitive.stroke_width * S
+            d.line(points, fill=primitive.stroke, width=width)
+            for x, y in points:
+                d.ellipse(
+                    [x - width // 2, y - width // 2,
+                     x + width // 2, y + width // 2],
+                    fill=primitive.stroke,
+                )
+    return img
+
 
 def render_master() -> Image.Image:
-    """The 2048x2048 master frame, mirroring kettle.svg's geometry."""
-    img = Image.new("RGBA", (512 * S, 512 * S), (0, 0, 0, 0))
-    d = ImageDraw.Draw(img)
+    return render_primitives(icon_primitives(modern_macos=False))
 
-    # Outer window: rect x/y=32 w/h=448 rx=64, stroke #7aa2f7 width 20.
-    # Emulate the centered SVG stroke with two rounded rects: the stroke's
-    # outer extent filled with the blue accent, then the inner fill on top.
-    d.rounded_rectangle(
-        [22 * S, 22 * S, 490 * S, 490 * S], radius=74 * S, fill=ACCENT
-    )
-    d.rounded_rectangle(
-        [42 * S, 42 * S, 470 * S, 470 * S], radius=54 * S, fill=BASE
-    )
 
-    # Prompt chevron `>`: polyline (156,168)→(260,256)→(156,344),
-    # stroke-width 36, round caps + joins (circles at every vertex).
-    pts = [(156 * S, 168 * S), (260 * S, 256 * S), (156 * S, 344 * S)]
-    w = 36 * S
-    d.line(pts, fill=TEXT, width=w)
-    for (x, y) in pts:
-        d.ellipse([x - w // 2, y - w // 2, x + w // 2, y + w // 2], fill=TEXT)
-
-    # Underscore caret `_`: rect x=296 y=326 w=120 h=28 rx=8, blue accent.
-    d.rounded_rectangle(
-        [296 * S, 326 * S, 416 * S, 354 * S], radius=8 * S, fill=ACCENT
-    )
-    return img
+def render_modern_macos_master() -> Image.Image:
+    return render_primitives(icon_primitives(modern_macos=True))
 
 
 def scaled(master: Image.Image, px: int) -> Image.Image:
@@ -105,9 +213,26 @@ def emit(
     set it would have produced.
     """
     master = render_master()
+    modern_macos_master = render_modern_macos_master()
     written: list[tuple[Path, str]] = []
 
     linux_dir.mkdir(parents=True, exist_ok=True)
+    linux_svg = linux_dir / "kettle.svg"
+    # Write bytes, not text mode: Windows translates `\n` to CRLF in
+    # `Path.write_text`, while .gitattributes forces the tracked SVGs to LF and
+    # the drift gate deliberately compares vector bytes exactly.
+    linux_svg.write_bytes(svg_source(modern_macos=False).encode("utf-8"))
+    written.append((linux_svg, "packaging/linux/kettle.svg"))
+
+    macos_svg = iconset_dir.parent / "kettle.svg"
+    macos_svg.parent.mkdir(parents=True, exist_ok=True)
+    macos_svg.write_bytes(svg_source(modern_macos=True).encode("utf-8"))
+    written.append((macos_svg, "packaging/macos/kettle.svg"))
+
+    modern_macos_png = iconset_dir.parent / "kettle-modern.png"
+    scaled(modern_macos_master, 1024).save(modern_macos_png)
+    written.append((modern_macos_png, "packaging/macos/kettle-modern.png"))
+
     for px in LINUX_SIZES:
         path = linux_dir / f"kettle-{px}.png"
         scaled(master, px).save(path)
@@ -122,6 +247,9 @@ def emit(
             (f"icon_{base}x{base}@2x.png", base * 2),
         )
         for name, px in names_and_sizes:
+            # macOS 11-15 do not provide Tahoe's automatic source treatment.
+            # Keep the static .icns pre-rounded; the full-bleed source is set
+            # at runtime only on macOS 26+.
             scaled(master, px).save(iconset_dir / name)
             written.append(
                 (iconset_dir / name, f"packaging/macos/kettle.iconset/{name}")
@@ -204,15 +332,21 @@ def same_pixels(a: Path, b: Path) -> bool:
         return left.tobytes() == right.tobytes()
 
 
-def check() -> int:
-    """Fail if any tracked raster has drifted from the Pillow generator.
+def same_artifact(generated: Path, tracked: Path) -> bool:
+    if generated.suffix == ".svg":
+        return generated.read_bytes() == tracked.read_bytes()
+    return same_pixels(generated, tracked)
 
-    The 18 tracked rasters had no gate of any kind: `gen-icons.py` was run by
-    hand and dispatched by no recipe or CI job, so an edit to the geometry — or
-    a hand-touched PNG — could ship silently. The generator is deterministic
-    (pure Pillow, fixed supersampling), so regenerating into a scratch tree and
-    comparing decoded content and required image metadata is an exact check
-    rather than a perceptual one.
+
+def check() -> int:
+    """Fail if any tracked icon artifact has drifted from the generator.
+
+    The tracked artifacts once had no gate of any kind: `gen-icons.py` was run
+    by hand and dispatched by no recipe or CI job, so an edit to the geometry —
+    or a hand-touched SVG/PNG — could ship silently. The generator is
+    deterministic (pure Pillow, fixed supersampling), so regenerating into a
+    scratch tree and comparing vector bytes, decoded content, and required image
+    metadata is an exact check rather than a perceptual one.
     """
     with tempfile.TemporaryDirectory(prefix="kettle-icons-") as tmp:
         root = Path(tmp)
@@ -228,7 +362,7 @@ def check() -> int:
             tracked = ROOT / rel
             if not tracked.exists():
                 missing.append(rel)
-            elif not same_pixels(path, tracked):
+            elif not same_artifact(path, tracked):
                 drifted.append(rel)
     for rel in missing:
         print(f"ERROR: tracked icon missing: {rel}")
@@ -240,7 +374,7 @@ def check() -> int:
             "run `python3 scripts/gen-icons.py` and commit the result"
         )
         return 1
-    print(f"icons OK ({len(produced)} tracked rasters match the Pillow generator)")
+    print(f"icons OK ({len(produced)} tracked artifacts match the generator)")
     return 0
 
 

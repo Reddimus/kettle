@@ -458,8 +458,9 @@ macOS needs only a stable Rust toolchain (`rustup`). Windows needs the Visual
 Studio 2022 Build Tools **Desktop development with C++** workload and a Windows
 SDK in addition to Rust. A native Windows ARM64 build also needs the **MSVC
 ARM64 build tools** and **C++ Clang tools for Windows** components: `ring` uses
-the ARM64-hosted `clang.exe`, while other native crates use the ARM64 MSVC
-linker and libraries. Run Cargo from an ARM64 Developer Command Prompt, or
+the component's x64-hosted `clang.exe` targeting ARM64, while other native
+crates use the ARM64 MSVC linker and libraries. Run Cargo from an ARM64
+Developer Command Prompt, or
 initialize an ordinary shell first:
 
 ```bat
@@ -490,24 +491,30 @@ drivers). The workspace also contains native PTY/ConPTY lifecycle tests. See
 
 ## Regenerating the app icons (contributors)
 
-`packaging/linux/kettle.svg` is the single source of truth for the app icon
-(as of v2.18.0 the artwork no longer carries the macOS-style titlebar strip).
-Every shipped raster is regenerated from it — the fixed-size PNGs in the
-hicolor theme (`kettle-16.png` … `kettle-256.png`), the macOS iconset, and
-the Windows `.ico`:
+`scripts/gen-icons.py` is the single source of truth for the icon geometry. It
+emits two deliberate SVG treatments and every shipped raster from that same
+model. The generated `packaging/linux/kettle.svg` is transparent for Linux and
+Windows. The static macOS iconset deliberately uses that compatible pre-rounded
+treatment because macOS 11–15 do not apply Tahoe's mask. The generated
+`packaging/macos/kettle.svg` and `kettle-modern.png` are opaque and full-bleed;
+Kettle embeds that PNG and applies it to the running app only on macOS 26+ so
+the system owns the single outer curve. The generator also writes the fixed-size
+hicolor PNGs (`kettle-16.png` … `kettle-256.png`), the legacy macOS iconset,
+and the Windows `.ico`:
 
 ```sh
-# Cross-platform path (committed; needs Pillow) — regenerates the Linux
-# PNGs + the macOS iconset + the Windows .ico in one pass:
+# Cross-platform path (needs Pillow) — regenerates both SVGs, the modern
+# macOS PNG, every Linux PNG and legacy iconset member, and the Windows .ico:
 python3 scripts/gen-icons.py
 
-# Linux rsvg path (PNGs; needs rsvg-convert — Debian/Ubuntu: librsvg2-bin):
+# Backward-compatible wrapper around the same canonical generator:
 ./scripts/gen-icons.sh
 ```
 
 The scripts emit **8-bit/color RGBA** PNGs. This matters: 16-bit PNGs are
-silently rejected by GNOME Shell's icon loader. After editing the SVG, re-run
-a script and commit the regenerated rasters together. Verify with
+silently rejected by GNOME Shell's icon loader. Edit the geometry constants in
+`gen-icons.py`, re-run it, and commit the generated SVGs and rasters together.
+Verify with
 `file packaging/linux/kettle-*.png` (every line should read `8-bit/color RGBA`).
 
 **Why the user-install `.desktop` uses an absolute `Icon=` path.** GNOME

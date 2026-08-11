@@ -161,6 +161,8 @@ tempfile = "3"
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.5"
 # Class features must be opted into (objc2-app-kit ships none by default).
-# NSView + NSWindow + their shared NSResponder superclass — the same trio winit
-# 0.30 enables — give us `NSView::window()` and `NSWindow::setCollectionBehavior`.
-objc2-app-kit = { version = "0.2", features = ["NSView", "NSWindow", "NSResponder"] }
+# NSView + NSWindow support sticky windows; NSColor synchronizes the native
+# titlebar background with Kettle's palette; NSApplication + NSImage apply the
+# macOS 26 full-bleed Dock art without weakening the legacy bundle icon.
+objc2-app-kit = { version = "0.2", features = ["NSApplication", "NSColor", "NSImage", "NSResponder", "NSView", "NSWindow"] }
+objc2-foundation = { version = "0.2", features = ["NSData", "NSProcessInfo", "NSThread"] }

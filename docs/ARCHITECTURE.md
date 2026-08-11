@@ -352,6 +352,28 @@ silently shortened.
 
 ## In-process multi-window
 
+On macOS, decorated windows keep AppKit's title, traffic lights, drag region,
+shadow, and rounded window mask. The titlebar material is transparent so the
+NSWindow background shows through it, and that native background is synchronized
+to the active Kettle theme's exact sRGB background color on every palette
+change. The content view is deliberately *not* full-size: tabs, terminal cells,
+pointer hit-testing, and ctl geometry all stay below the traffic lights without
+a platform-specific synthetic inset. Extending the renderer under the titlebar
+would require compensating every one of those coordinate systems for AppKit's
+content layout rect; no such hidden geometry shift is introduced for a cosmetic
+fix.
+
+The application icon is versioned at runtime rather than weakening the static
+bundle's compatibility. macOS 11–15 receive the pre-rounded transparent
+`.icns` they expect. On macOS 26+, `ApplicationHandler::resumed` replaces the
+running application's icon once with an embedded opaque full-bleed PNG, then
+AppKit applies Tahoe's single outer mask. This avoids both failure modes: a
+square full-bleed icon on older systems and a twice-rounded accent on current
+systems. A closed app still exposes the compatible bundle icon because a
+single static `.icns` cannot select different artwork by OS release. The live
+Dock result is a native visual release gate, not inferred from image alpha or a
+Linux generator test.
+
 Since v2.18.0 every kettle window lives in one process. `App` holds
 `windows: BTreeMap<u64, WindowState>`
 (`crates/kettle-ui/src/window_state.rs`) — every per-window field (the

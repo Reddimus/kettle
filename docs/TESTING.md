@@ -1543,9 +1543,18 @@ name the shape of bug each pass caught.
   toolchain@1.89` builds + tests the workspace at the declared
   floor, catches a future transitive-dep MSRV bump at PR time
   instead of release time.
-- The **iconutil / ico packaging smoke** on macOS and
-  Windows runners — verifies the .icns / .ico build assets stay
-  intact on every push (not just release tags).
+- The **icon raster, iconutil, and ico packaging smokes** — the Linux CI leg
+  compares 2 generated SVGs and 19 raster artifacts: 18 PNG files plus the
+  Windows ICO. It decodes all 18 PNGs and all 7 ICO resolutions (25 decoded
+  images). The macOS leg compiles the unchanged legacy iconset into `.icns`;
+  the Windows leg validates and embeds the existing `.ico`. Generator tests pin
+  the platform boundary: legacy Linux/Windows/macOS assets keep transparent
+  outer corners, while the macOS 26+ runtime PNG is fully opaque. A macOS-native
+  source guard pins that production startup invokes the versioned icon setter
+  and that window creation plus runtime palette changes synchronize the native
+  titlebar background. These checks prove wiring and input assets; they do not
+  prove AppKit's visual treatment. Before release, run the native macOS 26 Dock
+  and rounded-window check in [RELEASING.md](RELEASING.md#macos-appearance-gate).
 - The Windows installer smoke covers both portable install/uninstall and an
   isolated default install. It seeds a pre-existing Start shortcut with stale
   PowerShell launcher arguments, upgrades it, and verifies the shortcut target,

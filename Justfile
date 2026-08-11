@@ -155,10 +155,11 @@ vendor-check: vendor-parser-check vendor-pty-check
 # bounds. The focused self-test pins that a missing Markdown target is fatal.
 # The JSON ledger is written under ignored target/diagnostics.
 
-# Verify the 18 tracked icon rasters against the Pillow generator. The check
-# compares decoded pixels, all ICO resolutions, and required PNG mode/bit depth;
-# it ignores only encoder-dependent compression and chunk ordering. Skips without
-# Pillow so a contributor is not blocked; CI and `gauntlet-full` pass
+# Verify 2 generated SVGs and 19 raster artifacts against the canonical
+# geometry model. The check compares SVG bytes, 18 decoded PNGs, all 7 ICO
+# resolutions, and required PNG mode/bit depth; it ignores only
+# encoder-dependent compression and chunk ordering. Skips without Pillow so a
+# contributor is not blocked; CI and `gauntlet-full` pass
 # --require-tooling so the gate cannot quietly stop running.
 [unix]
 icons-check:
