@@ -336,6 +336,48 @@ fn window_is_render_hidden(ws: &WindowState) -> bool {
     }) || ws.window_occluded
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ScreenshotWindowAvailability {
+    Available,
+    Unavailable,
+    /// The backend cannot report visibility/minimization (notably Wayland).
+    /// Capture remains eligible, but its bounded timeout is the only fallback
+    /// if the compositor withholds work for a state the client cannot observe.
+    Unknown,
+}
+
+fn screenshot_window_availability(
+    minimized: Option<bool>,
+    window_shown: bool,
+    visible: Option<bool>,
+) -> ScreenshotWindowAvailability {
+    if !window_shown || minimized == Some(true) || visible == Some(false) {
+        ScreenshotWindowAvailability::Unavailable
+    } else if minimized.is_none() || visible.is_none() {
+        ScreenshotWindowAvailability::Unknown
+    } else {
+        ScreenshotWindowAvailability::Available
+    }
+}
+
+fn screenshot_window_accepts_control_capture(
+    minimized: Option<bool>,
+    window_shown: bool,
+    visible: Option<bool>,
+) -> bool {
+    screenshot_window_availability(minimized, window_shown, visible)
+        != ScreenshotWindowAvailability::Unavailable
+}
+
+fn pending_screenshot_may_render_offscreen(
+    pending: bool,
+    minimized: Option<bool>,
+    window_shown: bool,
+    visible: Option<bool>,
+) -> bool {
+    pending && screenshot_window_accepts_control_capture(minimized, window_shown, visible)
+}
+
 fn output_wakeup_must_quiesce(
     render_hidden: bool,
     renderer_repair_pending: bool,
@@ -9567,6 +9609,10 @@ impl App {
         self.gpu_software_fallback = new_gpu.is_software();
         let adapter = new_gpu.adapter_info();
         let adapter_name = new_gpu.adapter_name();
+        let recovery_proxy = self.proxy.clone();
+        new_gpu.set_recovery_wake(kettle_render::ScreenshotRecoveryWake::new(move || {
+            let _ = recovery_proxy.send_event(UserEvent::Wakeup);
+        }));
         self.gpu = Some(new_gpu);
 
         self.finish_gpu_renderer_recovery(ws);
@@ -11249,10 +11295,24 @@ impl App {
         // deadline is polled in about_to_wait. This gate also stops unrelated
         // cursor/input/output redraw requests from bypassing the backoff. Do
         // the non-GPU state maintenance above, but neither snapshot terminal
-        // contents nor touch an invisible surface.
+        // contents nor touch an invisible surface except for one explicit
+        // offscreen capture. That exception may bypass a transient retry, never
+        // a pending renderer rebuild.
+        let screenshot_may_render_offscreen = ws.renderer.as_ref().is_some_and(|renderer| {
+            ws.window.as_ref().is_some_and(|window| {
+                pending_screenshot_may_render_offscreen(
+                    renderer.has_pending_screenshot(),
+                    window.is_minimized(),
+                    ws.window_shown,
+                    window.is_visible(),
+                )
+            })
+        });
+        let recovery_blocks_render = ws.frame_recovery.renderer_rebuild_pending()
+            || (ws.frame_recovery.has_pending() && !screenshot_may_render_offscreen);
         if !ws.dpi_resize.render_allowed()
-            || ws.frame_recovery.has_pending()
-            || window_is_render_hidden(ws)
+            || recovery_blocks_render
+            || (window_is_render_hidden(ws) && !screenshot_may_render_offscreen)
         {
             return;
         }
@@ -14358,11 +14418,18 @@ impl App {
                     let cache = cache_dir_from_env(|k| std::env::var(k).ok());
                     let path = session_screenshot_path(secs, std::process::id(), cache.as_deref());
                     let path_str = path.display().to_string();
+                    let proxy = self.proxy.clone();
                     let request = kettle_render::ScreenshotRequest {
                         out_path: path,
                         output_policy: kettle_render::ScreenshotOutputPolicy::PrivateState,
                         crop,
                         completion: None,
+                        cancellation: None,
+                        recovery_wake: Some(kettle_render::ScreenshotRecoveryWake::new(
+                            move || {
+                                let _ = proxy.send_event(UserEvent::Wakeup);
+                            },
+                        )),
                     };
                     if renderer.set_pending_screenshot(request).is_ok() {
                         log::info!("take_screenshot: queued -> {path_str}");
@@ -17719,6 +17786,35 @@ impl App {
             let _ = reply.send(Response::err(req.id, ec::NO_SUCH_PANE, "pane vanished"));
             return;
         };
+        let target_accepts_capture = {
+            let target = if target_seq == ws.seq {
+                Some(&*ws)
+            } else {
+                self.windows.get(&target_seq)
+            };
+            target
+                .and_then(|target| {
+                    target
+                        .window
+                        .as_ref()
+                        .map(|window| (window, target.window_shown))
+                })
+                .is_some_and(|(window, shown)| {
+                    screenshot_window_accepts_control_capture(
+                        window.is_minimized(),
+                        shown,
+                        window.is_visible(),
+                    )
+                })
+        };
+        if !target_accepts_capture {
+            let _ = reply.send(Response::err(
+                req.id,
+                ec::BUSY,
+                "target window is minimized, hidden, or not yet shown; restore it before capturing",
+            ));
+            return;
+        }
         let crop = if full_window {
             None
         } else {
@@ -17767,6 +17863,7 @@ impl App {
             }
         };
         let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let cancellation = kettle_render::ScreenshotCancellation::default();
         let renderer = if target_seq == ws.seq {
             ws.renderer.as_mut()
         } else {
@@ -17787,6 +17884,13 @@ impl App {
             output_policy,
             crop,
             completion: Some(done_tx),
+            cancellation: Some(cancellation.clone()),
+            recovery_wake: {
+                let proxy = self.proxy.clone();
+                Some(kettle_render::ScreenshotRecoveryWake::new(move || {
+                    let _ = proxy.send_event(UserEvent::Wakeup);
+                }))
+            },
         };
         if renderer.set_pending_screenshot(screenshot).is_err() {
             let _ = reply.send(Response::err(
@@ -17807,8 +17911,8 @@ impl App {
         }
         let request_id = req.id;
         std::thread::spawn(move || {
-            let resp = match done_rx.recv_timeout(std::time::Duration::from_secs(10)) {
-                Ok(Ok(saved)) => Response::ok(
+            let response_for_result = |result| match result {
+                Ok(saved) => Response::ok(
                     request_id,
                     serde_json::json!({
                         "path": saved,
@@ -17817,8 +17921,42 @@ impl App {
                         "full_window": full_window,
                     }),
                 ),
-                Ok(Err(e)) => Response::err(request_id, ec::INTERNAL, e),
-                Err(_) => Response::err(request_id, ec::INTERNAL, "screenshot capture timed out"),
+                Err(error) => Response::err(request_id, ec::INTERNAL, error),
+            };
+            let resp = match done_rx.recv_timeout(std::time::Duration::from_secs(10)) {
+                Ok(result) => response_for_result(result),
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) if cancellation.cancel() => {
+                    Response::err(request_id, ec::INTERNAL, "screenshot capture timed out")
+                }
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                    // The encoder already won the final publication race. Give
+                    // the atomic link/rename and directory sync one finite
+                    // grace period, but never turn the advertised ten-second
+                    // deadline into an unbounded control thread. If even this
+                    // expires, report the only honest outcome: publication may
+                    // have happened and the caller must inspect the path.
+                    match done_rx.recv_timeout(std::time::Duration::from_secs(5)) {
+                        Ok(result) => response_for_result(result),
+                        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => Response::err(
+                            request_id,
+                            ec::INTERNAL,
+                            "screenshot publication did not finish within the extended deadline; the destination may exist",
+                        ),
+                        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => Response::err(
+                            request_id,
+                            ec::INTERNAL,
+                            "screenshot worker disconnected after publication began",
+                        ),
+                    }
+                }
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                    let _ = cancellation.cancel();
+                    Response::err(
+                        request_id,
+                        ec::INTERNAL,
+                        "screenshot capture worker disconnected",
+                    )
+                }
             };
             let _ = reply.send(resp);
         });
@@ -23162,7 +23300,12 @@ impl App {
             t_startup.elapsed().as_secs_f64() * 1000.0
         );
         // C4: cache the shared GPU context for open_window (windows 2..N).
-        self.gpu = Some(renderer.gpu().clone());
+        let gpu = renderer.gpu().clone();
+        let recovery_proxy = self.proxy.clone();
+        gpu.set_recovery_wake(kettle_render::ScreenshotRecoveryWake::new(move || {
+            let _ = recovery_proxy.send_event(UserEvent::Wakeup);
+        }));
+        self.gpu = Some(gpu);
         ws.renderer = Some(renderer);
         ws.accessibility = Some(accessibility);
         ws.window = Some(window);
@@ -28701,6 +28844,66 @@ mod tests {
     }
 
     #[test]
+    fn an_explicit_screenshot_overrides_only_transient_surface_guards() {
+        let allowed = super::pending_screenshot_may_render_offscreen;
+
+        assert!(allowed(true, Some(false), true, Some(true)));
+        assert!(!allowed(false, Some(false), true, Some(true)), "no request");
+        assert!(!allowed(true, Some(true), true, Some(true)), "minimized");
+        assert!(
+            !allowed(true, Some(false), false, Some(true)),
+            "not yet shown"
+        );
+        assert!(
+            !allowed(true, Some(false), true, Some(false)),
+            "explicitly hidden"
+        );
+        assert!(
+            allowed(true, None, true, None),
+            "Wayland cannot report these states, so a shown window remains eligible for bounded capture"
+        );
+
+        let available = super::screenshot_window_accepts_control_capture;
+        assert!(available(Some(false), true, Some(true)));
+        assert!(!available(Some(true), true, Some(true)));
+        assert!(!available(Some(false), false, Some(true)));
+        assert!(!available(Some(false), true, Some(false)));
+        assert!(available(None, true, None));
+        assert_eq!(
+            super::screenshot_window_availability(None, true, None),
+            super::ScreenshotWindowAvailability::Unknown
+        );
+    }
+
+    #[test]
+    fn control_screenshot_rejects_hidden_targets_and_cancels_timeouts() {
+        let src = production_source();
+        let body = src
+            .split("fn ctl_screenshot(")
+            .nth(1)
+            .and_then(|rest| rest.split("\n    /// `send_text`").next())
+            .expect("ctl_screenshot body");
+        let availability = body
+            .find("target_accepts_capture")
+            .expect("target renderability must be checked");
+        let queue = body
+            .find("renderer.set_pending_screenshot")
+            .expect("screenshot queue site");
+        assert!(
+            availability < queue,
+            "a hidden/minimized target must be rejected before it can strand a pending request"
+        );
+        assert!(
+            body.contains("RecvTimeoutError::Timeout")
+                && body.contains("if cancellation.cancel()")
+                && body.contains("done_rx.recv_timeout(std::time::Duration::from_secs(5))")
+                && !body.contains("done_rx.recv()")
+                && body.contains("target window is minimized, hidden, or not yet shown"),
+            "timeouts must either win cancellation or bound the wait for an already-committed result, and unavailable targets must receive a prompt error"
+        );
+    }
+
+    #[test]
     fn hidden_output_sidechannels_keep_transport_wakes_without_enabling_paints() {
         assert!(!super::output_wake_transport_enabled(true, false));
         assert!(super::output_wake_transport_enabled(true, true));
@@ -31541,20 +31744,26 @@ mod tests {
         let renderability_guard = redraw
             .find("if !ws.dpi_resize.render_allowed()")
             .expect("DPI/recovery/visibility guard present");
+        let screenshot_policy = redraw
+            .find("let screenshot_may_render_offscreen")
+            .expect("offscreen screenshot policy present");
         let renderer_guard = redraw
             .find("if ws.renderer.is_none()")
             .expect("renderer-availability guard present");
         let frame_transition = redraw
             .find("let was_coalescing_paint = ws.output_pacer.begin_frame();")
             .expect("output frame transition present");
-        let combined_guard = &redraw[renderability_guard..renderer_guard];
+        let combined_guard = &redraw[screenshot_policy..renderer_guard];
 
         assert!(
             combined_guard.contains("ws.frame_recovery.has_pending()")
+                && combined_guard.contains("ws.frame_recovery.renderer_rebuild_pending()")
+                && combined_guard.contains("!screenshot_may_render_offscreen")
                 && combined_guard.contains("window_is_render_hidden(ws)")
                 && renderability_guard < frame_transition
                 && renderer_guard < frame_transition,
-            "Deferred/Queued output may enter Presenting only when a real frame will be attempted"
+            "only an explicit offscreen capture may bypass transient surface recovery; renderer \
+             rebuilds and ordinary hidden output must stay blocked before Presenting"
         );
     }
 

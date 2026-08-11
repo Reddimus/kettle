@@ -5,6 +5,269 @@ use std::io;
 use std::path::Path;
 
 type CreatedFileCleanup = Box<dyn FnOnce(&File) -> io::Result<()> + Send + 'static>;
+type CreatedFilePublish = Box<
+    dyn FnOnce(&File) -> Result<CreatedFilePublication, CreatedFilePublishError> + Send + 'static,
+>;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CreatedFilePublication {
+    /// Publication added a second name; the staging name still needs removal.
+    Linked,
+    /// Publication moved the staging name; its cleanup capability must be
+    /// disarmed so Windows does not delete the completed destination on close.
+    Renamed,
+}
+
+#[derive(Debug)]
+struct CreatedFilePublishError {
+    error: io::Error,
+    destination_may_exist: bool,
+}
+
+impl CreatedFilePublishError {
+    fn published(error: io::Error) -> Self {
+        Self {
+            error,
+            destination_may_exist: true,
+        }
+    }
+}
+
+impl From<io::Error> for CreatedFilePublishError {
+    fn from(error: io::Error) -> Self {
+        Self {
+            error,
+            destination_may_exist: false,
+        }
+    }
+}
+
+/// Failure to publish a staged user-selected file.
+///
+/// [`destination_may_exist`](Self::destination_may_exist) distinguishes a
+/// failure before the atomic namespace operation from a durability,
+/// verification, or staging-cleanup failure after it. Callers must not retry
+/// the same path blindly in the latter case.
+#[derive(Debug)]
+pub struct StagedFilePublishError {
+    error: io::Error,
+    destination_may_exist: bool,
+}
+
+impl StagedFilePublishError {
+    fn not_published(error: io::Error) -> Self {
+        Self {
+            error,
+            destination_may_exist: false,
+        }
+    }
+
+    fn after_publication(error: io::Error) -> Self {
+        Self {
+            error,
+            destination_may_exist: true,
+        }
+    }
+
+    pub fn destination_may_exist(&self) -> bool {
+        self.destination_may_exist
+    }
+
+    pub fn kind(&self) -> io::ErrorKind {
+        self.error.kind()
+    }
+}
+
+impl std::fmt::Display for StagedFilePublishError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.error.fmt(formatter)
+    }
+}
+
+impl std::error::Error for StagedFilePublishError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.error)
+    }
+}
+
+#[derive(Clone, Copy)]
+enum HardLinkMode {
+    Native,
+    #[cfg(test)]
+    ForceUnsupported,
+}
+
+fn with_cleanup_error(primary: io::Error, cleanup: io::Result<()>, action: &str) -> io::Error {
+    match cleanup {
+        Ok(()) => primary,
+        Err(cleanup) => io::Error::new(
+            primary.kind(),
+            format!("{primary}; {action} cleanup failed: {cleanup}"),
+        ),
+    }
+}
+
+fn publish_with_atomic_fallback(
+    link: impl FnOnce() -> io::Result<()>,
+    rename_no_replace: impl FnOnce() -> io::Result<()>,
+) -> io::Result<CreatedFilePublication> {
+    match link() {
+        Ok(()) => Ok(CreatedFilePublication::Linked),
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => Err(error),
+        Err(link_error) => match rename_no_replace() {
+            Ok(()) => Ok(CreatedFilePublication::Renamed),
+            Err(rename_error) => Err(io::Error::new(
+                rename_error.kind(),
+                format!(
+                    "hard-link publication failed: {link_error}; atomic rename fallback failed: {rename_error}"
+                ),
+            )),
+        },
+    }
+}
+
+/// An owner-only sibling file that is invisible at its requested destination
+/// until [`publish`](Self::publish) atomically creates that destination.
+///
+/// The staging leaf is removed on drop. Publication never replaces an existing
+/// entry and retains the platform's pinned parent capability across the final
+/// link-or-rename operation, so a renamed parent cannot redirect the write.
+pub struct StagedUserSelectedFile {
+    staged: Option<CreatedUserSelectedFile>,
+    publish: Option<CreatedFilePublish>,
+}
+
+impl std::fmt::Debug for StagedUserSelectedFile {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("StagedUserSelectedFile")
+            .field("staged", &self.staged)
+            .field("publish_armed", &self.publish.is_some())
+            .finish()
+    }
+}
+
+impl StagedUserSelectedFile {
+    fn new(staged: CreatedUserSelectedFile, publish: CreatedFilePublish) -> Self {
+        Self {
+            staged: Some(staged),
+            publish: Some(publish),
+        }
+    }
+
+    /// Make every streamed byte durable while publication is still reversible.
+    ///
+    /// A bounded caller may cancel after this returns and before
+    /// [`publish_synced`](Self::publish_synced) begins. Keeping this operation
+    /// separate prevents a slow filesystem flush from turning a nominal
+    /// control-plane timeout into an unbounded wait.
+    pub fn sync_for_publish(&self) -> io::Result<()> {
+        self.staged
+            .as_ref()
+            .expect("staged user-selected file remains present")
+            .sync_all()
+    }
+
+    /// Atomically create the requested destination from an already-synced
+    /// staging file and retire the sibling staging name. Existing destinations
+    /// are refused.
+    pub fn publish_synced(mut self) -> Result<(), StagedFilePublishError> {
+        let staged = self
+            .staged
+            .take()
+            .expect("staged user-selected file remains present");
+        let publish = self
+            .publish
+            .take()
+            .expect("staged publication remains armed");
+        match publish(&staged) {
+            Ok(CreatedFilePublication::Linked) => staged.discard().map_err(|error| {
+                StagedFilePublishError::after_publication(io::Error::new(
+                    error.kind(),
+                    format!("destination was published, but staging cleanup failed: {error}"),
+                ))
+            }),
+            Ok(CreatedFilePublication::Renamed) => {
+                drop(staged.persist());
+                Ok(())
+            }
+            Err(error) if error.destination_may_exist => {
+                let error = with_cleanup_error(error.error, staged.discard(), "staged export");
+                Err(StagedFilePublishError::after_publication(error))
+            }
+            Err(error) => Err(StagedFilePublishError::not_published(with_cleanup_error(
+                error.error,
+                staged.discard(),
+                "staged export",
+            ))),
+        }
+    }
+
+    /// Flush the staged inode, atomically create the requested destination,
+    /// and retire the sibling staging name. Existing destinations are refused.
+    pub fn publish(self) -> Result<(), StagedFilePublishError> {
+        if let Err(error) = self.sync_for_publish() {
+            return Err(StagedFilePublishError::not_published(with_cleanup_error(
+                error,
+                self.discard(),
+                "staged export",
+            )));
+        }
+        self.publish_synced()
+    }
+
+    /// Remove the exact staging leaf without publishing it.
+    pub fn discard(mut self) -> io::Result<()> {
+        self.publish = None;
+        self.staged
+            .take()
+            .expect("staged user-selected file remains present")
+            .discard()
+    }
+}
+
+impl std::ops::Deref for StagedUserSelectedFile {
+    type Target = File;
+
+    fn deref(&self) -> &Self::Target {
+        self.staged
+            .as_ref()
+            .expect("staged user-selected file remains present")
+    }
+}
+
+impl std::ops::DerefMut for StagedUserSelectedFile {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.staged
+            .as_mut()
+            .expect("staged user-selected file remains present")
+    }
+}
+
+impl io::Write for StagedUserSelectedFile {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        self.staged
+            .as_mut()
+            .expect("staged user-selected file remains present")
+            .write(bytes)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.staged
+            .as_mut()
+            .expect("staged user-selected file remains present")
+            .flush()
+    }
+}
+
+impl io::Seek for StagedUserSelectedFile {
+    fn seek(&mut self, position: io::SeekFrom) -> io::Result<u64> {
+        self.staged
+            .as_mut()
+            .expect("staged user-selected file remains present")
+            .seek(position)
+    }
+}
 
 /// A newly created user-selected file whose path is removed if publication is
 /// abandoned before [`persist`](Self::persist).
@@ -453,6 +716,90 @@ pub fn create_user_selected_file_new(path: &Path) -> io::Result<CreatedUserSelec
     Ok(CreatedUserSelectedFile::new(file, cleanup))
 }
 
+/// Create an owner-only sibling for a streamed export, publishing it at `path`
+/// only after the caller finishes writing and calls
+/// [`StagedUserSelectedFile::publish`].
+///
+/// The parent must already exist. The final operation is an atomic no-replace
+/// hard link, with an atomic no-replace rename fallback on filesystems that do
+/// not implement hard links, so readers never observe partial bytes and a
+/// concurrent creator wins without being overwritten. This is the streaming
+/// counterpart to `atomic_create_new`: it avoids buffering a potentially large
+/// export in RAM.
+pub fn stage_user_selected_file_new(path: &Path) -> io::Result<StagedUserSelectedFile> {
+    stage_user_selected_file_new_with(path, || {
+        let mut nonce = [0_u8; 16];
+        getrandom::fill(&mut nonce).map_err(|error| {
+            io::Error::other(format!(
+                "secure randomness for export staging failed: {error}"
+            ))
+        })?;
+        Ok(nonce)
+    })
+}
+
+fn stage_user_selected_file_new_with(
+    path: &Path,
+    next_nonce: impl FnMut() -> io::Result<[u8; 16]>,
+) -> io::Result<StagedUserSelectedFile> {
+    stage_user_selected_file_new_with_mode(path, next_nonce, HardLinkMode::Native)
+}
+
+fn stage_user_selected_file_new_with_mode(
+    path: &Path,
+    mut next_nonce: impl FnMut() -> io::Result<[u8; 16]>,
+    hard_link_mode: HardLinkMode,
+) -> io::Result<StagedUserSelectedFile> {
+    const ATTEMPTS: usize = 32;
+
+    #[cfg(windows)]
+    windows::validate_user_selected_file_path(path)?;
+    let destination = std::path::absolute(path)?;
+    let parent = destination.parent().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "user-selected output has no parent: {}",
+                destination.display()
+            ),
+        )
+    })?;
+    for _ in 0..ATTEMPTS {
+        let nonce = next_nonce()?;
+        let mut suffix = String::with_capacity(nonce.len() * 2);
+        use std::fmt::Write as _;
+        for byte in nonce {
+            write!(&mut suffix, "{byte:02x}").expect("writing to String cannot fail");
+        }
+        let staged_path = parent.join(format!(".kettle-export-{suffix}.tmp"));
+        let (file, cleanup) = match create_user_selected_file_new_impl(&staged_path) {
+            Ok(created) => created,
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(error),
+        };
+        let staged = CreatedUserSelectedFile::new(file, cleanup);
+        match create_user_selected_file_publish_impl(
+            &staged_path,
+            &destination,
+            &staged,
+            hard_link_mode,
+        ) {
+            Ok(publish) => return Ok(StagedUserSelectedFile::new(staged, publish)),
+            Err(error) => {
+                return Err(with_cleanup_error(
+                    error,
+                    staged.discard(),
+                    "publication setup",
+                ));
+            }
+        }
+    }
+    Err(io::Error::new(
+        io::ErrorKind::AlreadyExists,
+        "could not allocate a unique user-selected staging file",
+    ))
+}
+
 /// Open a private regular file for reading and writing, creating it if absent.
 ///
 /// Existing Unix symbolic links and Windows reparse points are rejected.
@@ -570,6 +917,16 @@ fn create_user_selected_file_new_impl(path: &Path) -> io::Result<(File, CreatedF
 }
 
 #[cfg(unix)]
+fn create_user_selected_file_publish_impl(
+    staged: &Path,
+    destination: &Path,
+    file: &File,
+    hard_link_mode: HardLinkMode,
+) -> io::Result<CreatedFilePublish> {
+    unix::create_user_selected_file_publish(staged, destination, file, hard_link_mode)
+}
+
+#[cfg(unix)]
 fn open_private_file_impl(path: &Path) -> io::Result<File> {
     match unix::create_private_file_new(path, false) {
         Ok(file) => Ok(file),
@@ -616,6 +973,16 @@ fn create_private_file_new_impl(path: &Path) -> io::Result<File> {
 #[cfg(windows)]
 fn create_user_selected_file_new_impl(path: &Path) -> io::Result<(File, CreatedFileCleanup)> {
     windows::create_user_selected_file_new(path)
+}
+
+#[cfg(windows)]
+fn create_user_selected_file_publish_impl(
+    staged: &Path,
+    destination: &Path,
+    file: &File,
+    hard_link_mode: HardLinkMode,
+) -> io::Result<CreatedFilePublish> {
+    windows::create_user_selected_file_publish(staged, destination, file, hard_link_mode)
 }
 
 #[cfg(windows)]
@@ -707,6 +1074,21 @@ fn create_user_selected_file_new_impl(path: &Path) -> io::Result<(File, CreatedF
         Ok(())
     });
     Ok((file, cleanup))
+}
+
+#[cfg(not(any(unix, windows)))]
+fn create_user_selected_file_publish_impl(
+    staged: &Path,
+    destination: &Path,
+    _file: &File,
+    _hard_link_mode: HardLinkMode,
+) -> io::Result<CreatedFilePublish> {
+    let staged = staged.to_path_buf();
+    let destination = destination.to_path_buf();
+    Ok(Box::new(move |_| {
+        std::fs::hard_link(staged, destination)?;
+        Ok(CreatedFilePublication::Linked)
+    }))
 }
 
 #[cfg(not(any(unix, windows)))]
@@ -2037,6 +2419,173 @@ mod unix {
         create_user_selected_file_new_with(path, || {})
     }
 
+    pub(super) fn create_user_selected_file_publish(
+        staged: &Path,
+        destination: &Path,
+        file: &File,
+        hard_link_mode: HardLinkMode,
+    ) -> io::Result<CreatedFilePublish> {
+        let staged = std::path::absolute(staged)?;
+        let destination = std::path::absolute(destination)?;
+        let staged_parent = staged.parent().ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidInput, "staged export has no parent")
+        })?;
+        if destination.parent() != Some(staged_parent) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "staged export and destination must share one parent",
+            ));
+        }
+        let staged_leaf = staged
+            .file_name()
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "staged export has no file name",
+                )
+            })?
+            .to_os_string();
+        let destination_leaf = destination
+            .file_name()
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "export destination has no file name",
+                )
+            })?
+            .to_os_string();
+        let staged_c = c_name(&staged_leaf, "staged export file name")?;
+        let destination_c = c_name(&destination_leaf, "export destination file name")?;
+        let parent = open_user_selected_parent(staged_parent)?;
+        let expected = FileIdentity::from_metadata(&file.metadata()?);
+        let staged_matches = entry_stat(&parent, &staged_leaf)?
+            .is_some_and(|stat| FileIdentity::from_stat(&stat) == expected);
+        if !staged_matches {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "staged export path no longer identifies the open file",
+            ));
+        }
+        if entry_stat(&parent, &destination_leaf)?.is_some() {
+            return Err(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                "export destination already exists",
+            ));
+        }
+        let current_parent = open_user_selected_parent(staged_parent)?;
+        if FileIdentity::from_metadata(&current_parent.metadata()?)
+            != FileIdentity::from_metadata(&parent.metadata()?)
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "user-selected output parent changed before publication",
+            ));
+        }
+        Ok(Box::new(move |file: &File| {
+            if FileIdentity::from_metadata(&file.metadata()?) != expected
+                || !entry_stat(&parent, &staged_leaf)?
+                    .is_some_and(|stat| FileIdentity::from_stat(&stat) == expected)
+            {
+                return Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    "staged export changed before publication",
+                )
+                .into());
+            }
+            // Prefer a hard link because it keeps the staging cleanup path
+            // available until every postcondition is checked. Some ordinary
+            // export filesystems do not implement hard links, so supported
+            // kernels fall back to an equally atomic no-replace rename.
+            let publication = publish_with_atomic_fallback(
+                || match hard_link_mode {
+                    HardLinkMode::Native => {
+                        if unsafe {
+                            libc::linkat(
+                                parent.as_raw_fd(),
+                                staged_c.as_ptr(),
+                                parent.as_raw_fd(),
+                                destination_c.as_ptr(),
+                                0,
+                            )
+                        } == 0
+                        {
+                            Ok(())
+                        } else {
+                            Err(io::Error::last_os_error())
+                        }
+                    }
+                    #[cfg(test)]
+                    HardLinkMode::ForceUnsupported => Err(io::Error::new(
+                        io::ErrorKind::Unsupported,
+                        "injected hard-link rejection",
+                    )),
+                },
+                || {
+                    #[cfg(any(target_os = "linux", target_os = "android"))]
+                    let renamed = unsafe {
+                        libc::renameat2(
+                            parent.as_raw_fd(),
+                            staged_c.as_ptr(),
+                            parent.as_raw_fd(),
+                            destination_c.as_ptr(),
+                            libc::RENAME_NOREPLACE,
+                        )
+                    };
+                    #[cfg(target_os = "macos")]
+                    let renamed = {
+                        unsafe extern "C" {
+                            fn renameatx_np(
+                                from_dir: libc::c_int,
+                                from: *const libc::c_char,
+                                to_dir: libc::c_int,
+                                to: *const libc::c_char,
+                                flags: libc::c_uint,
+                            ) -> libc::c_int;
+                        }
+                        const RENAME_EXCL: libc::c_uint = 0x0000_0004;
+                        unsafe {
+                            renameatx_np(
+                                parent.as_raw_fd(),
+                                staged_c.as_ptr(),
+                                parent.as_raw_fd(),
+                                destination_c.as_ptr(),
+                                RENAME_EXCL,
+                            )
+                        }
+                    };
+                    #[cfg(not(any(
+                        target_os = "linux",
+                        target_os = "android",
+                        target_os = "macos"
+                    )))]
+                    return Err(io::Error::new(
+                        io::ErrorKind::Unsupported,
+                        "this platform has no atomic no-replace rename API",
+                    ));
+                    #[cfg(any(target_os = "linux", target_os = "android", target_os = "macos"))]
+                    if renamed == 0 {
+                        Ok(())
+                    } else {
+                        Err(io::Error::last_os_error())
+                    }
+                },
+            )?;
+            let post_publish = (|| {
+                let published = entry_stat(&parent, &destination_leaf)?
+                    .is_some_and(|stat| FileIdentity::from_stat(&stat) == expected);
+                if !published {
+                    return Err(io::Error::new(
+                        io::ErrorKind::PermissionDenied,
+                        "published export path does not identify the staged file",
+                    ));
+                }
+                sync_directory(&parent)
+            })();
+            post_publish.map_err(CreatedFilePublishError::published)?;
+            Ok(publication)
+        }))
+    }
+
     fn open_user_selected_parent(path: &Path) -> io::Result<File> {
         let parent_c = c_name(path.as_os_str(), "user-selected output parent")?;
         #[cfg(any(target_os = "linux", target_os = "android"))]
@@ -2065,8 +2614,6 @@ mod unix {
         leaf_c: &CString,
         path: &Path,
     ) -> io::Result<File> {
-        use std::sync::atomic::{AtomicU64, Ordering};
-
         unsafe extern "C" {
             fn renameatx_np(
                 from_dir: libc::c_int,
@@ -2079,15 +2626,21 @@ mod unix {
 
         const RENAME_EXCL: libc::c_uint = 0x0000_0004;
         const STAGING_ATTEMPTS: usize = 32;
-        static STAGING_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
         let payload_c = CString::new("payload").expect("static payload name has no NUL");
         for _ in 0..STAGING_ATTEMPTS {
-            let sequence = STAGING_SEQUENCE.fetch_add(1, Ordering::Relaxed);
-            let staging_name = OsString::from(format!(
-                ".kettle-screenshot-{}-{sequence:016x}",
-                std::process::id()
-            ));
+            let mut nonce = [0_u8; 16];
+            getrandom::fill(&mut nonce).map_err(|error| {
+                io::Error::other(format!(
+                    "secure randomness for screenshot staging failed: {error}"
+                ))
+            })?;
+            let mut suffix = String::with_capacity(nonce.len() * 2);
+            use std::fmt::Write as _;
+            for byte in nonce {
+                write!(&mut suffix, "{byte:02x}").expect("writing to String cannot fail");
+            }
+            let staging_name = OsString::from(format!(".kettle-screenshot-{suffix}"));
             let staging_c = c_name(&staging_name, "screenshot staging directory")?;
             // The directory is empty while its inherited ACL is removed. The
             // PNG is created only after this held directory object is 0700 and
@@ -2115,24 +2668,31 @@ mod unix {
                 )
             };
             if stage_fd < 0 {
+                // We have no descriptor identity with which to distinguish our
+                // directory from a name swapped in by another writer. Leaving
+                // an empty, randomly named 0700 directory is safer than
+                // unlinking an unverified replacement.
                 let error = io::Error::last_os_error();
-                unsafe {
-                    libc::unlinkat(parent.as_raw_fd(), staging_c.as_ptr(), libc::AT_REMOVEDIR);
-                }
-                return Err(error);
+                return Err(io::Error::new(
+                    error.kind(),
+                    format!(
+                        "screenshot staging directory could not be opened and was left in place for safety: {error}"
+                    ),
+                ));
             }
             let staging = unsafe { File::from_raw_fd(stage_fd) };
             let staging_identity = FileIdentity::from_metadata(&staging.metadata()?);
-            let remove_staging_if_same = || {
-                let linked = entry_stat(parent, &staging_name)
-                    .ok()
-                    .flatten()
+            let remove_staging_if_same = || -> io::Result<()> {
+                let linked = entry_stat(parent, &staging_name)?
                     .is_some_and(|stat| FileIdentity::from_stat(&stat) == staging_identity);
-                if linked {
-                    unsafe {
-                        libc::unlinkat(parent.as_raw_fd(), staging_c.as_ptr(), libc::AT_REMOVEDIR);
-                    }
+                if linked
+                    && unsafe {
+                        libc::unlinkat(parent.as_raw_fd(), staging_c.as_ptr(), libc::AT_REMOVEDIR)
+                    } != 0
+                {
+                    return Err(io::Error::last_os_error());
                 }
+                Ok(())
             };
 
             let created = (|| {
@@ -2179,21 +2739,52 @@ mod unix {
                     )
                 } != 0
                 {
-                    let error = io::Error::last_os_error();
-                    unsafe {
-                        libc::unlinkat(staging.as_raw_fd(), payload_c.as_ptr(), 0);
-                    }
-                    return Err(error);
+                    return Err(io::Error::last_os_error());
                 }
                 Ok(file)
             })();
-            if created.is_err() {
-                unsafe {
-                    libc::unlinkat(staging.as_raw_fd(), payload_c.as_ptr(), 0);
+            let payload_cleanup = if created.is_err() {
+                if unsafe { libc::unlinkat(staging.as_raw_fd(), payload_c.as_ptr(), 0) } == 0 {
+                    Ok(())
+                } else {
+                    let error = io::Error::last_os_error();
+                    if error.kind() == io::ErrorKind::NotFound {
+                        Ok(())
+                    } else {
+                        Err(error)
+                    }
+                }
+            } else {
+                Ok(())
+            };
+            let staging_cleanup = remove_staging_if_same();
+            match created {
+                Err(error) => {
+                    let error = with_cleanup_error(error, payload_cleanup, "staging payload");
+                    return Err(with_cleanup_error(
+                        error,
+                        staging_cleanup,
+                        "staging directory",
+                    ));
+                }
+                Ok(file) => {
+                    if let Err(error) = staging_cleanup {
+                        let expected = FileIdentity::from_metadata(&file.metadata()?);
+                        let published = entry_stat(parent, path.file_name().unwrap_or_default())?
+                            .is_some_and(|stat| FileIdentity::from_stat(&stat) == expected);
+                        let final_cleanup = if published
+                            && unsafe { libc::unlinkat(parent.as_raw_fd(), leaf_c.as_ptr(), 0) }
+                                != 0
+                        {
+                            Err(io::Error::last_os_error())
+                        } else {
+                            Ok(())
+                        };
+                        return Err(with_cleanup_error(error, final_cleanup, "published output"));
+                    }
+                    return Ok(file);
                 }
             }
-            remove_staging_if_same();
-            return created;
         }
 
         Err(io::Error::new(
@@ -2306,6 +2897,10 @@ mod unix {
                 if unsafe { libc::unlinkat(parent.as_raw_fd(), cleanup_leaf.as_ptr(), 0) } != 0 {
                     return Err(io::Error::last_os_error());
                 }
+                // The destination link was made durable by publication. Make
+                // retirement of the staging sibling durable as well before a
+                // successful publish is reported.
+                sync_directory(&parent)?;
             }
             Ok(())
         });
@@ -2775,16 +3370,16 @@ mod windows {
         WinBuiltinAdministratorsSid, WinLocalSystemSid,
     };
     use windows_sys::Win32::Storage::FileSystem::{
-        BY_HANDLE_FILE_INFORMATION, CREATE_NEW, CreateDirectoryW, CreateFileW, DELETE,
-        FILE_ADD_FILE, FILE_ADD_SUBDIRECTORY, FILE_ALL_ACCESS, FILE_APPEND_DATA,
+        BY_HANDLE_FILE_INFORMATION, CREATE_NEW, CreateDirectoryW, CreateFileW, CreateHardLinkW,
+        DELETE, FILE_ADD_FILE, FILE_ADD_SUBDIRECTORY, FILE_ALL_ACCESS, FILE_APPEND_DATA,
         FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_ENCRYPTED, FILE_ATTRIBUTE_NORMAL,
         FILE_ATTRIBUTE_REPARSE_POINT, FILE_DELETE_CHILD, FILE_DISPOSITION_INFO,
         FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_ID_INFO,
         FILE_LIST_DIRECTORY, FILE_READ_ATTRIBUTES, FILE_RENAME_INFO, FILE_SHARE_DELETE,
         FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_TRAVERSE, FILE_WRITE_DATA, FileDispositionInfo,
-        FileIdInfo, FileRenameInfoEx, GetFileInformationByHandle, GetFileInformationByHandleEx,
-        GetFinalPathNameByHandleW, OPEN_EXISTING, READ_CONTROL, ReOpenFile,
-        SetFileInformationByHandle, VOLUME_NAME_GUID, WRITE_DAC, WRITE_OWNER,
+        FileIdInfo, FileRenameInfo, FileRenameInfoEx, GetFileInformationByHandle,
+        GetFileInformationByHandleEx, GetFinalPathNameByHandleW, OPEN_EXISTING, READ_CONTROL,
+        ReOpenFile, SetFileInformationByHandle, VOLUME_NAME_GUID, WRITE_DAC, WRITE_OWNER,
     };
     use windows_sys::Win32::System::SystemServices::{
         ACCESS_ALLOWED_ACE_TYPE, ACCESS_ALLOWED_CALLBACK_ACE_TYPE,
@@ -3274,6 +3869,196 @@ mod windows {
         path: &Path,
     ) -> io::Result<(File, CreatedFileCleanup)> {
         create_user_selected_file_new_with(path, || {})
+    }
+
+    pub(super) fn validate_user_selected_file_path(path: &Path) -> io::Result<()> {
+        let leaf = path.file_name().ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("user-selected output has no file name: {}", path.display()),
+            )
+        })?;
+        private_component(leaf).map(|_| ())
+    }
+
+    pub(super) fn create_user_selected_file_publish(
+        staged: &Path,
+        destination: &Path,
+        file: &File,
+        hard_link_mode: HardLinkMode,
+    ) -> io::Result<CreatedFilePublish> {
+        let requested_destination = destination.file_name().ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "export destination has no file name",
+            )
+        })?;
+        private_component(requested_destination)?;
+        let staged = std::path::absolute(staged)?;
+        let destination = std::path::absolute(destination)?;
+        let parent_path = staged.parent().ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidInput, "staged export has no parent")
+        })?;
+        if destination.parent() != Some(parent_path) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "staged export and destination must share one parent",
+            ));
+        }
+        let staged_leaf = staged.file_name().ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "staged export has no file name",
+            )
+        })?;
+        let destination_leaf = destination.file_name().ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "export destination has no file name",
+            )
+        })?;
+        let parent = open_user_selected_parent(parent_path)?;
+        let expected = file_identity(file)?;
+        let mut staged_path = stable_child_path(&parent, staged_leaf)?;
+        staged_path.push(0);
+        let mut destination_path = stable_child_path(&parent, destination_leaf)?;
+        destination_path.push(0);
+        let stable_destination = std::path::PathBuf::from(std::ffi::OsString::from_wide(
+            &destination_path[..destination_path.len() - 1],
+        ));
+
+        let mut inspect = std::fs::OpenOptions::new();
+        inspect
+            .access_mode(FILE_READ_ATTRIBUTES)
+            .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
+            .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
+        let staged_check = inspect.open(&staged)?;
+        require_regular_non_reparse(&staged_check, &staged)?;
+        if file_identity(&staged_check)? != expected {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "staged export path no longer identifies the open file",
+            ));
+        }
+        match std::fs::symlink_metadata(&destination) {
+            Ok(_) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::AlreadyExists,
+                    "export destination already exists",
+                ));
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+
+        Ok(Box::new(move |file: &File| {
+            let _keep_parent_pinned = &parent;
+            if file_identity(file)? != expected {
+                return Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    "staged export changed before publication",
+                )
+                .into());
+            }
+            // Prefer a hard link so the staging name remains available through
+            // the postcondition check. ReFS, FAT-family volumes, and some
+            // network exports do not implement it, so fall back to renaming the
+            // already-open file with ReplaceIfExists=false. Both operations are
+            // atomic and refuse a concurrent destination.
+            let publication = publish_with_atomic_fallback(
+                || match hard_link_mode {
+                    HardLinkMode::Native => {
+                        if unsafe {
+                            CreateHardLinkW(
+                                destination_path.as_ptr(),
+                                staged_path.as_ptr(),
+                                std::ptr::null(),
+                            )
+                        } != 0
+                        {
+                            Ok(())
+                        } else {
+                            Err(io::Error::last_os_error())
+                        }
+                    }
+                    #[cfg(test)]
+                    HardLinkMode::ForceUnsupported => Err(io::Error::new(
+                        io::ErrorKind::Unsupported,
+                        "injected hard-link rejection",
+                    )),
+                },
+                || {
+                    let destination_name = &destination_path[..destination_path.len() - 1];
+                    let name_bytes = destination_name
+                        .len()
+                        .checked_mul(std::mem::size_of::<u16>())
+                        .ok_or_else(|| {
+                            io::Error::new(
+                                io::ErrorKind::InvalidInput,
+                                "export destination is too long",
+                            )
+                        })?;
+                    let total_bytes = std::mem::size_of::<FILE_RENAME_INFO>()
+                        .checked_add(name_bytes)
+                        .ok_or_else(|| {
+                            io::Error::new(
+                                io::ErrorKind::InvalidInput,
+                                "export destination is too long",
+                            )
+                        })?;
+                    let words = total_bytes.div_ceil(std::mem::size_of::<u64>());
+                    let mut storage = vec![0_u64; words];
+                    let info = storage.as_mut_ptr().cast::<FILE_RENAME_INFO>();
+                    unsafe {
+                        (*info).Anonymous.ReplaceIfExists = false;
+                        (*info).RootDirectory = std::ptr::null_mut();
+                        (*info).FileNameLength = u32::try_from(name_bytes).map_err(|_| {
+                            io::Error::new(
+                                io::ErrorKind::InvalidInput,
+                                "export destination is too long",
+                            )
+                        })?;
+                        std::ptr::copy_nonoverlapping(
+                            destination_name.as_ptr(),
+                            std::ptr::addr_of_mut!((*info).FileName).cast::<u16>(),
+                            destination_name.len(),
+                        );
+                    }
+                    let buffer_len = u32::try_from(total_bytes).map_err(|_| {
+                        io::Error::new(
+                            io::ErrorKind::InvalidInput,
+                            "export destination is too long",
+                        )
+                    })?;
+                    if unsafe {
+                        SetFileInformationByHandle(
+                            file.as_raw_handle() as HANDLE,
+                            FileRenameInfo,
+                            info.cast(),
+                            buffer_len,
+                        )
+                    } != 0
+                    {
+                        Ok(())
+                    } else {
+                        Err(io::Error::last_os_error())
+                    }
+                },
+            )?;
+            let post_publish = (|| {
+                let published = inspect.open(&stable_destination)?;
+                require_regular_non_reparse(&published, &stable_destination)?;
+                if file_identity(&published)? != expected {
+                    return Err(io::Error::new(
+                        io::ErrorKind::PermissionDenied,
+                        "published export path does not identify the staged file",
+                    ));
+                }
+                Ok(())
+            })();
+            post_publish.map_err(CreatedFilePublishError::published)?;
+            Ok(publication)
+        }))
     }
 
     pub(super) fn create_user_selected_file_new_with(
@@ -4924,6 +5709,186 @@ mod tests {
         assert_eq!(std::fs::read(existing).unwrap(), b"keep");
     }
 
+    #[test]
+    fn staged_user_selected_file_is_invisible_until_atomic_publication() {
+        let root = crate::test_tempdir();
+        let destination = root.path().join("shot.png");
+        let mut staged = stage_user_selected_file_new(&destination).unwrap();
+        staged.write_all(b"complete png").unwrap();
+        staged.flush().unwrap();
+        assert!(
+            !destination.exists(),
+            "the requested leaf must not expose partial streamed bytes"
+        );
+
+        staged.publish().unwrap();
+        assert_eq!(std::fs::read(&destination).unwrap(), b"complete png");
+        let staging_names = std::fs::read_dir(root.path())
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".kettle-export-")
+            })
+            .count();
+        assert_eq!(staging_names, 0, "publication must remove its sibling");
+    }
+
+    #[test]
+    fn staged_user_selected_publication_never_replaces_a_racing_winner() {
+        let root = crate::test_tempdir();
+        let destination = root.path().join("shot.png");
+        let mut staged = stage_user_selected_file_new(&destination).unwrap();
+        staged.write_all(b"ours").unwrap();
+        std::fs::write(&destination, b"winner").unwrap();
+
+        let error = staged.publish().unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::AlreadyExists);
+        assert_eq!(std::fs::read(destination).unwrap(), b"winner");
+    }
+
+    #[test]
+    fn unsupported_hard_links_fall_back_to_atomic_no_replace_rename() {
+        let renamed = std::cell::Cell::new(false);
+        let publication = publish_with_atomic_fallback(
+            || Err(io::Error::new(io::ErrorKind::Unsupported, "no hard links")),
+            || {
+                renamed.set(true);
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert_eq!(publication, CreatedFilePublication::Renamed);
+        assert!(renamed.get());
+
+        let rename_called = std::cell::Cell::new(false);
+        let error = publish_with_atomic_fallback(
+            || Err(io::Error::new(io::ErrorKind::AlreadyExists, "winner")),
+            || {
+                rename_called.set(true);
+                Ok(())
+            },
+        )
+        .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::AlreadyExists);
+        assert!(
+            !rename_called.get(),
+            "a racing destination must never reach a rename fallback"
+        );
+    }
+
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn platform_atomic_rename_fallback_publishes_and_never_replaces() {
+        let root = crate::test_tempdir();
+        let destination = root.path().join("fallback.png");
+        let mut nonce = 0_u8;
+        let mut staged = stage_user_selected_file_new_with_mode(
+            &destination,
+            || {
+                nonce = nonce.wrapping_add(1);
+                Ok([nonce; 16])
+            },
+            HardLinkMode::ForceUnsupported,
+        )
+        .unwrap();
+        staged.write_all(b"complete").unwrap();
+        staged.publish().unwrap();
+        assert_eq!(std::fs::read(&destination).unwrap(), b"complete");
+
+        let racing_destination = root.path().join("racing.png");
+        let mut staged = stage_user_selected_file_new_with_mode(
+            &racing_destination,
+            || {
+                nonce = nonce.wrapping_add(1);
+                Ok([nonce; 16])
+            },
+            HardLinkMode::ForceUnsupported,
+        )
+        .unwrap();
+        staged.write_all(b"ours").unwrap();
+        std::fs::write(&racing_destination, b"winner").unwrap();
+        let error = staged.publish().unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::AlreadyExists);
+        assert!(!error.destination_may_exist());
+        assert_eq!(std::fs::read(&racing_destination).unwrap(), b"winner");
+    }
+
+    #[test]
+    fn random_staging_collisions_are_bounded_and_leave_the_destination_absent() {
+        let root = crate::test_tempdir();
+        let destination = root.path().join("shot.png");
+        let nonce = [0xab; 16];
+        let occupied = root
+            .path()
+            .join(format!(".kettle-export-{}.tmp", "ab".repeat(nonce.len())));
+        std::fs::write(&occupied, b"occupied").unwrap();
+
+        let attempts = std::cell::Cell::new(0_usize);
+        let error = stage_user_selected_file_new_with(&destination, || {
+            attempts.set(attempts.get() + 1);
+            Ok(nonce)
+        })
+        .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::AlreadyExists);
+        assert_eq!(attempts.get(), 32, "collision retries must stay bounded");
+        assert!(!destination.exists());
+        assert_eq!(std::fs::read(occupied).unwrap(), b"occupied");
+    }
+
+    #[test]
+    fn staged_publication_reports_primary_and_cleanup_failures() {
+        let root = crate::test_tempdir();
+        let path = root.path().join("stage.tmp");
+        let file = std::fs::OpenOptions::new()
+            .create_new(true)
+            .read(true)
+            .write(true)
+            .open(path)
+            .unwrap();
+        let staged = CreatedUserSelectedFile::new(
+            file,
+            Box::new(|_| Err(io::Error::other("injected cleanup failure"))),
+        );
+        let staged = StagedUserSelectedFile::new(
+            staged,
+            Box::new(|_| Err(io::Error::other("injected publication failure").into())),
+        );
+
+        let error = staged.publish_synced().unwrap_err();
+        assert!(!error.destination_may_exist());
+        let message = error.to_string();
+        assert!(message.contains("injected publication failure"));
+        assert!(message.contains("injected cleanup failure"));
+    }
+
+    #[test]
+    fn post_publication_failure_reports_that_the_destination_may_exist() {
+        let root = crate::test_tempdir();
+        let path = root.path().join("stage.tmp");
+        let file = std::fs::OpenOptions::new()
+            .create_new(true)
+            .read(true)
+            .write(true)
+            .open(path)
+            .unwrap();
+        let staged = CreatedUserSelectedFile::new(file, Box::new(|_| Ok(())));
+        let staged = StagedUserSelectedFile::new(
+            staged,
+            Box::new(|_| {
+                Err(CreatedFilePublishError::published(io::Error::other(
+                    "injected durability failure",
+                )))
+            }),
+        );
+
+        let error = staged.publish_synced().unwrap_err();
+        assert!(error.destination_may_exist());
+        assert!(error.to_string().contains("injected durability failure"));
+    }
+
     #[cfg(unix)]
     #[test]
     fn user_selected_file_is_owner_only_beneath_a_public_parent() {
@@ -5071,12 +6036,24 @@ mod tests {
                 .kind(),
             io::ErrorKind::InvalidInput
         );
+        assert_eq!(
+            stage_user_selected_file_new(Path::new(&stream))
+                .expect_err("a staged export must reject alternate data streams")
+                .kind(),
+            io::ErrorKind::InvalidInput
+        );
 
         let mut trailing_dot = target.as_os_str().to_os_string();
         trailing_dot.push(".");
         assert_eq!(
             create_user_selected_file_new(Path::new(&trailing_dot))
                 .expect_err("a trailing-dot alias is not a new export file")
+                .kind(),
+            io::ErrorKind::InvalidInput
+        );
+        assert_eq!(
+            stage_user_selected_file_new(Path::new(&trailing_dot))
+                .expect_err("a staged export must reject trailing-dot aliases")
                 .kind(),
             io::ErrorKind::InvalidInput
         );
@@ -5088,6 +6065,12 @@ mod tests {
         assert_eq!(
             create_user_selected_file_new(Path::new(&nul))
                 .expect_err("an embedded NUL must not truncate the requested path")
+                .kind(),
+            io::ErrorKind::InvalidInput
+        );
+        assert_eq!(
+            stage_user_selected_file_new(Path::new(&nul))
+                .expect_err("a staged export must reject embedded NUL aliases")
                 .kind(),
             io::ErrorKind::InvalidInput
         );

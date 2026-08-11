@@ -1719,8 +1719,8 @@ features list. What's left is genuinely-multi-week threads + polish.
       closure. ConPTY's anonymous input pipe still has no EOF half-close, so a
       child waiting for EOF needs an explicit delimiter or finite `--timeout`.
 - [x] **Live-grid `screenshot` control method** for `kettle ctl` / the MCP
-      surface. It queues the existing live renderer readback, works in
-      `agent-server=read-only`, and returns the saved PNG path.
+      surface. It queues a bounded offscreen-scene renderer readback, works in
+      `agent-server=full`, and returns the saved PNG path.
 - [ ] Terminal::from_raw_fd in kettle-core for SCM_RIGHTS live-PTY
       adoption (phase 7 of `docs/TERMINATOR-DETACHABLE-TABS-DESIGN.md`,
       the final piece of detachable tabs). Internal

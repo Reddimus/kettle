@@ -171,6 +171,21 @@ impl GraphicsBudget {
         self.reserve(Resource::Cpu, bytes, false)
     }
 
+    /// Reserve short-lived renderer storage in the process GPU account only.
+    ///
+    /// A live screenshot target is bounded by its own 256 MiB readback limit,
+    /// but can legitimately exceed the 64 MiB cap for one retained terminal
+    /// image (a 6K window is about 78 MiB). It is not retained window state, so
+    /// charging it to the process limit for exactly the GPU submission/readback
+    /// lifetime preserves that distinction without weakening the hostile-image
+    /// boundary enforced by [`Self::reserve_gpu`].
+    pub fn reserve_transient_gpu(&self, bytes: usize) -> Option<GraphicsReservation> {
+        if bytes == 0 {
+            return None;
+        }
+        self.reserve(Resource::Gpu, bytes, false)
+    }
+
     /// Reserve a retained GPU texture/buffer in this window and process.
     pub fn reserve_gpu(&self, bytes: usize) -> Option<GraphicsReservation> {
         if bytes == 0 || bytes > self.limits.image_bytes {
@@ -335,6 +350,26 @@ mod tests {
         let _r = b.reserve_transient_cpu(48).unwrap();
         assert_eq!(b.usage(), (48, 0, 0, 0));
         assert!(b.reserve_transient_cpu(17).is_none());
+    }
+
+    #[test]
+    fn transient_gpu_storage_bypasses_only_the_per_image_limit() {
+        let b = GraphicsBudget::isolated(tiny_limits()).unwrap();
+        assert_eq!(b.limits().image_bytes, 16);
+        let texture = b
+            .reserve_transient_gpu(32)
+            .expect("a transient frame may exceed one retained image");
+        let staging = b
+            .reserve_transient_gpu(32)
+            .expect("its separately allocated staging buffer is charged too");
+        assert_eq!((texture.bytes(), staging.bytes()), (32, 32));
+        assert_eq!(b.usage(), (0, 0, 64, 0));
+        assert!(
+            b.reserve_transient_gpu(1).is_none(),
+            "the combined allocations reach the process-wide GPU limit"
+        );
+        drop((texture, staging));
+        assert_eq!(b.usage(), (0, 0, 0, 0));
     }
 
     #[test]

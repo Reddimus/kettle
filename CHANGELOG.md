@@ -8,6 +8,37 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Fixed
 
+- **An explicit live screenshot timed out whenever macOS marked the window
+  occluded.** Kettle queued the capture and requested a redraw, but the normal
+  background-window power guard discarded that frame; even bypassing the guard
+  cannot work because Metal refuses to vend a drawable for an occluded
+  `NSWindow`. An explicit capture now renders the completed terminal scene into
+  a bounded transient target before swapchain acquisition and reads that target
+  back, so the request neither depends on a drawable nor wakes ordinary
+  background paints. Both the target and its separately allocated staging
+  buffer are reserved before encoding and charged to the process GPU budget
+  until submission completion or device loss, preserving the 256 MiB
+  per-allocation capture ceiling for 6K/8K
+  windows without weakening the 64 MiB untrusted-image cap. Control targets
+  known to be hidden or minimized fail promptly; backends such as Wayland that
+  cannot report those states retain the bounded timeout. Timeout and final file
+  publication now share one atomic decision. PNG bytes stream into a randomly
+  named owner-only sibling and the potentially slow inode flush remains
+  cancellable. The requested path appears only through an atomic no-replace
+  link, with a no-replace rename fallback for filesystems without hard links,
+  so neither timeout nor a crash exposes a changing partial leaf. The control
+  reply has a finite post-commit grace period and reports an explicitly
+  uncertain destination rather than waiting forever if the filesystem stalls;
+  post-publication durability, verification, and cleanup failures carry that
+  same destination-may-exist state instead of masquerading as safe retries.
+  GPU resources and accounting are released as soon as readback reaches CPU
+  memory, and one process-wide fixed two-worker persistence pool prevents one cancelled,
+  filesystem-blocked save from retaining capture admission indefinitely.
+  A submission still pending after two bounded waits resets the wedged GPU,
+  while genuine driver-loss callbacks also wake an occluded event loop into
+  normal device recovery. Publication and setup failures explicitly
+  remove the exact staging object and include any cleanup error in the result.
+
 - **macOS rounded off Kettle's color twice.** On macOS 26+, Kettle now gives
   AppKit an opaque, full-bleed runtime icon so the system owns the only outer
   mask instead of pinching an already-rounded blue border. The static `.icns`

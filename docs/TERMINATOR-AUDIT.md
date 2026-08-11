@@ -368,7 +368,7 @@ kettle's `kettle_core::cwd` (OSC 7 cwd tracking) is the equivalent.
 | `custom_commands.py` | Custom menu items | A | `menu-item = LABEL = CMD` config + Lua `kettle.add_menu_item` |
 | ~~`remote.py`~~ | SSH/Docker/Podman session detection | A | Shipped across a phased rollout, from initial design through detector coverage. `kettle-remote` crate with sysinfo-backed BFS process-tree walk, SSH + Container detectors (22 argv shapes covered), `Terminal::child_pid()`, App's 5 Hz poll loop, pane-title flip on detect change, right-click "Reconnect" menu entry. Deployed. |
 | `logger.py` | Log terminal output to file | A | `Action::ToggleSessionLog` (aliases: `start_logger`/`stop_logger`/`toggle_session_log`) — opens `<cache>/kettle/logs/kettle-<secs>-<pid>.log`, tee's raw PTY bytes via per-Terminal `Arc<Mutex<Option<File>>>` log_file slot in the reader thread. No ANSI stripping (preserves replayable output). Best-effort I/O (errors swallowed). |
-| ~~`terminalshot.py`~~ | Screenshot focused terminal | A | `Action::TakeScreenshot` queues one bounded `ScreenshotRequest { out_path, crop }`. The frame copy is encoded in the normal render submission; a single lazy worker performs the finite GPU wait, mapping, BGRA→RGBA conversion, crop, PNG encode, and write so the winit/Wayland event loop never blocks on readback. A concurrent request receives an explicit busy error. The focused-pane PNG appears at `<cache>/kettle/shots/kettle-<secs>-<pid>.png`; whole-window screenshots remain available through `--screenshot=PATH`. Hardened in v2.36.1. |
+| ~~`terminalshot.py`~~ | Screenshot focused terminal | A | `Action::TakeScreenshot` queues one bounded `ScreenshotRequest { out_path, crop }`. One explicit frame renders into a transient offscreen target before surface acquisition; a capture worker performs the finite GPU wait, mapping, and BGRA→RGBA conversion, then drops GPU resources before a fixed two-worker pool crops, encodes, syncs, and publishes the PNG. The winit/Wayland event loop never blocks on readback, and filesystem stalls cannot retain GPU capture admission indefinitely. A concurrent capture receives an explicit busy error. The focused-pane PNG appears at `<cache>/kettle/shots/kettle-<secs>-<pid>.png`; whole-window screenshots remain available through `--screenshot=PATH`. Hardened in v2.36.1 and v2.56.x. |
 | `dir_open.py` | Open cwd in file manager | A | `Action::OpenCwdInFileManager` (file:// URL → `open` crate) |
 | `insert_term_name.py` | Insert pane name into input | A | `Action::InsertPaneName` (writes pane title to PTY) |
 | `maven.py` | Maven artifact URL handler | E | domain-specific; user can add via Lua plugin |
@@ -741,7 +741,7 @@ and progressed each through implementation. Status snapshot:
 | `plugins/auto_theme.py`      | ✅ A   | 7/7        | Manual + clock schedule + sunrise/sunset (NOAA solar). Deployed. |
 | `ask_before_closing`         | ✅ A   | Complete; centered-panel polish deferred | Every close gesture — the three close actions, the titlebar ✕, Alt+F4, the tab-bar ✕, and middle-click — routes through the shared `confirm_close` gate, pinned by `every_close_gesture_asks_before_closing`. Bottom-bar modal renderer supports keyboard navigation and mouse clicks on the visible `[Cancel]` / `[Close]` buttons. |
 | `tab_position = left/right`  | ✅ A   | 7/8 + 1 polish-deferred | Variants + layout + paint + cfg width. Drag-reorder y-axis deferred (horizontal works; y-axis is identical-shape work). Deployed. |
-| `plugins/terminalshot.py`    | ✅ A   | 7/7        | Action + path helper + Renderer slot + wgpu surface readback + focused-pane crop + desktop notification. Deployed. |
+| `plugins/terminalshot.py`    | ✅ A   | 7/7        | Action + path helper + Renderer slot + wgpu offscreen-scene readback + focused-pane crop + desktop notification. Deployed. |
 | Named broadcast groups       | ✅ A   | 7/8        | `BroadcastScope { Off, Tab, All, Group(String) }` + mux migration + bulk-apply GroupTab/Window + UngroupTab/Window + ToggleBroadcastGroup/Window + `[group]` titlebar pill + right-click context-menu entries. Cross-window groups via the file-based IPC remain. Deployed. |
 | Right-click theme submenu    | D     | 0/9        | Design doc only; no implementation yet. The command palette covers the same UX via `/theme NAME`. |
 
@@ -760,7 +760,7 @@ user-visible behavior:
     click menu
   - Theme/Profile submenu: drill-in UI exposing ~512 themes
     and configured profiles
-  - `plugins/terminalshot.py`: wgpu surface readback +
+  - `plugins/terminalshot.py`: wgpu offscreen-scene readback +
     focused-pane crop + desktop notification
 
 The BroadcastScope migration alone touched 5 call
