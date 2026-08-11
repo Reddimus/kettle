@@ -8,6 +8,14 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Fixed
 
+- **A transient release-network failure could make the Linux online installer
+  fail even when every signed asset was healthy.** Each bounded fetch now gets
+  two curl-classified retries with bounded backoff, including refused
+  connections. Kettle suppresses user curl configuration before applying that
+  policy, so a local `retry-all-errors` cannot turn a permanent HTTP or
+  size-limit refusal into more requests. A modern release still fails closed if
+  its signed manifest cannot be authenticated after the third total attempt.
+
 - **Kettle could not create a GPU device on Parallels' otherwise usable
   virtual adapter.** The GLES device advertises graphics and presentation but
   zero compute workgroups; Kettle requested WebGPU's default 65,535 even though
