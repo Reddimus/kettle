@@ -31,7 +31,14 @@ use tempfile::Builder;
 
 #[test]
 fn context_menu_renders_visibly_with_text() {
-    let cfg = Config::default();
+    // Parallels' Windows ARM WDDM adapter faults during a headless wgpu device
+    // request. WARP still exercises the complete screenshot pipeline and exact
+    // pixels; physical Windows machines and the live renderer retain
+    // hardware-first coverage.
+    let cfg = Config {
+        gpu_force_software: cfg!(all(target_os = "windows", target_arch = "aarch64")),
+        ..Config::default()
+    };
     // `.png` suffix matters — kettle-render's `capture_png_with`
     // hands the path to `image::save`, which dispatches on extension.
     let default_tmp = Builder::new()

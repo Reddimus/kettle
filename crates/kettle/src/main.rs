@@ -977,6 +977,14 @@ fn attach_parent_console_if_needed() {
 #[cfg(not(windows))]
 fn attach_parent_console_if_needed() {}
 
+fn queue_startup_update_recovery(warning: Option<&str>, queue: impl FnOnce(&str, &str)) -> bool {
+    let Some(warning) = warning else {
+        return false;
+    };
+    queue("Kettle update recovery", warning);
+    true
+}
+
 fn main() -> anyhow::Result<()> {
     // Under the GUI subsystem (see the crate-root attribute), a
     // terminal launch must attach the parent console so CLI subcommands print;
@@ -1020,16 +1028,8 @@ fn main() -> anyhow::Result<()> {
                 std::process::exit(code);
             }
         };
-    if let Some(warning) = startup_update_warning {
+    if let Some(warning) = startup_update_warning.as_deref() {
         eprintln!("kettle update recovery: {warning}");
-        let mut notification = notify_rust::Notification::new();
-        notification
-            .summary("Kettle update recovery")
-            .body(&warning)
-            .appname("kettle");
-        if let Err(error) = notification.show() {
-            log::warn!("could not show update recovery notification: {error}");
-        }
     }
     // Log the build identity at info level on startup. A user
     // grep'ing their stderr for warnings to file a bug report can paste
@@ -1741,13 +1741,25 @@ fn main() -> anyhow::Result<()> {
         recording_key: record.as_ref().map(recording_activation_key),
         record_raw_input: record.is_some() && record_raw_input,
     };
+    let startup_notification_queued = queue_startup_update_recovery(
+        startup_update_warning.as_deref(),
+        kettle_ui::queue_desktop_notification,
+    );
     let activation = if bare_gui_launch && !cli.new_process {
         let cwd = std::env::current_dir()
             .ok()
             .and_then(|path| path.to_str().map(str::to_string));
         let request = kettle_ctl::activation::ActivationRequest::new(cwd, activation_identity);
         match kettle_ctl::activation::activate_or_elect(request) {
-            Ok(kettle_ctl::activation::ActivationOutcome::Activated) => return Ok(()),
+            Ok(kettle_ctl::activation::ActivationOutcome::Activated) => {
+                if startup_notification_queued {
+                    // This secondary process owns the notification worker.
+                    // Give its one admitted recovery warning a bounded chance
+                    // to reach the OS before activation handoff exits.
+                    kettle_ui::flush_desktop_notifications(std::time::Duration::from_millis(250));
+                }
+                return Ok(());
+            }
             Ok(kettle_ctl::activation::ActivationOutcome::Primary(primary)) => Some(primary),
             Ok(kettle_ctl::activation::ActivationOutcome::Standalone) => None,
             Err(error) => {
@@ -2560,10 +2572,50 @@ mod tests {
     use super::{
         Cli, DefaultConfigWrite, append_remote_command, append_remote_command_with_timeout,
         config_path_problem, encode_remote_send_command, extra_check_config_lines,
-        flag_value_problem, format_ssh_hosts, ignores_profile, resolved_config_trust,
-        write_default_config,
+        flag_value_problem, format_ssh_hosts, ignores_profile, queue_startup_update_recovery,
+        resolved_config_trust, write_default_config,
     };
     use clap::Parser;
+
+    #[test]
+    fn update_recovery_notification_is_flushed_before_activated_handoff() {
+        let mut observed = None;
+        assert!(queue_startup_update_recovery(
+            Some("pending transaction recovered"),
+            |title, body| observed = Some((title.to_string(), body.to_string())),
+        ));
+        assert_eq!(
+            observed,
+            Some((
+                "Kettle update recovery".to_string(),
+                "pending transaction recovered".to_string()
+            ))
+        );
+        assert!(!queue_startup_update_recovery(None, |_title, _body| {
+            panic!("an absent warning must not queue a notification")
+        }));
+
+        let src = super::production_source();
+        let activated_arm = src
+            .split("ActivationOutcome::Activated")
+            .nth(1)
+            .and_then(|rest| rest.split("ActivationOutcome::Primary").next())
+            .expect("activation handoff arm");
+        assert!(
+            activated_arm.contains("flush_desktop_notifications"),
+            "a secondary GUI process must flush its queued recovery warning before activation handoff returns"
+        );
+        let queue_at = src
+            .find("let startup_notification_queued = queue_startup_update_recovery(")
+            .expect("GUI startup must queue the recovery warning");
+        let activation_at = src
+            .find("activate_or_elect(request)")
+            .expect("bare GUI activation decision");
+        assert!(
+            queue_at < activation_at,
+            "the warning must be queued before an Activated outcome can return"
+        );
+    }
 
     /// `--write-default-config` must refuse to clobber, and must say so
     /// pleasantly rather than failing.

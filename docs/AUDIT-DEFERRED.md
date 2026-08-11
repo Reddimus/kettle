@@ -14,10 +14,30 @@ tracked here so they are not lost.
   Reddimus/kettle#36 stays open until `ttf-parser` disappears from the dependency
   graph. The only accepted temporary path is `glyphon → cosmic-text → fontdb`;
   `scripts/check-ttf-parser-scope.sh` guards that scope in CI. Upstream tracking:
-  RazrFalcon/fontdb#90, pop-os/cosmic-text#352, and grovesNL/glyphon#123. Close
-  this only after updating the text-rendering stack, confirming
+  RazrFalcon/fontdb#90, pop-os/cosmic-text#352, pop-os/cosmic-text#526, and
+  grovesNL/glyphon#123. Rechecked 2026-08-11: crates.io still publishes
+  `cosmic-text 0.19.0` and `glyphon 0.12.0`; both projects' `main` manifests
+  still select that pair, and cosmic-text still pins `fontdb 0.23`. The focused
+  upstream bump to `fontdb 0.24` is open as cosmic-text PR #526, currently
+  mergeable but blocked, so Kettle cannot consume the already-published fontdb
+  fix without maintaining a fork or unreleased Git dependency. Close this only
+  after an upstream release, updating the text-rendering stack, confirming
   `cargo tree -i ttf-parser` reports no matches, and removing
   RUSTSEC-2026-0192 ignores from `deny.toml` and `.github/workflows/audit.yml`.
+- **RUSTSEC-2026-0253 upstream exit for `lru`.** Issue Reddimus/kettle#207
+  tracks the `lru 0.16.4` unsoundness warning until glyphon accepts a fixed
+  release (`lru >=0.18.2`). The reviewed product path is only
+  `lru 0.16.4 → glyphon 0.12.0 → kettle-render`: glyphon's cache key is
+  `Copy`, so its destructor cannot panic, and glyphon calls `peek_lru`,
+  `pop_lru`, and `get`, never the affected `LruCache::pop()` method. A fork or
+  vendored text renderer would add more supply-chain surface without making a
+  reachable product path safer. `scripts/check-lru-scope.py` therefore reads
+  the committed lockfile's all-feature, all-platform metadata graph and pins
+  both upstream crates.io sources, versions, and every reverse edge; a source
+  replacement, target-specific new consumer, or version fails Linux CI and
+  requires a fresh reachability review. Once upstream
+  resolves it, remove the audit ignores and the guard in the same change, then
+  close #207.
 - **`app.rs` god-file split + testability seams.** Extract dispatch / frame /
   modals / ctl-glue into focused subsystems and make per-event handlers return a
   typed `Outcome` command list (pure deciders + a thin applier), replacing the
@@ -516,8 +536,57 @@ tracked here so they are not lost.
   recovery, preventing a late write or a stranded `BUSY` request. Native
   verification put Finder in front and completed two consecutive control
   screenshots (816x520 RGBA, non-empty and
-  byte-identical); the broader agent smoke produced eleven live screenshots
-  before reaching its separate, superseded LazyVCS marker failure.
+  byte-identical). After repairing the separate LazyVCS harness defects below,
+  the broader native agent smoke completed all 14 live states, including the
+  configured sidebar, changed-row gutter, and fixture-row inline blame.
+
+  The smoke harness now records the exact executable path, SHA-256, version
+  output, source commit/dirty state (including untracked regular files), exact
+  target Neovim bytes, copied LazyVCS tree hash, canonical loaded module source,
+  and harness SHA-256. The basic identity is captured before launch; the bounded,
+  no-follow plugin baseline is captured only after configured Neovim finishes
+  any first-run bootstrap, then all of it is verified again afterward. This
+  retains the files that were actually tested without misclassifying a
+  legitimate absent-to-installed bootstrap as a product mutation. Repository
+  NUL-delimited porcelain status, diffs, and untracked contents are streamed
+  under pathname/record and file/byte budgets, and the complete filesystem pass
+  runs in a contained child under one absolute
+  parent-enforced launch-and-run deadline. Unix uses a private process group for
+  the worker and ordinary descendants and disables configured Git fsmonitor
+  processes; a deliberately detached `setsid` descendant is outside POSIX
+  process-group containment, so this is cleanup rather than a sandbox.
+  Windows uses a kill-on-close Job Object assigned before a handshake lets the
+  worker launch Git. A timeout transfers reaping to a background owner rather
+  than waiting past the deadline; tests require a successful reap rather than
+  only reaper-thread exit, exercise Job close without explicit termination on
+  Windows after both tree PIDs are atomically published, kill completed Unix
+  worker groups, and route unexpected pipe failures through the same cleanup.
+  Ignored trees are pruned and untracked links or special files fail closed
+  rather than disappearing from the identity. Its configured-LazyVCS leg also
+  fixes three harness defects in the marker itself: Vimscript concatenation
+  embedded in Lua, a write to a non-modifiable plugin buffer, and a
+  configured-plugin warning whose hit-enter pager covered the otherwise
+  successful sidebar. The stable marker gate checks the exact fixture path in
+  active and discovered state plus a per-run unique sidebar row. Terminal-grid
+  evidence is divided at one cell-proven split column: sidebar tokens must stay
+  on the left and the unique gutter/blame rows on the tracked-file side, and
+  that exact cell snapshot is retained, so unrelated or independently sampled
+  text cannot satisfy the probe. It no longer depends on LazyVCS's private
+  caches or extmark namespace names. Native failure cleanup likewise retains
+  Linux pidfds or macOS audit tokens for every session member and
+  exact-environment daemon; it never carries a reusable numeric PID from a
+  check to a signal. Environment matching reads the actual NUL-delimited values
+  rather than argv-rendering text. Every acquired handle becomes
+  finalizer-owned before any duplicate close or first stop, and individual
+  signal/close failures cannot skip later handles. The wrapper preserves both
+  normal exit codes and terminating signals while remaining the session anchor
+  only for a live background descendant. A reused append-only tracker PID is
+  reopened and independently classified in the same pass, and an internal
+  identity-query error closes every handle acquired earlier in that scan. On
+  native Windows, the PowerShell pane assigns its own handle to an unpredictable
+  named Job before configured Neovim starts; cleanup waits for zero active Job
+  processes before deletion rather than treating asynchronous termination as a
+  completed drain.
 
 - **One shared streaming control-state kernel for the three ANSI parsers.** The
   `kettle exec` stripper, the session-log scrubber, and the VT extractor have now
@@ -540,23 +609,16 @@ tracked here so they are not lost.
   `ansi_stripper_control_events_cover_every_state_cross_product` test added in
   this pass is the shape the shared kernel's conformance matrix should take.
 
-- **`scroll_page_up` does not enter scrollback on macOS — reproduced three times.**
-  `scripts/perf/kettle-live-probes.py` seeds 1600 lines and then asserts
-  `display_offset > 0` after `perform_action scroll_page_up`. That assertion
-  failed during macOS comparator development and again in the full comparator
-  run, under different machine loads:
-
-      kettle-live-probes: scroll_page_up did not enter scrollback
-
-  Two independent reproductions make contention flakiness the less likely
-  explanation, so this is now a **probable real defect** rather than an
-  unconfirmed observation. It was recorded rather than fixed because it was found
-  during a benchmark run and diagnosing it properly needs a live UI session, not
-  a hurried patch. Start from `Action::ScrollPageUp` in
-  `crates/kettle-ui/src/app.rs:13204` and the `display_offset` the control plane
-  reports through `read_screen`; establish first whether the viewport actually
-  fails to move or whether only the reported offset is wrong, because those are
-  different bugs.
+- **`scroll_page_up` intermittently failed to enter scrollback on macOS.** Three
+  comparator runs recorded `display_offset == 0` after seeding 1,600 lines.
+  Later 2026-08-10 reruns moved the viewport and reported a positive offset, but
+  no source change explains the difference and the historical analyses did not
+  retain build hashes. Passing reruns therefore do not close a load- or
+  state-sensitive defect. Keep this open until either a root cause is fixed or
+  a bounded stress run against identified commits/artifacts establishes its
+  actual failure rate. The next failure must retain executable and harness
+  provenance, `read_screen` before/after payloads, visible PNGs, and system load
+  so viewport movement can be distinguished from stale control metadata.
 
 ## Search follow-up and platform evidence
 

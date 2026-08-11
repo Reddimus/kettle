@@ -115,10 +115,10 @@ deny:
     cargo deny --manifest-path vendor/Cargo.toml check licenses sources bans
 
 # RustSec advisory coverage for both committed lock graphs. The product graph
-# retains one narrowly guarded unmaintained-crate exception; the vendor graph
-# has no product exceptions. Missing cargo-audit is a hard command failure.
+# retains two narrowly guarded upstream exceptions; the vendor graph has no
+# product exceptions. Missing cargo-audit is a hard command failure.
 audit:
-    cargo audit --db target/advisory-db --url https://github.com/RustSec/advisory-db.git --ignore RUSTSEC-2026-0192
+    cargo audit --db target/advisory-db --url https://github.com/RustSec/advisory-db.git --ignore RUSTSEC-2026-0192 --ignore RUSTSEC-2026-0253
     cargo audit --db target/advisory-db --url https://github.com/RustSec/advisory-db.git --file vendor/Cargo.lock
 
 # `cargo machete` — finds unused workspace dependencies. CI runs
@@ -214,6 +214,20 @@ ttf-parser-scope:
 [windows]
 ttf-parser-scope:
     python scripts/check-ttf-parser-scope.py
+
+# Guard the accepted RUSTSEC-2026-0253 warning while #207 is open. The
+# affected `LruCache::pop()` method is not used by glyphon 0.12.0, but any
+# dependency-path or reviewed-version change fails until reachability is
+# reassessed. Unlike the older ttf-parser guard, resolution also fails with
+# cleanup instructions so an obsolete advisory ignore cannot linger silently.
+[unix]
+lru-scope:
+    ./scripts/check-lru-scope.sh
+
+[windows]
+lru-scope:
+    python scripts/test-lru-scope.py
+    python scripts/check-lru-scope.py
 
 # === Packaging & release metadata ==================================
 # These four wrap CI checks that used to have NO `just` entry point at
@@ -343,7 +357,7 @@ build:
 # Release build of just the binary crate — what gets shipped in the
 # release tarballs. Use this to test the same artifact CI would build.
 release:
-    cargo build --release -p kettle
+    cargo build --locked --release -p kettle
 
 # === Verification gauntlet =========================================
 
@@ -394,9 +408,9 @@ gauntlet: live-ui-helper-selftest shell-integration-check
 # pass locally first. Requires cargo-audit, cargo-deny, and cargo-machete
 # (one-time). The current-OS vendor check is supplemented by Linux + Windows
 # native vendor legs in CI.
-gauntlet-strict: gauntlet vendor-check deny audit ttf-parser-scope machete tracked-audit
+gauntlet-strict: gauntlet vendor-check deny audit ttf-parser-scope lru-scope machete tracked-audit
     @echo ""
-    @echo "STRICT GAUNTLET PASSED — core, patched crates, RustSec product/vendor audits, ttf-parser scope, deny, machete, and tracked-file audit are green."
+    @echo "STRICT GAUNTLET PASSED — core, patched crates, RustSec product/vendor audits, ttf-parser/lru scopes, deny, machete, and tracked-file audit are green."
 
 # The FULL CI-equivalent gate: gauntlet-strict plus every packaging,
 # installer, update-manifest, and GPU-render check ci.yml runs that
@@ -540,7 +554,8 @@ gpu-render-smoke: release
 # --list-themes/--actions/--keybinds/--ssh-hosts, --print-default-config,
 # --profile, --shell-integration, --print-completions, --config-path)
 # and asserts both the happy-path output shape and the error-path exit
-# codes. Self-builds the debug binary if missing, exactly like CI.
+# codes. Rebuilds the debug binary so a prior checkout cannot make the smoke
+# report success against stale code.
 # Artifacts land under {{TMPDIR}}/kettle-cli-smoke instead of a CI
 # runner's throwaway workspace. The CI script's `$RUNNER_OS` branch
 # collapses to the non-Windows binary path — Git Bash on Windows
@@ -551,12 +566,20 @@ gpu-render-smoke: release
 cli-smoke:
     #!/usr/bin/env bash
     set -euo pipefail
+    # The shared helper always rebuilds from Cargo.lock and compares the full
+    # 12-character Git/dirty identity before the legacy shell assertions below.
+    python3 scripts/check-cli-smoke.py
+    umask 077
     out_dir="{{TMPDIR}}/kettle-cli-smoke"
     mkdir -p "$out_dir"
+    chmod 700 "$out_dir"
+    # Every config assertion below describes an empty CI-style profile. Keep
+    # it independent of the developer machine: a real ~/.config/kettle made
+    # the "no config" hint disappear and failed this smoke on Ubuntu.
+    export XDG_CONFIG_HOME="$out_dir/xdg-config"
+    rm -rf "$XDG_CONFIG_HOME"
     KETTLE_CI_BIN="./target/debug/kettle"
-    if [ ! -x "$KETTLE_CI_BIN" ]; then
-      cargo build -q -p kettle
-    fi
+    cargo build --locked -q -p kettle
     # --version exercises the build.rs git-SHA capture.
     "$KETTLE_CI_BIN" --version | tee "$out_dir/kettle-version.txt"
     grep -E '^kettle [0-9]+\.[0-9]+\.[0-9]+ \([0-9a-f]+(\+dirty)?\)' "$out_dir/kettle-version.txt"
@@ -597,7 +620,6 @@ cli-smoke:
     # a deliberately malformed value under a scratch XDG_CONFIG_HOME
     # (never the user's real config dir) and assert --check-config's
     # exit code goes non-zero.
-    export XDG_CONFIG_HOME="$out_dir/xdg-config"
     mkdir -p "$XDG_CONFIG_HOME/kettle/profiles"
     echo 'font-size = not_a_number' > "$XDG_CONFIG_HOME/kettle/profiles/cibad.config"
     out=$("$KETTLE_CI_BIN" --profile cibad --check-config 2>&1) && \
@@ -923,7 +945,9 @@ hover-wheel-smoke:
     python scripts/check-live-ui-smoke.py --cargo-release hover-wheel
 
 # Terminate one detached window's child through the PTY reap path and prove the
-# sibling OS window and its pane remain live.
+# sibling OS window and its pane remain live. Linux requires X11 + xdotool; the
+# helper forces winit's X11 backend because Wayland has no portable independent
+# top-level-window inventory.
 [unix]
 window-close-isolation-smoke:
     python3 scripts/check-live-ui-smoke.py --cargo-release window-close-isolation

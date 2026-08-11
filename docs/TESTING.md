@@ -23,8 +23,14 @@ just gauntlet-strict
 
 The strict gate includes the normal gauntlet, direct patched-crate validation,
 RustSec advisory scans of the product and vendor lock graphs, the scoped
-`ttf-parser` exception guard, dependency-policy checks, unused-dependency
-checks, and the tracked-file ledger. Install `cargo-audit`, `cargo-deny`, and
+`ttf-parser` and `lru` exception guards, dependency-policy checks,
+unused-dependency checks, and the tracked-file ledger. Both guards fail when
+their reviewed inverse path changes; the `lru` guard also pins the upstream
+crates.io sources and versions whose API reachability was reviewed for
+RUSTSEC-2026-0253. It reads
+locked Cargo metadata without a platform filter, so target-specific Windows
+and macOS consumers remain visible when the guard runs on Linux CI. Install
+`cargo-audit`, `cargo-deny`, and
 `cargo-machete` locally first; a missing tool fails the recipe. `cargo-audit`
 fetches into ignored `target/advisory-db` rather than trusting a stale global
 cache.
@@ -81,11 +87,25 @@ matrix. The Parallels Ubuntu ARM guest can build and run the aarch64 product,
 its PTY tests, and live Wayland scenarios. The Parallels Windows 11 ARM guest
 can build the complete workspace natively once its Visual Studio ARM64 MSVC and
 LLVM/Clang components are loaded with `VsDevCmd.bat -arch=arm64
--host_arch=arm64`; it exercises ARM64 ConPTY and the Parallels virtual GPU. It
-does not produce or validate the shipped x86_64 Windows archive, which remains
-the job of hosted Windows CI and the physical x86_64 Windows machine. Record
-the exact commit and adapter for each guest run, then stop the guest when the
-batch is complete.
+-host_arch=amd64` (or `Launch-VsDevShell.ps1 -Arch arm64 -HostArch amd64`).
+Visual Studio currently supplies an x64-hosted ARM64 compiler, so `cl.exe`
+runs through Windows ARM's x64 compatibility layer while its objects and the
+Rust target remain native `aarch64-pc-windows-msvc`.
+
+The renderer unit fixtures force Windows ARM's DX12/WARP software adapter.
+Parallels Desktop 26.4.1's ARM64 WDDM adapter faults during a headless wgpu
+device request even when a single test runs, whereas the same compiled
+pipelines and pixel readbacks pass under WARP. This exception is deliberately
+scoped: the Windows GPU and live-UI smoke harnesses detect that exact Parallels
+ARM guest and use WARP, while physical Windows machines and ordinary Kettle
+launches keep hardware-first adapter selection. A Parallels guest therefore
+proves the complete renderer and pixel pipeline through WARP, not the virtual
+WDDM driver. The guest still
+exercises native ARM64 ConPTY and every portable renderer path, but it does not
+produce or validate the shipped x86_64 Windows archive; that remains the job of
+hosted Windows CI and the physical x86_64 Windows machine. Record the exact
+commit and adapter for each guest run, then stop the guest when the batch is
+complete.
 
 Run Windows tests as the ordinary signed-in user, not from an elevated shell.
 The `kettle-update` unit-test harness deliberately embeds an `asInvoker`
@@ -117,8 +137,9 @@ adapter's advertised value. This matters on virtual GLES adapters which expose
 graphics and presentation while advertising zero compute workgroups: Kettle
 has no compute pipelines, so a default request for 65,535 workgroups must not
 reject an otherwise usable device. The pure limit regression is portable; a
-Parallels guest run is still required to prove the real virtual adapter creates
-the device and renders.
+Parallels guest run is still required to prove the guest pipeline creates a
+WARP device and renders. The known-bad virtual WDDM adapter is not claimed as
+covered.
 
 Performance-harness changes first run GUI-free fixtures under both supported
 PowerShell hosts:
@@ -1289,12 +1310,109 @@ These need a real display and are run by hand (or on real hardware):
     fixture separately decodes the exact raster attributes, palette, scaling,
     and empty columns emitted by the locally verified tmux 3.4 path. When
     Neovim is present, the run includes both `nvim-split-clean` and
-    `nvim-split-configured` states.
-    Editor markers are assembled from separate string halves by Vimscript and
-    never occur literally in the typed launch command, so shell echo cannot
-    satisfy the editor-state waits. The tmux server uses an unpredictable
-    private socket, the target-resolved Bash path, and checked cleanup on every
-    Kettle exit path.
+    `nvim-split-configured` states plus a configured LazyVCS sidebar over a
+    disposable repository with a real unstaged change. The LazyVCS marker is
+    conditional on completed discovery, the disposable repository's exact
+    canonical root in both the active state and discovered repository specs,
+    its per-run unique rendered sidebar row, and the matching `tracked.txt`
+    buffer. The captured screen is split at the visible pane
+    divider: marker/change-count/repository evidence must be on the sidebar
+    side, while the unique changed-row gutter and committed-row blame must be
+    on the tracked-file side. The divider is one consistent column taken from
+    the cell grid, and the exact cell snapshot being validated is the one
+    retained in the artifact. Generic, misplaced, or independently
+    sampled tokens cannot satisfy the probe. Those visible checks deliberately
+    do not depend on LazyVCS's private caches or extmark namespace names.
+    Because that plugin buffer is normally non-modifiable, the helper inserts
+    one persistent marker line under a
+    temporary option toggle and restores the option; it also dismisses an exact
+    Neovim hit-enter prompt if an unrelated configured plugin warning covers
+    the grid. The sandbox forces the C message locale and the LazyVCS launch
+    repeats that choice inside Neovim, so prompt recognition is not tied to the
+    developer's language. Editor markers are assembled without occurring
+    literally in the typed launch command, so shell echo cannot satisfy the
+    editor-state waits.
+    On native Unix, a same-basename shell wrapper runs as portable-pty's session
+    leader under the host's absolute Python interpreter with isolated, no-site
+    startup (`-I -S`). User `sitecustomize` and `.pth` hooks therefore cannot run
+    before it records its id or starts the real shell/explicit command, while the
+    basename still preserves Kettle's shell-integration selection. The wrapper returns the
+    payload's exit status as soon as its session is otherwise empty, or
+    terminates itself with the payload's signal, preserving pane-exit behavior.
+    A pipe barrier holds the payload before exec until the session leader has
+    placed its new process group in the foreground; only the parent calls
+    `tcsetpgrp`, so restoring `SIGTTOU` cannot stop the child in a handoff race.
+    A failed foreground handoff closes the barrier and kills/reaps the child
+    instead of releasing it in the background. The self-test repeats the success
+    transition through a real controlling PTY and injects the failed handoff.
+    It remains alive while a same-session background job still needs an
+    identity-stable cleanup anchor. A reported leader is accepted only after a
+    stable handle is retained and while it is a live direct child of the
+    launched Kettle; Linux retains a pidfd and macOS a process audit token at
+    that point. Control inventories may associate panes only with those
+    independently retained anchors, while a transient unavailable child id
+    retains the last value for that pane rather than erasing it. A hung control
+    request is best-effort and cannot skip the retained PTY sessions or the
+    outer Kettle group. Failed cleanup transfers every acquired process handle
+    to one finalizer-owned set before it closes a duplicate or signals any of
+    them, then freezes every process instance in each anchored session until
+    enumeration is stable, kills foreground Neovim/plugin jobs without resuming
+    their signal handlers, and kills the wrapper anchor last before stopping
+    Kettle. Every signal uses the retained pidfd/audit token rather than the
+    reusable PID printed by `ps`. The self-test covers a separate job group, its
+    descendant, a payload that exits while its background job remains, and a
+    TERM handler that would spawn a new group if resumed; a separate-session
+    decoy survives. Duplicate and final handle-close failures are aggregated
+    after every later target is killed and closed. A second exact-environment
+    pass catches configured-editor daemons that intentionally detach from the
+    PTY session. It reads the actual NUL-delimited environment rather than
+    `ps`'s combined argv/environment rendering, so whitespace in a sandbox path
+    remains exact and command-line decoys survive; a matching process for which
+    no stable handle can be acquired fails the drain closed. Linux
+    configured-editor containment uses the child-subreaper contract before
+    Neovim starts. A helper that detaches, reparents, hides its environment, or
+    outlives Kettle is therefore adopted by the harness instead of PID 1. New
+    direct children are compared to a stable-identity baseline. The self-test
+    models a reused numeric PID with two distinct retained identities, so reuse
+    cannot redirect ownership. The complete acquired batch is stopped before a
+    linear parent-to-children walk and rescanned until the tree is quiescent;
+    handle exhaustion and other non-disappearance errors fail closed, and the
+    absolute eight-second drain deadline also bounds every process-table query.
+    A TERM handler never resumes to fork a late escape. Nested scopes leave the
+    process-global subreaper state enabled until the last close, and a failed
+    restoration remains retryable. Unrelated same-user services with protected
+    `/proc/<pid>/environ` entries remain outside that owned tree and are ignored,
+    which keeps hardened hosted runners and desktop sessions usable. Readable
+    exact-marker matches are still found regardless of ancestry, including
+    detached plugin daemons. WSL retains its narrow, nonblocking regular-file
+    PID-record path because the Windows host cannot become a Linux subreaper;
+    Linux fixtures present a FIFO, symlink, and Unix socket and require each to
+    be rejected within the bounded subprocess deadline.
+    After a successful drain,
+    Unix identity and removal walk from retained directory descriptors. Child
+    opens are relative and no-follow; permission restoration uses `fchmod` only
+    after the opened inode is validated; unlink/rmdir stay relative. An ancestor
+    swap therefore cannot redirect an operation outside the sandbox. Sabotage
+    fixtures replace a checked directory with a link or hard link immediately
+    before open. A nonzero or
+    malformed ownership query and a retained identity that cannot be reopened
+    are uncertainty, not absence: startup aborts through full process and path
+    cleanup while every already-retained handle remains owned. The self-test
+    injects those failures and a `KeyboardInterrupt` across the actual
+    post-launch startup boundary, models identity reuse across two stable
+    identities, and proves an internal member-recheck failure closes its
+    complete partial handle batch. A preliminary session-query failure after
+    earlier handles were acquired closes that partial batch as well. Native
+    Windows creates the unpredictable named kill-on-close Job before creating
+    the sandbox, registers cleanup immediately after creation, and makes the
+    exact PowerShell pane self-assign before sandboxed Neovim starts. A real
+    native regression holds a sandbox file without delete sharing, proves the
+    OS refuses an actual pre-drain tree deletion, terminates the Job, requires
+    zero active processes, and only then accepts deletion. The
+    separate Job close-only test proves the configured limit kills both a
+    process and its child even without explicit termination. The
+    tmux server uses an unpredictable private socket, the target-resolved Bash
+    path, and checked cleanup on every Kettle exit path.
     `KETTLE_AGENT_AUTH_SMOKE=1 just agent-tui-smoke` additionally runs real
     serialized authenticated `codex exec` / `claude --print` marker prompts
     inside the Kettle pane and records `*-auth-session` probes. Success requires
@@ -1312,7 +1430,27 @@ These need a real display and are run by hand (or on real hardware):
     tmux control, Neovim/AstroNvim, and agent commands then run inside that
     distro. The harness removes `/mnt/<drive>` entries from WSL `PATH`, resolves
     candidate executables canonically, and reports Windows-host shims as skips
-    rather than treating them as Linux coverage.
+    rather than treating them as Linux coverage. WSL failure cleanup opens a
+    pidfd before inspecting each exact `XDG_CONFIG_HOME` environment entry,
+    rechecks that the held process is still live, signals through the pidfd,
+    closes every retained descriptor even when another signal fails, and
+    rescans until the sandbox process set stays empty. An unreadable same-user
+    environment is an unsafe unknown rather than an absent match. The sandbox
+    is removed only after that drain succeeds; the prerequisite fixture also
+    leaves its tree in place if its final drain fails. Before creating the
+    sandbox it requires target-side Python/kernel `pidfd_open` and
+    `pidfd_send_signal`, then runs a real selected-distro check in which a
+    signalled process spawns one final matching child while an environment
+    decoy must survive. The ordinary helper self-test compiles that exact
+    assembled WSL exercise, not only the cleanup fragments embedded inside it.
+    Neovim writes its own PID during a pre-init `--cmd`, so
+    emergency cleanup is independent of launcher or AppImage process names.
+    The normal pane command emits only a release marker and deliberately leaves
+    the tree in place; a portable detached-daemon test proves the host cleanup
+    retains and drains that process, while a shared lifecycle guard fails if
+    removal is moved before the drain.
+    Every signal uses a held pidfd; an unanchored numeric PID is never retained
+    across a grace period, including in the self-test.
     `KETTLE_SMOKE_ASTRO_CONFIG` can select the target-shell config directory.
     `KETTLE_SMOKE_NVIM_DATA` can select its installed plugin data. The helper
     creates an unpredictable owner-private directory inside the target distro,
@@ -1326,6 +1464,56 @@ These need a real display and are run by hand (or on real hardware):
     Ordinary writes that honor those paths cannot edit live configuration.
     This is not an OS security sandbox; config code that deliberately uses a
     hard-coded absolute path can still reach that path.
+    The artifact directory writes its initial `provenance.json` before Kettle
+    launches. After configured Neovim has completed any first-run bootstrap,
+    it adds a bounded, no-follow content hash of the copied LazyVCS tree and
+    the canonical source plus hash of the LazyVCS module Neovim actually loaded
+    from that tree. It counts each directory entry before retaining it for the
+    deterministic sort, and rejects links, junctions, special files, oversized
+    files, deep trees, and mutations during hashing. Sentinel-iterator tests for
+    both native and generated WSL implementations prove traversal stops at the
+    cap rather than merely rejecting after materializing the directory. Typed
+    directory and file path records are part of the digest, so adding an empty
+    directory changes the identity without inflating file or byte counts. The
+    exact target Neovim executable bytes, copied tree, loaded module, Kettle executable, and harness
+    are re-hashed after the run. Repository identity first streams exact
+    NUL-delimited porcelain status under pathname-byte and record caps, then
+    counts every indexed path and streams textconv-disabled staged/worktree
+    diffs and untracked regular-file contents under one 100,000-file, 2-GiB
+    aggregate budget,
+    rather than buffering binary patches or hashing only porcelain path names.
+    The entire filesystem pass runs in a child process under one absolute,
+    parent-enforced 120-second launch-and-run deadline. On Unix the worker and
+    ordinary descendants share a private process group, and configured Git
+    fsmonitor processes are disabled. A pipe-free silent member ignores the
+    leader-exit hangup and retains that group until controller cleanup, so
+    `communicate()` cannot make the numeric PGID reusable before the final
+    `killpg`. This cleanup boundary does not claim to
+    sandbox a helper that deliberately calls `setsid`. On Windows the complete
+    tree is assigned to a kill-on-close Job Object. Internal workers start with
+    Python isolated and site-disabled (`-I -S`), so environment/user-site
+    `sitecustomize` and `.pth` code cannot execute in the CreateProcess-to-Job
+    assignment window. The worker then waits for a parent handshake before it
+    can launch Git, so no descendant can escape during Job assignment. Timeout
+    returns at the deadline while an asynchronous reaper owns any process whose
+    filesystem state delays exit. A sabotage test spawns a child and blocks,
+    then verifies the error, deadline, tree death, and successful process reap;
+    a failed `communicate` plus failed `wait` must leave the completion event
+    unset. Completed Unix workers also prove the anchor still reserves their
+    process group, then kill it before a result is accepted, covering ordinary
+    inherited-group helpers from failed Git operations without adding a new
+    post-deadline reap wait. Windows runs a
+    close-only case only after atomically reading both worker and child PIDs,
+    proving the configured Job limit, rather than `TerminateJobObject`, kills
+    the whole tree. Unexpected pipe errors take the same containment and
+    asynchronous-reaping path. Thus
+    even a blocked open/read/stat cannot extend the caller's wait. A
+    separate 200,000-entry streaming worktree scan rejects untracked
+    links, junctions, FIFOs, sockets, and devices; every directory chain remains
+    held while its leaf is opened, and traversal errors fail closed. The smoke
+    fails if any of those inputs or the target Neovim identity changed while it
+    ran; a successful `analysis.json` carries the verified pre-run identity rather
+    than describing whatever happened to be on disk after the UI checks.
   - **Live interaction window**: `just interaction-smoke` opens a real
     grid-renderer Kettle window and drives multiline text entry, scrollback
     mouse wheel movement, local selection drag, the exact keyboard/Shift-click
@@ -1353,6 +1541,33 @@ These need a real display and are run by hand (or on real hardware):
     follows the visible scrolled viewport, modal state is reported by
     `ui_geometry`, title-edit chrome does not intersect the terminal content
     rect, and resize updates the focused pane grid.
+    Shell completion tokens are split across two separately quoted arguments in
+    every typed fixture. The contiguous token therefore appears only after the
+    shell executes the command, not in terminal-driver echo; this is especially
+    important for scrollback builders, where accepting echo inspects an empty
+    history and misdiagnoses a working touchpad accumulator. `just
+    touchpad-scroll-smoke` drives 60 raw 0.08-detent events through the live
+    accumulator, requires about 14 lines of movement, mirrors the gesture back
+    to the live bottom, and then checks one whole detent still moves three lines.
+    Its control-plane screen JSON is the assertion surface. Supporting PNGs are
+    captured when the window is mapped; a Kettle launched through Windows SSH
+    can remain fully controllable while its window is intentionally unmapped,
+    so only that precise state skips the optional images. The exception requires
+    Windows, an `SSH_CONNECTION` or `SSH_CLIENT` marker, and the exact structured
+    `busy` server error stating that the target is hidden, minimized, or not yet
+    shown, including the CLI's one expected terminal newline and no other
+    output. The same text on a local session, a different code or message,
+    leading/trailing blank lines, stdout output, and every renderer, control, or
+    filesystem failure still fail the scenario.
+    The same interaction scenario emits OSC 777 and waits for both its executed
+    completion token and the control event. This is also the live regression for
+    desktop-notification dispatch: the OS backend runs on a bounded worker, so a
+    slow notification service cannot make `wait_for` lose the UI thread. A
+    deterministic injected backend blocks inside the real dispatcher worker
+    while the caller continues to admit/drop messages immediately and bounded
+    shutdown returns on deadline. Separate admission tests fill and disconnect
+    a one-slot queue, and normal GUI shutdown gives admitted messages a bounded
+    drain without joining a platform call that may never return.
     `just hover-wheel-smoke` extracts the split-wheel portion as a focused
     control-plane scenario: it fills two independent panes, keeps keyboard
     focus on the left, hovers the right, and proves only the right viewport
@@ -1364,11 +1579,25 @@ These need a real display and are run by hand (or on real hardware):
     adapters, but native capture completion on those backends is not claimed
     until it is exercised there.
     `just window-close-isolation-smoke` detaches a tab into a second native
-    window, exits only that window's shell, and then proves the original window
-    and pane still accept terminal input. The child program is deliberately the
+    window, exits only that window's shell, requires the logical map to fall to
+    one, rejects an exact geometry query for the detached id, and independently
+    requires the OS-native visible-window inventory to return to the original
+    single id. The original pane must still accept terminal input. Linux runs
+    this scenario through winit's X11 backend by removing the Wayland selectors
+    from only the child environment, and requires `DISPLAY` plus
+    `xdotool`; native Wayland surfaces expose no portable independent window
+    inventory, so this focused proof does not claim Wayland coverage. Windows
+    excludes winit's named 16x16 thread-event helper, which Win32 reports as a
+    visible top-level handle even though it owns no user surface. On Unix the
+    smoke waits for each new PTY wrapper's stable cleanup handle before it can
+    trigger the exit and uses a non-reaping leader probe so failure cleanup
+    retains the outer process group's numeric anchor; a portable regression
+    proves an outliving group child is still killed. The child program is deliberately the
     native shell: Kettle receives the same PTY exit/reap event whether the child
     was a shell, Codex, or another TUI, while the shell keeps the check
-    deterministic and credential-independent.
+    deterministic and credential-independent. Commands are typed literally and
+    submitted with `send_keys enter`; a raw `\n` is not an Enter key on ConPTY
+    and would leave the Windows child alive without testing the reap path.
   - **`kettle exec`**: `kettle exec -- echo ok` — output is piped to stdout and
     the child's exit code propagates (`kettle exec -- sh -c 'exit 7'` → 7).
     On Unix/WSL, also verify stdin-driven one-shots:
@@ -1570,12 +1799,15 @@ name the shape of bug each pass caught.
 - The macOS comparator score self-test and the mandatory Kettle-owned portion of
   `just agent-cli-smoke` on macOS; unavailable third-party clients are recorded
   as skips rather than claimed as covered.
-- A CLI smoke on every OS: `--version` SHA-regex,
+- A CLI smoke on every OS: locked rebuild plus exact 12-character Git/dirty
+  identity matching, `--version` shape,
   `--check-config` lead line, `--config-path`, `--list-themes`
   > 400, `--list-actions` > 50, `--list-keybinds` > 40,
   `--list-ssh-hosts` empty fallback, `--print-default-config`
   round-trip, `--shell-integration <bash|zsh|fish|powershell>` snippets,
   `--print-completions <bash|zsh|fish|powershell>` scripts,
+  malformed-profile diagnostics from an owner-private fixture created under a
+  deliberate Unix `002` umask (every directory/file mode is named explicitly),
   `--config /<typo>` + `--working-directory /<typo>` hard-fail
   exit codes, happy-path basename round-trip
   (Windows path-translation parity).
@@ -1620,7 +1852,10 @@ name the shape of bug each pass caught.
   new installs and upgrades, and next-run recovery of intentionally abandoned
   pre- and post-publication transactions. It also rejects broad-ACL and
   junction-preseeded sibling transaction roots while checking that a real
-  abandoned transaction has the exact protected ACL. Eight subprocess
+  abandoned transaction has the exact protected ACL. The broad sibling fixture
+  adds an explicit Everyone/Modify ACE instead of depending on the runner's
+  temporary-directory inheritance, so a private LocalAppData temp root cannot
+  make the negative test pass for an unrelated journal-entry error. Eight subprocess
   `TerminateProcess` checkpoints cover the initial journal temporary, created
   shell directory, staged payload temporary, write-ahead publication journal,
   destination temporary, each ownership marker immediately after its atomic

@@ -4,7 +4,14 @@ use tempfile::Builder;
 
 #[test]
 fn compact_scrollbar_is_visible_contrasting_and_edge_scoped() {
-    let cfg = Config::default();
+    // Keep the visual fixture usable in Parallels Windows ARM, whose virtual
+    // WDDM adapter faults on headless wgpu device creation. Physical Windows
+    // machines and the live renderer retain hardware-first coverage; this test
+    // asserts the rendered pixels.
+    let cfg = Config {
+        gpu_force_software: cfg!(all(target_os = "windows", target_arch = "aarch64")),
+        ..Config::default()
+    };
     let baseline = Builder::new().suffix(".png").tempfile().unwrap();
     let scrollbar = Builder::new().suffix(".png").tempfile().unwrap();
     capture_png_with(&cfg, 96, 28, baseline.path(), DebugScene::Default).unwrap();

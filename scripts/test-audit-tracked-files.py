@@ -38,13 +38,16 @@ def initialize_repository(root: Path) -> None:
     )
 
 
+def write_lf(path: Path, text: str) -> None:
+    """Create a fixture with the byte-level LF policy the audit expects."""
+    path.write_bytes(text.encode("utf-8"))
+
+
 class TrackedFileAuditTests(unittest.TestCase):
     def test_missing_local_markdown_link_is_fatal(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
-            (root / "README.md").write_text(
-                "[missing](docs/missing.md)\n", encoding="utf-8"
-            )
+            write_lf(root / "README.md", "[missing](docs/missing.md)\n")
             initialize_repository(root)
 
             report = AUDIT.audit(root)
@@ -59,8 +62,8 @@ class TrackedFileAuditTests(unittest.TestCase):
             root = Path(temporary)
             docs = root / "docs"
             docs.mkdir()
-            (root / "README.md").write_text("[guide](docs/guide.md)\n", encoding="utf-8")
-            (docs / "guide.md").write_text("# Guide\n", encoding="utf-8")
+            write_lf(root / "README.md", "[guide](docs/guide.md)\n")
+            write_lf(docs / "guide.md", "# Guide\n")
             initialize_repository(root)
 
             report = AUDIT.audit(root)

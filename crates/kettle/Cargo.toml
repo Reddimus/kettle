@@ -49,7 +49,6 @@ kettle-update.workspace = true
 kettle-ui.workspace = true
 tracing-subscriber.workspace = true
 log.workspace = true
-notify-rust.workspace = true
 serde.workspace = true
 # (agent-first A1) `kettle exec --json` NDJSON event stream; also
 # the JSON-RPC/MCP surface and the ctl client.

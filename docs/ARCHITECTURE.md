@@ -1116,6 +1116,17 @@ text, so its bitmap is already resident).
   phase repeatedly. Empty `Ime::Preedit` events normalize to absent state and
   do not reposition IME or request another frame unless visible preedit state
   actually changed.
+- **One process-wide desktop-notification worker** — every OSC 9/777, Lua,
+  command-completion, and internal diagnostic toast enters a 64-message
+  `try_send` queue. The worker preserves order while calling the OS backend.
+  Notification services are allowed to block or fail without holding winit's
+  event loop; saturation drops later notifications and logs once per saturated
+  interval instead of freezing terminal rendering, input, or control replies.
+  Backend panics are caught per message so one platform failure cannot silently
+  disconnect the dispatcher. The worker handle remains process-owned, and a
+  normal GUI exit gives admitted messages a bounded 250 ms flush. If the OS
+  service remains hung, Kettle favors a prompt exit over guaranteed desktop
+  notification delivery.
 - **Monitor-DPI transitions are one layout transaction per window.** winit
   delivers Windows `WM_DPICHANGED` as `ScaleFactorChanged` before the
   `SetWindowPos`-driven physical `Resized`. The renderer adopts the new glyph

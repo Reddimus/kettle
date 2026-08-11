@@ -100,8 +100,10 @@ An invalid or exhausted regular pending record is atomically quarantined as
 when the prefix permits it. Quarantine itself is best-effort so a read-only
 prefix or antivirus sharing denial cannot block the intact old binary from
 starting. A nonregular pending path is never renamed into trusted evidence.
-Startup emits a stderr message and attempts a desktop recovery notification;
-notification failure is logged. Evidence that could be preserved remains in
+Startup emits a stderr message. A GUI launch also attempts a desktop recovery
+notification; a secondary launch queues and gives that warning a bounded flush
+before handing off to the existing window. Notification failure is logged.
+Evidence that could be preserved remains in
 the install prefix for diagnosis instead of trapping every future launch in a
 handoff loop. At most eight failed transaction pairs are retained; older exact
 records are pruned by transaction timestamp and then PID while the update lock

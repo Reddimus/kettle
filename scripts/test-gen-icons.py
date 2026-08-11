@@ -7,6 +7,7 @@ import binascii
 from contextlib import ExitStack, redirect_stdout
 from io import BytesIO, StringIO
 import importlib.util
+import os
 from pathlib import Path
 import shutil
 import struct
@@ -221,7 +222,7 @@ class PillowIconTests(unittest.TestCase):
         self.assertNotEqual(modern[0], legacy[0])
 
     def test_compatibility_wrapper_forwards_arguments_and_status(self):
-        if shutil.which("bash") is None:
+        if os.name == "nt" or shutil.which("bash") is None:
             self.skipTest("the compatibility wrapper is Unix-only")
         result = subprocess.run(
             ["bash", str(SCRIPT.with_name("gen-icons.sh")), "--check", "--require-tooling"],

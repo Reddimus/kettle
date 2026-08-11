@@ -579,6 +579,25 @@ $preseededTransaction = $prefix + '.install-transaction'
 $preseededSentinel = Join-Path $preseededTransaction 'must-survive.txt'
 Set-Content -LiteralPath $preseededSentinel -Value 'sentinel' -NoNewline
 $preseededAcl = Get-Acl -LiteralPath $preseededTransaction
+# Do not rely on the runner's temporary-directory inheritance to make this
+# fixture unsafe. GitHub's temp tree carries broad entries, but a private
+# LocalAppData temp root on Windows ARM may inherit only Kettle's trusted
+# principals; merely protecting that DACL then creates the exact private ACL
+# this test means to reject. Add one explicit untrusted mutation grant so the
+# failure is deterministic on both machines and occurs before the sentinel is
+# interpreted as transaction state.
+$preseededAcl.AddAccessRule((
+    New-Object Security.AccessControl.FileSystemAccessRule -ArgumentList @(
+        $everyoneSid,
+        [Security.AccessControl.FileSystemRights]::Modify,
+        (
+            [Security.AccessControl.InheritanceFlags]::ContainerInherit -bor
+            [Security.AccessControl.InheritanceFlags]::ObjectInherit
+        ),
+        [Security.AccessControl.PropagationFlags]::None,
+        [Security.AccessControl.AccessControlType]::Allow
+    )
+))
 $preseededAcl.SetAccessRuleProtection($true, $true)
 Set-Acl -LiteralPath $preseededTransaction -AclObject $preseededAcl
 Assert-InstallerRejected `

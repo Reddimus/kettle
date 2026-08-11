@@ -8,6 +8,19 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Fixed
 
+- **A new dependency-unsoundness warning had no fail-closed scope guard.**
+  RUSTSEC-2026-0253 affects `LruCache::pop()` in `lru 0.16.4`. Kettle reaches
+  that crate only through glyphon 0.12.0, whose `Copy` cache key cannot panic
+  on drop and which never calls the affected method, so replacing the renderer
+  with a fork would increase risk without removing a reachable bug. CI now
+  pins the reviewed crates.io sources, workspace membership, unique package
+  identities, upstream versions, and every reverse edge in
+  locked, unfiltered all-platform Cargo metadata; even a source replacement, a
+  Windows- or macOS-only new consumer, an uncommitted resolution, or an upstream
+  version change fails until the reachability decision and temporary audit
+  exception are revisited. Issue #207 tracks removal once
+  glyphon accepts `lru >=0.18.2`.
+
 - **An explicit live screenshot timed out whenever macOS marked the window
   occluded.** Kettle queued the capture and requested a redraw, but the normal
   background-window power guard discarded that frame; even bypassing the guard
@@ -39,6 +52,15 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   normal device recovery. Publication and setup failures explicitly
   remove the exact staging object and include any cleanup error in the result.
 
+- **The multi-window close regression smoke mistook winit's internal Win32
+  message target for a second Kettle window.** Windows exposes that visible
+  16x16 event-loop helper through `EnumWindows`, even though it owns no user
+  surface. The native inventory now excludes the helper by its framework class
+  name rather than a fragile size or title heuristic, while continuing to count
+  every real Kettle top-level window. The scenario also submits its typed
+  `exit` through the terminal-mode-aware Enter path, because a literal line feed
+  does not execute a PowerShell command under ConPTY.
+
 - **macOS rounded off Kettle's color twice.** On macOS 26+, Kettle now gives
   AppKit an opaque, full-bleed runtime icon so the system owns the only outer
   mask instead of pinching an already-rounded blue border. The static `.icns`
@@ -48,6 +70,152 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   underlying NSWindow background tracks the exact Kettle theme color. The
   content view stays below the native controls, so traffic lights, terminal
   geometry, and pointer hit-testing remain native and unobscured.
+
+- **The macOS Agent/TUI live smoke could fail after every product check had
+  passed.** Its LazyVCS probe embedded a Vimscript `.` concatenation in Lua,
+  then tried to write its success marker into the plugin's non-modifiable
+  sidebar buffer; fixing either alone only advanced the failure from E5107 to
+  E21. The marker is now assembled with Lua byte strings, inserted under a
+  temporary buffer-option toggle, and kept conditional on the disposable
+  repository's exact canonical root in active and discovered state, rendered
+  sidebar row, and matching file buffer. Gutter and blame are then validated
+  from the terminal grid rather than coupled to LazyVCS's private cache and
+  extmark namespace internals: the visible evidence requires the gutter beside
+  `CHANGED` and `KTLBL` beside the fixture's committed line. The probe dismisses
+  Neovim's
+  hit-enter pager when an unrelated configured plugin warning covers that
+  persistent marker. On native Unix, an isolated, no-site Python shell wrapper records the
+  portable-pty session before any payload and before the control server is
+  needed, returns the payload's exit code or re-raises its terminating signal
+  when the session empties, remains alive only while a same-session background
+  job survives, synchronizes the parent-only foreground-process-group handoff
+  before the child restores `SIGTTOU`, kills/reaps the child when that handoff
+  fails instead of releasing its barrier, distinguishes an inherited tty
+  descriptor from a controlling terminal before calling `tcsetpgrp`, and
+  accepts only session leaders checked
+  as children after a stable handle is retained. Linux retains pidfds and macOS retains audit
+  tokens before cleanup freezes each process; neither path carries a reusable
+  numeric PID across a check/signal boundary. Every acquired handle enters the
+  finalizer-owned set before any duplicate close or first signal, and signal or
+  close failures are aggregated only after later handles are processed. An
+  exact two-key sandbox-environment sweep reads real NUL-delimited values and
+  uses the same stable handles for configured editor daemons that deliberately
+  detached from the PTY session; argv decoys cannot be mistaken for them. A
+  reported live PTY wrapper whose stable handle cannot be retained now fails
+  closed instead of silently looking absent. This covers
+  separate foreground groups and background jobs that outlive their shell.
+  WSL cleanup records Neovim's PID before config initialization and drains that
+  process, then every exact sandbox environment, through pidfds after a
+  capability and spawn-during-cleanup self-test. Its narrow PID record is
+  opened no-follow and nonblocking, then accepted only as a small, owner-held,
+  single-link regular file; FIFO, symlink, and Unix-socket regressions must be
+  rejected within a bounded subprocess deadline. Every retained pidfd is
+  closed even when one signal fails, unreadable same-user environments fail
+  closed, and the sandbox is removed only after a successful quiet scan. The normal
+  pane command publishes a release marker without deleting the tree; a
+  detached-daemon regression and an explicit ordering guard prove host cleanup
+  drains it before removal. On native Windows, the exact PowerShell pane joins
+  an unpredictable named kill-on-close Job itself before any sandboxed editor
+  starts, avoiding a reusable numeric-PID handoff. The Job now exists before
+  the sandbox and cleanup ownership is registered as soon as the tree exists.
+  Cleanup terminates the Job,
+  waits until Job accounting reports zero active processes, then closes it and
+  deletes the tree, so detached editor daemons cannot survive or race removal;
+  a native regression proves Windows refuses an actual pre-drain deletion, and
+  a junction regression proves cleanup cannot walk out of the sandbox or change
+  an external target's permissions.
+  Native Linux acquires a child-subreaper scope before the configured editor
+  starts, so a detached helper that reparents, hides its environment, or outlives
+  Kettle is adopted by the harness instead of disappearing under PID 1. A
+  stable-identity baseline distinguishes existing children from adopted ones;
+  nested scopes restore process-global state only on the last close, and failed
+  restoration remains retryable. Every exact/adopted/descendant handle batch is
+  transferred before the first signal, stopped, and walked through a linear
+  parent-to-children index under one absolute eight-second deadline. Only
+  `ENOENT`/`ESRCH` mean a process disappeared; handle exhaustion and permission
+  errors fail closed. Unrelated protected same-user services remain outside the
+  adopted tree and no longer disable the smoke. Reparenting, a nondumpable
+  descendant, modeled numeric-PID reuse across distinct stable identities, and
+  duplicate-close failures are covered. A successful Unix drain hashes and
+  removes the snapshot through retained directory descriptors: recursive opens,
+  chmods, unlinks, and rmdirs are relative and no-follow, and ancestor-swap
+  sabotage cannot redirect them outside the sandbox. The copied
+  plugin hash is bounded before it retains a directory's entries, with sentinel
+  tests proving iteration stops at the cap; it rejects links and special files,
+  hashes typed directory paths so empty-directory changes are visible,
+  and starts only after configured Neovim
+  finishes any bootstrap, and is tied to the canonical LazyVCS module source
+  Neovim actually loaded. Repository provenance now streams the exact
+  NUL-delimited status under pathname-byte and record caps, counts indexed
+  paths, disables textconv, streams diffs and untracked files under one
+  file/byte budget, holds every no-follow directory chain, and rejects traversal
+  errors and untracked special files. The complete filesystem pass runs in a
+  child process under one parent-enforced 120-second launch-and-run deadline. Unix
+  contains ordinary inherited-group workers in a private process group and
+  Windows uses a kill-on-close Job Object. Internal Python starts with `-I -S`
+  so user site hooks cannot run before assignment; a pre-work handshake then
+  prevents children escaping containment, and
+  an asynchronous owner reaps a terminated filesystem-stalled worker without
+  extending the caller's deadline. A blocked-worker/child regression asserts
+  actual reap success rather than only reaper-thread completion. User-configured
+  Git fsmonitor processes are disabled. A silent, pipe-free Unix group member
+  remains until controller cleanup, so reaping the worker cannot make its PGID
+  reusable before every completed result kills that group and removes any
+  ordinary outliving helper. This is
+  cleanup rather than a POSIX sandbox: a deliberately detached `setsid` process
+  is outside that group. A Windows close-only case requires both the
+  worker and its child to be recorded before proving the Job limit itself kills
+  the tree; unexpected communication errors take the same cleanup path. The
+  portable helper self-test compiles both the fully assembled WSL cleanup
+  preflight and the generated child it embeds. The visible
+  LazyVCS proof uses a per-run fixture token and one cell-proven divider column
+  to associate sidebar evidence with the left split and changed/blame rows with
+  the tracked-file split; the exact validated cell snapshot is retained.
+  Native Windows containment is scoped to the configured-editor phase; Unix
+  additionally inventories and freezes every PTY session during whole-window
+  failure cleanup. A startup identity uncertainty or interrupt now crosses the
+  same cleanup boundary as a timeout. The driver creates and retains the
+  owner-only tracker file before launch; wrappers append through a no-follow
+  descriptor, then restore the real `SHELL` and remove the tracker-control
+  variables before the pane payload starts. Reads stay on that retained file,
+  reject path replacement, deduplicate records, and enforce byte, record, PID,
+  and absolute-time bounds. A malformed record is reported only after later
+  bounded records have been checked and retained, so one corrupt line cannot
+  hide a cleanup target. Teardown freezes Kettle's spawning process group,
+  drains the tracker again, and independently retains every direct child that
+  already escaped into a PTY session, closing the append-after-snapshot race.
+  If an append-only tracker PID is reused,
+  its replacement is reopened and independently classified in the same pass;
+  internal revalidation errors close the complete partial handle batch.
+  The complete native macOS run produced and checked all 14 live states,
+  including the configured LazyVCS sidebar.
+
+- **Several live-UI smokes could accept a command Kettle had only echoed as if
+  the shell had executed it.** Their completion token appeared literally in the
+  typed command, so the control-plane wait could return before Enter reached the
+  shell; the precision-touchpad gate then inspected an empty history and
+  incorrectly reported a product scroll regression. Completion tokens for the
+  touchpad, interaction, hovered-pane wheel, notification, cwd/title, LazyVCS
+  readiness, and sibling-window checks are now assembled from two shell
+  arguments. The literal token exists only in executed output, and portable
+  tests reject builders that put it back into command echo.
+
+- **A desktop notification could freeze every Kettle window.** OSC 777, Lua,
+  command-completion, and error toasts all called the platform notification
+  backend synchronously on winit's UI thread. The stricter interaction smoke
+  reproduced a macOS notification call blocking beyond the ten-second event-loop
+  watchdog, during which rendering, input, and control replies all stopped. One
+  process-wide worker now sends notifications from a bounded 64-message queue.
+  Ordering is preserved; a hung OS service fills the queue and drops later
+  notifications with one warning instead of hanging the terminal. A portable
+  admission test proves full and disconnected queues return immediately. An
+  injected backend blocks inside the real worker while admission and bounded
+  shutdown remain responsive, and module privacy keeps the OS backend out of
+  UI event-loop code. Normal GUI exit
+  gives admitted notifications a bounded 250 ms drain; a notification service
+  still hung at that boundary may lose queued messages rather than preventing
+  Kettle from closing. Update-recovery warnings are queued before bare-launch
+  activation and receive that bounded flush before a secondary process exits.
 
 - **A transient release-network failure could make the Linux online installer
   fail even when every signed asset was healthy.** Each bounded fetch now gets
@@ -104,7 +272,8 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   cross-window control dispatch already needed a special case to avoid closing
   the focused window instead of its target. Requests are now keyed by window
   id and consumed only by that window. A focused live regression now terminates
-  one detached window's child through the PTY reap path and proves its sibling
+  one detached window's child through the PTY reap path, requires the mapped
+  window count to fall, rejects geometry for the removed id, and proves its sibling
   still accepts terminal input. This removes a Kettle-side path by which one
   exiting CLI pane could make separate terminal windows disappear; the child
   program itself (shell, Codex, or another TUI) is not causal.
