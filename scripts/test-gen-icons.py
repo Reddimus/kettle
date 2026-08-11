@@ -8,6 +8,7 @@ from contextlib import ExitStack, redirect_stdout
 from io import BytesIO, StringIO
 import importlib.util
 from pathlib import Path
+import shutil
 import struct
 import subprocess
 import sys
@@ -23,6 +24,7 @@ SCRIPT = Path(__file__).with_name("gen-icons.py")
 SPEC = importlib.util.spec_from_file_location("gen_icons", SCRIPT)
 assert SPEC and SPEC.loader
 MODULE = importlib.util.module_from_spec(SPEC)
+sys.modules[SPEC.name] = MODULE
 SPEC.loader.exec_module(MODULE)
 
 
@@ -145,6 +147,91 @@ class PillowIconTests(unittest.TestCase):
                 stack.enter_context(patch.object(sys, "argv", [str(SCRIPT)]))
                 stack.enter_context(redirect_stdout(StringIO()))
                 self.assertEqual(MODULE.main(), 0)
+
+    def test_macos_keeps_legacy_icon_and_has_modern_runtime_source(self):
+        linux = MODULE.render_master()
+        modern = MODULE.render_modern_macos_master()
+
+        self.assertEqual(linux.getpixel((0, 0))[3], 0)
+        self.assertEqual(modern.getpixel((0, 0)), MODULE.ACCENT)
+        self.assertEqual(modern.getchannel("A").getextrema(), (255, 255))
+
+        legacy = self.root / "iconset" / "icon_512x512@2x.png"
+        with MODULE.Image.open(legacy) as icon:
+            self.assertEqual(icon.getpixel((0, 0))[3], 0)
+
+        emitted = self.root / "kettle-modern.png"
+        with MODULE.Image.open(emitted) as icon:
+            self.assertEqual(icon.size, (1024, 1024))
+            self.assertEqual(icon.getpixel((0, 0)), MODULE.ACCENT)
+            self.assertEqual(icon.getchannel("A").getextrema(), (255, 255))
+
+    def test_svg_sources_are_generated_from_the_raster_geometry(self):
+        linux = self.root / "linux" / "kettle.svg"
+        macos = self.root / "kettle.svg"
+
+        self.assertEqual(
+            linux.read_text(), MODULE.svg_source(modern_macos=False)
+        )
+        self.assertEqual(
+            macos.read_text(), MODULE.svg_source(modern_macos=True)
+        )
+        self.assertIn('fill="#7aa2f7"', macos.read_text())
+        self.assertNotIn('fill="none" stroke="#7aa2f7"', macos.read_text())
+
+        mutant = self.root / "macos-mutant.svg"
+        mutant.write_text(macos.read_text().replace('x="42"', 'x="43"', 1))
+        self.assertFalse(MODULE.same_artifact(macos, mutant))
+
+    def test_svg_generation_never_uses_platform_text_newlines(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            with patch.object(
+                Path,
+                "write_text",
+                side_effect=AssertionError("SVGs must be written as exact UTF-8 bytes"),
+            ):
+                MODULE.emit(
+                    root / "linux",
+                    root / "iconset",
+                    root / "windows" / "kettle.ico",
+                    quiet=True,
+                )
+            for svg in [root / "linux" / "kettle.svg", root / "kettle.svg"]:
+                self.assertNotIn(b"\r", svg.read_bytes())
+
+    def test_svg_and_raster_paths_consume_the_same_primitives(self):
+        modern = MODULE.icon_primitives(modern_macos=True)
+        legacy = MODULE.icon_primitives(modern_macos=False)
+
+        with patch.object(MODULE, "icon_primitives", wraps=MODULE.icon_primitives) as model:
+            MODULE.svg_source(modern_macos=True)
+            MODULE.render_modern_macos_master()
+            MODULE.svg_source(modern_macos=False)
+            MODULE.render_master()
+        self.assertEqual(
+            model.call_args_list,
+            [
+                unittest.mock.call(modern_macos=True),
+                unittest.mock.call(modern_macos=True),
+                unittest.mock.call(modern_macos=False),
+                unittest.mock.call(modern_macos=False),
+            ],
+        )
+        self.assertNotEqual(modern[0], legacy[0])
+
+    def test_compatibility_wrapper_forwards_arguments_and_status(self):
+        if shutil.which("bash") is None:
+            self.skipTest("the compatibility wrapper is Unix-only")
+        result = subprocess.run(
+            ["bash", str(SCRIPT.with_name("gen-icons.sh")), "--check", "--require-tooling"],
+            cwd=SCRIPT.parent.parent,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("tracked artifacts match the generator", result.stdout)
 
     def test_nonlargest_ico_resolution_is_compared(self):
         original = self.root / "windows" / "kettle.ico"

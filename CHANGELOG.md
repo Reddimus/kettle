@@ -8,6 +8,16 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Fixed
 
+- **macOS rounded off Kettle's color twice.** On macOS 26+, Kettle now gives
+  AppKit an opaque, full-bleed runtime icon so the system owns the only outer
+  mask instead of pinching an already-rounded blue border. The static `.icns`
+  remains pre-rounded for macOS 11–15, whose Dock does not supply Tahoe's new
+  treatment. A decorated Kettle window also ended its terminal theme at an
+  opaque titlebar seam. Its native titlebar material is now transparent and the
+  underlying NSWindow background tracks the exact Kettle theme color. The
+  content view stays below the native controls, so traffic lights, terminal
+  geometry, and pointer hit-testing remain native and unobscured.
+
 - **A transient release-network failure could make the Linux online installer
   fail even when every signed asset was healthy.** Each bounded fetch now gets
   two curl-classified retries with bounded backoff, including refused

@@ -179,16 +179,15 @@ jobs:
             || { echo ".ico has only ${count:-0} resolutions (expected ≥4)"; exit 1; }
           echo "kettle.ico OK (${count} resolutions)"
       - name: Icon rasters match the Pillow generator
-        # The 18 tracked PNG/ICO rasters had no gate: gen-icons.py was run by
-        # hand and dispatched by nothing, so a geometry edit or a hand-touched
-        # PNG shipped silently. --require-tooling makes an absent Pillow fatal
-        # HERE, so the local skip that keeps contributors unblocked cannot
-        # quietly become a gate that never runs.
+        # The generated vectors and rasters once had no gate: the generator was
+        # run by hand and dispatched by nothing, so drift shipped silently.
+        # Exercise the documented wrapper as well as its tests; --require-tooling
+        # makes an absent Pillow fatal here.
         if: runner.os == 'Linux'
         run: |
           python3 -m pip install --quiet --disable-pip-version-check Pillow
           python3 scripts/test-gen-icons.py
-          python3 scripts/gen-icons.py --check --require-tooling
+          ./scripts/gen-icons.sh --check --require-tooling
       - name: Package template lockstep
         # Release CI renders Homebrew and AUR metadata only after it has the
         # verified archives. This guard tests that renderer and, when the

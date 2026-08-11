@@ -609,6 +609,176 @@ fn production_source() -> String {
     production
 }
 
+#[cfg(any(test, target_os = "macos"))]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum MacosTitlebarPolicy {
+    /// Keep AppKit's geometry and controls, but let its material match Kettle.
+    TransparentNative,
+    /// Borderless windows have no native titlebar to configure.
+    NotApplicable,
+}
+
+#[cfg(any(test, target_os = "macos"))]
+fn macos_titlebar_policy(borderless: bool) -> MacosTitlebarPolicy {
+    if borderless {
+        MacosTitlebarPolicy::NotApplicable
+    } else {
+        MacosTitlebarPolicy::TransparentNative
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn apply_macos_window_chrome(
+    attrs: winit::window::WindowAttributes,
+    borderless: bool,
+) -> winit::window::WindowAttributes {
+    use winit::platform::macos::WindowAttributesExtMacOS as _;
+
+    match macos_titlebar_policy(borderless) {
+        MacosTitlebarPolicy::TransparentNative => attrs.with_titlebar_transparent(true),
+        MacosTitlebarPolicy::NotApplicable => attrs.with_decorations(false),
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn set_macos_window_background(window: &Window, color: kettle_config::Rgb) {
+    use objc2_app_kit::{NSColor, NSView};
+    use winit::raw_window_handle::{HasWindowHandle as _, RawWindowHandle};
+
+    let Ok(handle) = window.window_handle() else {
+        return;
+    };
+    let RawWindowHandle::AppKit(appkit) = handle.as_raw() else {
+        return;
+    };
+    // SAFETY: winit owns a live NSView for this window, and every caller runs
+    // on the event-loop (AppKit main) thread. The color is an owned sRGB
+    // object retained by NSWindow when assigned.
+    let view: &NSView = unsafe { &*appkit.ns_view.as_ptr().cast::<NSView>() };
+    let Some(ns_window) = view.window() else {
+        return;
+    };
+    let background = unsafe {
+        NSColor::colorWithSRGBRed_green_blue_alpha(
+            f64::from(color.r) / 255.0,
+            f64::from(color.g) / 255.0,
+            f64::from(color.b) / 255.0,
+            1.0,
+        )
+    };
+    ns_window.setBackgroundColor(Some(&background));
+}
+
+#[cfg(any(test, target_os = "macos"))]
+fn macos_uses_modern_application_icon(major_version: i64) -> bool {
+    major_version >= 26
+}
+
+#[cfg(target_os = "macos")]
+fn set_macos_application_icon_for_current_os() {
+    use objc2::ClassType as _;
+    use objc2_app_kit::{NSApplication, NSImage};
+    use objc2_foundation::{MainThreadMarker, NSData, NSProcessInfo};
+    use std::sync::Once;
+
+    static SET_APPLICATION_ICON: Once = Once::new();
+    SET_APPLICATION_ICON.call_once(|| {
+        let version = NSProcessInfo::processInfo().operatingSystemVersion();
+        if !macos_uses_modern_application_icon(version.majorVersion as i64) {
+            return;
+        }
+        let Some(main_thread) = MainThreadMarker::new() else {
+            log::warn!("cannot set the modern macOS icon away from the main thread");
+            return;
+        };
+        let data = NSData::with_bytes(include_bytes!("../../../packaging/macos/kettle-modern.png"));
+        let Some(icon) = NSImage::initWithData(NSImage::alloc(), &data) else {
+            log::warn!("cannot decode the embedded modern macOS application icon");
+            return;
+        };
+        let application = NSApplication::sharedApplication(main_thread);
+        // SAFETY: winit invokes `resumed` on AppKit's main thread, proven by
+        // `MainThreadMarker`, and the retained NSImage outlives this message.
+        unsafe { application.setApplicationIconImage(Some(&icon)) };
+    });
+}
+
+#[cfg(test)]
+mod macos_chrome_policy_tests {
+    use super::{
+        MacosTitlebarPolicy, macos_titlebar_policy, macos_uses_modern_application_icon,
+        production_source,
+    };
+
+    #[test]
+    fn decorated_windows_use_transparent_native_chrome() {
+        assert_eq!(
+            macos_titlebar_policy(false),
+            MacosTitlebarPolicy::TransparentNative
+        );
+    }
+
+    #[test]
+    fn borderless_windows_do_not_configure_a_native_titlebar() {
+        assert_eq!(
+            macos_titlebar_policy(true),
+            MacosTitlebarPolicy::NotApplicable
+        );
+    }
+
+    #[test]
+    fn full_bleed_runtime_icon_starts_with_macos_26() {
+        assert!(!macos_uses_modern_application_icon(15));
+        assert!(macos_uses_modern_application_icon(26));
+        assert!(macos_uses_modern_application_icon(27));
+    }
+
+    #[test]
+    fn production_wires_the_runtime_icon_and_native_background() {
+        let src = production_source();
+        let resumed = src
+            .split("fn resumed(&mut self, event_loop: &ActiveEventLoop)")
+            .nth(1)
+            .and_then(|rest| rest.split("fn window_event(").next())
+            .expect("ApplicationHandler::resumed body");
+        assert!(
+            resumed.contains("set_macos_application_icon_for_current_os()"),
+            "the tested macOS version policy must be wired into startup"
+        );
+
+        let post_create = src
+            .split("fn apply_post_create(&self, window: &Window)")
+            .nth(1)
+            .and_then(|rest| rest.split("fn open_window(").next())
+            .expect("apply_post_create body");
+        assert!(
+            post_create.contains("set_macos_window_background(window, self.cfg.theme.background)"),
+            "every created window must seed its native titlebar background"
+        );
+        assert!(
+            src.contains("set_macos_window_background(w, background)"),
+            "runtime theme changes must update every native titlebar background"
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn production_chrome_helper_keeps_native_geometry() {
+        use super::apply_macos_window_chrome;
+
+        let decorated =
+            apply_macos_window_chrome(winit::window::Window::default_attributes(), false);
+        let debug = format!("{decorated:?}");
+        assert!(decorated.decorations);
+        assert!(debug.contains("titlebar_transparent: true"), "{debug}");
+        assert!(debug.contains("fullsize_content_view: false"), "{debug}");
+
+        let borderless =
+            apply_macos_window_chrome(winit::window::Window::default_attributes(), true);
+        assert!(!borderless.decorations);
+    }
+}
+
 #[cfg(test)]
 mod ctl_target_param_tests {
     use super::optional_u64_param;
@@ -5211,6 +5381,12 @@ pub struct App {
     /// at redraw (vs. per-mutation-site calls) can't drift when a new
     /// theme-mutation path is added (Lua, preview, reload, schedule, ...).
     native_theme_synced: Option<Option<WindowTheme>>,
+    /// The sRGB color last assigned to every decorated NSWindow background.
+    /// A transparent titlebar without full-size content reveals this native
+    /// background, so it must follow palette changes independently of the
+    /// coarse light/dark theme hint above.
+    #[cfg(target_os = "macos")]
+    macos_window_background_synced: Option<kettle_config::Rgb>,
     /// Window ids awaiting removal after their checked-out dispatch finishes.
     /// This must be keyed by window: a process-global boolean can be set while
     /// ctl/Lua dispatches into one mapped window and then consumed by another
@@ -6105,6 +6281,8 @@ impl App {
             gpu_incident_started_for_loss: false,
             gpu_software_fallback: false,
             native_theme_synced: None,
+            #[cfg(target_os = "macos")]
+            macos_window_background_synced: None,
             pending_window_closes: std::collections::BTreeSet::new(),
             quit_requested: false,
             recorder: None,
@@ -15111,15 +15289,26 @@ impl App {
     /// the map holds only the others during dispatch.
     fn maybe_sync_native_theme(&mut self, ws: &WindowState) {
         let hint = self.native_theme_hint();
-        if self.native_theme_synced == Some(hint) {
-            return;
+        if self.native_theme_synced != Some(hint) {
+            self.native_theme_synced = Some(hint);
+            for w in std::iter::once(ws)
+                .chain(self.windows.values())
+                .filter_map(|s| s.window.as_ref())
+            {
+                w.set_theme(hint);
+            }
         }
-        self.native_theme_synced = Some(hint);
-        for w in std::iter::once(ws)
-            .chain(self.windows.values())
-            .filter_map(|s| s.window.as_ref())
-        {
-            w.set_theme(hint);
+
+        #[cfg(target_os = "macos")]
+        if self.macos_window_background_synced != Some(self.cfg.theme.background) {
+            let background = self.cfg.theme.background;
+            self.macos_window_background_synced = Some(background);
+            for w in std::iter::once(ws)
+                .chain(self.windows.values())
+                .filter_map(|s| s.window.as_ref())
+            {
+                set_macos_window_background(w, background);
+            }
         }
     }
 
@@ -20674,6 +20863,8 @@ impl ApplicationHandler<UserEvent> for App {
     // mid-handler drops the entry, which is fine: kettle aborts on panic,
     // nothing observes the missing window.
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
+        #[cfg(target_os = "macos")]
+        set_macos_application_icon_for_current_os();
         let runtime_tracker = self.runtime_tracker.clone();
         let _phase = runtime_tracker.enter("resumed");
         let seq = self.focused_seq;
@@ -21295,12 +21486,20 @@ impl App {
             // Adwaita CSD) to match the active palette from the first frame;
             // runtime changes go through `maybe_sync_native_theme`.
             .with_theme(self.native_theme_hint());
+        #[cfg(target_os = "macos")]
+        {
+            // Keep AppKit's title, traffic lights, rounded mask and drag region,
+            // but let its material show the window's native theme beneath it.
+            // Full-size content would instead put tabs and cells under the
+            // traffic lights, changing geometry and pointer hit-testing.
+            attrs = apply_macos_window_chrome(attrs, self.cfg.borderless);
+        }
         // Terminator parity, terminatorlib/config.py:75 +
         // 78. `borderless` removes OS chrome; `always-on-top` keeps
         // the window above other windows. Best-effort per OS; failure
         // modes degrade silently (e.g. Wayland respects compositor
         // rules over our hint).
-        if self.cfg.borderless {
+        if self.cfg.borderless && !cfg!(target_os = "macos") {
             attrs = attrs.with_decorations(false);
         }
         if self.cfg.always_on_top {
@@ -21678,7 +21877,13 @@ impl App {
     fn apply_post_create(&self, window: &Window) {
         window.set_ime_allowed(true);
         #[cfg(target_os = "macos")]
-        set_macos_option_as_alt(window, self.cfg.macos_option_as_alt);
+        {
+            set_macos_option_as_alt(window, self.cfg.macos_option_as_alt);
+            // `titlebarAppearsTransparent` does not extend Kettle's content
+            // beneath AppKit's controls; it reveals NSWindow's background.
+            // Seed that background before the hidden window is ever shown.
+            set_macos_window_background(window, self.cfg.theme.background);
+        }
         // Terminator parity, terminatorlib/config.py:81
         // `sticky`: show window on every workspace. macOS exposes
         // this as a Window-level method via `WindowExtMacOS`, so
